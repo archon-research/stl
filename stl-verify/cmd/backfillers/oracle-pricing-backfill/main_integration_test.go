@@ -13,8 +13,17 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+var sharedDSN string
+
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunTestsWithLeakCheck(m))
+	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+
+	code := m.Run()
+
+	cleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -22,7 +31,7 @@ func TestMain(m *testing.M) {
 // ---------------------------------------------------------------------------
 
 func TestRunIntegration_HappyPath(t *testing.T) {
-	pool, dbURL, cleanup := testutil.SetupTimescaleDB(t)
+	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()

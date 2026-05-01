@@ -827,6 +827,16 @@ func TestProcessBlockEvent_VaultDiscovery_RPCTransientError(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_VaultDiscovery_TransientErrorThenSuccess verifies that
+// when the first log's vault discovery fails transiently and the second log's
+// discovery succeeds, the vault is still registered in memory AND processBlock
+// returns an error.
+//
+// VEC-188: a later success does NOT retroactively process the earlier log —
+// that log's event was never saved. Returning an error forces SQS to redeliver
+// so both logs are retried on the next message. On redelivery, both logs see
+// the vault as already-known (registered in memory) and both are processed
+// normally.
 func TestProcessBlockEvent_VaultDiscovery_TransientErrorThenSuccess(t *testing.T) {
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
@@ -863,13 +873,90 @@ func TestProcessBlockEvent_VaultDiscovery_TransientErrorThenSuccess(t *testing.T
 	log2 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(3000), big.NewInt(2700))
 	receipt := makeReceipt(testTxHash, log1, log2)
 
-	// Should succeed because the second attempt discovers the vault.
-	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
-		t.Fatalf("processBlock should succeed after transient error followed by success: %v", err)
+	// VEC-188: processBlock must FAIL even though the 2nd log's discovery
+	// succeeded — the 1st log's event was never persisted and must be retried
+	// via SQS redelivery.
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err == nil {
+		t.Fatal("processBlock must fail so SQS redelivers and both logs are retried (VEC-188)")
 	}
 
+	// Even though processBlock fails, the vault was registered in memory by
+	// the 2nd log's successful discovery. This is correct: on SQS redelivery,
+	// both logs will see the vault as already-known and process normally.
 	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
 		t.Error("vault should be registered after eventual success")
+	}
+	// Transient RPC failure must NOT permanently mark the address as non-vault.
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient RPC error")
+	}
+}
+
+// TestProcessReceipt_VaultDiscoveryRace_KeepsFirstError verifies the VEC-188
+// invariant that a transient failure on the first log for a vault address must
+// NOT be wiped by a later success for the same address within the same receipt.
+//
+// Scenario: two MetaMorpho Deposit logs in the same receipt target the same
+// newly-discovered vault. The first tryDiscoverVault call hits a transient
+// (non-ErrNotVault) error. The second call succeeds. Under the old behavior,
+// the success's delete(discoveryErrs, logAddress) wiped the error and
+// processReceipt returned nil — SQS would ACK, permanently losing the first
+// log's event. The fix keeps the first failure so the error propagates and SQS
+// redelivers, allowing BOTH logs to be retried.
+func TestProcessReceipt_VaultDiscoveryRace_KeepsFirstError(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// First probe call fails transiently (simulating 429 / timeout from Alchemy).
+	// Second probe call succeeds, allowing vault registration on the 2nd log.
+	probeCallCount := 0
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				probeCallCount++
+				if probeCallCount == 1 {
+					// Transient RPC error on the FIRST log's discovery attempt.
+					return nil, fmt.Errorf("connection timeout")
+				}
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			// vault state + balance (after discovery, process the event)
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		return 99, nil
+	}
+
+	// Two Deposit logs from the same vault in one receipt.
+	// Log 1: triggers discovery → transient failure (event lost).
+	// Log 2: retries discovery → succeeds, vault registered.
+	// Per VEC-188, the first log's event was never saved, so processReceipt
+	// MUST return a non-nil error to force SQS redelivery.
+	log1 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log2 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(3000), big.NewInt(2700))
+	receipt := makeReceipt(testTxHash, log1, log2)
+
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
+	if err == nil {
+		t.Fatal("processBlock must return error so SQS redelivers and BOTH logs are retried; " +
+			"a later success for the same address does NOT retroactively save the earlier lost log")
+	}
+	if !strings.Contains(err.Error(), "connection timeout") {
+		t.Errorf("error should surface the first log's transient failure, got: %s", err.Error())
+	}
+
+	// Transient RPC failure must NOT permanently mark the address as non-vault.
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("vault should NOT be marked as not-vault on transient RPC error")
 	}
 }
 

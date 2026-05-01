@@ -1,3 +1,4 @@
+import { LoadingIndicator } from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -5,14 +6,16 @@ import { flex } from '#styled-system/patterns';
 
 import { getBadDebt } from '../../../lib/api';
 import {
-  formatTokenAmount,
   formatRatioPercent,
+  formatTokenAmount,
   formatUsdValue,
   getBadDebtTone,
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
+import { logging } from '../../../lib/logging';
 import type { Allocation, BadDebt } from '../../../types/allocation';
+import { PercentageSlider, StatusBadge, SummaryMetric } from '../../shared';
 
 type BadDebtTabProps = {
   selectedReceiptToken: Allocation | null;
@@ -22,87 +25,21 @@ function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
   switch (tone) {
     case 'green':
       return {
-        badgeBg: { _dark: 'green.950', base: 'green.50' },
-        badgeColor: { _dark: 'green.200', base: 'green.700' },
-        valueColor: { _dark: 'green.300', base: 'green.700' },
+        valueColor: { _dark: 'green.400', base: 'green.600' },
       };
     case 'yellow':
       return {
-        badgeBg: { _dark: 'yellow.950', base: 'yellow.50' },
-        badgeColor: { _dark: 'yellow.200', base: 'yellow.800' },
-        valueColor: { _dark: 'yellow.300', base: 'yellow.800' },
+        valueColor: { _dark: 'yellow.400', base: 'yellow.700' },
       };
     case 'neutral':
       return {
-        badgeBg: { _dark: 'gray.900', base: 'gray.100' },
-        badgeColor: { _dark: 'gray.400', base: 'gray.600' },
-        valueColor: { _dark: 'gray.400', base: 'gray.600' },
+        valueColor: { _dark: 'gray.400', base: 'gray.700' },
       };
     default:
       return {
-        badgeBg: { _dark: 'red.950', base: 'red.50' },
-        badgeColor: { _dark: 'red.200', base: 'red.700' },
-        valueColor: { _dark: 'red.300', base: 'red.700' },
+        valueColor: { _dark: 'red.400', base: 'red.600' },
       };
   }
-}
-
-function SummaryMetric({
-  detail,
-  label,
-  value,
-}: {
-  detail?: string;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.default',
-        p: '3',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'xs',
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
-          color: 'text.muted',
-        })}
-      >
-        {label}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '2',
-          fontSize: 'lg',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {value}
-      </p>
-      {detail ? (
-        <p
-          className={css({
-            m: 0,
-            mt: '1',
-            fontSize: 'xs',
-            color: 'text.muted',
-          })}
-        >
-          {detail}
-        </p>
-      ) : null}
-    </div>
-  );
 }
 
 export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
@@ -147,6 +84,11 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
           return;
         }
 
+        logging.error('Failed to load bad debt calculation', {
+          error,
+          receiptTokenId: selectedReceiptToken.receipt_token_id,
+          gapPct: debouncedGapPct,
+        });
         setErrorMessage(toErrorMessage(error));
         setBadDebt(null);
       })
@@ -161,7 +103,6 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
 
   const tone = getBadDebtTone(badDebt?.bad_debt_usd);
   const toneStyles = getToneStyles(tone);
-  const sliderLabel = formatRatioPercent(sliderValue, 0);
   const requestLabel = formatRatioPercent(
     badDebt?.gap_pct ?? debouncedGapPct,
     0,
@@ -175,6 +116,8 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
         return 'Contained';
       case 'yellow':
         return 'Monitor';
+      case 'neutral':
+        return 'Unavailable';
       default:
         return 'Escalating';
     }
@@ -231,79 +174,21 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             >
               Bad debt model
             </p>
-            <h3 className={css({ m: 0, fontSize: 'lg', color: 'text.strong' })}>
-              {selectedReceiptToken.symbol}
-            </h3>
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              {selectedReceiptToken.protocol_name} · request gap {requestLabel}
-            </p>
+            {isLoading ? (
+              <LoadingIndicator message="Recalculating scenario" />
+            ) : null}
           </div>
 
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              borderRadius: 'sm',
-              bg: toneStyles.badgeBg,
-              color: toneStyles.badgeColor,
-              fontSize: 'xs',
-              fontWeight: 'semibold',
-              px: '3',
-              py: '1.5',
-            })}
-          >
-            {statusLabel}
-          </span>
+          <StatusBadge tone={tone} label={statusLabel} />
         </div>
 
         <div className={css({ mt: '5' })}>
-          <label
-            htmlFor="bad-debt-gap"
-            className={css({ display: 'grid', gap: '2' })}
-          >
-            <span
-              className={css({
-                fontSize: 'sm',
-                fontWeight: 'semibold',
-                color: 'text.strong',
-              })}
-            >
-              Gap percentage
-            </span>
-            <div
-              className={flex({
-                align: 'center',
-                justify: 'space-between',
-                gap: '3',
-                wrap: 'wrap',
-              })}
-            >
-              <input
-                id="bad-debt-gap"
-                type="range"
-                min="0.05"
-                max="0.95"
-                step="0.05"
-                value={sliderValue}
-                onChange={(event) => setSliderValue(Number(event.target.value))}
-                className={css({
-                  flex: '1',
-                  minWidth: '16rem',
-                  accentColor: 'interactive.accent',
-                  cursor: 'pointer',
-                })}
-              />
-              <span
-                className={css({
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                })}
-              >
-                {sliderLabel}
-              </span>
-            </div>
-          </label>
+          <PercentageSlider
+            id="bad-debt-gap"
+            label="Gap percentage"
+            value={sliderValue}
+            onChange={setSliderValue}
+          />
         </div>
       </div>
 
@@ -347,12 +232,11 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             display: 'grid',
             gridTemplateColumns: {
               base: '1fr',
-              md: 'repeat(4, minmax(0, 1fr))',
+              md: 'repeat(3, minmax(0, 1fr))',
             },
             gap: '3',
           })}
         >
-          <SummaryMetric label="Requested gap" value={requestLabel} />
           <SummaryMetric
             label="Receipt token balance"
             value={`${formatTokenAmount(selectedReceiptToken.balance)} ${selectedReceiptToken.symbol}`}
@@ -402,21 +286,27 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             {badDebt
               ? formatUsdValue(badDebt.bad_debt_usd)
               : isLoading
-                ? 'Loading…'
+                ? '—'
                 : '—'}
           </p>
-          <p
-            className={css({
-              m: 0,
-              mt: '2',
-              fontSize: 'sm',
-              color: 'text.muted',
-            })}
-          >
-            {hasProjectedShortfall
-              ? `At ${requestLabel}, the model projects a shortfall on this receipt token after liquidation.`
-              : `At ${requestLabel}, the model currently shows no bad debt for this receipt token.`}
-          </p>
+          {isLoading && !badDebt ? (
+            <div className={css({ mt: '3' })}>
+              <LoadingIndicator message="Fetching bad debt model" />
+            </div>
+          ) : (
+            <p
+              className={css({
+                m: 0,
+                mt: '2',
+                fontSize: 'sm',
+                color: 'text.muted',
+              })}
+            >
+              {hasProjectedShortfall
+                ? `At ${requestLabel}, the model projects a shortfall after liquidation.`
+                : `At ${requestLabel}, the model currently shows no bad debt.`}
+            </p>
+          )}
         </div>
       ) : null}
     </div>

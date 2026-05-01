@@ -14,8 +14,11 @@ func NewLogHandler(logger *slog.Logger) *LogHandler {
 	return &LogHandler{logger: logger.With("component", "log-handler")}
 }
 
-func (h *LogHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
-	for _, s := range snapshots {
+func (h *LogHandler) HandleBatch(ctx context.Context, batch *SnapshotBatch) error {
+	if batch == nil {
+		return nil
+	}
+	for _, s := range batch.Snapshots {
 		fields := []any{
 			"star", s.Entry.Star,
 			"chain", s.Entry.Chain,
@@ -40,6 +43,19 @@ func (h *LogHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionS
 
 		h.logger.Info("position snapshot", fields...)
 	}
+	for _, sup := range batch.Supplies {
+		fields := []any{
+			"chain", sup.ChainID,
+			"contract", sup.TokenAddress.Hex(),
+			"total_supply_raw", sup.TotalSupply.String(),
+			"block", sup.BlockNumber,
+			"source", sup.Source,
+		}
+		if sup.ScaledTotalSupply != nil {
+			fields = append(fields, "scaled_total_supply_raw", sup.ScaledTotalSupply.String())
+		}
+		h.logger.Info("supply snapshot", fields...)
+	}
 	return nil
 }
 
@@ -51,10 +67,10 @@ func NewMultiHandler(handlers ...AllocationHandler) *MultiHandler {
 	return &MultiHandler{handlers: handlers}
 }
 
-func (h *MultiHandler) HandleSnapshots(ctx context.Context, snapshots []*PositionSnapshot) error {
+func (h *MultiHandler) HandleBatch(ctx context.Context, batch *SnapshotBatch) error {
 	var errs []error
 	for _, handler := range h.handlers {
-		if err := handler.HandleSnapshots(ctx, snapshots); err != nil {
+		if err := handler.HandleBatch(ctx, batch); err != nil {
 			errs = append(errs, err)
 		}
 	}

@@ -26,7 +26,7 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 	subscriber := testutil.NewMockSubscriber()
 	client := testutil.NewMockBlockchainClient()
 
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 	stateRepo := postgres.NewBlockStateRepository(pool, 1, nil)
 

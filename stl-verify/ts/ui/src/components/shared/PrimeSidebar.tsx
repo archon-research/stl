@@ -1,8 +1,9 @@
-import { ThemeToggle } from '@archon-research/design-system';
+import { SkeletonStack, ThemeToggle } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { EmptyState, ErrorState } from '.';
 import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {
@@ -21,27 +22,6 @@ function formatAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
-function PrimeSkeletonList() {
-  return (
-    <div className={css({ display: 'grid', gap: '3' })}>
-      {Array.from({ length: 6 }, (_, index) => (
-        <div
-          key={index}
-          className={css({
-            height: '16',
-            borderRadius: 'md',
-            borderWidth: '1px',
-            borderStyle: 'solid',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            opacity: 0.8,
-          })}
-        />
-      ))}
-    </div>
-  );
-}
-
 export function PrimeSidebar({
   primes,
   selectedPrimeId,
@@ -54,12 +34,19 @@ export function PrimeSidebar({
       className={css({
         display: 'flex',
         flexDirection: 'column',
-        minHeight: '100%',
+        width: '100%',
+        maxWidth: '100%',
+        height: '100%',
+        minHeight: 0,
+        overflow: 'hidden',
+        boxSizing: 'border-box',
         bg: 'surface.default',
       })}
     >
       <div
         className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '5',
           py: '4',
           borderBottomWidth: '1px',
@@ -83,55 +70,33 @@ export function PrimeSidebar({
         className={css({
           flex: '1',
           minHeight: 0,
+          width: '100%',
           overflowY: 'auto',
+          overflowX: 'hidden',
+          scrollbarWidth: 'none',
+          '&::-webkit-scrollbar': {
+            display: 'none',
+          },
+          boxSizing: 'border-box',
           px: '3',
           py: '4',
         })}
       >
-        {isLoading ? <PrimeSkeletonList /> : null}
+        {isLoading ? <SkeletonStack count={6} itemHeight={64} /> : null}
 
         {!isLoading && errorMessage ? (
-          <div
-            className={css({
-              borderRadius: 'md',
-              borderWidth: '1px',
-              borderStyle: 'solid',
-              borderColor: 'border.default',
-              bg: 'surface.subtle',
-              p: '4',
-            })}
-          >
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.strong' })}>
-              Unable to load primes.
-            </p>
-            <p
-              className={css({
-                m: 0,
-                mt: '2',
-                fontSize: 'sm',
-                color: 'text.muted',
-              })}
-            >
-              {errorMessage}
-            </p>
-          </div>
+          <ErrorState
+            title="Unable to load primes"
+            description="An error occurred while fetching primes data."
+            errorMessage={errorMessage}
+          />
         ) : null}
 
         {!isLoading && !errorMessage && primes.length === 0 ? (
-          <div
-            className={css({
-              borderRadius: 'md',
-              borderWidth: '1px',
-              borderStyle: 'dashed',
-              borderColor: 'border.default',
-              bg: 'surface.subtle',
-              p: '4',
-            })}
-          >
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              No primes were returned by the API.
-            </p>
-          </div>
+          <EmptyState
+            title="No primes returned"
+            description="No primes were returned by the API."
+          />
         ) : null}
 
         {!isLoading && !errorMessage && primes.length > 0 ? (
@@ -146,6 +111,7 @@ export function PrimeSidebar({
                   onClick={() => onSelectPrime(prime.id)}
                   className={css({
                     width: '100%',
+                    boxSizing: 'border-box',
                     textAlign: 'left',
                     borderRadius: 'md',
                     borderWidth: '1px',
@@ -225,6 +191,8 @@ export function PrimeSidebar({
 
       <div
         className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '4',
           py: '3',
           borderTopWidth: '1px',

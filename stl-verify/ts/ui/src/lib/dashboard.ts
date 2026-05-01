@@ -1,5 +1,6 @@
 import type { Allocation } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import { logging } from './logging';
 
 export type FilterOption = {
   value: string;
@@ -78,13 +79,22 @@ function normalizeLabel(value: string): string {
 
 export function parseNumericValue(
   value: number | string | null | undefined,
+  context?: string,
 ): number | null {
   if (value === null || value === undefined || value === '') {
     return null;
   }
 
   const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
+  if (!Number.isFinite(numeric)) {
+    logging.warn(
+      `Failed to parse numeric value: "${value}"`,
+      context ? { context } : undefined,
+    );
+    return null;
+  }
+
+  return numeric;
 }
 
 export function buildChainLabelLookup(

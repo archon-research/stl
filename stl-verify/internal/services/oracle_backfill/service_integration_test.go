@@ -76,7 +76,7 @@ func integrationMockMulticallFactoryConstant(t *testing.T, prices []*big.Int) Mu
 // ---------------------------------------------------------------------------
 
 func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -185,7 +185,7 @@ func TestIntegration_BackfillRun_HappyPath(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -272,7 +272,7 @@ func TestIntegration_BackfillRun_ChangeDetection(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -343,7 +343,7 @@ func TestIntegration_BackfillRun_UpsertIdempotency(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -401,7 +401,7 @@ func TestIntegration_BackfillRun_GetLatestBlock(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -462,7 +462,7 @@ func TestIntegration_BackfillRun_RespectsDeploymentBlock(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -545,7 +545,7 @@ func TestIntegration_BackfillRun_RespectsSupersession(t *testing.T) {
 }
 
 func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -654,7 +654,7 @@ func TestIntegration_BackfillRun_PartialTokenFailure(t *testing.T) {
 // or errors. This exercises the ON CONFLICT DO NOTHING clause in UpsertPrices
 // through the full service path.
 func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -720,7 +720,7 @@ func TestIntegration_BackfillRun_DuplicateBlocksSafeWithOnConflict(t *testing.T)
 }
 
 func TestIntegration_BackfillRun_MultipleSelectiveChanges(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()

@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "imports": {
+    "#env": "./env.ts",
     "#src/*": "./src/*",
     "#styled-system/*": "./styled-system/*"
   },
@@ -13,9 +14,9 @@
     "predev": "npm run codegen:styles",
     "dev": "vite",
     "prebuild": "npm run codegen:styles",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "pretype:check": "npm run codegen:styles",
-    "type:check": "tsc -b",
+    "type:check": "tsgo -b",
     "format": "oxfmt -c ./.oxfmtrc.ts --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "format:check": "oxfmt -c ./.oxfmtrc.ts --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "preview": "vite preview",
@@ -24,19 +25,22 @@
     "lint": "oxlint -c ./.oxlintrc.ts src panda.config.ts vite.config.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-core": "0.1.0",
-    "@archon-research/http-client-react": "0.1.0",
+    "@archon-research/http-client-core": "0.2.0",
+    "@archon-research/http-client-react": "0.2.0",
     "@tanstack/react-query": "^5.99.2",
+    "@tanstack/react-table": "^8.20.0",
+    "lucide-react": "^1.14.0",
     "openapi-fetch": "^0.17.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@archon-research/design-system": "0.1.0",
-    "@archon-research/oxfmt-config": "0.1.0",
-    "@archon-research/oxlint-config": "0.1.0",
-    "@archon-research/tsconfig": "0.1.0",
+    "@typescript/native-preview": "7.0.0-dev.20260429.1",
+    "@archon-research/design-system": "0.2.0",
+    "@archon-research/oxfmt-config": "0.2.0",
+    "@archon-research/oxlint-config": "0.2.0",
+    "@archon-research/tsconfig": "0.2.0",
     "@pandacss/dev": "^1.9.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -272,13 +272,30 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 		}
 
 		r := results[i]
-		if r.Err != nil {
-			s.logger.Warn("failed to read vault debt",
+		// Reverted = the contract returned `Success: false` for at least
+		// one of its per-vault calls. Under AllowFailure: true that's a
+		// legitimate "no debt this block" signal — skip and continue.
+		if r.Reverted {
+			s.logger.Warn("vault debt call reverted (contract-level); skipping",
 				"prime", prime.Name,
 				"vault", prime.VaultAddress,
-				"error", r.Err,
 			)
 			continue
+		}
+		// Err = a non-revert structural failure from the producer (ABI
+		// decode, unexpected type, missing multicall result). Surface it
+		// as a hard error so the SQS message NACKs and an operator can
+		// investigate.
+		//
+		// Fail-fast asymmetry: returning on the FIRST hard error throws
+		// away results we already received for primes later in the slice
+		// — they'll be re-read on SQS retry. The wasted work scales
+		// linearly with the prime count; at small N the simpler
+		// return-on-first wins. If this slice ever grows enough that
+		// re-reads become expensive, accumulate-then-return is the next
+		// form.
+		if r.Err != nil {
+			return fmt.Errorf("prime %s: error reading debt: %w", prime.Name, r.Err)
 		}
 
 		debtWad := entity.ComputeDebtWad(r.Art, r.Rate)
@@ -300,6 +317,13 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 		})
 	}
 
+	// Asymmetry vs the per-prime classification above: a single prime
+	// reverting is treated as legitimate "no debt this block" (skip +
+	// continue). But if EVERY prime reverts we treat it as a hard error
+	// rather than ACK silently — an all-empty result is far more likely a
+	// misconfiguration (wrong vault addresses, ABI drift, full provider
+	// outage) than a real coordinated "no data" answer across independent
+	// vaults. Prefer the loud DLQ over a silent ACK.
 	if len(snapshots) == 0 {
 		return fmt.Errorf("all vault reads failed, skipping db write")
 	}

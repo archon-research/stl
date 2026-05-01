@@ -18,8 +18,27 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+var (
+	sharedDSN           string
+	sharedRedisAddr     string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
+
 func TestMain(m *testing.M) {
-	os.Exit(testutil.RunTestsWithLeakCheck(m))
+	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+	redisAddr, redisCleanup := testutil.StartRedisForMain()
+	sharedRedisAddr = redisAddr
+	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
+	sharedLocalStackCfg = lsCfg
+
+	code := m.Run()
+
+	lsCleanup()
+	redisCleanup()
+	dbCleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +72,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTimescaleDB(t)
+	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,12 +84,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
-	redisAddr, redisCleanup := testutil.StartRedis(t, ctx)
-	defer redisCleanup()
-
-	s3Container, s3Cfg := testutil.StartLocalStack(t, ctx, "s3")
-	defer s3Container.Terminate(context.Background())
-	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
+	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 
 	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention.
 	const (
@@ -86,7 +100,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
-	t.Setenv("AWS_S3_ENDPOINT", s3Cfg.Endpoint)
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
@@ -101,7 +115,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		errCh <- run(runCtx, []string{
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
-			"-redis", redisAddr,
+			"-redis", sharedRedisAddr,
 		})
 	}()
 

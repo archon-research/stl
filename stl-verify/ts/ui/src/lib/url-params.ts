@@ -8,6 +8,11 @@ export const PARAMS = {
   protocol: 'protocol',
   tab: 'tab',
   receiptToken: 'rt',
+  // Data table params (shared across tables)
+  sort: 'sort',
+  search: 'q',
+  // Drawer state
+  drawerOpen: 'drawer',
 } as const;
 
 function isBrowser(): boolean {

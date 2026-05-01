@@ -492,7 +492,11 @@ func TestGetTokenMetadata_CacheHit(t *testing.T) {
 	}
 }
 
-func TestGetTokenMetadata_SymbolFails_DecimalsSucceeds(t *testing.T) {
+// TestGetTokenMetadata_SymbolFails_ErrorsOut replaces a previous test that
+// codified the silent-zero behavior (symbol() reverting returned an empty
+// Symbol with nil error). Post-VEC-188 Finding 3: any sub-call revert must
+// surface as an error — silent empty metadata would persist corrupt rows.
+func TestGetTokenMetadata_SymbolFails_ErrorsOut(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xBBBB")
 
@@ -503,23 +507,20 @@ func TestGetTokenMetadata_SymbolFails_DecimalsSucceeds(t *testing.T) {
 		}, nil
 	}
 
-	md, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
-	if err != nil {
-		t.Fatalf("getTokenMetadata: %v", err)
-	}
-	if md.Symbol != "" {
-		t.Errorf("Symbol = %q, want empty", md.Symbol)
-	}
-	if md.Decimals != 18 {
-		t.Errorf("Decimals = %d, want 18", md.Decimals)
+	_, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when symbol() sub-call reverts; silent empty metadata would be persisted")
 	}
 }
 
-func TestGetTokenMetadata_CachesOnlyWithSymbol(t *testing.T) {
+// TestGetTokenMetadata_DoesNotCacheOnSubCallRevert replaces the previous
+// "CachesOnlyWithSymbol" test that relied on silent-zero behavior. Post-VEC-188
+// Finding 3: on any sub-call revert we return an error and must not pollute
+// the cache.
+func TestGetTokenMetadata_DoesNotCacheOnSubCallRevert(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xCCCC")
 
-	// Return empty symbol — should not be cached.
 	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		return []outbound.Result{
 			{Success: false, ReturnData: nil},
@@ -529,7 +530,7 @@ func TestGetTokenMetadata_CachesOnlyWithSymbol(t *testing.T) {
 
 	_, _ = h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
 	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; ok {
-		t.Error("should not cache token with empty symbol")
+		t.Error("should not cache token when any sub-call reverts")
 	}
 }
 
@@ -619,6 +620,125 @@ func TestGetTokenPairMetadata_OneCached(t *testing.T) {
 	}
 	if mdB.Symbol != "FETCHED_B" {
 		t.Errorf("mdB.Symbol = %s, want FETCHED_B", mdB.Symbol)
+	}
+}
+
+// TestGetTokenMetadata_ErrorsWhenSymbolSubCallFails codifies VEC-188 Finding 3.
+// A reverted symbol() sub-call must surface as an error — otherwise the caller
+// silently persists zero-valued metadata (empty Symbol, 0 Decimals) into the
+// token table.
+func TestGetTokenMetadata_ErrorsWhenSymbolSubCallFails(t *testing.T) {
+	h := newTestHarness(t)
+	tokenAddr := common.HexToAddress("0xDDDD")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: false, ReturnData: nil},            // symbol() reverted
+			{Success: true, ReturnData: h.packUint8(18)}, // decimals() succeeded
+		}, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when symbol() sub-call reverts; silent empty metadata would be persisted")
+	}
+	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; ok {
+		t.Error("metadata cache must not be populated when sub-calls revert")
+	}
+}
+
+// TestGetTokenMetadata_ErrorsWhenDecimalsSubCallFails codifies VEC-188 Finding 3.
+// A reverted decimals() sub-call must surface as an error; a silent decimals=0
+// would corrupt downstream unit conversions.
+func TestGetTokenMetadata_ErrorsWhenDecimalsSubCallFails(t *testing.T) {
+	h := newTestHarness(t)
+	tokenAddr := common.HexToAddress("0xEEEE")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packString("USDC")}, // symbol() succeeded
+			{Success: false, ReturnData: nil},                 // decimals() reverted
+		}, nil
+	}
+
+	_, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
+	if err == nil {
+		t.Fatal("expected error when decimals() sub-call reverts; silent 0-decimals would corrupt units")
+	}
+	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; ok {
+		t.Error("metadata cache must not be populated when sub-calls revert")
+	}
+}
+
+// TestGetTokenMetadata_CachesAndReturnsOnSuccess verifies the happy path plus
+// the cache behavior still works after the VEC-188 Finding 3 fix.
+func TestGetTokenMetadata_CachesAndReturnsOnSuccess(t *testing.T) {
+	h := newTestHarness(t)
+	tokenAddr := common.HexToAddress("0xFFFF")
+
+	var callCount int
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		callCount++
+		return h.tokenMetadataResults("USDC", 6), nil
+	}
+
+	md, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
+	if err != nil {
+		t.Fatalf("first call: unexpected error: %v", err)
+	}
+	if md.Symbol != "USDC" {
+		t.Errorf("first call: Symbol = %q, want %q", md.Symbol, "USDC")
+	}
+	if md.Decimals != 6 {
+		t.Errorf("first call: Decimals = %d, want 6", md.Decimals)
+	}
+
+	md2, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
+	if err != nil {
+		t.Fatalf("second call: unexpected error: %v", err)
+	}
+	if md2.Symbol != "USDC" || md2.Decimals != 6 {
+		t.Errorf("second call: got %+v, want USDC/6", md2)
+	}
+	if callCount != 1 {
+		t.Errorf("multicaller called %d times, want 1 (second call must hit cache)", callCount)
+	}
+}
+
+// TestGetTokenPairMetadata_ErrorsWhenAnySubCallFails codifies VEC-188 Finding 3
+// for the pair variant: any of the 4 sub-calls reverting must surface as an
+// error rather than silently returning zero-valued metadata.
+func TestGetTokenPairMetadata_ErrorsWhenAnySubCallFails(t *testing.T) {
+	tokenA := common.HexToAddress("0xA1A1")
+	tokenB := common.HexToAddress("0xB2B2")
+
+	failingIndices := []int{0, 1, 2, 3}
+	for _, failIdx := range failingIndices {
+		t.Run(fmt.Sprintf("subcall_%d_fails", failIdx), func(t *testing.T) {
+			h := newTestHarness(t)
+
+			h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				results := []outbound.Result{
+					{Success: true, ReturnData: h.packString("TKA")},
+					{Success: true, ReturnData: h.packUint8(18)},
+					{Success: true, ReturnData: h.packString("TKB")},
+					{Success: true, ReturnData: h.packUint8(6)},
+				}
+				results[failIdx] = outbound.Result{Success: false, ReturnData: nil}
+				return results, nil
+			}
+
+			_, _, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), tokenA, tokenB, 20000000)
+			if err == nil {
+				t.Fatalf("expected error when sub-call %d reverts; silent zero-valued pair metadata would be persisted", failIdx)
+			}
+			if _, ok := h.svc.blockchainSvc.metadataCache[tokenA]; ok {
+				t.Error("token A cache must not be populated when any sub-call reverts")
+			}
+			if _, ok := h.svc.blockchainSvc.metadataCache[tokenB]; ok {
+				t.Error("token B cache must not be populated when any sub-call reverts")
+			}
+		})
 	}
 }
 

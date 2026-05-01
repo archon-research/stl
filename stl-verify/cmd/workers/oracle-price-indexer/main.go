@@ -15,8 +15,6 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 
-	"github.com/ethereum/go-ethereum/ethclient"
-
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -27,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_price_worker"
@@ -132,7 +131,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
 
-	ethClient, err := ethclient.Dial(cfg.alchemyURL)
+	ethClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}

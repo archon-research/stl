@@ -46,13 +46,13 @@ func (s *UniV3Source) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
 	blockNumber int64,
-) (map[EntryKey]*PositionBalance, error) {
+) (*FetchResult, error) {
+	result := NewFetchResult()
 	if len(entries) == 0 {
-		return make(map[EntryKey]*PositionBalance), nil
+		return result, nil
 	}
 
 	block := big.NewInt(blockNumber)
-	result := make(map[EntryKey]*PositionBalance, len(entries))
 
 	// Group entries by chain to use the correct NonfungiblePositionManager.
 	byChain := make(map[string][]*TokenEntry)
@@ -67,7 +67,7 @@ func (s *UniV3Source) FetchBalances(
 			continue
 		}
 
-		if err := s.fetchChainBalances(ctx, chainEntries, nftManager, block, result); err != nil {
+		if err := s.fetchChainBalances(ctx, chainEntries, nftManager, block, result.Balances); err != nil {
 			return nil, fmt.Errorf("fetch V3 balances for chain %s: %w", chain, err)
 		}
 	}

@@ -349,6 +349,88 @@ func TestDirectCaller_Execute(t *testing.T) {
 	})
 }
 
+// TestDirectCaller_TransportErrorPropagates_EvenWithAllowFailure verifies the
+// transient-error half of the VEC-188 invariant: an RPC transport-level
+// failure (HTTP 429, network, timeout) must propagate out of Execute even
+// when AllowFailure=true, so the caller refuses to ack the source event.
+func TestDirectCaller_TransportErrorPropagates_EvenWithAllowFailure(t *testing.T) {
+	target := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	callData := []byte{0xAB, 0xCD}
+
+	callCount := 0
+	srv := startBatchRPCServer(t, func(req rpcutil.Request) (json.RawMessage, *rpcError) {
+		callCount++
+		if callCount == 2 {
+			// Alchemy's actual per-element 429 response shape.
+			return nil, &rpcError{
+				Code:    429,
+				Message: "Your app has exceeded its compute units per second capacity.",
+			}
+		}
+		return json.RawMessage(`"0xaa"`), nil
+	})
+	defer srv.Close()
+
+	dc := newTestDirectCaller(t, srv.URL)
+	calls := []outbound.Call{
+		{Target: target, AllowFailure: true, CallData: callData},
+		{Target: target, AllowFailure: true, CallData: callData}, // this one will 429
+		{Target: target, AllowFailure: true, CallData: callData},
+	}
+	results, err := dc.Execute(context.Background(), calls, big.NewInt(100))
+	if err == nil {
+		t.Fatal("expected transport error to propagate even with AllowFailure=true; got nil")
+	}
+	if results != nil {
+		t.Errorf("expected nil results on transport error, got %d results", len(results))
+	}
+	if !strings.Contains(err.Error(), "429") && !strings.Contains(err.Error(), "compute units") {
+		t.Errorf("error %q should reference the 429 / compute-units cause", err)
+	}
+}
+
+// TestDirectCaller_ContractRevertIsNotPropagated verifies the contract-revert
+// half of the VEC-188 invariant: a genuine EVM revert from the contract must
+// remain AllowFailure-compatible — Execute returns nil error and
+// Success: false on the reverting element only.
+func TestDirectCaller_ContractRevertIsNotPropagated(t *testing.T) {
+	target := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	callData := []byte{0xAB, 0xCD}
+
+	callCount := 0
+	srv := startBatchRPCServer(t, func(req rpcutil.Request) (json.RawMessage, *rpcError) {
+		callCount++
+		if callCount == 1 {
+			// Geth's standard revert shape.
+			return nil, &rpcError{Code: 3, Message: "execution reverted"}
+		}
+		return json.RawMessage(`"0xbb"`), nil
+	})
+	defer srv.Close()
+
+	dc := newTestDirectCaller(t, srv.URL)
+	calls := []outbound.Call{
+		{Target: target, AllowFailure: true, CallData: callData}, // reverts
+		{Target: target, AllowFailure: true, CallData: callData}, // succeeds
+	}
+	results, err := dc.Execute(context.Background(), calls, big.NewInt(100))
+	if err != nil {
+		t.Fatalf("revert with AllowFailure=true must not propagate as error; got %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Success {
+		t.Error("results[0].Success = true; want false (reverted)")
+	}
+	if results[0].ReturnData != nil {
+		t.Errorf("results[0].ReturnData = %x; want nil", results[0].ReturnData)
+	}
+	if !results[1].Success {
+		t.Error("results[1].Success = false; want true")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestNewDirectCaller
 // ---------------------------------------------------------------------------

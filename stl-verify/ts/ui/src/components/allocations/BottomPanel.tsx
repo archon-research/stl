@@ -1,30 +1,25 @@
 import {
+  SearchInput,
   StyledSelect,
   Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
+import { segmentedControl } from '#styled-system/recipes';
 
-import {
-  type ChainLabelLookup,
-  findProtocolMetadata,
-  formatTokenAmount,
-  getChainLabel,
-  getProtocolLabel,
-  sortAllocations,
-} from '../../lib/dashboard';
+import { getProtocolLabel, sortAllocations } from '../../lib/dashboard';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
 import type { Allocation, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
+import { EmptyState, ErrorState } from '../shared';
 import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
-  chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
@@ -34,91 +29,12 @@ type BottomPanelProps = {
 
 type ActiveTab = 'risk' | 'bad-debt';
 
-const toggleGroupStyles = css({
-  alignItems: 'center',
-  bg: 'transparent',
-  borderColor: 'border.default',
-  borderRadius: 'sm',
-  borderStyle: 'solid',
-  borderWidth: '1px',
-  display: 'inline-flex',
-  gap: '0.5',
-  p: '0.5',
-});
-
-const toggleStyles = css({
-  '&[data-pressed]': {
-    bg: 'interactive.selected',
-    color: 'text.default',
-  },
-  _hover: {
-    bg: 'interactive.hover',
-    color: 'text.default',
-  },
-  borderRadius: 'xs',
-  display: 'inline-flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  color: 'text.muted',
-  cursor: 'pointer',
-  fontSize: 'sm',
-  lineHeight: 'normal',
-  h: '7',
-  px: '3',
-  py: '1',
-  transitionDuration: 'fast',
-  transitionProperty: 'background-color, color, border-color, box-shadow',
-});
-
-function formatAddress(value: string): string {
-  const address = value.startsWith('0x') ? value : `0x${value}`;
-
-  if (address.length <= 18) {
-    return address;
-  }
-
-  return `${address.slice(0, 10)}...${address.slice(-6)}`;
-}
-
-function EmptyPanelState({ body, title }: { body: string; title: string }) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.subtle',
-        p: '4',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {title}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '1.5',
-          fontSize: 'sm',
-          color: 'text.muted',
-        })}
-      >
-        {body}
-      </p>
-    </div>
-  );
-}
+const segmentedControlStyles = segmentedControl();
+const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.5', gap: '1' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'xs' })}`;
 
 export function BottomPanel({
   allocations,
-  chainLabels,
   errorMessage,
   isLoading,
   localProtocols,
@@ -129,6 +45,8 @@ export function BottomPanel({
     PARAMS.receiptToken,
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
+  const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
+  const [riskSearchValue, setRiskSearchValue] = useState('');
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
   const previousSelectedAllocationIdRef = useRef<number | null>(
@@ -208,17 +126,24 @@ export function BottomPanel({
       (allocation) => String(allocation.receipt_token_id) === receiptTokenParam,
     ) ?? null;
 
-  const focusedProtocol = useMemo(
-    () =>
-      focusedAllocation
-        ? findProtocolMetadata(
-            focusedAllocation.protocol_name,
-            localProtocols,
-            focusedAllocation.chain_id,
-          )
-        : null,
-    [focusedAllocation, localProtocols],
-  );
+  useEffect(() => {
+    if (activeTab !== 'risk') {
+      setLocalRiskSearchValue('');
+      setRiskSearchValue('');
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setRiskSearchValue(localRiskSearchValue);
+    }, 300);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [activeTab, localRiskSearchValue]);
+
+  useEffect(() => {
+    setLocalRiskSearchValue('');
+    setRiskSearchValue('');
+  }, [receiptTokenParam]);
 
   return (
     <div
@@ -226,7 +151,7 @@ export function BottomPanel({
         display: 'grid',
         gap: '4',
         bg: 'surface.default',
-        px: { base: '5', md: '6' },
+        px: { base: '5', md: '7' },
         py: { base: '5', md: '6' },
       })}
     >
@@ -248,12 +173,12 @@ export function BottomPanel({
             }
           }}
           aria-label="Risk views"
-          className={toggleGroupStyles}
+          className={toggleGroupClassName}
         >
-          <Toggle value="risk" className={toggleStyles}>
+          <Toggle value="risk" className={toggleClassName}>
             Risk breakdown
           </Toggle>
-          <Toggle value="bad-debt" className={toggleStyles}>
+          <Toggle value="bad-debt" className={toggleClassName}>
             Bad debt
           </Toggle>
         </ToggleGroup>
@@ -261,113 +186,96 @@ export function BottomPanel({
 
       <div
         className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
+          display: 'grid',
+          gridTemplateColumns: {
+            base: '1fr',
+            md: 'minmax(16rem, 24rem) minmax(18rem, 1fr)',
+          },
+          gap: '4',
+          alignItems: 'end',
         })}
       >
-        <div className={flex({ align: 'flex-start', gap: '4', wrap: 'wrap' })}>
-          <label
-            className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
+        <label
+          className={css({
+            display: 'grid',
+            gap: '1',
+          })}
+        >
+          <span
+            className={css({
+              fontSize: 'xs',
+              textTransform: 'uppercase',
+              letterSpacing: '0.14em',
+              color: 'text.muted',
+            })}
           >
-            <span
-              className={css({
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.14em',
-                color: 'text.muted',
-              })}
-            >
-              Receipt token
-            </span>
-            <StyledSelect
-              value={receiptTokenParam ?? ''}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                setReceiptTokenParam(event.target.value || null)
-              }
-              disabled={
-                !selectedPrime ||
-                isLoading ||
-                errorMessage !== null ||
-                sortedAllocations.length === 0
-              }
-            >
-              <option value="">Choose a receipt token</option>
-              {sortedAllocations.map((allocation) => (
-                <option
-                  key={allocation.receipt_token_id}
-                  value={allocation.receipt_token_id}
-                >
-                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
-                </option>
-              ))}
-            </StyledSelect>
-          </label>
+            Receipt token
+          </span>
+          <StyledSelect
+            value={receiptTokenParam ?? ''}
+            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+              setReceiptTokenParam(event.target.value || null)
+            }
+            disabled={
+              !selectedPrime ||
+              isLoading ||
+              errorMessage !== null ||
+              sortedAllocations.length === 0
+            }
+          >
+            <option value="">Choose a receipt token</option>
+            {sortedAllocations.map((allocation) => (
+              <option
+                key={allocation.receipt_token_id}
+                value={allocation.receipt_token_id}
+              >
+                {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
+              </option>
+            ))}
+          </StyledSelect>
+        </label>
 
+        {activeTab === 'risk' ? (
           <div
-            className={css({ display: 'grid', gap: '1', minWidth: '16rem' })}
+            className={css({
+              width: '100%',
+            })}
           >
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.14em',
-                color: 'text.muted',
-              })}
-            >
-              Focused allocation
-            </p>
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'sm',
-                fontWeight: 'semibold',
-                color: 'text.strong',
-              })}
-            >
-              {focusedAllocation
-                ? `${focusedAllocation.symbol} · ${getProtocolLabel(focusedAllocation.protocol_name, localProtocols, focusedAllocation.chain_id)}`
-                : 'No allocation row selected'}
-            </p>
-            <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-              {focusedAllocation
-                ? `${formatTokenAmount(focusedAllocation.balance)} ${focusedAllocation.symbol} · ${getChainLabel(focusedAllocation.chain_id, chainLabels)}`
-                : 'Pick a grid row to drive this panel, or choose a receipt token directly.'}
-            </p>
-            {focusedProtocol ? (
-              <p className={css({ m: 0, fontSize: 'xs', color: 'text.muted' })}>
-                {`Protocol address ${formatAddress(focusedProtocol.encode)}`}
-              </p>
-            ) : null}
+            <SearchInput
+              aria-label="Search risk breakdown"
+              disabled={
+                !focusedAllocation || isLoading || errorMessage !== null
+              }
+              onValueChange={setLocalRiskSearchValue}
+              placeholder="Search backing assets"
+              value={localRiskSearchValue}
+            />
           </div>
-        </div>
+        ) : null}
       </div>
 
       <div
         className={css({ display: 'grid', gap: '4', alignContent: 'start' })}
       >
         {!selectedPrime ? (
-          <EmptyPanelState
+          <EmptyState
             title="Choose a prime to inspect risk"
-            body="The lower panel comes alive after a prime is selected."
+            description="The detail drawer becomes available after a prime is selected."
           />
         ) : null}
 
         {selectedPrime && errorMessage ? (
-          <EmptyPanelState
-            title="Unable to load allocations"
-            body={errorMessage}
+          <ErrorState
+            title="Unable to load receipt tokens"
+            description="An error occurred while fetching receipt token data."
+            errorMessage={errorMessage}
           />
         ) : null}
 
         {selectedPrime && !errorMessage && isLoading ? (
-          <EmptyPanelState
+          <EmptyState
             title="Loading receipt tokens"
-            body="Waiting for the selected prime's receipt token holdings."
+            description="Waiting for the selected prime's receipt token holdings."
           />
         ) : null}
 
@@ -375,9 +283,9 @@ export function BottomPanel({
         !errorMessage &&
         !isLoading &&
         sortedAllocations.length === 0 ? (
-          <EmptyPanelState
+          <EmptyState
             title="No receipt tokens returned"
-            body="The selected prime did not return any receipt token holdings from the API."
+            description="The selected prime did not return any receipt token holdings from the API."
           />
         ) : null}
 
@@ -386,7 +294,10 @@ export function BottomPanel({
         !isLoading &&
         sortedAllocations.length > 0 ? (
           activeTab === 'risk' ? (
-            <RiskBreakdownTab selectedReceiptToken={focusedAllocation} />
+            <RiskBreakdownTab
+              searchQuery={riskSearchValue}
+              selectedReceiptToken={focusedAllocation}
+            />
           ) : (
             <BadDebtTab selectedReceiptToken={focusedAllocation} />
           )

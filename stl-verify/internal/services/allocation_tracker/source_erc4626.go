@@ -50,9 +50,10 @@ func (s *ERC4626Source) Supports(tokenType string, protocol string) bool {
 	return tokenType == "erc4626"
 }
 
-func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (map[EntryKey]*PositionBalance, error) {
+func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+	result := NewFetchResult()
 	if len(entries) == 0 {
-		return make(map[EntryKey]*PositionBalance), nil
+		return result, nil
 	}
 
 	var block *big.Int
@@ -65,11 +66,13 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
 
-	results := make(map[EntryKey]*PositionBalance, len(entries))
 	for _, e := range valid1 {
 		sh := shares[e.Key()]
-		if sh == nil || sh.Sign() == 0 {
-			results[e.Key()] = &PositionBalance{
+		if sh == nil {
+			return nil, fmt.Errorf("missing erc4626 share result for %s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex())
+		}
+		if sh.Sign() == 0 {
+			result.Balances[e.Key()] = &PositionBalance{
 				Balance:       big.NewInt(0),
 				ScaledBalance: big.NewInt(0),
 			}
@@ -78,13 +81,13 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		s.logger.Debug("erc4626 position",
 			"contract", e.ContractAddress.Hex(),
 			"shares", sh.String())
-		results[e.Key()] = &PositionBalance{
+		result.Balances[e.Key()] = &PositionBalance{
 			Balance:       new(big.Int).Set(sh),
 			ScaledBalance: new(big.Int).Set(sh),
 		}
 	}
 
-	return results, nil
+	return result, nil
 }
 
 func (s *ERC4626Source) fetchShares(ctx context.Context, entries []*TokenEntry, block *big.Int) (map[EntryKey]*big.Int, []*TokenEntry, error) {
@@ -111,18 +114,26 @@ func (s *ERC4626Source) fetchShares(ctx context.Context, entries []*TokenEntry, 
 	}
 
 	shares := make(map[EntryKey]*big.Int, len(valid))
+	var failures []string
 	for i, e := range valid {
-		if i >= len(mc) {
-			break
+		if i >= len(mc) || !mc[i].Success || len(mc[i].ReturnData) == 0 {
+			failures = append(failures, fmt.Sprintf("%s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex()))
+			continue
 		}
-		shares[e.Key()] = big.NewInt(0)
-		if mc[i].Success && len(mc[i].ReturnData) > 0 {
-			if unpacked, err := s.vaultABI.Unpack("balanceOf", mc[i].ReturnData); err == nil && len(unpacked) > 0 {
-				if v, ok := unpacked[0].(*big.Int); ok {
-					shares[e.Key()] = v
-				}
-			}
+		unpacked, err := s.vaultABI.Unpack("balanceOf", mc[i].ReturnData)
+		if err != nil || len(unpacked) == 0 {
+			failures = append(failures, fmt.Sprintf("%s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex()))
+			continue
 		}
+		v, ok := unpacked[0].(*big.Int)
+		if !ok {
+			failures = append(failures, fmt.Sprintf("%s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex()))
+			continue
+		}
+		shares[e.Key()] = v
+	}
+	if len(failures) > 0 {
+		return nil, nil, fmt.Errorf("erc4626 balanceOf call failures: %s", strings.Join(failures, ", "))
 	}
 
 	return shares, valid, nil

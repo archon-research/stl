@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -77,8 +78,16 @@ func (c *DirectCaller) Execute(ctx context.Context, calls []outbound.Call, block
 	results := make([]outbound.Result, len(calls))
 	for i, elem := range elems {
 		if elem.Error != nil {
+			// RPC transport failures (429, 5xx, timeouts, parse errors) are
+			// NOT contract answers — the contract never got to run. Treating
+			// them as "no data" (Success: false) would silently lose data.
+			// Propagate regardless of AllowFailure so the SQS message is not
+			// ack'd and the block is redelivered. See VEC-188.
+			if !rpcerr.IsEVMRevert(elem.Error) {
+				return nil, fmt.Errorf("direct call to %s: transport error (transient): %w", calls[i].Target.Hex(), elem.Error)
+			}
 			if !calls[i].AllowFailure {
-				return nil, fmt.Errorf("direct call to %s failed: %w", calls[i].Target.Hex(), elem.Error)
+				return nil, fmt.Errorf("direct call to %s reverted: %w", calls[i].Target.Hex(), elem.Error)
 			}
 			results[i] = outbound.Result{Success: false}
 			continue

@@ -1,10 +1,12 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -126,6 +128,18 @@ func (r *PriceRepository) UpsertPrices(ctx context.Context, prices []*entity.Tok
 	if len(prices) == 0 {
 		return nil
 	}
+
+	// Sort by natural key once, before chunking, so the per-row advisory lock
+	// in assign_processing_version_offchain_token_price is acquired in a
+	// transaction-stable order across concurrent callers — including across
+	// chunks within the same transaction. See ADR-0002 §3.
+	slices.SortFunc(prices, func(a, b *entity.TokenPrice) int {
+		return cmp.Or(
+			cmp.Compare(a.TokenID, b.TokenID),
+			cmp.Compare(a.SourceID, b.SourceID),
+			a.Timestamp.Compare(b.Timestamp),
+		)
+	})
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {

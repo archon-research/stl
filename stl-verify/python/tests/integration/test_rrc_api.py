@@ -6,6 +6,7 @@ exercised end-to-end.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from decimal import Decimal
 from pathlib import Path
@@ -16,8 +17,12 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.main import create_app
+from tests.integration.conftest import composite_mapping_key, insert_receipt_token
 
 SAMPLE_PACKAGE = Path(__file__).resolve().parents[1] / "unit" / "risk_engine" / "suraf" / "testdata" / "sample_rating"
+
+_TEST_ADDRESS = bytes.fromhex("Bcca60bB61934080951369a648Fb03DF4F96263C")
+_TEST_CHAIN_ID = 1
 
 
 def _inputs_dir(tmp_path: Path) -> Path:
@@ -35,27 +40,35 @@ def _mapping_file(tmp_path: Path, content: str) -> Path:
 
 
 @pytest.fixture
-def app_factory(async_db_url: str, tmp_path: Path):
-    def _build(mapping_json: str = '{"aUSDC": "sample_rating"}'):
+def app_factory(async_db_url: str, db_url: str, tmp_path: Path):
+    receipt_token_id = asyncio.run(insert_receipt_token(db_url, _TEST_CHAIN_ID, _TEST_ADDRESS))
+
+    def _build(mapping_json: str | None = None):
+        if mapping_json is None:
+            key = composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
+            mapping_json = "{" + f'"{key}": "sample_rating"' + "}"
         settings = Settings(
             database_url=SecretStr(async_db_url),
             suraf_inputs_dir=_inputs_dir(tmp_path),
             suraf_mappings_file=_mapping_file(tmp_path, mapping_json),
         )
-        return create_app(settings)
+        return create_app(settings), receipt_token_id
 
     return _build
 
 
 def test_post_rrc_scenario_mapped_asset(app_factory) -> None:
-    app = app_factory()
+    app, receipt_token_id = app_factory()
 
     with TestClient(app) as client:
-        response = client.post("/v1/risk/rrc/scenario", json={"asset": "aUSDC", "usd_exposure": "1000"})
+        response = client.post(
+            "/v1/risk/rrc/scenario",
+            json={"receipt_token_id": receipt_token_id, "usd_exposure": "1000"},
+        )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["asset"] == "aUSDC"
+    assert body["receipt_token_id"] == receipt_token_id
     assert Decimal(body["usd_exposure"]) == Decimal("1000")
     assert body["rating_id"] == "sample_rating"
     assert body["rating_version"] == "v1"
@@ -65,21 +78,30 @@ def test_post_rrc_scenario_mapped_asset(app_factory) -> None:
 
 
 def test_post_rrc_scenario_unmapped_asset_returns_404(app_factory) -> None:
-    app = app_factory()
+    app, _ = app_factory()
 
     with TestClient(app) as client:
-        response = client.post("/v1/risk/rrc/scenario", json={"asset": "WBTC", "usd_exposure": "1000"})
+        response = client.post(
+            "/v1/risk/rrc/scenario",
+            json={"receipt_token_id": 999999, "usd_exposure": "1000"},
+        )
 
     assert response.status_code == 404
-    assert "WBTC" in response.json()["detail"]
+    assert "999999" in response.json()["detail"]
 
 
 def test_post_rrc_scenario_rejects_non_positive_exposure(app_factory) -> None:
-    app = app_factory()
+    app, receipt_token_id = app_factory()
 
     with TestClient(app) as client:
-        zero = client.post("/v1/risk/rrc/scenario", json={"asset": "aUSDC", "usd_exposure": "0"})
-        negative = client.post("/v1/risk/rrc/scenario", json={"asset": "aUSDC", "usd_exposure": "-1"})
+        zero = client.post(
+            "/v1/risk/rrc/scenario",
+            json={"receipt_token_id": receipt_token_id, "usd_exposure": "0"},
+        )
+        negative = client.post(
+            "/v1/risk/rrc/scenario",
+            json={"receipt_token_id": receipt_token_id, "usd_exposure": "-1"},
+        )
 
     assert zero.status_code == 422
     assert negative.status_code == 422

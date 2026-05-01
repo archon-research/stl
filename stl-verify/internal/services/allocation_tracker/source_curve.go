@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 
@@ -42,9 +43,10 @@ func (s *CurveSource) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
 	blockNumber int64,
-) (map[EntryKey]*PositionBalance, error) {
+) (*FetchResult, error) {
+	result := NewFetchResult()
 	if len(entries) == 0 {
-		return make(map[EntryKey]*PositionBalance), nil
+		return result, nil
 	}
 
 	var block *big.Int
@@ -57,11 +59,13 @@ func (s *CurveSource) FetchBalances(
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
 
-	results := make(map[EntryKey]*PositionBalance, len(entries))
 	for _, e := range valid1 {
 		sh := shares[e.Key()]
-		if sh == nil || sh.Sign() == 0 {
-			results[e.Key()] = &PositionBalance{
+		if sh == nil {
+			return nil, fmt.Errorf("missing curve share result for %s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex())
+		}
+		if sh.Sign() == 0 {
+			result.Balances[e.Key()] = &PositionBalance{
 				Balance:       big.NewInt(0),
 				ScaledBalance: big.NewInt(0),
 			}
@@ -70,13 +74,13 @@ func (s *CurveSource) FetchBalances(
 		s.logger.Debug("curve position",
 			"pool", e.ContractAddress.Hex(),
 			"shares", sh.String())
-		results[e.Key()] = &PositionBalance{
+		result.Balances[e.Key()] = &PositionBalance{
 			Balance:       new(big.Int).Set(sh),
 			ScaledBalance: new(big.Int).Set(sh),
 		}
 	}
 
-	return results, nil
+	return result, nil
 }
 
 func (s *CurveSource) fetchShares(
@@ -113,21 +117,26 @@ func (s *CurveSource) fetchShares(
 	}
 
 	shares := make(map[EntryKey]*big.Int, len(valid))
+	var failures []string
 	for i, e := range valid {
-		if i >= len(mc) {
-			break
+		if i >= len(mc) || !mc[i].Success || len(mc[i].ReturnData) == 0 {
+			failures = append(failures, fmt.Sprintf("%s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex()))
+			continue
 		}
-		shares[e.Key()] = big.NewInt(0)
-		if mc[i].Success && len(mc[i].ReturnData) > 0 {
-			unpacked, err := s.poolABI.Unpack(
-				"balanceOf", mc[i].ReturnData,
-			)
-			if err == nil && len(unpacked) > 0 {
-				if v, ok := unpacked[0].(*big.Int); ok {
-					shares[e.Key()] = v
-				}
-			}
+		unpacked, err := s.poolABI.Unpack("balanceOf", mc[i].ReturnData)
+		if err != nil || len(unpacked) == 0 {
+			failures = append(failures, fmt.Sprintf("%s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex()))
+			continue
 		}
+		v, ok := unpacked[0].(*big.Int)
+		if !ok {
+			failures = append(failures, fmt.Sprintf("%s/%s", e.ContractAddress.Hex(), e.WalletAddress.Hex()))
+			continue
+		}
+		shares[e.Key()] = v
+	}
+	if len(failures) > 0 {
+		return nil, nil, fmt.Errorf("curve balanceOf call failures: %s", strings.Join(failures, ", "))
 	}
 
 	return shares, valid, nil

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -16,6 +17,8 @@ import (
 
 type PrimePositionHandler struct {
 	repo        outbound.AllocationRepository
+	supplyRepo  outbound.TokenTotalSupplyRepository
+	txm         outbound.TxManager
 	metadata    *metadataCache
 	primeLookup map[string]int64 // star name → prime.id
 	logger      *slog.Logger
@@ -23,6 +26,8 @@ type PrimePositionHandler struct {
 
 func NewPrimePositionHandler(
 	repo outbound.AllocationRepository,
+	supplyRepo outbound.TokenTotalSupplyRepository,
+	txm outbound.TxManager,
 	multicaller outbound.Multicaller,
 	erc20ABI *abi.ABI,
 	primeLookup map[string]int64,
@@ -30,21 +35,31 @@ func NewPrimePositionHandler(
 ) *PrimePositionHandler {
 	return &PrimePositionHandler{
 		repo:        repo,
+		supplyRepo:  supplyRepo,
+		txm:         txm,
 		metadata:    newMetadataCache(multicaller, erc20ABI, logger),
 		primeLookup: primeLookup,
 		logger:      logger.With("component", "postgres-handler"),
 	}
 }
 
-func (h *PrimePositionHandler) HandleSnapshots(
+func (h *PrimePositionHandler) HandleBatch(
 	ctx context.Context,
-	snapshots []*PositionSnapshot,
+	batch *SnapshotBatch,
 ) error {
-	if len(snapshots) == 0 {
+	if batch == nil {
+		return nil
+	}
+	if len(batch.Snapshots) == 0 && len(batch.Supplies) == 0 {
 		return nil
 	}
 
-	blockNum := snapshots[0].BlockNumber
+	var blockNum int64
+	if len(batch.Snapshots) > 0 {
+		blockNum = batch.Snapshots[0].BlockNumber
+	} else {
+		blockNum = batch.Supplies[0].BlockNumber
+	}
 
 	// Token types where the contract itself isn't ERC20-compatible
 	// (e.g. Uniswap V3 pool contracts don't have decimals/symbol).
@@ -55,9 +70,8 @@ func (h *PrimePositionHandler) HandleSnapshots(
 	}
 
 	var addrs []common.Address
-	for _, s := range snapshots {
+	for _, s := range batch.Snapshots {
 		if nonERC20Types[s.Entry.TokenType] {
-			// Only fetch metadata for the asset, not the pool contract.
 			if s.Entry.AssetAddress != nil {
 				addrs = append(addrs, *s.Entry.AssetAddress)
 			}
@@ -68,26 +82,61 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			addrs = append(addrs, *s.Entry.AssetAddress)
 		}
 	}
+	for _, sup := range batch.Supplies {
+		addrs = append(addrs, sup.TokenAddress)
+	}
 	if err := h.metadata.fetchMissing(ctx, addrs, blockNum); err != nil {
 		return fmt.Errorf("metadata fetch: %w", err)
 	}
 
+	positions, err := h.buildPositions(batch.Snapshots, nonERC20Types)
+	if err != nil {
+		return err
+	}
+
+	supplies, err := h.buildSupplyEntities(batch.Supplies)
+	if err != nil {
+		return err
+	}
+
+	if len(positions) == 0 && len(supplies) == 0 {
+		return nil
+	}
+
+	return h.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		if len(positions) > 0 {
+			if err := h.repo.SavePositions(ctx, tx, positions); err != nil {
+				return fmt.Errorf("save positions: %w", err)
+			}
+		}
+		if len(supplies) > 0 {
+			if err := h.supplyRepo.SaveSupplies(ctx, tx, supplies); err != nil {
+				return fmt.Errorf("save supplies: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+func (h *PrimePositionHandler) buildPositions(
+	snapshots []*PositionSnapshot,
+	nonERC20Types map[string]bool,
+) ([]*entity.AllocationPosition, error) {
 	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
 		var meta tokenMeta
 		var ok bool
 
 		if nonERC20Types[s.Entry.TokenType] {
-			// Use asset metadata for non-ERC20 contract types.
 			if s.Entry.AssetAddress == nil {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"uni_v3 entry %s has no asset address",
 					s.Entry.ContractAddress.Hex(),
 				)
 			}
 			meta, ok = h.metadata.get(*s.Entry.AssetAddress)
 			if !ok {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"metadata missing for asset %s (pool %s)",
 					s.Entry.AssetAddress.Hex(),
 					s.Entry.ContractAddress.Hex(),
@@ -96,7 +145,7 @@ func (h *PrimePositionHandler) HandleSnapshots(
 		} else {
 			meta, ok = h.metadata.get(s.Entry.ContractAddress)
 			if !ok {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"metadata missing for token %s",
 					s.Entry.ContractAddress.Hex(),
 				)
@@ -105,7 +154,7 @@ func (h *PrimePositionHandler) HandleSnapshots(
 
 		primeID, ok := h.primeLookup[s.Entry.Star]
 		if !ok {
-			return fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
+			return nil, fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
 		}
 
 		var createdAtBlock int64
@@ -132,8 +181,41 @@ func (h *PrimePositionHandler) HandleSnapshots(
 			CreatedAt:      s.BlockTimestamp,
 		})
 	}
+	return positions, nil
+}
 
-	return h.repo.SavePositions(ctx, positions)
+func (h *PrimePositionHandler) buildSupplyEntities(
+	snapshots []*TokenTotalSupplySnapshot,
+) ([]*entity.TokenTotalSupply, error) {
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	out := make([]*entity.TokenTotalSupply, 0, len(snapshots))
+	for _, s := range snapshots {
+		meta, ok := h.metadata.get(s.TokenAddress)
+		if !ok {
+			return nil, fmt.Errorf("metadata missing for supply token %s", s.TokenAddress.Hex())
+		}
+		out = append(out, &entity.TokenTotalSupply{
+			ChainID:           s.ChainID,
+			TokenAddress:      s.TokenAddress,
+			TokenSymbol:       meta.symbol,
+			TokenDecimals:     meta.decimals,
+			TotalSupply:       s.TotalSupply,
+			ScaledTotalSupply: s.ScaledTotalSupply,
+			BlockNumber:       s.BlockNumber,
+			BlockVersion:      s.BlockVersion,
+			BlockTimestamp:    s.BlockTimestamp,
+			Source:            s.Source,
+			// Use the observation block as a non-zero floor for the token's
+			// `created_at_block`. The token upsert applies LEAST(existing,
+			// new), so a later allocation_position write with the actual
+			// deploy block self-corrects to the smaller value. Passing 0 here
+			// would permanently pin token.created_at_block to 0.
+			CreatedAtBlock: s.BlockNumber,
+		})
+	}
+	return out, nil
 }
 
 type tokenMeta struct {

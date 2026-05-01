@@ -79,7 +79,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 		t.Fatalf("expected exactly one multicall round, got %d", mc.CallCount)
 	}
 
-	got := results[entries[0].Key()]
+	got := results.Balances[entries[0].Key()]
 	if got == nil {
 		t.Fatal("expected result for entry")
 	}
@@ -89,9 +89,12 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 	if got.ScaledBalance == nil || got.ScaledBalance.Cmp(expectedShares) != 0 {
 		t.Fatalf("scaled balance = %v, want %s", got.ScaledBalance, expectedShares)
 	}
+	if len(results.Supplies) != 0 {
+		t.Fatalf("erc4626 source should not emit supply rows, got %d", len(results.Supplies))
+	}
 }
 
-func TestERC4626Source_FetchBalances_FailedCallStoresZero(t *testing.T) {
+func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
@@ -109,18 +112,10 @@ func TestERC4626Source_FetchBalances_FailedCallStoresZero(t *testing.T) {
 	}}
 
 	results, err := src.FetchBalances(context.Background(), entries, 100)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for failed balanceOf call")
 	}
-
-	got := results[entries[0].Key()]
-	if got == nil {
-		t.Fatal("expected result for entry")
-	}
-	if got.Balance.Cmp(big.NewInt(0)) != 0 {
-		t.Fatalf("balance = %s, want 0", got.Balance)
-	}
-	if got.ScaledBalance == nil || got.ScaledBalance.Cmp(big.NewInt(0)) != 0 {
-		t.Fatalf("scaled balance = %v, want 0", got.ScaledBalance)
+	if results != nil {
+		t.Fatal("expected nil results on failed balanceOf call")
 	}
 }

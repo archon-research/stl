@@ -81,7 +81,10 @@ func TestProcessMessages_Success(t *testing.T) {
 	}
 }
 
-func TestProcessMessages_HandlerError_SkipsDelete(t *testing.T) {
+// TestProcessMessages_DoesNotDeleteOnHandlerError verifies the SQS half of
+// the VEC-188 transient-error invariant: a handler returning any error must
+// leave the message undeleted so SQS re-delivers it.
+func TestProcessMessages_DoesNotDeleteOnHandlerError(t *testing.T) {
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
 	consumer := &mockConsumer{
 		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},

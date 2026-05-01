@@ -1,30 +1,26 @@
-import path from 'node:path';
-
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
-const uikitWorktreePath = process.env.UIKIT_WORKTREE_PATH;
+import { resolveAppEnv } from '#env';
 
 // https://vitejs.dev/config/
-export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    preserveSymlinks: true,
-    dedupe: ['react', 'react-dom'],
-  },
-  server: {
-    proxy: {
-      '/v1': 'http://localhost:8000',
+export default defineConfig(({ mode }) => {
+  const env = resolveAppEnv(mode, __dirname);
+
+  return {
+    plugins: [react()],
+    resolve: {
+      preserveSymlinks: true,
+      dedupe: ['react', 'react-dom'],
     },
-    fs: {
-      allow: [
-        path.resolve(__dirname),
-        ...(uikitWorktreePath ? [path.resolve(uikitWorktreePath)] : []),
-      ],
+    server: {
+      proxy: {
+        '/v1': env.API_URL,
+      },
     },
-  },
-  build: {
-    outDir: 'dist',
-    sourcemap: false,
-  },
+    build: {
+      outDir: 'dist',
+      sourcemap: false,
+    },
+  };
 });

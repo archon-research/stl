@@ -5,6 +5,7 @@ package migrator_test
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,15 +24,115 @@ func getMigrationsPath() string {
 	return filepath.Join(testDir, "..", "migrations")
 }
 
-func setupPostgres(ctx context.Context, t *testing.T) (*pgxpool.Pool, func()) {
+func setupPostgres(_ context.Context, t *testing.T) (*pgxpool.Pool, func()) {
 	t.Helper()
-	dsn, containerCleanup := testutil.StartTimescaleDB(t)
+	dsn, dbCleanup := createTestDatabase(t)
 	pool := testutil.ConnectPool(t, dsn)
 	cleanup := func() {
 		pool.Close()
-		containerCleanup()
+		dbCleanup()
 	}
 	return pool, cleanup
+}
+
+func createTestDatabase(t *testing.T) (dsn string, cleanup func()) {
+	t.Helper()
+
+	dbName := testutil.SanitizeTestName(t.Name())
+	ctx := context.Background()
+
+	adminPool, err := pgxpool.New(ctx, sharedDSN)
+	if err != nil {
+		t.Fatalf("connect for db creation: %v", err)
+	}
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName))
+	if err != nil {
+		adminPool.Close()
+		t.Fatalf("create database %s: %v", dbName, err)
+	}
+	adminPool.Close()
+
+	// Build DSN for the new database by replacing the path component.
+	u, err := url.Parse(sharedDSN)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	u.Path = "/" + dbName
+	dsn = u.String()
+
+	// Enable TimescaleDB in the new database
+	tmpPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect to new db: %v", err)
+	}
+	_, err = tmpPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb")
+	if err != nil {
+		tmpPool.Close()
+		t.Fatalf("enable timescaledb: %v", err)
+	}
+	tmpPool.Close()
+
+	cleanup = func() {
+		dropCtx := context.Background()
+		dropPool, err := pgxpool.New(dropCtx, sharedDSN)
+		if err != nil {
+			return
+		}
+		defer dropPool.Close()
+		dropPool.Exec(dropCtx, fmt.Sprintf(
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", dbName))
+		dropPool.Exec(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName))
+	}
+	return dsn, cleanup
+}
+
+func createBenchDatabase(b *testing.B) (dsn string, cleanup func()) {
+	b.Helper()
+
+	dbName := testutil.SanitizeTestName(b.Name())
+	ctx := context.Background()
+
+	adminPool, err := pgxpool.New(ctx, sharedDSN)
+	if err != nil {
+		b.Fatalf("connect for db creation: %v", err)
+	}
+	_, err = adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName))
+	if err != nil {
+		adminPool.Close()
+		b.Fatalf("create database %s: %v", dbName, err)
+	}
+	adminPool.Close()
+
+	u, err := url.Parse(sharedDSN)
+	if err != nil {
+		b.Fatalf("parse DSN: %v", err)
+	}
+	u.Path = "/" + dbName
+	dsn = u.String()
+
+	tmpPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		b.Fatalf("connect to new db: %v", err)
+	}
+	_, err = tmpPool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb")
+	if err != nil {
+		tmpPool.Close()
+		b.Fatalf("enable timescaledb: %v", err)
+	}
+	tmpPool.Close()
+
+	cleanup = func() {
+		dropCtx := context.Background()
+		dropPool, err := pgxpool.New(dropCtx, sharedDSN)
+		if err != nil {
+			return
+		}
+		defer dropPool.Close()
+		dropPool.Exec(dropCtx, fmt.Sprintf(
+			"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s'", dbName))
+		dropPool.Exec(dropCtx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName))
+	}
+	return dsn, cleanup
 }
 
 func TestMigrator_ApplyAll(t *testing.T) {
@@ -570,11 +671,11 @@ func TestProcessingVersion_NonZeroBuildID(t *testing.T) {
 // the cost added to normal (non-reprocessing) operations.
 func BenchmarkProcessingVersionTrigger_WithLock(b *testing.B) {
 	ctx := context.Background()
-	dsn, containerCleanup := testutil.StartTimescaleDBForMain()
+	dsn, dbCleanup := createBenchDatabase(b)
 	pool := testutil.ConnectPoolForMain(dsn)
 	defer func() {
 		pool.Close()
-		containerCleanup()
+		dbCleanup()
 	}()
 
 	m := migrator.New(pool, getMigrationsPath())

@@ -14,7 +14,7 @@ import (
 type mockSource struct {
 	name       string
 	tokenTypes map[string]bool
-	balances   map[EntryKey]*PositionBalance
+	result     *FetchResult
 	err        error
 	called     int
 }
@@ -25,12 +25,15 @@ func (m *mockSource) Supports(tokenType, protocol string) bool {
 	return m.tokenTypes[tokenType]
 }
 
-func (m *mockSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (map[EntryKey]*PositionBalance, error) {
+func (m *mockSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
 	m.called++
 	if m.err != nil {
 		return nil, m.err
 	}
-	return m.balances, nil
+	if m.result == nil {
+		return NewFetchResult(), nil
+	}
+	return m.result, nil
 }
 
 func TestSourceRegistry_Route(t *testing.T) {
@@ -81,19 +84,22 @@ func TestSourceRegistry_FetchAll_GroupsBySource(t *testing.T) {
 	key1 := EntryKey{ContractAddress: contract1, WalletAddress: wallet1}
 	key2 := EntryKey{ContractAddress: contract2, WalletAddress: wallet2}
 
+	result1 := NewFetchResult()
+	result1.Balances[key1] = &PositionBalance{Balance: big.NewInt(100)}
+	result1.Supplies[contract1] = &PoolSupply{TotalSupply: big.NewInt(999)}
+
+	result2 := NewFetchResult()
+	result2.Balances[key2] = &PositionBalance{Balance: big.NewInt(200)}
+
 	erc20Source := &mockSource{
 		name:       "erc20",
 		tokenTypes: map[string]bool{"erc20": true},
-		balances: map[EntryKey]*PositionBalance{
-			key1: {Balance: big.NewInt(100)},
-		},
+		result:     result1,
 	}
 	erc4626Source := &mockSource{
 		name:       "erc4626",
 		tokenTypes: map[string]bool{"erc4626": true},
-		balances: map[EntryKey]*PositionBalance{
-			key2: {Balance: big.NewInt(200)},
-		},
+		result:     result2,
 	}
 
 	registry.Register(erc20Source)
@@ -109,15 +115,22 @@ func TestSourceRegistry_FetchAll_GroupsBySource(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(results) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(results))
+	if len(results.Balances) != 2 {
+		t.Fatalf("expected 2 balance entries, got %d", len(results.Balances))
 	}
 
-	if results[key1].Balance.Cmp(big.NewInt(100)) != 0 {
-		t.Errorf("erc20 balance = %s, want 100", results[key1].Balance.String())
+	if results.Balances[key1].Balance.Cmp(big.NewInt(100)) != 0 {
+		t.Errorf("erc20 balance = %s, want 100", results.Balances[key1].Balance.String())
 	}
-	if results[key2].Balance.Cmp(big.NewInt(200)) != 0 {
-		t.Errorf("erc4626 balance = %s, want 200", results[key2].Balance.String())
+	if results.Balances[key2].Balance.Cmp(big.NewInt(200)) != 0 {
+		t.Errorf("erc4626 balance = %s, want 200", results.Balances[key2].Balance.String())
+	}
+
+	if len(results.Supplies) != 1 {
+		t.Fatalf("expected 1 supply entry, got %d", len(results.Supplies))
+	}
+	if results.Supplies[contract1].TotalSupply.Cmp(big.NewInt(999)) != 0 {
+		t.Errorf("total supply = %s, want 999", results.Supplies[contract1].TotalSupply)
 	}
 
 	if erc20Source.called != 1 {
@@ -135,7 +148,7 @@ func TestSourceRegistry_FetchAll_SkipsUnsupported(t *testing.T) {
 	src := &mockSource{
 		name:       "erc20",
 		tokenTypes: map[string]bool{"erc20": true},
-		balances:   map[EntryKey]*PositionBalance{},
+		result:     NewFetchResult(),
 	}
 	registry.Register(src)
 
@@ -147,8 +160,8 @@ func TestSourceRegistry_FetchAll_SkipsUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 0 {
-		t.Errorf("unsupported entries should be skipped, got %d results", len(results))
+	if len(results.Balances) != 0 {
+		t.Errorf("unsupported entries should be skipped, got %d results", len(results.Balances))
 	}
 	if src.called != 0 {
 		t.Errorf("source should not be called for unsupported entry")
@@ -163,12 +176,13 @@ func TestSourceRegistry_FetchAll_PartialFailure(t *testing.T) {
 	wallet1 := common.HexToAddress("0xaaaa")
 	key1 := EntryKey{ContractAddress: contract1, WalletAddress: wallet1}
 
+	okRes := NewFetchResult()
+	okRes.Balances[key1] = &PositionBalance{Balance: big.NewInt(100)}
+
 	goodSource := &mockSource{
 		name:       "erc20",
 		tokenTypes: map[string]bool{"erc20": true},
-		balances: map[EntryKey]*PositionBalance{
-			key1: {Balance: big.NewInt(100)},
-		},
+		result:     okRes,
 	}
 	badSource := &mockSource{
 		name:       "erc4626",
@@ -190,10 +204,10 @@ func TestSourceRegistry_FetchAll_PartialFailure(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for partial failure")
 	}
-	if len(results) != 1 {
-		t.Errorf("expected 1 partial result, got %d", len(results))
+	if len(results.Balances) != 1 {
+		t.Errorf("expected 1 partial balance, got %d", len(results.Balances))
 	}
-	if results[key1].Balance.Cmp(big.NewInt(100)) != 0 {
+	if results.Balances[key1].Balance.Cmp(big.NewInt(100)) != 0 {
 		t.Errorf("good source result should still be present")
 	}
 }

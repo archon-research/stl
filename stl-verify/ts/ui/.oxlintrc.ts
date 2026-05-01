@@ -9,6 +9,7 @@ const config = {
   rules: {
     ...(reactConfig.rules ?? {}),
     'import/no-unassigned-import': 'off',
+    'no-console': 'error',
   },
   ignorePatterns: ['dist', 'src/generated'],
 };

@@ -34,8 +34,9 @@ func (r *SourceRegistry) Route(entry *TokenEntry) PositionSource {
 	return nil
 }
 
-// FetchAll groups entries by source, fetches in batch, returns all results.
-func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, blockNumber int64) (map[EntryKey]*PositionBalance, error) {
+// FetchAll groups entries by source, fetches in batch, unions both the balance
+// and supply maps across sources, and returns the aggregated FetchResult.
+func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
 	grouped := make(map[PositionSource][]*TokenEntry)
 	for _, entry := range entries {
 		source := r.Route(entry)
@@ -49,11 +50,11 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 		grouped[source] = append(grouped[source], entry)
 	}
 
-	results := make(map[EntryKey]*PositionBalance)
+	aggregate := NewFetchResult()
 	var errs []error
 
 	for source, sourceEntries := range grouped {
-		balances, err := source.FetchBalances(ctx, sourceEntries, blockNumber)
+		res, err := source.FetchBalances(ctx, sourceEntries, blockNumber)
 		if err != nil {
 			r.logger.Error("source fetch failed",
 				"source", source.Name(),
@@ -62,11 +63,15 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 			errs = append(errs, fmt.Errorf("%s: %w", source.Name(), err))
 			continue
 		}
-		maps.Copy(results, balances)
+		if res == nil {
+			continue
+		}
+		maps.Copy(aggregate.Balances, res.Balances)
+		maps.Copy(aggregate.Supplies, res.Supplies)
 	}
 
 	if len(errs) > 0 {
-		return results, fmt.Errorf("partial fetch failures: %w", errors.Join(errs...))
+		return aggregate, fmt.Errorf("partial fetch failures: %w", errors.Join(errs...))
 	}
-	return results, nil
+	return aggregate, nil
 }

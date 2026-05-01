@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -28,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
@@ -225,7 +225,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Ethereum
-	rawClient, err := ethclient.DialContext(ctx, cfg.alchemyURL)
+	rawClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("eth dial: %w", err)
 	}
@@ -241,6 +241,10 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
+	atokenReadABI, err := abis.GetATokenReadABI()
+	if err != nil {
+		return fmt.Errorf("atoken read abi: %w", err)
+	}
 
 	// Build source registry
 	registry := at.NewSourceRegistry(logger)
@@ -249,7 +253,7 @@ func run(ctx context.Context, args []string) error {
 		registry.Register(s)
 	}
 
-	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, logger))
+	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, atokenReadABI, logger))
 
 	erc4626, err := at.NewERC4626Source(mc, logger)
 	if err != nil {
@@ -328,7 +332,8 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("token repo: %w", err)
 	}
 	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	pgHandler := at.NewPrimePositionHandler(allocRepo, mc, erc20ABI, primeLookup, logger)
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
+	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
 
