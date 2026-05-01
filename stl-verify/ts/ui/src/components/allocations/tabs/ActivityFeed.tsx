@@ -7,6 +7,7 @@ import { flex } from '#styled-system/patterns';
 
 import { getAllocationActivity } from '../../../lib/api';
 import { formatTokenAmount } from '../../../lib/dashboard';
+import { TokenAddress } from '../../shared';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
@@ -156,19 +157,7 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
           {event.tx_hash ? (
             <>
               <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>•</span>
-              <a
-                href={`https://etherscan.io/tx/${event.tx_hash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={css({
-                  fontSize: 'xs',
-                  color: 'interactive.accent',
-                  textDecoration: 'none',
-                  _hover: { textDecoration: 'underline' },
-                })}
-              >
-                {event.tx_hash.slice(0, 8)}...
-              </a>
+              <TokenAddress address={event.tx_hash} />
             </>
           ) : null}
         </div>

@@ -14,13 +14,12 @@ import {
   formatUsdValue,
   getAllocationKey,
   getChainLabel,
-  getExplorerUrl,
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
 import type { Allocation, AllocationCategory, CapitalMetrics, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { Address, EmptyState, ErrorState, SummaryMetric } from '../shared';
+import { EmptyState, ErrorState, SummaryMetric, TokenAddress } from '../shared';
 import { CapitalMetricsPanel } from './CapitalMetricsPanel';
 
 type AllocationGridProps = {
@@ -246,26 +245,30 @@ export function AllocationGrid({
           const allocation = row.original;
 
           return (
-            <div>
-              <p
+            <div
+              className={css({
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1',
+              })}
+            >
+              <span
                 className={css({
-                  m: 0,
                   fontSize: 'sm',
                   fontWeight: 'semibold',
                   color: 'text.strong',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  m: 0,
                 })}
               >
                 {allocation.underlying_symbol}
-              </p>
-              <Address
-                value={allocation.underlying_token_address}
-                href={getExplorerUrl(allocation.chain_id, allocation.underlying_token_address)}
-                truncate={false}
-                className={css({
-                  fontFamily: 'mono',
-                  fontSize: 'xs',
-                  color: 'text.muted',
-                })}
+              </span>
+              <TokenAddress
+                address={allocation.underlying_token_address}
+                chainId={allocation.chain_id}
+                style={{ fontSize: '0.8rem' }}
               />
             </div>
           );
@@ -280,28 +283,32 @@ export function AllocationGrid({
           const amountUsd = allocation.amount_usd;
 
           return (
-            <div>
-              <p
+            <div
+              className={css({
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1',
+              })}
+            >
+              <span
                 className={css({
-                  m: 0,
                   fontSize: 'sm',
                   fontWeight: 'semibold',
                   color: 'text.strong',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  m: 0,
                 })}
               >
                 {amountUsd !== undefined && amountUsd !== null
                   ? formatUsdValue(amountUsd)
                   : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
-              </p>
-              <Address
-                value={allocation.receipt_token_address}
-                href={getExplorerUrl(allocation.chain_id, allocation.receipt_token_address)}
-                truncate={false}
-                className={css({
-                  fontFamily: 'mono',
-                  fontSize: 'xs',
-                  color: 'text.muted',
-                })}
+              </span>
+              <TokenAddress
+                address={allocation.receipt_token_address}
+                chainId={allocation.chain_id}
+                style={{ fontSize: '0.8rem' }}
               />
             </div>
           );
@@ -507,15 +514,7 @@ export function AllocationGrid({
                 {selectedPrime ? selectedPrime.name : 'Select a prime'}
               </h1>
               {selectedPrime ? (
-                <p
-                  className={css({
-                    m: 0,
-                    fontSize: 'sm',
-                    color: 'text.muted',
-                  })}
-                >
-                  {selectedPrime.id}
-                </p>
+                <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
             <div
