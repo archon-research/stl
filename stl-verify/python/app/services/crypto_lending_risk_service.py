@@ -126,16 +126,12 @@ class CryptoLendingRiskService:
         # ``503 share_data_missing`` instead of ``200``.
         if prime_id is None:
             share = await self._reader.get_legacy_share(info)
-        else:
-            share = None
 
         breakdown = await self._reader.get_breakdown(info)
         if not breakdown.items:
             return breakdown.backed_asset_id, []
 
-        if share is None:
-            if prime_id is None:
-                raise ValueError("prime_id is required for non-legacy share resolution")
+        if prime_id is not None:
             share = await self._reader.get_share(info, prime_id)
 
         token_ids = [item.token_id for item in breakdown.items]

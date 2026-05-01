@@ -406,6 +406,22 @@ async def test_nonexistent_debt_token_returns_empty(
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_wrong_protocol_id_returns_empty(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Regression guard: the query must filter by ``protocol_id``.
+
+    Seed data above only populates SparkLend. Querying a real, seeded debt
+    token but with a different ``protocol_id`` must return an empty breakdown.
+    If the SQL silently ignored the parameter the SparkLend rows would still
+    come back, which would attribute one protocol's collateral to another.
+    """
+    result = await repository.get_backed_breakdown(999_999, test_ids["sp_usds_id"])
+
+    assert result.items == ()
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_latest_debt_snapshot_used_not_summed(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
