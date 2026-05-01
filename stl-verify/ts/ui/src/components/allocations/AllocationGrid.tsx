@@ -14,15 +14,18 @@ import {
   formatUsdValue,
   getAllocationKey,
   getChainLabel,
+  getExplorerUrl,
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import type { Allocation, AllocationCategory, Prime } from '../../types/allocation';
+import type { Allocation, AllocationCategory, CapitalMetrics, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { Address, EmptyState, ErrorState, SummaryMetric } from '../shared';
+import { CapitalMetricsPanel } from './CapitalMetricsPanel';
 
 type AllocationGridProps = {
   allocations: Allocation[];
+  capitalMetrics: CapitalMetrics | null;
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: Allocation[];
@@ -81,6 +84,7 @@ function getCategoryLabel(category: AllocationCategory | undefined): string {
 
 export function AllocationGrid({
   allocations,
+  capitalMetrics,
   chainLabels,
   errorMessage,
   filteredAllocations,
@@ -255,6 +259,7 @@ export function AllocationGrid({
               </p>
               <Address
                 value={allocation.underlying_token_address}
+                href={getExplorerUrl(allocation.chain_id, allocation.underlying_token_address)}
                 truncate={false}
                 className={css({
                   fontFamily: 'mono',
@@ -290,6 +295,7 @@ export function AllocationGrid({
               </p>
               <Address
                 value={allocation.receipt_token_address}
+                href={getExplorerUrl(allocation.chain_id, allocation.receipt_token_address)}
                 truncate={false}
                 className={css({
                   fontFamily: 'mono',
@@ -428,6 +434,9 @@ export function AllocationGrid({
           >
             Allocations
           </span>
+          {capitalMetrics ? (
+            <CapitalMetricsPanel metrics={capitalMetrics} />
+          ) : null}
           {summary ? (
             <div
               className={css({

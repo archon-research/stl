@@ -5,6 +5,8 @@ type AddressProps = {
   truncate?: boolean;
   truncateLength?: { start: number; end: number };
   className?: string;
+  /** When provided, renders the address as an external link to this URL. */
+  href?: string | null;
 };
 
 function formatAddress(
@@ -24,8 +26,32 @@ export function Address({
   truncate = true,
   truncateLength = { start: 8, end: 4 },
   className,
+  href,
 }: AddressProps) {
   const displayValue = truncate ? formatAddress(value, truncateLength) : value;
+
+  if (href) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer noopener"
+        title={value}
+        className={
+          className ??
+          css({
+            fontFamily: 'mono',
+            fontSize: 'xs',
+            color: 'text.muted',
+            textDecoration: 'none',
+            _hover: { textDecoration: 'underline', color: 'text.interactive' },
+          })
+        }
+      >
+        {displayValue}
+      </a>
+    );
+  }
 
   return (
     <span

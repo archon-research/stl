@@ -390,3 +390,42 @@ export function sortAllocations(allocations: Allocation[]): Allocation[] {
     return left.symbol.localeCompare(right.symbol);
   });
 }
+
+const CHAIN_EXPLORERS: Record<number, string> = {
+  1: 'https://etherscan.io',
+  10: 'https://optimistic.etherscan.io',
+  137: 'https://polygonscan.com',
+  324: 'https://explorer.zksync.io',
+  130: 'https://unichain.blockscout.com',
+  8453: 'https://basescan.org',
+  42161: 'https://arbiscan.io',
+  43114: 'https://snowscan.xyz',
+};
+
+/**
+ * Returns an Etherscan/block-explorer URL for the given chain + address,
+ * or null if the chain is not recognised.
+ */
+export function getExplorerUrl(chainId: number, address: string): string | null {
+  const base = CHAIN_EXPLORERS[chainId];
+  if (!base) {
+    return null;
+  }
+  return `${base}/address/${address}`;
+}
+
+/**
+ * Lookup table of well-known contract addresses to human-readable labels.
+ * Keys are lowercased hex addresses (without checksum).
+ * Extend as needed — used as a best-effort enrichment layer on top of
+ * protocol/symbol fields already available from the API.
+ */
+const KNOWN_ADDRESS_LABELS: Record<string, string> = {};
+
+/**
+ * Returns a human-readable label for a known contract address, or null
+ * if the address is not in the local dictionary.
+ */
+export function getAddressLabel(address: string): string | null {
+  return KNOWN_ADDRESS_LABELS[address.toLowerCase()] ?? null;
+}

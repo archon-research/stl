@@ -13,6 +13,7 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
+  getCapitalMetrics,
   getChains,
   getPrimes,
   getProtocols,
@@ -30,7 +31,7 @@ import {
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
-import type { Allocation, Prime } from './types/allocation';
+import type { Allocation, CapitalMetrics, Prime } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
 function App() {
@@ -46,6 +47,7 @@ function App() {
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
+  const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(null);
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -187,6 +189,33 @@ function App() {
         if (!controller.signal.aborted) {
           setIsAllocationsLoading(false);
         }
+      });
+
+    return () => controller.abort();
+  }, [selectedPrimeId]);
+
+  useEffect(() => {
+    if (!selectedPrimeId) {
+      setCapitalMetrics(null);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    void getCapitalMetrics(selectedPrimeId, controller.signal)
+      .then((metrics) => {
+        setCapitalMetrics(metrics);
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.error('Failed to load capital metrics', {
+          error,
+          primeId: selectedPrimeId,
+        });
+        setCapitalMetrics(null);
       });
 
     return () => controller.abort();
@@ -377,6 +406,7 @@ function App() {
           main={
             <AllocationGrid
               allocations={allocations}
+              capitalMetrics={capitalMetrics}
               chainLabels={chainLabels}
               errorMessage={allocationsErrorMessage}
               filteredAllocations={filteredAllocations}
