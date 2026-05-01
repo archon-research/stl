@@ -333,13 +333,13 @@ async def test_ids(db_url: str, _seed_data: None) -> dict[str, int]:
 async def repository(
     async_db_url: str, _seed_data: None, test_ids: dict[str, int]
 ) -> AsyncIterator[ProtocolScopedBackedBreakdownRepository]:
-    """Create a Morpho repository already bound to the Morpho protocol."""
+    """Create the Morpho backed breakdown repository."""
     engine = create_async_engine(async_db_url)
     try:
         repository_class = cast(Any, MorphoBackedBreakdownRepository)
         yield cast(
             ProtocolScopedBackedBreakdownRepository,
-            repository_class(engine, protocol_id=test_ids["protocol_id"]),
+            repository_class(engine),
         )
     finally:
         await engine.dispose()

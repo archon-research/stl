@@ -1,6 +1,8 @@
 """Table-driven tests for the RiskModel port, RrcResult, and FakeRiskModel."""
 
+from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -32,7 +34,7 @@ class FakeRiskModel:
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:
         return (asset_id, prime_id) in self._supported
 
-    async def compute(self, asset_id: int, prime_id: EthAddress, overrides: dict) -> RrcResult:
+    async def compute(self, asset_id: int, prime_id: EthAddress, overrides: Mapping[str, Any]) -> RrcResult:
         return self._result
 
 

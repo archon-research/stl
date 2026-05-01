@@ -2,7 +2,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.domain.entities.receipt_token import ReceiptTokenInfo
+from app.domain.entities.receipt_token import ReceiptTokenInfo, ReceiptTokenProtocolPair
 from app.logging import get_logger
 from app.risk_engine.mapping import MappingError
 
@@ -26,9 +26,16 @@ LEFT JOIN token t ON t.chain_id = p.chain_id AND t.address = rt.receipt_token_ad
 WHERE rt.id = :receipt_token_id
 """
 
+_RECEIPT_TOKEN_ROUTING_SQL = """
+SELECT rt.id AS receipt_token_id, p.name AS protocol_name
+FROM receipt_token rt
+JOIN protocol p ON p.id = rt.protocol_id
+ORDER BY rt.id
+"""
+
 
 class ReceiptTokenRepository:
-    """Look up a receipt token and its associated protocol metadata."""
+    """Look up receipt-token metadata used by risk-model routing and execution."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
@@ -54,6 +61,21 @@ class ReceiptTokenRepository:
             protocol_name=row.protocol_name,
             receipt_token_token_id=row.receipt_token_token_id,
         )
+
+    async def list_protocol_pairs(self) -> list[ReceiptTokenProtocolPair]:
+        """Return receipt-token IDs paired with their protocol names."""
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(_RECEIPT_TOKEN_ROUTING_SQL))
+                rows = result.fetchall()
+        except SQLAlchemyError:
+            logger.exception("receipt_token_repository: DB error listing routing info")
+            raise
+
+        return [
+            ReceiptTokenProtocolPair(receipt_token_id=row.receipt_token_id, protocol_name=row.protocol_name)
+            for row in rows
+        ]
 
 
 async def resolve_receipt_token_mapping(

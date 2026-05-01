@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app.config import Settings
+from app.domain.entities.allocation import EthAddress
 from app.main import create_app
 from app.risk_engine.mapping import MappingError
 from app.risk_engine.suraf.result import SurafResult
@@ -73,6 +74,9 @@ def test_startup_populates_suraf_ratings(async_db_url: str, db_url: str, tmp_pat
         assert isinstance(ratings["sample_rating"], SurafResult)
 
         assert app.state.asset_to_rating == {receipt_token_id: "sample_rating"}
+        applicable = app.state.model_registry.applicable(receipt_token_id, EthAddress("0x" + "11" * 20))
+        assert any(model.model == "suraf" for model in applicable)
+        assert any(model.model == "gap_sweep" for model in applicable)
 
 
 def test_startup_fails_on_invalid_package(async_db_url: str, tmp_path: Path) -> None:
