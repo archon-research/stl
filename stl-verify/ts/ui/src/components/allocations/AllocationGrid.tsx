@@ -10,6 +10,7 @@ import {
   type ChainLabelLookup,
   formatDateTime,
   formatFreshnessLabel,
+  formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
   getAllocationKey,
@@ -20,7 +21,6 @@ import {
 import type { Allocation, AllocationCategory, CapitalMetrics, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { EmptyState, ErrorState, SummaryMetric, TokenAddress } from '../shared';
-import { CapitalMetricsPanel } from './CapitalMetricsPanel';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -29,6 +29,7 @@ type AllocationGridProps = {
   errorMessage: string | null;
   filteredAllocations: Allocation[];
   isLoading: boolean;
+  isCapitalMetricsLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
   onSearchChange: (value: string) => void;
@@ -88,6 +89,7 @@ export function AllocationGrid({
   errorMessage,
   filteredAllocations,
   isLoading,
+  isCapitalMetricsLoading,
   localProtocols,
   onSelectAllocation,
   onSearchChange,
@@ -402,6 +404,11 @@ export function AllocationGrid({
     sorting,
   });
 
+  const showTopMetricsSkeleton =
+    selectedPrime !== null && (isLoading || isCapitalMetricsLoading);
+
+  const hasTopMetrics = capitalMetrics !== null || summary !== null;
+
   return (
     <div
       className={css({
@@ -423,80 +430,11 @@ export function AllocationGrid({
         })}
       >
         <div className={css({ display: 'grid', gap: '4' })}>
-          <span
-            className={css({
-              display: 'inline-flex',
-              width: 'fit-content',
-              alignItems: 'center',
-              borderRadius: 'full',
-              bg: { _dark: 'gray.800', base: 'gray.100' },
-              px: '3',
-              py: '1',
-              fontSize: 'xs',
-              fontWeight: 'semibold',
-              letterSpacing: '0.14em',
-              textTransform: 'uppercase',
-              color: 'text.muted',
-            })}
-          >
-            Allocations
-          </span>
-          {capitalMetrics ? (
-            <CapitalMetricsPanel metrics={capitalMetrics} />
-          ) : null}
-          {summary ? (
-            <div
-              className={css({
-                display: 'grid',
-                gridTemplateColumns: {
-                  base: '1fr',
-                  md: 'repeat(4, minmax(0, 1fr))',
-                },
-                gap: '3',
-              })}
-            >
-              <SummaryMetric
-                label="Total allocation"
-                value={formatUsdValue(summary.totalUsd)}
-                detail={`${summary.allocationCount} allocations`}
-              />
-              <SummaryMetric
-                label="Largest position"
-                value={
-                  summary.largestAllocation
-                    ? summary.largestAllocation.symbol
-                    : '—'
-                }
-                detail={
-                  summary.largestAllocation
-                    ? formatUsdValue(summary.largestAllocation.amount_usd)
-                    : undefined
-                }
-              />
-              <SummaryMetric
-                label="Allocations"
-                value={String(summary.allocationCount)}
-              />
-              <SummaryMetric
-                label="Latest activity"
-                value={
-                  summary.latestActivityAt
-                    ? formatFreshnessLabel(summary.latestActivityAt)
-                    : '—'
-                }
-                detail={
-                  summary.latestActivityAt
-                    ? formatDateTime(summary.latestActivityAt)
-                    : 'No indexed activity'
-                }
-              />
-            </div>
-          ) : null}
           <div
             className={flex({
               align: 'flex-end',
               justify: 'space-between',
-              gap: '5',
+              gap: '3',
               wrap: 'wrap',
             })}
           >
@@ -517,6 +455,133 @@ export function AllocationGrid({
                 <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
+            {!showTopMetricsSkeleton && capitalMetrics ? (
+              <span
+                className={css({
+                  fontSize: 'xs',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                })}
+              >
+                Risk-to-capital {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
+              </span>
+            ) : null}
+          </div>
+          {showTopMetricsSkeleton ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: 'repeat(2, minmax(0, 1fr))',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div
+                  key={`metrics-skeleton-${index}`}
+                  className={css({
+                    height: '88px',
+                    borderRadius: 'md',
+                    borderStyle: 'solid',
+                    borderWidth: '1px',
+                    borderColor: 'border.subtle',
+                    bg: 'surface.subtle',
+                  })}
+                />
+              ))}
+            </div>
+          ) : null}
+          {!showTopMetricsSkeleton && hasTopMetrics ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: 'repeat(2, minmax(0, 1fr))',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              {capitalMetrics ? (
+                <>
+                  <SummaryMetric
+                    label="Risk capital"
+                    value={formatUsdValue(capitalMetrics.risk_capital)}
+                    detail="Onchain allocation exposure"
+                  />
+                  <SummaryMetric
+                    label="Total capital"
+                    value={formatUsdValue(capitalMetrics.total_capital)}
+                    detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                  />
+                </>
+              ) : null}
+
+              {summary ? (
+                <>
+                  <SummaryMetric
+                    label="Total allocation"
+                    value={formatUsdValue(summary.totalUsd)}
+                    detail={`${summary.allocationCount} allocations`}
+                  />
+                  <SummaryMetric
+                    label="Latest activity"
+                    value={
+                      summary.latestActivityAt
+                        ? formatFreshnessLabel(summary.latestActivityAt)
+                        : '—'
+                    }
+                    detail={
+                      summary.latestActivityAt
+                        ? formatDateTime(summary.latestActivityAt)
+                        : 'No indexed activity'
+                    }
+                  />
+                </>
+              ) : null}
+            </div>
+          ) : null}
+          {!showTopMetricsSkeleton && capitalMetrics?.validation_note ? (
+            <p
+              className={css({
+                m: 0,
+                fontSize: 'xs',
+                color: 'text.muted',
+                fontStyle: 'italic',
+                textAlign: 'left',
+              })}
+            >
+              {capitalMetrics.validation_note}
+            </p>
+          ) : null}
+          <div
+            className={flex({
+              align: 'flex-end',
+              justify: 'space-between',
+              gap: '5',
+              wrap: 'wrap',
+            })}
+          >
+            <span
+              className={css({
+                display: 'inline-flex',
+                width: 'fit-content',
+                alignItems: 'center',
+                borderRadius: 'full',
+                bg: { _dark: 'gray.800', base: 'gray.100' },
+                px: '3',
+                py: '1',
+                fontSize: 'xs',
+                fontWeight: 'semibold',
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                color: 'text.muted',
+              })}
+            >
+              Allocations
+            </span>
             <div
               className={css({
                 flex: '0 1 24rem',

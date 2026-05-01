@@ -78,6 +78,7 @@ function App() {
     string | null
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
+  const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(null);
@@ -230,14 +231,17 @@ function App() {
   useEffect(() => {
     if (!selectedPrimeId) {
       setCapitalMetrics(null);
+      setIsCapitalMetricsLoading(false);
       return;
     }
 
     const controller = new AbortController();
+    setIsCapitalMetricsLoading(true);
 
     const selectedPrime = primes.find((prime) => prime.id === selectedPrimeId);
     if (!selectedPrime) {
       setCapitalMetrics(null);
+      setIsCapitalMetricsLoading(false);
       return () => controller.abort();
     }
 
@@ -270,6 +274,11 @@ function App() {
           primeId: selectedPrimeId,
         });
         setCapitalMetrics(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsCapitalMetricsLoading(false);
+        }
       });
 
     return () => controller.abort();
@@ -465,6 +474,7 @@ function App() {
               errorMessage={allocationsErrorMessage}
               filteredAllocations={filteredAllocations}
               isLoading={isAllocationsLoading}
+              isCapitalMetricsLoading={isCapitalMetricsLoading}
               localProtocols={localProtocols}
               onSelectAllocation={(allocationKey) => {
                 setSelectedAllocationKey(allocationKey);
