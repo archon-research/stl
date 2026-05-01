@@ -136,6 +136,3 @@ async def get_capital_metrics(
         is_validated=metrics.is_validated,
         validation_note=metrics.validation_note,
     )
-
-
-
