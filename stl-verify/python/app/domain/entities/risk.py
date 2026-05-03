@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Union, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -61,6 +61,15 @@ _RISK_MODEL_TO_DETAILS: dict[str, type] = {
     "suraf": SurafDetails,
     "gap_sweep": GapSweepDetails,
 }
+
+# Catch drift at import time: adding a literal to ``ModelName`` without
+# mapping it here would silently break ``_check_risk_model_details_pairing``
+# with a KeyError on the first request that uses the new variant.
+assert set(_RISK_MODEL_TO_DETAILS) == set(get_args(ModelName)), (
+    "_RISK_MODEL_TO_DETAILS keys must match ModelName literals "
+    f"(missing: {set(get_args(ModelName)) - set(_RISK_MODEL_TO_DETAILS)}, "
+    f"extra: {set(_RISK_MODEL_TO_DETAILS) - set(get_args(ModelName))})"
+)
 
 
 class RrcResult(BaseModel):

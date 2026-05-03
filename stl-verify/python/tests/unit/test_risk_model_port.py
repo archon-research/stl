@@ -104,7 +104,11 @@ class TestRrcResult:
         d = _SURAF_RESULT.details
         assert isinstance(d, SurafDetails)
         assert d.rating_id == "aave_ausdc"
+        assert d.rating_version == "v7"
         assert d.crr_pct == Decimal("33.7")
+        assert d.unadjusted_crr_pct == Decimal("32.7")
+        assert d.penalty_pp == Decimal("1.0")
+        assert d.source_commit_sha == "abc123"
 
     def test_gap_sweep_details_fields(self) -> None:
         d = _GAP_SWEEP_RESULT.details

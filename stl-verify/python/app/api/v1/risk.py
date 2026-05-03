@@ -252,7 +252,7 @@ async def _compute_envelope(
     if not applicable:
         raise HTTPException(
             status_code=404,
-            detail=f"no risk models apply for asset_id={asset_id}, prime_id={prime_id}",
+            detail=f"no risk models apply for asset_id={asset_id}",
         )
 
     results: list[RrcResult] = []

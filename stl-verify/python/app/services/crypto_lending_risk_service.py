@@ -69,7 +69,7 @@ class CryptoLendingRiskService:
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=rrc_usd,
-            risk_model="gap_sweep",
+            risk_model=self.risk_model,
             details=GapSweepDetails(gap_pct=gap_pct, loss_usd=rrc_usd),
         )
 

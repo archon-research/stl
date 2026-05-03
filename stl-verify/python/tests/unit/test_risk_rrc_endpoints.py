@@ -314,9 +314,16 @@ def test_post_returns_422_when_service_raises_on_unknown_per_model_key(client: T
 
 
 def test_post_lets_invariant_breach_value_error_become_500() -> None:
-    """Bare ValueError (not InvalidOverrideError) is treated as a service bug."""
+    """Bare ValueError (not InvalidOverrideError) is treated as a service bug.
+
+    Installs the same registry + lookup overrides as the shared fixture so the
+    only path to a 500 is the configured ``compute()`` raising — otherwise a
+    missing dependency would also produce a 500 and the assertion would pass
+    for the wrong reason.
+    """
     suraf = _FakeRiskModel("suraf", raises=ValueError("registry let through unsupported asset"))
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf]))
+    app.dependency_overrides[get_receipt_token_lookup] = _override_lookup()
     try:
         # raise_server_exceptions=False so the unhandled error becomes a 500
         # response we can assert on, rather than re-raising into the test.
@@ -328,8 +335,12 @@ def test_post_lets_invariant_breach_value_error_become_500() -> None:
         )
 
         assert response.status_code == 500
+        # Sanity: the fake compute() was the source. If the lookup had been
+        # unwired, we'd hit a 500 before ever calling compute().
+        assert len(suraf.calls) == 1
     finally:
         app.dependency_overrides.pop(get_model_registry, None)
+        app.dependency_overrides.pop(get_receipt_token_lookup, None)
 
 
 def test_get_returns_422_when_prime_id_missing(client: TestClient) -> None:

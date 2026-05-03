@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import GapSweepDetails, RrcResult, SurafDetails
 from app.services.model_registry import ModelRegistry
@@ -68,7 +70,7 @@ def test_applicable_returns_empty_list_when_no_models_apply() -> None:
 def test_applicable_returns_all_matching_models_in_construction_order() -> None:
     first = FakeRiskModel("suraf", supported={(1, _PRIME_A)})
     second = FakeRiskModel("gap_sweep", supported={(1, _PRIME_A)})
-    third = FakeRiskModel("suraf", supported={(2, _PRIME_A)})
+    third = FakeRiskModel("third_model", supported={(2, _PRIME_A)})
     registry = ModelRegistry([first, second, third])
 
     assert registry.applicable(asset_id=1, prime_id=_PRIME_A) == [first, second]
@@ -89,7 +91,16 @@ def test_applicable_order_is_stable_across_calls() -> None:
 def test_applicable_returns_all_models_when_all_apply() -> None:
     first = FakeRiskModel("suraf", supported={(1, _PRIME_A)})
     second = FakeRiskModel("gap_sweep", supported={(1, _PRIME_A)})
-    third = FakeRiskModel("suraf", supported={(1, _PRIME_A)})
+    third = FakeRiskModel("third_model", supported={(1, _PRIME_A)})
     registry = ModelRegistry([first, second, third])
 
     assert registry.applicable(asset_id=1, prime_id=_PRIME_A) == [first, second, third]
+
+
+def test_registry_rejects_duplicate_risk_model_discriminators() -> None:
+    """Two services with the same discriminator make override dispatch ambiguous."""
+    first = FakeRiskModel("suraf", supported={(1, _PRIME_A)})
+    duplicate = FakeRiskModel("suraf", supported={(2, _PRIME_A)})
+
+    with pytest.raises(ValueError, match="duplicate risk_model discriminators"):
+        ModelRegistry([first, duplicate])
