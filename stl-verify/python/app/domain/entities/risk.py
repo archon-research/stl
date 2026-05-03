@@ -71,8 +71,7 @@ _missing = set(get_args(ModelName)) - set(_RISK_MODEL_TO_DETAILS)
 _extra = set(_RISK_MODEL_TO_DETAILS) - set(get_args(ModelName))
 if _missing or _extra:
     raise RuntimeError(
-        "_RISK_MODEL_TO_DETAILS keys must match ModelName literals "
-        f"(missing: {_missing}, extra: {_extra})"
+        f"_RISK_MODEL_TO_DETAILS keys must match ModelName literals (missing: {_missing}, extra: {_extra})"
     )
 del _missing, _extra
 
