@@ -88,8 +88,13 @@ export function getChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
   return requestData(apiClient.GET('/v1/chains', { signal }), 'GET /v1/chains');
 }
 
-export function getProtocols(signal?: AbortSignal): Promise<LocalProtocolRow[]> {
-  return requestData(apiClient.GET('/v1/protocols', { signal }), 'GET /v1/protocols');
+export function getProtocols(
+  signal?: AbortSignal,
+): Promise<LocalProtocolRow[]> {
+  return requestData(
+    apiClient.GET('/v1/protocols', { signal }),
+    'GET /v1/protocols',
+  );
 }
 
 export function getAllocations(
@@ -199,14 +204,22 @@ export async function getStarRiskCapitalRequirements(
         error: jsonError,
         url: STAR_RISK_CAPITAL_URL,
       });
-      throw new Error('Received invalid JSON response from risk capital service');
+      throw new Error(
+        'Received invalid JSON response from risk capital service',
+        {
+          cause: jsonError,
+        },
+      );
     }
 
     if (!payload.data?.results) {
-      logging.warn('Star risk capital response missing expected data structure', {
-        hasData: !!payload.data,
-        hasResults: !!(payload.data?.results),
-      });
+      logging.warn(
+        'Star risk capital response missing expected data structure',
+        {
+          hasData: !!payload.data,
+          hasResults: !!payload.data?.results,
+        },
+      );
       return [];
     }
 
@@ -233,4 +246,3 @@ export function getDataSources(
     'GET /v1/data-sources',
   );
 }
-

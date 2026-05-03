@@ -10,13 +10,21 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
-import { getCategoryLabel, getProtocolLabel, sortAllocations } from '../../lib/dashboard';
+import {
+  getCategoryLabel,
+  getProtocolLabel,
+  sortAllocations,
+} from '../../lib/dashboard';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
-import type { Allocation, AllocationCategory, Prime } from '../../types/allocation';
+import type {
+  Allocation,
+  AllocationCategory,
+  Prime,
+} from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { EmptyState, ErrorState } from '../shared';
-import { BadDebtTab } from './tabs/BadDebtTab';
 import { ActivityFeed } from './tabs/ActivityFeed';
+import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
 type BottomPanelProps = {

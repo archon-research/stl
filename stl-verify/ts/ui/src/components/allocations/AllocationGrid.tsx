@@ -19,7 +19,12 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import type { Allocation, AllocationCategory, CapitalMetrics, Prime } from '../../types/allocation';
+import type {
+  Allocation,
+  AllocationCategory,
+  CapitalMetrics,
+  Prime,
+} from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { EmptyState, ErrorState, SummaryMetric, TokenAddress } from '../shared';
 
@@ -58,7 +63,9 @@ function getCategoryColor(category: AllocationCategory | undefined): string {
   }
 }
 
-function getCategoryTextColor(category: AllocationCategory | undefined): string {
+function getCategoryTextColor(
+  category: AllocationCategory | undefined,
+): string {
   switch (category) {
     case 'allocation':
       return 'text.success';
@@ -114,7 +121,8 @@ export function AllocationGrid({
     }
 
     const totalUsd = filteredAllocations.reduce(
-      (sum, allocation) => sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      (sum, allocation) =>
+        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
@@ -448,7 +456,8 @@ export function AllocationGrid({
                   color: 'text.strong',
                 })}
               >
-                Risk-to-capital {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
+                Risk-to-capital{' '}
+                {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
               </span>
             ) : null}
           </div>

@@ -370,7 +370,7 @@ export function getCategoryLabel(
     psm3: 'PSM3',
     asset: 'Asset',
   };
-  return category ? labels[category] ?? fallback : fallback;
+  return category ? (labels[category] ?? fallback) : fallback;
 }
 
 export function getBadDebtTone(

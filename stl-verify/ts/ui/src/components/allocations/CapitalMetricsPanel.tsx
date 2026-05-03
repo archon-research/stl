@@ -1,7 +1,11 @@
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { formatUsdValue, formatRatioPercent, parseNumericValue } from '../../lib/dashboard';
+import {
+  formatUsdValue,
+  formatRatioPercent,
+  parseNumericValue,
+} from '../../lib/dashboard';
 import type { CapitalMetrics } from '../../types/allocation';
 import { SummaryMetric } from '../shared';
 
@@ -56,7 +60,15 @@ export function CapitalMetricsPanel({ metrics }: CapitalMetricsPanelProps) {
         p: { base: '4', md: '5' },
       })}
     >
-      <div className={flex({ align: 'center', justify: 'space-between', mb: '3', gap: '3', wrap: 'wrap' })}>
+      <div
+        className={flex({
+          align: 'center',
+          justify: 'space-between',
+          mb: '3',
+          gap: '3',
+          wrap: 'wrap',
+        })}
+      >
         <span
           className={css({
             fontSize: 'xs',

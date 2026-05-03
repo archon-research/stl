@@ -14,8 +14,6 @@ type PrimeSidebarProps = {
   onSelectPrime: (primeId: string) => void;
 };
 
-
-
 export function PrimeSidebar({
   primes,
   selectedPrimeId,

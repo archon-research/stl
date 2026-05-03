@@ -2,7 +2,8 @@ import type { components, paths } from '../generated/openapi-types';
 
 export type Prime = components['schemas']['PrimeResponse'];
 export type Allocation = components['schemas']['AllocationResponse'];
-export type AllocationActivity = components['schemas']['AllocationActivityResponse'];
+export type AllocationActivity =
+  components['schemas']['AllocationActivityResponse'];
 export type CapitalMetrics = components['schemas']['CapitalMetricsResponse'];
 export type DataSources = components['schemas']['DataSourcesResponse'];
 export type DataSource = components['schemas']['DataSourceResponse'];

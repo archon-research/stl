@@ -30,7 +30,13 @@ function truncateMiddle(address: string, maxLength = 12): string {
   return `${address.slice(0, start)}...${address.slice(end)}`;
 }
 
-export function TokenAddress({ address, chainId = 1, type = 'address', style, className }: TokenAddressProps) {
+export function TokenAddress({
+  address,
+  chainId = 1,
+  type = 'address',
+  style,
+  className,
+}: TokenAddressProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   const explorerUrl = getExplorerUrl(chainId, address, type);

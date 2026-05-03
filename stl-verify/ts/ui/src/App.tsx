@@ -32,10 +32,21 @@ import {
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
-import type { Allocation, CapitalMetrics, DataSource, Prime } from './types/allocation';
-import type { LocalChainRow, LocalProtocolRow, StarRiskCapitalRow } from './types/local-data';
+import type {
+  Allocation,
+  CapitalMetrics,
+  DataSource,
+  Prime,
+} from './types/allocation';
+import type {
+  LocalChainRow,
+  LocalProtocolRow,
+  StarRiskCapitalRow,
+} from './types/local-data';
 
-function getStarRiskCapitalSource(sources: DataSource[]): DataSource | undefined {
+function getStarRiskCapitalSource(
+  sources: DataSource[],
+): DataSource | undefined {
   return sources.find((source) =>
     source.role.toLowerCase().includes('risk capital requirements'),
   );
@@ -88,7 +99,9 @@ function App() {
   const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
-  const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(null);
+  const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(
+    null,
+  );
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -284,7 +297,9 @@ function App() {
     void getStarRiskCapitalRequirements(controller.signal)
       .then((rows) => {
         const selectedRow = rows.find(
-          (row) => row.star.trim().toLowerCase() === selectedPrime.name.trim().toLowerCase(),
+          (row) =>
+            row.star.trim().toLowerCase() ===
+            selectedPrime.name.trim().toLowerCase(),
         );
 
         if (!selectedRow) {

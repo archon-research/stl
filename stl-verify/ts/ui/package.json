@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@archon-research/design-system": "0.2.1",
-    "@archon-research/oxfmt-config": "0.2.1",
+    "@archon-research/oxfmt-config": "0.2.0",
     "@archon-research/oxlint-config": "0.2.0",
     "@archon-research/tsconfig": "0.2.1",
     "@pandacss/dev": "^1.9.1",

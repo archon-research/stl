@@ -6,8 +6,10 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getAllocationActivity } from '../../../lib/api';
-import { formatTokenAmount, formatFreshnessLabel } from '../../../lib/dashboard';
-import { TokenAddress } from '../../shared';
+import {
+  formatTokenAmount,
+  formatFreshnessLabel,
+} from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
@@ -15,6 +17,7 @@ import type {
   AllocationActivityResponse,
   Prime,
 } from '../../../types/allocation';
+import { TokenAddress } from '../../shared';
 import { EmptyState, ErrorState } from '../../shared';
 
 type ActivityFeedProps = {
@@ -129,14 +132,22 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
           </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>•</span>
+          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+            •
+          </span>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             Block {event.block_number}
           </span>
           {event.tx_hash ? (
             <>
-              <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>•</span>
-              <TokenAddress address={event.tx_hash} chainId={event.chain_id} type="tx" />
+              <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+                •
+              </span>
+              <TokenAddress
+                address={event.tx_hash}
+                chainId={event.chain_id}
+                type="tx"
+              />
             </>
           ) : null}
         </div>
@@ -290,7 +301,10 @@ export function ActivityFeed({
         })}
       >
         {filteredEvents.map((event, idx) => (
-          <ActivityEventRow key={`${event.tx_hash}:${event.log_index}:${idx}`} event={event} />
+          <ActivityEventRow
+            key={`${event.tx_hash}:${event.log_index}:${idx}`}
+            event={event}
+          />
         ))}
       </div>
 

@@ -1,7 +1,7 @@
 import { SkeletonStack } from '@archon-research/design-system';
 import { ChevronDown, ChevronUp } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import { useEffect, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
 
 import { css } from '#styled-system/css';
 
@@ -86,7 +86,9 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          borderBottom: isOpen ? '1px solid token(colors.surface.subtle)' : 'none',
+          borderBottom: isOpen
+            ? '1px solid token(colors.surface.subtle)'
+            : 'none',
           bg: 'surface.subtle',
           cursor: 'pointer',
           fontSize: 'sm',
@@ -140,9 +142,23 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                   '& p': { mb: '2' },
                   '& ul, & ol': { pl: '5', mb: '2' },
                   '& li': { mb: '1' },
-                  '& h2, & h3': { mt: '3', mb: '2', fontWeight: 'semibold', color: 'text.strong' },
-                  '& code': { fontFamily: 'mono', fontSize: 'xs', bg: 'surface.subtle', px: '1', borderRadius: 'sm' },
-                  '& a': { color: 'interactive.accent', textDecoration: 'underline' },
+                  '& h2, & h3': {
+                    mt: '3',
+                    mb: '2',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                  },
+                  '& code': {
+                    fontFamily: 'mono',
+                    fontSize: 'xs',
+                    bg: 'surface.subtle',
+                    px: '1',
+                    borderRadius: 'sm',
+                  },
+                  '& a': {
+                    color: 'interactive.accent',
+                    textDecoration: 'underline',
+                  },
                 })}
               >
                 <ReactMarkdown>{METHODOLOGY_MARKDOWN}</ReactMarkdown>
@@ -169,7 +185,13 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                   border: '1px solid token(colors.surface.subtle)',
                 })}
               >
-                <table className={css({ width: '100%', borderCollapse: 'collapse', fontSize: 'xs' })}>
+                <table
+                  className={css({
+                    width: '100%',
+                    borderCollapse: 'collapse',
+                    fontSize: 'xs',
+                  })}
+                >
                   <thead>
                     <tr className={css({ bg: 'surface.subtle' })}>
                       {['Source', 'Host', 'Role', 'Access'].map((h) => (
@@ -180,7 +202,8 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                             textAlign: 'left',
                             fontWeight: 'semibold',
                             color: 'text.muted',
-                            borderBottom: '1px solid token(colors.surface.subtle)',
+                            borderBottom:
+                              '1px solid token(colors.surface.subtle)',
                           })}
                         >
                           {h}
@@ -190,17 +213,48 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                   </thead>
                   <tbody>
                     {sources.map((source) => (
-                      <tr key={source.name} className={css({ _hover: { bg: 'surface.subtle' } })}>
-                        <td className={css({ padding: '3', borderBottom: '1px solid token(colors.surface.subtle)', fontWeight: 'semibold', color: 'text.strong' })}>
+                      <tr
+                        key={source.name}
+                        className={css({ _hover: { bg: 'surface.subtle' } })}
+                      >
+                        <td
+                          className={css({
+                            padding: '3',
+                            borderBottom:
+                              '1px solid token(colors.surface.subtle)',
+                            fontWeight: 'semibold',
+                            color: 'text.strong',
+                          })}
+                        >
                           {source.name}
                         </td>
-                        <td className={css({ padding: '3', borderBottom: '1px solid token(colors.surface.subtle)', color: 'text.default' })}>
+                        <td
+                          className={css({
+                            padding: '3',
+                            borderBottom:
+                              '1px solid token(colors.surface.subtle)',
+                            color: 'text.default',
+                          })}
+                        >
                           {source.host}
                         </td>
-                        <td className={css({ padding: '3', borderBottom: '1px solid token(colors.surface.subtle)', color: 'text.default' })}>
+                        <td
+                          className={css({
+                            padding: '3',
+                            borderBottom:
+                              '1px solid token(colors.surface.subtle)',
+                            color: 'text.default',
+                          })}
+                        >
                           {source.role}
                         </td>
-                        <td className={css({ padding: '3', borderBottom: '1px solid token(colors.surface.subtle)' })}>
+                        <td
+                          className={css({
+                            padding: '3',
+                            borderBottom:
+                              '1px solid token(colors.surface.subtle)',
+                          })}
+                        >
                           <span
                             className={css({
                               display: 'inline-flex',
@@ -209,8 +263,18 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                               borderRadius: 'md',
                               fontSize: 'xs',
                               fontWeight: 'semibold',
-                              bg: source.access_model === 'open' ? 'bg.success' : source.access_model === 'public' ? 'bg.warning' : 'bg.subtle',
-                              color: source.access_model === 'open' ? 'text.success' : source.access_model === 'public' ? 'text.warning' : 'text.default',
+                              bg:
+                                source.access_model === 'open'
+                                  ? 'bg.success'
+                                  : source.access_model === 'public'
+                                    ? 'bg.warning'
+                                    : 'bg.subtle',
+                              color:
+                                source.access_model === 'open'
+                                  ? 'text.success'
+                                  : source.access_model === 'public'
+                                    ? 'text.warning'
+                                    : 'text.default',
                             })}
                           >
                             {source.access_model}
@@ -243,15 +307,24 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                   >
                     Caveats
                   </h4>
-                  {sources.filter((s) => s.caveat).map((source) => (
-                    <div
-                      key={source.name}
-                      className={css({ fontSize: 'xs', color: 'text.default', display: 'flex', gap: '2' })}
-                    >
-                      <span className={css({ fontWeight: 'semibold' })}>{source.name}:</span>
-                      <span>{source.caveat}</span>
-                    </div>
-                  ))}
+                  {sources
+                    .filter((s) => s.caveat)
+                    .map((source) => (
+                      <div
+                        key={source.name}
+                        className={css({
+                          fontSize: 'xs',
+                          color: 'text.default',
+                          display: 'flex',
+                          gap: '2',
+                        })}
+                      >
+                        <span className={css({ fontWeight: 'semibold' })}>
+                          {source.name}:
+                        </span>
+                        <span>{source.caveat}</span>
+                      </div>
+                    ))}
                 </div>
               )}
             </div>
