@@ -74,7 +74,7 @@ class CapitalMetricsResponse(BaseModel):
     capital_buffer: Decimal
     first_loss_capital: Decimal
     total_capital: Decimal
-    risk_to_capital_ratio: Decimal
+    risk_to_capital_ratio: Decimal | None
     timestamp: str  # ISO format
     benchmark_source: str | None = None
     is_validated: bool = False
@@ -85,7 +85,7 @@ class AllocationActivityResponse(BaseModel):
     """Allocation activity event record for timeline feeds."""
 
     chain_id: int
-    prime_id: str
+    prime_address: str
     prime_name: str
     protocol_name: str | None
     token_id: int
@@ -93,7 +93,7 @@ class AllocationActivityResponse(BaseModel):
     action_type: str
     tx_amount: Decimal
     balance: Decimal
-    tx_hash: str
+    tx_hash: str | None
     log_index: int
     block_number: int
     block_version: int
@@ -218,7 +218,7 @@ async def list_allocation_activity(
     return [
         AllocationActivityResponse(
             chain_id=e.chain_id,
-            prime_id=e.prime_id,
+            prime_address=e.prime_address,
             prime_name=e.prime_name,
             protocol_name=e.protocol_name,
             token_id=e.token_id,

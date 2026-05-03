@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def _escape_like_pattern(value: str) -> str:
-    """Escape LIKE metacharacters to prevent pattern injection.
+    r"""Escape LIKE metacharacters to prevent pattern injection.
 
     LIKE patterns support wildcards: % (any chars), _ (single char), \ (escape).
     User input must be escaped to prevent unintended wildcard matching.
@@ -233,7 +233,7 @@ class PostgresAllocationRepository:
         return [
             AllocationActivityEvent(
                 chain_id=row.chain_id,
-                prime_id="0x" + row.prime_address,
+                prime_address="0x" + row.prime_address,
                 prime_name=row.prime_name,
                 protocol_name=row.protocol_name,
                 token_id=row.token_id,
@@ -241,7 +241,7 @@ class PostgresAllocationRepository:
                 action_type=row.action_type,
                 tx_amount=_safe_decimal(row.tx_amount, "tx_amount", f"block={row.block_number}"),
                 balance=_safe_decimal(row.balance, "balance", f"block={row.block_number}"),
-                tx_hash=("0x" + row.tx_hash) if row.tx_hash else "0x",
+                tx_hash=("0x" + row.tx_hash) if row.tx_hash else None,
                 log_index=row.log_index,
                 block_number=row.block_number,
                 block_version=row.block_version,

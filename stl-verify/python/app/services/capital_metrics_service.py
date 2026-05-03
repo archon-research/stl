@@ -35,7 +35,9 @@ class CapitalMetricsService:
         if total_capital > 0:
             risk_to_capital_ratio = risk_capital / total_capital
         else:
-            risk_to_capital_ratio = Decimal("0")
+            # Ratio is undefined when total_capital is zero; return None instead of
+            # misleading zero that implies "fully safe"
+            risk_to_capital_ratio = None
 
         return CapitalMetrics(
             prime_id=prime.id,
@@ -69,7 +71,7 @@ class CapitalMetricsService:
             if total_capital > 0:
                 risk_to_capital_ratio = risk_capital / total_capital
             else:
-                risk_to_capital_ratio = Decimal("0")
+                risk_to_capital_ratio = None
 
             metrics.append(
                 CapitalMetrics(
