@@ -25,7 +25,7 @@ class SurafDetails(BaseModel):
     parts.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     risk_model: Literal["suraf"] = "suraf"
     rating_id: str
@@ -47,7 +47,7 @@ class GapSweepDetails(BaseModel):
     rounded to USD cents.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     risk_model: Literal["gap_sweep"] = "gap_sweep"
     gap_pct: Decimal
@@ -65,11 +65,16 @@ _RISK_MODEL_TO_DETAILS: dict[str, type] = {
 # Catch drift at import time: adding a literal to ``ModelName`` without
 # mapping it here would silently break ``_check_risk_model_details_pairing``
 # with a KeyError on the first request that uses the new variant.
-assert set(_RISK_MODEL_TO_DETAILS) == set(get_args(ModelName)), (
-    "_RISK_MODEL_TO_DETAILS keys must match ModelName literals "
-    f"(missing: {set(get_args(ModelName)) - set(_RISK_MODEL_TO_DETAILS)}, "
-    f"extra: {set(_RISK_MODEL_TO_DETAILS) - set(get_args(ModelName))})"
-)
+# Use ``raise`` rather than ``assert`` so ``python -O`` doesn't strip the
+# guard from production builds.
+_missing = set(get_args(ModelName)) - set(_RISK_MODEL_TO_DETAILS)
+_extra = set(_RISK_MODEL_TO_DETAILS) - set(get_args(ModelName))
+if _missing or _extra:
+    raise RuntimeError(
+        "_RISK_MODEL_TO_DETAILS keys must match ModelName literals "
+        f"(missing: {_missing}, extra: {_extra})"
+    )
+del _missing, _extra
 
 
 class RrcResult(BaseModel):
@@ -81,7 +86,7 @@ class RrcResult(BaseModel):
     on ``details.risk_model`` and serves as the OpenAPI discriminator.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     asset_id: int
     prime_id: str
