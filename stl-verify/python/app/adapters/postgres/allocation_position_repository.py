@@ -410,9 +410,12 @@ WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime
     AND ap.block_version IS NOT NULL
     AND ap.created_at IS NOT NULL
     AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
-    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, '')) LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%')
-    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) = LOWER(CAST(:action_type AS TEXT)))
-    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, '')) LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%')
+    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, '')) 
+         LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%')
+    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) = 
+         LOWER(CAST(:action_type AS TEXT)))
+    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, '')) 
+         LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%')
     AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
     AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMP))
     AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMP))

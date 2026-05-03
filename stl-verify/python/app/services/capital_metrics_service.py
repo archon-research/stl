@@ -1,6 +1,6 @@
 """Service for computing and retrieving prime-level capital metrics."""
 
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from app.domain.entities.allocation import EthAddress

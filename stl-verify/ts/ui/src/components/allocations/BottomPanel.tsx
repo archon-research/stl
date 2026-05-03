@@ -273,6 +273,7 @@ export function BottomPanel({
         })}
       >
         <label
+          htmlFor="category-select"
           className={css({
             display: 'grid',
             gap: '1',
@@ -289,6 +290,7 @@ export function BottomPanel({
             Category
           </span>
           <StyledSelect
+            id="category-select"
             value={categoryFilter}
             onChange={(event: ChangeEvent<HTMLSelectElement>) => {
               const nextCategory =

@@ -34,7 +34,6 @@ class AllocationCategoryService:
 
         return AllocationCategory.ALLOCATION
 
-
     def get_category_label(self, category: AllocationCategory) -> str:
         """Return user-friendly display label for category."""
         labels = {
