@@ -6,7 +6,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getAllocationActivity } from '../../../lib/api';
-import { formatTokenAmount } from '../../../lib/dashboard';
+import { formatTokenAmount, formatFreshnessLabel } from '../../../lib/dashboard';
 import { TokenAddress } from '../../shared';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
@@ -55,27 +55,6 @@ function getActionColor(actionType: string | null | undefined): string {
     default:
       return 'text.default';
   }
-}
-
-function formatTimestamp(isoString: string): string {
-  const date = new Date(isoString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 60) {
-    return `${diffMins}m ago`;
-  }
-  if (diffHours < 24) {
-    return `${diffHours}h ago`;
-  }
-  if (diffDays < 7) {
-    return `${diffDays}d ago`;
-  }
-
-  return date.toLocaleDateString();
 }
 
 function ActivityEventRow({ event }: { event: AllocationActivity }) {
@@ -157,7 +136,7 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
           {event.tx_hash ? (
             <>
               <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>•</span>
-              <TokenAddress address={event.tx_hash} />
+              <TokenAddress address={event.tx_hash} chainId={event.chain_id} type="tx" />
             </>
           ) : null}
         </div>
@@ -170,7 +149,7 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
           whiteSpace: 'nowrap',
         })}
       >
-        {formatTimestamp(event.created_at)}
+        {formatFreshnessLabel(event.created_at)}
       </span>
     </div>
   );

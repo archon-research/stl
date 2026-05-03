@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
@@ -14,6 +15,7 @@ from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
 from app.services.capital_metrics_service import CapitalMetricsService
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -191,6 +193,14 @@ async def list_allocation_activity(
         try:
             parsed_prime_id = EthAddress(prime_id)
         except ValueError as exc:
+            logger.warning(
+                "Invalid Ethereum address provided to allocation activity endpoint",
+                extra={
+                    "prime_id_input": prime_id,
+                    "validation_error": str(exc),
+                    "endpoint": "/v1/allocations/activity",
+                },
+            )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     events = await service.list_allocation_activity(

@@ -14,6 +14,7 @@ import {
   formatTokenAmount,
   formatUsdValue,
   getAllocationKey,
+  getCategoryLabel,
   getChainLabel,
   getProtocolLabel,
   parseNumericValue,
@@ -72,16 +73,6 @@ function getCategoryTextColor(category: AllocationCategory | undefined): string 
   }
 }
 
-function getCategoryLabel(category: AllocationCategory | undefined): string {
-  const labels: Record<AllocationCategory, string> = {
-    allocation: 'Allocation',
-    pol: 'Protocol Owned Liquidity',
-    psm3: 'PSM3',
-    asset: 'Asset',
-  };
-  return category ? labels[category] : 'Unknown';
-}
-
 export function AllocationGrid({
   allocations,
   capitalMetrics,
@@ -99,11 +90,6 @@ export function AllocationGrid({
   selectedPrime,
   sorting,
 }: AllocationGridProps) {
-  type AllocationWithMetrics = Allocation & {
-    amount_usd?: string | number | null;
-    latest_activity_at?: string | null;
-  };
-
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
   useEffect(() => {
@@ -127,13 +113,12 @@ export function AllocationGrid({
       return null;
     }
 
-    const allocationsWithMetrics = filteredAllocations as AllocationWithMetrics[];
-    const totalUsd = allocationsWithMetrics.reduce(
+    const totalUsd = filteredAllocations.reduce(
       (sum, allocation) => sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
-    const largestAllocation = allocationsWithMetrics.reduce<AllocationWithMetrics | null>(
+    const largestAllocation = filteredAllocations.reduce<Allocation | null>(
       (largest, allocation) => {
         if (!largest) {
           return allocation;
@@ -146,7 +131,7 @@ export function AllocationGrid({
       null,
     );
 
-    const latestActivityAt = allocationsWithMetrics.reduce<string | null>(
+    const latestActivityAt = filteredAllocations.reduce<string | null>(
       (latest, allocation) => {
         if (!allocation.latest_activity_at) {
           return latest;
@@ -281,7 +266,7 @@ export function AllocationGrid({
         header: 'Balance',
         accessorFn: (allocation) => Number(allocation.balance),
         cell: ({ row }) => {
-          const allocation = row.original as AllocationWithMetrics;
+          const allocation = row.original;
           const amountUsd = allocation.amount_usd;
 
           return (
@@ -320,11 +305,11 @@ export function AllocationGrid({
         id: 'latest_activity_at',
         header: 'Latest activity',
         accessorFn: (allocation) => {
-          const latestActivityAt = (allocation as AllocationWithMetrics).latest_activity_at;
+          const latestActivityAt = allocation.latest_activity_at;
           return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
         },
         cell: ({ row }) => {
-          const allocation = row.original as AllocationWithMetrics;
+          const allocation = row.original;
 
           if (!allocation.latest_activity_at) {
             return (

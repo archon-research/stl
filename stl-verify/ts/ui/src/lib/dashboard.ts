@@ -329,12 +329,12 @@ export function formatFreshnessLabel(isoTimestamp: string): string {
     const date = new Date(isoTimestamp);
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
+    const diffMins = Math.max(0, Math.floor(diffMs / 60000));
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
 
     if (diffMins < 60) {
-      return `${diffMins}m ago`;
+      return diffMins === 0 ? 'Just now' : `${diffMins}m ago`;
     } else if (diffHours < 24) {
       return `${diffHours}h ago`;
     } else if (diffDays < 7) {
@@ -355,6 +355,22 @@ export function formatDateTime(value: string): string {
   }
 
   return DATE_TIME_FORMAT.format(date);
+}
+
+/**
+ * Get human-readable label for allocation category.
+ */
+export function getCategoryLabel(
+  category: 'allocation' | 'pol' | 'psm3' | 'asset' | '' | undefined,
+  fallback: string = 'Unknown',
+): string {
+  const labels: Record<string, string> = {
+    allocation: 'Allocation',
+    pol: 'Protocol Owned Liquidity',
+    psm3: 'PSM3',
+    asset: 'Asset',
+  };
+  return category ? labels[category] ?? fallback : fallback;
 }
 
 export function getBadDebtTone(
@@ -406,12 +422,16 @@ const CHAIN_EXPLORERS: Record<number, string> = {
  * Returns an Etherscan/block-explorer URL for the given chain + address,
  * or null if the chain is not recognised.
  */
-export function getExplorerUrl(chainId: number, address: string): string | null {
+export function getExplorerUrl(
+  chainId: number,
+  address: string,
+  type: 'address' | 'tx' = 'address',
+): string | null {
   const base = CHAIN_EXPLORERS[chainId];
   if (!base) {
     return null;
   }
-  return `${base}/address/${address}`;
+  return `${base}/${type}/${address}`;
 }
 
 /**

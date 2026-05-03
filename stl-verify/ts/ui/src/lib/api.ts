@@ -161,18 +161,68 @@ export function getAllocationActivity(
 export async function getStarRiskCapitalRequirements(
   signal?: AbortSignal,
 ): Promise<StarRiskCapitalRow[]> {
-  const response = await fetch(STAR_RISK_CAPITAL_URL, {
-    signal,
-  });
+  try {
+    // Create timeout signal (10s) that merges with provided signal
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), 10000);
 
-  if (!response.ok) {
-    throw new Error(
-      `GET ${STAR_RISK_CAPITAL_URL} failed (${response.status})`,
-    );
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : timeoutController.signal;
+
+    const response = await fetch(STAR_RISK_CAPITAL_URL, {
+      signal: combinedSignal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '<no body>');
+
+      logging.error('Star risk capital API request failed', {
+        url: STAR_RISK_CAPITAL_URL,
+        status: response.status,
+        statusText: response.statusText,
+        responseBody: responseText.slice(0, 500), // Limit log size
+      });
+
+      throw new Error(
+        `Failed to fetch risk capital data (${response.status}): ${response.statusText}`,
+      );
+    }
+
+    let payload: StarRiskCapitalResponse;
+    try {
+      payload = (await response.json()) as StarRiskCapitalResponse;
+    } catch (jsonError) {
+      logging.error('Failed to parse Star risk capital response as JSON', {
+        error: jsonError,
+        url: STAR_RISK_CAPITAL_URL,
+      });
+      throw new Error('Received invalid JSON response from risk capital service');
+    }
+
+    if (!payload.data?.results) {
+      logging.warn('Star risk capital response missing expected data structure', {
+        hasData: !!payload.data,
+        hasResults: !!(payload.data?.results),
+      });
+      return [];
+    }
+
+    return payload.data.results;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw error; // Let abort errors propagate
+    }
+
+    // Network errors, timeouts, etc.
+    logging.error('Network error fetching Star risk capital', {
+      error,
+      url: STAR_RISK_CAPITAL_URL,
+    });
+    throw error;
   }
-
-  const payload = (await response.json()) as StarRiskCapitalResponse;
-  return payload.data?.results ?? [];
 }
 
 export function getDataSources(

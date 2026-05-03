@@ -1,5 +1,7 @@
+import logging
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -13,47 +15,99 @@ from app.domain.entities.allocation import (
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 
+logger = logging.getLogger(__name__)
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape LIKE metacharacters to prevent pattern injection.
+
+    LIKE patterns support wildcards: % (any chars), _ (single char), \ (escape).
+    User input must be escaped to prevent unintended wildcard matching.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
+    """Convert value to Decimal with error context for debugging.
+
+    Raises ValueError with context if conversion fails, helping identify
+    which field and row caused the issue in production.
+    """
+    try:
+        if value is None:
+            return Decimal("0")
+        return Decimal(str(value))
+    except (ValueError, InvalidOperation, TypeError) as exc:
+        logger.error(
+            f"Invalid decimal value in database field {field_name}",
+            extra={
+                "field_name": field_name,
+                "row_identifier": str(row_identifier) if row_identifier else None,
+                "value": str(value),
+                "value_type": type(value).__name__,
+            },
+        )
+        raise ValueError(f"Database contains invalid numeric value for {field_name}: {value}") from exc
+
 
 class PostgresAllocationRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
     async def list_chains(self) -> list[ChainMetadata]:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                text(
-                    """
-                    SELECT chain_id, name
-                    FROM chain
-                    ORDER BY chain_id ASC
-                    """
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT chain_id, name
+                        FROM chain
+                        ORDER BY chain_id ASC
+                        """
+                    )
                 )
-            )
+                rows = result.fetchall()
 
-        return [ChainMetadata(chain_id=row.chain_id, name=row.name) for row in result]
+            return [ChainMetadata(chain_id=row.chain_id, name=row.name) for row in rows]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch chains from database",
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching chains: {exc}") from exc
 
     async def list_protocols(self) -> list[ProtocolMetadata]:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                text(
-                    """
-                    SELECT id, chain_id, encode(address, 'hex') AS encode, name
-                    FROM protocol
-                    WHERE name IS NOT NULL
-                    ORDER BY chain_id ASC, name ASC
-                    """
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT id, chain_id, encode(address, 'hex') AS encode, name
+                        FROM protocol
+                        WHERE name IS NOT NULL
+                        ORDER BY chain_id ASC, name ASC
+                        """
+                    )
                 )
-            )
+                rows = result.fetchall()
 
-        return [
-            ProtocolMetadata(
-                id=row.id,
-                chain_id=row.chain_id,
-                encode=row.encode,
-                name=row.name,
+            return [
+                ProtocolMetadata(
+                    id=row.id,
+                    chain_id=row.chain_id,
+                    encode=row.encode,
+                    name=row.name,
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch protocols from database",
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
             )
-            for row in result
-        ]
+            raise ValueError(f"Database query failed while fetching protocols: {exc}") from exc
 
     async def list_primes(self) -> list[Prime]:
         async with self._engine.connect() as conn:
@@ -87,8 +141,12 @@ class PostgresAllocationRepository:
                     symbol=row.symbol,
                     underlying_symbol=row.underlying_symbol,
                     protocol_name=row.protocol_name,
-                    balance=Decimal(str(row.balance)),
-                    amount_usd=Decimal(str(row.amount_usd)) if row.amount_usd is not None else None,
+                    balance=_safe_decimal(row.balance, "balance", row.receipt_token_id),
+                    amount_usd=(
+                        _safe_decimal(row.amount_usd, "amount_usd", row.receipt_token_id)
+                        if row.amount_usd is not None
+                        else None
+                    ),
                     latest_activity_at=row.latest_activity_at,
                 )
                 for row in result
@@ -106,8 +164,8 @@ class PostgresAllocationRepository:
         if row is None:
             raise ValueError(f"no position or price found for receipt_token_id={receipt_token_id} prime_id={prime_id}")
 
-        balance = Decimal(str(row.balance))
-        price_usd = Decimal(str(row.price_usd))
+        balance = _safe_decimal(row.balance, "balance", f"receipt_token_id={receipt_token_id}")
+        price_usd = _safe_decimal(row.price_usd, "price_usd", f"receipt_token_id={receipt_token_id}")
         return balance * price_usd
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
@@ -119,7 +177,7 @@ class PostgresAllocationRepository:
         if row is None or row.total_usd_exposure is None:
             return Decimal("0")
 
-        return Decimal(str(row.total_usd_exposure))
+        return _safe_decimal(row.total_usd_exposure, "total_usd_exposure", f"prime_id={prime_id}")
 
     async def list_allocation_activity(
         self,
@@ -134,20 +192,43 @@ class PostgresAllocationRepository:
         to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
+        # Escape LIKE metacharacters to prevent pattern injection
         params = {
             "prime_hex": prime_id.hex if prime_id else None,
             "chain_id": chain_id,
-            "protocol_name": protocol_name,
+            "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
-            "token_symbol": token_symbol,
+            "token_symbol": _escape_like_pattern(token_symbol) if token_symbol else None,
             "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "limit": min(max(limit, 1), 1000),
         }
 
-        async with self._engine.connect() as conn:
-            result = await conn.execute(_ALLOCATION_ACTIVITY_SQL, params)
+        logger.debug(
+            "Executing allocation activity query",
+            extra={
+                "prime_id": str(prime_id) if prime_id else None,
+                "chain_id": chain_id,
+                "limit": params["limit"],
+                "has_time_filter": from_timestamp is not None,
+            },
+        )
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_ALLOCATION_ACTIVITY_SQL, params)
+                rows = result.fetchall()
+        except Exception as exc:
+            logger.error(
+                "Allocation activity query failed",
+                extra={
+                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "error_type": type(exc).__name__,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching allocation activity: {exc}") from exc
 
         return [
             AllocationActivityEvent(
@@ -158,15 +239,15 @@ class PostgresAllocationRepository:
                 token_id=row.token_id,
                 token_symbol=row.token_symbol,
                 action_type=row.action_type,
-                tx_amount=Decimal(str(row.tx_amount)),
-                balance=Decimal(str(row.balance)),
+                tx_amount=_safe_decimal(row.tx_amount, "tx_amount", f"block={row.block_number}"),
+                balance=_safe_decimal(row.balance, "balance", f"block={row.block_number}"),
                 tx_hash=("0x" + row.tx_hash) if row.tx_hash else "0x",
                 log_index=row.log_index,
                 block_number=row.block_number,
                 block_version=row.block_version,
                 created_at=row.created_at,
             )
-            for row in result
+            for row in rows
         ]
 
 
@@ -410,12 +491,12 @@ WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime
     AND ap.block_version IS NOT NULL
     AND ap.created_at IS NOT NULL
     AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
-    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, '')) 
-         LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%')
-    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) = 
+    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, ''))
+         LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\')
+    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) =
          LOWER(CAST(:action_type AS TEXT)))
-    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, '')) 
-         LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%')
+    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
+         LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\')
     AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
     AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMP))
     AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMP))

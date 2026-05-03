@@ -531,7 +531,7 @@ function App() {
       <RiskDetailDrawer
         detail={
           selectedAllocation
-            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol} · ${formatUsdValue((selectedAllocation as Allocation & { amount_usd?: string | number | null }).amount_usd ?? null)}`
+            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol} · ${formatUsdValue(selectedAllocation.amount_usd ?? null)}`
             : undefined
         }
         isOpen={isDrawerOpen}

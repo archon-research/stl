@@ -10,7 +10,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
-import { getProtocolLabel, sortAllocations } from '../../lib/dashboard';
+import { getCategoryLabel, getProtocolLabel, sortAllocations } from '../../lib/dashboard';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
 import type { Allocation, AllocationCategory, Prime } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
@@ -204,16 +204,6 @@ export function BottomPanel({
     setLocalRiskSearchValue('');
     setRiskSearchValue('');
   }, [receiptTokenParam]);
-
-  const getCategoryLabel = (category: AllocationCategory | ''): string => {
-    const labels: Record<AllocationCategory, string> = {
-      allocation: 'Allocation',
-      pol: 'Protocol Owned Liquidity',
-      psm3: 'PSM3',
-      asset: 'Asset',
-    };
-    return category ? labels[category] : 'All Categories';
-  };
 
   return (
     <div
@@ -422,7 +412,7 @@ export function BottomPanel({
         filteredAllocations.length === 0 ? (
           <EmptyState
             title="No receipt tokens in category"
-            description={`No allocations found in the "${getCategoryLabel(categoryFilter)}" category.`}
+            description={`No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`}
           />
         ) : null}
 

@@ -1,5 +1,5 @@
 import { Copy, ExternalLink } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type React from 'react';
 
 import { css } from '#styled-system/css';
@@ -9,6 +9,8 @@ import { getExplorerUrl } from '../../lib/dashboard';
 type TokenAddressProps = {
   address: string;
   chainId?: number;
+  /** Type of address: 'address' for contract/EOA, 'tx' for transaction hash */
+  type?: 'address' | 'tx';
   /** Optional inline styles applied to the button (use for font-size overrides etc.) */
   style?: React.CSSProperties;
   /** Optional custom className to override defaults */
@@ -28,11 +30,25 @@ function truncateMiddle(address: string, maxLength = 12): string {
   return `${address.slice(0, start)}...${address.slice(end)}`;
 }
 
-export function TokenAddress({ address, chainId = 1, style, className }: TokenAddressProps) {
+export function TokenAddress({ address, chainId = 1, type = 'address', style, className }: TokenAddressProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
 
-  const explorerUrl = getExplorerUrl(chainId, address);
+  const explorerUrl = getExplorerUrl(chainId, address, type);
+
+  useEffect(() => {
+    if (!isMenuOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isMenuOpen]);
 
   const handleCopy = async () => {
     try {
@@ -63,7 +79,6 @@ export function TokenAddress({ address, chainId = 1, style, className }: TokenAd
         display: 'inline-flex',
         alignItems: 'center',
       })}
-      ref={menuRef}
     >
       {/* Clickable address display */}
       <button
@@ -148,7 +163,7 @@ export function TokenAddress({ address, chainId = 1, style, className }: TokenAd
             })}
           >
             <ExternalLink size={16} />
-            View on Etherscan
+            View on explorer
           </button>
 
           <button
@@ -187,11 +202,6 @@ export function TokenAddress({ address, chainId = 1, style, className }: TokenAd
             zIndex: '40',
           })}
           onClick={() => setIsMenuOpen(false)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              setIsMenuOpen(false);
-            }
-          }}
           role="presentation"
         />
       )}
