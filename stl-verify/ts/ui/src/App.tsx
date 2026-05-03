@@ -14,6 +14,7 @@ import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
   getChains,
+  getDataSources,
   getPrimes,
   getProtocols,
   getStarRiskCapitalRequirements,
@@ -31,8 +32,14 @@ import {
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
-import type { Allocation, CapitalMetrics, Prime } from './types/allocation';
+import type { Allocation, CapitalMetrics, DataSource, Prime } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow, StarRiskCapitalRow } from './types/local-data';
+
+function getStarRiskCapitalSource(sources: DataSource[]): DataSource | undefined {
+  return sources.find((source) =>
+    source.role.toLowerCase().includes('risk capital requirements'),
+  );
+}
 
 function toPositiveDifference(total: string, current: string): string {
   const totalNum = Number(total);
@@ -49,6 +56,7 @@ function mapRiskCapitalRowToMetrics(
   row: StarRiskCapitalRow,
   primeId: string,
   primeName: string,
+  source: DataSource,
 ): CapitalMetrics {
   return {
     prime_id: primeId,
@@ -59,11 +67,9 @@ function mapRiskCapitalRowToMetrics(
     capital_buffer: toPositiveDifference(row.total_rc, row.financial_rrc),
     risk_to_capital_ratio: row.risk_tolerance_ratio,
     timestamp: new Date().toISOString(),
-    benchmark_source:
-      'https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/',
+    benchmark_source: source.host,
     is_validated: false,
-    validation_note:
-      'Sourced from Star Agents Risk Capital & Requirements Monitor.',
+    validation_note: `Sourced from ${source.name}.`,
   };
 }
 
@@ -79,6 +85,7 @@ function App() {
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
   const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(null);
@@ -96,6 +103,27 @@ function App() {
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
   const isDrawerOpen = isDrawerOpenParam === '1';
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    void getDataSources(controller.signal)
+      .then((response) => {
+        setDataSources(response.sources ?? []);
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.error('Failed to load provenance data sources', {
+          error,
+        });
+        setDataSources([]);
+      });
+
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -245,6 +273,14 @@ function App() {
       return () => controller.abort();
     }
 
+    const starRiskCapitalSource = getStarRiskCapitalSource(dataSources);
+    if (!starRiskCapitalSource) {
+      logging.warn('Missing provenance source for Star risk capital metrics');
+      setCapitalMetrics(null);
+      setIsCapitalMetricsLoading(false);
+      return () => controller.abort();
+    }
+
     void getStarRiskCapitalRequirements(controller.signal)
       .then((rows) => {
         const selectedRow = rows.find(
@@ -261,6 +297,7 @@ function App() {
             selectedRow,
             selectedPrime.id,
             selectedPrime.name,
+            starRiskCapitalSource,
           ),
         );
       })
@@ -282,7 +319,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId, primes]);
+  }, [selectedPrimeId, primes, dataSources]);
 
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,

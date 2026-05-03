@@ -54,7 +54,7 @@ class DataProvenanceService:
             # STL Internal
             DataSource(
                 name="STL Allocation Index",
-                host="localhost:8000",
+                host="Same app (internal API)",
                 access_model=SourceAccessModel.CLOSED,
                 role="Internal allocation snapshots, price feeds, risk calculations",
                 caveat="Internal-only backend",
