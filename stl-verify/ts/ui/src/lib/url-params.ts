@@ -6,6 +6,7 @@ export const PARAMS = {
   prime: 'prime',
   network: 'network',
   protocol: 'protocol',
+  category: 'category',
   tab: 'tab',
   receiptToken: 'rt',
   // Data table params (shared across tables)

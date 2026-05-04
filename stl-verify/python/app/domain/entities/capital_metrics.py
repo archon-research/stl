@@ -16,7 +16,7 @@ class CapitalMetrics:
     capital_buffer: Decimal  # Baseline protective capital
     first_loss_capital: Decimal  # Prime-owned first-loss layer above buffer
     total_capital: Decimal  # Sum of all capital tiers
-    risk_to_capital_ratio: Decimal  # Risk / Capital (unitless; <1.0 is safe, >1.0 is risky)
+    risk_to_capital_ratio: Optional[Decimal]  # Risk / Capital (<1.0 safe, >1.0 risky); None when unavailable
     timestamp: datetime
     benchmark_source: Optional[str] = None  # Source of validation/reconciliation
     is_validated: bool = False  # Whether reconciled against external source

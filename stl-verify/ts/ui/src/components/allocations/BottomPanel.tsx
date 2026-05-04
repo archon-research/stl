@@ -10,32 +10,43 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
-import { getProtocolLabel, sortAllocations } from '../../lib/dashboard';
+import {
+  getCategoryLabel,
+  getProtocolLabel,
+  sortAllocations,
+} from '../../lib/dashboard';
 import { PARAMS, useUrlParam } from '../../lib/url-params';
-import type { Allocation, Prime } from '../../types/allocation';
+import type {
+  Allocation,
+  AllocationCategory,
+  Prime,
+} from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import { EmptyState, ErrorState } from '../shared';
+import { ActivityFeed } from './tabs/ActivityFeed';
 import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
   errorMessage: string | null;
+  isDrawerOpen: boolean;
   isLoading: boolean;
   localProtocols: LocalProtocolRow[];
   selectedAllocation: Allocation | null;
   selectedPrime: Prime | null;
 };
 
-type ActiveTab = 'risk' | 'bad-debt';
+type ActiveTab = 'risk' | 'bad-debt' | 'activity';
 
 const segmentedControlStyles = segmentedControl();
-const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.5', gap: '1' })}`;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'xs' })}`;
+const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '7', px: '2', fontSize: 'xs' })}`;
 
 export function BottomPanel({
   allocations,
   errorMessage,
+  isDrawerOpen,
   isLoading,
   localProtocols,
   selectedAllocation,
@@ -45,30 +56,68 @@ export function BottomPanel({
     PARAMS.receiptToken,
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
+  const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
+    categoryParam === 'allocation' ||
+      categoryParam === 'pol' ||
+      categoryParam === 'psm3' ||
+      categoryParam === 'asset'
+      ? categoryParam
+      : '',
+  );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
   const previousSelectedAllocationIdRef = useRef<number | null>(
     selectedAllocation?.receipt_token_id ?? null,
   );
 
-  const activeTab: ActiveTab = tabParam === 'bad-debt' ? 'bad-debt' : 'risk';
+  const activeTab: ActiveTab =
+    tabParam === 'bad-debt'
+      ? 'bad-debt'
+      : tabParam === 'activity'
+        ? 'activity'
+        : 'risk';
 
   useEffect(() => {
     const primeId = selectedPrime?.id ?? null;
 
     if (previousPrimeIdRef.current && previousPrimeIdRef.current !== primeId) {
       setReceiptTokenParam(null);
+      setCategoryFilter('');
+      setCategoryParam(null);
     }
 
     previousPrimeIdRef.current = primeId;
-  }, [selectedPrime?.id, setReceiptTokenParam]);
+  }, [selectedPrime?.id, setCategoryParam, setReceiptTokenParam]);
+
+  useEffect(() => {
+    const normalized =
+      categoryParam === 'allocation' ||
+      categoryParam === 'pol' ||
+      categoryParam === 'psm3' ||
+      categoryParam === 'asset'
+        ? categoryParam
+        : '';
+
+    if (normalized !== categoryFilter) {
+      setCategoryFilter(normalized);
+    }
+  }, [categoryFilter, categoryParam]);
 
   const sortedAllocations = useMemo(
     () => sortAllocations(allocations),
     [allocations],
   );
+
+  // Filter allocations by selected category
+  const filteredAllocations = useMemo(() => {
+    if (!categoryFilter) {
+      return sortedAllocations;
+    }
+    return sortedAllocations.filter((a) => a.category === categoryFilter);
+  }, [sortedAllocations, categoryFilter]);
 
   useEffect(() => {
     if (sortedAllocations.length === 0) {
@@ -78,9 +127,16 @@ export function BottomPanel({
       return;
     }
 
+    if (filteredAllocations.length === 0) {
+      if (receiptTokenParam !== null) {
+        setReceiptTokenParam(null);
+      }
+      return;
+    }
+
     if (
       receiptTokenParam &&
-      sortedAllocations.some(
+      filteredAllocations.some(
         (allocation) =>
           String(allocation.receipt_token_id) === receiptTokenParam,
       )
@@ -88,13 +144,25 @@ export function BottomPanel({
       return;
     }
 
-    const fallback = selectedAllocation ?? sortedAllocations[0];
-    setReceiptTokenParam(String(fallback.receipt_token_id));
+    const selectedInFiltered =
+      selectedAllocation &&
+      filteredAllocations.some(
+        (allocation) =>
+          allocation.receipt_token_id === selectedAllocation.receipt_token_id,
+      )
+        ? selectedAllocation
+        : null;
+
+    const fallback = selectedInFiltered ?? filteredAllocations[0];
+    if (fallback) {
+      setReceiptTokenParam(String(fallback.receipt_token_id));
+    }
   }, [
     receiptTokenParam,
     selectedAllocation,
     setReceiptTokenParam,
-    sortedAllocations,
+    filteredAllocations,
+    sortedAllocations.length,
   ]);
 
   // Sync the URL-backed receipt-token param to the grid's current selection
@@ -122,12 +190,12 @@ export function BottomPanel({
   }, [receiptTokenParam, selectedAllocation, setReceiptTokenParam]);
 
   const focusedAllocation =
-    sortedAllocations.find(
+    filteredAllocations.find(
       (allocation) => String(allocation.receipt_token_id) === receiptTokenParam,
     ) ?? null;
 
   useEffect(() => {
-    if (activeTab !== 'risk') {
+    if (activeTab === 'bad-debt') {
       setLocalRiskSearchValue('');
       setRiskSearchValue('');
       return;
@@ -158,8 +226,8 @@ export function BottomPanel({
       <div
         className={flex({
           align: 'center',
-          justify: 'flex-end',
-          gap: '4',
+          justify: 'flex-start',
+          gap: '2',
           wrap: 'wrap',
         })}
       >
@@ -168,7 +236,11 @@ export function BottomPanel({
           onValueChange={(value: readonly string[]) => {
             const nextValue = value[0];
 
-            if (nextValue === 'risk' || nextValue === 'bad-debt') {
+            if (
+              nextValue === 'risk' ||
+              nextValue === 'bad-debt' ||
+              nextValue === 'activity'
+            ) {
               setTabParam(nextValue);
             }
           }}
@@ -181,6 +253,9 @@ export function BottomPanel({
           <Toggle value="bad-debt" className={toggleClassName}>
             Bad debt
           </Toggle>
+          <Toggle value="activity" className={toggleClassName}>
+            Activity
+          </Toggle>
         </ToggleGroup>
       </div>
 
@@ -189,12 +264,53 @@ export function BottomPanel({
           display: 'grid',
           gridTemplateColumns: {
             base: '1fr',
-            md: 'minmax(16rem, 24rem) minmax(18rem, 1fr)',
+            md: 'repeat(2, minmax(14rem, 1fr)) minmax(18rem, 1fr)',
           },
           gap: '4',
           alignItems: 'end',
         })}
       >
+        <label
+          htmlFor="category-select"
+          className={css({
+            display: 'grid',
+            gap: '1',
+          })}
+        >
+          <span
+            className={css({
+              fontSize: 'xs',
+              textTransform: 'uppercase',
+              letterSpacing: '0.14em',
+              color: 'text.muted',
+            })}
+          >
+            Category
+          </span>
+          <StyledSelect
+            id="category-select"
+            value={categoryFilter}
+            onChange={(event: ChangeEvent<HTMLSelectElement>) => {
+              const nextCategory =
+                (event.target.value as AllocationCategory) || '';
+              setCategoryFilter(nextCategory);
+              setCategoryParam(nextCategory || null);
+            }}
+            disabled={
+              !selectedPrime ||
+              isLoading ||
+              errorMessage !== null ||
+              sortedAllocations.length === 0
+            }
+          >
+            <option value="">All Categories</option>
+            <option value="allocation">Allocation</option>
+            <option value="pol">Protocol Owned Liquidity</option>
+            <option value="psm3">PSM3</option>
+            <option value="asset">Asset</option>
+          </StyledSelect>
+        </label>
+
         <label
           className={css({
             display: 'grid',
@@ -220,11 +336,11 @@ export function BottomPanel({
               !selectedPrime ||
               isLoading ||
               errorMessage !== null ||
-              sortedAllocations.length === 0
+              filteredAllocations.length === 0
             }
           >
             <option value="">Choose a receipt token</option>
-            {sortedAllocations.map((allocation) => (
+            {filteredAllocations.map((allocation) => (
               <option
                 key={allocation.receipt_token_id}
                 value={allocation.receipt_token_id}
@@ -235,19 +351,27 @@ export function BottomPanel({
           </StyledSelect>
         </label>
 
-        {activeTab === 'risk' ? (
+        {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
               width: '100%',
             })}
           >
             <SearchInput
-              aria-label="Search risk breakdown"
+              aria-label={
+                activeTab === 'risk'
+                  ? 'Search risk breakdown'
+                  : 'Search activity feed'
+              }
               disabled={
                 !focusedAllocation || isLoading || errorMessage !== null
               }
               onValueChange={setLocalRiskSearchValue}
-              placeholder="Search backing assets"
+              placeholder={
+                activeTab === 'risk'
+                  ? 'Search backing assets'
+                  : 'Search activity'
+              }
               value={localRiskSearchValue}
             />
           </div>
@@ -292,14 +416,31 @@ export function BottomPanel({
         {selectedPrime &&
         !errorMessage &&
         !isLoading &&
-        sortedAllocations.length > 0 ? (
+        sortedAllocations.length > 0 &&
+        filteredAllocations.length === 0 ? (
+          <EmptyState
+            title="No receipt tokens in category"
+            description={`No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`}
+          />
+        ) : null}
+
+        {selectedPrime &&
+        !errorMessage &&
+        !isLoading &&
+        filteredAllocations.length > 0 ? (
           activeTab === 'risk' ? (
             <RiskBreakdownTab
               searchQuery={riskSearchValue}
               selectedReceiptToken={focusedAllocation}
             />
-          ) : (
+          ) : activeTab === 'bad-debt' ? (
             <BadDebtTab selectedReceiptToken={focusedAllocation} />
+          ) : (
+            <ActivityFeed
+              isEnabled={isDrawerOpen && activeTab === 'activity'}
+              searchQuery={riskSearchValue}
+              selectedPrime={selectedPrime}
+            />
           )
         ) : null}
       </div>

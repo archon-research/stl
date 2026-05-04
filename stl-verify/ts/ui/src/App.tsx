@@ -13,15 +13,18 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
-  getLocalChains,
-  getLocalProtocols,
+  getChains,
+  getDataSources,
   getPrimes,
+  getProtocols,
+  getStarRiskCapitalRequirements,
 } from './lib/api';
 import {
   buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
   formatTokenAmount,
+  formatUsdValue,
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
@@ -29,8 +32,57 @@ import {
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { PARAMS, useUrlParam } from './lib/url-params';
-import type { Allocation, Prime } from './types/allocation';
-import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
+import type {
+  Allocation,
+  CapitalMetrics,
+  DataSource,
+  Prime,
+} from './types/allocation';
+import type {
+  LocalChainRow,
+  LocalProtocolRow,
+  StarRiskCapitalRow,
+} from './types/local-data';
+
+function getStarRiskCapitalSource(
+  sources: DataSource[],
+): DataSource | undefined {
+  return sources.find((source) =>
+    source.role.toLowerCase().includes('risk capital requirements'),
+  );
+}
+
+function toPositiveDifference(total: string, current: string): string {
+  try {
+    const totalBigInt = BigInt(total.split('.')[0] || '0');
+    const currentBigInt = BigInt(current.split('.')[0] || '0');
+    const diff = totalBigInt - currentBigInt;
+    return diff > 0n ? diff.toString() : '0';
+  } catch {
+    return '0';
+  }
+}
+
+function mapRiskCapitalRowToMetrics(
+  row: StarRiskCapitalRow,
+  primeId: string,
+  primeName: string,
+  source: DataSource,
+): CapitalMetrics {
+  return {
+    prime_id: primeId,
+    prime_name: primeName,
+    risk_capital: row.exposure,
+    total_capital: row.total_rc,
+    first_loss_capital: row.financial_rrc,
+    capital_buffer: toPositiveDifference(row.total_rc, row.financial_rrc),
+    risk_to_capital_ratio: row.risk_tolerance_ratio,
+    timestamp: new Date().toISOString(),
+    benchmark_source: source.host,
+    is_validated: false,
+    validation_note: `Sourced from ${source.name}.`,
+  };
+}
 
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
@@ -43,8 +95,13 @@ function App() {
     string | null
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
+  const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
+  const [dataSources, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
+  const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(
+    null,
+  );
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -63,9 +120,30 @@ function App() {
   useEffect(() => {
     const controller = new AbortController();
 
+    void getDataSources(controller.signal)
+      .then((response) => {
+        setDataSources(response.sources ?? []);
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.error('Failed to load provenance data sources', {
+          error,
+        });
+        setDataSources([]);
+      });
+
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
     void Promise.all([
-      getLocalChains(controller.signal),
-      getLocalProtocols(controller.signal),
+      getChains(controller.signal),
+      getProtocols(controller.signal),
     ])
       .then(([chains, protocols]) => {
         setLocalChains(chains);
@@ -190,6 +268,73 @@ function App() {
 
     return () => controller.abort();
   }, [selectedPrimeId]);
+
+  useEffect(() => {
+    if (!selectedPrimeId) {
+      setCapitalMetrics(null);
+      setIsCapitalMetricsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsCapitalMetricsLoading(true);
+
+    const selectedPrime = primes.find((prime) => prime.id === selectedPrimeId);
+    if (!selectedPrime) {
+      setCapitalMetrics(null);
+      setIsCapitalMetricsLoading(false);
+      return () => controller.abort();
+    }
+
+    const starRiskCapitalSource = getStarRiskCapitalSource(dataSources);
+    if (!starRiskCapitalSource) {
+      logging.warn('Missing provenance source for Star risk capital metrics');
+      setCapitalMetrics(null);
+      setIsCapitalMetricsLoading(false);
+      return () => controller.abort();
+    }
+
+    void getStarRiskCapitalRequirements(controller.signal)
+      .then((rows) => {
+        const selectedRow = rows.find(
+          (row) =>
+            row.star.trim().toLowerCase() ===
+            selectedPrime.name.trim().toLowerCase(),
+        );
+
+        if (!selectedRow) {
+          setCapitalMetrics(null);
+          return;
+        }
+
+        setCapitalMetrics(
+          mapRiskCapitalRowToMetrics(
+            selectedRow,
+            selectedPrime.id,
+            selectedPrime.name,
+            starRiskCapitalSource,
+          ),
+        );
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.error('Failed to load Star risk capital metrics', {
+          error,
+          primeId: selectedPrimeId,
+        });
+        setCapitalMetrics(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsCapitalMetricsLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [selectedPrimeId, primes, dataSources]);
 
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
@@ -376,10 +521,12 @@ function App() {
           main={
             <AllocationGrid
               allocations={allocations}
+              capitalMetrics={capitalMetrics}
               chainLabels={chainLabels}
               errorMessage={allocationsErrorMessage}
               filteredAllocations={filteredAllocations}
               isLoading={isAllocationsLoading}
+              isCapitalMetricsLoading={isCapitalMetricsLoading}
               localProtocols={localProtocols}
               onSelectAllocation={(allocationKey) => {
                 setSelectedAllocationKey(allocationKey);
@@ -399,7 +546,7 @@ function App() {
       <RiskDetailDrawer
         detail={
           selectedAllocation
-            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol}`
+            ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol} · ${formatUsdValue(selectedAllocation.amount_usd ?? null)}`
             : undefined
         }
         isOpen={isDrawerOpen}
@@ -414,6 +561,7 @@ function App() {
         <BottomPanel
           allocations={allocations}
           errorMessage={allocationsErrorMessage}
+          isDrawerOpen={isDrawerOpen}
           isLoading={isAllocationsLoading}
           localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}

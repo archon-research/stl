@@ -24,6 +24,7 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, RiskBreakdown } from '../../../types/allocation';
 import { SummaryMetric } from '../../shared';
+import { MethodologyPanel } from '../../shared/MethodologyPanel';
 
 type RiskBreakdownTabProps = {
   searchQuery?: string;
@@ -158,6 +159,7 @@ export function RiskBreakdownTab({
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
 
   useEffect(() => {
     if (!selectedReceiptToken) {
@@ -381,6 +383,12 @@ export function RiskBreakdownTab({
           searchQuery={searchQuery}
         />
       ) : null}
+
+      {/* Data Sources & Methodology Footer */}
+      <MethodologyPanel
+        isOpen={isMethodologyOpen}
+        onToggle={() => setIsMethodologyOpen(!isMethodologyOpen)}
+      />
     </div>
   );
 }

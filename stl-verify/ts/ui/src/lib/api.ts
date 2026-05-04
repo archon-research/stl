@@ -1,25 +1,25 @@
 import { createApiClient } from '@archon-research/http-client-react';
 
-import {
-  localChainRows,
-  localCostRows,
-  localProtocolRows,
-} from '../generated/local-metadata';
 import type { paths } from '../generated/openapi-types';
 import type {
+  AllocationActivityResponse,
   AllocationsResponse,
   BadDebt,
+  DataSourcesResponse,
   PrimesResponse,
   RiskBreakdown,
 } from '../types/allocation';
 import type {
   LocalChainRow,
-  LocalCostRow,
   LocalProtocolRow,
+  StarRiskCapitalResponse,
+  StarRiskCapitalRow,
 } from '../types/local-data';
 import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
+const STAR_RISK_CAPITAL_URL =
+  'https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/';
 const apiClient = createApiClient<paths>(API_BASE_URL);
 
 type BadDebtQuery =
@@ -30,10 +30,6 @@ type ApiResult<TData, TError> = Promise<{
   error?: TError;
   response: Response;
 }>;
-
-function createAbortError(): DOMException {
-  return new DOMException('Request aborted', 'AbortError');
-}
 
 function toErrorBody(error: unknown): string {
   if (typeof error === 'string') {
@@ -84,55 +80,21 @@ async function requestData<TData, TError>(
   return data;
 }
 
-function resolveLocalData<T>(data: T, signal?: AbortSignal): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(createAbortError());
-      return;
-    }
-
-    let settled = false;
-
-    const onAbort = () => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      signal?.removeEventListener('abort', onAbort);
-      reject(createAbortError());
-    };
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-
-    queueMicrotask(() => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      signal?.removeEventListener('abort', onAbort);
-      resolve(data);
-    });
-  });
-}
-
 export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
   return requestData(apiClient.GET('/v1/primes', { signal }), 'GET /v1/primes');
 }
 
-export function getLocalChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
-  return resolveLocalData(localChainRows, signal);
+export function getChains(signal?: AbortSignal): Promise<LocalChainRow[]> {
+  return requestData(apiClient.GET('/v1/chains', { signal }), 'GET /v1/chains');
 }
 
-export function getLocalProtocols(
+export function getProtocols(
   signal?: AbortSignal,
 ): Promise<LocalProtocolRow[]> {
-  return resolveLocalData(localProtocolRows, signal);
-}
-
-export function getLocalCosts(signal?: AbortSignal): Promise<LocalCostRow[]> {
-  return resolveLocalData(localCostRows, signal);
+  return requestData(
+    apiClient.GET('/v1/protocols', { signal }),
+    'GET /v1/protocols',
+  );
 }
 
 export function getAllocations(
@@ -175,5 +137,112 @@ export function getBadDebt(
       signal,
     }),
     'GET /v1/risk/{receipt_token_id}/bad-debt',
+  );
+}
+
+export function getAllocationActivity(
+  filters?: {
+    prime_id?: string;
+    chain_id?: number;
+    protocol_name?: string;
+    action_type?: string;
+    token_symbol?: string;
+    tx_hash?: string;
+    from_timestamp?: string;
+    to_timestamp?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<AllocationActivityResponse> {
+  return requestData(
+    apiClient.GET('/v1/allocations/activity', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/allocations/activity',
+  );
+}
+
+export async function getStarRiskCapitalRequirements(
+  signal?: AbortSignal,
+): Promise<StarRiskCapitalRow[]> {
+  try {
+    // Create timeout signal (10s) that merges with provided signal
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), 10000);
+
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : timeoutController.signal;
+
+    const response = await fetch(STAR_RISK_CAPITAL_URL, {
+      signal: combinedSignal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '<no body>');
+
+      logging.error('Star risk capital API request failed', {
+        url: STAR_RISK_CAPITAL_URL,
+        status: response.status,
+        statusText: response.statusText,
+        responseBody: responseText.slice(0, 500), // Limit log size
+      });
+
+      throw new Error(
+        `Failed to fetch risk capital data (${response.status}): ${response.statusText}`,
+      );
+    }
+
+    let payload: StarRiskCapitalResponse;
+    try {
+      payload = (await response.json()) as StarRiskCapitalResponse;
+    } catch (jsonError) {
+      logging.error('Failed to parse Star risk capital response as JSON', {
+        error: jsonError,
+        url: STAR_RISK_CAPITAL_URL,
+      });
+      throw new Error(
+        'Received invalid JSON response from risk capital service',
+        {
+          cause: jsonError,
+        },
+      );
+    }
+
+    if (!payload.data?.results) {
+      logging.warn(
+        'Star risk capital response missing expected data structure',
+        {
+          hasData: !!payload.data,
+          hasResults: !!payload.data?.results,
+        },
+      );
+      return [];
+    }
+
+    return payload.data.results;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw error; // Let abort errors propagate
+    }
+
+    // Network errors, timeouts, etc.
+    logging.error('Network error fetching Star risk capital', {
+      error,
+      url: STAR_RISK_CAPITAL_URL,
+    });
+    throw error;
+  }
+}
+
+export function getDataSources(
+  signal?: AbortSignal,
+): Promise<DataSourcesResponse> {
+  return requestData(
+    apiClient.GET('/v1/data-sources', { signal }),
+    'GET /v1/data-sources',
   );
 }
