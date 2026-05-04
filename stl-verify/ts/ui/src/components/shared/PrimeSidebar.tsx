@@ -14,14 +14,6 @@ type PrimeSidebarProps = {
   onSelectPrime: (primeId: string) => void;
 };
 
-function formatAddress(address: string): string {
-  if (address.length <= 12) {
-    return address;
-  }
-
-  return `${address.slice(0, 6)}…${address.slice(-4)}`;
-}
-
 export function PrimeSidebar({
   primes,
   selectedPrimeId,
@@ -170,16 +162,20 @@ export function PrimeSidebar({
                       >
                         {prime.name}
                       </p>
-                      <p
+                      <span
                         className={css({
-                          m: 0,
+                          fontFamily: 'mono',
                           fontSize: 'xs',
-                          letterSpacing: '0.04em',
-                          color: 'text.muted',
+                          color: { base: 'blue.500', _dark: 'blue.400' },
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          display: 'block',
                         })}
+                        title={prime.address}
                       >
-                        {formatAddress(prime.address)}
-                      </p>
+                        {prime.address.slice(0, 6)}...{prime.address.slice(-4)}
+                      </span>
                     </div>
                   </div>
                 </button>

@@ -129,9 +129,8 @@ WITH morpho_vaults AS (
 class MorphoBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Morpho vaults."""
 
-    def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:
+    def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
-        self._protocol_id = protocol_id
 
     async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
         """Resolve a Morpho vault's internal ID from its onchain address."""

@@ -5,3 +5,4 @@ export { ErrorState } from './ErrorState';
 export { PercentageSlider } from './PercentageSlider';
 export { StatusBadge } from './StatusBadge';
 export { SummaryMetric } from './SummaryMetric';
+export { TokenAddress } from './TokenAddress';
