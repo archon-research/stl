@@ -25,9 +25,10 @@ function truncateMiddle(address: string, maxLength = 12): string {
   if (address.length <= maxLength) {
     return address;
   }
-  const start = Math.ceil(maxLength / 2);
-  const end = address.length - Math.floor(maxLength / 2) + 2;
-  return `${address.slice(0, start)}...${address.slice(end)}`;
+  const charsToShow = maxLength - 3; // Account for "..."
+  const frontChars = Math.ceil(charsToShow / 2);
+  const backChars = Math.floor(charsToShow / 2);
+  return `${address.slice(0, frontChars)}...${address.slice(-backChars)}`;
 }
 
 export function TokenAddress({
@@ -94,6 +95,8 @@ export function TokenAddress({
           setIsMenuOpen(!isMenuOpen);
         }}
         title={address}
+        aria-haspopup="menu"
+        aria-expanded={isMenuOpen}
         style={style}
         className={
           className ??

@@ -126,19 +126,6 @@ export function AllocationGrid({
       0,
     );
 
-    const largestAllocation = filteredAllocations.reduce<Allocation | null>(
-      (largest, allocation) => {
-        if (!largest) {
-          return allocation;
-        }
-
-        const largestUsd = parseNumericValue(largest.amount_usd) ?? 0;
-        const nextUsd = parseNumericValue(allocation.amount_usd) ?? 0;
-        return nextUsd > largestUsd ? allocation : largest;
-      },
-      null,
-    );
-
     const latestActivityAt = filteredAllocations.reduce<string | null>(
       (latest, allocation) => {
         if (!allocation.latest_activity_at) {
@@ -158,7 +145,6 @@ export function AllocationGrid({
 
     return {
       allocationCount: filteredAllocations.length,
-      largestAllocation,
       latestActivityAt,
       totalUsd,
     };

@@ -269,11 +269,16 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
                  ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
     ),
     latest_prices AS (
-        SELECT DISTINCT ON (otp.token_id)
-            otp.token_id,
+        SELECT DISTINCT ON (rt.id, rt.underlying_token_id)
+            rt.id AS receipt_token_id,
+            rt.underlying_token_id AS token_id,
             otp.price_usd
-        FROM onchain_token_price otp
-        ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        FROM receipt_token rt
+        JOIN protocol_oracle po ON po.protocol_id = rt.protocol_id
+        JOIN onchain_token_price otp ON otp.oracle_id = po.oracle_id
+            AND otp.token_id = rt.underlying_token_id
+        ORDER BY rt.id, rt.underlying_token_id,
+                 otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
     ),
     latest_activity AS (
         SELECT DISTINCT ON (receipt_token_id)
@@ -351,7 +356,8 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN protocol pr ON pr.id = rt.protocol_id
         WHERE lp.balance > 0
     ) combined
-    LEFT JOIN latest_prices lp ON lp.token_id = combined.underlying_token_id
+    LEFT JOIN latest_prices lp ON lp.receipt_token_id = combined.receipt_token_id
+        AND lp.token_id = combined.underlying_token_id
     LEFT JOIN latest_activity la ON la.receipt_token_id = combined.receipt_token_id
     ORDER BY receipt_token_id, balance DESC
 """)
@@ -434,15 +440,21 @@ receipt_positions AS (
     ORDER BY receipt_token_id, balance DESC
 ),
 latest_prices AS (
-    SELECT DISTINCT ON (otp.token_id)
-        otp.token_id,
+    SELECT DISTINCT ON (rt.id, rt.underlying_token_id)
+        rt.id AS receipt_token_id,
+        rt.underlying_token_id AS token_id,
         otp.price_usd
-    FROM onchain_token_price otp
-    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    FROM receipt_token rt
+    JOIN protocol_oracle po ON po.protocol_id = rt.protocol_id
+    JOIN onchain_token_price otp ON otp.oracle_id = po.oracle_id
+        AND otp.token_id = rt.underlying_token_id
+    ORDER BY rt.id, rt.underlying_token_id,
+             otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
 )
 SELECT COALESCE(SUM(rp.balance * lp.price_usd), 0) AS total_usd_exposure
 FROM receipt_positions rp
-LEFT JOIN latest_prices lp ON lp.token_id = rp.underlying_token_id
+LEFT JOIN latest_prices lp ON lp.receipt_token_id = rp.receipt_token_id
+    AND lp.token_id = rp.underlying_token_id
 """)
 
 

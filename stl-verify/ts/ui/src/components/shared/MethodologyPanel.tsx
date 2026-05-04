@@ -29,6 +29,8 @@ const METHODOLOGY_MARKDOWN = `## Internal Data (STL)
 
 export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
   const [sources, setSources] = useState<DataSource[]>([]);
+  const [methodologyText, setMethodologyText] =
+    useState<string>(METHODOLOGY_MARKDOWN);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,6 +48,9 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
       try {
         const response = await getDataSources(abortController.signal);
         setSources(response.sources ?? []);
+        if (response.methodology_markdown) {
+          setMethodologyText(response.methodology_markdown);
+        }
       } catch (err) {
         if (isAbortError(err)) {
           return;
@@ -161,7 +166,7 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
                   },
                 })}
               >
-                <ReactMarkdown>{METHODOLOGY_MARKDOWN}</ReactMarkdown>
+                <ReactMarkdown>{methodologyText}</ReactMarkdown>
               </div>
             </div>
 

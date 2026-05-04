@@ -53,14 +53,14 @@ function getStarRiskCapitalSource(
 }
 
 function toPositiveDifference(total: string, current: string): string {
-  const totalNum = Number(total);
-  const currentNum = Number(current);
-
-  if (!Number.isFinite(totalNum) || !Number.isFinite(currentNum)) {
+  try {
+    const totalBigInt = BigInt(total.split('.')[0] || '0');
+    const currentBigInt = BigInt(current.split('.')[0] || '0');
+    const diff = totalBigInt - currentBigInt;
+    return diff > 0n ? diff.toString() : '0';
+  } catch {
     return '0';
   }
-
-  return String(Math.max(totalNum - currentNum, 0));
 }
 
 function mapRiskCapitalRowToMetrics(
