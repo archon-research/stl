@@ -25,7 +25,8 @@ type ServiceTelemetry struct {
 	meter metric.Meter
 
 	// Chain metrics
-	reorgsTotal metric.Int64Counter
+	reorgsTotal        metric.Int64Counter
+	reorgsDroppedTotal metric.Int64Counter
 }
 
 // NewServiceTelemetry creates a new ServiceTelemetry instance with OpenTelemetry instrumentation.
@@ -52,6 +53,14 @@ func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry
 		return nil, err
 	}
 
+	t.reorgsDroppedTotal, err = meter.Int64Counter(
+		"chain.reorgs.dropped.total",
+		metric.WithDescription("Total number of reorg signals dropped before state mutation, labelled by reason (stale_fork, verify_error, state_shifted)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return t, nil
 }
 
@@ -63,5 +72,16 @@ func (t *ServiceTelemetry) RecordReorg(ctx context.Context, depth int, fromBlock
 		attribute.Int("reorg.depth", depth),
 		attribute.Int64("reorg.from_block", fromBlock),
 		attribute.Int64("reorg.to_block", toBlock),
+	))
+}
+
+// RecordReorgDropped records a reorg signal that was rejected before any state
+// mutation. reason is a stable label value (see outbound.ReorgDropReason*
+// constants) so Grafana dashboards and alerts can filter by it. The block
+// number is intentionally NOT included as a metric attribute — it would
+// produce one Prometheus series per block and balloon storage.
+func (t *ServiceTelemetry) RecordReorgDropped(ctx context.Context, reason string) {
+	t.reorgsDroppedTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("reorg.dropped_reason", reason),
 	))
 }

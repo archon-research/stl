@@ -46,6 +46,12 @@ type MockBlockchainClient struct {
 	// GetBlockByNumber should return for that block. Used by tests that need
 	// to simulate transient RPC failures at specific heights.
 	getBlockByNumberErr map[int64]error
+
+	// getBlockByNumberHook keys block numbers to a callback that runs when
+	// GetBlockByNumber is invoked for that block. Used by tests to simulate
+	// concurrent state changes during the RPC call (e.g., a backfill writing
+	// to the DB during a live-side verification window).
+	getBlockByNumberHook map[int64]func()
 }
 
 func NewMockBlockchainClient() *MockBlockchainClient {
@@ -123,6 +129,19 @@ func (m *MockBlockchainClient) SetBlockHeader(num int64, hash, parentHash string
 }
 
 func (m *MockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
+	// Run the per-block hook (if any) before the lookup, holding no lock so
+	// the hook may freely mutate other state. We pop the hook so it fires at
+	// most once per configured invocation.
+	m.mu.Lock()
+	hook := m.getBlockByNumberHook[blockNum]
+	if hook != nil {
+		delete(m.getBlockByNumberHook, blockNum)
+	}
+	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -155,6 +174,23 @@ func (m *MockBlockchainClient) SetGetBlockByNumberError(blockNum int64, err erro
 		return
 	}
 	m.getBlockByNumberErr[blockNum] = err
+}
+
+// SetGetBlockByNumberHook installs a one-shot callback that fires when
+// GetBlockByNumber is next invoked for the given block number. The hook runs
+// before the response is constructed and is cleared after firing. Tests use
+// this to simulate concurrent writers landing during an RPC round-trip.
+func (m *MockBlockchainClient) SetGetBlockByNumberHook(blockNum int64, hook func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getBlockByNumberHook == nil {
+		m.getBlockByNumberHook = make(map[int64]func())
+	}
+	if hook == nil {
+		delete(m.getBlockByNumberHook, blockNum)
+		return
+	}
+	m.getBlockByNumberHook[blockNum] = hook
 }
 
 func (m *MockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {

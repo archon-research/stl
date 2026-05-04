@@ -1673,14 +1673,30 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 }
 
 type mockMetrics struct {
-	mu         sync.Mutex
-	reorgCount int
+	mu            sync.Mutex
+	reorgCount    int
+	dropsByReason map[string]int
 }
 
 func (m *mockMetrics) RecordReorg(ctx context.Context, depth int, commonAncestor, blockNum int64) {
 	m.mu.Lock()
 	m.reorgCount++
 	m.mu.Unlock()
+}
+
+func (m *mockMetrics) RecordReorgDropped(ctx context.Context, reason string) {
+	m.mu.Lock()
+	if m.dropsByReason == nil {
+		m.dropsByReason = make(map[string]int)
+	}
+	m.dropsByReason[reason]++
+	m.mu.Unlock()
+}
+
+func (m *mockMetrics) DropCount(reason string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dropsByReason[reason]
 }
 
 func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
@@ -3188,9 +3204,11 @@ func TestProcessBlock_StaleForkBroadcast_NoOrphan(t *testing.T) {
 		}
 	}
 
+	metrics := &mockMetrics{}
 	svc, err := NewLiveService(LiveConfig{
 		ChainID:            1,
 		FinalityBlockCount: 64,
+		Metrics:            metrics,
 	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -3253,6 +3271,17 @@ func TestProcessBlock_StaleForkBroadcast_NoOrphan(t *testing.T) {
 	// failure can occur).
 	if procErr != nil {
 		t.Errorf("processBlockWithPrefetch returned error %v; the verification gate should have dropped the block cleanly", procErr)
+	}
+
+	// Metric: exactly one stale_fork drop must have been recorded.
+	if got := metrics.DropCount(outbound.ReorgDropReasonStaleFork); got != 1 {
+		t.Errorf("expected 1 stale_fork drop recorded, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonVerifyError); got != 0 {
+		t.Errorf("expected 0 verify_error drops, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonStateShifted); got != 0 {
+		t.Errorf("expected 0 state_shifted drops, got %d", got)
 	}
 }
 
@@ -3333,6 +3362,110 @@ func TestProcessBlock_RealReorg_PassesVerification(t *testing.T) {
 	}
 }
 
+// TestProcessBlock_StateShiftedDuringVerify_DropsBlock verifies the VEC-202
+// follow-up TOCTOU mitigation: detectReorg reads `latestBlock` to compute
+// commonAncestor and reorgEvent BEFORE the RPC verification round-trip. If
+// another writer (e.g. backfill's recoverFromStaleChain) commits to
+// `block_states` during that round-trip, the precomputed reorgEvent is stale
+// against the current DB state. The fix re-reads `latestBlock` after verify
+// and drops the reorg if it shifted, letting the next live broadcast trigger
+// a fresh detect→verify→commit pass.
+func TestProcessBlock_StateShiftedDuringVerify_DropsBlock(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := testutil.NewMockBlockchainClient()
+	// RPC view: 99 and a NEW canonical 100. The incoming reorg block IS canonical
+	// at the time verify runs — but during the verify round-trip, another writer
+	// will land a higher canonical block, so by the time we'd otherwise call
+	// HandleReorgAtomic, our snapshot of latestBlock is stale.
+	client.SetBlockHeader(99, "0xblock99", "0xblock98")
+	client.SetBlockHeader(100, "0xblock100_new", "0xblock99")
+	client.SetBlockHeader(101, "0xblock101_new", "0xblock100_new")
+
+	// DB starts with old chain at 100.
+	for _, b := range []struct {
+		num          int64
+		hash, parent string
+	}{
+		{99, "0xblock99", "0xblock98"},
+		{100, "0xblock100_old", "0xblock99"},
+	} {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: b.num, Hash: b.hash, ParentHash: b.parent, BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed %d: %v", b.num, err)
+		}
+	}
+
+	// Hook: while verifyIncomingIsCanonical is asking RPC for block 100, simulate
+	// a concurrent writer (e.g., backfill) committing a new canonical block at
+	// height 101. After this, the DB's "latest" is 101, not 100 — the snapshot
+	// detectReorg used is stale.
+	client.SetGetBlockByNumberHook(100, func() {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: 101, Hash: "0xblock101_new", ParentHash: "0xblock100_new", BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("hook save: %v", err)
+		}
+	})
+
+	metrics := &mockMetrics{}
+	svc, err := NewLiveService(LiveConfig{
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		Metrics:            metrics,
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(ctx)
+	defer svc.cancel()
+
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0xblock100_new",
+		ParentHash: "0xblock99",
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	_ = svc.processBlockWithPrefetch(header, time.Now())
+
+	// 0xblock100_old must NOT be orphaned — the DB state shifted under us during
+	// verify, so the precomputed reorgEvent is no longer valid and we must bail.
+	b100old, err := stateRepo.GetBlockByHash(ctx, "0xblock100_old")
+	if err != nil {
+		t.Fatalf("get 0xblock100_old: %v", err)
+	}
+	if b100old == nil {
+		t.Fatal("0xblock100_old missing from DB")
+	}
+	if b100old.IsOrphaned {
+		t.Errorf("0xblock100_old must remain canonical after state-shifted-during-verify; the TOCTOU mitigation should have re-read latestBlock and dropped the reorg")
+	}
+
+	// The incoming reorg block must NOT be saved either.
+	staleReorg, err := stateRepo.GetBlockByHash(ctx, "0xblock100_new")
+	if err != nil {
+		t.Fatalf("get 0xblock100_new: %v", err)
+	}
+	if staleReorg != nil {
+		t.Errorf("0xblock100_new must not be saved when state shifted during verify (got %+v)", staleReorg)
+	}
+
+	// Metric: exactly one state_shifted drop must have been recorded.
+	if got := metrics.DropCount(outbound.ReorgDropReasonStateShifted); got != 1 {
+		t.Errorf("expected 1 state_shifted drop recorded, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonStaleFork); got != 0 {
+		t.Errorf("expected 0 stale_fork drops, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonVerifyError); got != 0 {
+		t.Errorf("expected 0 verify_error drops, got %d", got)
+	}
+}
+
 // TestProcessBlock_VerifyRpcError_DropsBlock verifies that a transient RPC error
 // during canonical verification causes the block to be dropped without state mutation.
 func TestProcessBlock_VerifyRpcError_DropsBlock(t *testing.T) {
@@ -3361,9 +3494,11 @@ func TestProcessBlock_VerifyRpcError_DropsBlock(t *testing.T) {
 		}
 	}
 
+	metrics := &mockMetrics{}
 	svc, err := NewLiveService(LiveConfig{
 		ChainID:            1,
 		FinalityBlockCount: 64,
+		Metrics:            metrics,
 	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
@@ -3396,5 +3531,16 @@ func TestProcessBlock_VerifyRpcError_DropsBlock(t *testing.T) {
 	}
 	if stale != nil {
 		t.Errorf("0xblock100_new must not be saved: %+v", stale)
+	}
+
+	// Metric: exactly one verify_error drop must have been recorded.
+	if got := metrics.DropCount(outbound.ReorgDropReasonVerifyError); got != 1 {
+		t.Errorf("expected 1 verify_error drop recorded, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonStaleFork); got != 0 {
+		t.Errorf("expected 0 stale_fork drops, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonStateShifted); got != 0 {
+		t.Errorf("expected 0 state_shifted drops, got %d", got)
 	}
 }
