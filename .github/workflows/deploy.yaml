@@ -340,10 +340,11 @@ jobs:
     needs: [build-push-staging, update-staging]
     runs-on: ubuntu-latest
     steps:
-      - uses: archon-research/github-actions/slack-notify-failure@6c81493c5f924b2d57fb84c7f298630037f5f27f # main
+      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
-          header: Staging Deploy Failed
+          status: failure
+          context: Staging Deploy
           failed-jobs: |
             Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
             Update Staging Image Tags=${{ needs.update-staging.result }}
