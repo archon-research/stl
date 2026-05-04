@@ -3,12 +3,14 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import AfterValidator, BaseModel
+from pydantic import AfterValidator, BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
 from app.api.deps import get_engine
+from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
 from app.services.allocation_category_service import AllocationCategoryService
@@ -100,6 +102,25 @@ class AllocationActivityResponse(BaseModel):
     created_at: str
 
 
+class StarRiskCapitalRowResponse(BaseModel):
+    star: str
+    exposure: str
+    total_rc: str
+    financial_rrc: str
+    exposure_share: str
+    risk_tolerance_ratio: str
+
+
+class StarRiskCapitalDataResponse(BaseModel):
+    results: list[StarRiskCapitalRowResponse] = []
+
+
+class StarRiskCapitalResponse(BaseModel):
+    data: StarRiskCapitalDataResponse | None = None
+    status: int | None = None
+    success: bool | None = None
+
+
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(PostgresAllocationRepository(engine))
 
@@ -108,10 +129,82 @@ async def _get_capital_metrics_service(engine: AsyncEngine = Depends(get_engine)
     return CapitalMetricsService(PostgresAllocationRepository(engine))
 
 
+async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
+    settings = get_settings()
+
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            response = await client.get(settings.star_risk_capital_upstream_url)
+    except httpx.HTTPError as exc:
+        logger.exception(
+            "Failed to fetch Star risk capital upstream",
+            extra={"upstream_url": settings.star_risk_capital_upstream_url},
+        )
+        raise HTTPException(status_code=502, detail="Risk capital upstream request failed") from exc
+
+    if not response.is_success:
+        logger.error(
+            "Star risk capital upstream returned non-success status",
+            extra={
+                "upstream_url": settings.star_risk_capital_upstream_url,
+                "status_code": response.status_code,
+                "response_preview": response.text[:500],
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Risk capital upstream returned status {response.status_code}",
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        logger.exception(
+            "Star risk capital upstream returned invalid JSON",
+            extra={"upstream_url": settings.star_risk_capital_upstream_url},
+        )
+        raise HTTPException(status_code=502, detail="Risk capital upstream returned invalid JSON") from exc
+
+    try:
+        return StarRiskCapitalResponse.model_validate(payload)
+    except ValidationError as exc:
+        logger.exception(
+            "Star risk capital upstream response had unexpected shape",
+            extra={
+                "upstream_url": settings.star_risk_capital_upstream_url,
+                "validation_errors": exc.errors(),
+            },
+        )
+        raise HTTPException(status_code=502, detail="Risk capital upstream response shape mismatch") from exc
+
+
 @router.get("/primes", response_model=list[PrimeResponse])
 async def list_primes(service: AllocationService = Depends(_get_service)):
     primes = await service.list_primes()
     return [PrimeResponse(id=p.id, name=p.name, address=p.address) for p in primes]
+
+
+@router.get("/capital-metrics", response_model=list[CapitalMetricsResponse])
+async def list_capital_metrics(
+    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
+):
+    metrics = await service.list_all_capital_metrics()
+    return [
+        CapitalMetricsResponse(
+            prime_id=m.prime_id,
+            prime_name=m.prime_name,
+            risk_capital=m.risk_capital,
+            capital_buffer=m.capital_buffer,
+            first_loss_capital=m.first_loss_capital,
+            total_capital=m.total_capital,
+            risk_to_capital_ratio=m.risk_to_capital_ratio,
+            timestamp=m.timestamp.isoformat(),
+            benchmark_source=m.benchmark_source,
+            is_validated=m.is_validated,
+            validation_note=m.validation_note,
+        )
+        for m in metrics
+    ]
 
 
 @router.get("/chains", response_model=list[ChainResponse])
@@ -236,36 +329,7 @@ async def list_allocation_activity(
     ]
 
 
-@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
-async def get_capital_metrics(
-    prime_id: EthAddressPath,
-    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
-):
-    """Retrieve capital metrics for a prime.
-
-    Responds with:
-    - risk_capital: Total risk-bearing capital
-    - capital_buffer: Baseline protective capital
-    - first_loss_capital: Prime-owned first-loss layer
-    - total_capital: Sum of capital tiers
-    - risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)
-    - is_validated: Whether reconciled against external benchmark
-    - validation_note: Any caveats or pending work on this endpoint
-    """
-    metrics = await service.get_capital_metrics(prime_id)
-    if not metrics:
-        raise HTTPException(status_code=404, detail="Prime not found")
-
-    return CapitalMetricsResponse(
-        prime_id=metrics.prime_id,
-        prime_name=metrics.prime_name,
-        risk_capital=metrics.risk_capital,
-        capital_buffer=metrics.capital_buffer,
-        first_loss_capital=metrics.first_loss_capital,
-        total_capital=metrics.total_capital,
-        risk_to_capital_ratio=metrics.risk_to_capital_ratio,
-        timestamp=metrics.timestamp.isoformat(),
-        benchmark_source=metrics.benchmark_source,
-        is_validated=metrics.is_validated,
-        validation_note=metrics.validation_note,
-    )
+@router.get("/star-risk-capital/primes", response_model=StarRiskCapitalResponse)
+async def get_star_risk_capital_requirements():
+    """Proxy published Star risk capital payload through backend to avoid browser CORS issues."""
+    return await _fetch_star_risk_capital_payload()

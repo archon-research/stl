@@ -13,11 +13,11 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
+  getCapitalMetrics,
   getChains,
   getDataSources,
   getPrimes,
   getProtocols,
-  getStarRiskCapitalRequirements,
 } from './lib/api';
 import {
   buildChainLabelLookup,
@@ -38,51 +38,7 @@ import type {
   DataSource,
   Prime,
 } from './types/allocation';
-import type {
-  LocalChainRow,
-  LocalProtocolRow,
-  StarRiskCapitalRow,
-} from './types/local-data';
-
-function getStarRiskCapitalSource(
-  sources: DataSource[],
-): DataSource | undefined {
-  return sources.find((source) =>
-    source.role.toLowerCase().includes('risk capital requirements'),
-  );
-}
-
-function toPositiveDifference(total: string, current: string): string {
-  try {
-    const totalBigInt = BigInt(total.split('.')[0] || '0');
-    const currentBigInt = BigInt(current.split('.')[0] || '0');
-    const diff = totalBigInt - currentBigInt;
-    return diff > 0n ? diff.toString() : '0';
-  } catch {
-    return '0';
-  }
-}
-
-function mapRiskCapitalRowToMetrics(
-  row: StarRiskCapitalRow,
-  primeId: string,
-  primeName: string,
-  source: DataSource,
-): CapitalMetrics {
-  return {
-    prime_id: primeId,
-    prime_name: primeName,
-    risk_capital: row.exposure,
-    total_capital: row.total_rc,
-    first_loss_capital: row.financial_rrc,
-    capital_buffer: toPositiveDifference(row.total_rc, row.financial_rrc),
-    risk_to_capital_ratio: row.risk_tolerance_ratio,
-    timestamp: new Date().toISOString(),
-    benchmark_source: source.host,
-    is_validated: false,
-    validation_note: `Sourced from ${source.name}.`,
-  };
-}
+import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
@@ -96,7 +52,7 @@ function App() {
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
   const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
-  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(
@@ -279,49 +235,33 @@ function App() {
     const controller = new AbortController();
     setIsCapitalMetricsLoading(true);
 
-    const selectedPrime = primes.find((prime) => prime.id === selectedPrimeId);
-    if (!selectedPrime) {
+    if (!primes.some((prime) => prime.id === selectedPrimeId)) {
       setCapitalMetrics(null);
       setIsCapitalMetricsLoading(false);
       return () => controller.abort();
     }
 
-    const starRiskCapitalSource = getStarRiskCapitalSource(dataSources);
-    if (!starRiskCapitalSource) {
-      logging.warn('Missing provenance source for Star risk capital metrics');
-      setCapitalMetrics(null);
-      setIsCapitalMetricsLoading(false);
-      return () => controller.abort();
-    }
-
-    void getStarRiskCapitalRequirements(controller.signal)
-      .then((rows) => {
-        const selectedRow = rows.find(
-          (row) =>
-            row.star.trim().toLowerCase() ===
-            selectedPrime.name.trim().toLowerCase(),
+    void getCapitalMetrics(controller.signal)
+      .then((metrics) => {
+        const selectedMetric = metrics.find(
+          (metric) =>
+            metric.prime_id.trim().toLowerCase() ===
+            selectedPrimeId.trim().toLowerCase(),
         );
 
-        if (!selectedRow) {
+        if (!selectedMetric) {
           setCapitalMetrics(null);
           return;
         }
 
-        setCapitalMetrics(
-          mapRiskCapitalRowToMetrics(
-            selectedRow,
-            selectedPrime.id,
-            selectedPrime.name,
-            starRiskCapitalSource,
-          ),
-        );
+        setCapitalMetrics(selectedMetric);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        logging.error('Failed to load Star risk capital metrics', {
+        logging.error('Failed to load capital metrics', {
           error,
           primeId: selectedPrimeId,
         });
@@ -334,7 +274,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId, primes, dataSources]);
+  }, [selectedPrimeId, primes]);
 
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,

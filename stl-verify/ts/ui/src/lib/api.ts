@@ -5,21 +5,15 @@ import type {
   AllocationActivityResponse,
   AllocationsResponse,
   BadDebt,
+  CapitalMetricsResponse,
   DataSourcesResponse,
   PrimesResponse,
   RiskBreakdown,
 } from '../types/allocation';
-import type {
-  LocalChainRow,
-  LocalProtocolRow,
-  StarRiskCapitalResponse,
-  StarRiskCapitalRow,
-} from '../types/local-data';
+import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { logging } from './logging';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
-const STAR_RISK_CAPITAL_URL =
-  'https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 const apiClient = createApiClient<paths>(API_BASE_URL);
 
 type BadDebtQuery =
@@ -163,79 +157,24 @@ export function getAllocationActivity(
   );
 }
 
-export async function getStarRiskCapitalRequirements(
+export function getCapitalMetrics(
   signal?: AbortSignal,
-): Promise<StarRiskCapitalRow[]> {
-  try {
-    // Create timeout signal (10s) that merges with provided signal
-    const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), 10000);
+): Promise<CapitalMetricsResponse[]> {
+  return fetch('/v1/capital-metrics', { signal })
+    .then(async (response) => {
+      if (!response.ok) {
+        const responseText = await response.text().catch(() => '<no body>');
+        throw new Error(
+          `GET /v1/capital-metrics failed (${response.status}): ${responseText}`,
+        );
+      }
 
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, timeoutController.signal])
-      : timeoutController.signal;
-
-    const response = await fetch(STAR_RISK_CAPITAL_URL, {
-      signal: combinedSignal,
+      return response.json() as Promise<CapitalMetricsResponse[]>;
+    })
+    .catch((error: unknown) => {
+      logging.error('Failed to fetch capital metrics list', { error });
+      throw error;
     });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const responseText = await response.text().catch(() => '<no body>');
-
-      logging.error('Star risk capital API request failed', {
-        url: STAR_RISK_CAPITAL_URL,
-        status: response.status,
-        statusText: response.statusText,
-        responseBody: responseText.slice(0, 500), // Limit log size
-      });
-
-      throw new Error(
-        `Failed to fetch risk capital data (${response.status}): ${response.statusText}`,
-      );
-    }
-
-    let payload: StarRiskCapitalResponse;
-    try {
-      payload = (await response.json()) as StarRiskCapitalResponse;
-    } catch (jsonError) {
-      logging.error('Failed to parse Star risk capital response as JSON', {
-        error: jsonError,
-        url: STAR_RISK_CAPITAL_URL,
-      });
-      throw new Error(
-        'Received invalid JSON response from risk capital service',
-        {
-          cause: jsonError,
-        },
-      );
-    }
-
-    if (!payload.data?.results) {
-      logging.warn(
-        'Star risk capital response missing expected data structure',
-        {
-          hasData: !!payload.data,
-          hasResults: !!payload.data?.results,
-        },
-      );
-      return [];
-    }
-
-    return payload.data.results;
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw error; // Let abort errors propagate
-    }
-
-    // Network errors, timeouts, etc.
-    logging.error('Network error fetching Star risk capital', {
-      error,
-      url: STAR_RISK_CAPITAL_URL,
-    });
-    throw error;
-  }
 }
 
 export function getDataSources(

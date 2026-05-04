@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.domain.entities.allocation import EthAddress, Prime
@@ -136,37 +137,35 @@ def _make_capital_metrics_stub() -> CapitalMetrics:
     )
 
 
-def test_get_capital_metrics_returns_200_for_known_prime():
+def test_list_capital_metrics_returns_200_with_all_primes():
     from app.api.v1 import allocations
 
     metrics = _make_capital_metrics_stub()
+    metrics_two = CapitalMetrics(
+        prime_id="0x" + "cd" * 20,
+        prime_name="spark",
+        risk_capital=Decimal("10"),
+        capital_buffer=Decimal("2"),
+        first_loss_capital=Decimal("1"),
+        total_capital=Decimal("3"),
+        risk_to_capital_ratio=Decimal("3.3333333333"),
+        timestamp=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        is_validated=False,
+        validation_note="test",
+    )
     mock_service = AsyncMock(spec=CapitalMetricsService)
-    mock_service.get_capital_metrics.return_value = metrics
+    mock_service.list_all_capital_metrics.return_value = [metrics, metrics_two]
     app.dependency_overrides[allocations._get_capital_metrics_service] = lambda: mock_service
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/capital-metrics")
+    response = client.get("/v1/capital-metrics")
 
     assert response.status_code == 200
     data = response.json()
-    assert data["prime_id"] == _VALID_ADDR
-    assert data["prime_name"] == "grove"
-    assert data["is_validated"] is False
-    assert "timestamp" in data
-    mock_service.get_capital_metrics.assert_awaited_once_with(EthAddress(_VALID_ADDR))
-
-
-def test_get_capital_metrics_returns_404_for_unknown_prime():
-    from app.api.v1 import allocations
-
-    mock_service = AsyncMock(spec=CapitalMetricsService)
-    mock_service.get_capital_metrics.return_value = None
-    app.dependency_overrides[allocations._get_capital_metrics_service] = lambda: mock_service
-    client = TestClient(app)
-
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/capital-metrics")
-
-    assert response.status_code == 404
+    assert len(data) == 2
+    assert data[0]["prime_id"] == _VALID_ADDR
+    assert data[1]["prime_name"] == "spark"
+    mock_service.list_all_capital_metrics.assert_awaited_once()
 
 
 # --- data-sources endpoint ---
@@ -182,3 +181,65 @@ def test_get_data_sources_returns_200_with_sources():
     assert "sources" in data
     assert isinstance(data["sources"], list)
     assert len(data["sources"]) > 0
+
+
+def test_get_star_risk_capital_requirements_returns_upstream_shape(monkeypatch):
+    from app.api.v1 import allocations
+
+    async def _fake_payload():
+        return allocations.StarRiskCapitalResponse.model_validate(
+            {
+                "status": 200,
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "star": "ALM",
+                            "exposure": "123.45",
+                            "total_rc": "67.89",
+                            "financial_rrc": "12.34",
+                            "exposure_share": "10.00%",
+                            "risk_tolerance_ratio": "1.23",
+                        }
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
+    client = TestClient(app)
+
+    response = client.get("/v1/star-risk-capital/primes")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": 200,
+        "success": True,
+        "data": {
+            "results": [
+                {
+                    "star": "ALM",
+                    "exposure": "123.45",
+                    "total_rc": "67.89",
+                    "financial_rrc": "12.34",
+                    "exposure_share": "10.00%",
+                    "risk_tolerance_ratio": "1.23",
+                }
+            ]
+        },
+    }
+
+
+def test_get_star_risk_capital_requirements_returns_502_on_upstream_failure(monkeypatch):
+    from app.api.v1 import allocations
+
+    async def _raise_http_exception():
+        raise HTTPException(status_code=502, detail="Risk capital upstream request failed")
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _raise_http_exception)
+    client = TestClient(app)
+
+    response = client.get("/v1/star-risk-capital/primes")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Risk capital upstream request failed"}
