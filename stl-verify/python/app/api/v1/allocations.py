@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
@@ -186,25 +186,43 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
 
 @router.get("/capital-metrics", response_model=list[CapitalMetricsResponse])
 async def list_capital_metrics(
-    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
-):
-    metrics = await service.list_all_capital_metrics()
-    return [
-        CapitalMetricsResponse(
-            prime_id=m.prime_id,
-            prime_name=m.prime_name,
-            risk_capital=m.risk_capital,
-            capital_buffer=m.capital_buffer,
-            first_loss_capital=m.first_loss_capital,
-            total_capital=m.total_capital,
-            risk_to_capital_ratio=m.risk_to_capital_ratio,
-            timestamp=m.timestamp.isoformat(),
-            benchmark_source=m.benchmark_source,
-            is_validated=m.is_validated,
-            validation_note=m.validation_note,
+    service: AllocationService = Depends(_get_service),
+) -> list[CapitalMetricsResponse]:
+    primes = await service.list_primes()
+    star_payload = await _fetch_star_risk_capital_payload()
+    rows = star_payload.data.results if star_payload.data else []
+
+    settings = get_settings()
+    metrics = []
+    for prime in primes:
+        row = next(
+            (r for r in rows if r.star.strip().lower() == prime.name.strip().lower()),
+            None,
         )
-        for m in metrics
-    ]
+        if not row:
+            continue
+
+        total_rc = Decimal(row.total_rc)
+        financial_rrc = Decimal(row.financial_rrc)
+        capital_buffer = max(total_rc - financial_rrc, Decimal("0"))
+
+        metrics.append(
+            CapitalMetricsResponse(
+                prime_id=prime.id,
+                prime_name=prime.name,
+                risk_capital=Decimal(row.exposure),
+                capital_buffer=capital_buffer,
+                first_loss_capital=financial_rrc,
+                total_capital=total_rc,
+                risk_to_capital_ratio=Decimal(row.risk_tolerance_ratio),
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                benchmark_source=settings.star_risk_capital_upstream_url,
+                is_validated=False,
+                validation_note="Sourced from Star Agents Risk Capital & Requirements Monitor.",
+            )
+        )
+
+    return metrics
 
 
 @router.get("/chains", response_model=list[ChainResponse])

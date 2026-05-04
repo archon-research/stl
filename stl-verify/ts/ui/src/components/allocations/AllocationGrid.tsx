@@ -463,7 +463,9 @@ export function AllocationGrid({
                 <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
-            {!showTopMetricsSkeleton && capitalMetrics ? (
+            {!showTopMetricsSkeleton &&
+            capitalMetrics &&
+            parseNumericValue(capitalMetrics.risk_to_capital_ratio) !== null ? (
               <span
                 className={css({
                   fontSize: 'xs',
