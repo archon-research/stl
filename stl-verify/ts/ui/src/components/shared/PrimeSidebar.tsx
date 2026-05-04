@@ -46,16 +46,41 @@ export function PrimeSidebar({
           borderBottomColor: 'border.subtle',
         })}
       >
-        <h2
-          className={css({
-            m: 0,
-            fontSize: '2xl',
-            lineHeight: 'tight',
-            color: 'text.strong',
-          })}
-        >
-          STL Verify
-        </h2>
+        <div className={flex({ align: 'center', gap: '3.5' })}>
+          <img
+            src="/assets/archon-logo.png"
+            alt=""
+            aria-hidden="true"
+            className={css({
+              width: '14',
+              height: '14',
+              flexShrink: 0,
+              objectFit: 'contain',
+            })}
+          />
+          <div
+            className={css({
+              display: 'grid',
+              gap: '0.5',
+              minWidth: 0,
+            })}
+          >
+            <span
+              className={css({
+                display: 'block',
+                m: 0,
+                fontSize: '2xl',
+                lineHeight: '0.95',
+                letterSpacing: '0.05em',
+                fontWeight: '700',
+                textTransform: 'uppercase',
+                color: 'text.strong',
+              })}
+            >
+              Sentinel Verify
+            </span>
+          </div>
+        </div>
       </div>
 
       <div
