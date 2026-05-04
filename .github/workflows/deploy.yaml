@@ -208,6 +208,18 @@ jobs:
             docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
           done
 
+  notify-prod-pending:
+    name: Notify Prod Deploy Awaiting Approval
+    needs: build-push-prod
+    if: ${{ github.event_name != 'workflow_dispatch' && needs.build-push-prod.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+        with:
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+          status: pending
+          context: Prod Deploy
+
   create-prod-pr:
     name: Create Prod Deploy PR
     needs: build-push-prod
@@ -217,6 +229,8 @@ jobs:
     concurrency:
       group: deploy-prod-pr
       cancel-in-progress: false
+    outputs:
+      pr_url: ${{ steps.create-pr.outputs.pr_url }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -237,6 +251,7 @@ jobs:
           sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/prod/kustomization.yaml
 
       - name: Create or update prod PR
+        id: create-pr
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -303,6 +318,22 @@ jobs:
             --head "$BRANCH" \
             --base main
 
+          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+  notify-prod-pr-created:
+    name: Notify Prod Deploy PR Created
+    needs: create-prod-pr
+    if: ${{ needs.create-prod-pr.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+        with:
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+          status: success
+          context: Prod Deploy PR
+          pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
+
   notify-staging-failure:
     name: Notify Staging Deploy Failure
     if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
@@ -323,10 +354,11 @@ jobs:
     needs: [build-push-prod, create-prod-pr]
     runs-on: ubuntu-latest
     steps:
-      - uses: archon-research/github-actions/slack-notify-failure@6c81493c5f924b2d57fb84c7f298630037f5f27f # main
+      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-          header: Prod Deploy Failed
+          status: failure
+          context: Prod Deploy
           failed-jobs: |
             Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
             Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
