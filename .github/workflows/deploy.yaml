@@ -214,7 +214,13 @@ jobs:
     if: ${{ github.event_name != 'workflow_dispatch' && needs.build-push-prod.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+      - uses: ./.github-actions/slack-notify
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
           status: pending
@@ -327,7 +333,13 @@ jobs:
     if: ${{ needs.create-prod-pr.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+      - uses: ./.github-actions/slack-notify
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
           status: success
@@ -340,7 +352,13 @@ jobs:
     needs: [build-push-staging, update-staging]
     runs-on: ubuntu-latest
     steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+      - uses: ./.github-actions/slack-notify
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
           status: failure
@@ -355,7 +373,13 @@ jobs:
     needs: [build-push-prod, create-prod-pr]
     runs-on: ubuntu-latest
     steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+      - uses: ./.github-actions/slack-notify
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
           status: failure
