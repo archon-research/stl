@@ -1946,10 +1946,15 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 		t.Errorf("expected first block to have version 0, got %d", savedBlock1.Version)
 	}
 
-	// Directly save a second block at height 100 to simulate reorg scenario
-	// without triggering the reorg detection logic
-	// This mimics what happens when MarkBlocksOrphanedAfter runs and then
-	// a new block is processed
+	// Simulate the real reorg state transition: orphan v0, then save v1 as the
+	// new canonical. Without orphaning v0 first, two canonical rows would coexist
+	// at height 100 — that state never occurs in production (HandleReorgAtomic
+	// always orphans old before inserting new), and it confuses the VEC-202
+	// state-shift check (GetLastBlock has no deterministic tiebreaker among
+	// rows with the same number).
+	if err := stateRepo.MarkBlockOrphaned(ctx, "0x100_v0"); err != nil {
+		t.Fatalf("failed to orphan v0: %v", err)
+	}
 	_, err = stateRepo.SaveBlock(ctx, outbound.BlockState{
 		Number:         100,
 		Hash:           "0x100_v1",
@@ -3283,6 +3288,13 @@ func TestProcessBlock_StaleForkBroadcast_NoOrphan(t *testing.T) {
 	if got := metrics.DropCount(outbound.ReorgDropReasonStateShifted); got != 0 {
 		t.Errorf("expected 0 state_shifted drops, got %d", got)
 	}
+
+	// No BlockEvent must have been published — drop paths must never emit a
+	// downstream event, even partially. A future refactor that accidentally
+	// inserts a publish call into the drop path must fail this assertion.
+	if events := eventSink.GetBlockEvents(); len(events) != 0 {
+		t.Errorf("expected no BlockEvents on stale-fork drop; got %d (%+v)", len(events), events)
+	}
 }
 
 // TestProcessBlock_RealReorg_PassesVerification verifies that a legitimate reorg —
@@ -3464,6 +3476,11 @@ func TestProcessBlock_StateShiftedDuringVerify_DropsBlock(t *testing.T) {
 	if got := metrics.DropCount(outbound.ReorgDropReasonVerifyError); got != 0 {
 		t.Errorf("expected 0 verify_error drops, got %d", got)
 	}
+
+	// No BlockEvent must have been published.
+	if events := eventSink.GetBlockEvents(); len(events) != 0 {
+		t.Errorf("expected no BlockEvents on state-shift drop; got %d (%+v)", len(events), events)
+	}
 }
 
 // TestProcessBlock_VerifyRpcError_DropsBlock verifies that a transient RPC error
@@ -3542,5 +3559,97 @@ func TestProcessBlock_VerifyRpcError_DropsBlock(t *testing.T) {
 	}
 	if got := metrics.DropCount(outbound.ReorgDropReasonStateShifted); got != 0 {
 		t.Errorf("expected 0 state_shifted drops, got %d", got)
+	}
+
+	// No BlockEvent must have been published.
+	if events := eventSink.GetBlockEvents(); len(events) != 0 {
+		t.Errorf("expected no BlockEvents on verify-error drop; got %d (%+v)", len(events), events)
+	}
+}
+
+// TestProcessBlock_EmptyCanonicalHash_DropsAsVerifyError verifies the PR #269
+// follow-up: an unusable RPC response (JSON-RPC `null`, malformed header, or
+// any path that yields an empty canonical hash after parsing) must classify as
+// verify_error, NOT stale_fork. Conflating the two would silently misattribute
+// transient RPC inconsistency to fork-loss, breaking the operator dashboard
+// that alerts on stale_fork rates.
+func TestProcessBlock_EmptyCanonicalHash_DropsAsVerifyError(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := testutil.NewMockBlockchainClient()
+	// RPC returns a header with an empty hash for block 100 — this is the
+	// post-parse shape we get when alchemy returns JSON-RPC `null` (the
+	// "null" payload unmarshals into a zero-valued struct), and also when
+	// a buggy provider returns a header object with hash="".
+	client.SetBlockHeader(99, "0xblock99", "0xblock98")
+	client.SetBlockHeader(100, "", "0xblock99")
+
+	// DB matches the original canonical chain at 100.
+	for _, b := range []struct {
+		num          int64
+		hash, parent string
+	}{
+		{99, "0xblock99", "0xblock98"},
+		{100, "0xblock100", "0xblock99"},
+	} {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: b.num, Hash: b.hash, ParentHash: b.parent, BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed %d: %v", b.num, err)
+		}
+	}
+
+	metrics := &mockMetrics{}
+	svc, err := NewLiveService(LiveConfig{
+		ChainID:            1,
+		FinalityBlockCount: 64,
+		Metrics:            metrics,
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(ctx)
+	defer svc.cancel()
+
+	// Trigger the reorg path: incoming hash differs from DB at height 100.
+	// verifyIncomingIsCanonical will fetch RPC, parse a header with hash="",
+	// and must surface that as a verify_error.
+	header := outbound.BlockHeader{
+		Number:     "0x64",
+		Hash:       "0xblock100_new",
+		ParentHash: "0xblock99",
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	if procErr := svc.processBlockWithPrefetch(header, time.Now()); procErr != nil {
+		t.Errorf("processBlockWithPrefetch must return nil when canonical hash is empty (got %v)", procErr)
+	}
+
+	// DB unchanged: original canonical at 100 remains canonical, new hash not saved.
+	b100, err := stateRepo.GetBlockByNumber(ctx, 100)
+	if err != nil || b100 == nil || b100.Hash != "0xblock100" {
+		t.Errorf("block 100 must remain unchanged after empty-canonical-hash drop: %+v err=%v", b100, err)
+	}
+	if stale, _ := stateRepo.GetBlockByHash(ctx, "0xblock100_new"); stale != nil {
+		t.Errorf("0xblock100_new must not be saved on empty-canonical-hash drop; got %+v", stale)
+	}
+
+	// Metric: must classify as verify_error, NOT stale_fork. This is the
+	// whole point of the post-parse hash="" guard.
+	if got := metrics.DropCount(outbound.ReorgDropReasonVerifyError); got != 1 {
+		t.Errorf("expected 1 verify_error drop on empty canonical hash, got %d", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonStaleFork); got != 0 {
+		t.Errorf("empty canonical hash must NOT be classified as stale_fork; got %d stale_fork drops", got)
+	}
+	if got := metrics.DropCount(outbound.ReorgDropReasonStateShifted); got != 0 {
+		t.Errorf("expected 0 state_shifted drops, got %d", got)
+	}
+
+	// No BlockEvent must have been published.
+	if events := eventSink.GetBlockEvents(); len(events) != 0 {
+		t.Errorf("expected no BlockEvents on empty-canonical-hash drop; got %d", len(events))
 	}
 }

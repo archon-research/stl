@@ -412,15 +412,17 @@ func (s *LiveService) decideReorgAction(ctx context.Context, span trace.Span, bl
 		return reorgDecision{action: reorgActionSave}, nil
 	}
 
+	// Span attributes describe the detected (provisional) reorg so traces show
+	// the full picture even when the block is later dropped. The "reorg
+	// detected" log line and the chain.reorgs.total metric, however, only fire
+	// after every gate passes — otherwise stale-fork broadcasts and verify
+	// failures inflate the dashboards/alerts that operators use to spot real
+	// chain reorganizations.
 	span.SetAttributes(
 		attribute.Bool("block.reorg", true),
 		attribute.Int("block.reorg_depth", depth),
 		attribute.Int64("block.common_ancestor", commonAncestor),
 	)
-	s.logger.Warn("reorg detected", "block", block.Number, "depth", depth, "commonAncestor", commonAncestor)
-	if s.metrics != nil {
-		s.metrics.RecordReorg(ctx, depth, commonAncestor, block.Number)
-	}
 
 	preVerifyLatest, err := s.stateRepo.GetLastBlock(ctx)
 	if err != nil {
@@ -466,6 +468,15 @@ func (s *LiveService) decideReorgAction(ctx context.Context, span trace.Span, bl
 			"postHash", snapshotHashShort(postVerifyLatest))
 		s.recordReorgDropped(ctx, outbound.ReorgDropReasonStateShifted)
 		return reorgDecision{action: reorgActionDrop}, nil
+	}
+
+	// All gates passed — this is a real, committed reorg. Emit the
+	// detection log and metric here (not earlier) so chain.reorgs.total
+	// counts only actual reorganizations, not provisional detections that
+	// were dropped on verify or state-shift.
+	s.logger.Warn("reorg detected", "block", block.Number, "depth", depth, "commonAncestor", commonAncestor)
+	if s.metrics != nil {
+		s.metrics.RecordReorg(ctx, depth, commonAncestor, block.Number)
 	}
 
 	return reorgDecision{
@@ -820,9 +831,14 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 //
 //   - (true,  nil)  : RPC confirms the incoming hash is canonical → real reorg, proceed.
 //   - (false, nil)  : RPC's canonical hash differs → stale-fork broadcast, drop the block.
-//   - (false, err)  : RPC error → caller should drop the block to be safe; the next
-//     live block on the canonical chain will trigger another detection
-//     once RPC stabilises.
+//   - (false, err)  : RPC lookup, parse, or response-shape failure → caller should
+//     drop the block to be safe; the next live block on the
+//     canonical chain will trigger another detection once RPC
+//     stabilises. An empty/absent canonical hash (RPC `null`,
+//     malformed header, etc.) is intentionally classified as an
+//     error here, NOT a stale fork — silently downgrading these
+//     to stale_fork would conflate transient RPC inconsistency
+//     with the genuine fork-loss signal we alert on.
 //
 // Every call site that mutates state via HandleReorgAtomic must be gated by this
 // check, otherwise a stale-fork broadcast over-orphans canonical blocks (creating
@@ -862,6 +878,17 @@ func (s *LiveService) verifyIncomingIsCanonical(ctx context.Context, blockNum in
 	}
 
 	canonicalHash := normalizeHash(canonicalHeader.Hash)
+	if canonicalHash == "" {
+		// RPC returned an unusable response: JSON-RPC `null` (json.Unmarshal of
+		// "null" leaves the struct zero-valued), an empty header object, or a
+		// header whose hash field is genuinely empty. Surface this as a
+		// verification error so the caller records `verify_error` rather than
+		// silently misattributing the failure to `stale_fork`.
+		err := fmt.Errorf("canonical block %d has empty hash (likely RPC null result or malformed header)", blockNum)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "canonical hash missing")
+		return false, err
+	}
 	span.SetAttributes(attribute.String("canonical.hash", canonicalHash))
 	if canonicalHash != incomingHash {
 		span.SetAttributes(attribute.Bool("verify.stale_fork", true))
