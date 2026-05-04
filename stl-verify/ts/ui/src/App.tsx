@@ -331,15 +331,9 @@ function App() {
     setSelectedProtocol,
   ]);
 
-  const filteredAllocations = useMemo(
+  const searchFilteredAllocations = useMemo(
     () =>
       allocations.filter((allocation) => {
-        const matchesNetwork =
-          selectedNetwork === null ||
-          String(allocation.chain_id) === selectedNetwork;
-        const matchesProtocol =
-          selectedProtocol === null ||
-          allocation.protocol_name === selectedProtocol;
         const matchesGlobalFilter = matchesSearchQuery(
           buildRowSearchString([
             allocation.symbol,
@@ -357,16 +351,24 @@ function App() {
           globalFilter,
         );
 
-        return matchesNetwork && matchesProtocol && matchesGlobalFilter;
+        return matchesGlobalFilter;
       }),
-    [
-      allocations,
-      chainLabels,
-      globalFilter,
-      localProtocols,
-      selectedNetwork,
-      selectedProtocol,
-    ],
+    [allocations, chainLabels, globalFilter, localProtocols],
+  );
+
+  const filteredAllocations = useMemo(
+    () =>
+      searchFilteredAllocations.filter((allocation) => {
+        const matchesNetwork =
+          selectedNetwork === null ||
+          String(allocation.chain_id) === selectedNetwork;
+        const matchesProtocol =
+          selectedProtocol === null ||
+          allocation.protocol_name === selectedProtocol;
+
+        return matchesNetwork && matchesProtocol;
+      }),
+    [searchFilteredAllocations, selectedNetwork, selectedProtocol],
   );
 
   useEffect(() => {
@@ -482,6 +484,7 @@ function App() {
               chainLabels={chainLabels}
               errorMessage={allocationsErrorMessage}
               filteredAllocations={filteredAllocations}
+              topMetricsAllocations={searchFilteredAllocations}
               isLoading={isAllocationsLoading}
               isCapitalMetricsLoading={isCapitalMetricsLoading}
               localProtocols={localProtocols}

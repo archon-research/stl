@@ -8,6 +8,8 @@ import {
   polygon,
 } from 'viem/chains';
 
+import { buildTokenLogoUrl } from '../lib/logo-cdn';
+
 /**
  * Token metadata from Trust Wallet API
  */
@@ -58,7 +60,7 @@ async function fetchTokenMetadata(
     const chainKey = getChainKeyForTrustWallet(chainId);
     if (!chainKey) {
       // Generate minimal metadata with logo from 1inch
-      return generateMinimalMetadata(tokenAddress);
+      return generateMinimalMetadata(chainId, tokenAddress);
     }
 
     // Try to fetch from Trust Wallet (may be restored in future)
@@ -80,7 +82,7 @@ async function fetchTokenMetadata(
             name: token.name,
             decimals: token.decimals,
             // Use 1inch CDN for logos (replaces deprecated Trust Wallet CDN)
-            logoURI: `https://tokens-data.1inch.io/images/${tokenAddress.toLowerCase()}.png`,
+            logoURI: buildTokenLogoUrl(chainId, tokenAddress),
           };
           tokenMetadataCache.set(cacheKey, metadata);
           return metadata;
@@ -92,7 +94,7 @@ async function fetchTokenMetadata(
     }
 
     // Fallback: generate minimal metadata with 1inch logo URL
-    const metadata = generateMinimalMetadata(tokenAddress);
+    const metadata = generateMinimalMetadata(chainId, tokenAddress);
     tokenMetadataCache.set(cacheKey, metadata);
     return metadata;
   } catch {
@@ -104,10 +106,13 @@ async function fetchTokenMetadata(
  * Generate minimal token metadata with 1inch logo URL
  * Used as fallback when Trust Wallet API is unavailable
  */
-function generateMinimalMetadata(tokenAddress: string): TokenMetadata {
+function generateMinimalMetadata(
+  chainId: number,
+  tokenAddress: string,
+): TokenMetadata {
   return {
     symbol: '???', // Fallback symbol - should be overridden by user
-    logoURI: `https://tokens-data.1inch.io/images/${tokenAddress.toLowerCase()}.png`,
+    logoURI: buildTokenLogoUrl(chainId, tokenAddress),
   };
 }
 

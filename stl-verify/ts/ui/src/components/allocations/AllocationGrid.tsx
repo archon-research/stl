@@ -42,6 +42,7 @@ type AllocationGridProps = {
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: Allocation[];
+  topMetricsAllocations: Allocation[];
   isLoading: boolean;
   isCapitalMetricsLoading: boolean;
   localProtocols: LocalProtocolRow[];
@@ -94,6 +95,7 @@ export function AllocationGrid({
   chainLabels,
   errorMessage,
   filteredAllocations,
+  topMetricsAllocations,
   isLoading,
   isCapitalMetricsLoading,
   localProtocols,
@@ -124,17 +126,17 @@ export function AllocationGrid({
   }, [localSearchValue, onSearchChange, searchValue]);
 
   const summary = useMemo(() => {
-    if (filteredAllocations.length === 0) {
+    if (topMetricsAllocations.length === 0) {
       return null;
     }
 
-    const totalUsd = filteredAllocations.reduce(
+    const totalUsd = topMetricsAllocations.reduce(
       (sum, allocation) =>
         sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
-    const latestActivityAt = filteredAllocations.reduce<string | null>(
+    const latestActivityAt = topMetricsAllocations.reduce<string | null>(
       (latest, allocation) => {
         if (!allocation.latest_activity_at) {
           return latest;
@@ -152,11 +154,29 @@ export function AllocationGrid({
     );
 
     return {
-      allocationCount: filteredAllocations.length,
+      allocationCount: topMetricsAllocations.length,
       latestActivityAt,
       totalUsd,
     };
-  }, [filteredAllocations]);
+  }, [topMetricsAllocations]);
+
+  const overallSummary = useMemo(() => {
+    if (allocations.length === 0) {
+      return null;
+    }
+
+    const totalUsd = allocations.reduce(
+      (sum, allocation) => sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      0,
+    );
+
+    return {
+      allocationCount: allocations.length,
+      totalUsd,
+    };
+  }, [allocations]);
+
+  const hasSearchQuery = searchValue.trim().length > 0;
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [
@@ -534,8 +554,16 @@ export function AllocationGrid({
                 <>
                   <SummaryMetric
                     label="Total allocation"
-                    value={formatUsdValue(summary.totalUsd)}
-                    detail={`${summary.allocationCount} allocations`}
+                    value={
+                      hasSearchQuery && overallSummary
+                        ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+                        : formatUsdValue(summary.totalUsd)
+                    }
+                    detail={
+                      hasSearchQuery && overallSummary
+                        ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                        : `${summary.allocationCount} allocations`
+                    }
                   />
                   <SummaryMetric
                     label="Latest activity"
