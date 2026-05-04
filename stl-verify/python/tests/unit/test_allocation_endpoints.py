@@ -85,6 +85,8 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "underlying_symbol": "USDC",
             "protocol_name": "aave_v3",
             "balance": "100.0",
+            "amount_usd": None,
+            "latest_activity_at": None,
             "category": "allocation",
         }
     ]

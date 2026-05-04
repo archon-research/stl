@@ -306,6 +306,48 @@ export function formatMultiplier(
   return `${numeric.toFixed(3)}x`;
 }
 
+export function formatDeltaSign(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+
+  if (numeric === null) {
+    return '—';
+  }
+
+  const sign = numeric >= 0 ? '+' : '−';
+  const formattedAmount =
+    Math.abs(numeric) >= 1_000_000
+      ? COMPACT_NUMBER_FORMAT.format(Math.abs(numeric))
+      : TOKEN_NUMBER_FORMAT.format(Math.abs(numeric));
+
+  return `${sign}${formattedAmount}`;
+}
+
+export function formatFreshnessLabel(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  const timestamp = date.getTime();
+
+  if (Number.isNaN(timestamp)) {
+    return isoTimestamp;
+  }
+
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 60) {
+    return diffMins === 0 ? 'Just now' : `${diffMins}m ago`;
+  } else if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  } else if (diffDays < 7) {
+    return `${diffDays}d ago`;
+  }
+
+  return date.toLocaleDateString();
+}
+
 export function formatDateTime(value: string): string {
   const date = new Date(value);
 
@@ -314,6 +356,22 @@ export function formatDateTime(value: string): string {
   }
 
   return DATE_TIME_FORMAT.format(date);
+}
+
+/**
+ * Get human-readable label for allocation category.
+ */
+export function getCategoryLabel(
+  category: 'allocation' | 'pol' | 'psm3' | 'asset' | '' | undefined,
+  fallback: string = 'Unknown',
+): string {
+  const labels: Record<string, string> = {
+    allocation: 'Allocation',
+    pol: 'Protocol Owned Liquidity',
+    psm3: 'PSM3',
+    asset: 'Asset',
+  };
+  return category ? (labels[category] ?? fallback) : fallback;
 }
 
 export function getBadDebtTone(
@@ -348,4 +406,47 @@ export function sortAllocations(allocations: Allocation[]): Allocation[] {
 
     return left.symbol.localeCompare(right.symbol);
   });
+}
+
+const CHAIN_EXPLORERS: Record<number, string> = {
+  1: 'https://etherscan.io',
+  10: 'https://optimistic.etherscan.io',
+  137: 'https://polygonscan.com',
+  324: 'https://explorer.zksync.io',
+  130: 'https://unichain.blockscout.com',
+  8453: 'https://basescan.org',
+  42161: 'https://arbiscan.io',
+  43114: 'https://snowscan.xyz',
+};
+
+/**
+ * Returns an Etherscan/block-explorer URL for the given chain + address,
+ * or null if the chain is not recognised.
+ */
+export function getExplorerUrl(
+  chainId: number,
+  address: string,
+  type: 'address' | 'tx' = 'address',
+): string | null {
+  const base = CHAIN_EXPLORERS[chainId];
+  if (!base) {
+    return null;
+  }
+  return `${base}/${type}/${address}`;
+}
+
+/**
+ * Lookup table of well-known contract addresses to human-readable labels.
+ * Keys are lowercased hex addresses (without checksum).
+ * Extend as needed — used as a best-effort enrichment layer on top of
+ * protocol/symbol fields already available from the API.
+ */
+const KNOWN_ADDRESS_LABELS: Record<string, string> = {};
+
+/**
+ * Returns a human-readable label for a known contract address, or null
+ * if the address is not in the local dictionary.
+ */
+export function getAddressLabel(address: string): string | null {
+  return KNOWN_ADDRESS_LABELS[address.toLowerCase()] ?? null;
 }

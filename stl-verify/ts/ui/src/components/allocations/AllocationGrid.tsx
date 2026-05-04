@@ -8,21 +8,34 @@ import { flex } from '#styled-system/patterns';
 import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
+  formatDateTime,
+  formatFreshnessLabel,
+  formatRatioPercent,
   formatTokenAmount,
+  formatUsdValue,
   getAllocationKey,
+  getCategoryLabel,
   getChainLabel,
   getProtocolLabel,
+  parseNumericValue,
 } from '../../lib/dashboard';
-import type { Allocation, Prime } from '../../types/allocation';
+import type {
+  Allocation,
+  AllocationCategory,
+  CapitalMetrics,
+  Prime,
+} from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { Address, EmptyState, ErrorState } from '../shared';
+import { EmptyState, ErrorState, SummaryMetric, TokenAddress } from '../shared';
 
 type AllocationGridProps = {
   allocations: Allocation[];
+  capitalMetrics: CapitalMetrics | null;
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: Allocation[];
   isLoading: boolean;
+  isCapitalMetricsLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
   onSearchChange: (value: string) => void;
@@ -35,12 +48,46 @@ type AllocationGridProps = {
   sorting: SortingState;
 };
 
+function getCategoryColor(category: AllocationCategory | undefined): string {
+  switch (category) {
+    case 'allocation':
+      return 'bg.success';
+    case 'pol':
+      return 'bg.warning';
+    case 'psm3':
+      return 'bg.interactive';
+    case 'asset':
+      return 'bg.info';
+    default:
+      return 'bg.subtle';
+  }
+}
+
+function getCategoryTextColor(
+  category: AllocationCategory | undefined,
+): string {
+  switch (category) {
+    case 'allocation':
+      return 'text.success';
+    case 'pol':
+      return 'text.warning';
+    case 'psm3':
+      return 'text.interactive';
+    case 'asset':
+      return 'text.info';
+    default:
+      return 'text.default';
+  }
+}
+
 export function AllocationGrid({
   allocations,
+  capitalMetrics,
   chainLabels,
   errorMessage,
   filteredAllocations,
   isLoading,
+  isCapitalMetricsLoading,
   localProtocols,
   onSelectAllocation,
   onSearchChange,
@@ -67,6 +114,41 @@ export function AllocationGrid({
 
     return () => window.clearTimeout(timeoutId);
   }, [localSearchValue, onSearchChange, searchValue]);
+
+  const summary = useMemo(() => {
+    if (filteredAllocations.length === 0) {
+      return null;
+    }
+
+    const totalUsd = filteredAllocations.reduce(
+      (sum, allocation) =>
+        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      0,
+    );
+
+    const latestActivityAt = filteredAllocations.reduce<string | null>(
+      (latest, allocation) => {
+        if (!allocation.latest_activity_at) {
+          return latest;
+        }
+
+        if (!latest) {
+          return allocation.latest_activity_at;
+        }
+
+        return new Date(allocation.latest_activity_at) > new Date(latest)
+          ? allocation.latest_activity_at
+          : latest;
+      },
+      null,
+    );
+
+    return {
+      allocationCount: filteredAllocations.length,
+      latestActivityAt,
+      totalUsd,
+    };
+  }, [filteredAllocations]);
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [
@@ -144,18 +226,31 @@ export function AllocationGrid({
           const allocation = row.original;
 
           return (
-            <div>
-              <p
+            <div
+              className={css({
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1',
+              })}
+            >
+              <span
                 className={css({
-                  m: 0,
                   fontSize: 'sm',
                   fontWeight: 'semibold',
                   color: 'text.strong',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  m: 0,
                 })}
               >
                 {allocation.underlying_symbol}
-              </p>
-              <Address value={allocation.underlying_token_address} />
+              </span>
+              <TokenAddress
+                address={allocation.underlying_token_address}
+                chainId={allocation.chain_id}
+                style={{ fontSize: '0.8rem' }}
+              />
             </div>
           );
         },
@@ -166,6 +261,63 @@ export function AllocationGrid({
         accessorFn: (allocation) => Number(allocation.balance),
         cell: ({ row }) => {
           const allocation = row.original;
+          const amountUsd = allocation.amount_usd;
+
+          return (
+            <div
+              className={css({
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1',
+              })}
+            >
+              <span
+                className={css({
+                  fontSize: 'sm',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  m: 0,
+                })}
+              >
+                {amountUsd !== undefined && amountUsd !== null
+                  ? formatUsdValue(amountUsd)
+                  : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+              </span>
+              <TokenAddress
+                address={allocation.receipt_token_address}
+                chainId={allocation.chain_id}
+                style={{ fontSize: '0.8rem' }}
+              />
+            </div>
+          );
+        },
+      },
+      {
+        id: 'latest_activity_at',
+        header: 'Latest activity',
+        accessorFn: (allocation) => {
+          const latestActivityAt = allocation.latest_activity_at;
+          return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
+        },
+        cell: ({ row }) => {
+          const allocation = row.original;
+
+          if (!allocation.latest_activity_at) {
+            return (
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  color: 'text.muted',
+                })}
+              >
+                —
+              </p>
+            );
+          }
 
           return (
             <div>
@@ -177,9 +329,46 @@ export function AllocationGrid({
                   color: 'text.strong',
                 })}
               >
-                {formatTokenAmount(allocation.balance)} {allocation.symbol}
+                {formatFreshnessLabel(allocation.latest_activity_at)}
               </p>
-              <Address value={allocation.receipt_token_address} />
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              >
+                {formatDateTime(allocation.latest_activity_at)}
+              </p>
+            </div>
+          );
+        },
+      },
+      {
+        id: 'category',
+        header: 'Category',
+        accessorFn: (allocation) => allocation.category,
+        cell: ({ row }) => {
+          const allocation = row.original;
+          const category = allocation.category;
+          const categoryBg = getCategoryColor(category);
+          const categoryText = getCategoryTextColor(category);
+
+          return (
+            <div
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                px: '2',
+                py: '1',
+                borderRadius: 'md',
+                fontSize: 'xs',
+                fontWeight: 'semibold',
+                bg: categoryBg,
+                color: categoryText,
+              })}
+            >
+              {getCategoryLabel(category)}
             </div>
           );
         },
@@ -193,6 +382,11 @@ export function AllocationGrid({
     onSortingChange,
     sorting,
   });
+
+  const showTopMetricsSkeleton =
+    selectedPrime !== null && (isLoading || isCapitalMetricsLoading);
+
+  const hasTopMetrics = capitalMetrics !== null || summary !== null;
 
   return (
     <div
@@ -215,29 +409,11 @@ export function AllocationGrid({
         })}
       >
         <div className={css({ display: 'grid', gap: '4' })}>
-          <span
-            className={css({
-              display: 'inline-flex',
-              width: 'fit-content',
-              alignItems: 'center',
-              borderRadius: 'full',
-              bg: { _dark: 'gray.800', base: 'gray.100' },
-              px: '3',
-              py: '1',
-              fontSize: 'xs',
-              fontWeight: 'semibold',
-              letterSpacing: '0.14em',
-              textTransform: 'uppercase',
-              color: 'text.muted',
-            })}
-          >
-            Allocations
-          </span>
           <div
             className={flex({
               align: 'flex-end',
               justify: 'space-between',
-              gap: '5',
+              gap: '3',
               wrap: 'wrap',
             })}
           >
@@ -255,17 +431,137 @@ export function AllocationGrid({
                 {selectedPrime ? selectedPrime.name : 'Select a prime'}
               </h1>
               {selectedPrime ? (
-                <p
-                  className={css({
-                    m: 0,
-                    fontSize: 'sm',
-                    color: 'text.muted',
-                  })}
-                >
-                  {selectedPrime.id}
-                </p>
+                <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
+            {!showTopMetricsSkeleton && capitalMetrics ? (
+              <span
+                className={css({
+                  fontSize: 'xs',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                })}
+              >
+                Risk-to-capital{' '}
+                {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
+              </span>
+            ) : null}
+          </div>
+          {showTopMetricsSkeleton ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: 'repeat(2, minmax(0, 1fr))',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div
+                  key={`metrics-skeleton-${index}`}
+                  className={css({
+                    height: '88px',
+                    borderRadius: 'md',
+                    borderStyle: 'solid',
+                    borderWidth: '1px',
+                    borderColor: 'border.subtle',
+                    bg: 'surface.subtle',
+                  })}
+                />
+              ))}
+            </div>
+          ) : null}
+          {!showTopMetricsSkeleton && hasTopMetrics ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: 'repeat(2, minmax(0, 1fr))',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              {capitalMetrics ? (
+                <>
+                  <SummaryMetric
+                    label="Risk capital"
+                    value={formatUsdValue(capitalMetrics.risk_capital)}
+                    detail="Onchain allocation exposure"
+                  />
+                  <SummaryMetric
+                    label="Total capital"
+                    value={formatUsdValue(capitalMetrics.total_capital)}
+                    detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                  />
+                </>
+              ) : null}
+
+              {summary ? (
+                <>
+                  <SummaryMetric
+                    label="Total allocation"
+                    value={formatUsdValue(summary.totalUsd)}
+                    detail={`${summary.allocationCount} allocations`}
+                  />
+                  <SummaryMetric
+                    label="Latest activity"
+                    value={
+                      summary.latestActivityAt
+                        ? formatFreshnessLabel(summary.latestActivityAt)
+                        : '—'
+                    }
+                    detail={
+                      summary.latestActivityAt
+                        ? formatDateTime(summary.latestActivityAt)
+                        : 'No indexed activity'
+                    }
+                  />
+                </>
+              ) : null}
+            </div>
+          ) : null}
+          {!showTopMetricsSkeleton && capitalMetrics?.validation_note ? (
+            <p
+              className={css({
+                m: 0,
+                fontSize: 'xs',
+                color: 'text.muted',
+                fontStyle: 'italic',
+                textAlign: 'left',
+              })}
+            >
+              {capitalMetrics.validation_note}
+            </p>
+          ) : null}
+          <div
+            className={flex({
+              align: 'flex-end',
+              justify: 'space-between',
+              gap: '5',
+              wrap: 'wrap',
+            })}
+          >
+            <span
+              className={css({
+                display: 'inline-flex',
+                width: 'fit-content',
+                alignItems: 'center',
+                borderRadius: 'full',
+                bg: { _dark: 'gray.800', base: 'gray.100' },
+                px: '3',
+                py: '1',
+                fontSize: 'xs',
+                fontWeight: 'semibold',
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                color: 'text.muted',
+              })}
+            >
+              Allocations
+            </span>
             <div
               className={css({
                 flex: '0 1 24rem',

@@ -54,7 +54,7 @@ class DataProvenanceService:
             # STL Internal
             DataSource(
                 name="STL Allocation Index",
-                host="localhost:8000",
+                host="Same app (internal API)",
                 access_model=SourceAccessModel.CLOSED,
                 role="Internal allocation snapshots, price feeds, risk calculations",
                 caveat="Internal-only backend",
@@ -71,5 +71,11 @@ class DataProvenanceService:
                 host="onchain + API",
                 access_model=SourceAccessModel.OPEN,
                 role="Multi-chain token oracle prices and confidence intervals",
+            ),
+            DataSource(
+                name="Star Agents Risk Capital & Requirements Monitor",
+                host="https://info.skyeco.com/required-risk-capital",
+                access_model=SourceAccessModel.PUBLIC,
+                role="Risk capital requirements and monitor metrics by star",
             ),
         ]
