@@ -26,7 +26,13 @@ import type {
   Prime,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { EmptyState, ErrorState, SummaryMetric, TokenAddress } from '../shared';
+import {
+  EmptyState,
+  ErrorState,
+  SummaryMetric,
+  TokenAddress,
+  TokenLogo,
+} from '../shared';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -163,23 +169,12 @@ export function AllocationGrid({
 
           return (
             <div className={flex({ align: 'center', gap: '3' })}>
-              <div
-                className={css({
-                  width: '10',
-                  height: '10',
-                  borderRadius: 'full',
-                  bg: isSelected ? 'interactive.accent' : 'surface.subtle',
-                  color: isSelected ? 'white' : 'text.strong',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 'xs',
-                  fontWeight: 'semibold',
-                  flexShrink: 0,
-                })}
-              >
-                {allocation.symbol.slice(0, 2).toUpperCase()}
-              </div>
+              <TokenLogo
+                address={allocation.underlying_token_address}
+                chainId={allocation.chain_id}
+                isSelected={isSelected}
+                symbol={allocation.symbol}
+              />
               <div className={css({ display: 'grid', gap: '1' })}>
                 <p
                   className={css({

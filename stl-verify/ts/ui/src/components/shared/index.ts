@@ -6,3 +6,4 @@ export { PercentageSlider } from './PercentageSlider';
 export { StatusBadge } from './StatusBadge';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
+export { TokenLogo } from './TokenLogo';
