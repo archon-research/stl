@@ -27,8 +27,10 @@ import type {
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import {
+  ChainLogo,
   EmptyState,
   ErrorState,
+  ProtocolLogo,
   SummaryMetric,
   TokenAddress,
   TokenLogo,
@@ -164,50 +166,61 @@ export function AllocationGrid({
         accessorFn: (allocation) => allocation.symbol,
         cell: ({ row }) => {
           const allocation = row.original;
-          const isSelected =
-            getAllocationKey(allocation) === selectedAllocationKey;
 
           return (
-            <div className={flex({ align: 'center', gap: '3' })}>
-              <TokenLogo
-                address={allocation.underlying_token_address}
-                chainId={allocation.chain_id}
-                isSelected={isSelected}
-                symbol={allocation.symbol}
-              />
-              <div className={css({ display: 'grid', gap: '1' })}>
-                <p
+            <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                })}
+              >
+                {allocation.symbol}
+              </p>
+              <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
+                <span
                   className={css({
-                    m: 0,
-                    fontSize: 'sm',
-                    fontWeight: 'semibold',
-                    color: 'text.strong',
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    whiteSpace: 'nowrap',
                   })}
                 >
-                  {allocation.symbol}
-                </p>
-                <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
-                  <span
-                    className={css({
-                      fontSize: 'xs',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {getProtocolLabel(
+                  <ProtocolLogo
+                    protocolName={getProtocolLabel(
                       allocation.protocol_name,
                       localProtocols,
                       allocation.chain_id,
                     )}
-                  </span>
-                  <span
-                    className={css({
-                      fontSize: 'xs',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {getChainLabel(allocation.chain_id, chainLabels)}
-                  </span>
-                </div>
+                    size="5"
+                  />
+                  {getProtocolLabel(
+                    allocation.protocol_name,
+                    localProtocols,
+                    allocation.chain_id,
+                  )}
+                </span>
+                <span
+                  className={css({
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    whiteSpace: 'nowrap',
+                  })}
+                >
+                  <ChainLogo
+                    chainId={allocation.chain_id}
+                    label={getChainLabel(allocation.chain_id, chainLabels)}
+                    size="5"
+                  />
+                  {getChainLabel(allocation.chain_id, chainLabels)}
+                </span>
               </div>
             </div>
           );
@@ -228,19 +241,27 @@ export function AllocationGrid({
                 gap: '1',
               })}
             >
-              <span
-                className={css({
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  m: 0,
-                })}
-              >
-                {allocation.underlying_symbol}
-              </span>
+              <div className={flex({ align: 'center', gap: '2' })}>
+                <TokenLogo
+                  address={allocation.underlying_token_address}
+                  chainId={allocation.chain_id}
+                  size="6"
+                  symbol={allocation.underlying_symbol}
+                />
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    m: 0,
+                  })}
+                >
+                  {allocation.underlying_symbol}
+                </span>
+              </div>
               <TokenAddress
                 address={allocation.underlying_token_address}
                 chainId={allocation.chain_id}
@@ -266,21 +287,29 @@ export function AllocationGrid({
                 gap: '1',
               })}
             >
-              <span
-                className={css({
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  m: 0,
-                })}
-              >
-                {amountUsd !== undefined && amountUsd !== null
-                  ? formatUsdValue(amountUsd)
-                  : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
-              </span>
+              <div className={flex({ align: 'center', gap: '2' })}>
+                <TokenLogo
+                  address={allocation.receipt_token_address}
+                  chainId={allocation.chain_id}
+                  size="6"
+                  symbol={allocation.symbol}
+                />
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    m: 0,
+                  })}
+                >
+                  {amountUsd !== undefined && amountUsd !== null
+                    ? formatUsdValue(amountUsd)
+                    : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+                </span>
+              </div>
               <TokenAddress
                 address={allocation.receipt_token_address}
                 chainId={allocation.chain_id}
@@ -415,16 +444,21 @@ export function AllocationGrid({
             <div
               className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
             >
-              <h1
-                className={css({
-                  m: 0,
-                  fontSize: { base: '2xl', md: '3xl' },
-                  lineHeight: 'tight',
-                  color: 'text.strong',
-                })}
-              >
-                {selectedPrime ? selectedPrime.name : 'Select a prime'}
-              </h1>
+              <div className={flex({ align: 'center', gap: '2.5' })}>
+                {selectedPrime ? (
+                  <ProtocolLogo protocolName={selectedPrime.name} size="9" />
+                ) : null}
+                <h1
+                  className={css({
+                    m: 0,
+                    fontSize: { base: '2xl', md: '3xl' },
+                    lineHeight: 'tight',
+                    color: 'text.strong',
+                  })}
+                >
+                  {selectedPrime ? selectedPrime.name : 'Select a prime'}
+                </h1>
+              </div>
               {selectedPrime ? (
                 <TokenAddress address={selectedPrime.id} />
               ) : null}

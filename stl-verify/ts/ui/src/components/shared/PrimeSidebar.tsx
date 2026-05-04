@@ -3,7 +3,7 @@ import { SkeletonStack, ThemeToggle } from '@archon-research/design-system';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { EmptyState, ErrorState } from '.';
+import { EmptyState, ErrorState, ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {
@@ -125,26 +125,11 @@ export function PrimeSidebar({
                   })}
                 >
                   <div className={flex({ align: 'center', gap: '3.5' })}>
-                    <div
-                      className={css({
-                        width: '9',
-                        height: '9',
-                        borderRadius: 'full',
-                        bg: isSelected
-                          ? 'interactive.accent'
-                          : 'surface.subtle',
-                        color: isSelected ? 'white' : 'text.strong',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: 'xs',
-                        fontWeight: 'semibold',
-                        textTransform: 'uppercase',
-                        flexShrink: 0,
-                      })}
-                    >
-                      {prime.name.slice(0, 2)}
-                    </div>
+                    <ProtocolLogo
+                      protocolName={prime.name}
+                      isSelected={isSelected}
+                      size="8"
+                    />
                     <div
                       className={css({
                         display: 'grid',

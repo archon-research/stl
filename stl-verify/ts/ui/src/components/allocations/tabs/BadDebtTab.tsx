@@ -15,7 +15,7 @@ import {
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, BadDebt } from '../../../types/allocation';
-import { PercentageSlider, StatusBadge, SummaryMetric } from '../../shared';
+import { PercentageSlider, ProtocolLogo, StatusBadge, SummaryMetric, TokenLogo } from '../../shared';
 
 type BadDebtTabProps = {
   selectedReceiptToken: Allocation | null;
@@ -239,15 +239,43 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
         >
           <SummaryMetric
             label="Receipt token balance"
-            value={`${formatTokenAmount(selectedReceiptToken.balance)} ${selectedReceiptToken.symbol}`}
+            value={
+              <>
+                <TokenLogo
+                  address={selectedReceiptToken.receipt_token_address}
+                  chainId={selectedReceiptToken.chain_id}
+                  symbol={selectedReceiptToken.symbol}
+                  size="7"
+                />
+                {`${formatTokenAmount(selectedReceiptToken.balance)} ${selectedReceiptToken.symbol}`}
+              </>
+            }
           />
           <SummaryMetric
             label="Underlying asset"
-            value={selectedReceiptToken.underlying_symbol}
+            value={
+              <>
+                <TokenLogo
+                  address={selectedReceiptToken.underlying_token_address}
+                  chainId={selectedReceiptToken.chain_id}
+                  symbol={selectedReceiptToken.underlying_symbol}
+                  size="7"
+                />
+                {selectedReceiptToken.underlying_symbol}
+              </>
+            }
           />
           <SummaryMetric
             label="Protocol"
-            value={selectedReceiptToken.protocol_name}
+            value={
+              <>
+                <ProtocolLogo
+                  protocolName={selectedReceiptToken.protocol_name}
+                  size="5"
+                />
+                {selectedReceiptToken.protocol_name}
+              </>
+            }
           />
         </div>
       ) : null}

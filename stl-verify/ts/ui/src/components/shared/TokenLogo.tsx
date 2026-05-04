@@ -2,42 +2,50 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
+import { buildTokenLogoUrl } from '../../lib/logo-cdn';
+
 type TokenLogoProps = {
   address: string;
   chainId: number;
   isSelected?: boolean;
+  size?: '6' | '7' | '8' | '9' | '10';
   symbol: string;
 };
 
-// 1inch Tokens Data API CDN
-// Replaces deprecated Trust Wallet Assets CDN
-// Format: https://tokens-data.1inch.io/images/{tokenAddress}.png
-// See: https://github.com/1inch/token-icons for details
-// Supports 40k+ tokens across multiple chains
-const LOGO_CDN_BASE = 'https://tokens-data.1inch.io/images';
+const TOKEN_LOGO_SIZE_MAP: Record<NonNullable<TokenLogoProps['size']>, number> = {
+  6: 16,
+  7: 18,
+  8: 20,
+  9: 24,
+  10: 28,
+};
 
-function buildTokenLogoUrl(_chainId: number, address: string): string | null {
-  // 1inch CDN works consistently across all EVM chains for the same token address
-  // Chain ID is not needed for the logo URL lookup
-  return `${LOGO_CDN_BASE}/${address.toLowerCase()}.png`;
+function resolveTokenLogoSize(size: NonNullable<TokenLogoProps['size']>): number {
+  return TOKEN_LOGO_SIZE_MAP[size];
 }
+
+type TokenLogoFallbackProps = {
+  isSelected?: boolean;
+  size: number;
+  symbol: string;
+};
 
 function TokenLogoFallback({
   isSelected = false,
+  size,
   symbol,
-}: Pick<TokenLogoProps, 'isSelected' | 'symbol'>) {
+}: TokenLogoFallbackProps) {
   return (
     <div
+      style={{ width: `${size}px`, height: `${size}px` }}
       className={css({
-        width: '10',
-        height: '10',
         borderRadius: 'full',
         bg: isSelected ? 'interactive.accent' : 'surface.subtle',
         color: isSelected ? 'white' : 'text.strong',
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        fontSize: 'xs',
+        fontSize: '2xs',
         fontWeight: 'semibold',
         flexShrink: 0,
         overflow: 'hidden',
@@ -52,9 +60,11 @@ export function TokenLogo({
   address,
   chainId,
   isSelected = false,
+  size = '10',
   symbol,
 }: TokenLogoProps) {
   const [hasImageError, setHasImageError] = useState(false);
+  const resolvedSize = resolveTokenLogoSize(size);
   const logoUrl = useMemo(
     () => buildTokenLogoUrl(chainId, address),
     [address, chainId],
@@ -65,14 +75,19 @@ export function TokenLogo({
   }, [logoUrl]);
 
   if (!logoUrl || hasImageError) {
-    return <TokenLogoFallback isSelected={isSelected} symbol={symbol} />;
+    return (
+      <TokenLogoFallback
+        isSelected={isSelected}
+        size={resolvedSize}
+        symbol={symbol}
+      />
+    );
   }
 
   return (
     <div
+      style={{ width: `${resolvedSize}px`, height: `${resolvedSize}px` }}
       className={css({
-        width: '10',
-        height: '10',
         borderRadius: 'full',
         overflow: 'hidden',
         flexShrink: 0,
