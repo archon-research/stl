@@ -220,6 +220,11 @@ var publicMigrationsMu sync.Mutex
 // EnsurePublicMigrations runs migrations in public schema if not already done.
 // Some migrations reference public.* explicitly, so we need the tables to exist.
 // On error it calls log.Fatal.
+//
+// Safe to call concurrently from multiple processes against the same database.
+// A Postgres advisory lock serializes initial migration application, so when
+// CI shares a single TimescaleDB container across all integration test
+// packages there's no race on creating the public.migrations table.
 func EnsurePublicMigrations(dsn string) {
 	publicMigrationsMu.Lock()
 	defer publicMigrationsMu.Unlock()
@@ -230,6 +235,30 @@ func EnsurePublicMigrations(dsn string) {
 
 	pool := ConnectPoolForMain(dsn)
 	defer pool.Close()
+
+	// Acquire a session-scoped advisory lock on a dedicated connection so
+	// concurrent test processes serialize their first migration run. The
+	// lock is released when the connection is returned to the pool (i.e.
+	// when this function returns). Other processes block on
+	// pg_advisory_lock until we release, then observe migrations as
+	// already applied.
+	ctx := context.Background()
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		log.Fatalf("acquire conn for migration lock: %v", err)
+	}
+	defer conn.Release()
+
+	const migrationLockKey = int64(74249191) // arbitrary STL-specific key
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
+		log.Fatalf("acquire migration advisory lock: %v", err)
+	}
+	defer func() {
+		if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", migrationLockKey); err != nil {
+			log.Printf("warning: release migration advisory lock: %v", err)
+		}
+	}()
+
 	RunMigrationsForMain(pool)
 	publicMigrationsRun = true
 }

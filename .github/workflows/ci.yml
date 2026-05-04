@@ -101,27 +101,72 @@ jobs:
           cache: true
           cache-dependency-path: 'stl-verify/go.sum'
 
-      - name: Pull container images
+      - name: Start shared test services
+        # Start a single TimescaleDB / Redis / LocalStack instance shared by
+        # every integration test package, instead of each package spinning up
+        # its own containers via testcontainers. The *ForMain helpers in
+        # stl-verify/internal/testutil detect these env vars and skip the
+        # per-package container startup. Image tags are kept in sync with
+        # internal/testutil/images.go (one source of truth).
         run: |
-          IMAGES=$(grep -E 'Image[A-Za-z0-9_]+\s*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
-          if [ -z "$IMAGES" ]; then
-            echo "::error::No image constants found in internal/testutil/images.go — check the grep pattern"
-            exit 1
-          fi
-          # Pull images in parallel; fail the step if any pull fails.
-          pids=()
-          for IMAGE in $IMAGES; do
+          set -euo pipefail
+          eval "$(grep -E 'Image[A-Za-z0-9_]+\s*=' internal/testutil/images.go \
+            | sed -E 's/^[[:space:]]+//; s/[[:space:]]*=[[:space:]]*/=/')"
+
+          # Pull all images in parallel.
+          for IMAGE in "$ImageTimescaleDB" "$ImageRedis" "$ImageLocalStack"; do
             docker pull "$IMAGE" &
-            pids+=($!)
           done
-          rc=0
-          for pid in "${pids[@]}"; do
-            wait "$pid" || rc=$?
+          wait
+
+          docker network create stl-test || true
+
+          docker run -d --name stl-test-db --network stl-test \
+            -e POSTGRES_USER=test -e POSTGRES_PASSWORD=test -e POSTGRES_DB=testdb \
+            -p 5432:5432 "$ImageTimescaleDB"
+
+          docker run -d --name stl-test-redis --network stl-test \
+            -p 6379:6379 "$ImageRedis"
+
+          docker run -d --name stl-test-localstack --network stl-test \
+            -e SERVICES=sns,sqs,s3 -e DEBUG=0 -e DISABLE_EVENTS=1 \
+            -e SKIP_SSL_CERT_DOWNLOAD=1 \
+            -p 4566:4566 "$ImageLocalStack"
+
+          # Wait for TimescaleDB to be ready (it logs the ready line twice).
+          for i in $(seq 1 60); do
+            if [ "$(docker logs stl-test-db 2>&1 | grep -c 'database system is ready to accept connections')" -ge 2 ]; then
+              break
+            fi
+            sleep 1
           done
-          exit $rc
+          docker exec stl-test-db pg_isready -U test -d testdb
+
+          # Wait for Redis.
+          for i in $(seq 1 30); do
+            if docker exec stl-test-redis redis-cli ping >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+
+          # Wait for LocalStack "Ready." log.
+          for i in $(seq 1 60); do
+            if docker logs stl-test-localstack 2>&1 | grep -q 'Ready\.'; then break; fi
+            sleep 1
+          done
 
       - name: Run integration tests
+        env:
+          STL_TEST_DB_DSN: postgres://test:test@localhost:5432/testdb?sslmode=disable
+          STL_TEST_REDIS_ADDR: localhost:6379
+          STL_TEST_LOCALSTACK_ENDPOINT: http://localhost:4566
         run: make test-integration
+
+      - name: Dump shared service logs on failure
+        if: failure()
+        run: |
+          for c in stl-test-db stl-test-redis stl-test-localstack; do
+            echo "::group::$c logs"; docker logs --tail=200 "$c" || true; echo "::endgroup::"
+          done
 
   python-ci:
     needs: detect-changes
