@@ -41,6 +41,11 @@ type MockBlockchainClient struct {
 	// UseBlockErrForMissing makes GetBlocksBatch set BlockErr on missing blocks
 	// instead of leaving them empty.
 	UseBlockErrForMissing bool
+
+	// getBlockByNumberErr keys block numbers to errors that
+	// GetBlockByNumber should return for that block. Used by tests that need
+	// to simulate transient RPC failures at specific heights.
+	getBlockByNumberErr map[int64]error
 }
 
 func NewMockBlockchainClient() *MockBlockchainClient {
@@ -125,11 +130,31 @@ func (m *MockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum in
 		time.Sleep(m.Delay)
 	}
 
+	if e, ok := m.getBlockByNumberErr[blockNum]; ok && e != nil {
+		return nil, e
+	}
+
 	if bd, ok := m.blocks[blockNum]; ok {
 		data, _ := json.Marshal(bd.Header)
 		return data, nil
 	}
 	return nil, fmt.Errorf("block %d not found", blockNum)
+}
+
+// SetGetBlockByNumberError configures GetBlockByNumber to return the given error
+// for a specific block number (overriding any stored block at that height).
+// Pass err=nil to clear a previously-set error for the block number.
+func (m *MockBlockchainClient) SetGetBlockByNumberError(blockNum int64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getBlockByNumberErr == nil {
+		m.getBlockByNumberErr = make(map[int64]error)
+	}
+	if err == nil {
+		delete(m.getBlockByNumberErr, blockNum)
+		return
+	}
+	m.getBlockByNumberErr[blockNum] = err
 }
 
 func (m *MockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {

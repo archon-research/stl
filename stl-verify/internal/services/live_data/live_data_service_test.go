@@ -3150,3 +3150,251 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 		t.Error("reorg block (102') should be canonical, not orphaned")
 	}
 }
+
+// TestProcessBlock_StaleForkBroadcast_NoOrphan verifies VEC-202: a "reorg" signal
+// for a block whose hash is NOT canonical on RPC must not orphan our existing
+// canonical blocks. This is the staging stale-fork broadcast scenario observed
+// on arbitrum-watcher on 2026-04-14.
+func TestProcessBlock_StaleForkBroadcast_NoOrphan(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := testutil.NewMockBlockchainClient()
+	// RPC's canonical view: blocks 99, 100, 101 with their original hashes.
+	// In particular, GetBlockByNumber(100) returns 0xblock100 — NOT the stale-fork hash
+	// the broadcast will provide. This is what the verification step relies on.
+	client.SetBlockHeader(99, "0xblock99", "0xblock98")
+	client.SetBlockHeader(100, "0xblock100", "0xblock99")
+	client.SetBlockHeader(101, "0xblock101", "0xblock100")
+
+	// DB matches RPC's canonical view.
+	for _, b := range []struct {
+		num          int64
+		hash, parent string
+	}{
+		{99, "0xblock99", "0xblock98"},
+		{100, "0xblock100", "0xblock99"},
+		{101, "0xblock101", "0xblock100"},
+	} {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: b.num, Hash: b.hash, ParentHash: b.parent, BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed %d: %v", b.num, err)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, b.hash); err != nil {
+			t.Fatalf("publish %d: %v", b.num, err)
+		}
+	}
+
+	svc, err := NewLiveService(LiveConfig{
+		ChainID:            1,
+		FinalityBlockCount: 64,
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(ctx)
+	defer svc.cancel()
+
+	// A stale-fork broadcast: hash 0xblock100_stale at number 100. RPC says canonical
+	// at 100 is still 0xblock100. detectReorg fires (hash differs from latest, number
+	// equals latest); the fix must verify against RPC and drop the block.
+	header := outbound.BlockHeader{
+		Number:     "0x64", // 100
+		Hash:       "0xblock100_stale",
+		ParentHash: "0xblock99",
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	// We don't fail on the error from processBlockWithPrefetch — even when the
+	// reorg path has already mutated DB state via HandleReorgAtomic, a downstream
+	// prefetch failure may cause an error return. The assertions below check the
+	// DB state regardless: the bug manifests as canonical blocks 100/101 being
+	// orphaned, even when processBlockWithPrefetch ultimately errors.
+	procErr := svc.processBlockWithPrefetch(header, time.Now())
+
+	// Block 100 (the real canonical with hash 0xblock100) must remain canonical.
+	b100, err := stateRepo.GetBlockByHash(ctx, "0xblock100")
+	if err != nil {
+		t.Fatalf("get block 100: %v", err)
+	}
+	if b100 == nil {
+		t.Fatal("block 100 (0xblock100) missing from DB")
+	}
+	if b100.IsOrphaned {
+		t.Errorf("block 100 (0xblock100) must remain canonical after stale-fork broadcast, got orphaned")
+	}
+
+	// Block 101 must remain canonical (it would have been orphaned by the over-orphan
+	// query in HandleReorgAtomic without the verification gate).
+	b101, err := stateRepo.GetBlockByHash(ctx, "0xblock101")
+	if err != nil {
+		t.Fatalf("get block 101: %v", err)
+	}
+	if b101 == nil {
+		t.Fatal("block 101 missing from DB")
+	}
+	if b101.IsOrphaned {
+		t.Errorf("block 101 must remain canonical after stale-fork broadcast, got orphaned")
+	}
+
+	// The stale-fork hash must NOT be saved (no row at all).
+	stale, err := stateRepo.GetBlockByHash(ctx, "0xblock100_stale")
+	if err != nil {
+		t.Fatalf("get stale: %v", err)
+	}
+	if stale != nil {
+		t.Errorf("stale-fork block must not be saved, got %+v", stale)
+	}
+
+	// Final guard: with the fix in place, processBlockWithPrefetch should also
+	// return nil (we drop the block before the prefetch wait, so no downstream
+	// failure can occur).
+	if procErr != nil {
+		t.Errorf("processBlockWithPrefetch returned error %v; the verification gate should have dropped the block cleanly", procErr)
+	}
+}
+
+// TestProcessBlock_RealReorg_PassesVerification verifies that a legitimate reorg —
+// where RPC confirms the incoming hash IS the canonical at that number — proceeds
+// to HandleReorgAtomic as before.
+func TestProcessBlock_RealReorg_PassesVerification(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := testutil.NewMockBlockchainClient()
+	// RPC's NEW canonical view (post-reorg): block 100 and 101 have new hashes.
+	client.SetBlockHeader(99, "0xblock99", "0xblock98")
+	client.SetBlockHeader(100, "0xblock100_new", "0xblock99")
+	client.SetBlockHeader(101, "0xblock101_new", "0xblock100_new")
+
+	// DB has the OLD chain at 100 and 101.
+	for _, b := range []struct {
+		num          int64
+		hash, parent string
+	}{
+		{99, "0xblock99", "0xblock98"},
+		{100, "0xblock100_old", "0xblock99"},
+		{101, "0xblock101_old", "0xblock100_old"},
+	} {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: b.num, Hash: b.hash, ParentHash: b.parent, BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed %d: %v", b.num, err)
+		}
+	}
+
+	svc, err := NewLiveService(LiveConfig{
+		ChainID:            1,
+		FinalityBlockCount: 64,
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(ctx)
+	defer svc.cancel()
+
+	// Incoming: block 101 with new chain's parent (= new chain's 100). RPC's canonical
+	// at 101 is 0xblock101_new — matches incoming hash, so verification passes.
+	header := outbound.BlockHeader{
+		Number:     "0x65", // 101
+		Hash:       "0xblock101_new",
+		ParentHash: "0xblock100_new",
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	// We don't fail on the prefetch error here either — the verification gate
+	// should let the reorg proceed; downstream cache/publish failure is unrelated.
+	_ = svc.processBlockWithPrefetch(header, time.Now())
+
+	// 0xblock101_new must be saved (HandleReorgAtomic ran).
+	saved, err := stateRepo.GetBlockByHash(ctx, "0xblock101_new")
+	if err != nil {
+		t.Fatalf("get 0xblock101_new: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("expected 0xblock101_new saved (real reorg should pass verification)")
+	}
+	if saved.IsOrphaned {
+		t.Errorf("0xblock101_new must be canonical")
+	}
+
+	// Old 100 and 101 must now be orphaned.
+	for _, h := range []string{"0xblock100_old", "0xblock101_old"} {
+		b, err := stateRepo.GetBlockByHash(ctx, h)
+		if err != nil || b == nil {
+			t.Fatalf("get %s: b=%+v err=%v", h, b, err)
+		}
+		if !b.IsOrphaned {
+			t.Errorf("%s must be orphaned after real reorg", h)
+		}
+	}
+}
+
+// TestProcessBlock_VerifyRpcError_DropsBlock verifies that a transient RPC error
+// during canonical verification causes the block to be dropped without state mutation.
+func TestProcessBlock_VerifyRpcError_DropsBlock(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := testutil.NewMockBlockchainClient()
+	client.SetBlockHeader(99, "0xblock99", "0xblock98")
+	client.SetBlockHeader(100, "0xblock100", "0xblock99")
+	// Force GetBlockByNumber(100) to error so the verification step fails.
+	client.SetGetBlockByNumberError(100, fmt.Errorf("simulated rpc unavailable"))
+
+	for _, b := range []struct {
+		num          int64
+		hash, parent string
+	}{
+		{99, "0xblock99", "0xblock98"},
+		{100, "0xblock100", "0xblock99"},
+	} {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: b.num, Hash: b.hash, ParentHash: b.parent, BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed %d: %v", b.num, err)
+		}
+	}
+
+	svc, err := NewLiveService(LiveConfig{
+		ChainID:            1,
+		FinalityBlockCount: 64,
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	svc.ctx, svc.cancel = context.WithCancel(ctx)
+	defer svc.cancel()
+
+	// Trigger the reorg path (block 100 with different hash).
+	header := outbound.BlockHeader{
+		Number:     "0x64",
+		Hash:       "0xblock100_new",
+		ParentHash: "0xblock99",
+		Timestamp:  fmt.Sprintf("0x%x", time.Now().Unix()),
+	}
+	if procErr := svc.processBlockWithPrefetch(header, time.Now()); procErr != nil {
+		t.Errorf("processBlockWithPrefetch must return nil when verification RPC errors (got %v)", procErr)
+	}
+
+	// DB unchanged: 100 still 0xblock100 canonical, 0xblock100_new not saved.
+	b100, err := stateRepo.GetBlockByNumber(ctx, 100)
+	if err != nil {
+		t.Fatalf("get block 100: %v", err)
+	}
+	if b100 == nil || b100.Hash != "0xblock100" {
+		t.Errorf("block 100 must remain unchanged: %+v", b100)
+	}
+	stale, err := stateRepo.GetBlockByHash(ctx, "0xblock100_new")
+	if err != nil {
+		t.Fatalf("get 0xblock100_new: %v", err)
+	}
+	if stale != nil {
+		t.Errorf("0xblock100_new must not be saved: %+v", stale)
+	}
+}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 const (
@@ -317,6 +318,29 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
 		if s.metrics != nil {
 			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
+		}
+
+		// VEC-202: gate every reorg execution on RPC verification. A stale-fork
+		// broadcast (incoming hash differs from RPC's canonical at this number)
+		// must be dropped, not committed — otherwise HandleReorgAtomic over-
+		// orphans canonical blocks and creates phantom-orphan rows.
+		canonical, verr := s.verifyIncomingIsCanonical(ctx, blockNum, normalizedHash)
+		if verr != nil {
+			span.SetAttributes(attribute.Bool("block.dropped_verify_error", true))
+			s.logger.Warn("dropping reorg block: canonical verification failed",
+				"block", blockNum,
+				"hash", normalizedHash,
+				"error", verr)
+			return nil
+		}
+		if !canonical {
+			span.SetAttributes(attribute.Bool("block.dropped_stale_fork", true))
+			s.logger.Info("dropping stale-fork reorg broadcast",
+				"block", blockNum,
+				"hash", normalizedHash,
+				"depth", reorgDepth,
+				"commonAncestor", commonAncestor)
+			return nil
 		}
 	}
 
@@ -625,6 +649,52 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	}
 
 	return true, reorgDepth, commonAncestor, reorgEvent, nil
+}
+
+// verifyIncomingIsCanonical asks RPC whether the incoming block's hash is the
+// canonical hash at its number. Returns:
+//
+//   - (true,  nil)  : RPC confirms the incoming hash is canonical → real reorg, proceed.
+//   - (false, nil)  : RPC's canonical hash differs → stale-fork broadcast, drop the block.
+//   - (false, err)  : RPC error → caller should drop the block to be safe; the next
+//     live block on the canonical chain will trigger another detection
+//     once RPC stabilises.
+//
+// Every call site that mutates state via HandleReorgAtomic must be gated by this
+// check, otherwise a stale-fork broadcast over-orphans canonical blocks (creating
+// phantom-orphan rows that no later flow can heal — see VEC-202).
+func (s *LiveService) verifyIncomingIsCanonical(ctx context.Context, blockNum int64, incomingHash string) (bool, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.verifyIncomingIsCanonical",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", incomingHash),
+		),
+	)
+	defer span.End()
+
+	blockJSON, err := s.client.GetBlockByNumber(ctx, blockNum, false)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "canonical lookup failed")
+		return false, fmt.Errorf("canonical lookup for block %d: %w", blockNum, err)
+	}
+
+	var canonicalHeader outbound.BlockHeader
+	if err := shared.ParseBlockHeader(blockJSON, &canonicalHeader); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "canonical parse failed")
+		return false, fmt.Errorf("parse canonical block %d: %w", blockNum, err)
+	}
+
+	canonicalHash := normalizeHash(canonicalHeader.Hash)
+	span.SetAttributes(attribute.String("canonical.hash", canonicalHash))
+	if canonicalHash != incomingHash {
+		span.SetAttributes(attribute.Bool("verify.stale_fork", true))
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {
