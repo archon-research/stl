@@ -116,7 +116,7 @@ test:
 
 test-integration: 
 	@echo "==> Running integration tests..."
-	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 ./...
+	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -timeout=10m -p 8 ./...
 
 # Run tests with coverage
 cover:

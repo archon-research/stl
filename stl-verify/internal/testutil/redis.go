@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"testing"
 	"time"
 
@@ -49,7 +50,14 @@ func StartRedis(t *testing.T, ctx context.Context) (addr string, cleanup func())
 
 // StartRedisForMain starts a Redis container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
+//
+// If the STL_TEST_REDIS_ADDR environment variable is set, no container is
+// started and the env-provided address is returned with a no-op cleanup.
 func StartRedisForMain() (addr string, cleanup func()) {
+	if envAddr := os.Getenv("STL_TEST_REDIS_ADDR"); envAddr != "" {
+		return envAddr, func() {}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 

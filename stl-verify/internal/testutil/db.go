@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -117,7 +118,16 @@ func SetupTimescaleDB(t *testing.T) (pool *pgxpool.Pool, dsn string, cleanup fun
 // StartTimescaleDBForMain starts a shared TimescaleDB container for use in
 // TestMain (which receives *testing.M, not *testing.T). On error it calls
 // log.Fatal instead of t.Fatalf.
+//
+// If the STL_TEST_DB_DSN environment variable is set, no container is started
+// and the env-provided DSN is returned with a no-op cleanup. This lets CI (or
+// local dev) share a single TimescaleDB instance across all integration test
+// packages.
 func StartTimescaleDBForMain() (dsn string, cleanup func()) {
+	if envDSN := os.Getenv("STL_TEST_DB_DSN"); envDSN != "" {
+		return envDSN, func() {}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 

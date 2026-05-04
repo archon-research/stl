@@ -108,9 +108,17 @@ jobs:
             echo "::error::No image constants found in internal/testutil/images.go — check the grep pattern"
             exit 1
           fi
+          # Pull images in parallel; fail the step if any pull fails.
+          pids=()
           for IMAGE in $IMAGES; do
-            docker pull "$IMAGE"
+            docker pull "$IMAGE" &
+            pids+=($!)
           done
+          rc=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || rc=$?
+          done
+          exit $rc
 
       - name: Run integration tests
         run: make test-integration

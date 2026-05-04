@@ -101,7 +101,19 @@ func NewS3Client(t *testing.T, ctx context.Context, cfg LocalStackConfig) *s3.Cl
 
 // StartLocalStackForMain starts a LocalStack container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
+//
+// If the STL_TEST_LOCALSTACK_ENDPOINT environment variable is set, no
+// container is started and the env-provided endpoint is returned with a no-op
+// cleanup. The shared LocalStack instance must have been started with all
+// services any package may need (e.g. SERVICES=sns,sqs,s3); the requested
+// services parameter is ignored in shared mode.
 func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func()) {
+	if endpoint := os.Getenv("STL_TEST_LOCALSTACK_ENDPOINT"); endpoint != "" {
+		cfg.Region = "us-east-1"
+		cfg.Endpoint = endpoint
+		return cfg, func() {}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
