@@ -6,7 +6,7 @@ import { flex } from '#styled-system/patterns';
 type SummaryMetricProps = {
   label: string;
   value: ReactNode;
-  detail?: string;
+  detail?: ReactNode;
   className?: string;
 };
 
@@ -58,9 +58,8 @@ export function SummaryMetric({
         {value}
       </div>
       {detail ? (
-        <p
+        <div
           className={css({
-            m: 0,
             mt: '1',
             fontSize: 'xs',
             color: 'text.muted',
@@ -69,7 +68,7 @@ export function SummaryMetric({
           })}
         >
           {detail}
-        </p>
+        </div>
       ) : null}
     </div>
   );

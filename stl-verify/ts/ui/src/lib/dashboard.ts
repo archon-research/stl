@@ -282,6 +282,22 @@ export function formatRatioPercent(
   return `${(numeric * 100).toFixed(digits)}%`;
 }
 
+export function truncateMiddle(
+  value: string | null | undefined,
+  prefixLength = 8,
+  suffixLength = 6,
+): string {
+  if (!value) {
+    return '—';
+  }
+
+  if (value.length <= prefixLength + suffixLength + 3) {
+    return value;
+  }
+
+  return `${value.slice(0, prefixLength)}...${value.slice(-suffixLength)}`;
+}
+
 export function formatMultiplier(
   value: number | string | null | undefined,
 ): string {
@@ -381,6 +397,16 @@ export function formatWadValue(
   }
 
   return formatTokenAmount(numeric / 1e18);
+}
+
+export function formatRawWadLabel(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return 'Raw WAD unavailable';
+  }
+
+  return `Raw WAD ${truncateMiddle(String(value))}`;
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   type ChainLabelLookup,
   formatDateTime,
   formatFreshnessLabel,
+  formatRawWadLabel,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
@@ -29,6 +30,7 @@ import type {
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import {
+  AppTooltip,
   ChainLogo,
   EmptyState,
   ErrorState,
@@ -491,19 +493,89 @@ export function AllocationGrid({
                 <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
-            {!showTopMetricsSkeleton &&
-            capitalMetrics &&
-            parseNumericValue(capitalMetrics.risk_to_capital_ratio) !== null ? (
-              <span
+            {!showTopMetricsSkeleton ? (
+              <div
                 className={css({
-                  fontSize: 'xs',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '4',
+                  justifyContent: 'flex-end',
+                  textAlign: 'right',
                 })}
               >
-                Risk-to-capital{' '}
-                {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
-              </span>
+                {summary ? (
+                  <div
+                    className={css({
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: '1.5',
+                      flexWrap: 'wrap',
+                      justifyContent: 'flex-end',
+                    })}
+                  >
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Latest activity{' '}
+                      {summary.latestActivityAt
+                        ? formatFreshnessLabel(summary.latestActivityAt)
+                        : '—'}
+                    </span>
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                      })}
+                    >
+                      {summary.latestActivityAt
+                        ? formatDateTime(summary.latestActivityAt)
+                        : 'No indexed activity'}
+                    </span>
+                  </div>
+                ) : null}
+                {selectedPrime ? (
+                  <div
+                    className={css({
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: '1.5',
+                      flexWrap: 'wrap',
+                      justifyContent: 'flex-end',
+                    })}
+                  >
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Debt sync{' '}
+                      {isPrimeDebtLoading
+                        ? 'Loading...'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                          : '—'}
+                    </span>
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                      })}
+                    >
+                      {isPrimeDebtLoading
+                        ? 'Waiting for sync timestamp'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatDateTime(primeDebtSnapshot.synced_at)
+                          : 'No debt sync timestamp'}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
           {showTopMetricsSkeleton ? (
@@ -543,56 +615,49 @@ export function AllocationGrid({
                 gap: '3',
               })}
             >
+              {summary ? (
+                <SummaryMetric
+                  label="Total allocation"
+                  value={
+                    hasSearchQuery && overallSummary
+                      ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+                      : formatUsdValue(summary.totalUsd)
+                  }
+                  detail={
+                    hasSearchQuery && overallSummary
+                      ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                      : `${summary.allocationCount} allocations`
+                  }
+                />
+              ) : null}
+
               {capitalMetrics ? (
                 <>
                   <SummaryMetric
                     label="Risk capital"
                     value={formatUsdValue(capitalMetrics.risk_capital)}
-                    detail="Onchain allocation exposure"
-                  />
-                  <SummaryMetric
-                    label="Total capital"
-                    value={formatUsdValue(capitalMetrics.total_capital)}
-                    detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                    detail={
+                      parseNumericValue(capitalMetrics.risk_to_capital_ratio) !==
+                      null
+                        ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
+                        : undefined
+                    }
                   />
                 </>
               ) : null}
 
-              {summary ? (
-                <>
-                  <SummaryMetric
-                    label="Total allocation"
-                    value={
-                      hasSearchQuery && overallSummary
-                        ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
-                        : formatUsdValue(summary.totalUsd)
-                    }
-                    detail={
-                      hasSearchQuery && overallSummary
-                        ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
-                        : `${summary.allocationCount} allocations`
-                    }
-                  />
-                  <SummaryMetric
-                    label="Latest activity"
-                    value={
-                      summary.latestActivityAt
-                        ? formatFreshnessLabel(summary.latestActivityAt)
-                        : '—'
-                    }
-                    detail={
-                      summary.latestActivityAt
-                        ? formatDateTime(summary.latestActivityAt)
-                        : 'No indexed activity'
-                    }
-                  />
-                </>
+              {capitalMetrics ? (
+                <SummaryMetric
+                  label="Total capital"
+                  value={formatUsdValue(capitalMetrics.total_capital)}
+                  detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                />
               ) : null}
 
               {selectedPrime ? (
                 <>
                   <SummaryMetric
-                    label="Prime debt"
+                    label="Prime debt exposure"
                     value={
                       isPrimeDebtLoading
                         ? 'Loading...'
@@ -601,24 +666,49 @@ export function AllocationGrid({
                     detail={
                       isPrimeDebtLoading
                         ? 'Fetching latest debt snapshot'
-                        : `Ilk ${primeDebtSnapshot?.ilk_name ?? 'Unknown'} · WAD-scaled source`
-                    }
-                  />
-                  <SummaryMetric
-                    label="Debt sync"
-                    value={
-                      isPrimeDebtLoading
-                        ? 'Loading...'
-                        : primeDebtSnapshot?.synced_at
-                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
-                          : '—'
-                    }
-                    detail={
-                      isPrimeDebtLoading
-                        ? 'Waiting for sync timestamp'
-                        : primeDebtSnapshot?.synced_at
-                          ? formatDateTime(primeDebtSnapshot.synced_at)
-                          : 'No debt sync timestamp'
+                        : (
+                            <div
+                              className={css({
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                alignItems: 'center',
+                                gap: '1',
+                              })}
+                            >
+                              <span>
+                                Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                              </span>
+                              <span aria-hidden="true">·</span>
+                              <AppTooltip
+                                ariaLabel={
+                                  primeDebtSnapshot?.debt_wad
+                                    ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                    : 'Raw WAD unavailable'
+                                }
+                                trigger={
+                                  <span
+                                    title={
+                                      primeDebtSnapshot?.debt_wad
+                                        ? String(primeDebtSnapshot.debt_wad)
+                                        : 'Raw WAD unavailable'
+                                    }
+                                    className={css({
+                                      textDecoration: 'underline',
+                                      textDecorationStyle: 'dotted',
+                                      textUnderlineOffset: '2px',
+                                    })}
+                                  >
+                                    {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                                  </span>
+                                }
+                                content={
+                                  primeDebtSnapshot?.debt_wad
+                                    ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                    : 'Raw WAD unavailable'
+                                }
+                              />
+                            </div>
+                          )
                     }
                   />
                 </>
