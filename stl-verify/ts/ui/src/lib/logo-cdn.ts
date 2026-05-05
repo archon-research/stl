@@ -1,6 +1,11 @@
 const LLAMA_CDN_BASE = 'https://icons.llamao.fi/icons';
 const ONE_INCH_TOKEN_CDN_BASE = 'https://tokens-data.1inch.io/images';
 
+/**
+ * Chain ID to llama.fi slug mapping
+ * Source: https://defillama.com/chains
+ * Used to build URLs like: https://icons.llamao.fi/icons/chains/rsz_{slug}.jpg
+ */
 const LLAMA_CHAIN_SLUGS: Record<number, string> = {
   1: 'ethereum',
   10: 'optimism',

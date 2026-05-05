@@ -38,12 +38,11 @@ const CHAIN_ID_TO_VIEM_CHAIN = {
 const tokenMetadataCache = new Map<string, TokenMetadata>();
 
 /**
- * Fetch token metadata from Trust Wallet Assets API
+ * Fetch token metadata from Trust Wallet Assets API (if available) or generate minimal metadata
  * Falls back to generating logo URL from 1inch CDN
  *
- * NOTE: Trust Wallet Assets CDN was deprecated (returns 404s).
+ * NOTE: Trust Wallet Assets API was deprecated (returns 404s).
  * Logo URLs are now generated from 1inch Tokens Data API which provides consistent coverage
- * See: TOKEN_CDN_RESEARCH.md for CDN analysis and alternatives
  */
 async function fetchTokenMetadata(
   chainId: number,
@@ -57,43 +56,8 @@ async function fetchTokenMetadata(
   }
 
   try {
-    const chainKey = getChainKeyForTrustWallet(chainId);
-    if (!chainKey) {
-      // Generate minimal metadata with logo from 1inch
-      return generateMinimalMetadata(chainId, tokenAddress);
-    }
-
-    // Try to fetch from Trust Wallet (may be restored in future)
-    try {
-      const response = await fetch(
-        `https://assets.trustwallet.com/blockchains/${chainKey}/tokens.json`,
-        { signal: AbortSignal.timeout(5000) }, // 5 second timeout
-      );
-
-      if (response.ok) {
-        const tokenList = await response.json() as { tokens: Array<{ address: string; symbol: string; decimals?: number; name?: string }> };
-        const token = tokenList.tokens.find(
-          (t) => t.address.toLowerCase() === tokenAddress.toLowerCase(),
-        );
-
-        if (token) {
-          const metadata: TokenMetadata = {
-            symbol: token.symbol,
-            name: token.name,
-            decimals: token.decimals,
-            // Use 1inch CDN for logos (replaces deprecated Trust Wallet CDN)
-            logoURI: buildTokenLogoUrl(chainId, tokenAddress),
-          };
-          tokenMetadataCache.set(cacheKey, metadata);
-          return metadata;
-        }
-      }
-    } catch (trustWalletError) {
-      // Trust Wallet API failed, fall back to minimal metadata
-      console.debug('Trust Wallet API fetch failed, using fallback metadata', trustWalletError);
-    }
-
-    // Fallback: generate minimal metadata with 1inch logo URL
+    // Trust Wallet API is deprecated, skip to fallback
+    // Generate minimal metadata with 1inch logo URL
     const metadata = generateMinimalMetadata(chainId, tokenAddress);
     tokenMetadataCache.set(cacheKey, metadata);
     return metadata;
@@ -104,7 +68,7 @@ async function fetchTokenMetadata(
 
 /**
  * Generate minimal token metadata with 1inch logo URL
- * Used as fallback when Trust Wallet API is unavailable
+ * Used as fallback when token metadata is unavailable
  */
 function generateMinimalMetadata(
   chainId: number,
@@ -114,26 +78,6 @@ function generateMinimalMetadata(
     symbol: '???', // Fallback symbol - should be overridden by user
     logoURI: buildTokenLogoUrl(chainId, tokenAddress),
   };
-}
-
-/**
- * Get chain key for Trust Wallet Assets API
- */
-function getChainKeyForTrustWallet(chainId: number): string | null {
-  const chainMap: Record<number, string> = {
-    1: 'ethereum',
-    10: 'optimism',
-    137: 'polygon',
-    324: 'era',
-    8453: 'base',
-    42161: 'arbitrumone',
-    43114: 'avalanche-2',
-    56: 'binance',
-    250: 'fantom',
-    1101: 'polygon-zkevm',
-  };
-
-  return chainMap[chainId] || null;
 }
 
 /**
