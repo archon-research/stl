@@ -4,12 +4,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.adapters.postgres.allocation_share_repository import MissingShareError
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from app.domain.entities.receipt_token import ReceiptTokenInfo, ReceiptTokenProtocolPair
 from app.domain.entities.risk import LiquidationParams
+from app.domain.exceptions import MissingShareError
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
 

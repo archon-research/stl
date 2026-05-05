@@ -1,14 +1,14 @@
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import AfterValidator, BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.api._validators import EthAddressParam
 from app.api.deps import get_engine
 from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
@@ -19,17 +19,6 @@ from app.services.capital_metrics_service import CapitalMetricsService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _validate_eth_address(value: str) -> EthAddress:
-    """Convert a raw path string to an EthAddress.
-
-    Raises ValueError on malformed input, which FastAPI surfaces as HTTP 422.
-    """
-    return EthAddress(value)
-
-
-EthAddressPath = Annotated[str, AfterValidator(_validate_eth_address)]
 
 
 class PrimeResponse(BaseModel):
@@ -285,10 +274,10 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
 
 @router.get("/primes/{prime_id}/allocations", response_model=list[AllocationResponse])
 async def list_allocations(
-    prime_id: EthAddressPath,
+    prime_id: EthAddressParam,
     service: AllocationService = Depends(_get_service),
 ):
-    positions = await service.list_receipt_token_positions(prime_id)
+    positions = await service.list_receipt_token_positions(EthAddress(prime_id))
     category_service = AllocationCategoryService()
 
     return [
@@ -383,6 +372,41 @@ async def list_allocation_activity(
         )
         for e in events
     ]
+
+
+@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
+async def get_capital_metrics(
+    prime_id: EthAddressParam,
+    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
+):
+    """Retrieve capital metrics for a prime.
+
+    Responds with:
+    - risk_capital: Total risk-bearing capital
+    - capital_buffer: Baseline protective capital
+    - first_loss_capital: Prime-owned first-loss layer
+    - total_capital: Sum of capital tiers
+    - risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)
+    - is_validated: Whether reconciled against external benchmark
+    - validation_note: Any caveats or pending work on this endpoint
+    """
+    metrics = await service.get_capital_metrics(EthAddress(prime_id))
+    if not metrics:
+        raise HTTPException(status_code=404, detail="Prime not found")
+
+    return CapitalMetricsResponse(
+        prime_id=metrics.prime_id,
+        prime_name=metrics.prime_name,
+        risk_capital=metrics.risk_capital,
+        capital_buffer=metrics.capital_buffer,
+        first_loss_capital=metrics.first_loss_capital,
+        total_capital=metrics.total_capital,
+        risk_to_capital_ratio=metrics.risk_to_capital_ratio,
+        timestamp=metrics.timestamp.isoformat(),
+        benchmark_source=metrics.benchmark_source,
+        is_validated=metrics.is_validated,
+        validation_note=metrics.validation_note,
+    )
 
 
 @router.get("/star-risk-capital/primes", response_model=StarRiskCapitalResponse)

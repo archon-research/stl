@@ -17,7 +17,7 @@ from app.domain.entities.risk import RrcResult
 class RiskModel(Protocol):
     """Inbound port that any risk model (SURAF, gap-sweep, ...) must implement."""
 
-    model: str
+    risk_model: str
     """Discriminator string used in responses and override dispatch."""
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:

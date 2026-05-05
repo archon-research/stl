@@ -75,8 +75,8 @@ def test_startup_populates_suraf_ratings(async_db_url: str, db_url: str, tmp_pat
 
         assert app.state.asset_to_rating == {receipt_token_id: "sample_rating"}
         applicable = app.state.model_registry.applicable(receipt_token_id, EthAddress("0x" + "11" * 20))
-        assert any(model.model == "suraf" for model in applicable)
-        assert any(model.model == "gap_sweep" for model in applicable)
+        assert any(model.risk_model == "suraf" for model in applicable)
+        assert any(model.risk_model == "gap_sweep" for model in applicable)
 
 
 def test_startup_fails_on_invalid_package(async_db_url: str, tmp_path: Path) -> None:

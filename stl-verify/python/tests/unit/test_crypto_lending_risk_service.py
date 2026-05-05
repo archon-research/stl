@@ -1,13 +1,13 @@
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.adapters.postgres.allocation_share_repository import MissingShareError
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, LiquidationParams, RiskBreakdown, RrcResult
+from app.domain.exceptions import MissingShareError
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -76,9 +76,17 @@ def reader() -> MagicMock:
 
 
 @pytest.fixture
-def service(reader: MagicMock) -> CryptoLendingRiskService:
+def allocation_repo() -> MagicMock:
+    repo = MagicMock()
+    repo.get_usd_exposure = AsyncMock(return_value=Decimal("1000"))
+    return repo
+
+
+@pytest.fixture
+def service(reader: MagicMock, allocation_repo: MagicMock) -> CryptoLendingRiskService:
     return CryptoLendingRiskService(
         reader=reader,
+        allocation_repo=allocation_repo,
         default_gap_pct=Decimal("0.15"),
         supported_asset_ids={RECEIPT_TOKEN_ID},
     )
@@ -86,7 +94,7 @@ def service(reader: MagicMock) -> CryptoLendingRiskService:
 
 class TestModelAttribute:
     def test_model_attribute_is_gap_sweep(self, service: CryptoLendingRiskService) -> None:
-        assert service.model == "gap_sweep"
+        assert service.risk_model == "gap_sweep"
 
 
 class TestAppliesTo:
@@ -113,6 +121,7 @@ class TestCompute:
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
+        allocation_repo: MagicMock,
     ) -> None:
         info = _aave_like_info()
 
@@ -121,11 +130,15 @@ class TestCompute:
         assert isinstance(result, RrcResult)
         assert result.asset_id == RECEIPT_TOKEN_ID
         assert result.prime_id == str(DUMMY_PRIME)
-        assert result.model == "gap_sweep"
+        assert result.risk_model == "gap_sweep"
         assert result.rrc_usd >= Decimal("0")
+        assert result.comparable_crr_pct == (result.rrc_usd / Decimal("1000") * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_EVEN
+        )
         assert isinstance(result.details, GapSweepDetails)
         assert result.details.gap_pct == Decimal("0.15")
-        assert result.details.bad_debt_usd == result.rrc_usd
+        assert result.details.loss_usd == result.rrc_usd
+        allocation_repo.get_usd_exposure.assert_awaited_once_with(RECEIPT_TOKEN_ID, DUMMY_PRIME)
         reader.get_receipt_token.assert_awaited_once_with(RECEIPT_TOKEN_ID)
         reader.get_breakdown.assert_awaited_once_with(info)
         reader.get_liquidation_params.assert_awaited_once_with(info, UNDERLYING_TOKEN_ID, [10])
@@ -150,6 +163,7 @@ class TestCompute:
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
+        allocation_repo: MagicMock,
     ) -> None:
         info = _morpho_info()
         reader.get_receipt_token.return_value = info
@@ -163,6 +177,7 @@ class TestCompute:
 
         assert isinstance(result, RrcResult)
         assert result.asset_id == RECEIPT_TOKEN_ID
+        allocation_repo.get_usd_exposure.assert_awaited_once_with(RECEIPT_TOKEN_ID, DUMMY_PRIME)
         reader.get_breakdown.assert_awaited_once_with(info)
         reader.get_liquidation_params.assert_awaited_once_with(info, MORPHO_VAULT_ID, [11])
         reader.get_share.assert_awaited_once_with(info, DUMMY_PRIME)
@@ -254,6 +269,7 @@ class TestCompute:
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
+        allocation_repo: MagicMock,
     ) -> None:
         reader.get_breakdown.return_value = _breakdown(
             (_contrib(10, "WETH", "10000", None),),
@@ -264,6 +280,45 @@ class TestCompute:
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
         assert result.rrc_usd == Decimal("0")
+        assert result.comparable_crr_pct == Decimal("0.00")
+        allocation_repo.get_usd_exposure.assert_awaited_once_with(RECEIPT_TOKEN_ID, DUMMY_PRIME)
+
+    @pytest.mark.asyncio
+    async def test_compute_uses_unrounded_usd_exposure_for_comparable_crr(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+        allocation_repo: MagicMock,
+    ) -> None:
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(10, "USDC", "1.00", "1"),),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
+        allocation_repo.get_usd_exposure.return_value = Decimal("1.234")
+
+        result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        assert result.comparable_crr_pct == (result.rrc_usd / Decimal("1.234") * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_EVEN
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exposure",
+        [Decimal("0"), Decimal("-1"), Decimal("-100")],
+        ids=["zero", "negative-small", "negative-large"],
+    )
+    async def test_compute_rejects_non_positive_usd_exposure(
+        self,
+        service: CryptoLendingRiskService,
+        allocation_repo: MagicMock,
+        exposure: Decimal,
+    ) -> None:
+        allocation_repo.get_usd_exposure.return_value = exposure
+
+        with pytest.raises(ValueError, match="usd_exposure must be positive"):
+            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
 
 class TestLegacyMethods:

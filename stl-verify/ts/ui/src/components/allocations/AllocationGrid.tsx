@@ -467,7 +467,7 @@ export function AllocationGrid({
             >
               <div className={flex({ align: 'center', gap: '2.5' })}>
                 {selectedPrime ? (
-                  <ProtocolLogo protocolName={selectedPrime.name} size="9" />
+                  <ProtocolLogo protocolName={selectedPrime.name} size="8" />
                 ) : null}
                 <h1
                   className={css({
