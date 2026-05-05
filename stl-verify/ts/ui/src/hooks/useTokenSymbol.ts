@@ -1,14 +1,7 @@
 import { useEffect, useState } from 'react';
-import {
-  arbitrum,
-  avalanche,
-  base,
-  mainnet,
-  optimism,
-  polygon,
-} from 'viem/chains';
 
 import { buildTokenLogoUrl } from '../lib/logo-cdn';
+import { getNativeSymbol } from '../lib/chain-metadata';
 
 /**
  * Token metadata from Trust Wallet API
@@ -19,18 +12,6 @@ export interface TokenMetadata {
   decimals?: number;
   logoURI?: string;
 }
-
-/**
- * Map of chain IDs to viem chain objects for native currency lookups
- */
-const CHAIN_ID_TO_VIEM_CHAIN = {
-  1: mainnet,
-  10: optimism,
-  137: polygon,
-  8453: base,
-  42161: arbitrum,
-  43114: avalanche,
-} as const;
 
 /**
  * In-memory cache for token metadata to avoid redundant API calls
@@ -78,14 +59,6 @@ function generateMinimalMetadata(
     symbol: '???', // Fallback symbol - should be overridden by user
     logoURI: buildTokenLogoUrl(chainId, tokenAddress),
   };
-}
-
-/**
- * Get native currency symbol for a chain
- */
-export function getNativeSymbol(chainId: number): string | null {
-  const viemChain = CHAIN_ID_TO_VIEM_CHAIN[chainId as keyof typeof CHAIN_ID_TO_VIEM_CHAIN];
-  return viemChain?.nativeCurrency?.symbol || null;
 }
 
 /**
