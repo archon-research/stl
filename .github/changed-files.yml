@@ -5,6 +5,7 @@ go:
   - .github/changed-files.yml
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
+  - .github/workflows/go-ci.yml
 
 python:
   - stl-verify/python/**
