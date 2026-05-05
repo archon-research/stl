@@ -166,7 +166,8 @@ export function AllocationGrid({
     }
 
     const totalUsd = allocations.reduce(
-      (sum, allocation) => sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      (sum, allocation) =>
+        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
@@ -418,7 +419,7 @@ export function AllocationGrid({
         },
       },
     ],
-    [chainLabels, localProtocols, selectedAllocationKey],
+    [chainLabels, localProtocols],
   );
 
   const table = useDataTable(filteredAllocations, columns, {

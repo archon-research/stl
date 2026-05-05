@@ -15,7 +15,13 @@ import {
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, BadDebt } from '../../../types/allocation';
-import { PercentageSlider, ProtocolLogo, StatusBadge, SummaryMetric, TokenLogo } from '../../shared';
+import {
+  PercentageSlider,
+  ProtocolLogo,
+  StatusBadge,
+  SummaryMetric,
+  TokenLogo,
+} from '../../shared';
 
 type BadDebtTabProps = {
   selectedReceiptToken: Allocation | null;

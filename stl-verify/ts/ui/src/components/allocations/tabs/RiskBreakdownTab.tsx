@@ -139,7 +139,7 @@ function RiskTable({
           ),
       },
     ],
-    [],
+    [chainId],
   );
 
   const table = useDataTable(filteredItems, columns, {

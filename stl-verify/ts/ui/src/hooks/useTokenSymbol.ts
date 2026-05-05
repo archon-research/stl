@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
-import { buildTokenLogoUrl } from '../lib/logo-cdn';
 import { getNativeSymbol } from '../lib/chain-metadata';
+import { buildTokenLogoUrl } from '../lib/logo-cdn';
 
 /**
  * Token metadata from Trust Wallet API
@@ -95,7 +95,11 @@ export function useTokenSymbol(chainId: number, tokenAddress: string) {
         }
       })
       .catch((err) => {
-        setError(err instanceof Error ? err : new Error('Failed to fetch token metadata'));
+        setError(
+          err instanceof Error
+            ? err
+            : new Error('Failed to fetch token metadata'),
+        );
         setSymbol(null);
         setMetadata(null);
       })
@@ -120,10 +124,11 @@ export function useSymbolResolver(
   loading: boolean;
   error: Error | null;
 } {
-  const { symbol: tokenSymbol, loading, error } = useTokenSymbol(
-    chainId,
-    tokenAddress || '',
-  );
+  const {
+    symbol: tokenSymbol,
+    loading,
+    error,
+  } = useTokenSymbol(chainId, tokenAddress || '');
 
   // If no token address provided, return native symbol
   if (!tokenAddress) {

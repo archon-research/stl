@@ -7,11 +7,7 @@ import { css } from '#styled-system/css';
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
-import {
-  ChainLogo,
-  ProtocolLogo,
-  TokenLogo,
-} from './components/shared';
+import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
@@ -512,57 +508,55 @@ function App() {
         isOpen={isDrawerOpen}
         onClose={() => setIsDrawerOpenParam(null)}
         subtitle={
-          selectedAllocation
-            ? (
-                <span
-                  className={css({
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '1.5',
-                    flexWrap: 'wrap',
-                    rowGap: '1',
-                  })}
-                >
-                  <span
-                    className={css({
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '1',
-                      whiteSpace: 'nowrap',
-                    })}
-                  >
-                    <ProtocolLogo
-                      protocolName={selectedProtocolLabel ?? 'Unknown'}
-                      size="4"
-                    />
-                    {selectedProtocolLabel}
-                  </span>
-                  <span
-                    className={css({
-                      color: 'text.muted',
-                      fontSize: 'xs',
-                    })}
-                  >
-                    ·
-                  </span>
-                  <span
-                    className={css({
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '1',
-                      whiteSpace: 'nowrap',
-                    })}
-                  >
-                    <ChainLogo
-                      chainId={selectedAllocation.chain_id}
-                      label={selectedChainLabel ?? undefined}
-                      size="4"
-                    />
-                    {selectedChainLabel}
-                  </span>
-                </span>
-              )
-            : undefined
+          selectedAllocation ? (
+            <span
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '1.5',
+                flexWrap: 'wrap',
+                rowGap: '1',
+              })}
+            >
+              <span
+                className={css({
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '1',
+                  whiteSpace: 'nowrap',
+                })}
+              >
+                <ProtocolLogo
+                  protocolName={selectedProtocolLabel ?? 'Unknown'}
+                  size="4"
+                />
+                {selectedProtocolLabel}
+              </span>
+              <span
+                className={css({
+                  color: 'text.muted',
+                  fontSize: 'xs',
+                })}
+              >
+                ·
+              </span>
+              <span
+                className={css({
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '1',
+                  whiteSpace: 'nowrap',
+                })}
+              >
+                <ChainLogo
+                  chainId={selectedAllocation.chain_id}
+                  label={selectedChainLabel ?? undefined}
+                  size="4"
+                />
+                {selectedChainLabel}
+              </span>
+            </span>
+          ) : undefined
         }
         title={
           selectedAllocation ? (

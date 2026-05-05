@@ -12,7 +12,10 @@ type TokenLogoProps = {
   symbol: string;
 };
 
-const TOKEN_LOGO_SIZE_MAP: Record<NonNullable<TokenLogoProps['size']>, number> = {
+const TOKEN_LOGO_SIZE_MAP: Record<
+  NonNullable<TokenLogoProps['size']>,
+  number
+> = {
   6: 16,
   7: 18,
   8: 20,
@@ -20,7 +23,9 @@ const TOKEN_LOGO_SIZE_MAP: Record<NonNullable<TokenLogoProps['size']>, number> =
   10: 28,
 };
 
-function resolveTokenLogoSize(size: NonNullable<TokenLogoProps['size']>): number {
+function resolveTokenLogoSize(
+  size: NonNullable<TokenLogoProps['size']>,
+): number {
   return TOKEN_LOGO_SIZE_MAP[size];
 }
 

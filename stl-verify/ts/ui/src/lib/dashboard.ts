@@ -1,8 +1,7 @@
 import type { Allocation } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
-import { logging } from './logging';
-
 import { getChainExplorerUrl, getChainName } from './chain-metadata';
+import { logging } from './logging';
 
 export type FilterOption = {
   value: string;

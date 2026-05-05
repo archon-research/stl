@@ -25,7 +25,10 @@ export function ProtocolLogo({
   size = '5',
 }: ProtocolLogoProps) {
   const [hasImageError, setHasImageError] = useState(false);
-  const imageUrl = useMemo(() => buildProtocolLogoUrl(protocolName), [protocolName]);
+  const imageUrl = useMemo(
+    () => buildProtocolLogoUrl(protocolName),
+    [protocolName],
+  );
 
   useEffect(() => {
     setHasImageError(false);
