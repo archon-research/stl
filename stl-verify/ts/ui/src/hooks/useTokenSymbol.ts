@@ -78,14 +78,22 @@ export function useTokenSymbol(chainId: number, tokenAddress: string) {
     if (!tokenAddress) {
       setSymbol(null);
       setMetadata(null);
+      setError(null);
+      setLoading(false);
       return;
     }
+
+    const controller = new AbortController();
 
     setLoading(true);
     setError(null);
 
     fetchTokenMetadata(chainId, tokenAddress)
       .then((result) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+
         if (result) {
           setSymbol(result.symbol);
           setMetadata(result);
@@ -95,6 +103,10 @@ export function useTokenSymbol(chainId: number, tokenAddress: string) {
         }
       })
       .catch((err) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+
         setError(
           err instanceof Error
             ? err
@@ -104,8 +116,12 @@ export function useTokenSymbol(chainId: number, tokenAddress: string) {
         setMetadata(null);
       })
       .finally(() => {
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       });
+
+    return () => controller.abort();
   }, [chainId, tokenAddress]);
 
   return { symbol, metadata, loading, error };
