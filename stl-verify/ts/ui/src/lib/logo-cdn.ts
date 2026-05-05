@@ -11,6 +11,7 @@ const LLAMA_CHAIN_SLUGS: Record<number, string> = {
   10: 'optimism',
   56: 'binance',
   100: 'gnosis',
+  130: 'unichain',
   137: 'polygon',
   250: 'fantom',
   324: 'zksync',

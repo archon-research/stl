@@ -258,7 +258,7 @@ export function ActivityFeed({
         event.token_symbol?.toLowerCase().includes(lowerQuery) ||
         event.protocol_name?.toLowerCase().includes(lowerQuery) ||
         event.action_type?.toLowerCase().includes(lowerQuery) ||
-        event.tx_hash.toLowerCase().includes(lowerQuery),
+        event.tx_hash?.toLowerCase().includes(lowerQuery),
     );
   }, [events, searchQuery]);
 

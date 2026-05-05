@@ -226,6 +226,42 @@ def test_list_capital_metrics_skips_primes_with_no_star_row(monkeypatch):
     assert data[0]["prime_name"] == "grove"
 
 
+def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatch):
+    from app.api.v1 import allocations
+
+    grove_addr = _VALID_ADDR
+    service = _make_service(primes=[Prime(id=grove_addr, name="grove", address=grove_addr)])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    async def _fake_payload():
+        return allocations.StarRiskCapitalResponse.model_validate(
+            {
+                "status": 200,
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "star": "grove",
+                            "exposure": "not-a-number",
+                            "total_rc": "50.00",
+                            "financial_rrc": "20.00",
+                            "exposure_share": "10.00%",
+                            "risk_tolerance_ratio": "2.00",
+                        }
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
+    client = TestClient(app)
+
+    response = client.get("/v1/capital-metrics")
+
+    assert response.status_code == 502
+    assert "invalid numeric value" in response.json()["detail"]
+
+
 # --- data-sources endpoint ---
 
 
@@ -301,3 +337,50 @@ def test_get_star_risk_capital_requirements_returns_502_on_upstream_failure(monk
 
     assert response.status_code == 502
     assert response.json() == {"detail": "Risk capital upstream request failed"}
+
+
+def test_get_star_risk_capital_requirements_returns_502_on_upstream_reported_failure(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api.v1 import allocations
+
+    class _FakeResponse:
+        is_success = True
+        status_code = 200
+        text = '{"status":500,"success":false}'
+
+        @staticmethod
+        def json():
+            return {
+                "status": 500,
+                "success": False,
+                "data": {"results": []},
+            }
+
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return _FakeResponse()
+
+    monkeypatch.setattr(
+        allocations,
+        "get_settings",
+        lambda: SimpleNamespace(star_risk_capital_upstream_url="https://example.invalid"),
+    )
+    monkeypatch.setattr(
+        allocations.httpx,
+        "AsyncClient",
+        lambda timeout: _FakeAsyncClient(),
+    )
+
+    client = TestClient(app)
+
+    response = client.get("/v1/star-risk-capital/primes")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Risk capital upstream reported failure"}

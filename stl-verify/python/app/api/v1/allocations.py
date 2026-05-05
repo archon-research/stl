@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 import httpx
@@ -131,9 +131,10 @@ async def _get_capital_metrics_service(engine: AsyncEngine = Depends(get_engine)
 
 async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
     settings = get_settings()
+    timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(settings.star_risk_capital_upstream_url)
     except httpx.HTTPError as exc:
         logger.exception(
@@ -166,7 +167,7 @@ async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
         raise HTTPException(status_code=502, detail="Risk capital upstream returned invalid JSON") from exc
 
     try:
-        return StarRiskCapitalResponse.model_validate(payload)
+        parsed = StarRiskCapitalResponse.model_validate(payload)
     except ValidationError as exc:
         logger.exception(
             "Star risk capital upstream response had unexpected shape",
@@ -176,6 +177,39 @@ async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
             },
         )
         raise HTTPException(status_code=502, detail="Risk capital upstream response shape mismatch") from exc
+
+    if parsed.success is False or (parsed.status is not None and parsed.status >= 400):
+        logger.error(
+            "Star risk capital upstream reported failure",
+            extra={
+                "upstream_url": settings.star_risk_capital_upstream_url,
+                "upstream_status": parsed.status,
+                "upstream_success": parsed.success,
+            },
+        )
+        raise HTTPException(status_code=502, detail="Risk capital upstream reported failure")
+
+    return parsed
+
+
+def _to_decimal(value: str, *, field: str, prime_name: str) -> Decimal:
+    try:
+        return Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        logger.error(
+            "Invalid numeric value in Star risk capital payload",
+            extra={
+                "field": field,
+                "prime_name": prime_name,
+                "value": value,
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Risk capital upstream returned invalid numeric value for field '{field}' and prime '{prime_name}'"
+            ),
+        ) from exc
 
 
 @router.get("/primes", response_model=list[PrimeResponse])
@@ -202,19 +236,23 @@ async def list_capital_metrics(
         if not row:
             continue
 
-        total_rc = Decimal(row.total_rc)
-        financial_rrc = Decimal(row.financial_rrc)
+        total_rc = _to_decimal(row.total_rc, field="total_rc", prime_name=prime.name)
+        financial_rrc = _to_decimal(row.financial_rrc, field="financial_rrc", prime_name=prime.name)
         capital_buffer = max(total_rc - financial_rrc, Decimal("0"))
 
         metrics.append(
             CapitalMetricsResponse(
                 prime_id=prime.id,
                 prime_name=prime.name,
-                risk_capital=Decimal(row.exposure),
+                risk_capital=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
                 capital_buffer=capital_buffer,
                 first_loss_capital=financial_rrc,
                 total_capital=total_rc,
-                risk_to_capital_ratio=Decimal(row.risk_tolerance_ratio),
+                risk_to_capital_ratio=_to_decimal(
+                    row.risk_tolerance_ratio,
+                    field="risk_tolerance_ratio",
+                    prime_name=prime.name,
+                ),
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 benchmark_source=settings.star_risk_capital_upstream_url,
                 is_validated=False,

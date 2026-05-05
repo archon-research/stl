@@ -5,15 +5,16 @@ import type {
   AllocationActivityResponse,
   AllocationsResponse,
   BadDebt,
-  CapitalMetricsResponse,
+  CapitalMetricsListResponse,
   DataSourcesResponse,
   PrimesResponse,
   RiskBreakdown,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import { isAbortError } from './errors';
 import { logging } from './logging';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
 
 type BadDebtQuery =
@@ -159,20 +160,25 @@ export function getAllocationActivity(
 
 export function getCapitalMetrics(
   signal?: AbortSignal,
-): Promise<CapitalMetricsResponse[]> {
-  return fetch('/v1/capital-metrics', { signal })
+): Promise<CapitalMetricsListResponse> {
+  const endpointPath = '/v1/capital-metrics';
+  const endpointUrl = API_BASE_URL ? `${API_BASE_URL}${endpointPath}` : endpointPath;
+
+  return fetch(endpointUrl, { signal })
     .then(async (response) => {
       if (!response.ok) {
         const responseText = await response.text().catch(() => '<no body>');
         throw new Error(
-          `GET /v1/capital-metrics failed (${response.status}): ${responseText}`,
+          `GET ${endpointPath} failed (${response.status}): ${responseText}`,
         );
       }
 
-      return response.json() as Promise<CapitalMetricsResponse[]>;
+      return response.json() as Promise<CapitalMetricsListResponse>;
     })
     .catch((error: unknown) => {
-      logging.error('Failed to fetch capital metrics list', { error });
+      if (!isAbortError(error)) {
+        logging.error('Failed to fetch capital metrics list', { error });
+      }
       throw error;
     });
 }
