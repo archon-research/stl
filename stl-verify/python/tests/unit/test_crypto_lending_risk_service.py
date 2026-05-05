@@ -304,12 +304,18 @@ class TestCompute:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exposure",
+        [Decimal("0"), Decimal("-1"), Decimal("-100")],
+        ids=["zero", "negative-small", "negative-large"],
+    )
     async def test_compute_rejects_non_positive_usd_exposure(
         self,
         service: CryptoLendingRiskService,
         allocation_repo: MagicMock,
+        exposure: Decimal,
     ) -> None:
-        allocation_repo.get_usd_exposure.return_value = Decimal("0")
+        allocation_repo.get_usd_exposure.return_value = exposure
 
         with pytest.raises(ValueError, match="usd_exposure must be positive"):
             await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
