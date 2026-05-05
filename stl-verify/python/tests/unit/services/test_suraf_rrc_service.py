@@ -134,6 +134,7 @@ class TestRiskModelCompute:
         assert result.prime_id == str(DUMMY_PRIME)
         assert result.risk_model == "suraf"
         assert result.rrc_usd == Decimal("337.0")
+        assert result.comparable_crr_pct == Decimal("33.7")
         assert isinstance(result.details, SurafDetails)
         assert result.details.rating_id == "aave_ausdc"
         assert result.details.rating_version == "v7"
@@ -183,6 +184,7 @@ class TestRiskModelCompute:
 
         mock_port.get_usd_exposure.assert_awaited_once_with(1, DUMMY_PRIME)
         assert result.rrc_usd == Decimal("5000") * Decimal("33.7") / Decimal("100")
+        assert result.comparable_crr_pct == Decimal("33.7")
 
     async def test_compute_override_takes_precedence_over_port(self) -> None:
         """Explicit usd_exposure override is used even if the port would return something else."""

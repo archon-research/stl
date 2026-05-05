@@ -27,7 +27,7 @@ class SurafDetails(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    risk_model: Literal["suraf"] = "suraf"
+    risk_model: Literal["suraf"]
     rating_id: str
     rating_version: str
     crr_pct: Decimal
@@ -43,13 +43,15 @@ class GapSweepDetails(BaseModel):
     means a 15% collateral price drop) — note this is a different scale
     from ``SurafDetails.crr_pct`` which is on 0–100. ``loss_usd`` is the
     engine-native expected loss in USD under that price drop; equal in
-    magnitude to the envelope-level ``rrc_usd`` for this model. Both are
-    rounded to USD cents.
+    magnitude to the envelope-level ``rrc_usd`` for this model and rounded
+    to USD cents. The cross-model comparable capital ratio is exposed on
+    ``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure
+    basis, not the collateral backing basis.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    risk_model: Literal["gap_sweep"] = "gap_sweep"
+    risk_model: Literal["gap_sweep"]
     gap_pct: Decimal
     loss_usd: Decimal
 
@@ -83,6 +85,8 @@ class RrcResult(BaseModel):
     ``"suraf"``, ``"gap_sweep"``).  ``details`` carries model-specific
     output — use ``isinstance`` to narrow. The same value also appears
     on ``details.risk_model`` and serves as the OpenAPI discriminator.
+    ``comparable_crr_pct`` is the model's effective capital ratio on the
+    shared receipt-token USD exposure basis, expressed on a 0–100 scale.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -90,6 +94,7 @@ class RrcResult(BaseModel):
     asset_id: int
     prime_id: str
     rrc_usd: Decimal
+    comparable_crr_pct: Decimal
     risk_model: ModelName
     details: RrcDetails
 

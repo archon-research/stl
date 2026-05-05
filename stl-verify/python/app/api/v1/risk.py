@@ -173,10 +173,18 @@ class RrcEnvelope(BaseModel):
     On-chain identifiers (``chain_id``, ``receipt_token_address``) are echoed
     so consumers can resolve the surrogate ``asset_id`` without a second call.
 
-    **Important:** ``results`` may contain multiple entries (when more than
-    one model applies). The values are *not* additive — SURAF capital and
-    gap-sweep expected-loss overlap economically. Pick the model relevant to
-    the consumer's question; do not sum.
+    ``max_rrc_usd`` and ``max_crr_pct`` collapse every applicable model to a
+    single conservative number. Use these when you need one capital figure
+    rather than a per-model breakdown: ``max_rrc_usd`` is the largest USD
+    figure across results; ``max_crr_pct`` is the largest
+    ``results[].comparable_crr_pct``. Each model computes that value on the
+    same receipt-token USD exposure basis, so it is safe to compare across
+    models.
+
+    Per-model values in ``results`` are *not* additive — SURAF capital and
+    gap-sweep expected-loss overlap economically. Pick a single result, or
+    use the ``max_*`` fields; do not sum across results. The two ``max_*``
+    fields may come from different models.
     """
 
     asset_id: int
@@ -184,6 +192,8 @@ class RrcEnvelope(BaseModel):
     receipt_token_address: str
     prime_id: str
     results: list[RrcResult]
+    max_rrc_usd: Decimal
+    max_crr_pct: Decimal
 
 
 @router.get("/risk/rrc", response_model=RrcEnvelope)
@@ -263,9 +273,6 @@ async def _compute_envelope(
             raise _share_error_503(exc) from exc
         except InvalidOverrideError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # Bare ValueError (invariant breach — e.g. registry returned an
-        # asset the service rejects) is intentionally NOT caught: it
-        # surfaces as 500 so the bug is loud rather than masked as 422.
         results.append(result)
 
     return RrcEnvelope(
@@ -274,4 +281,6 @@ async def _compute_envelope(
         receipt_token_address=info.receipt_token_address_hex,
         prime_id=str(prime_id),
         results=results,
+        max_rrc_usd=max(r.rrc_usd for r in results),
+        max_crr_pct=max(r.comparable_crr_pct for r in results),
     )

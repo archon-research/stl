@@ -77,8 +77,10 @@ def _suraf_result(rrc_usd: Decimal = Decimal("337.0")) -> RrcResult:
         asset_id=_ASSET_ID,
         prime_id=_PRIME_ID,
         rrc_usd=rrc_usd,
+        comparable_crr_pct=Decimal("33.7"),
         risk_model="suraf",
         details=SurafDetails(
+            risk_model="suraf",
             rating_id="aave_ausdc",
             rating_version="v7",
             crr_pct=Decimal("33.7"),
@@ -94,8 +96,10 @@ def _gap_sweep_result(rrc_usd: Decimal = Decimal("1200.5")) -> RrcResult:
         asset_id=_ASSET_ID,
         prime_id=_PRIME_ID,
         rrc_usd=rrc_usd,
+        comparable_crr_pct=Decimal("12.00"),
         risk_model="gap_sweep",
         details=GapSweepDetails(
+            risk_model="gap_sweep",
             gap_pct=Decimal("0.15"),
             loss_usd=rrc_usd,
         ),
@@ -212,6 +216,36 @@ def test_get_envelope_includes_chain_id_and_receipt_token_address(client: TestCl
     body = response.json()
     assert body["chain_id"] == _RECEIPT_TOKEN_INFO.chain_id
     assert body["receipt_token_address"] == _RECEIPT_TOKEN_INFO.receipt_token_address_hex
+
+
+def test_envelope_max_rrc_and_max_crr_take_max_across_models(client: TestClient) -> None:
+    """Multi-model: max_rrc_usd is the largest USD; max_crr_pct is the largest comparable CRR.
+
+    SURAF result: rrc_usd=337.0, crr_pct=33.7.
+    Gap-sweep result: rrc_usd=1200.5, comparable_crr_pct=12.00.
+    Expected: max_rrc_usd=1200.5 (gap-sweep wins), max_crr_pct=33.7 (SURAF wins).
+    """
+    suraf = _FakeRiskModel("suraf", _suraf_result())
+    gap = _FakeRiskModel("gap_sweep", _gap_sweep_result())
+    app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf, gap]))
+
+    response = client.get(f"/v1/risk/rrc?asset_id={_ASSET_ID}&prime_id={_PRIME_ID}")
+
+    body = response.json()
+    assert Decimal(body["max_rrc_usd"]) == Decimal("1200.5")
+    assert Decimal(body["max_crr_pct"]) == Decimal("33.7")
+
+
+def test_envelope_gap_sweep_only_uses_model_comparable_crr(client: TestClient) -> None:
+    """When only gap-sweep applies, max_crr_pct comes from the model result."""
+    gap = _FakeRiskModel("gap_sweep", _gap_sweep_result())
+    app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([gap]))
+
+    response = client.get(f"/v1/risk/rrc?asset_id={_ASSET_ID}&prime_id={_PRIME_ID}")
+
+    body = response.json()
+    assert Decimal(body["max_rrc_usd"]) == Decimal("1200.5")
+    assert Decimal(body["max_crr_pct"]) == Decimal("12.00")
 
 
 # ---------------------------------------------------------------------------
@@ -424,8 +458,11 @@ def test_get_returns_503_share_data_stale_when_compute_raises(client: TestClient
 
 def _real_gap_sweep_service() -> CryptoLendingRiskService:
     reader = AsyncMock(spec=CryptoLendingReader)
+    allocation_repo = AsyncMock(spec=AllocationRepository)
+    allocation_repo.get_usd_exposure.return_value = Decimal("1000")
     return CryptoLendingRiskService(
         reader=reader,
+        allocation_repo=allocation_repo,
         default_gap_pct=Decimal("0.15"),
         supported_asset_ids=[_ASSET_ID],
     )

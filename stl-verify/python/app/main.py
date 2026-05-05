@@ -147,6 +147,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             supported_crypto_lending_asset_ids = await crypto_lending_reader.list_supported_asset_ids()
             crypto_lending_risk_service = CryptoLendingRiskService(
                 reader=crypto_lending_reader,
+                allocation_repo=allocation_repo,
                 default_gap_pct=settings.risk_default_gap_pct,
                 supported_asset_ids=supported_crypto_lending_asset_ids,
             )

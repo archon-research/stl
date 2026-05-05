@@ -44,8 +44,10 @@ _SURAF_RESULT = RrcResult(
     asset_id=1,
     prime_id=_PRIME_A,
     rrc_usd=Decimal("337.00"),
+    comparable_crr_pct=Decimal("33.7"),
     risk_model="suraf",
     details=SurafDetails(
+        risk_model="suraf",
         rating_id="aave_ausdc",
         rating_version="v7",
         crr_pct=Decimal("33.7"),
@@ -59,8 +61,10 @@ _GAP_SWEEP_RESULT = RrcResult(
     asset_id=2,
     prime_id=_PRIME_A,
     rrc_usd=Decimal("1200.50"),
+    comparable_crr_pct=Decimal("12.00"),
     risk_model="gap_sweep",
     details=GapSweepDetails(
+        risk_model="gap_sweep",
         gap_pct=Decimal("0.15"),
         loss_usd=Decimal("1200.50"),
     ),
@@ -99,6 +103,7 @@ class TestRrcResult:
         assert _SURAF_RESULT.asset_id == 1
         assert _SURAF_RESULT.prime_id == str(_PRIME_A)
         assert _SURAF_RESULT.rrc_usd == Decimal("337.00")
+        assert _SURAF_RESULT.comparable_crr_pct == Decimal("33.7")
 
     def test_suraf_details_fields(self) -> None:
         d = _SURAF_RESULT.details
@@ -123,12 +128,17 @@ class TestRrcResult:
     INVALID_CASES = [
         pytest.param(
             "suraf",
-            GapSweepDetails(gap_pct=Decimal("0.15"), loss_usd=Decimal("100")),
+            GapSweepDetails(
+                risk_model="gap_sweep",
+                gap_pct=Decimal("0.15"),
+                loss_usd=Decimal("100"),
+            ),
             id="suraf-model-with-gap-sweep-details",
         ),
         pytest.param(
             "gap_sweep",
             SurafDetails(
+                risk_model="suraf",
                 rating_id="x",
                 rating_version="v1",
                 crr_pct=Decimal("10"),
@@ -147,6 +157,7 @@ class TestRrcResult:
                 asset_id=1,
                 prime_id=_PRIME_A,
                 rrc_usd=Decimal("100"),
+                comparable_crr_pct=Decimal("10"),
                 risk_model=risk_model,
                 details=details,  # type: ignore[arg-type]
             )
@@ -157,8 +168,10 @@ class TestRrcResult:
                 asset_id=1,
                 prime_id=_PRIME_A,
                 rrc_usd=Decimal("100"),
+                comparable_crr_pct=Decimal("10"),
                 risk_model="typo_model",
                 details=SurafDetails(
+                    risk_model="suraf",
                     rating_id="x",
                     rating_version="v1",
                     crr_pct=Decimal("10"),

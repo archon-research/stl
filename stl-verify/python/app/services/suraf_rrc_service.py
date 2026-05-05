@@ -90,8 +90,10 @@ class SurafRrcService:
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=rrc_usd,
+            comparable_crr_pct=rating.crr_pct,
             risk_model=self.risk_model,
             details=SurafDetails(
+                risk_model="suraf",
                 rating_id=rating_id,
                 rating_version=rating.version,
                 crr_pct=rating.crr_pct,

@@ -24,8 +24,10 @@ class FakeRiskModel:
                 asset_id=asset_id,
                 prime_id=prime_id,
                 rrc_usd=Decimal("100"),
+                comparable_crr_pct=Decimal("10"),
                 risk_model="suraf",
                 details=SurafDetails(
+                    risk_model="suraf",
                     rating_id="rating",
                     rating_version="v1",
                     crr_pct=Decimal("10"),
@@ -38,8 +40,13 @@ class FakeRiskModel:
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=Decimal("200"),
+            comparable_crr_pct=Decimal("20"),
             risk_model="gap_sweep",
-            details=GapSweepDetails(gap_pct=Decimal("0.15"), loss_usd=Decimal("200")),
+            details=GapSweepDetails(
+                risk_model="gap_sweep",
+                gap_pct=Decimal("0.15"),
+                loss_usd=Decimal("200"),
+            ),
         )
 
 
