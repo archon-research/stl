@@ -35,6 +35,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/capital-metrics': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Capital Metrics */
+    get: operations['list_capital_metrics_v1_capital_metrics_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/chains': {
     parameters: {
       query?: never;
@@ -61,11 +78,7 @@ export interface paths {
     };
     /**
      * Get Data Sources
-     * @description Retrieve data sources and methodology for transparency.
-     *
-     *     Returns:
-     *     - sources: List of data sources used across the platform
-     *     - methodology_markdown: Formatted methodology/transparency text for UI panels
+     * @description Retrieve the registry of data sources used by STL.
      */
     get: operations['get_data_sources_v1_data_sources_get'];
     put?: never;
@@ -102,35 +115,6 @@ export interface paths {
     };
     /** List Allocations */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/primes/{prime_id}/capital-metrics': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Get Capital Metrics
-     * @description Retrieve capital metrics for a prime.
-     *
-     *     Responds with:
-     *     - risk_capital: Total risk-bearing capital
-     *     - capital_buffer: Baseline protective capital
-     *     - first_loss_capital: Prime-owned first-loss layer
-     *     - total_capital: Sum of capital tiers
-     *     - risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)
-     *     - is_validated: Whether reconciled against external benchmark
-     *     - validation_note: Any caveats or pending work on this endpoint
-     */
-    get: operations['get_capital_metrics_v1_primes__prime_id__capital_metrics_get'];
     put?: never;
     post?: never;
     delete?: never;
@@ -236,6 +220,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/star-risk-capital/primes': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Star Risk Capital Requirements
+     * @description Proxy published Star risk capital payload through backend to avoid browser CORS issues.
+     */
+    get: operations['get_star_risk_capital_requirements_v1_star_risk_capital_primes_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/status': {
     parameters: {
       query?: never;
@@ -276,8 +280,8 @@ export interface components {
       created_at: string;
       /** Log Index */
       log_index: number;
-      /** Prime Id */
-      prime_id: string;
+      /** Prime Address */
+      prime_address: string;
       /** Prime Name */
       prime_name: string;
       /** Protocol Name */
@@ -289,7 +293,7 @@ export interface components {
       /** Tx Amount */
       tx_amount: string;
       /** Tx Hash */
-      tx_hash: string;
+      tx_hash: string | null;
     };
     /**
      * AllocationCategory
@@ -358,7 +362,7 @@ export interface components {
       /** Risk Capital */
       risk_capital: string;
       /** Risk To Capital Ratio */
-      risk_to_capital_ratio: string;
+      risk_to_capital_ratio: string | null;
       /** Timestamp */
       timestamp: string;
       /** Total Capital */
@@ -375,11 +379,10 @@ export interface components {
     };
     /**
      * DataSourceResponse
-     * @description Data source metadata for transparency panel.
+     * @description Data source metadata for the transparency panel.
      */
     DataSourceResponse: {
-      /** Access Model */
-      access_model: string;
+      access_model: components['schemas']['SourceAccessModel'];
       /**
        * Attribution Required
        * @default false
@@ -396,11 +399,9 @@ export interface components {
     };
     /**
      * DataSourcesResponse
-     * @description Aggregated data sources for methodology transparency.
+     * @description Registered data sources used by STL.
      */
     DataSourcesResponse: {
-      /** Methodology Markdown */
-      methodology_markdown: string;
       /** Sources */
       sources: components['schemas']['DataSourceResponse'][];
     };
@@ -479,6 +480,43 @@ export interface components {
       /** Usd Exposure */
       usd_exposure: string;
     };
+    /**
+     * SourceAccessModel
+     * @description Classification of data source accessibility and terms of use.
+     * @enum {string}
+     */
+    SourceAccessModel: 'open' | 'public' | 'closed';
+    /** StarRiskCapitalDataResponse */
+    StarRiskCapitalDataResponse: {
+      /**
+       * Results
+       * @default []
+       */
+      results: components['schemas']['StarRiskCapitalRowResponse'][];
+    };
+    /** StarRiskCapitalResponse */
+    StarRiskCapitalResponse: {
+      data?: components['schemas']['StarRiskCapitalDataResponse'] | null;
+      /** Status */
+      status?: number | null;
+      /** Success */
+      success?: boolean | null;
+    };
+    /** StarRiskCapitalRowResponse */
+    StarRiskCapitalRowResponse: {
+      /** Exposure */
+      exposure: string;
+      /** Exposure Share */
+      exposure_share: string;
+      /** Financial Rrc */
+      financial_rrc: string;
+      /** Risk Tolerance Ratio */
+      risk_tolerance_ratio: string;
+      /** Star */
+      star: string;
+      /** Total Rc */
+      total_rc: string;
+    };
     /** ValidationError */
     ValidationError: {
       /** Context */
@@ -536,6 +574,26 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_capital_metrics_v1_capital_metrics_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CapitalMetricsResponse'][];
         };
       };
     };
@@ -618,39 +676,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['AllocationResponse'][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_capital_metrics_v1_primes__prime_id__capital_metrics_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        prime_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json':
-            | components['schemas']['CapitalMetricsResponse']
-            | null;
         };
       };
       /** @description Validation Error */
@@ -797,6 +822,26 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_star_risk_capital_requirements_v1_star_risk_capital_primes_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['StarRiskCapitalResponse'];
         };
       };
     };

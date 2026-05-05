@@ -26,7 +26,15 @@ import type {
   Prime,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { EmptyState, ErrorState, SummaryMetric, TokenAddress } from '../shared';
+import {
+  ChainLogo,
+  EmptyState,
+  ErrorState,
+  ProtocolLogo,
+  SummaryMetric,
+  TokenAddress,
+  TokenLogo,
+} from '../shared';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -34,6 +42,7 @@ type AllocationGridProps = {
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: Allocation[];
+  topMetricsAllocations: Allocation[];
   isLoading: boolean;
   isCapitalMetricsLoading: boolean;
   localProtocols: LocalProtocolRow[];
@@ -86,6 +95,7 @@ export function AllocationGrid({
   chainLabels,
   errorMessage,
   filteredAllocations,
+  topMetricsAllocations,
   isLoading,
   isCapitalMetricsLoading,
   localProtocols,
@@ -116,17 +126,17 @@ export function AllocationGrid({
   }, [localSearchValue, onSearchChange, searchValue]);
 
   const summary = useMemo(() => {
-    if (filteredAllocations.length === 0) {
+    if (topMetricsAllocations.length === 0) {
       return null;
     }
 
-    const totalUsd = filteredAllocations.reduce(
+    const totalUsd = topMetricsAllocations.reduce(
       (sum, allocation) =>
         sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
-    const latestActivityAt = filteredAllocations.reduce<string | null>(
+    const latestActivityAt = topMetricsAllocations.reduce<string | null>(
       (latest, allocation) => {
         if (!allocation.latest_activity_at) {
           return latest;
@@ -144,11 +154,30 @@ export function AllocationGrid({
     );
 
     return {
-      allocationCount: filteredAllocations.length,
+      allocationCount: topMetricsAllocations.length,
       latestActivityAt,
       totalUsd,
     };
-  }, [filteredAllocations]);
+  }, [topMetricsAllocations]);
+
+  const overallSummary = useMemo(() => {
+    if (allocations.length === 0) {
+      return null;
+    }
+
+    const totalUsd = allocations.reduce(
+      (sum, allocation) =>
+        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      0,
+    );
+
+    return {
+      allocationCount: allocations.length,
+      totalUsd,
+    };
+  }, [allocations]);
+
+  const hasSearchQuery = searchValue.trim().length > 0;
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [
@@ -158,61 +187,61 @@ export function AllocationGrid({
         accessorFn: (allocation) => allocation.symbol,
         cell: ({ row }) => {
           const allocation = row.original;
-          const isSelected =
-            getAllocationKey(allocation) === selectedAllocationKey;
 
           return (
-            <div className={flex({ align: 'center', gap: '3' })}>
-              <div
+            <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
+              <p
                 className={css({
-                  width: '10',
-                  height: '10',
-                  borderRadius: 'full',
-                  bg: isSelected ? 'interactive.accent' : 'surface.subtle',
-                  color: isSelected ? 'white' : 'text.strong',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 'xs',
+                  m: 0,
+                  fontSize: 'sm',
                   fontWeight: 'semibold',
-                  flexShrink: 0,
+                  color: 'text.strong',
                 })}
               >
-                {allocation.symbol.slice(0, 2).toUpperCase()}
-              </div>
-              <div className={css({ display: 'grid', gap: '1' })}>
-                <p
+                {allocation.symbol}
+              </p>
+              <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
+                <span
                   className={css({
-                    m: 0,
-                    fontSize: 'sm',
-                    fontWeight: 'semibold',
-                    color: 'text.strong',
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    whiteSpace: 'nowrap',
                   })}
                 >
-                  {allocation.symbol}
-                </p>
-                <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
-                  <span
-                    className={css({
-                      fontSize: 'xs',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {getProtocolLabel(
+                  <ProtocolLogo
+                    protocolName={getProtocolLabel(
                       allocation.protocol_name,
                       localProtocols,
                       allocation.chain_id,
                     )}
-                  </span>
-                  <span
-                    className={css({
-                      fontSize: 'xs',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {getChainLabel(allocation.chain_id, chainLabels)}
-                  </span>
-                </div>
+                    size="5"
+                  />
+                  {getProtocolLabel(
+                    allocation.protocol_name,
+                    localProtocols,
+                    allocation.chain_id,
+                  )}
+                </span>
+                <span
+                  className={css({
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    whiteSpace: 'nowrap',
+                  })}
+                >
+                  <ChainLogo
+                    chainId={allocation.chain_id}
+                    label={getChainLabel(allocation.chain_id, chainLabels)}
+                    size="5"
+                  />
+                  {getChainLabel(allocation.chain_id, chainLabels)}
+                </span>
               </div>
             </div>
           );
@@ -233,19 +262,27 @@ export function AllocationGrid({
                 gap: '1',
               })}
             >
-              <span
-                className={css({
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  m: 0,
-                })}
-              >
-                {allocation.underlying_symbol}
-              </span>
+              <div className={flex({ align: 'center', gap: '2' })}>
+                <TokenLogo
+                  address={allocation.underlying_token_address}
+                  chainId={allocation.chain_id}
+                  size="6"
+                  symbol={allocation.underlying_symbol}
+                />
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    m: 0,
+                  })}
+                >
+                  {allocation.underlying_symbol}
+                </span>
+              </div>
               <TokenAddress
                 address={allocation.underlying_token_address}
                 chainId={allocation.chain_id}
@@ -271,21 +308,29 @@ export function AllocationGrid({
                 gap: '1',
               })}
             >
-              <span
-                className={css({
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  m: 0,
-                })}
-              >
-                {amountUsd !== undefined && amountUsd !== null
-                  ? formatUsdValue(amountUsd)
-                  : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
-              </span>
+              <div className={flex({ align: 'center', gap: '2' })}>
+                <TokenLogo
+                  address={allocation.receipt_token_address}
+                  chainId={allocation.chain_id}
+                  size="6"
+                  symbol={allocation.symbol}
+                />
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    m: 0,
+                  })}
+                >
+                  {amountUsd !== undefined && amountUsd !== null
+                    ? formatUsdValue(amountUsd)
+                    : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+                </span>
+              </div>
               <TokenAddress
                 address={allocation.receipt_token_address}
                 chainId={allocation.chain_id}
@@ -374,7 +419,7 @@ export function AllocationGrid({
         },
       },
     ],
-    [chainLabels, localProtocols, selectedAllocationKey],
+    [chainLabels, localProtocols],
   );
 
   const table = useDataTable(filteredAllocations, columns, {
@@ -420,21 +465,28 @@ export function AllocationGrid({
             <div
               className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
             >
-              <h1
-                className={css({
-                  m: 0,
-                  fontSize: { base: '2xl', md: '3xl' },
-                  lineHeight: 'tight',
-                  color: 'text.strong',
-                })}
-              >
-                {selectedPrime ? selectedPrime.name : 'Select a prime'}
-              </h1>
+              <div className={flex({ align: 'center', gap: '2.5' })}>
+                {selectedPrime ? (
+                  <ProtocolLogo protocolName={selectedPrime.name} size="9" />
+                ) : null}
+                <h1
+                  className={css({
+                    m: 0,
+                    fontSize: { base: '2xl', md: '3xl' },
+                    lineHeight: 'tight',
+                    color: 'text.strong',
+                  })}
+                >
+                  {selectedPrime ? selectedPrime.name : 'Select a prime'}
+                </h1>
+              </div>
               {selectedPrime ? (
                 <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
-            {!showTopMetricsSkeleton && capitalMetrics ? (
+            {!showTopMetricsSkeleton &&
+            capitalMetrics &&
+            parseNumericValue(capitalMetrics.risk_to_capital_ratio) !== null ? (
               <span
                 className={css({
                   fontSize: 'xs',
@@ -503,8 +555,16 @@ export function AllocationGrid({
                 <>
                   <SummaryMetric
                     label="Total allocation"
-                    value={formatUsdValue(summary.totalUsd)}
-                    detail={`${summary.allocationCount} allocations`}
+                    value={
+                      hasSearchQuery && overallSummary
+                        ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+                        : formatUsdValue(summary.totalUsd)
+                    }
+                    detail={
+                      hasSearchQuery && overallSummary
+                        ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                        : `${summary.allocationCount} allocations`
+                    }
                   />
                   <SummaryMetric
                     label="Latest activity"
