@@ -13,6 +13,7 @@ import {
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
+  formatWadValue,
   getAllocationKey,
   getCategoryLabel,
   getChainLabel,
@@ -24,6 +25,7 @@ import type {
   AllocationCategory,
   CapitalMetrics,
   Prime,
+  PrimeDebtSnapshot,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import {
@@ -45,8 +47,10 @@ type AllocationGridProps = {
   topMetricsAllocations: Allocation[];
   isLoading: boolean;
   isCapitalMetricsLoading: boolean;
+  isPrimeDebtLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
+  primeDebtSnapshot: PrimeDebtSnapshot | null;
   onSearchChange: (value: string) => void;
   onSortingChange: (
     sorting: SortingState | ((old: SortingState) => SortingState),
@@ -98,8 +102,10 @@ export function AllocationGrid({
   topMetricsAllocations,
   isLoading,
   isCapitalMetricsLoading,
+  isPrimeDebtLoading,
   localProtocols,
   onSelectAllocation,
+  primeDebtSnapshot,
   onSearchChange,
   onSortingChange,
   searchValue,
@@ -431,7 +437,8 @@ export function AllocationGrid({
   const showTopMetricsSkeleton =
     selectedPrime !== null && (isLoading || isCapitalMetricsLoading);
 
-  const hasTopMetrics = capitalMetrics !== null || summary !== null;
+  const hasTopMetrics =
+    capitalMetrics !== null || summary !== null || selectedPrime !== null;
 
   return (
     <div
@@ -577,6 +584,41 @@ export function AllocationGrid({
                       summary.latestActivityAt
                         ? formatDateTime(summary.latestActivityAt)
                         : 'No indexed activity'
+                    }
+                  />
+                </>
+              ) : null}
+
+              {selectedPrime ? (
+                <>
+                  <SummaryMetric
+                    label="Prime debt"
+                    value={
+                      isPrimeDebtLoading
+                        ? 'Loading...'
+                        : formatWadValue(primeDebtSnapshot?.debt_wad)
+                    }
+                    detail={
+                      isPrimeDebtLoading
+                        ? 'Fetching latest debt snapshot'
+                        : `Ilk ${primeDebtSnapshot?.ilk_name ?? 'Unknown'} · WAD-scaled source`
+                    }
+                  />
+                  <SummaryMetric
+                    label="Debt sync"
+                    value={
+                      isPrimeDebtLoading
+                        ? 'Loading...'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                          : '—'
+                    }
+                    detail={
+                      isPrimeDebtLoading
+                        ? 'Waiting for sync timestamp'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatDateTime(primeDebtSnapshot.synced_at)
+                          : 'No debt sync timestamp'
                     }
                   />
                 </>

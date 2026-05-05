@@ -45,10 +45,14 @@ export function SummaryMetric({
         className={flex({
           align: 'center',
           gap: '2',
+          wrap: 'wrap',
           mt: '2',
           fontSize: 'lg',
           fontWeight: 'semibold',
           color: 'text.strong',
+          minWidth: 0,
+          overflowWrap: 'anywhere',
+          wordBreak: 'break-word',
         })}
       >
         {value}
@@ -60,6 +64,8 @@ export function SummaryMetric({
             mt: '1',
             fontSize: 'xs',
             color: 'text.muted',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
           })}
         >
           {detail}

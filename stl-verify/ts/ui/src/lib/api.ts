@@ -14,6 +14,7 @@ import type {
   TokenPrice,
   TokensResponse,
   TxProtocolEventsResponse,
+  PrimeDebtSnapshot,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { isAbortError } from './errors';
@@ -30,6 +31,8 @@ type ApiResult<TData, TError> = Promise<{
   error?: TError;
   response: Response;
 }>;
+
+type UnknownRecord = Record<string, unknown>;
 
 function toErrorBody(error: unknown): string {
   if (typeof error === 'string') {
@@ -78,6 +81,69 @@ async function requestData<TData, TError>(
   }
 
   return data;
+}
+
+function normalizePrimeDebtSnapshot(
+  value: unknown,
+  primeId: string,
+): PrimeDebtSnapshot | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const row = value as UnknownRecord;
+
+  const debtWad =
+    typeof row.debt_wad === 'string'
+      ? row.debt_wad
+      : typeof row.borrowed_amount === 'string'
+        ? row.borrowed_amount
+        : null;
+
+  const ilkName =
+    typeof row.ilk_name === 'string'
+      ? row.ilk_name
+      : typeof row.collateral_type === 'string'
+        ? row.collateral_type
+        : null;
+
+  const syncedAt =
+    typeof row.synced_at === 'string'
+      ? row.synced_at
+      : typeof row.updated_at === 'string'
+        ? row.updated_at
+        : typeof row.timestamp === 'string'
+          ? row.timestamp
+          : null;
+
+  return {
+    prime_id: typeof row.prime_id === 'string' ? row.prime_id : primeId,
+    debt_wad: debtWad,
+    ilk_name: ilkName,
+    synced_at: syncedAt,
+  };
+}
+
+async function requestPrimeDebtEndpoint(
+  primeId: string,
+  suffix: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const endpointPath = `/v1/primes/${encodeURIComponent(primeId)}/debt${suffix}`;
+  const endpointUrl = API_BASE_URL
+    ? `${API_BASE_URL}${endpointPath}`
+    : endpointPath;
+
+  return fetch(endpointUrl, { signal }).then(async (response) => {
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '<no body>');
+      throw new Error(
+        `GET ${endpointPath} failed (${response.status}): ${responseText}`,
+      );
+    }
+
+    return response.json();
+  });
 }
 
 export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
@@ -279,4 +345,45 @@ export function getTokenPrice(
     }),
     'GET /v1/tokens/{token_id}/price',
   );
+}
+
+export async function getPrimeDebtSnapshots(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot[]> {
+  const payload = await requestPrimeDebtEndpoint(primeId, '', signal);
+
+  const rows = Array.isArray(payload)
+    ? payload
+    : payload &&
+        typeof payload === 'object' &&
+          Array.isArray((payload as UnknownRecord).items)
+      ? ((payload as UnknownRecord).items as unknown[])
+      : [];
+
+  return rows
+    .map((row) => normalizePrimeDebtSnapshot(row, primeId))
+    .filter((row): row is PrimeDebtSnapshot => row !== null);
+}
+
+export async function getLatestPrimeDebtSnapshot(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot | null> {
+  try {
+    const latestPayload = await requestPrimeDebtEndpoint(primeId, '/latest', signal);
+    return normalizePrimeDebtSnapshot(latestPayload, primeId);
+  } catch (latestError) {
+    if (isAbortError(latestError)) {
+      throw latestError;
+    }
+
+    logging.warn('Falling back to prime debt snapshots list endpoint', {
+      error: latestError,
+      primeId,
+    });
+
+    const snapshots = await getPrimeDebtSnapshots(primeId, signal);
+    return snapshots[0] ?? null;
+  }
 }

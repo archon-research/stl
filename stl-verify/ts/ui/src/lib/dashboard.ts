@@ -346,6 +346,43 @@ export function formatDateTime(value: string): string {
   return DATE_TIME_FORMAT.format(date);
 }
 
+export function formatDurationFromSeconds(
+  seconds: number | null | undefined,
+): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return 'Unknown';
+  }
+
+  if (seconds < 60) {
+    return `${Math.max(0, Math.floor(seconds))}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+export function formatWadValue(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value, 'formatWadValue');
+
+  if (numeric === null) {
+    return '—';
+  }
+
+  return formatTokenAmount(numeric / 1e18);
+}
+
 /**
  * Get human-readable label for allocation category.
  */

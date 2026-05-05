@@ -429,6 +429,51 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "PrimeDebtSnapshotResponse": {
+        "properties": {
+          "block_number": {
+            "title": "Block Number",
+            "type": "integer"
+          },
+          "block_version": {
+            "title": "Block Version",
+            "type": "integer"
+          },
+          "debt_wad": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Debt Wad",
+            "type": "string"
+          },
+          "ilk_name": {
+            "title": "Ilk Name",
+            "type": "string"
+          },
+          "prime_address": {
+            "title": "Prime Address",
+            "type": "string"
+          },
+          "prime_name": {
+            "title": "Prime Name",
+            "type": "string"
+          },
+          "synced_at": {
+            "format": "date-time",
+            "title": "Synced At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prime_address",
+          "prime_name",
+          "ilk_name",
+          "debt_wad",
+          "block_number",
+          "block_version",
+          "synced_at"
+        ],
+        "title": "PrimeDebtSnapshotResponse",
+        "type": "object"
+      },
       "PrimeResponse": {
         "properties": {
           "address": {
@@ -1492,6 +1537,100 @@
           }
         },
         "summary": "Get Capital Metrics"
+      }
+    },
+    "/v1/primes/{prime_id}/debt": {
+      "get": {
+        "operationId": "list_prime_debt_snapshots_v1_primes__prime_id__debt_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
+                  },
+                  "title": "Response List Prime Debt Snapshots V1 Primes  Prime Id  Debt Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Prime Debt Snapshots"
+      }
+    },
+    "/v1/primes/{prime_id}/debt/latest": {
+      "get": {
+        "operationId": "get_latest_prime_debt_snapshot_v1_primes__prime_id__debt_latest_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Latest Prime Debt Snapshot"
       }
     },
     "/v1/protocol-events": {
