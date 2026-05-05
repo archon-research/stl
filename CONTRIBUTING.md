@@ -81,8 +81,10 @@ When it finishes:
 kubectl --context=kind-vector get pods -n vector
 ```
 
-Everything should be `Running`. Teardown with `make dev-down`; nuke
-persistent volumes too with `make dev-wipe`.
+Everything should be `Running`. For local-only pause/resume use
+`make dev-suspend` and `make dev-resume` (do not use these in CI/prod).
+Use `make dev-down` to delete the cluster; nuke persistent volumes too
+with `make dev-wipe`.
 
 > **⚠️ You need an Alchemy key for anything to actually work.** By
 > default `make dev-up` points the watcher at a **mock blockchain

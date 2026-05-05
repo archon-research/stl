@@ -249,7 +249,7 @@ export function RiskDetailDrawer({
                 {title}
               </h2>
               {subtitle ? (
-                <p
+                <div
                   className={css({
                     m: 0,
                     mt: '1',
@@ -258,7 +258,7 @@ export function RiskDetailDrawer({
                   })}
                 >
                   {subtitle}
-                </p>
+                </div>
               ) : null}
               {detail ? (
                 <p
