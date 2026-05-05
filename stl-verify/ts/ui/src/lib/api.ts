@@ -162,7 +162,9 @@ export function getCapitalMetrics(
   signal?: AbortSignal,
 ): Promise<CapitalMetricsListResponse> {
   const endpointPath = '/v1/capital-metrics';
-  const endpointUrl = API_BASE_URL ? `${API_BASE_URL}${endpointPath}` : endpointPath;
+  const endpointUrl = API_BASE_URL
+    ? `${API_BASE_URL}${endpointPath}`
+    : endpointPath;
 
   return fetch(endpointUrl, { signal })
     .then(async (response) => {
