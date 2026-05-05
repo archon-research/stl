@@ -648,9 +648,9 @@ dev-down: kind-delete
 # Suspend local kind nodes without deleting cluster state.
 # Local development only: do not use for CI or production workflows.
 dev-suspend:
-	@NODES=$$(docker ps -a --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" --format '{{.Names}}'); \
+	@NODES=$$(docker ps --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" --format '{{.Names}}'); \
 	if [ -z "$$NODES" ]; then \
-	  echo "No kind nodes found for cluster $(KIND_CLUSTER)."; \
+	  echo "No running kind nodes found for cluster $(KIND_CLUSTER) (already suspended or cluster does not exist)."; \
 	else \
 	  echo "Suspending kind cluster $(KIND_CLUSTER)..."; \
 	  echo "$$NODES" | xargs docker stop; \

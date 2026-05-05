@@ -43,6 +43,7 @@ jobs:
 
   go-ci:
     needs: detect-changes
+    if: needs.detect-changes.outputs.go == 'true'
     uses: ./.github/workflows/go-ci.yml
     secrets: inherit
 
@@ -63,7 +64,7 @@ jobs:
     needs:
       - detect-changes
       - go-ci
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.go-ci.result == 'success'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.go-ci.result == 'success' || needs.go-ci.result == 'skipped')
     uses: ./.github/workflows/deploy.yaml
     secrets: inherit
     with:

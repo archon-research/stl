@@ -59,7 +59,7 @@ jobs:
 
       - name: Pull container images
         run: |
-          IMAGES=$(grep -E 'Image[A-Za-z0-9_]+\s*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
+          IMAGES=$(grep -E 'Image[A-Za-z0-9_]+[[:space:]]*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
           if [ -z "$IMAGES" ]; then
             echo "::error::No image constants found in internal/testutil/images.go — check the grep pattern"
             exit 1
