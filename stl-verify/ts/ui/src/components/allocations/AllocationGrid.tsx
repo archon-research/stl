@@ -646,6 +646,7 @@ export function AllocationGrid({
             <EmptyState
               title="Choose a prime to load positions"
               description="The main grid activates once a prime is selected from the sidebar."
+              stretch
             />
           ) : null}
 
@@ -664,6 +665,7 @@ export function AllocationGrid({
             <EmptyState
               title="No allocations returned"
               description="The selected prime did not return any allocation rows from the API."
+              stretch
             />
           ) : null}
 
@@ -675,6 +677,7 @@ export function AllocationGrid({
             <EmptyState
               title="No rows match the active filters"
               description="Clear one of the filters in the top bar to restore the allocation grid."
+              stretch
             />
           ) : null}
 

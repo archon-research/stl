@@ -405,6 +405,9 @@ export function RiskBreakdownTab({
       <MethodologyPanel
         isOpen={isMethodologyOpen}
         onToggle={() => setIsMethodologyOpen(!isMethodologyOpen)}
+        selectedChainId={selectedReceiptToken.chain_id}
+        selectedTokenId={selectedReceiptToken.underlying_token_id}
+        selectedTokenSymbol={selectedReceiptToken.underlying_symbol}
       />
     </div>
   );

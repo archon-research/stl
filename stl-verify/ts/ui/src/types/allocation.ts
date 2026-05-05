@@ -4,10 +4,13 @@ export type Prime = components['schemas']['PrimeResponse'];
 export type Allocation = components['schemas']['AllocationResponse'];
 export type AllocationActivity =
   components['schemas']['AllocationActivityResponse'];
+export type ProtocolEvent = components['schemas']['ProtocolEventResponse'];
 export type CapitalMetrics = components['schemas']['CapitalMetricsResponse'];
 export type DataSources = components['schemas']['DataSourcesResponse'];
 export type DataSource = components['schemas']['DataSourceResponse'];
 export type AllocationCategory = components['schemas']['AllocationCategory'];
+export type Token = components['schemas']['TokenResponse'];
+export type TokenPrice = components['schemas']['TokenPriceResponse'];
 
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
 export type BadDebt = components['schemas']['BadDebtResponse'];
@@ -32,4 +35,16 @@ export type CapitalMetricsResponse = CapitalMetricsListResponse[number];
 
 export type DataSourcesResponse = NonNullable<
   paths['/v1/data-sources']['get']['responses']['200']['content']['application/json']
+>;
+
+export type ProtocolEventsResponse = NonNullable<
+  paths['/v1/protocol-events']['get']['responses']['200']['content']['application/json']
+>;
+
+export type TxProtocolEventsResponse = NonNullable<
+  paths['/v1/tx/{tx_hash}/events']['get']['responses']['200']['content']['application/json']
+>;
+
+export type TokensResponse = NonNullable<
+  paths['/v1/tokens']['get']['responses']['200']['content']['application/json']
 >;
