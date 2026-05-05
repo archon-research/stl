@@ -238,6 +238,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          set -o pipefail
           SHA=${{ inputs.sha || github.sha }}
           SHORT_SHA=${SHA:0:7}
           REPO="${{ github.repository }}"
@@ -246,15 +247,25 @@ jobs:
           PROD_SHA=$(grep -m1 -oP '[a-f0-9]{40}' k8s/overlays/prod/kustomization.yaml || echo "")
           PROD_SHORT=${PROD_SHA:0:7}
 
+          if [ -z "$PROD_SHA" ]; then
+            echo "::error::Could not parse current prod SHA from kustomization.yaml"
+            exit 1
+          fi
+
           CHANGELOG=""
 
-          if [ -n "$PROD_SHA" ] && [ "$PROD_SHA" != "$SHA" ]; then
+          if [ "$PROD_SHA" = "$SHA" ]; then
+            CHANGELOG="No code changes (same SHA as current prod)."
+          else
             # List merged PRs between the two SHAs
-            MERGED_PRS=$(git log --merges --format="%s" "${PROD_SHA}..${SHA}" 2>/dev/null \
-              | grep -oP '#\d+' | sort -u | head -15 || echo "")
+            TOTAL_PRS=0
+            MERGED_PRS=$(git log --merges --format="%s" "${PROD_SHA}..${SHA}" \
+              | grep -oP '#\d+' | sort -u || echo "")
+            TOTAL_PRS=$(echo "$MERGED_PRS" | grep -c . || echo 0)
+            DISPLAY_PRS=$(echo "$MERGED_PRS" | head -15)
 
             PR_LIST=""
-            for pr_num in $MERGED_PRS; do
+            for pr_num in $DISPLAY_PRS; do
               num=${pr_num#\#}
               PR_INFO=$(gh pr view "$num" --json title,url,author --jq '"- [#'"$num"' \(.title)](\(.url)) by @\(.author.login)"' 2>/dev/null || echo "")
               if [ -n "$PR_INFO" ]; then
@@ -262,18 +273,23 @@ jobs:
               fi
             done
 
-            # List commits between current prod and new SHA
-            COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ 2>/dev/null | head -20 || echo "")
+            # List commits between current prod and new SHA (stl-verify/ only)
+            TOTAL_COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | wc -l | tr -d ' ')
+            COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | head -20)
 
             CHANGELOG="### Changes: \`${PROD_SHORT}\` → \`${SHORT_SHA}\`"
             if [ -n "$PR_LIST" ]; then
               CHANGELOG="${CHANGELOG}\n\n**Merged PRs:**\n${PR_LIST}"
+              if [ "$TOTAL_PRS" -gt 15 ]; then
+                CHANGELOG="${CHANGELOG}…and $((TOTAL_PRS - 15)) more"
+              fi
             fi
             if [ -n "$COMMITS" ]; then
-              CHANGELOG="${CHANGELOG}\n\n**Commits:**\n\`\`\`\n${COMMITS}\n\`\`\`"
+              CHANGELOG="${CHANGELOG}\n\n**Commits (stl-verify):**\n\`\`\`\n${COMMITS}\n\`\`\`"
+              if [ "$TOTAL_COMMITS" -gt 20 ]; then
+                CHANGELOG="${CHANGELOG}\n…and $((TOTAL_COMMITS - 20)) more"
+              fi
             fi
-          else
-            CHANGELOG="No code changes (same SHA or first deploy)."
           fi
 
           # Write to file to avoid quoting issues, then set output
