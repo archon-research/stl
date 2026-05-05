@@ -1,5 +1,6 @@
 import type { Allocation } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
 
 export type FilterOption = {
@@ -11,17 +12,6 @@ export type FilterOption = {
 type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
-
-const CHAIN_NAMES: Record<number, string> = {
-  1: 'Ethereum',
-  10: 'Optimism',
-  137: 'Polygon',
-  324: 'zkSync Era',
-  130: 'Unichain',
-  8453: 'Base',
-  42161: 'Arbitrum',
-  43114: 'Avalanche',
-};
 
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
@@ -161,9 +151,7 @@ export function getChainLabel(
   chainId: number,
   chainLabels?: ChainLabelLookup,
 ): string {
-  return (
-    chainLabels?.get(chainId) ?? CHAIN_NAMES[chainId] ?? `Chain ${chainId}`
-  );
+  return chainLabels?.get(chainId) ?? getChainName(chainId);
 }
 
 export function getProtocolLabel(
@@ -408,17 +396,6 @@ export function sortAllocations(allocations: Allocation[]): Allocation[] {
   });
 }
 
-const CHAIN_EXPLORERS: Record<number, string> = {
-  1: 'https://etherscan.io',
-  10: 'https://optimistic.etherscan.io',
-  137: 'https://polygonscan.com',
-  324: 'https://explorer.zksync.io',
-  130: 'https://unichain.blockscout.com',
-  8453: 'https://basescan.org',
-  42161: 'https://arbiscan.io',
-  43114: 'https://snowscan.xyz',
-};
-
 /**
  * Returns an Etherscan/block-explorer URL for the given chain + address,
  * or null if the chain is not recognised.
@@ -428,7 +405,7 @@ export function getExplorerUrl(
   address: string,
   type: 'address' | 'tx' = 'address',
 ): string | null {
-  const base = CHAIN_EXPLORERS[chainId];
+  const base = getChainExplorerUrl(chainId);
   if (!base) {
     return null;
   }

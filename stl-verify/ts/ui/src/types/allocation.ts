@@ -24,9 +24,11 @@ export type AllocationActivityResponse = NonNullable<
   paths['/v1/allocations/activity']['get']['responses']['200']['content']['application/json']
 >;
 
-export type CapitalMetricsResponse = NonNullable<
-  paths['/v1/primes/{prime_id}/capital-metrics']['get']['responses']['200']['content']['application/json']
+export type CapitalMetricsListResponse = NonNullable<
+  paths['/v1/capital-metrics']['get']['responses']['200']['content']['application/json']
 >;
+
+export type CapitalMetricsResponse = CapitalMetricsListResponse[number];
 
 export type DataSourcesResponse = NonNullable<
   paths['/v1/data-sources']['get']['responses']['200']['content']['application/json']

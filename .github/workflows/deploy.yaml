@@ -212,13 +212,13 @@ jobs:
     name: Notify Prod Deploy Awaiting Approval
     needs: build-push-prod
     if: ${{ github.event_name != 'workflow_dispatch' && needs.build-push-prod.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
-        with:
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-          status: pending
-          context: Prod Deploy
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: pending
+      context: Prod Deploy
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
   create-prod-pr:
     name: Create Prod Deploy PR
@@ -325,41 +325,41 @@ jobs:
     name: Notify Prod Deploy PR Created
     needs: create-prod-pr
     if: ${{ needs.create-prod-pr.result == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
-        with:
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-          status: success
-          context: Prod Deploy PR
-          pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: success
+      context: Prod Deploy PR
+      pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
   notify-staging-failure:
     name: Notify Staging Deploy Failure
     if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
     needs: [build-push-staging, update-staging]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
-        with:
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
-          status: failure
-          context: Staging Deploy
-          failed-jobs: |
-            Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
-            Update Staging Image Tags=${{ needs.update-staging.result }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Staging Deploy
+      failed-jobs: |
+        Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
+        Update Staging Image Tags=${{ needs.update-staging.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
   notify-prod-failure:
     name: Notify Prod Deploy Failure
     if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.create-prod-pr.result == 'failure') }}
     needs: [build-push-prod, create-prod-pr]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: archon-research/github-actions/slack-notify@b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
-        with:
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-          status: failure
-          context: Prod Deploy
-          failed-jobs: |
-            Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
-            Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Deploy
+      failed-jobs: |
+        Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
+        Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

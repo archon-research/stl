@@ -430,6 +430,7 @@ export function BottomPanel({
         filteredAllocations.length > 0 ? (
           activeTab === 'risk' ? (
             <RiskBreakdownTab
+              isEnabled={isDrawerOpen && activeTab === 'risk'}
               searchQuery={riskSearchValue}
               selectedReceiptToken={focusedAllocation}
             />
