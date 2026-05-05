@@ -714,8 +714,8 @@ app/api/v1/risk.py                # The two routes below. Never import risk_engi
 
 ### API contract — two routes cover every model
 
-Both return `{ asset_id, prime_id?, results: [{ version, model, rrc_usd, details }, ...] }`.
-Each `details` is a discriminated union keyed on `model`.
+Both return `{ asset_id, prime_id?, results: [{ version, risk_model, rrc_usd, details }, ...] }`.
+Each `details` is a discriminated union keyed on `risk_model` (the discriminator field is named `risk_model` to avoid collision with Pydantic's `model_*` protected namespace).
 Version is a reference to block_version and processing_version. These allow auditability of the results.
 
 - `GET /v1/risk/rrc?asset_id=…&prime_id=…` — every applicable model at
