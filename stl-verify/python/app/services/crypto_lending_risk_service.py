@@ -72,7 +72,7 @@ class CryptoLendingRiskService:
         # ``protocol_oracle`` would give us but goes through a code path with
         # broader coverage — ``allocation_repo.get_usd_exposure`` joins the
         # indexer's ``protocol_oracle`` table, which is empty for several
-        # protocols today (see VEC-XXX/YYY).
+        # protocols today.
         position_usd = sum((item.amount_usd for item in items), Decimal("0")).quantize(
             _USD_CENT, rounding=ROUND_HALF_EVEN
         )
