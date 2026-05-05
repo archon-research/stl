@@ -17,6 +17,7 @@ import type {
   AllocationActivityResponse,
   Prime,
 } from '../../../types/allocation';
+import { ChainLogo, ProtocolLogo } from '../../shared';
 import { TokenAddress } from '../../shared';
 import { EmptyState, ErrorState } from '../../shared';
 
@@ -94,7 +95,7 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
       </div>
 
       <div className={flex({ direction: 'column', gap: '1', flex: 1 })}>
-        <div className={flex({ gap: '2', align: 'center' })}>
+        <div className={flex({ gap: '2', align: 'center', wrap: 'wrap' })}>
           <span
             className={css({
               fontSize: 'sm',
@@ -122,13 +123,18 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
                 bg: 'surface.subtle',
                 padding: '1 2',
                 borderRadius: 'md',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '1',
+                whiteSpace: 'nowrap',
               })}
             >
+              <ProtocolLogo protocolName={event.protocol_name} size="4" />
               {event.protocol_name}
             </span>
           ) : null}
         </div>
-        <div className={flex({ gap: '2', align: 'center' })}>
+        <div className={flex({ gap: '2', align: 'center', wrap: 'wrap' })}>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
           </span>
@@ -137,6 +143,22 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
           </span>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             Block {event.block_number}
+          </span>
+          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+            •
+          </span>
+          <span
+            className={css({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '1',
+              fontSize: 'xs',
+              color: 'text.default',
+              whiteSpace: 'nowrap',
+            })}
+          >
+            <ChainLogo chainId={event.chain_id} size="4" />
+            Chain {event.chain_id}
           </span>
           {event.tx_hash ? (
             <>
@@ -236,7 +258,7 @@ export function ActivityFeed({
         event.token_symbol?.toLowerCase().includes(lowerQuery) ||
         event.protocol_name?.toLowerCase().includes(lowerQuery) ||
         event.action_type?.toLowerCase().includes(lowerQuery) ||
-        event.tx_hash.toLowerCase().includes(lowerQuery),
+        event.tx_hash?.toLowerCase().includes(lowerQuery),
     );
   }, [events, searchQuery]);
 

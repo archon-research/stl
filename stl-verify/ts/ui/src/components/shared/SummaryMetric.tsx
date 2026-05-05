@@ -1,8 +1,11 @@
+import type { ReactNode } from 'react';
+
 import { css } from '#styled-system/css';
+import { flex } from '#styled-system/patterns';
 
 type SummaryMetricProps = {
   label: string;
-  value: string;
+  value: ReactNode;
   detail?: string;
   className?: string;
 };
@@ -38,9 +41,10 @@ export function SummaryMetric({
       >
         {label}
       </p>
-      <p
-        className={css({
-          m: 0,
+      <div
+        className={flex({
+          align: 'center',
+          gap: '2',
           mt: '2',
           fontSize: 'lg',
           fontWeight: 'semibold',
@@ -48,7 +52,7 @@ export function SummaryMetric({
         })}
       >
         {value}
-      </p>
+      </div>
       {detail ? (
         <p
           className={css({

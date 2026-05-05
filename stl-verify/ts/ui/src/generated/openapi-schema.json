@@ -33,8 +33,8 @@
             "title": "Log Index",
             "type": "integer"
           },
-          "prime_id": {
-            "title": "Prime Id",
+          "prime_address": {
+            "title": "Prime Address",
             "type": "string"
           },
           "prime_name": {
@@ -73,13 +73,20 @@
             "type": "string"
           },
           "tx_hash": {
-            "title": "Tx Hash",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tx Hash"
           }
         },
         "required": [
           "chain_id",
-          "prime_id",
+          "prime_address",
           "prime_name",
           "protocol_name",
           "token_id",
@@ -257,9 +264,16 @@
             "type": "string"
           },
           "risk_to_capital_ratio": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Risk To Capital Ratio",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk To Capital Ratio"
           },
           "timestamp": {
             "title": "Timestamp",
@@ -314,11 +328,10 @@
         "type": "object"
       },
       "DataSourceResponse": {
-        "description": "Data source metadata for transparency panel.",
+        "description": "Data source metadata for the transparency panel.",
         "properties": {
           "access_model": {
-            "title": "Access Model",
-            "type": "string"
+            "$ref": "#/components/schemas/SourceAccessModel"
           },
           "attribution_required": {
             "default": false,
@@ -359,12 +372,8 @@
         "type": "object"
       },
       "DataSourcesResponse": {
-        "description": "Aggregated data sources for methodology transparency.",
+        "description": "Registered data sources used by STL.",
         "properties": {
-          "methodology_markdown": {
-            "title": "Methodology Markdown",
-            "type": "string"
-          },
           "sources": {
             "items": {
               "$ref": "#/components/schemas/DataSourceResponse"
@@ -374,8 +383,7 @@
           }
         },
         "required": [
-          "sources",
-          "methodology_markdown"
+          "sources"
         ],
         "title": "DataSourcesResponse",
         "type": "object"
@@ -589,6 +597,106 @@
           "source_commit_sha"
         ],
         "title": "ScenarioRrcResponse",
+        "type": "object"
+      },
+      "SourceAccessModel": {
+        "description": "Classification of data source accessibility and terms of use.",
+        "enum": [
+          "open",
+          "public",
+          "closed"
+        ],
+        "title": "SourceAccessModel",
+        "type": "string"
+      },
+      "StarRiskCapitalDataResponse": {
+        "properties": {
+          "results": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StarRiskCapitalRowResponse"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "title": "StarRiskCapitalDataResponse",
+        "type": "object"
+      },
+      "StarRiskCapitalResponse": {
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StarRiskCapitalDataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "success": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Success"
+          }
+        },
+        "title": "StarRiskCapitalResponse",
+        "type": "object"
+      },
+      "StarRiskCapitalRowResponse": {
+        "properties": {
+          "exposure": {
+            "title": "Exposure",
+            "type": "string"
+          },
+          "exposure_share": {
+            "title": "Exposure Share",
+            "type": "string"
+          },
+          "financial_rrc": {
+            "title": "Financial Rrc",
+            "type": "string"
+          },
+          "risk_tolerance_ratio": {
+            "title": "Risk Tolerance Ratio",
+            "type": "string"
+          },
+          "star": {
+            "title": "Star",
+            "type": "string"
+          },
+          "total_rc": {
+            "title": "Total Rc",
+            "type": "string"
+          }
+        },
+        "required": [
+          "star",
+          "exposure",
+          "total_rc",
+          "financial_rrc",
+          "exposure_share",
+          "risk_tolerance_ratio"
+        ],
+        "title": "StarRiskCapitalRowResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -814,6 +922,28 @@
         "summary": "List Allocation Activity"
       }
     },
+    "/v1/capital-metrics": {
+      "get": {
+        "operationId": "list_capital_metrics_v1_capital_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CapitalMetricsResponse"
+                  },
+                  "title": "Response List Capital Metrics V1 Capital Metrics Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Capital Metrics"
+      }
+    },
     "/v1/chains": {
       "get": {
         "operationId": "list_chains_v1_chains_get",
@@ -838,7 +968,7 @@
     },
     "/v1/data-sources": {
       "get": {
-        "description": "Retrieve data sources and methodology for transparency.\n\nReturns:\n- sources: List of data sources used across the platform\n- methodology_markdown: Formatted methodology/transparency text for UI panels",
+        "description": "Retrieve the registry of data sources used by STL.",
         "operationId": "get_data_sources_v1_data_sources_get",
         "responses": {
           "200": {
@@ -918,54 +1048,6 @@
           }
         },
         "summary": "List Allocations"
-      }
-    },
-    "/v1/primes/{prime_id}/capital-metrics": {
-      "get": {
-        "description": "Retrieve capital metrics for a prime.\n\nResponds with:\n- risk_capital: Total risk-bearing capital\n- capital_buffer: Baseline protective capital\n- first_loss_capital: Prime-owned first-loss layer\n- total_capital: Sum of capital tiers\n- risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)\n- is_validated: Whether reconciled against external benchmark\n- validation_note: Any caveats or pending work on this endpoint",
-        "operationId": "get_capital_metrics_v1_primes__prime_id__capital_metrics_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "prime_id",
-            "required": true,
-            "schema": {
-              "title": "Prime Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/CapitalMetricsResponse"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "title": "Response Get Capital Metrics V1 Primes  Prime Id  Capital Metrics Get"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Capital Metrics"
       }
     },
     "/v1/protocols": {
@@ -1140,6 +1222,25 @@
           }
         },
         "summary": "Get Risk Breakdown"
+      }
+    },
+    "/v1/star-risk-capital/primes": {
+      "get": {
+        "description": "Proxy published Star risk capital payload through backend to avoid browser CORS issues.",
+        "operationId": "get_star_risk_capital_requirements_v1_star_risk_capital_primes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StarRiskCapitalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Star Risk Capital Requirements"
       }
     },
     "/v1/status": {

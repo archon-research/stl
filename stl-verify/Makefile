@@ -831,15 +831,16 @@ docker-release-all-staging:
 # SSH tunnel to TigerData via bastion (after Tailscale is connected)
 # Auto-discovers bastion and TigerData details from AWS
 # Usage: make tigerdata-tunnel ENV=sentineldev
-# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>
-# Then connect locally: psql "postgres://user:pass@localhost:5432/dbname"
+# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host> [LOCAL_PORT=5432]
+# Then connect locally: psql "postgres://user:pass@localhost:$(LOCAL_PORT)/dbname"
+LOCAL_PORT ?= 5432
 tigerdata-tunnel:
 	@if [ -z "$(BASTION_IP)" ] || [ -z "$(TIGERDATA_HOST)" ]; then \
 		echo "Error: BASTION_IP and TIGERDATA_HOST are required"; \
-		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host>"; \
+		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host> [LOCAL_PORT=5432]"; \
 		exit 1; \
 	fi
-	ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
+	ssh -N -L $(LOCAL_PORT):$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
 
 # =============================================================================
 # Database Migrations
