@@ -458,11 +458,8 @@ def test_get_returns_503_share_data_stale_when_compute_raises(client: TestClient
 
 def _real_gap_sweep_service() -> CryptoLendingRiskService:
     reader = AsyncMock(spec=CryptoLendingReader)
-    allocation_repo = AsyncMock(spec=AllocationRepository)
-    allocation_repo.get_usd_exposure.return_value = Decimal("1000")
     return CryptoLendingRiskService(
         reader=reader,
-        allocation_repo=allocation_repo,
         default_gap_pct=Decimal("0.15"),
         supported_asset_ids=[_ASSET_ID],
     )

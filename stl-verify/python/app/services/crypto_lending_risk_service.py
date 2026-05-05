@@ -14,7 +14,6 @@ from app.domain.entities.risk import (
 )
 from app.domain.exceptions import InvalidOverrideError
 from app.logging import get_logger
-from app.ports.allocation_repository import AllocationRepository
 from app.ports.crypto_lending_reader import CryptoLendingReader
 from app.risk_engine.crypto_lending import gap_sweep
 
@@ -39,12 +38,10 @@ class CryptoLendingRiskService:
     def __init__(
         self,
         reader: CryptoLendingReader,
-        allocation_repo: AllocationRepository,
         default_gap_pct: Decimal,
         supported_asset_ids: Collection[int],
     ) -> None:
         self._reader = reader
-        self._allocation_repo = allocation_repo
         self._default_gap_pct = default_gap_pct
         self._supported_asset_ids = frozenset(supported_asset_ids)
 
@@ -69,12 +66,21 @@ class CryptoLendingRiskService:
         items = await self._load_enriched_items(receipt_token_id=asset_id, prime_id=prime_id)
         raw = gap_sweep.total_bad_debt(items, gap_pct)
         rrc_usd = abs(raw).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
-        usd_exposure = await self._allocation_repo.get_usd_exposure(asset_id, prime_id)
+        # Use the *protocol's own* collateral USD as the basis: gap-sweep
+        # already loads each collateral item priced via the protocol-specific
+        # reader (Aave/Morpho on-chain reads). This is the same fidelity
+        # ``protocol_oracle`` would give us but goes through a code path with
+        # broader coverage — ``allocation_repo.get_usd_exposure`` joins the
+        # indexer's ``protocol_oracle`` table, which is empty for several
+        # protocols today (see VEC-XXX/YYY).
+        position_usd = sum((item.amount_usd for item in items), Decimal("0")).quantize(
+            _USD_CENT, rounding=ROUND_HALF_EVEN
+        )
         return RrcResult(
             asset_id=asset_id,
             prime_id=prime_id,
             rrc_usd=rrc_usd,
-            comparable_crr_pct=self._compute_comparable_crr_pct(rrc_usd, usd_exposure),
+            comparable_crr_pct=self._compute_comparable_crr_pct(rrc_usd, position_usd),
             risk_model=self.risk_model,
             details=GapSweepDetails(risk_model="gap_sweep", gap_pct=gap_pct, loss_usd=rrc_usd),
         )
@@ -112,8 +118,10 @@ class CryptoLendingRiskService:
 
     @staticmethod
     def _compute_comparable_crr_pct(rrc_usd: Decimal, usd_exposure: Decimal) -> Decimal:
+        # Empty/zero-exposure positions naturally have zero implied CRR;
+        # gap-sweep would also have produced zero rrc_usd in that case.
         if usd_exposure <= Decimal("0"):
-            raise ValueError(f"usd_exposure must be positive, got {usd_exposure}")
+            return Decimal("0").quantize(_USD_CENT)
         return (rrc_usd / usd_exposure * _HUNDRED).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
 
     async def _load_enriched_items(self, receipt_token_id: int, prime_id: EthAddress) -> list[RiskEnrichedCollateral]:
