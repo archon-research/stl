@@ -19,6 +19,10 @@ on:
         required: false
         type: string
         default: ""
+      body:
+        required: false
+        type: string
+        default: ""
     secrets:
       slack-webhook-url:
         required: true
@@ -43,3 +47,4 @@ jobs:
           context: ${{ inputs.context }}
           pr-url: ${{ inputs.pr-url }}
           failed-jobs: ${{ inputs.failed-jobs }}
+          body: ${{ inputs.body }}
