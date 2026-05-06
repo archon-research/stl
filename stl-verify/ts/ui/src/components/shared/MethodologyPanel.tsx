@@ -405,11 +405,15 @@ export function MethodologyPanel({
                     {tokenPrice.source_type})
                   </div>
                   <div>Source ID: {tokenPrice.source_id}</div>
-                  <div>
-                    Timestamp: {formatDateTime(tokenPrice.timestamp)} (
-                    {formatFreshnessLabel(tokenPrice.timestamp)})
-                  </div>
-                  <div>Staleness: {tokenPrice.staleness_seconds}s</div>
+                  {tokenPrice.timestamp != null && (
+                    <div>
+                      Timestamp: {formatDateTime(tokenPrice.timestamp)} (
+                      {formatFreshnessLabel(tokenPrice.timestamp)})
+                    </div>
+                  )}
+                  {tokenPrice.staleness_seconds != null && (
+                    <div>Staleness: {tokenPrice.staleness_seconds}s</div>
+                  )}
                 </div>
               ) : null}
             </div>

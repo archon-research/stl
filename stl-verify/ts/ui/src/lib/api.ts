@@ -81,7 +81,6 @@ async function requestData<TData, TError>(
   return data;
 }
 
-
 export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
   return requestData(apiClient.GET('/v1/primes', { signal }), 'GET /v1/primes');
 }
@@ -293,7 +292,9 @@ export async function getPrimeDebtSnapshots(
 ): Promise<PrimeDebtSnapshot[]> {
   const query =
     typeof limit === 'number'
-      ? ({ limit } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
+      ? ({
+          limit,
+        } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
       : undefined;
 
   return requestData(

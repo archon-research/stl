@@ -475,7 +475,9 @@ export function RiskBreakdownTab({
               isTokenMetaLoading
                 ? 'Fetching price metadata'
                 : tokenPrice
-                  ? `${tokenPrice.source_name} (${tokenPrice.source_type}) · ${formatDurationFromSeconds(tokenPrice.staleness_seconds)} stale · ${formatFreshnessLabel(tokenPrice.timestamp)} · ${formatDateTime(tokenPrice.timestamp)}`
+                  ? tokenPrice.timestamp != null
+                    ? `${tokenPrice.source_name} (${tokenPrice.source_type}) · ${formatDurationFromSeconds(tokenPrice.staleness_seconds!)} stale · ${formatFreshnessLabel(tokenPrice.timestamp)} · ${formatDateTime(tokenPrice.timestamp)}`
+                    : 'Price data currently unavailable'
                   : 'Price metadata unavailable'
             }
           />
