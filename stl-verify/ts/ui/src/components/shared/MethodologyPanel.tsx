@@ -5,7 +5,12 @@ import ReactMarkdown from 'react-markdown';
 
 import { css } from '#styled-system/css';
 
-import { getDataSources, getToken, getTokenPrice, getTokens } from '../../lib/api';
+import {
+  getDataSources,
+  getToken,
+  getTokenPrice,
+  getTokens,
+} from '../../lib/api';
 import {
   formatDateTime,
   formatFreshnessLabel,
@@ -117,18 +122,19 @@ export function MethodologyPanel({
       setIsTokenLoading(true);
       setTokenError(null);
 
-      const [tokenResult, tokenPriceResult, tokensResult] = await Promise.allSettled([
-        getToken(tokenId, abortController.signal),
-        getTokenPrice(tokenId, abortController.signal),
-        getTokens(
-          {
-            chain_id: selectedChainId,
-            symbol: selectedTokenSymbol ?? undefined,
-            limit: 200,
-          },
-          abortController.signal,
-        ),
-      ]);
+      const [tokenResult, tokenPriceResult, tokensResult] =
+        await Promise.allSettled([
+          getToken(tokenId, abortController.signal),
+          getTokenPrice(tokenId, abortController.signal),
+          getTokens(
+            {
+              chain_id: selectedChainId,
+              symbol: selectedTokenSymbol ?? undefined,
+              limit: 200,
+            },
+            abortController.signal,
+          ),
+        ]);
 
       if (abortController.signal.aborted) {
         return;
@@ -289,15 +295,30 @@ export function MethodologyPanel({
               </h3>
 
               {!selectedTokenId ? (
-                <p className={css({ m: 0, fontSize: 'xs', color: 'text.default' })}>
-                  Select a receipt token to view matching token-catalog metadata and latest indexed token price.
+                <p
+                  className={css({
+                    m: 0,
+                    fontSize: 'xs',
+                    color: 'text.default',
+                  })}
+                >
+                  Select a receipt token to view matching token-catalog metadata
+                  and latest indexed token price.
                 </p>
               ) : null}
 
-              {selectedTokenId && isTokenLoading ? <SkeletonStack count={2} /> : null}
+              {selectedTokenId && isTokenLoading ? (
+                <SkeletonStack count={2} />
+              ) : null}
 
               {selectedTokenId && tokenError ? (
-                <p className={css({ m: 0, fontSize: 'xs', color: 'text.warning' })}>
+                <p
+                  className={css({
+                    m: 0,
+                    fontSize: 'xs',
+                    color: 'text.warning',
+                  })}
+                >
                   Failed to load token transparency metadata: {tokenError}
                 </p>
               ) : null}
@@ -318,7 +339,12 @@ export function MethodologyPanel({
                   })}
                 >
                   <div>
-                    <span className={css({ fontWeight: 'semibold', color: 'text.strong' })}>
+                    <span
+                      className={css({
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
                       Catalog Token:
                     </span>{' '}
                     {selectedToken.symbol ?? 'Unknown'} (ID {selectedToken.id})
@@ -326,7 +352,9 @@ export function MethodologyPanel({
                   <div>Address: {selectedToken.address}</div>
                   <div>Chain: {selectedToken.chain_id}</div>
                   <div>Decimals: {selectedToken.decimals ?? 'Unknown'}</div>
-                  <div>Catalog updated: {formatDateTime(selectedToken.updated_at)}</div>
+                  <div>
+                    Catalog updated: {formatDateTime(selectedToken.updated_at)}
+                  </div>
                   <div>
                     Metadata keys:{' '}
                     {selectedToken.metadata
@@ -334,7 +362,8 @@ export function MethodologyPanel({
                       : 'None'}
                   </div>
                   <div>
-                    Matching catalog rows (chain/symbol preview): {catalogPreviewCount}
+                    Matching catalog rows (chain/symbol preview):{' '}
+                    {catalogPreviewCount}
                   </div>
                 </div>
               ) : null}
@@ -355,17 +384,25 @@ export function MethodologyPanel({
                   })}
                 >
                   <div>
-                    <span className={css({ fontWeight: 'semibold', color: 'text.strong' })}>
+                    <span
+                      className={css({
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
                       Latest Price:
                     </span>{' '}
                     {formatUsdValue(tokenPrice.price_usd)}
                   </div>
                   <div>
-                    Source: {tokenPrice.source_display_name ?? tokenPrice.source_name} ({tokenPrice.source_type})
+                    Source:{' '}
+                    {tokenPrice.source_display_name ?? tokenPrice.source_name} (
+                    {tokenPrice.source_type})
                   </div>
                   <div>Source ID: {tokenPrice.source_id}</div>
                   <div>
-                    Timestamp: {formatDateTime(tokenPrice.timestamp)} ({formatFreshnessLabel(tokenPrice.timestamp)})
+                    Timestamp: {formatDateTime(tokenPrice.timestamp)} (
+                    {formatFreshnessLabel(tokenPrice.timestamp)})
                   </div>
                   <div>Staleness: {tokenPrice.staleness_seconds}s</div>
                 </div>

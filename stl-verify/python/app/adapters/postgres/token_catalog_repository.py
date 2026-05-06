@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -54,9 +53,7 @@ class PostgresTokenCatalogRepository:
         params = {
             "chain_id": chain_id,
             "symbol": (
-                f"%{_escape_like_pattern(symbol.strip())}%"
-                if symbol is not None and symbol.strip() != ""
-                else None
+                f"%{_escape_like_pattern(symbol.strip())}%" if symbol is not None and symbol.strip() != "" else None
             ),
             "limit": min(max(limit, 1), 500),
         }

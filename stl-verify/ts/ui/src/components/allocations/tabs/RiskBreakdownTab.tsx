@@ -12,11 +12,7 @@ import {
   buildRowSearchString,
   matchesSearchQuery,
 } from '../../../data-table/utils';
-import {
-  getRiskBreakdown,
-  getToken,
-  getTokenPrice,
-} from '../../../lib/api';
+import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
   formatDateTime,
   formatDurationFromSeconds,
@@ -455,7 +451,8 @@ export function RiskBreakdownTab({
             value={
               isTokenMetaLoading
                 ? 'Loading...'
-                : (tokenCatalog?.symbol ?? selectedReceiptToken.underlying_symbol)
+                : (tokenCatalog?.symbol ??
+                  selectedReceiptToken.underlying_symbol)
             }
             detail={
               isTokenMetaLoading

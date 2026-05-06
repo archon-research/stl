@@ -1,6 +1,5 @@
-import type { ReactNode } from 'react';
-
 import { Tooltip } from '@base-ui/react/tooltip';
+import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -10,11 +9,7 @@ type AppTooltipProps = {
   ariaLabel: string;
 };
 
-export function AppTooltip({
-  trigger,
-  content,
-  ariaLabel,
-}: AppTooltipProps) {
+export function AppTooltip({ trigger, content, ariaLabel }: AppTooltipProps) {
   return (
     <Tooltip.Provider>
       <Tooltip.Root>

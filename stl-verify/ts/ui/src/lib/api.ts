@@ -316,7 +316,10 @@ export function getTokens(
   );
 }
 
-export function getToken(tokenId: number, signal?: AbortSignal): Promise<Token> {
+export function getToken(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<Token> {
   return requestData(
     apiClient.GET('/v1/tokens/{token_id}', {
       params: {
@@ -357,7 +360,7 @@ export async function getPrimeDebtSnapshots(
     ? payload
     : payload &&
         typeof payload === 'object' &&
-          Array.isArray((payload as UnknownRecord).items)
+        Array.isArray((payload as UnknownRecord).items)
       ? ((payload as UnknownRecord).items as unknown[])
       : [];
 
@@ -371,7 +374,11 @@ export async function getLatestPrimeDebtSnapshot(
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot | null> {
   try {
-    const latestPayload = await requestPrimeDebtEndpoint(primeId, '/latest', signal);
+    const latestPayload = await requestPrimeDebtEndpoint(
+      primeId,
+      '/latest',
+      signal,
+    );
     return normalizePrimeDebtSnapshot(latestPayload, primeId);
   } catch (latestError) {
     if (isAbortError(latestError)) {

@@ -485,11 +485,16 @@ export function ActivityFeed({
         {filteredEvents.map((event, idx) => {
           const eventKey = buildActivityEventKey(event);
           const txHash = event.tx_hash;
-          const txCacheKey = txHash ? buildTxCacheKey(txHash, event.chain_id) : null;
+          const txCacheKey = txHash
+            ? buildTxCacheKey(txHash, event.chain_id)
+            : null;
           const isExpanded = selectedEventKey === eventKey;
           const txEvents = txCacheKey ? txEventsByHash[txCacheKey] : undefined;
-          const txError = txCacheKey ? txEventErrorsByHash[txCacheKey] : undefined;
-          const isTxLoading = txCacheKey !== null && txEventsLoadingHash === txCacheKey;
+          const txError = txCacheKey
+            ? txEventErrorsByHash[txCacheKey]
+            : undefined;
+          const isTxLoading =
+            txCacheKey !== null && txEventsLoadingHash === txCacheKey;
 
           return (
             <div key={`${eventKey}:${idx}`}>
@@ -525,18 +530,25 @@ export function ActivityFeed({
                   </div>
 
                   {isTxLoading ? (
-                    <span className={css({ fontSize: 'xs', color: 'text.default' })}>
+                    <span
+                      className={css({ fontSize: 'xs', color: 'text.default' })}
+                    >
                       Loading protocol events...
                     </span>
                   ) : null}
 
                   {!isTxLoading && txError ? (
-                    <span className={css({ fontSize: 'xs', color: 'text.warning' })}>
+                    <span
+                      className={css({ fontSize: 'xs', color: 'text.warning' })}
+                    >
                       Failed to load protocol events: {txError}
                     </span>
                   ) : null}
 
-                  {!isTxLoading && !txError && txEvents && txEvents.length === 0 ? (
+                  {!isTxLoading &&
+                  !txError &&
+                  txEvents &&
+                  txEvents.length === 0 ? (
                     <EmptyState
                       title="No Protocol Events"
                       description="No protocol events were indexed for this transaction."
@@ -576,25 +588,62 @@ export function ActivityFeed({
                             >
                               {protocolEvent.protocol_name}
                             </span>
-                            <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+                            <span
+                              className={css({
+                                fontSize: 'xs',
+                                color: 'text.subtle',
+                              })}
+                            >
                               •
                             </span>
-                            <span className={css({ fontSize: 'xs', color: 'text.default' })}>
+                            <span
+                              className={css({
+                                fontSize: 'xs',
+                                color: 'text.default',
+                              })}
+                            >
                               {protocolEvent.event_name}
                             </span>
-                            <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+                            <span
+                              className={css({
+                                fontSize: 'xs',
+                                color: 'text.subtle',
+                              })}
+                            >
                               log #{protocolEvent.log_index}
                             </span>
-                            <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
-                              block {protocolEvent.block_number} v{protocolEvent.block_version}
+                            <span
+                              className={css({
+                                fontSize: 'xs',
+                                color: 'text.subtle',
+                              })}
+                            >
+                              block {protocolEvent.block_number} v
+                              {protocolEvent.block_version}
                             </span>
                           </div>
 
-                          <div className={flex({ gap: '2', wrap: 'wrap', align: 'center' })}>
-                            <span className={css({ fontSize: 'xs', color: 'text.default' })}>
+                          <div
+                            className={flex({
+                              gap: '2',
+                              wrap: 'wrap',
+                              align: 'center',
+                            })}
+                          >
+                            <span
+                              className={css({
+                                fontSize: 'xs',
+                                color: 'text.default',
+                              })}
+                            >
                               {formatDateTime(protocolEvent.created_at)}
                             </span>
-                            <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+                            <span
+                              className={css({
+                                fontSize: 'xs',
+                                color: 'text.subtle',
+                              })}
+                            >
                               •
                             </span>
                             <TokenAddress

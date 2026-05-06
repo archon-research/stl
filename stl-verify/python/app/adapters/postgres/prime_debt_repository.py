@@ -33,8 +33,7 @@ class PostgresPrimeDebtRepository:
             WHERE
             """
             + self._prime_match_clause()
-            +
-            """
+            + """
             LIMIT 1
             """
         )
@@ -60,8 +59,7 @@ class PostgresPrimeDebtRepository:
             WHERE
             """
             + self._prime_match_clause()
-            +
-            """
+            + """
             ORDER BY pd.synced_at DESC, pd.block_number DESC, pd.block_version DESC
             LIMIT :limit
             """
@@ -105,8 +103,7 @@ class PostgresPrimeDebtRepository:
             WHERE
             """
             + self._prime_match_clause()
-            +
-            """
+            + """
             ORDER BY pd.synced_at DESC, pd.block_number DESC, pd.block_version DESC
             LIMIT 1
             """

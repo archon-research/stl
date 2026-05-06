@@ -637,8 +637,9 @@ export function AllocationGrid({
                     label="Risk capital"
                     value={formatUsdValue(capitalMetrics.risk_capital)}
                     detail={
-                      parseNumericValue(capitalMetrics.risk_to_capital_ratio) !==
-                      null
+                      parseNumericValue(
+                        capitalMetrics.risk_to_capital_ratio,
+                      ) !== null
                         ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
                         : undefined
                     }
@@ -664,51 +665,51 @@ export function AllocationGrid({
                         : formatWadValue(primeDebtSnapshot?.debt_wad)
                     }
                     detail={
-                      isPrimeDebtLoading
-                        ? 'Fetching latest debt snapshot'
-                        : (
-                            <div
-                              className={css({
-                                display: 'flex',
-                                flexWrap: 'wrap',
-                                alignItems: 'center',
-                                gap: '1',
-                              })}
-                            >
-                              <span>
-                                Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                      isPrimeDebtLoading ? (
+                        'Fetching latest debt snapshot'
+                      ) : (
+                        <div
+                          className={css({
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: '1',
+                          })}
+                        >
+                          <span>
+                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <AppTooltip
+                            ariaLabel={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                            trigger={
+                              <span
+                                title={
+                                  primeDebtSnapshot?.debt_wad
+                                    ? String(primeDebtSnapshot.debt_wad)
+                                    : 'Raw WAD unavailable'
+                                }
+                                className={css({
+                                  textDecoration: 'underline',
+                                  textDecorationStyle: 'dotted',
+                                  textUnderlineOffset: '2px',
+                                })}
+                              >
+                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
                               </span>
-                              <span aria-hidden="true">·</span>
-                              <AppTooltip
-                                ariaLabel={
-                                  primeDebtSnapshot?.debt_wad
-                                    ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
-                                    : 'Raw WAD unavailable'
-                                }
-                                trigger={
-                                  <span
-                                    title={
-                                      primeDebtSnapshot?.debt_wad
-                                        ? String(primeDebtSnapshot.debt_wad)
-                                        : 'Raw WAD unavailable'
-                                    }
-                                    className={css({
-                                      textDecoration: 'underline',
-                                      textDecorationStyle: 'dotted',
-                                      textUnderlineOffset: '2px',
-                                    })}
-                                  >
-                                    {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
-                                  </span>
-                                }
-                                content={
-                                  primeDebtSnapshot?.debt_wad
-                                    ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
-                                    : 'Raw WAD unavailable'
-                                }
-                              />
-                            </div>
-                          )
+                            }
+                            content={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                          />
+                        </div>
+                      )
                     }
                   />
                 </>
