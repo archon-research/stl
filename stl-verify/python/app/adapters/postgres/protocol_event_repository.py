@@ -7,6 +7,22 @@ from app.domain.entities.protocol_event import ProtocolEvent
 
 logger = logging.getLogger(__name__)
 
+_EVENT_SELECT_COLUMNS = """
+    SELECT
+        encode(pe.tx_hash, 'hex') AS tx_hash,
+        pe.log_index,
+        pe.chain_id,
+        pe.block_number,
+        pe.block_version,
+        p.name AS protocol_name,
+        pe.event_name,
+        encode(pe.contract_address, 'hex') AS contract_address,
+        pe.event_data,
+        pe.created_at
+    FROM protocol_event pe
+    JOIN protocol p ON pe.protocol_id = p.id
+"""
+
 
 class PostgresProtocolEventRepository:
     """PostgreSQL adapter for protocol event and related snapshot queries."""
@@ -43,25 +59,15 @@ class PostgresProtocolEventRepository:
         limit: int = 100,
     ) -> list[ProtocolEvent]:
         """List protocol events with optional filters."""
-        query = """
-            SELECT
-                encode(pe.tx_hash, 'hex') AS tx_hash,
-                pe.log_index,
-                pe.chain_id,
-                pe.block_number,
-                pe.block_version,
-                p.name AS protocol_name,
-                pe.event_name,
-                encode(pe.contract_address, 'hex') AS contract_address,
-                pe.event_data,
-                pe.created_at
-            FROM protocol_event pe
-            JOIN protocol p ON pe.protocol_id = p.id
+        query = (
+            _EVENT_SELECT_COLUMNS
+            + """
             WHERE (CAST(:tx_hash AS TEXT) IS NULL OR pe.tx_hash = decode(CAST(:tx_hash AS TEXT), 'hex'))
             AND (CAST(:protocol_name AS TEXT) IS NULL OR p.name = CAST(:protocol_name AS TEXT))
             ORDER BY pe.created_at DESC, pe.block_number DESC, pe.log_index DESC
             LIMIT :limit
         """
+        )
 
         params = {
             "tx_hash": self._normalize_tx_hash(tx_hash),
@@ -77,23 +83,13 @@ class PostgresProtocolEventRepository:
 
     async def list_events_by_tx(self, tx_hash: str) -> list[ProtocolEvent]:
         """Get all events for a transaction."""
-        query = """
-            SELECT
-                encode(pe.tx_hash, 'hex') AS tx_hash,
-                pe.log_index,
-                pe.chain_id,
-                pe.block_number,
-                pe.block_version,
-                p.name AS protocol_name,
-                pe.event_name,
-                encode(pe.contract_address, 'hex') AS contract_address,
-                pe.event_data,
-                pe.created_at
-            FROM protocol_event pe
-            JOIN protocol p ON pe.protocol_id = p.id
+        query = (
+            _EVENT_SELECT_COLUMNS
+            + """
             WHERE pe.tx_hash = decode(:tx_hash, 'hex')
             ORDER BY pe.log_index ASC, pe.created_at DESC
         """
+        )
 
         async with self._engine.connect() as conn:
             result = await conn.execute(text(query), {"tx_hash": self._normalize_tx_hash(tx_hash)})

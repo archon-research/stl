@@ -7,14 +7,14 @@ import type {
   BadDebt,
   CapitalMetricsListResponse,
   DataSourcesResponse,
-  ProtocolEventsResponse,
+  PrimeDebtSnapshot,
   PrimesResponse,
+  ProtocolEventsResponse,
   RiskBreakdown,
   Token,
   TokenPrice,
   TokensResponse,
   TxProtocolEventsResponse,
-  PrimeDebtSnapshot,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { isAbortError } from './errors';
@@ -83,43 +83,75 @@ async function requestData<TData, TError>(
   return data;
 }
 
-function normalizePrimeDebtSnapshot(
-  value: unknown,
-  primeId: string,
-): PrimeDebtSnapshot | null {
+function firstStringField(
+  row: UnknownRecord,
+  ...keys: string[]
+): string | null {
+  for (const key of keys) {
+    if (typeof row[key] === 'string') {
+      return row[key] as string;
+    }
+  }
+  return null;
+}
+
+function firstNumberField(
+  row: UnknownRecord,
+  ...keys: string[]
+): number | null {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value !== '') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+
+function normalizePrimeDebtSnapshot(value: unknown): PrimeDebtSnapshot | null {
   if (!value || typeof value !== 'object') {
     return null;
   }
 
   const row = value as UnknownRecord;
+  const primeAddress = firstStringField(row, 'prime_address', 'prime_id');
+  const primeName = firstStringField(row, 'prime_name', 'star');
+  const ilkName = firstStringField(row, 'ilk_name', 'collateral_type');
+  const debtWad = firstStringField(row, 'debt_wad', 'borrowed_amount');
+  const syncedAt = firstStringField(
+    row,
+    'synced_at',
+    'updated_at',
+    'timestamp',
+  );
+  const blockNumber = firstNumberField(row, 'block_number');
+  const blockVersion = firstNumberField(row, 'block_version');
 
-  const debtWad =
-    typeof row.debt_wad === 'string'
-      ? row.debt_wad
-      : typeof row.borrowed_amount === 'string'
-        ? row.borrowed_amount
-        : null;
-
-  const ilkName =
-    typeof row.ilk_name === 'string'
-      ? row.ilk_name
-      : typeof row.collateral_type === 'string'
-        ? row.collateral_type
-        : null;
-
-  const syncedAt =
-    typeof row.synced_at === 'string'
-      ? row.synced_at
-      : typeof row.updated_at === 'string'
-        ? row.updated_at
-        : typeof row.timestamp === 'string'
-          ? row.timestamp
-          : null;
+  if (
+    !primeAddress ||
+    !primeName ||
+    !ilkName ||
+    !debtWad ||
+    !syncedAt ||
+    blockNumber === null ||
+    blockVersion === null
+  ) {
+    return null;
+  }
 
   return {
-    prime_id: typeof row.prime_id === 'string' ? row.prime_id : primeId,
-    debt_wad: debtWad,
+    prime_address: primeAddress,
+    prime_name: primeName,
     ilk_name: ilkName,
+    debt_wad: debtWad,
+    block_number: Math.trunc(blockNumber),
+    block_version: Math.trunc(blockVersion),
     synced_at: syncedAt,
   };
 }
@@ -354,23 +386,31 @@ export function getTokenPrice(
   );
 }
 
+function extractRowsFromPayload(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (payload && typeof payload === 'object') {
+    const items = (payload as UnknownRecord).items;
+    if (Array.isArray(items)) {
+      return items;
+    }
+  }
+
+  return [];
+}
+
 export async function getPrimeDebtSnapshots(
   primeId: string,
   limit?: number,
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot[]> {
   const payload = await requestPrimeDebtEndpoint(primeId, limit, signal);
-
-  const rows = Array.isArray(payload)
-    ? payload
-    : payload &&
-        typeof payload === 'object' &&
-        Array.isArray((payload as UnknownRecord).items)
-      ? ((payload as UnknownRecord).items as unknown[])
-      : [];
+  const rows = extractRowsFromPayload(payload);
 
   return rows
-    .map((row) => normalizePrimeDebtSnapshot(row, primeId))
+    .map((row) => normalizePrimeDebtSnapshot(row))
     .filter((row): row is PrimeDebtSnapshot => row !== null);
 }
 

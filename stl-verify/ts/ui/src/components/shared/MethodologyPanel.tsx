@@ -121,6 +121,9 @@ export function MethodologyPanel({
     async function fetchTokenTransparency() {
       setIsTokenLoading(true);
       setTokenError(null);
+      setSelectedToken(null);
+      setTokenPrice(null);
+      setCatalogPreviewCount(0);
 
       const [tokenResult, tokenPriceResult, tokensResult] =
         await Promise.allSettled([
@@ -143,6 +146,7 @@ export function MethodologyPanel({
       if (tokenResult.status === 'fulfilled') {
         setSelectedToken(tokenResult.value);
       } else {
+        setSelectedToken(null);
         const errorMsg = toErrorMessage(tokenResult.reason);
         setTokenError(errorMsg);
         logging.error('Failed to fetch selected token from catalog', {
@@ -156,6 +160,7 @@ export function MethodologyPanel({
       if (tokenPriceResult.status === 'fulfilled') {
         setTokenPrice(tokenPriceResult.value);
       } else {
+        setTokenPrice(null);
         const errorMsg = toErrorMessage(tokenPriceResult.reason);
         setTokenError((previous) => previous ?? errorMsg);
         logging.error('Failed to fetch selected token price', {

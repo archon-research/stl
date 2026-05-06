@@ -48,24 +48,27 @@ def test_list_prime_debt_snapshots_returns_rows():
     snap = _snapshot()
     service = _make_service(snapshots=[snap])
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
-    client = TestClient(app)
+    try:
+        client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=25")
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=25")
 
-    assert response.status_code == 200
-    assert response.json() == [
-        {
-            "prime_address": _VALID_ADDR,
-            "prime_name": "spark",
-            "ilk_name": "ETH-A",
-            "debt_wad": "123456789.123",
-            "block_number": 22000123,
-            "block_version": 0,
-            "synced_at": "2026-03-05T12:00:00Z",
-        }
-    ]
-    service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
-    service.list_debt_snapshots.assert_awaited_once_with(EthAddress(_VALID_ADDR), limit=25)
+        assert response.status_code == 200
+        assert response.json() == [
+            {
+                "prime_address": _VALID_ADDR,
+                "prime_name": "spark",
+                "ilk_name": "ETH-A",
+                "debt_wad": "123456789.123",
+                "block_number": 22000123,
+                "block_version": 0,
+                "synced_at": "2026-03-05T12:00:00Z",
+            }
+        ]
+        service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+        service.list_debt_snapshots.assert_awaited_once_with(EthAddress(_VALID_ADDR), limit=25)
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
 
 def test_list_prime_debt_snapshots_returns_empty_when_prime_has_no_snapshots():
@@ -73,12 +76,15 @@ def test_list_prime_debt_snapshots_returns_empty_when_prime_has_no_snapshots():
 
     service = _make_service(snapshots=[])
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
-    client = TestClient(app)
+    try:
+        client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
 
-    assert response.status_code == 200
-    assert response.json() == []
+        assert response.status_code == 200
+        assert response.json() == []
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
 
 def test_list_prime_debt_snapshots_returns_404_when_prime_missing():
@@ -86,12 +92,15 @@ def test_list_prime_debt_snapshots_returns_404_when_prime_missing():
 
     service = _make_service(exists=False)
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
-    client = TestClient(app)
+    try:
+        client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Prime not found"
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Prime not found"
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
 
 def test_list_prime_debt_snapshots_returns_422_for_invalid_prime_id():
@@ -99,8 +108,11 @@ def test_list_prime_debt_snapshots_returns_422_for_invalid_prime_id():
 
     service = _make_service()
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
-    client = TestClient(app)
+    try:
+        client = TestClient(app)
 
-    response = client.get("/v1/primes/0xdeadbeef/debt")
+        response = client.get("/v1/primes/0xdeadbeef/debt")
 
-    assert response.status_code == 422
+        assert response.status_code == 422
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)

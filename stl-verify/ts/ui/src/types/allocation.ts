@@ -11,13 +11,8 @@ export type DataSource = components['schemas']['DataSourceResponse'];
 export type AllocationCategory = components['schemas']['AllocationCategory'];
 export type Token = components['schemas']['TokenResponse'];
 export type TokenPrice = components['schemas']['TokenPriceResponse'];
-
-export type PrimeDebtSnapshot = {
-  prime_id: string;
-  debt_wad: string | null;
-  ilk_name: string | null;
-  synced_at: string | null;
-};
+export type PrimeDebtSnapshot =
+  components['schemas']['PrimeDebtSnapshotResponse'];
 
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
 export type BadDebt = components['schemas']['BadDebtResponse'];

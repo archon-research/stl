@@ -17,8 +17,13 @@ def _escape_like_pattern(value: str) -> str:
 def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
     try:
         if value is None:
-            return Decimal("0")
-        return Decimal(str(value))
+            raise ValueError("missing numeric value")
+
+        parsed = Decimal(str(value))
+        if not parsed.is_finite():
+            raise ValueError("non-finite numeric value")
+
+        return parsed
     except (ValueError, InvalidOperation, TypeError) as exc:
         logger.error(
             "Invalid decimal value in token catalog query",
@@ -28,7 +33,9 @@ def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> De
                 "value": str(value),
             },
         )
-        raise ValueError(f"Database contains invalid numeric value for {field_name}: {value}") from exc
+        raise ValueError(
+            f"Database contains invalid numeric value for {field_name} (row={row_identifier}, value={value}): {exc}"
+        ) from exc
 
 
 def _normalize_metadata(value: Any) -> dict[str, Any] | None:
@@ -42,6 +49,18 @@ def _normalize_metadata(value: Any) -> dict[str, Any] | None:
 class PostgresTokenCatalogRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+
+    @staticmethod
+    def _row_to_metadata(row: object) -> TokenMetadata:
+        return TokenMetadata(
+            id=row.id,
+            chain_id=row.chain_id,
+            address="0x" + row.address,
+            symbol=row.symbol,
+            decimals=row.decimals,
+            updated_at=row.updated_at,
+            metadata=_normalize_metadata(row.metadata),
+        )
 
     async def list_tokens(
         self,
@@ -62,18 +81,7 @@ class PostgresTokenCatalogRepository:
             result = await conn.execute(_LIST_TOKENS_SQL, params)
             rows = result.fetchall()
 
-        return [
-            TokenMetadata(
-                id=row.id,
-                chain_id=row.chain_id,
-                address="0x" + row.address,
-                symbol=row.symbol,
-                decimals=row.decimals,
-                updated_at=row.updated_at,
-                metadata=_normalize_metadata(row.metadata),
-            )
-            for row in rows
-        ]
+        return [self._row_to_metadata(row) for row in rows]
 
     async def get_token(self, token_id: int) -> TokenMetadata | None:
         async with self._engine.connect() as conn:
@@ -82,15 +90,7 @@ class PostgresTokenCatalogRepository:
         if row is None:
             return None
 
-        return TokenMetadata(
-            id=row.id,
-            chain_id=row.chain_id,
-            address="0x" + row.address,
-            symbol=row.symbol,
-            decimals=row.decimals,
-            updated_at=row.updated_at,
-            metadata=_normalize_metadata(row.metadata),
-        )
+        return self._row_to_metadata(row)
 
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         async with self._engine.connect() as conn:

@@ -390,13 +390,28 @@ export function formatDurationFromSeconds(
 export function formatWadValue(
   value: number | string | null | undefined,
 ): string {
-  const numeric = parseNumericValue(value, 'formatWadValue');
-
-  if (numeric === null) {
+  if (value === null || value === undefined || value === '') {
     return '—';
   }
 
-  return formatTokenAmount(numeric / 1e18);
+  try {
+    const normalized =
+      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
+    const wei = BigInt(normalized.split('.')[0]);
+    const wad = 10n ** 18n;
+    const whole = wei / wad;
+    const fraction = wei % wad;
+    const fraction6 = ((fraction * 1_000_000n) / wad)
+      .toString()
+      .padStart(6, '0');
+
+    return formatTokenAmount(`${whole.toString()}.${fraction6}`);
+  } catch {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
 }
 
 export function formatRawWadLabel(

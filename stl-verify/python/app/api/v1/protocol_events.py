@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -50,7 +50,7 @@ async def list_protocol_events(
 
 @router.get("/tx/{tx_hash}/events", response_model=list[ProtocolEventResponse])
 async def get_tx_events(
-    tx_hash: str,
+    tx_hash: str = Path(..., pattern=r"^(?:0x)?[0-9a-fA-F]{64}$"),
     service: ProtocolEventService = Depends(_get_protocol_event_service),
 ) -> list[ProtocolEventResponse]:
     """Get all events for a transaction."""

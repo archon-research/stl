@@ -688,11 +688,6 @@ export function AllocationGrid({
                             }
                             trigger={
                               <span
-                                title={
-                                  primeDebtSnapshot?.debt_wad
-                                    ? String(primeDebtSnapshot.debt_wad)
-                                    : 'Raw WAD unavailable'
-                                }
                                 className={css({
                                   textDecoration: 'underline',
                                   textDecorationStyle: 'dotted',

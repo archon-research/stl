@@ -95,6 +95,118 @@ function buildTxCacheKey(txHash: string, chainId: number): string {
   return `${chainId}:${txHash.toLowerCase()}`;
 }
 
+function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
+  return (
+    <div
+      className={css({
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'border.subtle',
+        borderRadius: 'sm',
+        bg: 'surface.default',
+        padding: '2.5',
+        display: 'grid',
+        gap: '1',
+      })}
+    >
+      <div
+        className={flex({
+          align: 'center',
+          gap: '2',
+          wrap: 'wrap',
+        })}
+      >
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.strong',
+            fontWeight: 'semibold',
+          })}
+        >
+          {event.protocol_name}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          •
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.default',
+          })}
+        >
+          {event.event_name}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          log #{event.log_index}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          block {event.block_number} v{event.block_version}
+        </span>
+      </div>
+
+      <div
+        className={flex({
+          gap: '2',
+          wrap: 'wrap',
+          align: 'center',
+        })}
+      >
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.default',
+          })}
+        >
+          {formatDateTime(event.created_at)}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          •
+        </span>
+        <TokenAddress
+          address={event.contract_address}
+          chainId={event.chain_id}
+        />
+      </div>
+
+      <pre
+        className={css({
+          margin: 0,
+          borderRadius: 'sm',
+          bg: 'surface.subtle',
+          padding: '2',
+          fontFamily: 'mono',
+          fontSize: 'xs',
+          color: 'text.default',
+          overflowX: 'auto',
+          maxHeight: '10rem',
+        })}
+      >
+        {formatEventData(event.event_data)}
+      </pre>
+    </div>
+  );
+}
+
 function ActivityEventRow({
   event,
   isExpanded,
@@ -264,9 +376,9 @@ export function ActivityFeed({
   const [txEventErrorsByHash, setTxEventErrorsByHash] = useState<
     Record<string, string>
   >({});
-  const [txEventsLoadingHash, setTxEventsLoadingHash] = useState<string | null>(
-    null,
-  );
+  const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
+    Record<string, boolean>
+  >({});
   const [filters] = useState<ActivityFilters>({
     limit: 50,
   });
@@ -279,7 +391,7 @@ export function ActivityFeed({
       setSelectedEventKey(null);
       setTxEventsByHash({});
       setTxEventErrorsByHash({});
-      setTxEventsLoadingHash(null);
+      setTxEventsLoadingByHash({});
       return;
     }
 
@@ -337,11 +449,18 @@ export function ActivityFeed({
 
     setSelectedEventKey(eventKey);
 
-    if (txEventsLoadingHash === txCacheKey) {
+    if (txEventsByHash[txCacheKey] || txEventErrorsByHash[txCacheKey]) {
       return;
     }
 
-    setTxEventsLoadingHash(txCacheKey);
+    if (txEventsLoadingByHash[txCacheKey]) {
+      return;
+    }
+
+    setTxEventsLoadingByHash((previous) => ({
+      ...previous,
+      [txCacheKey]: true,
+    }));
     setTxEventErrorsByHash((previous) => {
       if (!previous[txCacheKey]) {
         return previous;
@@ -398,9 +517,14 @@ export function ActivityFeed({
         }
       })
       .finally(() => {
-        setTxEventsLoadingHash((current) =>
-          current === txCacheKey ? null : current,
-        );
+        setTxEventsLoadingByHash((previous) => {
+          if (!previous[txCacheKey]) {
+            return previous;
+          }
+
+          const { [txCacheKey]: _, ...rest } = previous;
+          return rest;
+        });
       });
   };
 
@@ -494,7 +618,7 @@ export function ActivityFeed({
             ? txEventErrorsByHash[txCacheKey]
             : undefined;
           const isTxLoading =
-            txCacheKey !== null && txEventsLoadingHash === txCacheKey;
+            txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
 
           return (
             <div key={`${eventKey}:${idx}`}>
@@ -559,115 +683,10 @@ export function ActivityFeed({
 
                   {!isTxLoading && !txError && txEvents && txEvents.length > 0
                     ? txEvents.map((protocolEvent) => (
-                        <div
+                        <ProtocolEventCard
                           key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
-                          className={css({
-                            borderWidth: '1px',
-                            borderStyle: 'solid',
-                            borderColor: 'border.subtle',
-                            borderRadius: 'sm',
-                            bg: 'surface.default',
-                            padding: '2.5',
-                            display: 'grid',
-                            gap: '1',
-                          })}
-                        >
-                          <div
-                            className={flex({
-                              align: 'center',
-                              gap: '2',
-                              wrap: 'wrap',
-                            })}
-                          >
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.strong',
-                                fontWeight: 'semibold',
-                              })}
-                            >
-                              {protocolEvent.protocol_name}
-                            </span>
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.subtle',
-                              })}
-                            >
-                              •
-                            </span>
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.default',
-                              })}
-                            >
-                              {protocolEvent.event_name}
-                            </span>
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.subtle',
-                              })}
-                            >
-                              log #{protocolEvent.log_index}
-                            </span>
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.subtle',
-                              })}
-                            >
-                              block {protocolEvent.block_number} v
-                              {protocolEvent.block_version}
-                            </span>
-                          </div>
-
-                          <div
-                            className={flex({
-                              gap: '2',
-                              wrap: 'wrap',
-                              align: 'center',
-                            })}
-                          >
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.default',
-                              })}
-                            >
-                              {formatDateTime(protocolEvent.created_at)}
-                            </span>
-                            <span
-                              className={css({
-                                fontSize: 'xs',
-                                color: 'text.subtle',
-                              })}
-                            >
-                              •
-                            </span>
-                            <TokenAddress
-                              address={protocolEvent.contract_address}
-                              chainId={protocolEvent.chain_id}
-                            />
-                          </div>
-
-                          <pre
-                            className={css({
-                              margin: 0,
-                              borderRadius: 'sm',
-                              bg: 'surface.subtle',
-                              padding: '2',
-                              fontFamily: 'mono',
-                              fontSize: 'xs',
-                              color: 'text.default',
-                              overflowX: 'auto',
-                              maxHeight: '10rem',
-                            })}
-                          >
-                            {formatEventData(protocolEvent.event_data)}
-                          </pre>
-                        </div>
+                          event={protocolEvent}
+                        />
                       ))
                     : null}
                 </div>

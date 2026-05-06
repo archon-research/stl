@@ -34,6 +34,18 @@ class TokenPriceResponse(BaseModel):
     staleness_seconds: int
 
 
+def _to_token_response(row) -> TokenResponse:
+    return TokenResponse(
+        id=row.id,
+        chain_id=row.chain_id,
+        address=row.address,
+        symbol=row.symbol,
+        decimals=row.decimals,
+        updated_at=row.updated_at,
+        metadata=row.metadata,
+    )
+
+
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> TokenCatalogService:
     return TokenCatalogService(PostgresTokenCatalogRepository(engine))
 
@@ -46,19 +58,7 @@ async def list_tokens(
     service: TokenCatalogService = Depends(_get_service),
 ) -> list[TokenResponse]:
     rows = await service.list_tokens(chain_id=chain_id, symbol=symbol, limit=limit)
-
-    return [
-        TokenResponse(
-            id=row.id,
-            chain_id=row.chain_id,
-            address=row.address,
-            symbol=row.symbol,
-            decimals=row.decimals,
-            updated_at=row.updated_at,
-            metadata=row.metadata,
-        )
-        for row in rows
-    ]
+    return [_to_token_response(row) for row in rows]
 
 
 @router.get("/tokens/{token_id}", response_model=TokenResponse)
@@ -67,15 +67,7 @@ async def get_token(token_id: int, service: TokenCatalogService = Depends(_get_s
     if row is None:
         raise HTTPException(status_code=404, detail="Token not found")
 
-    return TokenResponse(
-        id=row.id,
-        chain_id=row.chain_id,
-        address=row.address,
-        symbol=row.symbol,
-        decimals=row.decimals,
-        updated_at=row.updated_at,
-        metadata=row.metadata,
-    )
+    return _to_token_response(row)
 
 
 @router.get("/tokens/{token_id}/price", response_model=TokenPriceResponse)

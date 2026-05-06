@@ -47,7 +47,7 @@ class PostgresPrimeDebtRepository:
         query = text(
             """
             SELECT
-                encode(decode(:address_hex, 'hex'), 'hex') AS prime_address,
+                encode(p.vault_address, 'hex') AS prime_address,
                 p.name AS prime_name,
                 pd.ilk_name,
                 pd.debt_wad,
