@@ -218,6 +218,21 @@ async def list_capital_metrics(
             None,
         )
         if not row:
+            metrics.append(
+                CapitalMetricsResponse(
+                    prime_id=prime.id,
+                    prime_name=prime.name,
+                    risk_capital=Decimal("0"),
+                    capital_buffer=Decimal("0"),
+                    first_loss_capital=Decimal("0"),
+                    total_capital=Decimal("0"),
+                    risk_to_capital_ratio=None,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    benchmark_source=settings.star_risk_capital_upstream_url,
+                    is_validated=False,
+                    validation_note="No upstream Star risk-capital row matched this prime.",
+                )
+            )
             continue
 
         total_rc = _to_decimal(row.total_rc, field="total_rc", prime_name=prime.name)

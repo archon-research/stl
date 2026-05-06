@@ -50,7 +50,7 @@ def test_list_protocol_events_returns_rows_and_applies_filters():
     event = _event()
     service = _make_service(events=[event])
     app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
 
     response = client.get(
         "/v1/protocol-events",
@@ -77,7 +77,7 @@ def test_list_protocol_events_returns_422_for_invalid_tx_hash_query():
 
     service = _make_service()
     app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
 
     response = client.get("/v1/protocol-events", params={"tx_hash": "foo"})
 
@@ -154,3 +154,35 @@ def test_get_tx_events_returns_empty_list_for_nonexistent_tx():
     assert response.status_code == 200
     assert response.json() == []
     service.get_events_by_tx.assert_awaited_once_with(_VALID_TX_HASH)
+
+
+def test_list_protocol_events_returns_500_when_service_errors():
+    from app.api.v1 import protocol_events
+
+    service = _make_service()
+    service.list_events.side_effect = ValueError("db failure")
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/v1/protocol-events")
+
+        assert response.status_code == 500
+    finally:
+        app.dependency_overrides.pop(protocol_events._get_protocol_event_service, None)
+
+
+def test_get_tx_events_returns_500_when_service_errors():
+    from app.api.v1 import protocol_events
+
+    service = _make_service()
+    service.get_events_by_tx.side_effect = ValueError("db failure")
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get(f"/v1/tx/{_VALID_TX_HASH}/events")
+
+        assert response.status_code == 500
+    finally:
+        app.dependency_overrides.pop(protocol_events._get_protocol_event_service, None)

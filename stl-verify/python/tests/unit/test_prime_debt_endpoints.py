@@ -49,7 +49,7 @@ def test_list_prime_debt_snapshots_returns_rows():
     service = _make_service(snapshots=[snap])
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
     try:
-        client = TestClient(app)
+        client = TestClient(app, raise_server_exceptions=False)
 
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=25")
 
@@ -162,5 +162,21 @@ def test_list_prime_debt_snapshots_returns_422_for_address_too_long():
 
         assert response.status_code == 422
         service.prime_exists.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_returns_500_when_service_errors():
+    from app.api.v1 import prime_debts
+
+    service = _make_service()
+    service.list_debt_snapshots.side_effect = ValueError("db failure")
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+
+        assert response.status_code == 500
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)

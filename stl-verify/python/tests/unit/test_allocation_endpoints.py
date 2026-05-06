@@ -1,8 +1,12 @@
+from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.domain.entities.allocation import EthAddress, Prime
+from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
+from app.domain.entities.allocation_activity import AllocationActivityEvent
 from app.main import app
 from app.services.allocation_service import AllocationService
 from tests.conftest import make_receipt_token_position
@@ -114,6 +118,124 @@ def test_list_allocations_returns_422_for_invalid_prime_id():
     assert response.status_code == 422
 
 
+def test_list_chains_returns_200_with_chain_rows():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_chains.return_value = [
+        ChainMetadata(chain_id=1, name="Ethereum"),
+        ChainMetadata(chain_id=10, name="Optimism"),
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/chains")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"chain_id": 1, "name": "Ethereum"},
+        {"chain_id": 10, "name": "Optimism"},
+    ]
+    service.list_chains.assert_awaited_once()
+
+
+def test_list_protocols_returns_200_with_protocol_rows():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_protocols.return_value = [
+        ProtocolMetadata(id=1, chain_id=1, encode="aave_v3", name="Aave V3"),
+        ProtocolMetadata(id=2, chain_id=1, encode="spark", name="SparkLend"),
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/protocols")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {"id": 1, "chain_id": 1, "encode": "aave_v3", "name": "Aave V3"},
+        {"id": 2, "chain_id": 1, "encode": "spark", "name": "SparkLend"},
+    ]
+    service.list_protocols.assert_awaited_once()
+
+
+def test_list_allocation_activity_returns_rows_and_forwards_filters():
+    from app.api.v1 import allocations
+
+    from_ts = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, 0, 0, tzinfo=UTC)
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = [
+        AllocationActivityEvent(
+            chain_id=1,
+            prime_address=_VALID_ADDR,
+            prime_name="spark",
+            protocol_name="Aave V3",
+            token_id=1,
+            token_symbol="USDC",
+            action_type="in",
+            tx_amount=Decimal("100.0"),
+            balance=Decimal("200.0"),
+            tx_hash="0x" + "ab" * 32,
+            log_index=1,
+            block_number=100,
+            block_version=0,
+            created_at=from_ts,
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": _VALID_ADDR,
+            "chain_id": 1,
+            "protocol_name": "aave",
+            "action_type": "in",
+            "token_symbol": "usdc",
+            "tx_hash": "0x" + "ab" * 32,
+            "from_timestamp": from_ts.isoformat().replace("+00:00", "Z"),
+            "to_timestamp": to_ts.isoformat().replace("+00:00", "Z"),
+            "limit": 50,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["token_symbol"] == "USDC"
+
+    kwargs = service.list_allocation_activity.await_args.kwargs
+    assert kwargs["prime_id"] == EthAddress(_VALID_ADDR)
+    assert kwargs["chain_id"] == 1
+    assert kwargs["protocol_name"] == "aave"
+    assert kwargs["action_type"] == "in"
+    assert kwargs["token_symbol"] == "usdc"
+    assert kwargs["tx_hash"] == "0x" + "ab" * 32
+    assert kwargs["from_timestamp"] == from_ts
+    assert kwargs["to_timestamp"] == to_ts
+    assert kwargs["limit"] == 50
+
+
+def test_list_allocation_activity_returns_422_for_invalid_prime_id():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={"prime_id": "0xdeadbeef"},
+    )
+
+    assert response.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
 # --- capital-metrics endpoint ---
 
 
@@ -181,8 +303,8 @@ def test_list_capital_metrics_maps_star_risk_capital_data(monkeypatch):
     assert spark["risk_to_capital_ratio"] == "2.50"
 
 
-def test_list_capital_metrics_skips_primes_with_no_star_row(monkeypatch):
-    """Primes not present in Star risk capital data are omitted from results."""
+def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monkeypatch):
+    """Primes not present in Star risk capital data are returned with default metric values."""
     from app.api.v1 import allocations
 
     grove_addr = _VALID_ADDR
@@ -221,8 +343,17 @@ def test_list_capital_metrics_skips_primes_with_no_star_row(monkeypatch):
 
     assert response.status_code == 200
     data = response.json()
-    assert len(data) == 1
-    assert data[0]["prime_name"] == "grove"
+    assert len(data) == 2
+    grove = next(item for item in data if item["prime_name"] == "grove")
+    assert grove["risk_capital"] == "100.00"
+
+    missing = next(item for item in data if item["prime_name"] == "unknown-prime")
+    assert missing["risk_capital"] == "0"
+    assert missing["capital_buffer"] == "0"
+    assert missing["first_loss_capital"] == "0"
+    assert missing["total_capital"] == "0"
+    assert missing["risk_to_capital_ratio"] is None
+    assert missing["validation_note"] == "No upstream Star risk-capital row matched this prime."
 
 
 def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatch):
@@ -259,6 +390,52 @@ def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatc
 
     assert response.status_code == 502
     assert "invalid numeric value" in response.json()["detail"]
+
+
+def test_list_capital_metrics_returns_502_when_upstream_fetch_fails(monkeypatch):
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[Prime(id=_VALID_ADDR, name="grove", address=_VALID_ADDR)])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    async def _raise_fetch_error():
+        raise HTTPException(status_code=502, detail="Risk capital upstream request failed")
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _raise_fetch_error)
+    client = TestClient(app)
+
+    response = client.get("/v1/capital-metrics")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Risk capital upstream request failed"}
+
+
+def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch):
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[Prime(id=_VALID_ADDR, name="grove", address=_VALID_ADDR)])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    async def _fake_payload_without_data():
+        return allocations.StarRiskCapitalResponse.model_validate(
+            {
+                "status": 200,
+                "success": True,
+                "data": None,
+            }
+        )
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload_without_data)
+    client = TestClient(app)
+
+    response = client.get("/v1/capital-metrics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["prime_id"] == _VALID_ADDR
+    assert payload[0]["risk_capital"] == "0"
+    assert payload[0]["is_validated"] is False
 
 
 # --- data-sources endpoint ---

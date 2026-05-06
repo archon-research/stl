@@ -60,7 +60,7 @@ def test_list_tokens_returns_rows_and_applies_filters():
     token = _token()
     service = _make_service(tokens=[token])
     app.dependency_overrides[tokens._get_service] = _override_service(service)
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
 
     response = client.get("/v1/tokens", params={"chain_id": 1, "symbol": "US", "limit": 25})
 
@@ -76,7 +76,7 @@ def test_list_tokens_returns_422_for_invalid_limit():
 
     service = _make_service(tokens=[])
     app.dependency_overrides[tokens._get_service] = _override_service(service)
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
 
     response = client.get("/v1/tokens", params={"limit": 0})
 
@@ -111,7 +111,7 @@ def test_get_token_price_returns_404_when_token_missing():
     service.get_latest_price.assert_not_awaited()
 
 
-def test_get_token_price_returns_404_when_quote_missing():
+def test_get_token_price_returns_200_with_staleness_indicator_when_quote_missing():
     from app.api.v1 import tokens
 
     service = _make_service(token=_token(), price=None)
@@ -120,8 +120,14 @@ def test_get_token_price_returns_404_when_quote_missing():
 
     response = client.get("/v1/tokens/1/price")
 
-    assert response.status_code == 404
-    assert response.json()["detail"] == "No price quote found for token"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["token_id"] == 1
+    assert payload["price_usd"] is None
+    assert payload["timestamp"] is None
+    assert payload["staleness_seconds"] is None
+    assert payload["is_stale"] is True
+    assert payload["staleness_reason"] == "missing_quote"
 
 
 def test_get_token_price_returns_quote_payload():
@@ -138,6 +144,8 @@ def test_get_token_price_returns_quote_payload():
     assert payload["token_id"] == 1
     assert payload["source_name"] == "chainlink"
     assert payload["price_usd"] == "1.00"
+    assert payload["is_stale"] is False
+    assert payload["staleness_reason"] is None
 
 
 def test_list_tokens_returns_empty_list_when_no_matches():
@@ -212,3 +220,35 @@ def test_get_token_returns_row():
     assert payload["symbol"] == "USDC"
     assert payload["decimals"] == 6
     service.get_token.assert_awaited_once_with(1)
+
+
+def test_list_tokens_returns_500_when_service_errors():
+    from app.api.v1 import tokens
+
+    service = _make_service(tokens=[])
+    service.list_tokens.side_effect = ValueError("db failure")
+    app.dependency_overrides[tokens._get_service] = _override_service(service)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/v1/tokens")
+
+        assert response.status_code == 500
+    finally:
+        app.dependency_overrides.pop(tokens._get_service, None)
+
+
+def test_get_token_price_returns_500_when_service_errors():
+    from app.api.v1 import tokens
+
+    service = _make_service(token=_token())
+    service.get_latest_price.side_effect = ValueError("db failure")
+    app.dependency_overrides[tokens._get_service] = _override_service(service)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get("/v1/tokens/1/price")
+
+        assert response.status_code == 500
+    finally:
+        app.dependency_overrides.pop(tokens._get_service, None)

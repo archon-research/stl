@@ -1,4 +1,5 @@
 """Test domain entity validation to ensure business invariants are enforced."""
+
 from datetime import UTC, datetime
 from decimal import Decimal
 
