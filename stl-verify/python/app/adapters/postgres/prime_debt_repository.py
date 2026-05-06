@@ -1,8 +1,12 @@
+import logging
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class PostgresPrimeDebtRepository:
@@ -38,10 +42,22 @@ class PostgresPrimeDebtRepository:
             """
         )
 
-        async with self._engine.connect() as conn:
-            row = (await conn.execute(query, {"address_hex": prime_address.hex})).fetchone()
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(query, {"address_hex": prime_address.hex})).fetchone()
 
-        return row is not None
+            return row is not None
+        except Exception as exc:
+            logger.error(
+                "Failed to check prime existence in database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while checking if prime {prime_address} exists: {exc}") from exc
 
     async def list_debt_snapshots(self, prime_address: EthAddress, *, limit: int = 100) -> list[PrimeDebtSnapshot]:
         query = text(
@@ -70,19 +86,34 @@ class PostgresPrimeDebtRepository:
             "limit": min(max(limit, 1), 500),
         }
 
-        async with self._engine.connect() as conn:
-            result = await conn.execute(query, params)
-            rows = result.fetchall()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, params)
+                rows = result.fetchall()
 
-        return [
-            PrimeDebtSnapshot(
-                prime_address="0x" + row.prime_address,
-                prime_name=row.prime_name,
-                ilk_name=row.ilk_name,
-                debt_wad=row.debt_wad,
-                block_number=row.block_number,
-                block_version=row.block_version,
-                synced_at=row.synced_at,
+            return [
+                PrimeDebtSnapshot(
+                    prime_address="0x" + row.prime_address,
+                    prime_name=row.prime_name,
+                    ilk_name=row.ilk_name,
+                    debt_wad=row.debt_wad,
+                    block_number=row.block_number,
+                    block_version=row.block_version,
+                    synced_at=row.synced_at,
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch prime debt snapshots from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                    "limit": limit,
+                },
+                exc_info=True,
             )
-            for row in rows
-        ]
+            raise ValueError(
+                f"Database query failed while fetching debt snapshots for prime {prime_address}: {exc}"
+            ) from exc

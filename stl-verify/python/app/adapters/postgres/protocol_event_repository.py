@@ -75,11 +75,25 @@ class PostgresProtocolEventRepository:
             "limit": min(max(limit, 1), 500),
         }
 
-        async with self._engine.connect() as conn:
-            result = await conn.execute(text(query), params)
-            rows = result.fetchall()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(query), params)
+                rows = result.fetchall()
 
-        return [self._to_entity(row) for row in rows]
+            return [self._to_entity(row) for row in rows]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch protocol events from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "tx_hash": tx_hash,
+                    "protocol_name": protocol_name,
+                    "limit": limit,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching protocol events: {exc}") from exc
 
     async def list_events_by_tx(self, tx_hash: str) -> list[ProtocolEvent]:
         """Get all events for a transaction."""
@@ -91,8 +105,20 @@ class PostgresProtocolEventRepository:
         """
         )
 
-        async with self._engine.connect() as conn:
-            result = await conn.execute(text(query), {"tx_hash": self._normalize_tx_hash(tx_hash)})
-            rows = result.fetchall()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(query), {"tx_hash": self._normalize_tx_hash(tx_hash)})
+                rows = result.fetchall()
 
-        return [self._to_entity(row) for row in rows]
+            return [self._to_entity(row) for row in rows]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch events by transaction hash from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "tx_hash": tx_hash,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching events for transaction {tx_hash}: {exc}") from exc

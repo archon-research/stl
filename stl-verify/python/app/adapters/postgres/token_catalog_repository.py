@@ -77,38 +77,76 @@ class PostgresTokenCatalogRepository:
             "limit": min(max(limit, 1), 500),
         }
 
-        async with self._engine.connect() as conn:
-            result = await conn.execute(_LIST_TOKENS_SQL, params)
-            rows = result.fetchall()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_LIST_TOKENS_SQL, params)
+                rows = result.fetchall()
 
-        return [self._row_to_metadata(row) for row in rows]
+            return [self._row_to_metadata(row) for row in rows]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch tokens from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "chain_id": chain_id,
+                    "symbol": symbol,
+                    "limit": limit,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching tokens: {exc}") from exc
 
     async def get_token(self, token_id: int) -> TokenMetadata | None:
-        async with self._engine.connect() as conn:
-            row = (await conn.execute(_GET_TOKEN_SQL, {"token_id": token_id})).fetchone()
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(_GET_TOKEN_SQL, {"token_id": token_id})).fetchone()
 
-        if row is None:
-            return None
+            if row is None:
+                return None
 
-        return self._row_to_metadata(row)
+            return self._row_to_metadata(row)
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch token from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "token_id": token_id,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching token {token_id}: {exc}") from exc
 
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
-        async with self._engine.connect() as conn:
-            row = (await conn.execute(_LATEST_PRICE_SQL, {"token_id": token_id})).fetchone()
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(_LATEST_PRICE_SQL, {"token_id": token_id})).fetchone()
 
-        if row is None:
-            return None
+            if row is None:
+                return None
 
-        return TokenPriceQuote(
-            token_id=row.token_id,
-            source_type=row.source_type,
-            source_id=row.source_id,
-            source_name=row.source_name,
-            source_display_name=row.source_display_name,
-            price_usd=_safe_decimal(row.price_usd, "price_usd", token_id),
-            timestamp=row.timestamp,
-            staleness_seconds=max(int(row.staleness_seconds or 0), 0),
-        )
+            return TokenPriceQuote(
+                token_id=row.token_id,
+                source_type=row.source_type,
+                source_id=row.source_id,
+                source_name=row.source_name,
+                source_display_name=row.source_display_name,
+                price_usd=_safe_decimal(row.price_usd, "price_usd", token_id),
+                timestamp=row.timestamp,
+                staleness_seconds=max(int(row.staleness_seconds or 0), 0),
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch token price from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "token_id": token_id,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching price for token {token_id}: {exc}") from exc
 
 
 _LIST_TOKENS_SQL = text(
