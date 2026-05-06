@@ -15,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 )
 
 const (
@@ -85,6 +86,7 @@ type LiveService struct {
 	stateRepo  outbound.BlockStateRepository
 	cache      outbound.BlockCache
 	eventSink  outbound.EventSink
+	s3Backup   *s3backup.Backup
 	metrics    outbound.ReorgRecorder
 
 	ctx    context.Context
@@ -92,7 +94,10 @@ type LiveService struct {
 	logger *slog.Logger
 }
 
-// NewLiveService creates a new LiveService.
+// NewLiveService creates a new LiveService. The s3Backup parameter is required
+// — the watcher writes raw block artifacts to S3 on the critical path so the
+// data is durable before SNS publish. See VEC-216 for the move away from the
+// async backup worker.
 func NewLiveService(
 	config LiveConfig,
 	subscriber outbound.BlockSubscriber,
@@ -100,6 +105,7 @@ func NewLiveService(
 	stateRepo outbound.BlockStateRepository,
 	cache outbound.BlockCache,
 	eventSink outbound.EventSink,
+	s3Backup *s3backup.Backup,
 ) (*LiveService, error) {
 	if subscriber == nil {
 		return nil, fmt.Errorf("subscriber is required")
@@ -115,6 +121,9 @@ func NewLiveService(
 	}
 	if eventSink == nil {
 		return nil, fmt.Errorf("eventSink is required")
+	}
+	if s3Backup == nil {
+		return nil, fmt.Errorf("s3Backup is required")
 	}
 
 	// Apply defaults
@@ -136,6 +145,7 @@ func NewLiveService(
 		stateRepo:  stateRepo,
 		cache:      cache,
 		eventSink:  eventSink,
+		s3Backup:   s3Backup,
 		metrics:    config.Metrics,
 		logger:     config.Logger.With("component", "live-service"),
 	}, nil
@@ -1022,6 +1032,18 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		return err
 	}
 
+	// Kick off S3 backup goroutines as early as possible. The PUTs run in
+	// parallel with the Redis cache write below; we await the group right
+	// before SNS publish. Block exposure to downstream consumers is gated on
+	// S3 durability — if the group fails we return an error and let backfill
+	// recover, rather than publishing a block whose backup is missing.
+	s3Group := s.s3Backup.Start(ctx, blockNum, version, s3backup.Artifacts{
+		Block:    bd.Block,
+		Receipts: bd.Receipts,
+		Traces:   bd.Traces,
+		Blobs:    bd.Blobs,
+	})
+
 	// Cache all data types - create a child span for the cache operation
 	cacheCtx, cacheSpan := tracer.Start(ctx, "live.cacheBlockData",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -1058,7 +1080,16 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 	cacheSpan.End()
 	s.logger.Debug("cached all block data", "block", blockNum, "cache_ms", cacheDuration.Milliseconds())
 
-	// All data cached successfully - now publish the block event
+	// Await the parallel S3 backup before publishing. If any PUT failed the
+	// watcher returns an error here — no SNS publish, no MarkPublishComplete,
+	// so the block stays "unpublished" in the DB and backfill replays it.
+	if err := s3Group.Wait(ctx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "s3 backup failed")
+		return fmt.Errorf("s3 backup failed for block %d: %w", blockNum, err)
+	}
+
+	// All data cached and backed up - now publish the block event
 	return s.publishBlockEvent(ctx, chainID, blockNum, version, blockHash, parentHash, blockTimestamp, receivedAt, isReorg)
 }
 

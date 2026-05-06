@@ -14,6 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -62,12 +63,12 @@ func TestConcurrentLiveAndBackfill(t *testing.T) {
 		Logger:       slog.Default(),
 	}
 
-	liveService, err := live_data.NewLiveService(liveConfig, subscriber, client, stateRepo, cache, eventSink)
+	liveService, err := live_data.NewLiveService(liveConfig, subscriber, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create live service: %v", err)
 	}
 
-	backfillService, err := backfill_gaps.NewBackfillService(backfillConfig, client, stateRepo, cache, eventSink)
+	backfillService, err := backfill_gaps.NewBackfillService(backfillConfig, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create backfill service: %v", err)
 	}

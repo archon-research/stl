@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -55,7 +56,7 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 		Logger:    slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -142,7 +143,7 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 		Logger:    slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -309,7 +310,7 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 		Logger:    slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -370,7 +371,7 @@ func TestBackfillService_ReorgDuringDowntime_CannotMakeProgress(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -440,7 +441,7 @@ func TestBackfillService_ReorgDuringDowntime_RecoveryWithBoundaryCheck(t *testin
 		Logger:             slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -558,7 +559,7 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 		Logger:    slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -672,7 +673,7 @@ func TestBackfillService_HighestVersionIsCanonicalAfterRecovery(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -778,7 +779,7 @@ func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -962,7 +963,7 @@ func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
 	cfg.ChainID = 1
 	cfg.BoundaryCheckDepth = 5
 
-	svc, err := NewBackfillService(cfg, client, repo, cache, sink)
+	svc, err := NewBackfillService(cfg, client, repo, cache, sink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("Failed to create service: %v", err)
 	}
@@ -1031,7 +1032,7 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 	service, err := NewBackfillService(BackfillConfig{
 		BatchSize:          10,
 		BoundaryCheckDepth: 10,
-	}, client, stateRepo, cache, eventSink)
+	}, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1165,7 +1166,7 @@ func TestRetry_CacheFailureIsRetried(t *testing.T) {
 		client,
 		stateRepo,
 		cache,
-		eventSink,
+		eventSink, s3backup.NewForTestingBackup(t),
 	)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1241,7 +1242,7 @@ func TestRetry_PublishFailureIsRetried(t *testing.T) {
 		client,
 		stateRepo,
 		cache,
-		eventSink,
+		eventSink, s3backup.NewForTestingBackup(t),
 	)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
@@ -1302,7 +1303,7 @@ func TestProcessBlockData_ReturnsErrorOnCacheFailure(t *testing.T) {
 		client,
 		stateRepo,
 		cache,
-		eventSink,
+		eventSink, s3backup.NewForTestingBackup(t),
 	)
 
 	blockData, _ := client.GetBlocksBatch(ctx, []int64{1}, true)
@@ -1355,7 +1356,7 @@ func TestAdvanceWatermark_StopsAtUnpublishedBlock(t *testing.T) {
 		Logger:    slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1413,7 +1414,7 @@ func TestAdvanceWatermark_AdvancesWhenAllPublished(t *testing.T) {
 		Logger:    slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1507,7 +1508,7 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1614,7 +1615,7 @@ func TestPublishNeverHappensWithoutCache(t *testing.T) {
 				client,
 				stateRepo,
 				cache,
-				eventSink,
+				eventSink, s3backup.NewForTestingBackup(t),
 			)
 
 			err := service.processBlockData(ctx, tt.blockData)
@@ -1721,7 +1722,7 @@ func TestBackfillService_RetryLoopIsIndependentOfGapFill(t *testing.T) {
 		BoundaryCheckDepth: -1, // disable boundary RPC chatter for this test
 		Logger:             slog.Default(),
 	}
-	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -1830,7 +1831,7 @@ func TestBackfillService_RetriesIncompletePublishes_WhenNoGaps(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1921,7 +1922,7 @@ func TestBackfillService_RetryOrphansReorgedBlock(t *testing.T) {
 		BoundaryCheckDepth: -1,
 		Logger:             slog.Default(),
 	}
-	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -2009,7 +2010,7 @@ func TestBackfillService_RetryDoesNotOrphanOnTransientHashFailure(t *testing.T) 
 		BoundaryCheckDepth: -1,
 		Logger:             slog.Default(),
 	}
-	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -2081,7 +2082,7 @@ func TestBackfillService_RetryDoesNotOrphanWhenCanonicalVerificationFails(t *tes
 		BoundaryCheckDepth: -1,
 		Logger:             slog.Default(),
 	}
-	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink, s3backup.NewForTestingBackup(t))
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
