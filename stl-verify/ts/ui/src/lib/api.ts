@@ -7,8 +7,14 @@ import type {
   BadDebt,
   CapitalMetricsListResponse,
   DataSourcesResponse,
+  PrimeDebtSnapshot,
   PrimesResponse,
+  ProtocolEventsResponse,
   RiskBreakdown,
+  Token,
+  TokenPrice,
+  TokensResponse,
+  TxProtocolEventsResponse,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { isAbortError } from './errors';
@@ -25,6 +31,8 @@ type ApiResult<TData, TError> = Promise<{
   error?: TError;
   response: Response;
 }>;
+
+type UnknownRecord = Record<string, unknown>;
 
 function toErrorBody(error: unknown): string {
   if (typeof error === 'string') {
@@ -73,6 +81,105 @@ async function requestData<TData, TError>(
   }
 
   return data;
+}
+
+function firstStringField(
+  row: UnknownRecord,
+  ...keys: string[]
+): string | null {
+  for (const key of keys) {
+    if (typeof row[key] === 'string') {
+      return row[key] as string;
+    }
+  }
+  return null;
+}
+
+function firstNumberField(
+  row: UnknownRecord,
+  ...keys: string[]
+): number | null {
+  for (const key of keys) {
+    const value = row[key];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value !== '') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
+}
+
+function normalizePrimeDebtSnapshot(value: unknown): PrimeDebtSnapshot | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const row = value as UnknownRecord;
+  const primeAddress = firstStringField(row, 'prime_address', 'prime_id');
+  const primeName = firstStringField(row, 'prime_name', 'star');
+  const ilkName = firstStringField(row, 'ilk_name', 'collateral_type');
+  const debtWad = firstStringField(row, 'debt_wad', 'borrowed_amount');
+  const syncedAt = firstStringField(
+    row,
+    'synced_at',
+    'updated_at',
+    'timestamp',
+  );
+  const blockNumber = firstNumberField(row, 'block_number');
+  const blockVersion = firstNumberField(row, 'block_version');
+
+  if (
+    !primeAddress ||
+    !primeName ||
+    !ilkName ||
+    !debtWad ||
+    !syncedAt ||
+    blockNumber === null ||
+    blockVersion === null
+  ) {
+    return null;
+  }
+
+  return {
+    prime_address: primeAddress,
+    prime_name: primeName,
+    ilk_name: ilkName,
+    debt_wad: debtWad,
+    block_number: Math.trunc(blockNumber),
+    block_version: Math.trunc(blockVersion),
+    synced_at: syncedAt,
+  };
+}
+
+async function requestPrimeDebtEndpoint(
+  primeId: string,
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const endpointPath = `/v1/primes/${encodeURIComponent(primeId)}/debt`;
+  const endpointQuery =
+    typeof limit === 'number'
+      ? `?limit=${encodeURIComponent(String(limit))}`
+      : '';
+  const endpointUrl = API_BASE_URL
+    ? `${API_BASE_URL}${endpointPath}${endpointQuery}`
+    : `${endpointPath}${endpointQuery}`;
+
+  return fetch(endpointUrl, { signal }).then(async (response) => {
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => '<no body>');
+      throw new Error(
+        `GET ${endpointPath} failed (${response.status}): ${responseText}`,
+      );
+    }
+
+    return response.json();
+  });
 }
 
 export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
@@ -192,4 +299,125 @@ export function getDataSources(
     apiClient.GET('/v1/data-sources', { signal }),
     'GET /v1/data-sources',
   );
+}
+
+export function getProtocolEvents(
+  filters?: {
+    tx_hash?: string;
+    protocol_name?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<ProtocolEventsResponse> {
+  return requestData(
+    apiClient.GET('/v1/protocol-events', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/protocol-events',
+  );
+}
+
+export function getTxProtocolEvents(
+  txHash: string,
+  signal?: AbortSignal,
+): Promise<TxProtocolEventsResponse> {
+  return requestData(
+    apiClient.GET('/v1/tx/{tx_hash}/events', {
+      params: {
+        path: {
+          tx_hash: txHash,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tx/{tx_hash}/events',
+  );
+}
+
+export function getTokens(
+  filters?: {
+    chain_id?: number;
+    symbol?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<TokensResponse> {
+  return requestData(
+    apiClient.GET('/v1/tokens', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/tokens',
+  );
+}
+
+export function getToken(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<Token> {
+  return requestData(
+    apiClient.GET('/v1/tokens/{token_id}', {
+      params: {
+        path: {
+          token_id: tokenId,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tokens/{token_id}',
+  );
+}
+
+export function getTokenPrice(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<TokenPrice> {
+  return requestData(
+    apiClient.GET('/v1/tokens/{token_id}/price', {
+      params: {
+        path: {
+          token_id: tokenId,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tokens/{token_id}/price',
+  );
+}
+
+function extractRowsFromPayload(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (payload && typeof payload === 'object') {
+    const items = (payload as UnknownRecord).items;
+    if (Array.isArray(items)) {
+      return items;
+    }
+  }
+
+  return [];
+}
+
+export async function getPrimeDebtSnapshots(
+  primeId: string,
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot[]> {
+  const payload = await requestPrimeDebtEndpoint(primeId, limit, signal);
+  const rows = extractRowsFromPayload(payload);
+
+  return rows
+    .map((row) => normalizePrimeDebtSnapshot(row))
+    .filter((row): row is PrimeDebtSnapshot => row !== null);
+}
+
+export async function getLatestPrimeDebtSnapshot(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot | null> {
+  const snapshots = await getPrimeDebtSnapshots(primeId, 1, signal);
+  return snapshots[0] ?? null;
 }

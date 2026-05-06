@@ -10,9 +10,11 @@ import {
   type ChainLabelLookup,
   formatDateTime,
   formatFreshnessLabel,
+  formatRawWadLabel,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
+  formatWadValue,
   getAllocationKey,
   getCategoryLabel,
   getChainLabel,
@@ -24,9 +26,11 @@ import type {
   AllocationCategory,
   CapitalMetrics,
   Prime,
+  PrimeDebtSnapshot,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import {
+  AppTooltip,
   ChainLogo,
   EmptyState,
   ErrorState,
@@ -45,8 +49,10 @@ type AllocationGridProps = {
   topMetricsAllocations: Allocation[];
   isLoading: boolean;
   isCapitalMetricsLoading: boolean;
+  isPrimeDebtLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
+  primeDebtSnapshot: PrimeDebtSnapshot | null;
   onSearchChange: (value: string) => void;
   onSortingChange: (
     sorting: SortingState | ((old: SortingState) => SortingState),
@@ -98,8 +104,10 @@ export function AllocationGrid({
   topMetricsAllocations,
   isLoading,
   isCapitalMetricsLoading,
+  isPrimeDebtLoading,
   localProtocols,
   onSelectAllocation,
+  primeDebtSnapshot,
   onSearchChange,
   onSortingChange,
   searchValue,
@@ -431,7 +439,8 @@ export function AllocationGrid({
   const showTopMetricsSkeleton =
     selectedPrime !== null && (isLoading || isCapitalMetricsLoading);
 
-  const hasTopMetrics = capitalMetrics !== null || summary !== null;
+  const hasTopMetrics =
+    capitalMetrics !== null || summary !== null || selectedPrime !== null;
 
   return (
     <div
@@ -484,19 +493,89 @@ export function AllocationGrid({
                 <TokenAddress address={selectedPrime.id} />
               ) : null}
             </div>
-            {!showTopMetricsSkeleton &&
-            capitalMetrics &&
-            parseNumericValue(capitalMetrics.risk_to_capital_ratio) !== null ? (
-              <span
+            {!showTopMetricsSkeleton ? (
+              <div
                 className={css({
-                  fontSize: 'xs',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '4',
+                  justifyContent: 'flex-end',
+                  textAlign: 'right',
                 })}
               >
-                Risk-to-capital{' '}
-                {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
-              </span>
+                {summary ? (
+                  <div
+                    className={css({
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: '1.5',
+                      flexWrap: 'wrap',
+                      justifyContent: 'flex-end',
+                    })}
+                  >
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Latest activity{' '}
+                      {summary.latestActivityAt
+                        ? formatFreshnessLabel(summary.latestActivityAt)
+                        : '—'}
+                    </span>
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                      })}
+                    >
+                      {summary.latestActivityAt
+                        ? formatDateTime(summary.latestActivityAt)
+                        : 'No indexed activity'}
+                    </span>
+                  </div>
+                ) : null}
+                {selectedPrime ? (
+                  <div
+                    className={css({
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: '1.5',
+                      flexWrap: 'wrap',
+                      justifyContent: 'flex-end',
+                    })}
+                  >
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Debt sync{' '}
+                      {isPrimeDebtLoading
+                        ? 'Loading...'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                          : '—'}
+                    </span>
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                      })}
+                    >
+                      {isPrimeDebtLoading
+                        ? 'Waiting for sync timestamp'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatDateTime(primeDebtSnapshot.synced_at)
+                          : 'No debt sync timestamp'}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
           {showTopMetricsSkeleton ? (
@@ -536,47 +615,96 @@ export function AllocationGrid({
                 gap: '3',
               })}
             >
+              {summary ? (
+                <SummaryMetric
+                  label="Total allocation"
+                  value={
+                    hasSearchQuery && overallSummary
+                      ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+                      : formatUsdValue(summary.totalUsd)
+                  }
+                  detail={
+                    hasSearchQuery && overallSummary
+                      ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                      : `${summary.allocationCount} allocations`
+                  }
+                />
+              ) : null}
+
               {capitalMetrics ? (
                 <>
                   <SummaryMetric
                     label="Risk capital"
                     value={formatUsdValue(capitalMetrics.risk_capital)}
-                    detail="Onchain allocation exposure"
-                  />
-                  <SummaryMetric
-                    label="Total capital"
-                    value={formatUsdValue(capitalMetrics.total_capital)}
-                    detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                    detail={
+                      parseNumericValue(
+                        capitalMetrics.risk_to_capital_ratio,
+                      ) !== null
+                        ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
+                        : undefined
+                    }
                   />
                 </>
               ) : null}
 
-              {summary ? (
+              {capitalMetrics ? (
+                <SummaryMetric
+                  label="Total capital"
+                  value={formatUsdValue(capitalMetrics.total_capital)}
+                  detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                />
+              ) : null}
+
+              {selectedPrime ? (
                 <>
                   <SummaryMetric
-                    label="Total allocation"
+                    label="Prime debt exposure"
                     value={
-                      hasSearchQuery && overallSummary
-                        ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
-                        : formatUsdValue(summary.totalUsd)
+                      isPrimeDebtLoading
+                        ? 'Loading...'
+                        : formatWadValue(primeDebtSnapshot?.debt_wad)
                     }
                     detail={
-                      hasSearchQuery && overallSummary
-                        ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
-                        : `${summary.allocationCount} allocations`
-                    }
-                  />
-                  <SummaryMetric
-                    label="Latest activity"
-                    value={
-                      summary.latestActivityAt
-                        ? formatFreshnessLabel(summary.latestActivityAt)
-                        : '—'
-                    }
-                    detail={
-                      summary.latestActivityAt
-                        ? formatDateTime(summary.latestActivityAt)
-                        : 'No indexed activity'
+                      isPrimeDebtLoading ? (
+                        'Fetching latest debt snapshot'
+                      ) : (
+                        <div
+                          className={css({
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: '1',
+                          })}
+                        >
+                          <span>
+                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <AppTooltip
+                            ariaLabel={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                            trigger={
+                              <span
+                                className={css({
+                                  textDecoration: 'underline',
+                                  textDecorationStyle: 'dotted',
+                                  textUnderlineOffset: '2px',
+                                })}
+                              >
+                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                              </span>
+                            }
+                            content={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                          />
+                        </div>
+                      )
                     }
                   />
                 </>
@@ -646,6 +774,7 @@ export function AllocationGrid({
             <EmptyState
               title="Choose a prime to load positions"
               description="The main grid activates once a prime is selected from the sidebar."
+              stretch
             />
           ) : null}
 
@@ -664,6 +793,7 @@ export function AllocationGrid({
             <EmptyState
               title="No allocations returned"
               description="The selected prime did not return any allocation rows from the API."
+              stretch
             />
           ) : null}
 
@@ -675,6 +805,7 @@ export function AllocationGrid({
             <EmptyState
               title="No rows match the active filters"
               description="Clear one of the filters in the top bar to restore the allocation grid."
+              stretch
             />
           ) : null}
 

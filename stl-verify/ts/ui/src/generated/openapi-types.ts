@@ -123,6 +123,43 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/primes/{prime_id}/debt': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Prime Debt Snapshots */
+    get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/protocol-events': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Protocol Events
+     * @description List protocol events with optional filtering.
+     */
+    get: operations['list_protocol_events_v1_protocol_events_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/protocols': {
     parameters: {
       query?: never;
@@ -151,6 +188,43 @@ export interface paths {
     get: operations['get_ready_v1_ready_get'];
     put?: never;
     post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/risk/rrc': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Rrc
+     * @description Compute RRC at default stress for every model that applies to ``(asset_id, prime_id)``.
+     *
+     *     Errors:
+     *     - 404 if ``asset_id`` is not a known receipt token, or no models apply.
+     *     - 422 if ``prime_id`` is malformed or ``asset_id`` < 1.
+     *     - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
+     *       share-data lookup fails.
+     */
+    get: operations['get_rrc_v1_risk_rrc_get'];
+    put?: never;
+    /**
+     * Post Rrc
+     * @description Compute RRC with per-model scenario overrides for every applicable model.
+     *
+     *     Errors:
+     *     - 404 if ``asset_id`` is not a known receipt token, or no models apply.
+     *     - 422 if ``prime_id``/``asset_id`` invalid, an unknown override model key
+     *       is present, or any model rejects its overrides.
+     *     - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
+     *       share-data lookup fails.
+     */
+    post: operations['post_rrc_v1_risk_rrc_post'];
     delete?: never;
     options?: never;
     head?: never;
@@ -220,26 +294,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/star-risk-capital/primes': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Get Star Risk Capital Requirements
-     * @description Proxy published Star risk capital payload through backend to avoid browser CORS issues.
-     */
-    get: operations['get_star_risk_capital_requirements_v1_star_risk_capital_primes_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/status': {
     parameters: {
       query?: never;
@@ -249,6 +303,77 @@ export interface paths {
     };
     /** Get Status */
     get: operations['get_status_v1_status_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tokens': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Tokens */
+    get: operations['list_tokens_v1_tokens_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tokens/{token_id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Token */
+    get: operations['get_token_v1_tokens__token_id__get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tokens/{token_id}/price': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Token Price */
+    get: operations['get_token_price_v1_tokens__token_id__price_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tx/{tx_hash}/events': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Tx Events
+     * @description Get all events for a transaction.
+     */
+    get: operations['get_tx_events_v1_tx__tx_hash__events_get'];
     put?: never;
     post?: never;
     delete?: never;
@@ -405,10 +530,54 @@ export interface components {
       /** Sources */
       sources: components['schemas']['DataSourceResponse'][];
     };
+    /**
+     * GapSweepDetails
+     * @description Gap-sweep model-specific output embedded in an RrcResult.
+     *
+     *     ``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal("0.15")``
+     *     means a 15% collateral price drop) — note this is a different scale
+     *     from ``SurafDetails.crr_pct`` which is on 0–100. ``loss_usd`` is the
+     *     engine-native expected loss in USD under that price drop; equal in
+     *     magnitude to the envelope-level ``rrc_usd`` for this model and rounded
+     *     to USD cents. The cross-model comparable capital ratio is exposed on
+     *     ``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure
+     *     basis, not the collateral backing basis.
+     */
+    GapSweepDetails: {
+      /** Gap Pct */
+      gap_pct: string;
+      /** Loss Usd */
+      loss_usd: string;
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      risk_model: 'gap_sweep';
+    };
     /** HTTPValidationError */
     HTTPValidationError: {
       /** Detail */
       detail?: components['schemas']['ValidationError'][];
+    };
+    /** PrimeDebtSnapshotResponse */
+    PrimeDebtSnapshotResponse: {
+      /** Block Number */
+      block_number: number;
+      /** Block Version */
+      block_version: number;
+      /** Debt Wad */
+      debt_wad: string;
+      /** Ilk Name */
+      ilk_name: string;
+      /** Prime Address */
+      prime_address: string;
+      /** Prime Name */
+      prime_name: string;
+      /**
+       * Synced At
+       * Format: date-time
+       */
+      synced_at: string;
     };
     /** PrimeResponse */
     PrimeResponse: {
@@ -418,6 +587,37 @@ export interface components {
       id: string;
       /** Name */
       name: string;
+    };
+    /**
+     * ProtocolEventResponse
+     * @description Response model for protocol event.
+     */
+    ProtocolEventResponse: {
+      /** Block Number */
+      block_number: number;
+      /** Block Version */
+      block_version: number;
+      /** Chain Id */
+      chain_id: number;
+      /** Contract Address */
+      contract_address: string;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /** Event Data */
+      event_data: {
+        [key: string]: unknown;
+      } | null;
+      /** Event Name */
+      event_name: string;
+      /** Log Index */
+      log_index: number;
+      /** Protocol Name */
+      protocol_name: string;
+      /** Tx Hash */
+      tx_hash: string;
     };
     /** ProtocolResponse */
     ProtocolResponse: {
@@ -456,6 +656,88 @@ export interface components {
       /** Receipt Token Id */
       receipt_token_id: number;
     };
+    /**
+     * RrcEnvelope
+     * @description Response wrapper carrying one RrcResult per applicable model.
+     *
+     *     On-chain identifiers (``chain_id``, ``receipt_token_address``) are echoed
+     *     so consumers can resolve the surrogate ``asset_id`` without a second call.
+     *
+     *     ``max_rrc_usd`` and ``max_crr_pct`` collapse every applicable model to a
+     *     single conservative number. Use these when you need one capital figure
+     *     rather than a per-model breakdown: ``max_rrc_usd`` is the largest USD
+     *     figure across results; ``max_crr_pct`` is the largest
+     *     ``results[].comparable_crr_pct``. Each model computes that value on the
+     *     same receipt-token USD exposure basis, so it is safe to compare across
+     *     models.
+     *
+     *     Per-model values in ``results`` are *not* additive — SURAF capital and
+     *     gap-sweep expected-loss overlap economically. Pick a single result, or
+     *     use the ``max_*`` fields; do not sum across results. The two ``max_*``
+     *     fields may come from different models.
+     */
+    RrcEnvelope: {
+      /** Asset Id */
+      asset_id: number;
+      /** Chain Id */
+      chain_id: number;
+      /** Max Crr Pct */
+      max_crr_pct: string;
+      /** Max Rrc Usd */
+      max_rrc_usd: string;
+      /** Prime Id */
+      prime_id: string;
+      /** Receipt Token Address */
+      receipt_token_address: string;
+      /** Results */
+      results: components['schemas']['RrcResult'][];
+    };
+    /**
+     * RrcRequest
+     * @description POST /v1/risk/rrc body — overrides keyed by model name.
+     */
+    RrcRequest: {
+      /** Asset Id */
+      asset_id: number;
+      /** Overrides */
+      overrides?: {
+        [key: string]: {
+          [key: string]: unknown;
+        };
+      };
+      /** Prime Id */
+      prime_id: string;
+    };
+    /**
+     * RrcResult
+     * @description Shared result type returned by every RiskModel implementation.
+     *
+     *     ``risk_model`` identifies which model produced the result (e.g.
+     *     ``"suraf"``, ``"gap_sweep"``).  ``details`` carries model-specific
+     *     output — use ``isinstance`` to narrow. The same value also appears
+     *     on ``details.risk_model`` and serves as the OpenAPI discriminator.
+     *     ``comparable_crr_pct`` is the model's effective capital ratio on the
+     *     shared receipt-token USD exposure basis, expressed on a 0–100 scale.
+     */
+    RrcResult: {
+      /** Asset Id */
+      asset_id: number;
+      /** Comparable Crr Pct */
+      comparable_crr_pct: string;
+      /** Details */
+      details:
+        | components['schemas']['SurafDetails']
+        | components['schemas']['GapSweepDetails'];
+      /** Prime Id */
+      prime_id: string;
+      /**
+       * Risk Model
+       * @enum {string}
+       */
+      risk_model: 'suraf' | 'gap_sweep';
+      /** Rrc Usd */
+      rrc_usd: string;
+    };
     /** ScenarioRrcRequest */
     ScenarioRrcRequest: {
       /** Receipt Token Id */
@@ -486,36 +768,80 @@ export interface components {
      * @enum {string}
      */
     SourceAccessModel: 'open' | 'public' | 'closed';
-    /** StarRiskCapitalDataResponse */
-    StarRiskCapitalDataResponse: {
+    /**
+     * SurafDetails
+     * @description SURAF model-specific output embedded in an RrcResult.
+     *
+     *     ``crr_pct`` is the adjusted CRR (i.e. ``unadjusted_crr_pct + penalty_pp``,
+     *     capped at 100). All three are percentages on a 0–100 scale (e.g.
+     *     ``Decimal("33.7")`` means 33.7%, not 0.337). The relation
+     *     ``crr_pct == unadjusted_crr_pct + penalty_pp`` holds up to ~1e-10 only —
+     *     the underlying scorer caps to 100 in float before Decimal conversion;
+     *     consumers should always trust ``crr_pct`` over a recomputation from
+     *     parts.
+     */
+    SurafDetails: {
+      /** Crr Pct */
+      crr_pct: string;
+      /** Penalty Pp */
+      penalty_pp: string;
+      /** Rating Id */
+      rating_id: string;
+      /** Rating Version */
+      rating_version: string;
       /**
-       * Results
-       * @default []
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
        */
-      results: components['schemas']['StarRiskCapitalRowResponse'][];
+      risk_model: 'suraf';
+      /** Source Commit Sha */
+      source_commit_sha: string;
+      /** Unadjusted Crr Pct */
+      unadjusted_crr_pct: string;
     };
-    /** StarRiskCapitalResponse */
-    StarRiskCapitalResponse: {
-      data?: components['schemas']['StarRiskCapitalDataResponse'] | null;
-      /** Status */
-      status?: number | null;
-      /** Success */
-      success?: boolean | null;
+    /** TokenPriceResponse */
+    TokenPriceResponse: {
+      /** Price Usd */
+      price_usd: string;
+      /** Source Display Name */
+      source_display_name: string | null;
+      /** Source Id */
+      source_id: number;
+      /** Source Name */
+      source_name: string;
+      /** Source Type */
+      source_type: string;
+      /** Staleness Seconds */
+      staleness_seconds: number;
+      /**
+       * Timestamp
+       * Format: date-time
+       */
+      timestamp: string;
+      /** Token Id */
+      token_id: number;
     };
-    /** StarRiskCapitalRowResponse */
-    StarRiskCapitalRowResponse: {
-      /** Exposure */
-      exposure: string;
-      /** Exposure Share */
-      exposure_share: string;
-      /** Financial Rrc */
-      financial_rrc: string;
-      /** Risk Tolerance Ratio */
-      risk_tolerance_ratio: string;
-      /** Star */
-      star: string;
-      /** Total Rc */
-      total_rc: string;
+    /** TokenResponse */
+    TokenResponse: {
+      /** Address */
+      address: string;
+      /** Chain Id */
+      chain_id: number;
+      /** Decimals */
+      decimals: number | null;
+      /** Id */
+      id: number;
+      /** Metadata */
+      metadata?: {
+        [key: string]: unknown;
+      } | null;
+      /** Symbol */
+      symbol: string | null;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
     };
     /** ValidationError */
     ValidationError: {
@@ -689,6 +1015,75 @@ export interface operations {
       };
     };
   };
+  list_prime_debt_snapshots_v1_primes__prime_id__debt_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+      };
+      header?: never;
+      path: {
+        prime_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PrimeDebtSnapshotResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_protocol_events_v1_protocol_events_get: {
+    parameters: {
+      query?: {
+        /** @description Filter by transaction hash */
+        tx_hash?: string | null;
+        /** @description Filter by protocol name */
+        protocol_name?: string | null;
+        /** @description Limit number of results */
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProtocolEventResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
   list_protocols_v1_protocols_get: {
     parameters: {
       query?: never;
@@ -725,6 +1120,71 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+    };
+  };
+  get_rrc_v1_risk_rrc_get: {
+    parameters: {
+      query: {
+        asset_id: number;
+        prime_id: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RrcEnvelope'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  post_rrc_v1_risk_rrc_post: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['RrcRequest'];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RrcEnvelope'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
         };
       };
     };
@@ -826,26 +1286,6 @@ export interface operations {
       };
     };
   };
-  get_star_risk_capital_requirements_v1_star_risk_capital_primes_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['StarRiskCapitalResponse'];
-        };
-      };
-    };
-  };
   get_status_v1_status_get: {
     parameters: {
       query?: never;
@@ -862,6 +1302,132 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+    };
+  };
+  list_tokens_v1_tokens_get: {
+    parameters: {
+      query?: {
+        chain_id?: number | null;
+        symbol?: string | null;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TokenResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_token_v1_tokens__token_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        token_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TokenResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_token_price_v1_tokens__token_id__price_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        token_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TokenPriceResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_tx_events_v1_tx__tx_hash__events_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        tx_hash: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProtocolEventResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
         };
       };
     };

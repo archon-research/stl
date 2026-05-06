@@ -9,3 +9,4 @@ export { StatusBadge } from './StatusBadge';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
 export { TokenLogo } from './TokenLogo';
+export { AppTooltip } from './Tooltip';

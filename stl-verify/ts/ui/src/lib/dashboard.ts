@@ -282,6 +282,22 @@ export function formatRatioPercent(
   return `${(numeric * 100).toFixed(digits)}%`;
 }
 
+export function truncateMiddle(
+  value: string | null | undefined,
+  prefixLength = 8,
+  suffixLength = 6,
+): string {
+  if (!value) {
+    return '—';
+  }
+
+  if (value.length <= prefixLength + suffixLength + 3) {
+    return value;
+  }
+
+  return `${value.slice(0, prefixLength)}...${value.slice(-suffixLength)}`;
+}
+
 export function formatMultiplier(
   value: number | string | null | undefined,
 ): string {
@@ -344,6 +360,68 @@ export function formatDateTime(value: string): string {
   }
 
   return DATE_TIME_FORMAT.format(date);
+}
+
+export function formatDurationFromSeconds(
+  seconds: number | null | undefined,
+): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return 'Unknown';
+  }
+
+  if (seconds < 60) {
+    return `${Math.max(0, Math.floor(seconds))}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+export function formatWadValue(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return '—';
+  }
+
+  try {
+    const normalized =
+      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
+    const wei = BigInt(normalized.split('.')[0]);
+    const wad = 10n ** 18n;
+    const whole = wei / wad;
+    const fraction = wei % wad;
+    const fraction6 = ((fraction * 1_000_000n) / wad)
+      .toString()
+      .padStart(6, '0');
+
+    return formatTokenAmount(`${whole.toString()}.${fraction6}`);
+  } catch {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
+}
+
+export function formatRawWadLabel(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return 'Raw WAD unavailable';
+  }
+
+  return `Raw WAD ${truncateMiddle(String(value))}`;
 }
 
 /**
