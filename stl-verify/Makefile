@@ -2,7 +2,7 @@
 # Go 1.25+ best practices
 
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks \
-        dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-wipe dev-ips generate-er \
+	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
@@ -645,6 +645,28 @@ dev-up-rebuild:
 
 dev-down: kind-delete
 
+# Suspend local kind nodes without deleting cluster state.
+# Local development only: do not use for CI or production workflows.
+dev-suspend:
+	@NODES=$$(docker ps --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" --format '{{.Names}}'); \
+	if [ -z "$$NODES" ]; then \
+	  echo "No running kind nodes found for cluster $(KIND_CLUSTER) (already suspended or cluster does not exist)."; \
+	else \
+	  echo "Suspending kind cluster $(KIND_CLUSTER)..."; \
+	  echo "$$NODES" | xargs docker stop; \
+	fi
+
+# Resume previously suspended local kind nodes.
+# Local development only: do not use for CI or production workflows.
+dev-resume:
+	@NODES=$$(docker ps -a --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" --format '{{.Names}}'); \
+	if [ -z "$$NODES" ]; then \
+	  echo "No kind nodes found for cluster $(KIND_CLUSTER)."; \
+	else \
+	  echo "Resuming kind cluster $(KIND_CLUSTER)..."; \
+	  echo "$$NODES" | xargs docker start; \
+	fi
+
 # Wipe cluster and all persisted data. Cannot be undone.
 dev-wipe:
 	@echo "WARNING: This will tear down the cluster and permanently delete all local database data."
@@ -831,15 +853,16 @@ docker-release-all-staging:
 # SSH tunnel to TigerData via bastion (after Tailscale is connected)
 # Auto-discovers bastion and TigerData details from AWS
 # Usage: make tigerdata-tunnel ENV=sentineldev
-# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host>
-# Then connect locally: psql "postgres://user:pass@localhost:5432/dbname"
+# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host> [LOCAL_PORT=5432]
+# Then connect locally: psql "postgres://user:pass@localhost:$(LOCAL_PORT)/dbname"
+LOCAL_PORT ?= 5432
 tigerdata-tunnel:
 	@if [ -z "$(BASTION_IP)" ] || [ -z "$(TIGERDATA_HOST)" ]; then \
 		echo "Error: BASTION_IP and TIGERDATA_HOST are required"; \
-		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host>"; \
+		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host> [LOCAL_PORT=5432]"; \
 		exit 1; \
 	fi
-	ssh -N -L 5432:$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
+	ssh -N -L $(LOCAL_PORT):$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
 
 # =============================================================================
 # Database Migrations

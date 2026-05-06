@@ -1,0 +1,50 @@
+# Reusable workflow that checks out the private github-actions repo and
+# invokes slack-notify. Keeps the deploy key + checkout boilerplate in one place.
+name: Slack Notify
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        required: true
+        type: string
+      context:
+        required: true
+        type: string
+      pr-url:
+        required: false
+        type: string
+        default: ""
+      failed-jobs:
+        required: false
+        type: string
+        default: ""
+      body:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      slack-webhook-url:
+        required: true
+      gh-actions-deploy-key:
+        required: true
+
+jobs:
+  notify:
+    name: Send Slack Notification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+          ssh-key: ${{ secrets.gh-actions-deploy-key }}
+          path: .github-actions
+      - uses: ./.github-actions/slack-notify
+        with:
+          slack-webhook-url: ${{ secrets.slack-webhook-url }}
+          status: ${{ inputs.status }}
+          context: ${{ inputs.context }}
+          pr-url: ${{ inputs.pr-url }}
+          failed-jobs: ${{ inputs.failed-jobs }}
+          body: ${{ inputs.body }}

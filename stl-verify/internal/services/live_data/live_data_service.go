@@ -14,6 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 const (
@@ -247,11 +248,63 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 	}
 
 	start := time.Now()
+	ctx, span := s.startProcessBlockSpan(blockNum, header)
 
-	// Start span for the entire block processing FIRST
-	// This ensures the prefetch RPC calls are children of this span
+	// Start prefetching RPC data immediately so it overlaps with state ops.
+	prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
+	prefetchCh := s.startPrefetch(prefetchCtx, header, blockNum)
+
+	defer func() {
+		cancelPrefetch()
+		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
+		span.End()
+		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
+	}()
+
+	block := LightBlock{
+		Number:     blockNum,
+		Hash:       normalizeHash(header.Hash),
+		ParentHash: normalizeHash(header.ParentHash),
+	}
+
+	// === PHASE 1: State operations (runs while prefetch is in progress) ===
+	result, err := s.runStateOps(ctx, span, block, header, receivedAt)
+	if err != nil {
+		return err
+	}
+	if result.skip {
+		return nil
+	}
+	span.SetAttributes(attribute.Int64("block.state_ops_ms", time.Since(start).Milliseconds()))
+
+	// === PHASE 2: Wait for prefetch (should be mostly done by now) ===
+	prefetch, err := s.awaitPrefetch(ctx, span, prefetchCh, blockNum)
+	if err != nil {
+		return err
+	}
+
+	// === PHASE 3: Cache and publish ===
+	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, result.version, receivedAt, result.isReorg, prefetch.blockData); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to cache and publish block data")
+		// Log at ERROR level: block is saved to DB but NOT published.
+		// The backfill service will retry, but this needs operator attention.
+		s.logger.Error("block saved to DB but cache/publish FAILED - block_published=false, will be retried by backfill",
+			"block", blockNum,
+			"hash", header.Hash,
+			"version", result.version,
+			"error", err)
+		return fmt.Errorf("failed to cache and publish block data: %w", err)
+	}
+
+	return nil
+}
+
+// startProcessBlockSpan opens the parent span for the block-processing pipeline.
+// All prefetch RPC spans become children of this span.
+func (s *LiveService) startProcessBlockSpan(blockNum int64, header outbound.BlockHeader) (context.Context, trace.Span) {
 	tracer := otel.Tracer(tracerName)
-	ctx, span := tracer.Start(s.ctx, "live.processBlock",
+	return tracer.Start(s.ctx, "live.processBlock",
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.Int64("block.number", blockNum),
@@ -260,138 +313,284 @@ func (s *LiveService) processBlockWithPrefetch(header outbound.BlockHeader, rece
 			attribute.Bool("block.prefetched", true),
 		),
 	)
+}
 
-	// Create a cancellable context for the prefetch
-	// This allows us to cancel the prefetch if we return early (e.g., duplicate block)
-	prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
+// stateOpsResult is the outcome of Phase 1 (state operations) — see runStateOps.
+type stateOpsResult struct {
+	// version is the version assigned to the block by the state repository.
+	// Only meaningful when skip is false.
+	version int
 
-	// Start prefetching RPC data immediately with the traced context
-	// This ensures Alchemy RPC spans are linked to this parent span
-	prefetchCh := s.startPrefetch(prefetchCtx, header, blockNum)
+	// isReorg is true when the block was processed as part of a reorg path.
+	// Used downstream when publishing the BlockEvent.
+	isReorg bool
 
-	// Ensure we always clean up: cancel prefetch context and end span
-	defer func() {
-		cancelPrefetch()
-		span.SetAttributes(attribute.Int64("block.duration_ms", time.Since(start).Milliseconds()))
-		span.End()
-		s.logger.Info("processBlock completed", "block", blockNum, "duration", time.Since(start))
-	}()
+	// skip indicates the block was dropped (duplicate, stale-fork, or
+	// verification error) and the caller must short-circuit without entering
+	// the prefetch-wait or cache/publish phases.
+	skip bool
+}
 
-	// === PHASE 1: State Operations (runs while prefetch is in progress) ===
-
-	// Normalize hashes once at the entry point
-	normalizedHash := normalizeHash(header.Hash)
-	normalizedParentHash := normalizeHash(header.ParentHash)
-
-	block := LightBlock{
-		Number:     blockNum,
-		Hash:       normalizedHash,
-		ParentHash: normalizedParentHash,
-	}
-
-	// Check if we've already processed this block
-	isDuplicate, err := s.isDuplicateBlock(ctx, normalizedHash, blockNum)
+// runStateOps performs the Phase-1 state operations for an incoming block:
+// duplicate check → reorg decision (with RPC verification) → persist.
+// Returns skip=true when the block must be dropped without further processing.
+func (s *LiveService) runStateOps(ctx context.Context, span trace.Span, block LightBlock, header outbound.BlockHeader, receivedAt time.Time) (stateOpsResult, error) {
+	// Dedup: skip blocks we've already seen by hash.
+	isDup, err := s.isDuplicateBlock(ctx, block.Hash, block.Number)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to check for duplicate block")
-		return fmt.Errorf("failed to check for duplicate block: %w", err)
+		return stateOpsResult{}, fmt.Errorf("failed to check for duplicate block: %w", err)
 	}
-	if isDuplicate {
+	if isDup {
 		span.SetAttributes(attribute.Bool("block.duplicate", true))
-		return nil
+		return stateOpsResult{skip: true}, nil
 	}
 
-	// Detect reorg BEFORE adding to chain
-	isReorg, reorgDepth, commonAncestor, reorgEvent, err := s.detectReorg(ctx, block, receivedAt)
+	// Decide whether this block is a save, a reorg, or a drop.
+	decision, err := s.decideReorgAction(ctx, span, block, receivedAt)
+	if err != nil {
+		return stateOpsResult{}, err
+	}
+	if decision.action == reorgActionDrop {
+		return stateOpsResult{skip: true}, nil
+	}
+
+	// Persist the block (SaveBlock or HandleReorgAtomic).
+	state, err := buildBlockState(block, header, receivedAt)
+	if err != nil {
+		return stateOpsResult{}, err
+	}
+	version, err := s.persistBlockState(ctx, span, state, decision)
+	if err != nil {
+		return stateOpsResult{}, err
+	}
+	return stateOpsResult{
+		version: version,
+		isReorg: decision.action == reorgActionReorg,
+	}, nil
+}
+
+// reorgAction is the outcome of the reorg-decision phase: save the block
+// canonically, run a reorg, or drop the block (stale fork / verification error).
+type reorgAction int
+
+const (
+	reorgActionSave reorgAction = iota
+	reorgActionReorg
+	reorgActionDrop
+)
+
+// reorgDecision holds the action plus any reorg metadata required to commit.
+type reorgDecision struct {
+	action         reorgAction
+	commonAncestor int64
+	reorgEvent     *outbound.ReorgEvent
+	depth          int
+}
+
+// decideReorgAction runs detectReorg and, when a reorg is detected, gates the
+// commit on RPC verification (VEC-202): the incoming block's hash must equal
+// RPC's canonical hash at this number. A stale-fork broadcast or transient RPC
+// error returns reorgActionDrop so the caller bails without mutating state.
+//
+// To close the TOCTOU window the verification round-trip introduces, we
+// snapshot `latestBlock` immediately after detectReorg (the value the
+// reorgEvent was effectively computed against) and re-read it after verify.
+// If a concurrent writer (e.g. BackfillService) committed to block_states
+// during the RPC round-trip, the snapshot will differ from the post-verify
+// read and we drop the reorg — the next live broadcast will trigger a fresh
+// detect→verify→commit pass against the new state.
+func (s *LiveService) decideReorgAction(ctx context.Context, span trace.Span, block LightBlock, receivedAt time.Time) (reorgDecision, error) {
+	isReorg, depth, commonAncestor, reorgEvent, err := s.detectReorg(ctx, block, receivedAt)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "reorg detection failed")
-		return fmt.Errorf("reorg detection failed: %w", err)
+		return reorgDecision{}, fmt.Errorf("reorg detection failed: %w", err)
 	}
-	if isReorg {
-		span.SetAttributes(
-			attribute.Bool("block.reorg", true),
-			attribute.Int("block.reorg_depth", reorgDepth),
-			attribute.Int64("block.common_ancestor", commonAncestor),
-		)
-		s.logger.Warn("reorg detected", "block", blockNum, "depth", reorgDepth, "commonAncestor", commonAncestor)
-		if s.metrics != nil {
-			s.metrics.RecordReorg(ctx, reorgDepth, commonAncestor, blockNum)
-		}
+	if !isReorg {
+		return reorgDecision{action: reorgActionSave}, nil
 	}
 
-	// Parse block timestamp for deterministic created_at
+	// Span attributes describe the detected (provisional) reorg so traces show
+	// the full picture even when the block is later dropped. The "reorg
+	// detected" log line and the chain.reorgs.total metric, however, only fire
+	// after every gate passes — otherwise stale-fork broadcasts and verify
+	// failures inflate the dashboards/alerts that operators use to spot real
+	// chain reorganizations.
+	span.SetAttributes(
+		attribute.Bool("block.reorg", true),
+		attribute.Int("block.reorg_depth", depth),
+		attribute.Int64("block.common_ancestor", commonAncestor),
+	)
+
+	preVerifyLatest, err := s.stateRepo.GetLastBlock(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "snapshot latestBlock failed")
+		return reorgDecision{}, fmt.Errorf("snapshot latestBlock pre-verify: %w", err)
+	}
+
+	canonical, verr := s.verifyIncomingIsCanonical(ctx, block.Number, block.Hash)
+	if verr != nil {
+		span.SetAttributes(attribute.Bool("block.dropped_verify_error", true))
+		s.logger.Warn("dropping reorg block: canonical verification failed",
+			"block", block.Number,
+			"hash", block.Hash,
+			"error", verr)
+		s.recordReorgDropped(ctx, outbound.ReorgDropReasonVerifyError)
+		return reorgDecision{action: reorgActionDrop}, nil
+	}
+	if !canonical {
+		span.SetAttributes(attribute.Bool("block.dropped_stale_fork", true))
+		s.logger.Info("dropping stale-fork reorg broadcast",
+			"block", block.Number,
+			"hash", block.Hash,
+			"depth", depth,
+			"commonAncestor", commonAncestor)
+		s.recordReorgDropped(ctx, outbound.ReorgDropReasonStaleFork)
+		return reorgDecision{action: reorgActionDrop}, nil
+	}
+
+	postVerifyLatest, err := s.stateRepo.GetLastBlock(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "re-read latestBlock failed")
+		return reorgDecision{}, fmt.Errorf("re-read latestBlock post-verify: %w", err)
+	}
+	if !sameBlockSnapshot(preVerifyLatest, postVerifyLatest) {
+		span.SetAttributes(attribute.Bool("block.dropped_state_shifted", true))
+		s.logger.Info("dropping reorg block: latestBlock shifted during verify",
+			"block", block.Number,
+			"preNumber", snapshotNumber(preVerifyLatest),
+			"postNumber", snapshotNumber(postVerifyLatest),
+			"preHash", snapshotHashShort(preVerifyLatest),
+			"postHash", snapshotHashShort(postVerifyLatest))
+		s.recordReorgDropped(ctx, outbound.ReorgDropReasonStateShifted)
+		return reorgDecision{action: reorgActionDrop}, nil
+	}
+
+	// All gates passed — this is a real, committed reorg. Emit the
+	// detection log and metric here (not earlier) so chain.reorgs.total
+	// counts only actual reorganizations, not provisional detections that
+	// were dropped on verify or state-shift.
+	s.logger.Warn("reorg detected", "block", block.Number, "depth", depth, "commonAncestor", commonAncestor)
+	if s.metrics != nil {
+		s.metrics.RecordReorg(ctx, depth, commonAncestor, block.Number)
+	}
+
+	return reorgDecision{
+		action:         reorgActionReorg,
+		commonAncestor: commonAncestor,
+		reorgEvent:     reorgEvent,
+		depth:          depth,
+	}, nil
+}
+
+// recordReorgDropped emits the chain.reorgs.dropped.total counter with the
+// given reason label, no-op when no metrics recorder is configured. The
+// reason argument must come from outbound.ReorgDropReason* so dashboards stay
+// stable.
+func (s *LiveService) recordReorgDropped(ctx context.Context, reason string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.RecordReorgDropped(ctx, reason)
+}
+
+// sameBlockSnapshot returns true when two BlockState pointers represent the
+// same canonical tip — both nil, or both non-nil with matching number and hash.
+// Used by decideReorgAction's TOCTOU guard.
+func sameBlockSnapshot(a, b *outbound.BlockState) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.Number == b.Number && a.Hash == b.Hash
+}
+
+// snapshotNumber returns the block number for logging, or -1 when nil.
+func snapshotNumber(s *outbound.BlockState) int64 {
+	if s == nil {
+		return -1
+	}
+	return s.Number
+}
+
+// snapshotHashShort returns a truncated hash for logging, or "<nil>" when nil.
+func snapshotHashShort(s *outbound.BlockState) string {
+	if s == nil {
+		return "<nil>"
+	}
+	return truncateHashLive(s.Hash)
+}
+
+// truncateHashLive returns a shortened hex hash for log lines.
+func truncateHashLive(hash string) string {
+	if len(hash) > 18 {
+		return hash[:10] + "..." + hash[len(hash)-6:]
+	}
+	return hash
+}
+
+// buildBlockState assembles the BlockState row to persist from the normalized
+// incoming block + header timestamp.
+func buildBlockState(block LightBlock, header outbound.BlockHeader, receivedAt time.Time) (outbound.BlockState, error) {
 	blockTimestamp, err := hexutil.ParseInt64(header.Timestamp)
 	if err != nil {
-		return fmt.Errorf("failed to parse block timestamp: %w", err)
+		return outbound.BlockState{}, fmt.Errorf("failed to parse block timestamp: %w", err)
 	}
-
-	// Build block state for DB
-	state := outbound.BlockState{
+	return outbound.BlockState{
 		Number:         block.Number,
 		Hash:           block.Hash,
 		ParentHash:     block.ParentHash,
 		ReceivedAt:     receivedAt.Unix(),
 		BlockTimestamp: blockTimestamp,
 		IsOrphaned:     false,
-	}
+	}, nil
+}
 
-	// Save block state to DB
-	var version int
-	if isReorg && reorgEvent != nil {
-		version, err = s.stateRepo.HandleReorgAtomic(ctx, commonAncestor, *reorgEvent, state)
+// persistBlockState commits the block state via SaveBlock or HandleReorgAtomic
+// depending on the decision and returns the assigned version.
+func (s *LiveService) persistBlockState(ctx context.Context, span trace.Span, state outbound.BlockState, decision reorgDecision) (int, error) {
+	if decision.action == reorgActionReorg && decision.reorgEvent != nil {
+		version, err := s.stateRepo.HandleReorgAtomic(ctx, decision.commonAncestor, *decision.reorgEvent, state)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to handle reorg atomically")
-			return fmt.Errorf("failed to handle reorg atomically: %w", err)
+			return 0, fmt.Errorf("failed to handle reorg atomically: %w", err)
 		}
-	} else {
-		version, err = s.stateRepo.SaveBlock(ctx, state)
-		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to save block state")
-			return fmt.Errorf("failed to save block state: %w", err)
-		}
+		return version, nil
 	}
+	version, err := s.stateRepo.SaveBlock(ctx, state)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to save block state")
+		return 0, fmt.Errorf("failed to save block state: %w", err)
+	}
+	return version, nil
+}
 
-	stateOpsDuration := time.Since(start)
-	span.SetAttributes(attribute.Int64("block.state_ops_ms", stateOpsDuration.Milliseconds()))
-
-	// === PHASE 2: Wait for Prefetch (should be mostly done by now) ===
-
+// awaitPrefetch blocks on the prefetch result, records timing, and propagates
+// any prefetch error.
+func (s *LiveService) awaitPrefetch(ctx context.Context, span trace.Span, prefetchCh <-chan prefetchResult, blockNum int64) (prefetchResult, error) {
 	prefetchWaitStart := time.Now()
 	var prefetch prefetchResult
 	select {
 	case prefetch = <-prefetchCh:
-		// Got the prefetched data
 	case <-ctx.Done():
-		return ctx.Err()
+		return prefetchResult{}, ctx.Err()
 	}
-	prefetchWaitDuration := time.Since(prefetchWaitStart)
-	span.SetAttributes(attribute.Int64("block.prefetch_wait_ms", prefetchWaitDuration.Milliseconds()))
+	span.SetAttributes(attribute.Int64("block.prefetch_wait_ms", time.Since(prefetchWaitStart).Milliseconds()))
 
 	if prefetch.err != nil {
 		span.RecordError(prefetch.err)
 		span.SetStatus(codes.Error, "prefetch failed")
-		return fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, prefetch.err)
+		return prefetchResult{}, fmt.Errorf("failed to fetch block data for block %d: %w", blockNum, prefetch.err)
 	}
-
-	// === PHASE 3: Cache and Publish ===
-
-	if err := s.cacheAndPublishBlockData(ctx, header, blockNum, version, receivedAt, isReorg, prefetch.blockData); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "failed to cache and publish block data")
-		// Log at ERROR level: block is saved to DB but NOT published.
-		// The backfill service will retry, but this needs operator attention.
-		s.logger.Error("block saved to DB but cache/publish FAILED - block_published=false, will be retried by backfill",
-			"block", blockNum,
-			"hash", header.Hash,
-			"version", version,
-			"error", err)
-		return fmt.Errorf("failed to cache and publish block data: %w", err)
-	}
-
-	return nil
+	return prefetch, nil
 }
 
 // isDuplicateBlock checks if a block has already been processed by querying the database.
@@ -625,6 +824,77 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	}
 
 	return true, reorgDepth, commonAncestor, reorgEvent, nil
+}
+
+// verifyIncomingIsCanonical asks RPC whether the incoming block's hash is the
+// canonical hash at its number. Returns:
+//
+//   - (true,  nil)  : RPC confirms the incoming hash is canonical → real reorg, proceed.
+//   - (false, nil)  : RPC's canonical hash differs → stale-fork broadcast, drop the block.
+//   - (false, err)  : RPC lookup, parse, or response-shape failure → caller should
+//     drop the block to be safe; the next live block on the
+//     canonical chain will trigger another detection once RPC
+//     stabilises. An empty/absent canonical hash (RPC `null`,
+//     malformed header, etc.) is intentionally classified as an
+//     error here, NOT a stale fork — silently downgrading these
+//     to stale_fork would conflate transient RPC inconsistency
+//     with the genuine fork-loss signal we alert on.
+//
+// Every call site that mutates state via HandleReorgAtomic must be gated by this
+// check, otherwise a stale-fork broadcast over-orphans canonical blocks (creating
+// phantom-orphan rows that no later flow can heal — see VEC-202).
+//
+// IMPORTANT: this function MUST hit the upstream JSON-RPC endpoint on every
+// invocation. If the BlockchainClient is ever extended to read GetBlockByNumber
+// through a cache populated by the same broadcast pipeline (e.g., a
+// number-keyed pre-fetch cache), this verification would be checking the
+// broadcast against itself and the safety property silently disappears. The
+// current alchemy adapter (internal/adapters/outbound/alchemy/client.go)
+// dispatches directly via JSON-RPC; preserve that contract for any future
+// implementation, or introduce a dedicated uncached method on the port.
+func (s *LiveService) verifyIncomingIsCanonical(ctx context.Context, blockNum int64, incomingHash string) (bool, error) {
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(ctx, "live.verifyIncomingIsCanonical",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.Int64("block.number", blockNum),
+			attribute.String("block.hash", incomingHash),
+		),
+	)
+	defer span.End()
+
+	blockJSON, err := s.client.GetBlockByNumber(ctx, blockNum, false)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "canonical lookup failed")
+		return false, fmt.Errorf("canonical lookup for block %d: %w", blockNum, err)
+	}
+
+	var canonicalHeader outbound.BlockHeader
+	if err := shared.ParseBlockHeader(blockJSON, &canonicalHeader); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "canonical parse failed")
+		return false, fmt.Errorf("parse canonical block %d: %w", blockNum, err)
+	}
+
+	canonicalHash := normalizeHash(canonicalHeader.Hash)
+	if canonicalHash == "" {
+		// RPC returned an unusable response: JSON-RPC `null` (json.Unmarshal of
+		// "null" leaves the struct zero-valued), an empty header object, or a
+		// header whose hash field is genuinely empty. Surface this as a
+		// verification error so the caller records `verify_error` rather than
+		// silently misattributing the failure to `stale_fork`.
+		err := fmt.Errorf("canonical block %d has empty hash (likely RPC null result or malformed header)", blockNum)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "canonical hash missing")
+		return false, err
+	}
+	span.SetAttributes(attribute.String("canonical.hash", canonicalHash))
+	if canonicalHash != incomingHash {
+		span.SetAttributes(attribute.Bool("verify.stale_fork", true))
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *LiveService) publishBlockEvent(ctx context.Context, chainID, blockNum int64, version int, blockHash, parentHash string, blockTimestamp int64, receivedAt time.Time, isReorg bool) error {

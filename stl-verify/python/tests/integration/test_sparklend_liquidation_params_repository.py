@@ -81,7 +81,7 @@ async def test_ids(db_url: str, _seed_data: None) -> dict[str, int]:
 async def repository(async_db_url: str, _seed_data: None, test_ids: dict[str, int]):
     engine = create_async_engine(async_db_url)
     try:
-        yield AaveLikeLiquidationParamsRepository(engine, protocol_id=test_ids["protocol_id"])
+        yield AaveLikeLiquidationParamsRepository(engine)
     finally:
         await engine.dispose()
 
@@ -89,7 +89,7 @@ async def repository(async_db_url: str, _seed_data: None, test_ids: dict[str, in
 @pytest.mark.asyncio(loop_scope="module")
 async def test_returns_normalised_params_for_known_tokens(repository, test_ids: dict[str, int]) -> None:
     result = await repository.get_params(
-        backed_asset_id=0,  # unused for SparkLend
+        protocol_id=test_ids["protocol_id"],
         token_ids=[test_ids["weth_id"], test_ids["cbbtc_id"]],
     )
 
@@ -107,11 +107,11 @@ async def test_returns_normalised_params_for_known_tokens(repository, test_ids: 
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_missing_token_absent_from_result(repository, test_ids: dict[str, int]) -> None:
-    result = await repository.get_params(backed_asset_id=0, token_ids=[99999])
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"], token_ids=[99999])
     assert 99999 not in result
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_empty_token_ids_returns_empty_dict(repository) -> None:
-    result = await repository.get_params(backed_asset_id=0, token_ids=[])
+async def test_empty_token_ids_returns_empty_dict(repository, test_ids: dict[str, int]) -> None:
+    result = await repository.get_params(protocol_id=test_ids["protocol_id"], token_ids=[])
     assert result == {}

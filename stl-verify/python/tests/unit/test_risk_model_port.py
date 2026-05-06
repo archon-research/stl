@@ -23,11 +23,11 @@ class FakeRiskModel:
 
     def __init__(
         self,
-        model: str,
+        risk_model: str,
         supported: set[tuple[int, EthAddress]],
         result: RrcResult,
     ) -> None:
-        self.model = model
+        self.risk_model = risk_model
         self._supported = supported
         self._result = result
 
@@ -44,11 +44,15 @@ _SURAF_RESULT = RrcResult(
     asset_id=1,
     prime_id=_PRIME_A,
     rrc_usd=Decimal("337.00"),
-    model="suraf",
+    comparable_crr_pct=Decimal("33.7"),
+    risk_model="suraf",
     details=SurafDetails(
+        risk_model="suraf",
         rating_id="aave_ausdc",
         rating_version="v7",
         crr_pct=Decimal("33.7"),
+        unadjusted_crr_pct=Decimal("32.7"),
+        penalty_pp=Decimal("1.0"),
         source_commit_sha="abc123",
     ),
 )
@@ -57,10 +61,12 @@ _GAP_SWEEP_RESULT = RrcResult(
     asset_id=2,
     prime_id=_PRIME_A,
     rrc_usd=Decimal("1200.50"),
-    model="gap_sweep",
+    comparable_crr_pct=Decimal("12.00"),
+    risk_model="gap_sweep",
     details=GapSweepDetails(
+        risk_model="gap_sweep",
         gap_pct=Decimal("0.15"),
-        bad_debt_usd=Decimal("1200.50"),
+        loss_usd=Decimal("1200.50"),
     ),
 )
 
@@ -90,25 +96,30 @@ class TestRrcResult:
         expected_model: str,
         expected_details_type: type,
     ) -> None:
-        assert result.model == expected_model
+        assert result.risk_model == expected_model
         assert isinstance(result.details, expected_details_type)
 
     def test_common_fields(self) -> None:
         assert _SURAF_RESULT.asset_id == 1
         assert _SURAF_RESULT.prime_id == str(_PRIME_A)
         assert _SURAF_RESULT.rrc_usd == Decimal("337.00")
+        assert _SURAF_RESULT.comparable_crr_pct == Decimal("33.7")
 
     def test_suraf_details_fields(self) -> None:
         d = _SURAF_RESULT.details
         assert isinstance(d, SurafDetails)
         assert d.rating_id == "aave_ausdc"
+        assert d.rating_version == "v7"
         assert d.crr_pct == Decimal("33.7")
+        assert d.unadjusted_crr_pct == Decimal("32.7")
+        assert d.penalty_pp == Decimal("1.0")
+        assert d.source_commit_sha == "abc123"
 
     def test_gap_sweep_details_fields(self) -> None:
         d = _GAP_SWEEP_RESULT.details
         assert isinstance(d, GapSweepDetails)
         assert d.gap_pct == Decimal("0.15")
-        assert d.bad_debt_usd == Decimal("1200.50")
+        assert d.loss_usd == Decimal("1200.50")
 
     def test_frozen(self) -> None:
         with pytest.raises(ValidationError):
@@ -117,24 +128,37 @@ class TestRrcResult:
     INVALID_CASES = [
         pytest.param(
             "suraf",
-            GapSweepDetails(gap_pct=Decimal("0.15"), bad_debt_usd=Decimal("100")),
+            GapSweepDetails(
+                risk_model="gap_sweep",
+                gap_pct=Decimal("0.15"),
+                loss_usd=Decimal("100"),
+            ),
             id="suraf-model-with-gap-sweep-details",
         ),
         pytest.param(
             "gap_sweep",
-            SurafDetails(rating_id="x", rating_version="v1", crr_pct=Decimal("10"), source_commit_sha="abc"),
+            SurafDetails(
+                risk_model="suraf",
+                rating_id="x",
+                rating_version="v1",
+                crr_pct=Decimal("10"),
+                unadjusted_crr_pct=Decimal("10"),
+                penalty_pp=Decimal("0"),
+                source_commit_sha="abc",
+            ),
             id="gap-sweep-model-with-suraf-details",
         ),
     ]
 
-    @pytest.mark.parametrize("model,details", INVALID_CASES)
-    def test_mismatched_model_and_details_rejected(self, model: str, details: object) -> None:
+    @pytest.mark.parametrize("risk_model,details", INVALID_CASES)
+    def test_mismatched_model_and_details_rejected(self, risk_model: str, details: object) -> None:
         with pytest.raises(ValidationError):
             RrcResult(
                 asset_id=1,
                 prime_id=_PRIME_A,
                 rrc_usd=Decimal("100"),
-                model=model,
+                comparable_crr_pct=Decimal("10"),
+                risk_model=risk_model,
                 details=details,  # type: ignore[arg-type]
             )
 
@@ -144,11 +168,15 @@ class TestRrcResult:
                 asset_id=1,
                 prime_id=_PRIME_A,
                 rrc_usd=Decimal("100"),
-                model="typo_model",
+                comparable_crr_pct=Decimal("10"),
+                risk_model="typo_model",
                 details=SurafDetails(
+                    risk_model="suraf",
                     rating_id="x",
                     rating_version="v1",
                     crr_pct=Decimal("10"),
+                    unadjusted_crr_pct=Decimal("10"),
+                    penalty_pp=Decimal("0"),
                     source_commit_sha="abc",
                 ),
             )
@@ -160,15 +188,15 @@ class TestFakeRiskModel:
     def test_satisfies_protocol(self) -> None:
         """FakeRiskModel is a structural subtype of RiskModel."""
         fake: RiskModel = FakeRiskModel(
-            model="suraf",
+            risk_model="suraf",
             supported={(1, _PRIME_A)},
             result=_SURAF_RESULT,
         )
         assert isinstance(fake, FakeRiskModel)
 
     def test_model_attribute(self) -> None:
-        fake = FakeRiskModel(model="suraf", supported={(1, _PRIME_A)}, result=_SURAF_RESULT)
-        assert fake.model == "suraf"
+        fake = FakeRiskModel(risk_model="suraf", supported={(1, _PRIME_A)}, result=_SURAF_RESULT)
+        assert fake.risk_model == "suraf"
 
     APPLIES_TO_CASES = [
         pytest.param(1, _PRIME_A, True, id="supported-pair"),
@@ -184,16 +212,16 @@ class TestFakeRiskModel:
         prime_id: EthAddress,
         expected: bool,
     ) -> None:
-        fake = FakeRiskModel(model="suraf", supported={(1, _PRIME_A)}, result=_SURAF_RESULT)
+        fake = FakeRiskModel(risk_model="suraf", supported={(1, _PRIME_A)}, result=_SURAF_RESULT)
         assert fake.applies_to(asset_id, prime_id) is expected
 
     async def test_compute_returns_configured_result(self) -> None:
-        fake = FakeRiskModel(model="suraf", supported={(1, _PRIME_A)}, result=_SURAF_RESULT)
+        fake = FakeRiskModel(risk_model="suraf", supported={(1, _PRIME_A)}, result=_SURAF_RESULT)
         got = await fake.compute(asset_id=1, prime_id=_PRIME_A, overrides={})
         assert got is _SURAF_RESULT
 
     async def test_compute_with_gap_sweep_result(self) -> None:
-        fake = FakeRiskModel(model="gap_sweep", supported={(2, _PRIME_A)}, result=_GAP_SWEEP_RESULT)
+        fake = FakeRiskModel(risk_model="gap_sweep", supported={(2, _PRIME_A)}, result=_GAP_SWEEP_RESULT)
         got = await fake.compute(asset_id=2, prime_id=_PRIME_A, overrides={})
-        assert got.model == "gap_sweep"
+        assert got.risk_model == "gap_sweep"
         assert got.rrc_usd == Decimal("1200.50")

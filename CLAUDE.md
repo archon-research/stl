@@ -22,7 +22,9 @@ All commands run from `stl-verify/`:
 ```bash
 # Development
 make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
-make dev-down            # Stop services
+make dev-suspend         # Suspend local kind nodes (local dev only; do not use in CI/prod)
+make dev-resume          # Resume suspended local kind nodes (local dev only; do not use in CI/prod)
+make dev-down            # Delete local kind cluster
 make dev-env             # Generate .env files for all services (fetches secrets from AWS)
 make run-watcher         # Run watcher (loads .env from cmd/watcher/)
 

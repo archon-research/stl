@@ -8,15 +8,22 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
+from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
-from app.adapters.postgres.receipt_token_repository import resolve_receipt_token_mapping
-from app.api.v1 import allocations, risk, status
+from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
+from app.api.v1 import allocations, data_sources, risk, status
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
 from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
 from app.risk_engine.suraf.result import SurafResult
+from app.services.crypto_lending_risk_service import CryptoLendingRiskService
+from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
 from app.telemetry import instrument_sqlalchemy_engine, setup_telemetry, shutdown_telemetry
 
@@ -123,10 +130,35 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             allocation_repo = PostgresAllocationRepository(engine)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
+            receipt_token_repo = ReceiptTokenRepository(engine)
+            crypto_lending_reader = PostgresCryptoLendingReader(
+                receipt_token_repo=receipt_token_repo,
+                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
+                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
+                morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
+                engine=engine,
+                allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
+            )
+            # Snapshot supported crypto-lending assets at startup. New
+            # receipt tokens added after startup require a restart to appear
+            # in applies_to(), which matches other startup-loaded state such
+            # as the SURAF asset mapping.
+            supported_crypto_lending_asset_ids = await crypto_lending_reader.list_supported_asset_ids()
+            crypto_lending_risk_service = CryptoLendingRiskService(
+                reader=crypto_lending_reader,
+                default_gap_pct=settings.risk_default_gap_pct,
+                supported_asset_ids=supported_crypto_lending_asset_ids,
+            )
+            model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service])
+
             app.state.engine = engine
             app.state.suraf_ratings = suraf_ratings
             app.state.asset_to_rating = asset_to_rating
             app.state.suraf_rrc_service = suraf_rrc_service
+            app.state.crypto_lending_risk_service = crypto_lending_risk_service
+            app.state.model_registry = model_registry
+            app.state.receipt_token_lookup = receipt_token_repo
 
             instrument_sqlalchemy_engine(engine)
             yield
@@ -141,6 +173,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.state.tracer_provider = setup_telemetry(application, settings)
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
+    application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
     configure_docs(application)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)

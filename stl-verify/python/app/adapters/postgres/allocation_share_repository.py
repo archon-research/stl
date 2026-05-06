@@ -5,21 +5,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.domain.exceptions import MissingShareError, StaleShareError
 from app.logging import get_logger
 
 logger = get_logger(__name__)
-
-
-class AllocationShareError(Exception):
-    """Base class for allocation share lookup failures."""
-
-
-class StaleShareError(AllocationShareError):
-    """Raised when the most-recent supply row is older than the configured staleness window."""
-
-
-class MissingShareError(AllocationShareError):
-    """Raised when no balance or supply row is available for the (chain, token, wallet) triple."""
 
 
 # Single-round-trip query: pull the latest balance row for the wallet and the

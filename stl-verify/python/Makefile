@@ -8,18 +8,18 @@ STATIC_DIR := app/static
 OPENAPI_SCHEMA := $(TS_DIR)/ui/src/generated/openapi-schema.json
 
 lint:
-	$(UV) run ruff check .
-	$(UV) run ruff format --check .
+	$(UV) run --extra dev ruff check .
+	$(UV) run --extra dev ruff format --check .
 
 lint-fix:
-	$(UV) run ruff check --fix .
-	$(UV) run ruff format .
+	$(UV) run --extra dev ruff check --fix .
+	$(UV) run --extra dev ruff format .
 
 test-unit:
-	$(UV) run pytest tests/unit
+	$(UV) run --extra dev pytest tests/unit
 
 test-integration:
-	$(UV) run pytest tests/integration
+	$(UV) run --extra dev pytest tests/integration
 
 build-ui-static:
 	rm -rf $(STATIC_DIR)

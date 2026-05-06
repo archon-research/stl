@@ -3,7 +3,7 @@ import { SkeletonStack, ThemeToggle } from '@archon-research/design-system';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { EmptyState, ErrorState } from '.';
+import { EmptyState, ErrorState, ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {
@@ -13,14 +13,6 @@ type PrimeSidebarProps = {
   errorMessage: string | null;
   onSelectPrime: (primeId: string) => void;
 };
-
-function formatAddress(address: string): string {
-  if (address.length <= 12) {
-    return address;
-  }
-
-  return `${address.slice(0, 6)}…${address.slice(-4)}`;
-}
 
 export function PrimeSidebar({
   primes,
@@ -54,16 +46,41 @@ export function PrimeSidebar({
           borderBottomColor: 'border.subtle',
         })}
       >
-        <h2
-          className={css({
-            m: 0,
-            fontSize: '2xl',
-            lineHeight: 'tight',
-            color: 'text.strong',
-          })}
-        >
-          STL Verify
-        </h2>
+        <div className={flex({ align: 'center', gap: '3.5' })}>
+          <img
+            src="/assets/archon-logo.png"
+            alt=""
+            aria-hidden="true"
+            className={css({
+              width: '14',
+              height: '14',
+              flexShrink: 0,
+              objectFit: 'contain',
+            })}
+          />
+          <div
+            className={css({
+              display: 'grid',
+              gap: '0.5',
+              minWidth: 0,
+            })}
+          >
+            <span
+              className={css({
+                display: 'block',
+                m: 0,
+                fontSize: '2xl',
+                lineHeight: '0.95',
+                letterSpacing: '0.05em',
+                fontWeight: '700',
+                textTransform: 'uppercase',
+                color: 'text.strong',
+              })}
+            >
+              Sentinel Verify
+            </span>
+          </div>
+        </div>
       </div>
 
       <div
@@ -133,26 +150,11 @@ export function PrimeSidebar({
                   })}
                 >
                   <div className={flex({ align: 'center', gap: '3.5' })}>
-                    <div
-                      className={css({
-                        width: '9',
-                        height: '9',
-                        borderRadius: 'full',
-                        bg: isSelected
-                          ? 'interactive.accent'
-                          : 'surface.subtle',
-                        color: isSelected ? 'white' : 'text.strong',
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: 'xs',
-                        fontWeight: 'semibold',
-                        textTransform: 'uppercase',
-                        flexShrink: 0,
-                      })}
-                    >
-                      {prime.name.slice(0, 2)}
-                    </div>
+                    <ProtocolLogo
+                      protocolName={prime.name}
+                      isSelected={isSelected}
+                      size="8"
+                    />
                     <div
                       className={css({
                         display: 'grid',
@@ -170,16 +172,20 @@ export function PrimeSidebar({
                       >
                         {prime.name}
                       </p>
-                      <p
+                      <span
                         className={css({
-                          m: 0,
+                          fontFamily: 'mono',
                           fontSize: 'xs',
-                          letterSpacing: '0.04em',
-                          color: 'text.muted',
+                          color: { base: 'blue.500', _dark: 'blue.400' },
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          display: 'block',
                         })}
+                        title={prime.address}
                       >
-                        {formatAddress(prime.address)}
-                      </p>
+                        {prime.address.slice(0, 6)}...{prime.address.slice(-4)}
+                      </span>
                     </div>
                   </div>
                 </button>

@@ -213,10 +213,12 @@ jobs:
     needs: build-push-prod
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
-    environment: production
     concurrency:
       group: deploy-prod-pr
       cancel-in-progress: false
+    outputs:
+      pr_url: ${{ steps.create-pr.outputs.pr_url }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -229,6 +231,74 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           ref: main
+          fetch-depth: 0
+
+      - name: Build changelog
+        id: changelog
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -o pipefail
+          SHA=${{ inputs.sha || github.sha }}
+          SHORT_SHA=${SHA:0:7}
+          REPO="${{ github.repository }}"
+
+          # Get the SHA currently deployed in prod
+          PROD_SHA=$(grep -m1 -oP '[a-f0-9]{40}' k8s/overlays/prod/kustomization.yaml || echo "")
+          PROD_SHORT=${PROD_SHA:0:7}
+
+          if [ -z "$PROD_SHA" ]; then
+            echo "::error::Could not parse current prod SHA from kustomization.yaml"
+            exit 1
+          fi
+
+          CHANGELOG=""
+
+          if [ "$PROD_SHA" = "$SHA" ]; then
+            CHANGELOG="No code changes (same SHA as current prod)."
+          else
+            # List merged PRs between the two SHAs
+            TOTAL_PRS=0
+            MERGED_PRS=$(git log --merges --format="%s" "${PROD_SHA}..${SHA}" \
+              | grep -oP '#\d+' | sort -u || echo "")
+            TOTAL_PRS=$(echo "$MERGED_PRS" | grep -c . || echo 0)
+            DISPLAY_PRS=$(echo "$MERGED_PRS" | head -15)
+
+            PR_LIST=""
+            for pr_num in $DISPLAY_PRS; do
+              num=${pr_num#\#}
+              PR_INFO=$(gh pr view "$num" --json title,url,author --jq '"- [#'"$num"' \(.title)](\(.url)) by @\(.author.login)"' 2>/dev/null || echo "")
+              if [ -n "$PR_INFO" ]; then
+                PR_LIST="${PR_LIST}${PR_INFO}\n"
+              fi
+            done
+
+            # List commits between current prod and new SHA (stl-verify/ only)
+            TOTAL_COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | wc -l | tr -d ' ')
+            COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | head -20)
+
+            CHANGELOG="### Changes: \`${PROD_SHORT}\` → \`${SHORT_SHA}\`"
+            if [ -n "$PR_LIST" ]; then
+              CHANGELOG="${CHANGELOG}\n\n**Merged PRs:**\n${PR_LIST}"
+              if [ "$TOTAL_PRS" -gt 15 ]; then
+                CHANGELOG="${CHANGELOG}…and $((TOTAL_PRS - 15)) more"
+              fi
+            fi
+            if [ -n "$COMMITS" ]; then
+              CHANGELOG="${CHANGELOG}\n\n**Commits (stl-verify):**\n\`\`\`\n${COMMITS}\n\`\`\`"
+              if [ "$TOTAL_COMMITS" -gt 20 ]; then
+                CHANGELOG="${CHANGELOG}\n…and $((TOTAL_COMMITS - 20)) more"
+              fi
+            fi
+          fi
+
+          # Write to file to avoid quoting issues, then set output
+          echo -e "$CHANGELOG" > /tmp/changelog.md
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            cat /tmp/changelog.md
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update prod kustomization image tags
         run: |
@@ -237,6 +307,7 @@ jobs:
           sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/prod/kustomization.yaml
 
       - name: Create or update prod PR
+        id: create-pr
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -294,39 +365,62 @@ jobs:
             --body "$(cat <<EOF
           Automated prod image tag update.
 
-          **Commit:** ${SHA}
-          **Images pushed to:** prod ECR (030797368798)
+          **Deploy SHA:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${SHA})
+          **Images pushed to:** prod ECR (\`030797368798\`)
+          **Triggered by:** @${{ github.actor }}
 
-          Merge this PR to update prod kustomization, then manually sync in ArgoCD.
+          ${{ steps.changelog.outputs.changelog }}
+
+          ---
+          Merge this PR to update prod kustomization, then sync in ArgoCD.
           EOF
           )" \
             --head "$BRANCH" \
             --base main
 
+          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+  notify-prod-pr-created:
+    name: Notify Prod Deploy Awaiting Approval
+    needs: create-prod-pr
+    if: ${{ needs.create-prod-pr.result == 'success' }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: pending
+      context: Prod Deploy
+      pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
+      body: ${{ needs.create-prod-pr.outputs.changelog }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
   notify-staging-failure:
     name: Notify Staging Deploy Failure
     if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
     needs: [build-push-staging, update-staging]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: archon-research/github-actions/slack-notify-failure@6c81493c5f924b2d57fb84c7f298630037f5f27f # main
-        with:
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
-          header: Staging Deploy Failed
-          failed-jobs: |
-            Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
-            Update Staging Image Tags=${{ needs.update-staging.result }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Staging Deploy
+      failed-jobs: |
+        Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
+        Update Staging Image Tags=${{ needs.update-staging.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
   notify-prod-failure:
     name: Notify Prod Deploy Failure
     if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.create-prod-pr.result == 'failure') }}
     needs: [build-push-prod, create-prod-pr]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: archon-research/github-actions/slack-notify-failure@6c81493c5f924b2d57fb84c7f298630037f5f27f # main
-        with:
-          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-          header: Prod Deploy Failed
-          failed-jobs: |
-            Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
-            Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Deploy
+      failed-jobs: |
+        Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
+        Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

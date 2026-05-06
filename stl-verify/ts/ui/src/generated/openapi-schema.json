@@ -1,16 +1,156 @@
 {
   "components": {
     "schemas": {
-      "AllocationResponse": {
+      "AllocationActivityResponse": {
+        "description": "Allocation activity event record for timeline feeds.",
         "properties": {
+          "action_type": {
+            "title": "Action Type",
+            "type": "string"
+          },
           "balance": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Balance",
             "type": "string"
           },
+          "block_number": {
+            "title": "Block Number",
+            "type": "integer"
+          },
+          "block_version": {
+            "title": "Block Version",
+            "type": "integer"
+          },
           "chain_id": {
             "title": "Chain Id",
             "type": "integer"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "log_index": {
+            "title": "Log Index",
+            "type": "integer"
+          },
+          "prime_address": {
+            "title": "Prime Address",
+            "type": "string"
+          },
+          "prime_name": {
+            "title": "Prime Name",
+            "type": "string"
+          },
+          "protocol_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol Name"
+          },
+          "token_id": {
+            "title": "Token Id",
+            "type": "integer"
+          },
+          "token_symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token Symbol"
+          },
+          "tx_amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Tx Amount",
+            "type": "string"
+          },
+          "tx_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tx Hash"
+          }
+        },
+        "required": [
+          "chain_id",
+          "prime_address",
+          "prime_name",
+          "protocol_name",
+          "token_id",
+          "token_symbol",
+          "action_type",
+          "tx_amount",
+          "balance",
+          "tx_hash",
+          "log_index",
+          "block_number",
+          "block_version",
+          "created_at"
+        ],
+        "title": "AllocationActivityResponse",
+        "type": "object"
+      },
+      "AllocationCategory": {
+        "description": "Classification of allocation position types across primes.",
+        "enum": [
+          "allocation",
+          "pol",
+          "psm3",
+          "asset"
+        ],
+        "title": "AllocationCategory",
+        "type": "string"
+      },
+      "AllocationResponse": {
+        "description": "Enriched allocation response with category and metadata.",
+        "properties": {
+          "amount_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount Usd"
+          },
+          "balance": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Balance",
+            "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/AllocationCategory"
+          },
+          "chain_id": {
+            "title": "Chain Id",
+            "type": "integer"
+          },
+          "latest_activity_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Activity At"
           },
           "protocol_name": {
             "title": "Protocol Name",
@@ -50,7 +190,8 @@
           "symbol",
           "underlying_symbol",
           "protocol_name",
-          "balance"
+          "balance",
+          "category"
         ],
         "title": "AllocationResponse",
         "type": "object"
@@ -78,6 +219,173 @@
           "bad_debt_usd"
         ],
         "title": "BadDebtResponse",
+        "type": "object"
+      },
+      "CapitalMetricsResponse": {
+        "description": "Prime-level capital metrics for risk and alert management.",
+        "properties": {
+          "benchmark_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Source"
+          },
+          "capital_buffer": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Capital Buffer",
+            "type": "string"
+          },
+          "first_loss_capital": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "First Loss Capital",
+            "type": "string"
+          },
+          "is_validated": {
+            "default": false,
+            "title": "Is Validated",
+            "type": "boolean"
+          },
+          "prime_id": {
+            "title": "Prime Id",
+            "type": "string"
+          },
+          "prime_name": {
+            "title": "Prime Name",
+            "type": "string"
+          },
+          "risk_capital": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Risk Capital",
+            "type": "string"
+          },
+          "risk_to_capital_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Risk To Capital Ratio"
+          },
+          "timestamp": {
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "total_capital": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Capital",
+            "type": "string"
+          },
+          "validation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Validation Note"
+          }
+        },
+        "required": [
+          "prime_id",
+          "prime_name",
+          "risk_capital",
+          "capital_buffer",
+          "first_loss_capital",
+          "total_capital",
+          "risk_to_capital_ratio",
+          "timestamp"
+        ],
+        "title": "CapitalMetricsResponse",
+        "type": "object"
+      },
+      "ChainResponse": {
+        "properties": {
+          "chain_id": {
+            "title": "Chain Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain_id",
+          "name"
+        ],
+        "title": "ChainResponse",
+        "type": "object"
+      },
+      "DataSourceResponse": {
+        "description": "Data source metadata for the transparency panel.",
+        "properties": {
+          "access_model": {
+            "$ref": "#/components/schemas/SourceAccessModel"
+          },
+          "attribution_required": {
+            "default": false,
+            "title": "Attribution Required",
+            "type": "boolean"
+          },
+          "caveat": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Caveat"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "host",
+          "access_model",
+          "role"
+        ],
+        "title": "DataSourceResponse",
+        "type": "object"
+      },
+      "DataSourcesResponse": {
+        "description": "Registered data sources used by STL.",
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/DataSourceResponse"
+            },
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "title": "DataSourcesResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -114,6 +422,34 @@
           "address"
         ],
         "title": "PrimeResponse",
+        "type": "object"
+      },
+      "ProtocolResponse": {
+        "properties": {
+          "chain_id": {
+            "title": "Chain Id",
+            "type": "integer"
+          },
+          "encode": {
+            "title": "Encode",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "chain_id",
+          "encode",
+          "name"
+        ],
+        "title": "ProtocolResponse",
         "type": "object"
       },
       "RiskBreakdownItemResponse": {
@@ -193,9 +529,9 @@
       },
       "ScenarioRrcRequest": {
         "properties": {
-          "asset": {
-            "title": "Asset",
-            "type": "string"
+          "receipt_token_id": {
+            "title": "Receipt Token Id",
+            "type": "integer"
           },
           "usd_exposure": {
             "anyOf": [
@@ -211,7 +547,7 @@
           }
         },
         "required": [
-          "asset",
+          "receipt_token_id",
           "usd_exposure"
         ],
         "title": "ScenarioRrcRequest",
@@ -219,10 +555,6 @@
       },
       "ScenarioRrcResponse": {
         "properties": {
-          "asset": {
-            "title": "Asset",
-            "type": "string"
-          },
           "crr_pct": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Crr Pct",
@@ -235,6 +567,10 @@
           "rating_version": {
             "title": "Rating Version",
             "type": "string"
+          },
+          "receipt_token_id": {
+            "title": "Receipt Token Id",
+            "type": "integer"
           },
           "rrc_usd": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -252,7 +588,7 @@
           }
         },
         "required": [
-          "asset",
+          "receipt_token_id",
           "usd_exposure",
           "rating_id",
           "rating_version",
@@ -261,6 +597,106 @@
           "source_commit_sha"
         ],
         "title": "ScenarioRrcResponse",
+        "type": "object"
+      },
+      "SourceAccessModel": {
+        "description": "Classification of data source accessibility and terms of use.",
+        "enum": [
+          "open",
+          "public",
+          "closed"
+        ],
+        "title": "SourceAccessModel",
+        "type": "string"
+      },
+      "StarRiskCapitalDataResponse": {
+        "properties": {
+          "results": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StarRiskCapitalRowResponse"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "title": "StarRiskCapitalDataResponse",
+        "type": "object"
+      },
+      "StarRiskCapitalResponse": {
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StarRiskCapitalDataResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "success": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Success"
+          }
+        },
+        "title": "StarRiskCapitalResponse",
+        "type": "object"
+      },
+      "StarRiskCapitalRowResponse": {
+        "properties": {
+          "exposure": {
+            "title": "Exposure",
+            "type": "string"
+          },
+          "exposure_share": {
+            "title": "Exposure Share",
+            "type": "string"
+          },
+          "financial_rrc": {
+            "title": "Financial Rrc",
+            "type": "string"
+          },
+          "risk_tolerance_ratio": {
+            "title": "Risk Tolerance Ratio",
+            "type": "string"
+          },
+          "star": {
+            "title": "Star",
+            "type": "string"
+          },
+          "total_rc": {
+            "title": "Total Rc",
+            "type": "string"
+          }
+        },
+        "required": [
+          "star",
+          "exposure",
+          "total_rc",
+          "financial_rrc",
+          "exposure_share",
+          "risk_tolerance_ratio"
+        ],
+        "title": "StarRiskCapitalRowResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -311,6 +747,244 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/allocations/activity": {
+      "get": {
+        "description": "Retrieve allocation activity events with optional URL filters.\n\nQuery parameters:\n- prime_id: Filter by prime address (0x-prefixed Ethereum address)\n- chain_id: Filter by chain ID\n- protocol_name: Filter by protocol name (case-insensitive substring)\n- action_type: Filter by action type (`in`, `out`, `sweep`)\n- token_symbol: Filter by token symbol (case-insensitive substring)\n- tx_hash: Filter by transaction hash (0x-prefixed)\n- from_timestamp: Inclusive lower timestamp bound (ISO-8601)\n- to_timestamp: Inclusive upper timestamp bound (ISO-8601)\n- limit: Max results (default 100, max 1000)",
+        "operationId": "list_allocation_activity_v1_allocations_activity_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "prime_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Prime Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "chain_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Chain Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "protocol_name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Protocol Name"
+            }
+          },
+          {
+            "in": "query",
+            "name": "action_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Action Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "token_symbol",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token Symbol"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tx_hash",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tx Hash"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From Timestamp"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To Timestamp"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AllocationActivityResponse"
+                  },
+                  "title": "Response List Allocation Activity V1 Allocations Activity Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Allocation Activity"
+      }
+    },
+    "/v1/capital-metrics": {
+      "get": {
+        "operationId": "list_capital_metrics_v1_capital_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/CapitalMetricsResponse"
+                  },
+                  "title": "Response List Capital Metrics V1 Capital Metrics Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Capital Metrics"
+      }
+    },
+    "/v1/chains": {
+      "get": {
+        "operationId": "list_chains_v1_chains_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ChainResponse"
+                  },
+                  "title": "Response List Chains V1 Chains Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Chains"
+      }
+    },
+    "/v1/data-sources": {
+      "get": {
+        "description": "Retrieve the registry of data sources used by STL.",
+        "operationId": "get_data_sources_v1_data_sources_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataSourcesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Data Sources"
+      }
+    },
     "/v1/primes": {
       "get": {
         "operationId": "list_primes_v1_primes_get",
@@ -376,6 +1050,28 @@
         "summary": "List Allocations"
       }
     },
+    "/v1/protocols": {
+      "get": {
+        "operationId": "list_protocols_v1_protocols_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProtocolResponse"
+                  },
+                  "title": "Response List Protocols V1 Protocols Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Protocols"
+      }
+    },
     "/v1/ready": {
       "get": {
         "operationId": "get_ready_v1_ready_get",
@@ -394,7 +1090,7 @@
     },
     "/v1/risk/rrc/scenario": {
       "post": {
-        "description": "Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.\n\n``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating\nfor the asset. Pure scenario calculation \u2014 no DB lookup, no position\nstate. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is\ndeferred pending a decision on how to derive USD exposure from holdings.",
+        "description": "Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.\n\n``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating\nfor the receipt token. Pure scenario calculation \u2014 no position state.",
         "operationId": "post_rrc_scenario_v1_risk_rrc_scenario_post",
         "requestBody": {
           "content": {
@@ -526,6 +1222,25 @@
           }
         },
         "summary": "Get Risk Breakdown"
+      }
+    },
+    "/v1/star-risk-capital/primes": {
+      "get": {
+        "description": "Proxy published Star risk capital payload through backend to avoid browser CORS issues.",
+        "operationId": "get_star_risk_capital_requirements_v1_star_risk_capital_primes_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StarRiskCapitalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Star Risk Capital Requirements"
       }
     },
     "/v1/status": {

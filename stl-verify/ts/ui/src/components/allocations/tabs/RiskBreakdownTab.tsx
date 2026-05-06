@@ -23,9 +23,11 @@ import {
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, RiskBreakdown } from '../../../types/allocation';
-import { SummaryMetric } from '../../shared';
+import { ChainLogo, SummaryMetric } from '../../shared';
+import { MethodologyPanel } from '../../shared/MethodologyPanel';
 
 type RiskBreakdownTabProps = {
+  isEnabled: boolean;
   searchQuery?: string;
   selectedReceiptToken: Allocation | null;
 };
@@ -33,10 +35,12 @@ type RiskBreakdownTabProps = {
 type RiskItem = RiskBreakdown['items'][number];
 
 function RiskTable({
+  chainId,
   items,
   isLoading,
   searchQuery,
 }: {
+  chainId: number;
   items: RiskItem[];
   isLoading: boolean;
   searchQuery: string;
@@ -66,8 +70,21 @@ function RiskTable({
         id: 'symbol',
         header: 'Symbol',
         accessorKey: 'symbol',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          info.getValue() as string,
+        cell: (info: CellContext<RiskItem, unknown>) => {
+          const symbol = info.getValue() as string;
+          return (
+            <div
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '2',
+              })}
+            >
+              <ChainLogo chainId={chainId} size="6" />
+              <span>{symbol}</span>
+            </div>
+          );
+        },
       },
       {
         id: 'amount',
@@ -122,7 +139,7 @@ function RiskTable({
           ),
       },
     ],
-    [],
+    [chainId],
   );
 
   const table = useDataTable(filteredItems, columns, {
@@ -137,30 +154,31 @@ function RiskTable({
       skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
       minWidth="76rem"
       renderCell={(children) => (
-        <p
+        <div
           className={css({
-            m: 0,
             fontSize: 'sm',
             color: 'text.strong',
           })}
         >
           {children}
-        </p>
+        </div>
       )}
     />
   );
 }
 
 export function RiskBreakdownTab({
+  isEnabled,
   searchQuery = '',
   selectedReceiptToken,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
 
   useEffect(() => {
-    if (!selectedReceiptToken) {
+    if (!isEnabled || !selectedReceiptToken) {
       setBreakdown(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -202,7 +220,7 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [selectedReceiptToken]);
+  }, [isEnabled, selectedReceiptToken]);
 
   const totalUsd = useMemo(() => {
     if (!breakdown) {
@@ -376,11 +394,18 @@ export function RiskBreakdownTab({
 
       {!errorMessage && (isLoading || breakdown) ? (
         <RiskTable
+          chainId={selectedReceiptToken.chain_id}
           items={breakdown?.items ?? []}
           isLoading={isLoading}
           searchQuery={searchQuery}
         />
       ) : null}
+
+      {/* Data Sources & Methodology Footer */}
+      <MethodologyPanel
+        isOpen={isMethodologyOpen}
+        onToggle={() => setIsMethodologyOpen(!isMethodologyOpen)}
+      />
     </div>
   );
 }
