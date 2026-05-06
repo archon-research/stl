@@ -43,13 +43,18 @@ The watcher uses the mock blockchain server by default instead of real Alchemy. 
 ```bash
 make dev-up          # warm start — reuses existing images if present
 make dev-up-rebuild  # cold start — rebuilds all images from scratch
+make dev-suspend     # suspend local kind nodes; preserve cluster state (local dev only)
+make dev-resume      # resume suspended local kind nodes (local dev only)
 make dev-down        # delete cluster; database data persists
 make dev-reset       # dev-down + dev-up (warm)
 make dev-wipe        # tear down cluster and delete all persisted data (prompts for confirmation)
 ```
 
+`dev-suspend` / `dev-resume` are intended for local development only.
+Do not use them in CI or production workflows.
+
 Database data (TimescaleDB, Temporal) is persisted at `~/.vector/` and survives
-`dev-down` / `dev-up` cycles.
+`dev-down` / `dev-up` and `dev-suspend` / `dev-resume` cycles.
 
 ## Accessing Services
 

@@ -20,12 +20,14 @@ const LLAMA_CHAIN_SLUGS: Record<number, string> = {
   43114: 'avalanche',
 };
 
-const PROTOCOL_SLUG_OVERRIDES: Record<string, string> = {
+const PROTOCOL_SLUG_OVERRIDES: Record<string, string | null> = {
   'aave v2': 'aave-v2',
   'aave v3': 'aave-v3',
   'aave v3 lido': 'aave-v3',
+  'aave v3 rwa': 'aave-v3',
   'morpho blue': 'morpho',
   sparklend: 'spark',
+  grove: null,
 };
 
 export function buildTokenLogoUrl(_chainId: number, address: string): string {
@@ -41,11 +43,10 @@ export function buildChainLogoUrl(chainId: number): string | null {
   return `${LLAMA_CDN_BASE}/chains/rsz_${slug}.jpg`;
 }
 
-function toProtocolSlug(protocolName: string): string {
+function toProtocolSlug(protocolName: string): string | null {
   const normalized = protocolName.trim().toLowerCase();
-  const override = PROTOCOL_SLUG_OVERRIDES[normalized];
-  if (override) {
-    return override;
+  if (normalized in PROTOCOL_SLUG_OVERRIDES) {
+    return PROTOCOL_SLUG_OVERRIDES[normalized];
   }
 
   return normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
@@ -56,5 +57,10 @@ export function buildProtocolLogoUrl(protocolName: string): string | null {
     return null;
   }
 
-  return `${LLAMA_CDN_BASE}/protocols/${toProtocolSlug(protocolName)}`;
+  const slug = toProtocolSlug(protocolName);
+  if (!slug) {
+    return null;
+  }
+
+  return `${LLAMA_CDN_BASE}/protocols/${slug}`;
 }
