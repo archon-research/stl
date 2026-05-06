@@ -38,7 +38,11 @@ async def _get_protocol_event_service(engine: AsyncEngine = Depends(get_engine))
 # Protocol Event endpoints
 @router.get("/protocol-events", response_model=list[ProtocolEventResponse])
 async def list_protocol_events(
-    tx_hash: str | None = Query(None, description="Filter by transaction hash"),
+    tx_hash: str | None = Query(
+        None,
+        pattern=r"^(?:0[xX])?[0-9a-fA-F]{64}$",
+        description="Filter by transaction hash",
+    ),
     protocol_name: str | None = Query(None, description="Filter by protocol name"),
     limit: int = Query(100, ge=1, le=500, description="Limit number of results"),
     service: ProtocolEventService = Depends(_get_protocol_event_service),

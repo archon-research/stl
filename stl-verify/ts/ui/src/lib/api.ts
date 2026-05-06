@@ -32,8 +32,6 @@ type ApiResult<TData, TError> = Promise<{
   response: Response;
 }>;
 
-type UnknownRecord = Record<string, unknown>;
-
 function toErrorBody(error: unknown): string {
   if (typeof error === 'string') {
     return error;
@@ -83,104 +81,6 @@ async function requestData<TData, TError>(
   return data;
 }
 
-function firstStringField(
-  row: UnknownRecord,
-  ...keys: string[]
-): string | null {
-  for (const key of keys) {
-    if (typeof row[key] === 'string') {
-      return row[key] as string;
-    }
-  }
-  return null;
-}
-
-function firstNumberField(
-  row: UnknownRecord,
-  ...keys: string[]
-): number | null {
-  for (const key of keys) {
-    const value = row[key];
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return value;
-    }
-    if (typeof value === 'string' && value !== '') {
-      const parsed = Number(value);
-      if (Number.isFinite(parsed)) {
-        return parsed;
-      }
-    }
-  }
-  return null;
-}
-
-function normalizePrimeDebtSnapshot(value: unknown): PrimeDebtSnapshot | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const row = value as UnknownRecord;
-  const primeAddress = firstStringField(row, 'prime_address', 'prime_id');
-  const primeName = firstStringField(row, 'prime_name', 'star');
-  const ilkName = firstStringField(row, 'ilk_name', 'collateral_type');
-  const debtWad = firstStringField(row, 'debt_wad', 'borrowed_amount');
-  const syncedAt = firstStringField(
-    row,
-    'synced_at',
-    'updated_at',
-    'timestamp',
-  );
-  const blockNumber = firstNumberField(row, 'block_number');
-  const blockVersion = firstNumberField(row, 'block_version');
-
-  if (
-    !primeAddress ||
-    !primeName ||
-    !ilkName ||
-    !debtWad ||
-    !syncedAt ||
-    blockNumber === null ||
-    blockVersion === null
-  ) {
-    return null;
-  }
-
-  return {
-    prime_address: primeAddress,
-    prime_name: primeName,
-    ilk_name: ilkName,
-    debt_wad: debtWad,
-    block_number: Math.trunc(blockNumber),
-    block_version: Math.trunc(blockVersion),
-    synced_at: syncedAt,
-  };
-}
-
-async function requestPrimeDebtEndpoint(
-  primeId: string,
-  limit?: number,
-  signal?: AbortSignal,
-): Promise<unknown> {
-  const endpointPath = `/v1/primes/${encodeURIComponent(primeId)}/debt`;
-  const endpointQuery =
-    typeof limit === 'number'
-      ? `?limit=${encodeURIComponent(String(limit))}`
-      : '';
-  const endpointUrl = API_BASE_URL
-    ? `${API_BASE_URL}${endpointPath}${endpointQuery}`
-    : `${endpointPath}${endpointQuery}`;
-
-  return fetch(endpointUrl, { signal }).then(async (response) => {
-    if (!response.ok) {
-      const responseText = await response.text().catch(() => '<no body>');
-      throw new Error(
-        `GET ${endpointPath} failed (${response.status}): ${responseText}`,
-      );
-    }
-
-    return response.json();
-  });
-}
 
 export function getPrimes(signal?: AbortSignal): Promise<PrimesResponse> {
   return requestData(apiClient.GET('/v1/primes', { signal }), 'GET /v1/primes');
@@ -386,32 +286,28 @@ export function getTokenPrice(
   );
 }
 
-function extractRowsFromPayload(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-
-  if (payload && typeof payload === 'object') {
-    const items = (payload as UnknownRecord).items;
-    if (Array.isArray(items)) {
-      return items;
-    }
-  }
-
-  return [];
-}
-
 export async function getPrimeDebtSnapshots(
   primeId: string,
   limit?: number,
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot[]> {
-  const payload = await requestPrimeDebtEndpoint(primeId, limit, signal);
-  const rows = extractRowsFromPayload(payload);
+  const query =
+    typeof limit === 'number'
+      ? ({ limit } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
+      : undefined;
 
-  return rows
-    .map((row) => normalizePrimeDebtSnapshot(row))
-    .filter((row): row is PrimeDebtSnapshot => row !== null);
+  return requestData(
+    apiClient.GET('/v1/primes/{prime_id}/debt', {
+      params: {
+        path: {
+          prime_id: primeId,
+        },
+        query,
+      },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/debt',
+  );
 }
 
 export async function getLatestPrimeDebtSnapshot(
