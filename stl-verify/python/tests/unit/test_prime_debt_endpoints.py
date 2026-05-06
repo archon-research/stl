@@ -16,12 +16,10 @@ def _make_service(
     *,
     exists: bool = True,
     snapshots: list[PrimeDebtSnapshot] | None = None,
-    latest: PrimeDebtSnapshot | None = None,
 ) -> PrimeDebtService:
     service = AsyncMock(spec=PrimeDebtService)
     service.prime_exists.return_value = exists
     service.list_debt_snapshots.return_value = snapshots or []
-    service.get_latest_debt_snapshot.return_value = latest
     return service
 
 
@@ -106,31 +104,3 @@ def test_list_prime_debt_snapshots_returns_422_for_invalid_prime_id():
     response = client.get("/v1/primes/0xdeadbeef/debt")
 
     assert response.status_code == 422
-
-
-def test_get_latest_prime_debt_snapshot_returns_200_when_present():
-    from app.api.v1 import prime_debts
-
-    snap = _snapshot()
-    service = _make_service(latest=snap)
-    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
-    client = TestClient(app)
-
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt/latest")
-
-    assert response.status_code == 200
-    assert response.json()["ilk_name"] == "ETH-A"
-    service.get_latest_debt_snapshot.assert_awaited_once_with(EthAddress(_VALID_ADDR))
-
-
-def test_get_latest_prime_debt_snapshot_returns_404_when_no_snapshots():
-    from app.api.v1 import prime_debts
-
-    service = _make_service(latest=None)
-    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
-    client = TestClient(app)
-
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt/latest")
-
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Prime debt snapshot not found"

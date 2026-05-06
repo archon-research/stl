@@ -659,7 +659,7 @@ export function ActivityFeed({
                               bg: 'surface.subtle',
                               padding: '2',
                               fontFamily: 'mono',
-                              fontSize: '2xs',
+                              fontSize: 'xs',
                               color: 'text.default',
                               overflowX: 'auto',
                               maxHeight: '10rem',

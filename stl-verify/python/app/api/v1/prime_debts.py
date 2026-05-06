@@ -40,19 +40,3 @@ async def list_prime_debt_snapshots(
 
     snapshots = await service.list_debt_snapshots(prime_address, limit=limit)
     return [PrimeDebtSnapshotResponse(**snapshot.__dict__) for snapshot in snapshots]
-
-
-@router.get("/primes/{prime_id}/debt/latest", response_model=PrimeDebtSnapshotResponse)
-async def get_latest_prime_debt_snapshot(
-    prime_id: EthAddressParam,
-    service: PrimeDebtService = Depends(_get_prime_debt_service),
-) -> PrimeDebtSnapshotResponse:
-    prime_address = EthAddress(prime_id)
-    if not await service.prime_exists(prime_address):
-        raise HTTPException(status_code=404, detail="Prime not found")
-
-    snapshot = await service.get_latest_debt_snapshot(prime_address)
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail="Prime debt snapshot not found")
-
-    return PrimeDebtSnapshotResponse(**snapshot.__dict__)

@@ -126,13 +126,15 @@ function normalizePrimeDebtSnapshot(
 
 async function requestPrimeDebtEndpoint(
   primeId: string,
-  suffix: string,
+  limit?: number,
   signal?: AbortSignal,
 ): Promise<unknown> {
-  const endpointPath = `/v1/primes/${encodeURIComponent(primeId)}/debt${suffix}`;
+  const endpointPath = `/v1/primes/${encodeURIComponent(primeId)}/debt`;
+  const endpointQuery =
+    typeof limit === 'number' ? `?limit=${encodeURIComponent(String(limit))}` : '';
   const endpointUrl = API_BASE_URL
-    ? `${API_BASE_URL}${endpointPath}`
-    : endpointPath;
+    ? `${API_BASE_URL}${endpointPath}${endpointQuery}`
+    : `${endpointPath}${endpointQuery}`;
 
   return fetch(endpointUrl, { signal }).then(async (response) => {
     if (!response.ok) {
@@ -352,9 +354,10 @@ export function getTokenPrice(
 
 export async function getPrimeDebtSnapshots(
   primeId: string,
+  limit?: number,
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot[]> {
-  const payload = await requestPrimeDebtEndpoint(primeId, '', signal);
+  const payload = await requestPrimeDebtEndpoint(primeId, limit, signal);
 
   const rows = Array.isArray(payload)
     ? payload
@@ -373,24 +376,6 @@ export async function getLatestPrimeDebtSnapshot(
   primeId: string,
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot | null> {
-  try {
-    const latestPayload = await requestPrimeDebtEndpoint(
-      primeId,
-      '/latest',
-      signal,
-    );
-    return normalizePrimeDebtSnapshot(latestPayload, primeId);
-  } catch (latestError) {
-    if (isAbortError(latestError)) {
-      throw latestError;
-    }
-
-    logging.warn('Falling back to prime debt snapshots list endpoint', {
-      error: latestError,
-      primeId,
-    });
-
-    const snapshots = await getPrimeDebtSnapshots(primeId, signal);
-    return snapshots[0] ?? null;
-  }
+  const snapshots = await getPrimeDebtSnapshots(primeId, 1, signal);
+  return snapshots[0] ?? null;
 }

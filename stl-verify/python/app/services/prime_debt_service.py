@@ -14,6 +14,3 @@ class PrimeDebtService:
 
     async def list_debt_snapshots(self, prime_address: EthAddress, *, limit: int = 100) -> list[PrimeDebtSnapshot]:
         return await self._repository.list_debt_snapshots(prime_address, limit=limit)
-
-    async def get_latest_debt_snapshot(self, prime_address: EthAddress) -> PrimeDebtSnapshot | None:
-        return await self._repository.get_latest_debt_snapshot(prime_address)

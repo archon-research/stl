@@ -15,7 +15,6 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
-from app.services.capital_metrics_service import CapitalMetricsService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -112,10 +111,6 @@ class StarRiskCapitalResponse(BaseModel):
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(PostgresAllocationRepository(engine))
-
-
-async def _get_capital_metrics_service(engine: AsyncEngine = Depends(get_engine)) -> CapitalMetricsService:
-    return CapitalMetricsService(PostgresAllocationRepository(engine))
 
 
 async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
@@ -374,42 +369,3 @@ async def list_allocation_activity(
     ]
 
 
-@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
-async def get_capital_metrics(
-    prime_id: EthAddressParam,
-    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
-):
-    """Retrieve capital metrics for a prime.
-
-    Responds with:
-    - risk_capital: Total risk-bearing capital
-    - capital_buffer: Baseline protective capital
-    - first_loss_capital: Prime-owned first-loss layer
-    - total_capital: Sum of capital tiers
-    - risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)
-    - is_validated: Whether reconciled against external benchmark
-    - validation_note: Any caveats or pending work on this endpoint
-    """
-    metrics = await service.get_capital_metrics(EthAddress(prime_id))
-    if not metrics:
-        raise HTTPException(status_code=404, detail="Prime not found")
-
-    return CapitalMetricsResponse(
-        prime_id=metrics.prime_id,
-        prime_name=metrics.prime_name,
-        risk_capital=metrics.risk_capital,
-        capital_buffer=metrics.capital_buffer,
-        first_loss_capital=metrics.first_loss_capital,
-        total_capital=metrics.total_capital,
-        risk_to_capital_ratio=metrics.risk_to_capital_ratio,
-        timestamp=metrics.timestamp.isoformat(),
-        benchmark_source=metrics.benchmark_source,
-        is_validated=metrics.is_validated,
-        validation_note=metrics.validation_note,
-    )
-
-
-@router.get("/star-risk-capital/primes", response_model=StarRiskCapitalResponse)
-async def get_star_risk_capital_requirements():
-    """Proxy published Star risk capital payload through backend to avoid browser CORS issues."""
-    return await _fetch_star_risk_capital_payload()

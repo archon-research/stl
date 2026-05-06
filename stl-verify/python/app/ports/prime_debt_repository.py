@@ -14,7 +14,3 @@ class PrimeDebtRepository(Protocol):
     async def list_debt_snapshots(self, prime_address: EthAddress, *, limit: int = 100) -> list[PrimeDebtSnapshot]:
         """Return debt snapshots for a prime vault address."""
         ...
-
-    async def get_latest_debt_snapshot(self, prime_address: EthAddress) -> PrimeDebtSnapshot | None:
-        """Return the latest debt snapshot for a prime vault address."""
-        ...
