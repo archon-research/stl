@@ -76,17 +76,9 @@ def reader() -> MagicMock:
 
 
 @pytest.fixture
-def allocation_repo() -> MagicMock:
-    repo = MagicMock()
-    repo.get_usd_exposure = AsyncMock(return_value=Decimal("1000"))
-    return repo
-
-
-@pytest.fixture
-def service(reader: MagicMock, allocation_repo: MagicMock) -> CryptoLendingRiskService:
+def service(reader: MagicMock) -> CryptoLendingRiskService:
     return CryptoLendingRiskService(
         reader=reader,
-        allocation_repo=allocation_repo,
         default_gap_pct=Decimal("0.15"),
         supported_asset_ids={RECEIPT_TOKEN_ID},
     )
@@ -121,7 +113,6 @@ class TestCompute:
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
-        allocation_repo: MagicMock,
     ) -> None:
         info = _aave_like_info()
 
@@ -132,13 +123,15 @@ class TestCompute:
         assert result.prime_id == str(DUMMY_PRIME)
         assert result.risk_model == "gap_sweep"
         assert result.rrc_usd >= Decimal("0")
-        assert result.comparable_crr_pct == (result.rrc_usd / Decimal("1000") * Decimal("100")).quantize(
+        # Comparable CRR uses the protocol's own collateral basis: the sum of
+        # backing_value * share across breakdown items (default fixture: a
+        # single item with backing_value=10000, share=1 -> 10000 USD).
+        assert result.comparable_crr_pct == (result.rrc_usd / Decimal("10000") * Decimal("100")).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_EVEN
         )
         assert isinstance(result.details, GapSweepDetails)
         assert result.details.gap_pct == Decimal("0.15")
         assert result.details.loss_usd == result.rrc_usd
-        allocation_repo.get_usd_exposure.assert_awaited_once_with(RECEIPT_TOKEN_ID, DUMMY_PRIME)
         reader.get_receipt_token.assert_awaited_once_with(RECEIPT_TOKEN_ID)
         reader.get_breakdown.assert_awaited_once_with(info)
         reader.get_liquidation_params.assert_awaited_once_with(info, UNDERLYING_TOKEN_ID, [10])
@@ -163,7 +156,6 @@ class TestCompute:
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
-        allocation_repo: MagicMock,
     ) -> None:
         info = _morpho_info()
         reader.get_receipt_token.return_value = info
@@ -177,7 +169,6 @@ class TestCompute:
 
         assert isinstance(result, RrcResult)
         assert result.asset_id == RECEIPT_TOKEN_ID
-        allocation_repo.get_usd_exposure.assert_awaited_once_with(RECEIPT_TOKEN_ID, DUMMY_PRIME)
         reader.get_breakdown.assert_awaited_once_with(info)
         reader.get_liquidation_params.assert_awaited_once_with(info, MORPHO_VAULT_ID, [11])
         reader.get_share.assert_awaited_once_with(info, DUMMY_PRIME)
@@ -269,7 +260,6 @@ class TestCompute:
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
-        allocation_repo: MagicMock,
     ) -> None:
         reader.get_breakdown.return_value = _breakdown(
             (_contrib(10, "WETH", "10000", None),),
@@ -279,46 +269,52 @@ class TestCompute:
 
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
+        # Item dropped (no price) -> empty enriched list -> rrc=0 and the
+        # collateral basis is also 0, so comparable CRR is 0 (not div-by-zero).
         assert result.rrc_usd == Decimal("0")
         assert result.comparable_crr_pct == Decimal("0.00")
-        allocation_repo.get_usd_exposure.assert_awaited_once_with(RECEIPT_TOKEN_ID, DUMMY_PRIME)
 
     @pytest.mark.asyncio
-    async def test_compute_uses_unrounded_usd_exposure_for_comparable_crr(
+    async def test_compute_comparable_crr_uses_collateral_sum(
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
-        allocation_repo: MagicMock,
     ) -> None:
+        # Two items totalling 7000 USD; quantization should hit fractional cents.
         reader.get_breakdown.return_value = _breakdown(
-            (_contrib(10, "USDC", "1.00", "1"),),
+            (
+                _contrib(10, "USDC", "5000", "1"),
+                _contrib(11, "DAI", "2000", "1"),
+            ),
             backed_asset_id=UNDERLYING_TOKEN_ID,
         )
-        reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
-        allocation_repo.get_usd_exposure.return_value = Decimal("1.234")
+        reader.get_liquidation_params.return_value = {
+            10: _params(10, "0.825", "1.05"),
+            11: _params(11, "0.825", "1.05"),
+        }
 
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
-        assert result.comparable_crr_pct == (result.rrc_usd / Decimal("1.234") * Decimal("100")).quantize(
+        expected_basis = Decimal("7000")
+        assert result.comparable_crr_pct == (result.rrc_usd / expected_basis * Decimal("100")).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_EVEN
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "exposure",
-        [Decimal("0"), Decimal("-1"), Decimal("-100")],
-        ids=["zero", "negative-small", "negative-large"],
-    )
-    async def test_compute_rejects_non_positive_usd_exposure(
+    async def test_compute_empty_breakdown_returns_zero_crr_without_dividing(
         self,
         service: CryptoLendingRiskService,
-        allocation_repo: MagicMock,
-        exposure: Decimal,
+        reader: MagicMock,
     ) -> None:
-        allocation_repo.get_usd_exposure.return_value = exposure
+        # No collateral items -> total amount_usd = 0; must NOT divide by zero,
+        # must NOT raise. Both rrc_usd and comparable_crr_pct collapse to 0.
+        reader.get_breakdown.return_value = _breakdown((), backed_asset_id=UNDERLYING_TOKEN_ID)
+        reader.get_liquidation_params.return_value = {}
 
-        with pytest.raises(ValueError, match="usd_exposure must be positive"):
-            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+        result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        assert result.rrc_usd == Decimal("0")
+        assert result.comparable_crr_pct == Decimal("0.00")
 
 
 class TestLegacyMethods:
