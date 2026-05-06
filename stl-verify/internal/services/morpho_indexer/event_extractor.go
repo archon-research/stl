@@ -21,13 +21,20 @@ type EventExtractor struct {
 	morphoBlueSignatures map[common.Hash]*abi.Event
 	metaMorphoABI        *abi.ABI
 	metaMorphoSignatures map[common.Hash]*abi.Event
+
+	// vaultActivitySignatures is a subset of metaMorphoSignatures excluding
+	// the ERC20 Transfer topic, which every fungible token emits. Used by the
+	// backfiller to discover candidate vault contracts via their own logs
+	// without polluting the candidate set with every ERC20 in existence.
+	vaultActivitySignatures map[common.Hash]*abi.Event
 }
 
 // NewEventExtractor creates a new EventExtractor with loaded ABIs.
 func NewEventExtractor() (*EventExtractor, error) {
 	e := &EventExtractor{
-		morphoBlueSignatures: make(map[common.Hash]*abi.Event),
-		metaMorphoSignatures: make(map[common.Hash]*abi.Event),
+		morphoBlueSignatures:    make(map[common.Hash]*abi.Event),
+		metaMorphoSignatures:    make(map[common.Hash]*abi.Event),
+		vaultActivitySignatures: make(map[common.Hash]*abi.Event),
 	}
 	if err := e.loadABIs(); err != nil {
 		return nil, err
@@ -67,15 +74,24 @@ func (e *EventExtractor) loadABIs() error {
 			return fmt.Errorf("metaMorpho %s event not found in ABI", name)
 		}
 		e.metaMorphoSignatures[event.ID] = &event
+		if name != "Transfer" {
+			e.vaultActivitySignatures[event.ID] = &event
+		}
 	}
 
-	// Register V2 AccrueInterest (different topic hash due to different signature)
+	// Register VaultV2 AccrueInterest (different topic hash from the V1/V1.1
+	// 2-field variant because of the 4-field signature). V1.1 shares its
+	// 2-field AccrueInterest with V1 by topic and is already covered above.
 	v2ABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
 	if err != nil {
-		return fmt.Errorf("failed to parse MetaMorpho V2 AccrueInterest ABI: %w", err)
+		return fmt.Errorf("failed to parse VaultV2 AccrueInterest ABI: %w", err)
 	}
-	v2Event := v2ABI.Events["AccrueInterest"]
+	v2Event, ok := v2ABI.Events["AccrueInterest"]
+	if !ok {
+		return fmt.Errorf("VaultV2 AccrueInterest event not found in ABI")
+	}
 	e.metaMorphoSignatures[v2Event.ID] = &v2Event
+	e.vaultActivitySignatures[v2Event.ID] = &v2Event
 
 	return nil
 }
@@ -95,6 +111,20 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 		return false
 	}
 	_, ok := e.metaMorphoSignatures[common.HexToHash(log.Topics[0])]
+	return ok
+}
+
+// IsVaultActivityEvent returns true if the log matches a vault-activity event
+// (ERC4626 Deposit/Withdraw or AccrueInterest) — i.e. an event that, when
+// emitted by an unknown contract, makes that contract a candidate vault.
+//
+// Excludes ERC20 Transfer to avoid treating every fungible token as a vault
+// candidate during backfill discovery.
+func (e *EventExtractor) IsVaultActivityEvent(log shared.Log) bool {
+	if len(log.Topics) == 0 {
+		return false
+	}
+	_, ok := e.vaultActivitySignatures[common.HexToHash(log.Topics[0])]
 	return ok
 }
 

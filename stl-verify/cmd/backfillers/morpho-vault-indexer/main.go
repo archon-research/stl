@@ -665,8 +665,21 @@ func downloadReceipts(
 	return receipts, nil
 }
 
-// extractCandidatesFromReceipts scans receipts for Morpho Blue events and sends
-// candidate vault addresses (caller/onBehalf) to candidateCh.
+// extractCandidatesFromReceipts scans receipts for Morpho Blue events and
+// vault-activity events (Deposit/Withdraw/AccrueInterest), sending the
+// resulting candidate addresses to candidateCh.
+//
+// Two discovery paths feed into the candidate set:
+//
+//  1. Morpho Blue events emitted by the singleton — caller/onBehalf addresses
+//     are candidates because MetaMorpho V1/V1.1 vaults call into Morpho Blue.
+//  2. Vault-activity events emitted by any other contract — the emitter
+//     itself is the candidate, regardless of who called it. This covers
+//     Morpho VaultV2 vaults (e.g. sparkUSDTbc) that do not interact with
+//     Morpho Blue and therefore never appear via path 1.
+//
+// ERC20 Transfer is intentionally excluded from path 2 — every fungible
+// token emits it, and the on-chain probe is not free.
 func extractCandidatesFromReceipts(
 	logger *slog.Logger,
 	receipts []shared.TransactionReceipt,
@@ -677,29 +690,42 @@ func extractCandidatesFromReceipts(
 ) {
 	for _, receipt := range receipts {
 		for _, log := range receipt.Logs {
-			if !strings.EqualFold(log.Address, morphoBlueAddr.Hex()) {
-				continue
-			}
-			if !extractor.IsMorphoBlueEvent(log) {
-				continue
-			}
+			logAddr := common.HexToAddress(log.Address)
+			isMorphoBlue := strings.EqualFold(log.Address, morphoBlueAddr.Hex())
 
-			event, err := extractor.ExtractMorphoBlueEvent(log)
-			if err != nil {
-				logger.Warn("failed to extract Morpho Blue event",
-					"block", blockNumber,
-					"txHash", log.TransactionHash,
-					"error", err)
-				continue
-			}
-
-			for _, addr := range candidateAddresses(event) {
-				if addr == (common.Address{}) {
-					continue
-				}
-				candidateCh <- candidateEntry{address: addr, firstBlock: blockNumber}
+			switch {
+			case isMorphoBlue && extractor.IsMorphoBlueEvent(log):
+				emitMorphoBlueCandidates(logger, extractor, log, blockNumber, candidateCh)
+			case !isMorphoBlue && extractor.IsVaultActivityEvent(log):
+				candidateCh <- candidateEntry{address: logAddr, firstBlock: blockNumber}
 			}
 		}
+	}
+}
+
+// emitMorphoBlueCandidates extracts caller/onBehalf addresses from a Morpho
+// Blue event log and sends them to candidateCh.
+func emitMorphoBlueCandidates(
+	logger *slog.Logger,
+	extractor *morpho_indexer.EventExtractor,
+	log shared.Log,
+	blockNumber int64,
+	candidateCh chan<- candidateEntry,
+) {
+	event, err := extractor.ExtractMorphoBlueEvent(log)
+	if err != nil {
+		logger.Warn("failed to extract Morpho Blue event",
+			"block", blockNumber,
+			"txHash", log.TransactionHash,
+			"error", err)
+		return
+	}
+
+	for _, addr := range candidateAddresses(event) {
+		if addr == (common.Address{}) {
+			continue
+		}
+		candidateCh <- candidateEntry{address: addr, firstBlock: blockNumber}
 	}
 }
 

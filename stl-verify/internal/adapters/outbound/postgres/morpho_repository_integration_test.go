@@ -788,7 +788,7 @@ func TestGetOrCreateVault_Idempotent(t *testing.T) {
 		Name:           "Test Vault",
 		Symbol:         "tVLT",
 		AssetTokenID:   fixture.loanTokenID,
-		VaultVersion:   entity.MorphoVaultV2,
+		VaultVersion:   entity.MorphoVaultV1_1,
 		CreatedAtBlock: 19100000,
 	}
 

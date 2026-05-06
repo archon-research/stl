@@ -15,7 +15,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
-// confirmedVault holds metadata for a confirmed MetaMorpho vault.
+// confirmedVault holds metadata for a confirmed Morpho-family vault
+// (MetaMorpho V1/V1.1 or Morpho VaultV2).
 type confirmedVault struct {
 	Address     common.Address
 	Name        string
@@ -27,7 +28,8 @@ type confirmedVault struct {
 	FirstBlock  int64
 }
 
-// vaultProber probes candidate addresses on-chain to determine if they are MetaMorpho vaults.
+// vaultProber probes candidate addresses on-chain to determine if they are
+// Morpho-family vaults.
 type vaultProber struct {
 	multicaller  outbound.Multicaller
 	sharedProber *morpho_indexer.VaultProber
@@ -35,8 +37,19 @@ type vaultProber struct {
 	logger       *slog.Logger
 }
 
-// probeAllCandidates checks each candidate address by calling MORPHO() and asset()
-// via multicall. Returns confirmed vaults with their metadata.
+// callsPerProbe is how many sub-calls each candidate address consumes during
+// the probe phase. Mirrors the multicall layout in
+// morpho_indexer.VaultProber.ProbeCalls.
+const callsPerProbe = 4
+
+// callsPerMetadata is how many sub-calls each confirmed vault consumes during
+// the metadata phase: 4 details (name, symbol, decimals, skimRecipient) + 1
+// asset symbol from the underlying ERC20.
+const callsPerMetadata = 5
+
+// probeAllCandidates checks each candidate address by calling the shared probe
+// (MORPHO/asset/curator/liquidityAdapter) via multicall. Returns confirmed
+// vaults with their metadata.
 func (p *vaultProber) probeAllCandidates(
 	ctx context.Context,
 	candidates map[common.Address]int64,
@@ -117,17 +130,25 @@ func (p *vaultProber) probeBatchWithRetry(
 	return append(left, right...), nil
 }
 
+// confirmedProbe pairs a probe-confirmed vault address with the version the
+// probe could determine (V1 or V2; V1 may be upgraded to V1.1 in the metadata
+// phase) and the asset address it returned.
+type confirmedProbe struct {
+	address common.Address
+	asset   common.Address
+	version entity.MorphoVaultVersion
+}
+
 // probeBatch probes a batch of candidate addresses. For each address, it calls
-// MORPHO() and asset() in a single multicall. Confirmed vaults get their metadata
-// fetched in a follow-up multicall.
+// the shared 4-call probe in a single multicall. Confirmed vaults get their
+// metadata fetched in a follow-up multicall.
 func (p *vaultProber) probeBatch(
 	ctx context.Context,
 	batch []common.Address,
 	firstBlocks map[common.Address]int64,
 	blockNum *big.Int,
 ) ([]confirmedVault, error) {
-	// Build multicall: 2 calls per candidate (MORPHO, asset)
-	calls := make([]outbound.Call, 0, len(batch)*2)
+	calls := make([]outbound.Call, 0, len(batch)*callsPerProbe)
 	for _, addr := range batch {
 		calls = append(calls, p.sharedProber.ProbeCalls(addr)...)
 	}
@@ -137,43 +158,61 @@ func (p *vaultProber) probeBatch(
 		return nil, fmt.Errorf("multicall probe: %w", err)
 	}
 
-	// Identify confirmed vaults from results
-	var vaultAddrs []common.Address
-	vaultAssets := make(map[common.Address]common.Address)
+	probeConfirmed, err := p.collectProbeConfirmed(batch, results)
+	if err != nil {
+		return nil, err
+	}
+	if len(probeConfirmed) == 0 {
+		return nil, nil
+	}
 
+	return p.fetchVaultMetadata(ctx, probeConfirmed, firstBlocks, blockNum)
+}
+
+// collectProbeConfirmed parses the per-candidate probe results and returns the
+// addresses that look like Morpho-family vaults.
+//
+// MetaMorpho candidates whose MORPHO() points somewhere other than the
+// canonical Morpho Blue singleton are dropped — that's a foreign deployment we
+// don't index. VaultV2 candidates have no such constraint.
+//
+// *morpho_indexer.ErrNotVault is the only legitimate skip disposition: it means
+// the address is definitively not a Morpho-family vault. Any other error is
+// structural (ABI mismatch, unrecognised return shape) and is propagated so
+// the caller can decide how to retry — silently dropping such errors causes
+// the candidate to disappear from the backfill run with no recoverable trail.
+func (p *vaultProber) collectProbeConfirmed(batch []common.Address, results []outbound.Result) ([]confirmedProbe, error) {
+	confirmed := make([]confirmedProbe, 0, len(batch))
 	for i, addr := range batch {
-		probeResult, err := p.sharedProber.ParseProbeResults(results[i*2], results[i*2+1], addr)
+		base := i * callsPerProbe
+		probeResult, err := p.sharedProber.ParseProbeResults(
+			results[base], results[base+1], results[base+2], results[base+3], addr)
 		if err != nil {
 			var nv *morpho_indexer.ErrNotVault
 			if errors.As(err, &nv) {
 				continue
 			}
-			return nil, fmt.Errorf("parsing probe for %s: %w", addr.Hex(), err)
+			return nil, fmt.Errorf("parsing probe results for %s: %w", addr.Hex(), err)
 		}
-		if probeResult.MorphoAddr != morpho_indexer.MorphoBlueAddress {
+		if probeResult.Version != entity.MorphoVaultV2 && probeResult.MorphoAddr != morpho_indexer.MorphoBlueAddress {
 			continue
 		}
-		if probeResult.AssetAddr == (common.Address{}) {
-			continue
-		}
-
-		vaultAddrs = append(vaultAddrs, addr)
-		vaultAssets[addr] = probeResult.AssetAddr
+		// Zero-address asset is rejected upstream in ParseProbeResults.
+		confirmed = append(confirmed, confirmedProbe{
+			address: addr,
+			asset:   probeResult.AssetAddr,
+			version: probeResult.Version,
+		})
 	}
-
-	if len(vaultAddrs) == 0 {
-		return nil, nil
-	}
-
-	// Fetch metadata for confirmed vaults
-	return p.fetchVaultMetadata(ctx, vaultAddrs, vaultAssets, firstBlocks, blockNum)
+	return confirmed, nil
 }
 
-// fetchVaultMetadata fetches name, symbol, decimals, version, and asset symbol for confirmed vaults.
+// fetchVaultMetadata fetches name, symbol, decimals, version, and asset symbol
+// for confirmed vaults. The version may be upgraded from V1 → V1.1 here if
+// skimRecipient succeeds.
 func (p *vaultProber) fetchVaultMetadata(
 	ctx context.Context,
-	vaultAddrs []common.Address,
-	vaultAssets map[common.Address]common.Address,
+	probeConfirmed []confirmedProbe,
 	firstBlocks map[common.Address]int64,
 	blockNum *big.Int,
 ) ([]confirmedVault, error) {
@@ -182,11 +221,10 @@ func (p *vaultProber) fetchVaultMetadata(
 		return nil, fmt.Errorf("packing asset symbol: %w", err)
 	}
 
-	// 5 calls per vault: 4 details (name, symbol, decimals, skimRecipient) + 1 asset symbol
-	calls := make([]outbound.Call, 0, len(vaultAddrs)*5)
-	for _, addr := range vaultAddrs {
-		calls = append(calls, p.sharedProber.DetailsCalls(addr)...)
-		calls = append(calls, outbound.Call{Target: vaultAssets[addr], AllowFailure: true, CallData: assetSymbolData})
+	calls := make([]outbound.Call, 0, len(probeConfirmed)*callsPerMetadata)
+	for _, pc := range probeConfirmed {
+		calls = append(calls, p.sharedProber.DetailsCalls(pc.address)...)
+		calls = append(calls, outbound.Call{Target: pc.asset, AllowFailure: true, CallData: assetSymbolData})
 	}
 
 	results, err := p.multicaller.Execute(ctx, calls, blockNum)
@@ -195,28 +233,26 @@ func (p *vaultProber) fetchVaultMetadata(
 	}
 
 	var vaults []confirmedVault
-	for i, addr := range vaultAddrs {
-		base := i * 5
+	for i, pc := range probeConfirmed {
+		base := i * callsPerMetadata
 
-		// Parse vault details (name, symbol, decimals, skimRecipient) via shared prober
 		details, err := p.sharedProber.ParseDetailsResults(
-			results[base], results[base+1], results[base+2], results[base+3], addr)
+			results[base], results[base+1], results[base+2], results[base+3], pc.address, pc.version)
 		if err != nil {
-			return nil, fmt.Errorf("parsing metadata for confirmed vault %s: %w", addr.Hex(), err)
+			return nil, fmt.Errorf("parsing metadata for confirmed vault %s: %w", pc.address.Hex(), err)
 		}
 
 		v := confirmedVault{
-			Address:    addr,
+			Address:    pc.address,
 			Name:       details.Name,
 			Symbol:     details.Symbol,
 			Decimals:   details.Decimals,
 			Version:    details.Version,
-			Asset:      vaultAssets[addr],
-			FirstBlock: firstBlocks[addr],
+			Asset:      pc.asset,
+			FirstBlock: firstBlocks[pc.address],
 		}
 
-		// Parse asset symbol (ERC20 call on asset token)
-		assetSymbolResult := results[base+4]
+		assetSymbolResult := results[base+(callsPerMetadata-1)]
 		if assetSymbolResult.Success && len(assetSymbolResult.ReturnData) > 0 {
 			if unpacked, err := p.erc20ABI.Unpack("symbol", assetSymbolResult.ReturnData); err == nil && len(unpacked) > 0 {
 				if sym, ok := unpacked[0].(string); ok {
@@ -227,14 +263,14 @@ func (p *vaultProber) fetchVaultMetadata(
 
 		if v.AssetSymbol == "" {
 			p.logger.Warn("skipping vault with empty asset symbol",
-				"address", addr.Hex(),
+				"address", pc.address.Hex(),
 				"name", v.Name,
 				"asset", v.Asset.Hex())
 			continue
 		}
 
 		p.logger.Info("confirmed vault",
-			"address", addr.Hex(),
+			"address", pc.address.Hex(),
 			"name", v.Name,
 			"symbol", v.Symbol,
 			"asset", v.Asset.Hex(),

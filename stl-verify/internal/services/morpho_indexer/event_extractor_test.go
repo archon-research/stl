@@ -104,6 +104,57 @@ func TestIsMetaMorphoEvent(t *testing.T) {
 	}
 }
 
+// TestIsVaultActivityEvent codifies the invariant that Transfer is excluded
+// from the live-indexer discovery trigger. See VEC-198 multicall-gas-cap fix:
+// without this gate, plain ERC20 Transfer logs from legacy contracts (BAT,
+// STORJ, …) would route into tryDiscoverVault, where the 4-call probe blows
+// past Alchemy's 550M eth_call gas cap on contracts whose fallback runs
+// `INVALID` (0xfe).
+func TestIsVaultActivityEvent(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor() error: %v", err)
+	}
+
+	depositTopic := e.metaMorphoABI.Events["Deposit"].ID.Hex()
+	withdrawTopic := e.metaMorphoABI.Events["Withdraw"].ID.Hex()
+	transferTopic := e.metaMorphoABI.Events["Transfer"].ID.Hex()
+	accrueV1Topic := e.metaMorphoABI.Events["AccrueInterest"].ID.Hex()
+
+	v2AccrueABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
+	if err != nil {
+		t.Fatalf("GetMetaMorphoV2AccrueInterestABI() error: %v", err)
+	}
+	accrueV2Topic := v2AccrueABI.Events["AccrueInterest"].ID.Hex()
+
+	supplyTopic := e.morphoBlueABI.Events["Supply"].ID.Hex()
+
+	tests := []struct {
+		name   string
+		log    shared.Log
+		expect bool
+	}{
+		{name: "Deposit", log: shared.Log{Topics: []string{depositTopic}}, expect: true},
+		{name: "Withdraw", log: shared.Log{Topics: []string{withdrawTopic}}, expect: true},
+		{name: "AccrueInterest V1/V1.1 (2-field)", log: shared.Log{Topics: []string{accrueV1Topic}}, expect: true},
+		{name: "AccrueInterest V2 (4-field)", log: shared.Log{Topics: []string{accrueV2Topic}}, expect: true},
+
+		// The point of the gate — these must NOT trigger discovery.
+		{name: "ERC20 Transfer", log: shared.Log{Topics: []string{transferTopic}}, expect: false},
+		{name: "Morpho Blue Supply (different family)", log: shared.Log{Topics: []string{supplyTopic}}, expect: false},
+		{name: "unknown topic", log: shared.Log{Topics: []string{"0x0000000000000000000000000000000000000000000000000000000000000001"}}, expect: false},
+		{name: "no topics", log: shared.Log{Topics: nil}, expect: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := e.IsVaultActivityEvent(tt.log); got != tt.expect {
+				t.Errorf("IsVaultActivityEvent() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
 func TestExtractMorphoBlueEvent_AccrueInterest(t *testing.T) {
 	e, err := NewEventExtractor()
 	if err != nil {

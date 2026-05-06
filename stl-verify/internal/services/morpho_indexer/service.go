@@ -260,10 +260,16 @@ func (s *Service) hasRelevantEvents(receipt shared.TransactionReceipt) bool {
 		// MetaMorpho event from an address that isn't the MorphoBlue contract and
 		// isn't a known non-vault. This covers two cases:
 		//  1. Known vault emitting a MetaMorpho event (Deposit, Withdraw, Transfer, AccrueInterest).
-		//  2. Unknown address that needs vault discovery — processReceipt will call
-		//     tryDiscoverVault, which is real work worth tracing.
+		//     Always relevant — we already know it's a vault.
+		//  2. Unknown address. Only worth tracing if the event is vault-activity
+		//     (Deposit / Withdraw / AccrueInterest). Plain ERC20 Transfer from
+		//     an unknown address is not a discovery trigger; processReceipt
+		//     would otherwise skip it after gating, leaving an empty span.
+		//     Mirrors the gate in processReceipt's default branch.
 		if isMetaMorpho && logAddress != morphoBlueAddr {
-			return true
+			if s.vaultRegistry.IsKnownVault(logAddress) || s.eventExtractor.IsVaultActivityEvent(log) {
+				return true
+			}
 		}
 	}
 	return false
@@ -328,12 +334,44 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			}
 
 		default:
+			// Plain ERC20 Transfer from an unknown address is not a discovery
+			// trigger. Two reasons:
+			//
+			//  1. Every fungible token on Ethereum emits Transfer with the same
+			//     topic hash, so without this gate any tx that touches a
+			//     popular ERC20 (BAT, STORJ, …) drops into the probe path.
+			//  2. Some legacy ERC20s (BAT, STORJ deployed pre-Solidity-0.4.10)
+			//     terminate unrecognised selector calls with `INVALID` (0xfe)
+			//     instead of `REVERT`. `INVALID` consumes all available gas,
+			//     and Multicall3's `aggregate3` doesn't bound per-sub-call gas,
+			//     so a 4-call probe (VEC-198) against such contracts blows
+			//     past Alchemy's 550M `eth_call` cap and surfaces as a
+			//     transient transport error — never reaches `ErrNotVault`,
+			//     never enters the negative cache, retries forever.
+			//
+			// A real Morpho-family vault always emits Deposit / Withdraw /
+			// AccrueInterest at first interaction, all of which `IsVaultActivityEvent`
+			// matches; Transfer-only logs never carry new vault discovery info.
+			// This mirrors what the morpho-vault-indexer backfiller has always
+			// done (see cmd/backfillers/morpho-vault-indexer/main.go).
+			if !s.eventExtractor.IsVaultActivityEvent(log) {
+				continue
+			}
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
 			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 				var nv *ErrNotVault
 				if errors.As(err, &nv) {
 					s.vaultRegistry.MarkNotVault(logAddress)
-					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
+					if nv.VaultShaped {
+						// Address exposes at least one of MORPHO/curator/liquidityAdapter
+						// but didn't match a known vault flavour. Surface at WARN —
+						// pre-VEC-198 this case (Morpho VaultV2) sat invisible for ~225
+						// days; if Morpho ships a V3 we want a signal in logs/dashboards.
+						s.logger.Warn("vault-shaped address rejected by probe — possible new vault flavour",
+							"address", logAddress.Hex(), "reason", err)
+					} else {
+						s.logger.Debug("not a Morpho-family vault", "address", logAddress.Hex(), "reason", err)
+					}
 				} else {
 					s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
 					// VEC-188: keep the first failure. A later success for the
