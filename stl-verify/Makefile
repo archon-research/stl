@@ -705,6 +705,14 @@ dev-env:
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
+	@printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"SKY_RISK_CAPITAL_URL=https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/" \
+		"CAPITAL_STACK_SYNC_INTERVAL=15m" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/capital-stack-syncer/.env
 	@echo "Environment files generated (.env.secrets updated)."; \
 	MISSING=""; \
 	for key in ALCHEMY_API_KEY COINGECKO_API_KEY ETHERSCAN_API_KEY ANCHORAGE_API_KEY; do \
