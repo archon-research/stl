@@ -131,7 +131,9 @@ async function requestPrimeDebtEndpoint(
 ): Promise<unknown> {
   const endpointPath = `/v1/primes/${encodeURIComponent(primeId)}/debt`;
   const endpointQuery =
-    typeof limit === 'number' ? `?limit=${encodeURIComponent(String(limit))}` : '';
+    typeof limit === 'number'
+      ? `?limit=${encodeURIComponent(String(limit))}`
+      : '';
   const endpointUrl = API_BASE_URL
     ? `${API_BASE_URL}${endpointPath}${endpointQuery}`
     : `${endpointPath}${endpointQuery}`;

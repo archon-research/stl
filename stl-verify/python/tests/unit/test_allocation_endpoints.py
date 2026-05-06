@@ -274,5 +274,3 @@ def test_get_data_sources_returns_200_with_sources():
     assert "sources" in data
     assert isinstance(data["sources"], list)
     assert len(data["sources"]) > 0
-
-

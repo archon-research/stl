@@ -367,5 +367,3 @@ async def list_allocation_activity(
         )
         for e in events
     ]
-
-
