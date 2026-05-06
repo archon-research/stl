@@ -236,6 +236,35 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
     service.list_allocation_activity.assert_not_awaited()
 
 
+def test_list_allocation_activity_returns_422_for_limit_out_of_range():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    too_small = client.get("/v1/allocations/activity", params={"limit": 0})
+    too_large = client.get("/v1/allocations/activity", params={"limit": 1001})
+
+    assert too_small.status_code == 422
+    assert too_large.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_returns_500_when_service_raises_value_error():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.side_effect = ValueError("query failed")
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/v1/allocations/activity")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to retrieve allocation activity"}
+
+
 # --- capital-metrics endpoint ---
 
 
