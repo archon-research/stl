@@ -15,13 +15,6 @@ on:
         required: false
         type: string
 
-# Serialize prod deploy runs so two concurrent pushes can't both create PRs
-# without observing each other's state (otherwise the supersede step in
-# create-prod-pr can race and leave duplicate open PRs).
-concurrency:
-  group: deploy-prod
-  cancel-in-progress: false
-
 jobs:
   build-push-staging:
     name: Build & Push Images (Staging)
