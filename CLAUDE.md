@@ -155,7 +155,8 @@ Quality is enforced at three levels:
 1. **Git Hooks (Lefthook)** — Runs on `git commit` and `git push`
    - Automatically fixes formatting issues (`stage_fixed: true`)
    - Prevents broken code from being pushed
-   - Only runs on staged files (changed-file workflow)
+   - Pre-commit: runs on staged files only (fast)
+   - Pre-push: runs full-module checks (go vet, etc.)
    - Configured per-language: `lefthook.yml`, `python/lefthook.yml`, `ts/lefthook.yml`
 
 2. **Local Development** — Convenience Makefile targets
@@ -174,7 +175,8 @@ Quality is enforced at three levels:
 ### Linting by Language
 
 **Go:**
-- Hooks: gofmt, goimports, go vet
+- Pre-commit hooks: gofmt, goimports (staged files only)
+- Pre-push hooks: go vet (full module)
 - CI: `make ci-checks` (vet, staticcheck, golangci-lint, vulncheck, tidy)
 - Tools: Install with `make tools`
 

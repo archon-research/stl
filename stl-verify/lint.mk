@@ -22,15 +22,15 @@ format: ## Auto-format code (Go, Python, TypeScript)
 	@echo "==> Formatting Python..."
 	@$(MAKE) -C python lint-fix
 	@echo "==> Formatting TypeScript..."
-	@npm run format --workspace=@stl-verify/ui
+	@cd ts && npm run format
 
 lint: ## Run linters (delegates to language pipelines)
 	@echo "==> Linting Go (make ci-checks)..."
-	@$(MAKE) ci-checks 2>/dev/null || true
+	@$(MAKE) ci-checks
 	@echo "==> Linting Python..."
 	@$(MAKE) -C python lint
 	@echo "==> Linting TypeScript..."
-	@npm run lint --workspace=@stl-verify/ui
+	@cd ts && npm run lint
 
 # Help target
 help: ## Show this help message

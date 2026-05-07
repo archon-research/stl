@@ -9,11 +9,11 @@ pre-commit:
     ts-oxlint:
       root: *ts_root
       glob: 'ui/**/*.{ts,tsx}'
-      run: npx --no oxlint --fix {staged_files}
+      run: npx --no-install oxlint -c ui/.oxlintrc.ts --fix {staged_files}
       stage_fixed: true
 
     ts-oxfmt:
       root: *ts_root
       glob: 'ui/**/*.{ts,tsx,css,html,json}'
-      run: npx --no oxfmt {staged_files}
+      run: npx --no-install oxfmt -c ui/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true
