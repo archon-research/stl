@@ -35,6 +35,21 @@ DEFAULT_STATIC_DIR = APP_DIR / "static"
 RESERVED_FRONTEND_PREFIXES = ("v1", "docs", "redoc", "openapi.json")
 DOCS_FAVICON_URL = "/assets/archon-32.png"
 
+OPENAPI_TAGS: list[dict[str, str]] = [
+    {"name": "status", "description": "Liveness and readiness probes."},
+    {"name": "primes", "description": "Primes (capital allocators) and their on-chain debt snapshots."},
+    {"name": "allocations", "description": "Receipt-token positions held by primes and their activity feed."},
+    {"name": "capital", "description": "Per-prime capital metrics (risk capital, first-loss capital, buffers)."},
+    {
+        "name": "risk",
+        "description": "Risk-capital computations: RRC, bad-debt estimates, and risk-enriched breakdowns.",
+    },
+    {"name": "tokens", "description": "Token catalog metadata and latest USD prices."},
+    {"name": "protocol events", "description": "Decoded on-chain events emitted by tracked protocols."},
+    {"name": "data sources", "description": "Registry of upstream data sources used by STL."},
+    {"name": "metadata", "description": "Reference data for clients (chains, protocols)."},
+]
+
 
 def _check_mapping_refs(
     raw_mapping: list[tuple[int, bytes, str]],
@@ -169,7 +184,18 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             finally:
                 shutdown_telemetry(app.state.tracer_provider)
 
-    application = FastAPI(title="stl-verify", lifespan=lifespan, docs_url=None)
+    application = FastAPI(
+        title="stl-verify",
+        description=(
+            "Verify-side HTTP API for the STL pipeline.\n\n"
+            "Endpoints expose primes (capital allocators), their allocations and debt, "
+            "decoded protocol events, token catalog and pricing, and risk-capital "
+            "computations (RRC, bad debt, breakdown)."
+        ),
+        lifespan=lifespan,
+        docs_url=None,
+        openapi_tags=OPENAPI_TAGS,
+    )
     application.add_middleware(RequestIdMiddleware)
     application.state.tracer_provider = setup_telemetry(application, settings)
 

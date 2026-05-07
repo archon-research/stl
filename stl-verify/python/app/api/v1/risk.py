@@ -24,47 +24,124 @@ from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
 
-router = APIRouter()
+router = APIRouter(tags=["risk"])
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
 
 class BadDebtResponse(BaseModel):
-    receipt_token_id: int
-    gap_pct: Decimal
-    bad_debt_usd: Decimal
+    """Estimated bad debt for a receipt-token position at a given collateral gap."""
+
+    receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
+    gap_pct: Decimal = Field(
+        description="Collateral price gap as a fraction in `[0, 1]`. Decimal serialized as a JSON string.",
+        examples=["0.10"],
+    )
+    bad_debt_usd: Decimal = Field(
+        description="Estimated USD bad debt at the given gap. Decimal serialized as a JSON string.",
+        examples=["1234567.89"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"receipt_token_id": 42, "gap_pct": "0.10", "bad_debt_usd": "1234567.89"},
+        }
+    }
 
 
 class RiskBreakdownItemResponse(BaseModel):
-    token_id: int
-    symbol: str
-    amount: Decimal
-    backing_pct: Decimal
-    amount_usd: Decimal
-    price_usd: Decimal
-    liquidation_threshold: Decimal
-    liquidation_bonus: Decimal
+    """One backing-token row in a receipt-token's risk-enriched breakdown."""
+
+    token_id: int = Field(description="Surrogate token id of the backing token.", examples=[101])
+    symbol: str = Field(description="Backing-token symbol.", examples=["WETH"])
+    amount: Decimal = Field(
+        description="Backing-token amount, expressed in token units. Decimal serialized as a JSON string.",
+        examples=["12.345678"],
+    )
+    backing_pct: Decimal = Field(
+        description="Share of the receipt token backed by this row, in `[0, 1]`.",
+        examples=["0.42"],
+    )
+    amount_usd: Decimal = Field(
+        description="USD value of the backing-token row.",
+        examples=["41234.56"],
+    )
+    price_usd: Decimal = Field(description="Latest USD price for the backing token.", examples=["3340.55"])
+    liquidation_threshold: Decimal = Field(
+        description="Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`.",
+        examples=["0.83"],
+    )
+    liquidation_bonus: Decimal = Field(
+        description="Liquidation bonus (e.g. `0.05` for 5%).",
+        examples=["0.05"],
+    )
 
 
 class RiskBreakdownResponse(BaseModel):
-    receipt_token_id: int
-    items: list[RiskBreakdownItemResponse]
+    """Risk-enriched breakdown of a receipt token's backing collateral."""
+
+    receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
+    items: list[RiskBreakdownItemResponse] = Field(description="One entry per backing-token row.")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "receipt_token_id": 42,
+                "items": [
+                    {
+                        "token_id": 101,
+                        "symbol": "WETH",
+                        "amount": "12.345678",
+                        "backing_pct": "0.42",
+                        "amount_usd": "41234.56",
+                        "price_usd": "3340.55",
+                        "liquidation_threshold": "0.83",
+                        "liquidation_bonus": "0.05",
+                    }
+                ],
+            }
+        }
+    }
 
 
 class ScenarioRrcRequest(BaseModel):
-    receipt_token_id: int
-    usd_exposure: Decimal
+    """Request body for the legacy SURAF scenario RRC endpoint."""
+
+    receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
+    usd_exposure: Decimal = Field(
+        description="Hypothetical USD exposure to the receipt token. Must be positive.",
+        examples=["1000000"],
+    )
 
 
 class ScenarioRrcResponse(BaseModel):
-    receipt_token_id: int
-    usd_exposure: Decimal
-    rating_id: str
-    rating_version: str
-    crr_pct: Decimal
-    rrc_usd: Decimal
-    source_commit_sha: str
+    """Result of a legacy SURAF scenario RRC computation."""
+
+    receipt_token_id: int = Field(description="Echo of the requested receipt token id.")
+    usd_exposure: Decimal = Field(description="Echo of the requested USD exposure.")
+    rating_id: str = Field(description="SURAF rating id used for this asset.", examples=["aave-v3-eth-usdc"])
+    rating_version: str = Field(description="SURAF rating version string.", examples=["2026-04-15"])
+    crr_pct: Decimal = Field(description="Capital risk ratio applied (`rrc_usd / usd_exposure`).", examples=["0.0123"])
+    rrc_usd: Decimal = Field(description="Risk capital in USD: `usd_exposure * crr_pct`.", examples=["12300"])
+    source_commit_sha: str = Field(
+        description="Git commit sha of the rating source used at startup.",
+        examples=["abc123def456"],
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "receipt_token_id": 42,
+                "usd_exposure": "1000000",
+                "rating_id": "aave-v3-eth-usdc",
+                "rating_version": "2026-04-15",
+                "crr_pct": "0.0123",
+                "rrc_usd": "12300",
+                "source_commit_sha": "abc123def456",
+            }
+        }
+    }
 
 
 def _share_error_503(exc: AllocationShareError) -> HTTPException:
@@ -78,13 +155,24 @@ def _share_error_503(exc: AllocationShareError) -> HTTPException:
     return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
 
 
-@router.get("/risk/{receipt_token_id}/bad-debt", response_model=BadDebtResponse)
+@router.get(
+    "/risk/{receipt_token_id}/bad-debt",
+    response_model=BadDebtResponse,
+    summary="Estimate bad debt at a collateral gap",
+    description=(
+        "Estimate USD bad debt for a receipt-token position when collateral prices "
+        "fall by `gap_pct` (a fraction in `[0, 1]`).\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is not found.\n"
+        "- `422` if `gap_pct` is outside `[0, 1]`.\n"
+        "- `503` (`share_data_*`) if the allocation-share lookup fails."
+    ),
+)
 async def get_bad_debt(
     receipt_token_id: int,
-    gap_pct: Decimal,
+    gap_pct: Decimal = Query(description="Collateral gap fraction in [0, 1].", examples=["0.10"]),
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
 ) -> BadDebtResponse:
-    """Estimate bad debt for a receipt token position at the given collateral price gap."""
     if not (_ZERO <= gap_pct <= _ONE):
         raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
 
@@ -103,12 +191,22 @@ async def get_bad_debt(
     )
 
 
-@router.get("/risk/{receipt_token_id}/breakdown", response_model=RiskBreakdownResponse)
+@router.get(
+    "/risk/{receipt_token_id}/breakdown",
+    response_model=RiskBreakdownResponse,
+    summary="Risk-enriched collateral breakdown",
+    description=(
+        "Return the full risk-enriched collateral breakdown for a receipt-token position: "
+        "one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is not found.\n"
+        "- `503` (`share_data_*`) if the allocation-share lookup fails."
+    ),
+)
 async def get_risk_breakdown(
     receipt_token_id: int,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
 ) -> RiskBreakdownResponse:
-    """Return the full risk-enriched collateral breakdown for a receipt token position."""
     try:
         breakdown = await service.get_risk_breakdown_legacy(receipt_token_id)
     except AllocationShareError as exc:
@@ -135,16 +233,21 @@ async def get_risk_breakdown(
     )
 
 
-@router.post("/risk/rrc/scenario", response_model=ScenarioRrcResponse)
+@router.post(
+    "/risk/rrc/scenario",
+    response_model=ScenarioRrcResponse,
+    summary="Legacy SURAF scenario RRC",
+    description=(
+        "Return SURAF RRC for a hypothetical `(receipt_token_id, usd_exposure)` pair: "
+        "`RRC = usd_exposure * CRR`, where `CRR` is the pre-computed SURAF rating for the "
+        "receipt token. Pure scenario calculation — no position state. Prefer `POST /v1/risk/rrc` "
+        "for new integrations; this endpoint is retained for backwards compatibility."
+    ),
+)
 async def post_rrc_scenario(
     body: ScenarioRrcRequest,
     service: SurafRrcService = Depends(get_suraf_rrc_service),
 ) -> ScenarioRrcResponse:
-    """Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
-
-    ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the receipt token. Pure scenario calculation — no position state.
-    """
     if body.usd_exposure <= _ZERO:
         raise HTTPException(status_code=422, detail="usd_exposure must be positive")
 
@@ -162,9 +265,28 @@ async def post_rrc_scenario(
 class RrcRequest(BaseModel):
     """POST /v1/risk/rrc body — overrides keyed by model name."""
 
-    asset_id: int = Field(ge=1)
-    prime_id: EthAddressParam
-    overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    asset_id: int = Field(ge=1, description="Surrogate receipt-token id.", examples=[42])
+    prime_id: EthAddressParam = Field(
+        description="Prime's 0x-prefixed Ethereum address.",
+        examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
+    overrides: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-model scenario overrides. Outer keys are model names "
+            "(e.g. `suraf`, `crypto_lending`); inner objects are model-specific."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "asset_id": 42,
+                "prime_id": "0x1234567890abcdef1234567890abcdef12345678",
+                "overrides": {"crypto_lending": {"gap_pct": "0.15"}},
+            }
+        }
+    }
 
 
 class RrcEnvelope(BaseModel):
@@ -187,50 +309,73 @@ class RrcEnvelope(BaseModel):
     fields may come from different models.
     """
 
-    asset_id: int
-    chain_id: int
-    receipt_token_address: str
-    prime_id: str
-    results: list[RrcResult]
-    max_rrc_usd: Decimal
-    max_crr_pct: Decimal
+    asset_id: int = Field(description="Echo of the requested asset id.", examples=[42])
+    chain_id: int = Field(description="EVM chain id of the receipt token.", examples=[1])
+    receipt_token_address: str = Field(
+        description="0x-prefixed contract address of the receipt token.",
+        examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+    )
+    prime_id: str = Field(
+        description="Echo of the requested prime address.",
+        examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
+    results: list[RrcResult] = Field(description="One entry per applicable risk model.")
+    max_rrc_usd: Decimal = Field(
+        description="Largest `rrc_usd` across `results`. Decimal serialized as a JSON string.",
+        examples=["12300"],
+    )
+    max_crr_pct: Decimal = Field(
+        description="Largest `comparable_crr_pct` across `results`.",
+        examples=["0.0123"],
+    )
 
 
-@router.get("/risk/rrc", response_model=RrcEnvelope)
+@router.get(
+    "/risk/rrc",
+    response_model=RrcEnvelope,
+    summary="Risk capital (RRC) at default stress",
+    description=(
+        "Compute RRC at default stress for every model that applies to "
+        "`(asset_id, prime_id)`. See `RrcEnvelope` for how to interpret per-model "
+        "`results` versus the `max_*` summary fields.\n\n"
+        "Errors:\n"
+        "- `404` if `asset_id` is not a known receipt token, or no models apply.\n"
+        "- `422` if `prime_id` is malformed or `asset_id < 1`.\n"
+        "- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails."
+    ),
+)
 async def get_rrc(
-    asset_id: Annotated[int, Query(ge=1)],
+    asset_id: Annotated[int, Query(ge=1, description="Surrogate receipt-token id.", examples=[42])],
     prime_id: EthAddressParam,
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RrcEnvelope:
-    """Compute RRC at default stress for every model that applies to ``(asset_id, prime_id)``.
-
-    Errors:
-    - 404 if ``asset_id`` is not a known receipt token, or no models apply.
-    - 422 if ``prime_id`` is malformed or ``asset_id`` < 1.
-    - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
-      share-data lookup fails.
-    """
     return await _compute_envelope(
         asset_id, EthAddress(prime_id), overrides={}, registry=registry, lookup=receipt_token_lookup
     )
 
 
-@router.post("/risk/rrc", response_model=RrcEnvelope)
+@router.post(
+    "/risk/rrc",
+    response_model=RrcEnvelope,
+    summary="Risk capital (RRC) with scenario overrides",
+    description=(
+        "Compute RRC with per-model scenario overrides for every applicable model. "
+        "Outer override keys must be valid model names; unknown keys reject the request "
+        "with `422`. See `RrcEnvelope` for how to interpret per-model `results` versus the "
+        "`max_*` summary fields.\n\n"
+        "Errors:\n"
+        "- `404` if `asset_id` is not a known receipt token, or no models apply.\n"
+        "- `422` if `prime_id`/`asset_id` are invalid, an unknown override model key is "
+        "present, or any model rejects its overrides.\n"
+        "- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails."
+    ),
+)
 async def post_rrc(
     body: RrcRequest,
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RrcEnvelope:
-    """Compute RRC with per-model scenario overrides for every applicable model.
-
-    Errors:
-    - 404 if ``asset_id`` is not a known receipt token, or no models apply.
-    - 422 if ``prime_id``/``asset_id`` invalid, an unknown override model key
-      is present, or any model rejects its overrides.
-    - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
-      share-data lookup fails.
-    """
     return await _compute_envelope(
         body.asset_id,
         EthAddress(body.prime_id),
