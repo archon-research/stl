@@ -140,6 +140,44 @@ class PostgresAllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
+    async def prime_exists(self, prime_address: EthAddress) -> bool:
+        # Accept either prime.vault_address or any allocation_position.proxy_address.
+        # Matches the dual-identity convention in PostgresPrimeDebtRepository so
+        # /v1/primes/{prime_id}/* contracts behave the same regardless of which
+        # address form the caller uses.
+        query = text(
+            """
+            SELECT 1
+            FROM prime p
+            WHERE p.vault_address = decode(:address_hex, 'hex')
+               OR EXISTS (
+                   SELECT 1
+                   FROM allocation_position ap
+                   WHERE ap.prime_id = p.id
+                     AND ap.proxy_address = decode(:address_hex, 'hex')
+               )
+            LIMIT 1
+            """
+        )
+
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(query, {"address_hex": prime_address.hex})).fetchone()
+            return row is not None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to check prime existence in database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while checking if prime {prime_address} exists: {exc}") from exc
+
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         try:
             async with self._engine.connect() as conn:

@@ -21,10 +21,11 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
-def _make_service(primes=None, positions=None) -> AllocationService:
+def _make_service(primes=None, positions=None, *, exists: bool = True) -> AllocationService:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
+    service.prime_exists.return_value = exists
     return service
 
 
@@ -100,10 +101,10 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
 
 
-def test_list_allocations_returns_empty_when_no_holdings():
+def test_list_allocations_returns_empty_when_prime_exists_with_no_holdings():
     from app.api.v1 import allocations
 
-    service = _make_service(positions=[])
+    service = _make_service(positions=[], exists=True)
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
@@ -111,6 +112,21 @@ def test_list_allocations_returns_empty_when_no_holdings():
 
     assert response.status_code == 200
     assert response.json() == []
+    service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_returns_404_when_prime_missing():
+    from app.api.v1 import allocations
+
+    service = _make_service(exists=False)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Prime not found"
+    service.list_receipt_token_positions.assert_not_awaited()
 
 
 def test_list_allocations_returns_422_for_invalid_prime_id():
@@ -123,6 +139,8 @@ def test_list_allocations_returns_422_for_invalid_prime_id():
     response = client.get("/v1/primes/0xdeadbeef/allocations")
 
     assert response.status_code == 422
+    service.prime_exists.assert_not_awaited()
+    service.list_receipt_token_positions.assert_not_awaited()
 
 
 def test_list_chains_returns_200_with_chain_rows():
@@ -241,6 +259,27 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
 
     assert response.status_code == 422
     service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id():
+    """Valid-format prime_id with no rows is a filter miss, not a missing resource → 200 []."""
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    unknown_addr = "0x" + "ee" * 20
+    response = client.get(
+        "/v1/allocations/activity",
+        params={"prime_id": unknown_addr},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+    service.list_allocation_activity.assert_awaited_once()
+    assert service.list_allocation_activity.await_args.kwargs["prime_id"] == EthAddress(unknown_addr)
 
 
 def test_list_allocation_activity_returns_422_for_limit_out_of_range():

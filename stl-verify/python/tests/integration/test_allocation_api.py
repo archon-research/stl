@@ -283,11 +283,12 @@ def test_list_allocations_returns_empty_when_prime_has_no_receipt_token_holdings
     assert response.json() == []
 
 
-def test_list_allocations_returns_empty_for_unknown_prime(client: TestClient) -> None:
+def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:
+    """A well-formed but unknown prime_id is a missing path resource → 404."""
     response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/allocations")
 
-    assert response.status_code == 200
-    assert response.json() == []
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Prime not found"
 
 
 def test_list_allocations_returns_422_for_malformed_prime_id(client: TestClient) -> None:

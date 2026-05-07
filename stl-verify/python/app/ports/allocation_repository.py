@@ -25,6 +25,15 @@ class AllocationRepository(Protocol):
         """Return all distinct primes."""
         ...
 
+    async def prime_exists(self, prime_address: EthAddress) -> bool:
+        """Return whether a prime exists for the given address.
+
+        Accepts either the prime's ``vault_address`` or any
+        ``proxy_address`` recorded in ``allocation_position``, mirroring
+        the dual-identity convention used elsewhere in the API.
+        """
+        ...
+
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         """Return current receipt-token holdings for the given prime."""
         ...

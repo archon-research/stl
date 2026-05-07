@@ -1171,7 +1171,7 @@
   "paths": {
     "/v1/allocations/activity": {
       "get": {
-        "description": "Retrieve allocation activity events with optional URL filters.\n\nQuery parameters:\n- prime_id: Filter by prime address (0x-prefixed Ethereum address)\n- chain_id: Filter by chain ID\n- protocol_name: Filter by protocol name (case-insensitive substring)\n- action_type: Filter by action type (`in`, `out`, `sweep`)\n- token_symbol: Filter by token symbol (case-insensitive substring)\n- tx_hash: Filter by transaction hash (0x-prefixed)\n- from_timestamp: Inclusive lower timestamp bound (ISO-8601)\n- to_timestamp: Inclusive upper timestamp bound (ISO-8601)\n- limit: Max results (default 100, max 1000)",
+        "description": "Retrieve allocation activity events with optional URL filters.\n\nQuery parameters:\n- prime_id: Filter by prime address (0x-prefixed Ethereum address)\n- chain_id: Filter by chain ID\n- protocol_name: Filter by protocol name (case-insensitive substring)\n- action_type: Filter by action type (`in`, `out`, `sweep`)\n- token_symbol: Filter by token symbol (case-insensitive substring)\n- tx_hash: Filter by transaction hash (0x-prefixed)\n- from_timestamp: Inclusive lower timestamp bound (ISO-8601)\n- to_timestamp: Inclusive upper timestamp bound (ISO-8601)\n- limit: Max results (default 100, max 1000)\n\nErrors:\n- 422 if ``prime_id`` is malformed (or ``limit`` is out of range).\n- 200 with an empty list if filters match no rows \u2014 including when\n  ``prime_id`` is well-formed but unknown. ``prime_id`` is treated as\n  a filter here, not a path resource.",
         "operationId": "list_allocation_activity_v1_allocations_activity_get",
         "parameters": [
           {
@@ -1305,11 +1305,15 @@
             }
           },
           {
+            "description": "Max results (default 100, max 1000)",
             "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
               "default": 100,
+              "description": "Max results (default 100, max 1000)",
+              "maximum": 1000,
+              "minimum": 1,
               "title": "Limit",
               "type": "integer"
             }
@@ -1431,6 +1435,7 @@
     },
     "/v1/primes/{prime_id}/allocations": {
       "get": {
+        "description": "Return current receipt-token holdings for ``prime_id``.\n\nErrors:\n- 422 if ``prime_id`` is malformed.\n- 404 if ``prime_id`` is well-formed but no such prime exists.",
         "operationId": "list_allocations_v1_primes__prime_id__allocations_get",
         "parameters": [
           {
@@ -2057,7 +2062,7 @@
             "name": "tx_hash",
             "required": true,
             "schema": {
-              "pattern": "^(?:0x)?[0-9a-fA-F]{64}$",
+              "pattern": "^(?:0[xX])?[0-9a-fA-F]{64}$",
               "title": "Tx Hash",
               "type": "string"
             }
