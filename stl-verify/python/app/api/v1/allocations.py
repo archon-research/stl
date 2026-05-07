@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -218,6 +218,29 @@ async def list_capital_metrics(
             None,
         )
         if not row:
+            logger.warning(
+                "No upstream risk capital data found for prime",
+                extra={
+                    "prime_id": prime.id,
+                    "prime_name": prime.name,
+                    "upstream_url": settings.star_risk_capital_upstream_url,
+                },
+            )
+            metrics.append(
+                CapitalMetricsResponse(
+                    prime_id=prime.id,
+                    prime_name=prime.name,
+                    risk_capital=Decimal("0"),
+                    capital_buffer=Decimal("0"),
+                    first_loss_capital=Decimal("0"),
+                    total_capital=Decimal("0"),
+                    risk_to_capital_ratio=None,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    benchmark_source=settings.star_risk_capital_upstream_url,
+                    is_validated=False,
+                    validation_note="No upstream Star risk-capital row matched this prime.",
+                )
+            )
             continue
 
         total_rc = _to_decimal(row.total_rc, field="total_rc", prime_name=prime.name)
@@ -304,7 +327,7 @@ async def list_allocation_activity(
     tx_hash: str | None = None,
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)"),
     service: AllocationService = Depends(_get_service),
 ):
     """Retrieve allocation activity events with optional URL filters.
@@ -336,17 +359,30 @@ async def list_allocation_activity(
             )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    events = await service.list_allocation_activity(
-        prime_id=parsed_prime_id,
-        chain_id=chain_id,
-        protocol_name=protocol_name,
-        action_type=action_type,
-        token_symbol=token_symbol,
-        tx_hash=tx_hash,
-        from_timestamp=from_timestamp,
-        to_timestamp=to_timestamp,
-        limit=limit,
-    )
+    try:
+        events = await service.list_allocation_activity(
+            prime_id=parsed_prime_id,
+            chain_id=chain_id,
+            protocol_name=protocol_name,
+            action_type=action_type,
+            token_symbol=token_symbol,
+            tx_hash=tx_hash,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            limit=limit,
+        )
+    except ValueError as exc:
+        logger.error(
+            "Failed to retrieve allocation activity",
+            extra={
+                "prime_id": str(parsed_prime_id) if parsed_prime_id else None,
+                "chain_id": chain_id,
+                "protocol_name": protocol_name,
+                "error": str(exc),
+            },
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to retrieve allocation activity") from exc
 
     return [
         AllocationActivityResponse(

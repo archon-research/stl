@@ -116,3 +116,67 @@ def test_list_prime_debt_snapshots_returns_422_for_invalid_prime_id():
         assert response.status_code == 422
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_returns_422_for_limit_too_large():
+    from app.api.v1 import prime_debts
+
+    service = _make_service(snapshots=[])
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=600")
+
+        assert response.status_code == 422
+        service.prime_exists.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_returns_422_for_address_without_prefix():
+    from app.api.v1 import prime_debts
+
+    service = _make_service()
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{'ab' * 20}/debt")
+
+        assert response.status_code == 422
+        service.prime_exists.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_returns_422_for_address_too_long():
+    from app.api.v1 import prime_debts
+
+    service = _make_service()
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get("/v1/primes/0xabababababababababababababababababababababab/debt")
+
+        assert response.status_code == 422
+        service.prime_exists.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_returns_500_when_service_errors():
+    from app.api.v1 import prime_debts
+
+    service = _make_service()
+    service.list_debt_snapshots.side_effect = ValueError("db failure")
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app, raise_server_exceptions=False)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+
+        assert response.status_code == 500
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
