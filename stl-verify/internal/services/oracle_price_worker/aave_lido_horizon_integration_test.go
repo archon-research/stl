@@ -4,6 +4,8 @@ package oracle_price_worker
 
 import (
 	"context"
+	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +37,31 @@ func TestIntegration_AaveV3RWAOracle_EmitsPricesForCommonUnderlyings(t *testing.
 		"aave_v3_rwa",
 		[]string{"USDC"},
 	)
+}
+
+// VEC-215: lock in the exact canonical reserve set bound to each new oracle.
+// The original VEC-210 migration JOINed by symbol; this caused staging to
+// pick up stale duplicate-symbol token rows and revert on every block. The
+// fix-forward migration (20260507_120000) re-seeds by address. This test
+// fails loudly if the bound set drifts from the address-book canonical list.
+func TestIntegration_AaveV3LidoOracle_AssetBindingsAreCanonical(t *testing.T) {
+	assertOracleAssetsExactlyMatchAddresses(t, "aave_v3_lido", []string{
+		"0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", // wstETH
+		"0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", // WETH
+		"0xdC035D45d973E3EC169d2276DDab16f1e407384F", // USDS
+		"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
+		"0xbf5495Efe5DB9ce00f80364C8B423567e58d2110", // ezETH
+		"0x9D39A5DE30e57443BfF2A8307A4256c8797A3497", // sUSDe
+		"0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f", // GHO
+		"0xA1290d69c65A6Fe4DF752f95823fae25cB99e5A7", // rsETH
+	})
+}
+
+func TestIntegration_AaveV3RWAOracle_AssetBindingsAreCanonical(t *testing.T) {
+	assertOracleAssetsExactlyMatchAddresses(t, "aave_v3_rwa", []string{
+		"0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f", // GHO
+		"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // USDC
+	})
 }
 
 // assertOracleEmitsPricesForSymbols runs the price worker against a real schema
@@ -146,6 +173,60 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 		}
 		if !priced {
 			t.Errorf("oracle %q: expected at least one onchain_token_price row for %q at block %d", oracleName, symbol, blockNumber)
+		}
+	}
+}
+
+// assertOracleAssetsExactlyMatchAddresses asserts that the post-migration
+// aave-style oracle_asset bindings for the given oracle exactly match the
+// canonical address set (case-insensitive, order-insensitive). Picks up both
+// missing canonical reserves and bogus extras swept in by a symbol JOIN.
+func assertOracleAssetsExactlyMatchAddresses(t *testing.T, oracleName string, expectedAddrs []string) {
+	t.Helper()
+
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	rows, err := pool.Query(ctx, `
+		SELECT t.address
+		FROM oracle_asset oa
+		JOIN oracle o ON o.id = oa.oracle_id
+		JOIN token  t ON t.id = oa.token_id
+		WHERE o.name = $1 AND oa.feed_address IS NULL
+		ORDER BY t.address
+	`, oracleName)
+	if err != nil {
+		t.Fatalf("query oracle_asset: %v", err)
+	}
+	defer rows.Close()
+
+	got := make(map[string]struct{})
+	for rows.Next() {
+		var addr []byte
+		if err := rows.Scan(&addr); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[strings.ToLower("0x"+hex.EncodeToString(addr))] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+
+	want := make(map[string]struct{}, len(expectedAddrs))
+	for _, a := range expectedAddrs {
+		want[strings.ToLower(a)] = struct{}{}
+	}
+
+	for a := range got {
+		if _, ok := want[a]; !ok {
+			t.Errorf("oracle %q: unexpected oracle_asset address %s (not in canonical set)", oracleName, a)
+		}
+	}
+	for a := range want {
+		if _, ok := got[a]; !ok {
+			t.Errorf("oracle %q: missing canonical oracle_asset address %s", oracleName, a)
 		}
 	}
 }
