@@ -13,7 +13,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -131,7 +130,7 @@ func TestLateBlockAfterPruning(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	liveService, err := NewLiveService(liveConfig, subscriber, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	liveService, err := NewLiveService(liveConfig, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create live service: %v", err)
 	}
@@ -222,7 +221,7 @@ func TestNewLiveService_NilDependencies(t *testing.T) {
 				sink = nil
 			}
 
-			_, err := NewLiveService(LiveConfig{}, sub, cli, repo, c, sink, s3backup.NewForTestingBackup(t))
+			_, err := NewLiveService(LiveConfig{}, sub, cli, repo, c, sink)
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -241,7 +240,7 @@ func TestNewLiveService_AppliesDefaults(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	// Pass zero-value config
-	svc, err := NewLiveService(LiveConfig{}, subscriber, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -273,7 +272,7 @@ func TestNewLiveService_UsesProvidedConfig(t *testing.T) {
 		Logger:             customLogger,
 	}
 
-	svc, err := NewLiveService(config, subscriber, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(config, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -306,7 +305,7 @@ func TestIsDuplicateBlock_FoundInDB(t *testing.T) {
 		BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -327,7 +326,7 @@ func TestIsDuplicateBlock_NotFound(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -350,7 +349,7 @@ func TestIsDuplicateBlock_DBError(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -375,7 +374,7 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -422,7 +421,7 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -470,7 +469,7 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		FinalityBlockCount: 64,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -524,7 +523,7 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -566,7 +565,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -616,7 +615,7 @@ func TestHandleReorg_FindsCommonAncestorInDB(t *testing.T) {
 		_, _ = stateRepo.SaveBlock(ctx, b)
 	}
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -706,7 +705,7 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		_, _ = stateRepo.SaveBlock(ctx, b)
 	}
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -750,7 +749,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 		svc, err := NewLiveService(LiveConfig{
 			FinalityBlockCount: 64,
-		}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+		}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -790,7 +789,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 
 		svc, err := NewLiveService(LiveConfig{
 			FinalityBlockCount: 3, // Walk will exhaust after 3 iterations
-		}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+		}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -827,7 +826,7 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -877,7 +876,7 @@ func TestProcessBlock_Errors(t *testing.T) {
 		eventSink := memory.NewEventSink()
 		client := testutil.NewMockBlockchainClient()
 
-		svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+		svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -906,7 +905,7 @@ func TestProcessBlock_Errors(t *testing.T) {
 		client := testutil.NewMockBlockchainClient()
 		client.AddBlock(100, "")
 
-		svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+		svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 		if err != nil {
 			t.Fatalf("failed to create service: %v", err)
 		}
@@ -943,7 +942,7 @@ func TestProcessBlock_SkipsDuplicate(t *testing.T) {
 		Number: 100, Hash: "0x64", ParentHash: "0x63", BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -991,7 +990,7 @@ func TestProcessBlock_AddsBlockToChain(t *testing.T) {
 		Number: 100, Hash: header100.Hash, ParentHash: header100.ParentHash, BlockTimestamp: time.Now().Unix(),
 	})
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1198,7 +1197,6 @@ func (s *mockFailingEventSink) Publish(ctx context.Context, event outbound.Event
 func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 	tests := []struct {
 		name              string
-		chainID           int64 // 0 → Ethereum mainnet (1); use 43114 for tests that disable traces
 		failGetBlock      bool
 		failGetReceipts   bool
 		failGetTraces     bool
@@ -1291,11 +1289,7 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 			wantErr:      false,
 		},
 		{
-			// Avalanche (43114) does not expect traces, so EnableTraces=false
-			// is a valid configuration there. Same scenario on Ethereum (1)
-			// is rejected by chainexpect — verified by chain-mismatch tests.
 			name:          "traces_disabled_traces_error_ignored",
-			chainID:       43114,
 			enableTraces:  false,
 			failGetTraces: true,
 			wantErr:       false,
@@ -1335,16 +1329,10 @@ func TestCacheAndPublishBlockData_ErrorHandling(t *testing.T) {
 			eventSink := newMockFailingEventSink()
 			eventSink.failPublish = tt.failPublish
 
-			chainID := tt.chainID
-			if chainID == 0 {
-				chainID = 1
-			}
-			backup, _ := s3backup.NewForTestingChain(t, chainID)
 			svc, err := NewLiveService(LiveConfig{
-				ChainID:      chainID,
 				EnableTraces: tt.enableTraces,
 				EnableBlobs:  tt.enableBlobs,
-			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, backup)
+			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}
@@ -1383,7 +1371,7 @@ func TestCacheAndPublishBlockData_WithBlobs_CachesBlobs(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		EnableTraces: true,
 		EnableBlobs:  true, // Enable blobs
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1421,7 +1409,7 @@ func TestCacheAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1452,7 +1440,7 @@ func TestStart_SubscribeError_ReturnsError(t *testing.T) {
 
 	subscriber := &failingSubscriber{err: fmt.Errorf("subscribe failed")}
 
-	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1489,7 +1477,7 @@ func TestStart_Success_SetsContext(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1519,7 +1507,7 @@ func TestStop_CancelsContext(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1550,7 +1538,7 @@ func TestStop_BeforeStart_NoError(t *testing.T) {
 	cache := memory.NewBlockCache()
 	eventSink := memory.NewEventSink()
 
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1571,7 +1559,7 @@ func TestProcessHeaders_ContextCancellation(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	subscriber := testutil.NewMockSubscriber()
-	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1605,7 +1593,7 @@ func TestProcessHeaders_ChannelClosed(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	subscriber := testutil.NewMockSubscriber()
-	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1658,7 +1646,7 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
 		Metrics:     metrics,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1729,7 +1717,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		FinalityBlockCount: 10,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1761,7 +1749,7 @@ func TestProcessHeaders_LogsErrorOnProcessBlockFailure(t *testing.T) {
 	eventSink := memory.NewEventSink()
 
 	subscriber := testutil.NewMockSubscriber()
-	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(LiveConfig{}, subscriber, testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1796,7 +1784,7 @@ func TestProcessBlock_FetchAndPublishError_ReturnsError(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1843,7 +1831,7 @@ func TestProcessBlock_VersionIsCorrectAfterReorg(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1922,7 +1910,7 @@ func TestProcessBlock_VersionIsSavedToDatabase(t *testing.T) {
 
 	svc, err := NewLiveService(LiveConfig{
 		EnableBlobs: false,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2050,7 +2038,7 @@ func TestFetchBlockData_ReorgBetweenHeaderAndFetch(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2114,7 +2102,7 @@ func TestFetchBlockData_ByHashReturnsErrorWhenBlockNotFound(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2184,7 +2172,7 @@ func TestFetchReceiptsTracesBlobsByHash(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2304,7 +2292,7 @@ func TestHashComparisonCaseInsensitive(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2575,7 +2563,7 @@ func TestProcessBlock_RollsBackInMemoryChainOnDBFailure(t *testing.T) {
 		Logger:             slog.Default(),
 	}
 
-	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewLiveService(config, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2733,7 +2721,7 @@ func TestCacheAndPublishBlockData_CachesAllDataBeforePublishing(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		EnableTraces: true,
 		EnableBlobs:  true, // Enable all data types to test all 4 cache operations
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -2830,7 +2818,7 @@ func TestCacheAndPublishBlockData_NoPublishOnCacheFailure(t *testing.T) {
 			svc, err := NewLiveService(LiveConfig{
 				EnableTraces: true,
 				EnableBlobs:  true,
-			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 			if err != nil {
 				t.Fatalf("failed to create service: %v", err)
 			}
@@ -2897,7 +2885,7 @@ func TestReorgPruning_InMemoryMustMatchDB(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		Logger:             slog.Default(),
 		FinalityBlockCount: 64,
-	}, subscriber, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -3084,7 +3072,7 @@ func TestReorgWithBackfilledBlocks_CommonAncestorCalculation(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		Logger:             slog.Default(),
 		FinalityBlockCount: 64,
-	}, subscriber, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, subscriber, client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -3226,7 +3214,7 @@ func TestProcessBlock_StaleForkBroadcast_NoOrphan(t *testing.T) {
 		ChainID:            1,
 		FinalityBlockCount: 64,
 		Metrics:            metrics,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -3343,7 +3331,7 @@ func TestProcessBlock_RealReorg_PassesVerification(t *testing.T) {
 	svc, err := NewLiveService(LiveConfig{
 		ChainID:            1,
 		FinalityBlockCount: 64,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -3441,7 +3429,7 @@ func TestProcessBlock_StateShiftedDuringVerify_DropsBlock(t *testing.T) {
 		ChainID:            1,
 		FinalityBlockCount: 64,
 		Metrics:            metrics,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -3528,7 +3516,7 @@ func TestProcessBlock_VerifyRpcError_DropsBlock(t *testing.T) {
 		ChainID:            1,
 		FinalityBlockCount: 64,
 		Metrics:            metrics,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}
@@ -3619,7 +3607,7 @@ func TestProcessBlock_EmptyCanonicalHash_DropsAsVerifyError(t *testing.T) {
 		ChainID:            1,
 		FinalityBlockCount: 64,
 		Metrics:            metrics,
-	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(t))
+	}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
 	if err != nil {
 		t.Fatalf("new service: %v", err)
 	}

@@ -50,36 +50,3 @@ type BackupMetricsRecorder interface {
 	// RecordBlockProcessed increments the blocks processed counter.
 	RecordBlockProcessed(ctx context.Context, status string)
 }
-
-// S3BackupRecorder records metrics for the watcher's inline S3 backup path.
-// The watcher kicks off parallel S3 PUTs as soon as block data is in memory and
-// awaits them before publishing to SNS, so its critical-path budget includes the
-// slowest of the per-data-type PUTs. These metrics let operators see both
-// individual PUT latency and the wall-clock cost of the parallel group.
-type S3BackupRecorder interface {
-	// RecordPutDuration records the duration of a single S3 PUT for a data type.
-	// outcome ∈ {"success", "skipped", "error"}.
-	RecordPutDuration(ctx context.Context, dataType, outcome string, duration time.Duration)
-
-	// RecordPutBytes records the size of a written object in bytes.
-	RecordPutBytes(ctx context.Context, dataType string, bytes int64)
-
-	// RecordPutError counts a terminal PUT failure with a bounded error_class
-	// label so dashboards can distinguish throttling from auth/5xx/timeout.
-	RecordPutError(ctx context.Context, dataType, errorClass string)
-
-	// RecordGroupDuration records the wall-clock duration of the parallel S3
-	// PUT group (errgroup.Wait). outcome ∈ {"success", "error"}.
-	RecordGroupDuration(ctx context.Context, outcome string, duration time.Duration)
-}
-
-// S3BackupErrorClass labels are the bounded set used by RecordPutError.
-// Keep cardinality fixed — never pass a raw error string.
-const (
-	S3BackupErrorClassThrottle = "throttle"
-	S3BackupErrorClass5xx      = "5xx"
-	S3BackupErrorClass4xx      = "4xx"
-	S3BackupErrorClassTimeout  = "timeout"
-	S3BackupErrorClassAuth     = "auth"
-	S3BackupErrorClassOther    = "other"
-)

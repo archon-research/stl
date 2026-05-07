@@ -14,7 +14,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -632,7 +631,7 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 	mockSink := &integrationMockEventSink{}
 
 	// Create service
-	svc, err := NewBackfillService(BackfillConfigDefaults(), mockClient, raceRepo, mockCache, mockSink, s3backup.NewForTestingBackup(t))
+	svc, err := NewBackfillService(BackfillConfigDefaults(), mockClient, raceRepo, mockCache, mockSink)
 	if err != nil {
 		t.Fatalf("Failed to create service: %v", err)
 	}
@@ -776,7 +775,7 @@ func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
 		newMockClient(),
 		repo,
 		memory.NewBlockCache(),
-		&integrationMockEventSink{}, s3backup.NewForTestingBackup(t),
+		&integrationMockEventSink{},
 	)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)

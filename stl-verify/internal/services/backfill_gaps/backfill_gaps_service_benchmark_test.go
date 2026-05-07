@@ -12,7 +12,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 )
 
 // benchmarkBlockchainClient provides predictable block data for benchmarking.
@@ -301,7 +300,7 @@ func BenchmarkBackfillService_RunOnce(b *testing.B) {
 				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
-			service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(b))
+			service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
 			if err != nil {
 				b.Fatalf("failed to create backfill service: %v", err)
 			}
@@ -362,7 +361,7 @@ func BenchmarkBackfillService_FindAndFillGaps(b *testing.B) {
 				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
-			service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(b))
+			service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
 			if err != nil {
 				b.Fatalf("failed to create backfill service: %v", err)
 			}
@@ -407,7 +406,7 @@ func BenchmarkBackfillService_BatchSizes(b *testing.B) {
 				Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
-			service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(b))
+			service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
 			if err != nil {
 				b.Fatalf("failed to create backfill service: %v", err)
 			}
@@ -444,7 +443,7 @@ func BenchmarkBackfillService_NoGaps(b *testing.B) {
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink, s3backup.NewForTestingBackup(b))
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
 	if err != nil {
 		b.Fatalf("failed to create backfill service: %v", err)
 	}

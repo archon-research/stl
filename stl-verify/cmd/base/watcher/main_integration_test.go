@@ -24,7 +24,6 @@ import (
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -99,7 +98,7 @@ func TestLiveService_ProcessesNewBlock(t *testing.T) {
 		mockClient,
 		infra.BlockStateRepo,
 		infra.Cache,
-		infra.EventSink, s3backup.NewForTestingBackup(t),
+		infra.EventSink,
 	)
 	if err != nil {
 		t.Fatalf("failed to create live service: %v", err)
@@ -186,7 +185,7 @@ func TestMultipleBlocksInSequence(t *testing.T) {
 		mockClient,
 		infra.BlockStateRepo,
 		infra.Cache,
-		infra.EventSink, s3backup.NewForTestingBackup(t),
+		infra.EventSink,
 	)
 	if err != nil {
 		t.Fatalf("failed to create live service: %v", err)
@@ -283,7 +282,7 @@ func TestMultiChain_Isolation(t *testing.T) {
 	// Create per-chain live services
 	ethLive, err := live_data.NewLiveService(
 		live_data.LiveConfig{ChainID: 1, FinalityBlockCount: 2, Logger: logger},
-		ethSub, ethClient, ethRepo, infra.Cache, infra.EventSink, s3backup.NewForTestingBackup(t),
+		ethSub, ethClient, ethRepo, infra.Cache, infra.EventSink,
 	)
 	if err != nil {
 		t.Fatalf("failed to create eth live service: %v", err)
@@ -291,7 +290,7 @@ func TestMultiChain_Isolation(t *testing.T) {
 
 	avaxLive, err := live_data.NewLiveService(
 		live_data.LiveConfig{ChainID: 43114, FinalityBlockCount: 2, Logger: logger},
-		avaxSub, avaxClient, avaxRepo, infra.Cache, infra.EventSink, s3backup.NewForTestingBackup(t),
+		avaxSub, avaxClient, avaxRepo, infra.Cache, infra.EventSink,
 	)
 	if err != nil {
 		t.Fatalf("failed to create avalanche live service: %v", err)

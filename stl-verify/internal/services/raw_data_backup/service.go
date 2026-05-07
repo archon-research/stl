@@ -3,6 +3,7 @@
 package rawdatabackup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,23 +11,38 @@ import (
 	"sync"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/chainexpect"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 )
 
-// ChainExpectation aliases chainexpect.Expectation for backwards compatibility
-// with the existing backup-worker tests. The shared package is the source of
-// truth; new callers should use it directly.
-type ChainExpectation = chainexpect.Expectation
+// ChainExpectation defines what data is expected for a specific chain.
+// If a data type is expected but missing from cache, the message will error
+// and go to DLQ rather than retry infinitely.
+type ChainExpectation struct {
+	// ExpectReceipts indicates receipts data is required for this chain.
+	ExpectReceipts bool
+	// ExpectTraces indicates traces data is required for this chain.
+	ExpectTraces bool
+	// ExpectBlobs indicates blobs data is required for this chain.
+	ExpectBlobs bool
+}
 
-// DefaultChainExpectations returns the canonical expectations from the shared
-// chainexpect package.
+// DefaultChainExpectations returns the default expectations for known chains.
 func DefaultChainExpectations() map[int64]ChainExpectation {
-	return chainexpect.All()
+	return map[int64]ChainExpectation{
+		1: { // Ethereum Mainnet
+			ExpectReceipts: true,
+			ExpectTraces:   true,
+			ExpectBlobs:    false, // Blobs are optional (post-Dencun)
+		},
+		43114: { // Avalanche C-Chain
+			ExpectReceipts: true,
+			ExpectTraces:   false,
+			ExpectBlobs:    false,
+		},
+	}
 }
 
 // Config holds configuration for the backup service.
@@ -374,13 +390,15 @@ func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataT
 	return s3key.BuildWithPartition(partition, event.BlockNumber, event.Version, s3key.DataType(dataType))
 }
 
-// writeToS3 writes data to S3 via the shared s3backup.WriteArtifactByKey
-// helper so both this worker and the watcher use the exact same write
-// semantics (key format, gzip, idempotent WriteFileIfNotExists).
+// writeToS3 writes data to S3 with the appropriate key structure.
+// Key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
 func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
 	key := s.generateKey(partition, event, dataType)
-	if _, err := s3backup.WriteArtifactByKey(ctx, s.writer, s.config.Bucket, key, data); err != nil {
+
+	// Write to S3 with gzip compression, only if not exists to avoid overwritten races
+	if _, err := s.writer.WriteFileIfNotExists(ctx, s.config.Bucket, key, bytes.NewReader(data), true); err != nil {
 		return fmt.Errorf("failed to write %s to S3: %w", dataType, err)
 	}
+
 	return nil
 }

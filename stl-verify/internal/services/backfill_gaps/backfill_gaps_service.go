@@ -17,7 +17,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 )
 
 const (
@@ -70,7 +69,6 @@ type BackfillService struct {
 	stateRepo outbound.BlockStateRepository
 	cache     outbound.BlockCache
 	eventSink outbound.EventSink
-	s3Backup  *s3backup.Backup
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -78,17 +76,13 @@ type BackfillService struct {
 	logger *slog.Logger
 }
 
-// NewBackfillService creates a new BackfillService. The s3Backup parameter is
-// required — every block backfill writes raw artifacts to S3 alongside the
-// cache so the S3 fallback used by downstream consumers stays coherent with
-// the live path. See VEC-216.
+// NewBackfillService creates a new BackfillService.
 func NewBackfillService(
 	config BackfillConfig,
 	client outbound.BlockchainClient,
 	stateRepo outbound.BlockStateRepository,
 	cache outbound.BlockCache,
 	eventSink outbound.EventSink,
-	s3Backup *s3backup.Backup,
 ) (*BackfillService, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client is required")
@@ -101,9 +95,6 @@ func NewBackfillService(
 	}
 	if eventSink == nil {
 		return nil, fmt.Errorf("eventSink is required")
-	}
-	if s3Backup == nil {
-		return nil, fmt.Errorf("s3Backup is required")
 	}
 
 	// Apply defaults
@@ -131,7 +122,6 @@ func NewBackfillService(
 		stateRepo: stateRepo,
 		cache:     cache,
 		eventSink: eventSink,
-		s3Backup:  s3Backup,
 		logger:    config.Logger.With("component", "backfill-service"),
 	}, nil
 }
@@ -757,16 +747,6 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		blobs = bd.Blobs
 	}
 
-	// Kick off S3 backup goroutines as early as possible — they run in
-	// parallel with the cache write below. WriteFileIfNotExists makes this
-	// idempotent across backfill re-runs.
-	s3Group := s.s3Backup.Start(ctx, blockNum, version, s3backup.Artifacts{
-		Block:    bd.Block,
-		Receipts: bd.Receipts,
-		Traces:   bd.Traces,
-		Blobs:    blobs,
-	})
-
 	// Cache all block data in a single pipelined operation with retry
 	cacheInput := outbound.BlockDataInput{
 		Block:    bd.Block,
@@ -780,14 +760,7 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		return fmt.Errorf("failed to cache block data for block %d: %w", blockNum, err)
 	}
 
-	// Await S3 backup before publishing — same invariant as live_data: a
-	// block becomes visible to downstream consumers only after its S3 backup
-	// is durable.
-	if err := s3Group.Wait(ctx); err != nil {
-		return fmt.Errorf("s3 backup failed for block %d: %w", blockNum, err)
-	}
-
-	// All data cached and backed up - now publish the block event
+	// All data cached successfully - now publish the block event
 	event := outbound.BlockEvent{
 		ChainID:        chainID,
 		BlockNumber:    blockNum,

@@ -23,7 +23,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/memory"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -478,7 +477,7 @@ func BenchmarkLargePostgres_BackfillService(b *testing.B) {
 		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	service, err := NewBackfillService(config, client, repo, cache, eventSink, s3backup.NewForTestingBackup(b))
+	service, err := NewBackfillService(config, client, repo, cache, eventSink)
 	if err != nil {
 		b.Fatalf("failed to create backfill service: %v", err)
 	}

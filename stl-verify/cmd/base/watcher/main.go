@@ -27,14 +27,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
-	"github.com/archon-research/stl/stl-verify/internal/services/shared/s3backup"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info
@@ -282,39 +279,6 @@ func main() {
 		"topic", snsTopicARN,
 	)
 
-	// Construct the inline S3 backup primitive used by both live and backfill
-	// services. The watcher writes block artifacts to S3 on the critical path
-	// (parallel goroutines, fail-hard), so the data is durable before the SNS
-	// publish that exposes the block to downstream consumers.
-	deployEnv := env.Get("DEPLOY_ENV", "")
-	s3Bucket := requireEnv("S3_BUCKET")
-	if err := chainutil.ValidateS3BucketForChain(chainID, s3Bucket, deployEnv); err != nil {
-		logger.Error("S3 bucket validation failed", "error", err, "bucket", s3Bucket, "chainID", chainID)
-		os.Exit(1)
-	}
-	s3Writer := s3.NewWriter(awsCfg, logger)
-	s3BackupMetrics, err := telemetry.NewS3BackupMetrics("stl-verify/watcher")
-	if err != nil {
-		logger.Error("failed to create S3 backup metrics", "error", err)
-		os.Exit(1)
-	}
-	backup, err := s3backup.NewBackup(s3backup.Config{
-		Writer:  s3Writer,
-		Bucket:  s3Bucket,
-		ChainID: chainID,
-		Metrics: s3BackupMetrics,
-		Logger:  logger,
-	})
-	if err != nil {
-		logger.Error("failed to construct S3 backup", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("S3 backup configured",
-		"bucket", s3Bucket,
-		"chainID", chainID,
-		"expectation", fmt.Sprintf("%+v", backup.Expectation()),
-	)
-
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
 		ChainID:            chainID,
@@ -331,7 +295,6 @@ func main() {
 		blockStateRepo,
 		cache,
 		eventSink,
-		backup,
 	)
 	if err != nil {
 		logger.Error("failed to create live service", "error", err)
@@ -360,7 +323,6 @@ func main() {
 			blockStateRepo,
 			cache,
 			eventSink,
-			backup,
 		)
 		if err != nil {
 			logger.Error("failed to create backfill service", "error", err)
