@@ -397,7 +397,7 @@ export function MethodologyPanel({
                     >
                       Latest Price:
                     </span>{' '}
-                    {tokenPrice.is_stale
+                    {tokenPrice.is_stale || tokenPrice.price_usd == null
                       ? 'Price unavailable'
                       : formatUsdValue(tokenPrice.price_usd)}
                   </div>
