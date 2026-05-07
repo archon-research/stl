@@ -1,0 +1,115 @@
+# Lefthook configuration for stl-verify
+# Install: make install-hooks or lefthook install
+# Run manually: lefthook run pre-commit
+#
+# Extends language-specific configs from python/ and ts/ subdirectories
+# Includes generic file checks and Go-specific linting
+
+extends:
+  - python/lefthook.yml
+  - ts/lefthook.yml
+
+# Excluded patterns for all commands unless overridden
+_exclude_dirs: &exclude_dirs 'db/**|k8s/**|docs/**|*.pb.go|vendor/**'
+
+pre-commit:
+  parallel: true
+  exclude: "bin/**|dist/**"
+
+  commands:
+    # =================================================================
+    # Generic file checks (all languages)
+    # =================================================================
+
+    trailing-whitespace:
+      glob: "*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
+      exclude: 'lefthook.*\.yml'
+      stage_fixed: true
+      run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
+
+    end-of-file-fixer:
+      glob: "*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
+      exclude: 'lefthook.*\.yml'
+      stage_fixed: true
+      run: |
+        for file in {staged_files}; do
+          [ -f "$file" ] || continue
+          # Add newline at end if missing
+          [ -n "$(tail -c1 "$file")" ] && echo >> "$file"
+          # Remove multiple trailing newlines, keep exactly one
+          perl -i -0pe 's/\n+$/\n/' "$file"
+        done
+
+    check-yaml:
+      glob: "*.{yml,yaml}"
+      exclude: *exclude_dirs
+      run: |
+        if command -v yamllint > /dev/null 2>&1; then
+          yamllint {staged_files} || true
+        fi
+
+    check-json:
+      glob: "*.json"
+      exclude: *exclude_dirs
+      run: |
+        for file in {staged_files}; do
+          if [ -f "$file" ]; then
+            if ! jq . "$file" > /dev/null 2>&1; then
+              echo "Invalid JSON: $file"
+              exit 1
+            fi
+          fi
+        done
+
+    check-large-files:
+      glob: "*"
+      exclude: *exclude_dirs
+      run: |
+        for file in {staged_files}; do
+          # Skip directories
+          [ -d "$file" ] && continue
+
+          # If file is tracked by Git LFS, skip size check
+          if git lfs ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+            continue
+          fi
+
+          # Cross-platform file size (macOS/BSD stat first, then GNU stat)
+          size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)
+          if [ "$size" -gt 1024000 ]; then
+            echo "Error: $file is larger than 1000KB ($((size/1024))KB) and not tracked by Git LFS"
+            exit 1
+          fi
+        done
+
+    check-merge-conflict:
+      glob: "*"
+      exclude: *exclude_dirs
+      run: |
+        if grep -r -E '^(<<<<<<<|=======|>>>>>>>)' {staged_files}; then
+          echo "Error: Merge conflict markers found"
+          exit 1
+        fi
+
+    # =================================================================
+    # Go-specific linting
+    # =================================================================
+
+    go-fmt:
+      glob: "*.go"
+      exclude: *exclude_dirs
+      stage_fixed: true
+      run: gofmt -s -w {staged_files}
+
+    go-imports:
+      glob: "*.go"
+      exclude: *exclude_dirs
+      stage_fixed: true
+      run: |
+        GOBIN=$(go env GOPATH)/bin
+        $GOBIN/goimports -l -w {staged_files}
+
+    go-vet:
+      glob: "*.go"
+      exclude: *exclude_dirs
+      run: go vet ./...

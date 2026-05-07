@@ -1,0 +1,19 @@
+# Lefthook configuration for Python code
+# This file is extended by the root lefthook.yml
+
+_python_root: &python_root 'python/'
+
+pre-commit:
+  parallel: true
+  commands:
+    python-ruff-lint:
+      root: *python_root
+      glob: '**/*.{py,pyi}'
+      run: env -u VIRTUAL_ENV uv run ruff check --fix {staged_files}
+      stage_fixed: true
+
+    python-ruff-format:
+      root: *python_root
+      glob: '**/*.{py,pyi}'
+      run: env -u VIRTUAL_ENV uv run ruff format {staged_files}
+      stage_fixed: true

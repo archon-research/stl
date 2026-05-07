@@ -1,0 +1,19 @@
+# Lefthook configuration for TypeScript code
+# This file is extended by the root lefthook.yml
+
+_ts_root: &ts_root 'ts/'
+
+pre-commit:
+  parallel: true
+  commands:
+    ts-oxlint:
+      root: *ts_root
+      glob: 'ui/**/*.{ts,tsx}'
+      run: npx --no oxlint --fix {staged_files}
+      stage_fixed: true
+
+    ts-oxfmt:
+      root: *ts_root
+      glob: 'ui/**/*.{ts,tsx,css,html,json}'
+      run: npx --no oxfmt {staged_files}
+      stage_fixed: true
