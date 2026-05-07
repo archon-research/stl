@@ -104,7 +104,7 @@ export function TokenAddress({
             flex: '1 1 0',
             minWidth: '0', // Allows flex shrinking to work
             fontFamily: 'mono',
-            fontSize: '2xs',
+            fontSize: type === 'tx' ? 'xs' : '2xs',
             color: { base: 'blue.500', _dark: 'blue.400' },
             bg: 'transparent',
             border: 'none',

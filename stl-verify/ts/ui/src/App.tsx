@@ -17,6 +17,7 @@ import {
   getCapitalMetrics,
   getChains,
   getDataSources,
+  getLatestPrimeDebtSnapshot,
   getPrimes,
   getProtocols,
 } from './lib/api';
@@ -38,6 +39,7 @@ import type {
   CapitalMetrics,
   DataSource,
   Prime,
+  PrimeDebtSnapshot,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
@@ -59,6 +61,9 @@ function App() {
   const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(
     null,
   );
+  const [primeDebtSnapshot, setPrimeDebtSnapshot] =
+    useState<PrimeDebtSnapshot | null>(null);
+  const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -277,6 +282,44 @@ function App() {
     return () => controller.abort();
   }, [selectedPrimeId, primes]);
 
+  useEffect(() => {
+    if (!selectedPrimeId) {
+      setPrimeDebtSnapshot(null);
+      setIsPrimeDebtLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    setIsPrimeDebtLoading(true);
+    setPrimeDebtSnapshot(null);
+
+    void getLatestPrimeDebtSnapshot(selectedPrimeId, controller.signal)
+      .then((snapshot) => {
+        if (!controller.signal.aborted) {
+          setPrimeDebtSnapshot(snapshot);
+        }
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.warn('Prime debt snapshot unavailable for selected prime', {
+          error,
+          primeId: selectedPrimeId,
+        });
+        setPrimeDebtSnapshot(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsPrimeDebtLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [selectedPrimeId]);
+
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
     [selectedPrimeId, primes],
@@ -372,7 +415,7 @@ function App() {
       if (selectedAllocationKey !== null) {
         setSelectedAllocationKey(null);
       }
-      if (isDrawerOpen) {
+      if (isDrawerOpen && !isAllocationsLoading) {
         setIsDrawerOpenParam(null);
       }
       return;
@@ -388,6 +431,7 @@ function App() {
     }
   }, [
     filteredAllocations,
+    isAllocationsLoading,
     isDrawerOpen,
     selectedAllocationKey,
     setIsDrawerOpenParam,
@@ -398,17 +442,14 @@ function App() {
       return;
     }
 
-    if (selectedAllocationKey === null && filteredAllocations.length > 0) {
+    if (selectedAllocationKey === null) {
       return;
     }
 
     if (
-      isDrawerOpen &&
-      (!selectedAllocationKey ||
-        !filteredAllocations.some(
-          (allocation) =>
-            getAllocationKey(allocation) === selectedAllocationKey,
-        ))
+      !filteredAllocations.some(
+        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
+      )
     ) {
       setIsDrawerOpenParam(null);
     }
@@ -449,6 +490,32 @@ function App() {
         '& [data-sidebar-layout] [role="separator"] > [aria-hidden="true"]': {
           opacity: 0,
         },
+        '@media screen and (max-width: 64rem)': {
+          '& [data-sidebar-layout] > div': {
+            display: 'block !important',
+            height: 'auto !important',
+            overflow: 'visible !important',
+          },
+          '& [data-sidebar-layout] aside': {
+            width: '100% !important',
+            height: 'auto !important',
+            maxHeight: '22rem',
+            borderRight: 'none !important',
+            borderBottom: '1px solid var(--colors-border-subtle)',
+          },
+          '& [data-sidebar-layout] main': {
+            width: '100% !important',
+            height: 'auto !important',
+            minHeight: '0 !important',
+          },
+          '& [data-sidebar-layout] main > header': {
+            minHeight: '0 !important',
+            justifyContent: 'stretch !important',
+          },
+          '& [data-sidebar-layout] [role="separator"]': {
+            display: 'none !important',
+          },
+        },
       })}
     >
       <div data-sidebar-layout>
@@ -483,11 +550,13 @@ function App() {
               topMetricsAllocations={searchFilteredAllocations}
               isLoading={isAllocationsLoading}
               isCapitalMetricsLoading={isCapitalMetricsLoading}
+              isPrimeDebtLoading={isPrimeDebtLoading}
               localProtocols={localProtocols}
               onSelectAllocation={(allocationKey) => {
                 setSelectedAllocationKey(allocationKey);
                 setIsDrawerOpenParam('1');
               }}
+              primeDebtSnapshot={primeDebtSnapshot}
               onSearchChange={setGlobalFilter}
               onSortingChange={setSorting}
               searchValue={globalFilter}
