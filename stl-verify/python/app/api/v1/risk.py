@@ -60,8 +60,8 @@ class RiskBreakdownItemResponse(BaseModel):
         examples=["12.345678"],
     )
     backing_pct: Decimal = Field(
-        description="Share of the receipt token backed by this row, in `[0, 1]`.",
-        examples=["0.42"],
+        description="Share of the receipt token backed by this row, as a 0–100 percentage.",
+        examples=["42.0"],
     )
     amount_usd: Decimal = Field(
         description="USD value of the backing-token row.",
@@ -73,8 +73,11 @@ class RiskBreakdownItemResponse(BaseModel):
         examples=["0.83"],
     )
     liquidation_bonus: Decimal = Field(
-        description="Liquidation bonus (e.g. `0.05` for 5%).",
-        examples=["0.05"],
+        description=(
+            "Liquidation bonus expressed as a multiplier (e.g. `1.05` for a 5% bonus). "
+            "Stored as basis points upstream and normalised by dividing by 10000."
+        ),
+        examples=["1.05"],
     )
 
 
@@ -93,11 +96,11 @@ class RiskBreakdownResponse(BaseModel):
                         "token_id": 101,
                         "symbol": "WETH",
                         "amount": "12.345678",
-                        "backing_pct": "0.42",
+                        "backing_pct": "42.0",
                         "amount_usd": "41234.56",
                         "price_usd": "3340.55",
                         "liquidation_threshold": "0.83",
-                        "liquidation_bonus": "0.05",
+                        "liquidation_bonus": "1.05",
                     }
                 ],
             }
@@ -122,8 +125,14 @@ class ScenarioRrcResponse(BaseModel):
     usd_exposure: Decimal = Field(description="Echo of the requested USD exposure.")
     rating_id: str = Field(description="SURAF rating id used for this asset.", examples=["aave-v3-eth-usdc"])
     rating_version: str = Field(description="SURAF rating version string.", examples=["2026-04-15"])
-    crr_pct: Decimal = Field(description="Capital risk ratio applied (`rrc_usd / usd_exposure`).", examples=["0.0123"])
-    rrc_usd: Decimal = Field(description="Risk capital in USD: `usd_exposure * crr_pct`.", examples=["12300"])
+    crr_pct: Decimal = Field(
+        description="Capital risk ratio as a 0–100 percentage (e.g. `33.7` for 33.7%).",
+        examples=["1.23"],
+    )
+    rrc_usd: Decimal = Field(
+        description="Risk capital in USD: `usd_exposure * crr_pct / 100`.",
+        examples=["12300"],
+    )
     source_commit_sha: str = Field(
         description="Git commit sha of the rating source used at startup.",
         examples=["abc123def456"],
@@ -136,7 +145,7 @@ class ScenarioRrcResponse(BaseModel):
                 "usd_exposure": "1000000",
                 "rating_id": "aave-v3-eth-usdc",
                 "rating_version": "2026-04-15",
-                "crr_pct": "0.0123",
+                "crr_pct": "1.23",
                 "rrc_usd": "12300",
                 "source_commit_sha": "abc123def456",
             }
@@ -273,8 +282,10 @@ class RrcRequest(BaseModel):
     overrides: dict[str, dict[str, Any]] = Field(
         default_factory=dict,
         description=(
-            "Per-model scenario overrides. Outer keys are model names "
-            "(e.g. `suraf`, `crypto_lending`); inner objects are model-specific."
+            "Per-model scenario overrides. Outer keys are registered risk-model names "
+            "(`suraf`, `gap_sweep`); inner objects are model-specific. For example, "
+            "`gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and "
+            "`suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`."
         ),
     )
 
@@ -283,7 +294,7 @@ class RrcRequest(BaseModel):
             "example": {
                 "asset_id": 42,
                 "prime_id": "0x1234567890abcdef1234567890abcdef12345678",
-                "overrides": {"crypto_lending": {"gap_pct": "0.15"}},
+                "overrides": {"gap_sweep": {"gap_pct": "0.15"}},
             }
         }
     }
@@ -325,8 +336,8 @@ class RrcEnvelope(BaseModel):
         examples=["12300"],
     )
     max_crr_pct: Decimal = Field(
-        description="Largest `comparable_crr_pct` across `results`.",
-        examples=["0.0123"],
+        description="Largest `comparable_crr_pct` across `results`, as a 0–100 percentage.",
+        examples=["33.7"],
     )
 
 

@@ -131,13 +131,17 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> TokenCatalo
     summary="List tokens",
     description=(
         "List entries from the token catalog with optional filters. "
-        "Use `chain_id` to scope to a single chain and `symbol` for a case-sensitive "
-        "exact-symbol filter. Pagination is page-less; `limit` caps the page size."
+        "Use `chain_id` to scope to a single chain and `symbol` for a case-insensitive "
+        "substring match against the symbol. Pagination is page-less; `limit` caps the page size."
     ),
 )
 async def list_tokens(
     chain_id: int | None = Query(default=None, description="Filter by EVM chain id.", examples=[1]),
-    symbol: str | None = Query(default=None, description="Exact symbol filter.", examples=["USDC"]),
+    symbol: str | None = Query(
+        default=None,
+        description="Filter by symbol (case-insensitive substring match).",
+        examples=["USDC"],
+    ),
     limit: int = Query(default=100, ge=1, le=500, description="Max results (default 100, max 500)."),
     service: TokenCatalogService = Depends(_get_service),
 ) -> list[TokenResponse]:
