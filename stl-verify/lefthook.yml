@@ -5,6 +5,9 @@
 # Extends language-specific configs from python/ and ts/ subdirectories
 # Includes generic file checks and Go-specific linting
 
+# Use doublestar glob matcher for standard recursive behavior
+glob_matcher: doublestar
+
 extends:
   - python/lefthook.yml
   - ts/lefthook.yml
@@ -22,13 +25,13 @@ pre-commit:
     # =================================================================
 
     trailing-whitespace:
-      glob: "*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
+      glob: "**/*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
       exclude: 'lefthook.*\.yml'
       stage_fixed: true
       run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
 
     end-of-file-fixer:
-      glob: "*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
+      glob: "**/*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
       exclude: 'lefthook.*\.yml'
       stage_fixed: true
       run: |
@@ -41,15 +44,15 @@ pre-commit:
         done
 
     check-yaml:
-      glob: "*.{yml,yaml}"
+      glob: "**/*.{yml,yaml}"
       exclude: *exclude_dirs
       run: |
         if command -v yamllint > /dev/null 2>&1; then
-          yamllint {staged_files} || true
+          yamllint {staged_files}
         fi
 
     check-json:
-      glob: "*.json"
+      glob: "**/*.json"
       exclude: *exclude_dirs
       run: |
         if ! command -v jq > /dev/null 2>&1; then
@@ -66,7 +69,7 @@ pre-commit:
         done
 
     check-large-files:
-      glob: "*"
+      glob: "**/*"
       exclude: *exclude_dirs
       run: |
         for file in {staged_files}; do
@@ -87,7 +90,7 @@ pre-commit:
         done
 
     check-merge-conflict:
-      glob: "*"
+      glob: "**/*"
       exclude: *exclude_dirs
       run: |
         if grep -r -E '^(<<<<<<<|=======|>>>>>>>)' {staged_files}; then
@@ -100,13 +103,13 @@ pre-commit:
     # =================================================================
 
     go-fmt:
-      glob: "*.go"
+      glob: "**/*.go"
       exclude: *exclude_dirs
       stage_fixed: true
       run: gofmt -s -w {staged_files}
 
     go-imports:
-      glob: "*.go"
+      glob: "**/*.go"
       exclude: *exclude_dirs
       stage_fixed: true
       run: |
@@ -117,6 +120,6 @@ pre-push:
   parallel: true
   commands:
     go-vet:
-      glob: "*.go"
+      glob: "**/*.go"
       exclude: *exclude_dirs
       run: go vet ./...

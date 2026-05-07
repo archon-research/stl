@@ -3,6 +3,9 @@
 # Install: make install-hooks or lefthook install
 # Run manually: lefthook run pre-commit
 
+# Use doublestar glob matcher for standard recursive behavior
+glob_matcher: doublestar
+
 extends:
   - stl-verify/lefthook.yml
 
@@ -14,13 +17,13 @@ pre-commit:
   commands:
     # Root-level generic file checks
     trailing-whitespace:
-      glob: "*.{yml,yaml,json,md,sh}"
+      glob: "**/*.{yml,yaml,json,md,sh}"
       exclude: '(stl-verify|lefthook).*'
       stage_fixed: true
       run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
 
     end-of-file-fixer:
-      glob: "*.{yml,yaml,json,md,sh}"
+      glob: "**/*.{yml,yaml,json,md,sh}"
       exclude: '(stl-verify|lefthook).*'
       stage_fixed: true
       run: |
@@ -31,7 +34,7 @@ pre-commit:
         done
 
     check-merge-conflict:
-      glob: "*"
+      glob: "**/*"
       exclude: "stl-verify/.*"
       run: |
         if grep -r -E '^(<<<<<<<|=======|>>>>>>>)' {staged_files} 2>/dev/null; then

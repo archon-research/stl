@@ -157,7 +157,7 @@ Quality is enforced at three levels:
    - Prevents broken code from being pushed
    - Pre-commit: runs on staged files only (fast)
    - Pre-push: runs full-module checks (go vet, etc.)
-   - Configured per-language: `lefthook.yml`, `python/lefthook.yml`, `ts/lefthook.yml`
+   - Configured per-language: `stl-verify/lefthook.yml`, `stl-verify/python/lefthook.yml`, `stl-verify/ts/lefthook.yml`
 
 2. **Local Development** — Convenience Makefile targets
    - `make install-hooks` — Install git hooks
@@ -195,7 +195,7 @@ Quality is enforced at three levels:
 ```bash
 # Run git hooks manually without committing
 lefthook run pre-commit   # Run all pre-commit hooks
-lefthook run push         # Run all pre-push hooks
+lefthook run pre-push     # Run all pre-push hooks
 
 # Format and lint locally before committing
 make format
