@@ -1,6 +1,6 @@
 import { SkeletonStack } from '@archon-research/design-system';
 import { ArrowDownRight, ArrowRightLeft, ArrowUpLeft } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -366,6 +366,8 @@ export function ActivityFeed({
   selectedPrime,
   searchQuery = '',
 }: ActivityFeedProps) {
+  const txRequestControllersRef = useRef<Record<string, AbortController>>({});
+
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -385,6 +387,10 @@ export function ActivityFeed({
 
   useEffect(() => {
     if (!isEnabled || !selectedPrime) {
+      Object.values(txRequestControllersRef.current).forEach((controller) => {
+        controller.abort();
+      });
+      txRequestControllersRef.current = {};
       setEvents([]);
       setError(null);
       setIsLoading(false);
@@ -434,6 +440,15 @@ export function ActivityFeed({
     return () => abortController.abort();
   }, [filters, isEnabled, selectedPrime]);
 
+  useEffect(() => {
+    return () => {
+      Object.values(txRequestControllersRef.current).forEach((controller) => {
+        controller.abort();
+      });
+      txRequestControllersRef.current = {};
+    };
+  }, []);
+
   const handleSelectTx = (event: AllocationActivity) => {
     if (!event.tx_hash) {
       return;
@@ -443,6 +458,16 @@ export function ActivityFeed({
     const txCacheKey = buildTxCacheKey(event.tx_hash, event.chain_id);
 
     if (selectedEventKey === eventKey) {
+      txRequestControllersRef.current[txCacheKey]?.abort();
+      delete txRequestControllersRef.current[txCacheKey];
+      setTxEventsLoadingByHash((previous) => {
+        if (!previous[txCacheKey]) {
+          return previous;
+        }
+
+        const { [txCacheKey]: _, ...rest } = previous;
+        return rest;
+      });
       setSelectedEventKey(null);
       return;
     }
@@ -471,6 +496,7 @@ export function ActivityFeed({
     });
 
     const abortController = new AbortController();
+    txRequestControllersRef.current[txCacheKey] = abortController;
 
     void getTxProtocolEvents(event.tx_hash, abortController.signal)
       .then((result) => {
@@ -517,6 +543,10 @@ export function ActivityFeed({
         }
       })
       .finally(() => {
+        if (txRequestControllersRef.current[txCacheKey] === abortController) {
+          delete txRequestControllersRef.current[txCacheKey];
+        }
+
         setTxEventsLoadingByHash((previous) => {
           if (!previous[txCacheKey]) {
             return previous;

@@ -937,11 +937,25 @@
         "type": "object"
       },
       "TokenPriceResponse": {
+        "description": "Latest token price state.\n\nThe endpoint returns `200` when the token exists even if no quote is currently\navailable. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and\nquote fields are `null`.",
         "properties": {
+          "is_stale": {
+            "description": "Whether quote data is stale or missing",
+            "title": "Is Stale",
+            "type": "boolean"
+          },
           "price_usd": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Price Usd",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest USD price; null when no quote is available",
+            "title": "Price Usd"
           },
           "source_display_name": {
             "anyOf": [
@@ -952,48 +966,97 @@
                 "type": "null"
               }
             ],
+            "description": "Human-friendly source name when available",
             "title": "Source Display Name"
           },
           "source_id": {
-            "title": "Source Id",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Source identifier when available",
+            "title": "Source Id"
           },
           "source_name": {
-            "title": "Source Name",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Source machine name when available",
+            "title": "Source Name"
           },
           "source_type": {
-            "title": "Source Type",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Price source type (`onchain` or `offchain`) when available",
+            "title": "Source Type"
+          },
+          "staleness_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reason for stale state, e.g. `missing_quote`",
+            "title": "Staleness Reason"
           },
           "staleness_seconds": {
-            "title": "Staleness Seconds",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Age of the latest quote in seconds; null when unavailable",
+            "title": "Staleness Seconds"
           },
           "timestamp": {
-            "format": "date-time",
-            "title": "Timestamp",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Timestamp of the latest quote; null when unavailable",
+            "title": "Timestamp"
           },
           "token_id": {
+            "description": "Token identifier",
             "title": "Token Id",
             "type": "integer"
           }
         },
         "required": [
           "token_id",
-          "source_type",
-          "source_id",
-          "source_name",
-          "source_display_name",
-          "price_usd",
-          "timestamp",
-          "staleness_seconds"
+          "is_stale"
         ],
         "title": "TokenPriceResponse",
         "type": "object"
       },
       "TokenResponse": {
+        "description": "Token metadata entry from the token catalog.",
         "properties": {
           "address": {
             "title": "Address",
@@ -1477,6 +1540,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "pattern": "^(?:0[xX])?[0-9a-fA-F]{64}$",
                   "type": "string"
                 },
                 {
@@ -1945,6 +2009,7 @@
     },
     "/v1/tokens/{token_id}/price": {
       "get": {
+        "description": "Return latest token price state.\n\nReturns `404` only when the token does not exist.\nReturns `200` with stale indicators when token exists but no quote is available.",
         "operationId": "get_token_price_v1_tokens__token_id__price_get",
         "parameters": [
           {
@@ -1992,6 +2057,7 @@
             "name": "tx_hash",
             "required": true,
             "schema": {
+              "pattern": "^(?:0x)?[0-9a-fA-F]{64}$",
               "title": "Tx Hash",
               "type": "string"
             }
