@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: offchain-price-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: offchain-price-indexer
+  template:
+    metadata:
+      labels:
+        app: offchain-price-indexer
+    spec:
+      serviceAccountName: offchain-price-indexer
+      containers:
+        - name: offchain-price-indexer
+          image: offchain-price-indexer
+          envFrom:
+            - configMapRef:
+                name: offchain-price-indexer
+            - secretRef:
+                name: offchain-price-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

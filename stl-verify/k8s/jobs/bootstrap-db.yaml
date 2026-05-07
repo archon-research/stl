@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bootstrap-db
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-db
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h timescaledb -U postgres; do echo "waiting for timescaledb..."; sleep 2; done
+      containers:
+        - name: bootstrap
+          image: postgres:16-alpine
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "Bootstrapping database..."
+              psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" -c "
+              DO \$body\$
+              BEGIN
+                IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'stl_migrator') THEN
+                  CREATE ROLE stl_migrator WITH LOGIN CREATEROLE PASSWORD 'localdev';
+                  RAISE NOTICE 'Created stl_migrator role';
+                END IF;
+              END
+              \$body\$;
+              " -c "GRANT CONNECT ON DATABASE stl_verify TO stl_migrator;" -c "GRANT CREATE, USAGE ON SCHEMA public TO stl_migrator;"
+              echo "Bootstrap complete."
+          env:
+            - name: ADMIN_DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: stl-config
+                  key: DATABASE_URL

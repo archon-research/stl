@@ -272,7 +272,7 @@ func TestClose_Idempotent(t *testing.T) {
 	}
 
 	// Close multiple times should not panic
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		err = sink.Close()
 		if err != nil {
 			t.Fatalf("unexpected error on close %d: %v", i, err)

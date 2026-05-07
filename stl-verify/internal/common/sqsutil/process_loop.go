@@ -21,6 +21,18 @@ type Config struct {
 	MaxMessages  int
 	PollInterval time.Duration
 	Logger       *slog.Logger
+
+	// ChainID is the expected chain ID for incoming events. Events with a
+	// different chain ID are rejected. Must be set (non-zero).
+	ChainID int64
+}
+
+// Validate checks that required fields are set.
+func (c Config) Validate() error {
+	if c.ChainID == 0 {
+		return fmt.Errorf("sqsutil.Config: ChainID must be set")
+	}
+	return nil
 }
 
 // RunLoop polls SQS on a ticker interval and delegates each parsed BlockEvent
@@ -34,7 +46,7 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := ProcessMessages(ctx, cfg.Consumer, cfg.MaxMessages, cfg.Logger, handler); err != nil {
+			if err := ProcessMessages(ctx, cfg, handler); err != nil {
 				cfg.Logger.Error("error processing messages", "error", err)
 			}
 		}
@@ -43,15 +55,18 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 
 // ProcessMessages receives a batch of SQS messages, parses each as a
 // BlockEvent, calls the handler, and deletes successfully processed messages.
+// Events whose chain ID does not match cfg.ChainID are rejected.
 // Returns a joined error for any failures.
 func ProcessMessages(
 	ctx context.Context,
-	consumer outbound.SQSConsumer,
-	maxMessages int,
-	logger *slog.Logger,
+	cfg Config,
 	handler BlockEventHandler,
 ) error {
-	messages, err := consumer.ReceiveMessages(ctx, maxMessages)
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	messages, err := cfg.Consumer.ReceiveMessages(ctx, cfg.MaxMessages)
 	if err != nil {
 		return fmt.Errorf("receiving messages: %w", err)
 	}
@@ -60,29 +75,45 @@ func ProcessMessages(
 		return nil
 	}
 
-	logger.Info("received messages", "count", len(messages))
+	cfg.Logger.Info("received messages", "count", len(messages))
 
 	var errs []error
 	for _, msg := range messages {
 		var event outbound.BlockEvent
 		if err := json.Unmarshal([]byte(msg.Body), &event); err != nil {
-			logger.Error("failed to parse block event",
+			cfg.Logger.Error("failed to parse block event",
 				"messageID", msg.MessageID,
 				"error", err)
 			errs = append(errs, fmt.Errorf("parsing message %s: %w", msg.MessageID, err))
 			continue
 		}
 
+		if event.ChainID != cfg.ChainID {
+			cfg.Logger.Error("chain ID mismatch, deleting message",
+				"messageID", msg.MessageID,
+				"expected", cfg.ChainID,
+				"got", event.ChainID,
+				"block", event.BlockNumber)
+			// Chain ID is immutable in the message — retrying will never succeed.
+			// Delete to avoid infinite retry. Investigate queue subscription if this occurs.
+			if deleteErr := cfg.Consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
+				cfg.Logger.Error("failed to delete mismatched message",
+					"messageID", msg.MessageID,
+					"error", deleteErr)
+			}
+			continue
+		}
+
 		if err := handler(ctx, event); err != nil {
-			logger.Error("failed to process message",
+			cfg.Logger.Error("failed to process message",
 				"messageID", msg.MessageID,
 				"error", err)
 			errs = append(errs, err)
 			continue
 		}
 
-		if deleteErr := consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
-			logger.Error("failed to delete message",
+		if deleteErr := cfg.Consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
+			cfg.Logger.Error("failed to delete message",
 				"messageID", msg.MessageID,
 				"error", deleteErr)
 		}

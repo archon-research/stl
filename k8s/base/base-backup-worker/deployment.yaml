@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: base-backup-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: base-backup-worker
+  template:
+    metadata:
+      labels:
+        app: base-backup-worker
+    spec:
+      serviceAccountName: base-backup-worker
+      containers:
+        - name: base-backup-worker
+          image: base-backup-worker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: base-backup-worker-config
+            - secretRef:
+                name: base-backup-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f raw-data-backup"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

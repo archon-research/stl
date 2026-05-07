@@ -1,0 +1,43 @@
+# =============================================================================
+# Migrate Dockerfile
+# =============================================================================
+# Multi-stage build for the db migration utility
+
+# -----------------------------------------------------------------------------
+# Build Stage
+# -----------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.26.2-alpine AS builder
+
+ARG TARGETARCH
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+    -ldflags="-w -s -extldflags '-static'" \
+    -o /migrate \
+    ./cmd/util/migrate
+
+# -----------------------------------------------------------------------------
+# Runtime Stage
+# -----------------------------------------------------------------------------
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates tzdata
+
+RUN adduser -D -g '' appuser
+
+WORKDIR /app
+
+COPY --from=builder /migrate /app/migrate
+COPY db/migrations/ /app/db/migrations/
+
+USER appuser
+
+ENTRYPOINT ["/app/migrate"]

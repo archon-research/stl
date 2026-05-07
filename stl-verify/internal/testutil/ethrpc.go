@@ -13,15 +13,8 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 )
-
-// JSONRPCRequest represents a JSON-RPC request.
-type JSONRPCRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-	ID      json.RawMessage `json:"id"`
-}
 
 // StartMockEthRPC creates a mock Ethereum node that handles multicall3 and
 // block header requests. Each block returns unique prices so change detection
@@ -46,7 +39,7 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 
-		var req JSONRPCRequest
+		var req rpcutil.Request
 		if err := json.Unmarshal(body, &req); err != nil {
 			WriteRPCError(w, json.RawMessage(`1`), -32700, "parse error")
 			return
@@ -106,21 +99,12 @@ func StartMockEthRPC(t *testing.T, numTokens int) *httptest.Server {
 
 // WriteRPCResult writes a JSON-RPC success response.
 func WriteRPCResult(w http.ResponseWriter, id, result json.RawMessage) {
-	_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
-		"jsonrpc": json.RawMessage(`"2.0"`),
-		"id":      id,
-		"result":  result,
-	})
+	rpcutil.WriteResult(w, id, result)
 }
 
 // WriteRPCError writes a JSON-RPC error response.
 func WriteRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
-	errJSON, _ := json.Marshal(map[string]interface{}{"code": code, "message": message})
-	_ = json.NewEncoder(w).Encode(map[string]json.RawMessage{
-		"jsonrpc": json.RawMessage(`"2.0"`),
-		"id":      id,
-		"error":   json.RawMessage(errJSON),
-	})
+	rpcutil.WriteError(w, id, code, message)
 }
 
 func writeBlockHeaderResponse(w http.ResponseWriter, id json.RawMessage, blockNum int64) {
@@ -154,7 +138,7 @@ func countMulticallInnerCalls(params json.RawMessage) int {
 	if err := json.Unmarshal(params, &p); err != nil || len(p) < 1 {
 		return 1
 	}
-	var callObj map[string]interface{}
+	var callObj map[string]any
 	if err := json.Unmarshal(p[0], &callObj); err != nil {
 		return 1
 	}

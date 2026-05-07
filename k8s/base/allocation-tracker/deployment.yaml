@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: allocation-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: allocation-tracker
+  template:
+    metadata:
+      labels:
+        app: allocation-tracker
+    spec:
+      serviceAccountName: allocation-tracker
+      containers:
+        - name: allocation-tracker
+          image: allocation-tracker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: allocation-tracker-config
+            - secretRef:
+                name: allocation-tracker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f allocation"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -16,14 +16,14 @@ func NewChain(chainID int, name string) (*Chain, error) {
 		ChainID: chainID,
 		Name:    name,
 	}
-	if err := c.validate(); err != nil {
-		return nil, err
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("NewChain: %w", err)
 	}
 	return c, nil
 }
 
 // validate checks that all fields have valid values.
-func (c *Chain) validate() error {
+func (c *Chain) Validate() error {
 	if c.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", c.ChainID)
 	}
@@ -33,14 +33,23 @@ func (c *Chain) validate() error {
 	return nil
 }
 
-// ChainNameToID maps chain names to their chain IDs.
-var ChainNameToID = map[string]int{
-	"mainnet":     1,
-	"avalanche-c": 43114,
+// ChainIDToName maps chain IDs to internal chain names used by service configs.
+var ChainIDToName = map[int64]string{
+	1:     "mainnet",
+	10:    "optimism",
+	130:   "unichain",
+	8453:  "base",
+	42161: "arbitrum",
+	43114: "avalanche-c",
 }
 
-// ChainIDToName maps chain IDs to their names.
-var ChainIDToName = map[int]string{
-	1:     "mainnet",
-	43114: "avalanche-c",
+// ChainIDToS3Bucket maps chain IDs to canonical names expected in S3 bucket names.
+// Example: stl-sentinelstaging-ethereum-raw, stl-sentinelstaging-avalanche-raw.
+var ChainIDToS3Bucket = map[int64]string{
+	1:     "ethereum",
+	10:    "optimism",
+	130:   "unichain",
+	8453:  "base",
+	42161: "arbitrum",
+	43114: "avalanche",
 }

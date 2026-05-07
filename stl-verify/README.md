@@ -11,67 +11,18 @@ The watcher consists of two main services:
 
 ## Prerequisites
 
-- Go 1.25+
-- Docker and Docker Compose
-- Alchemy API key (for Ethereum mainnet access)
+- Go 1.26+
+- Docker
+- [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) — Kubernetes IN Docker
+- [kubectl](https://kubernetes.io/docs/tasks/tools/) — Kubernetes CLI
 
 ## Quick Start
 
-### 1. Start Infrastructure
-
-Start the required infrastructure services (PostgreSQL, Redis, Jaeger, LocalStack):
-
 ```bash
-docker compose up -d
+make dev-up
 ```
 
-This starts:
-- **PostgreSQL** (port 5432) - Block state persistence
-- **Redis** (port 6379) - Block data cache
-- **Jaeger** (port 16686) - Distributed tracing UI
-- **LocalStack** (port 4566) - Local AWS SNS/SQS for development
-
-### 2. Configure Environment
-
-```bash
-# Required
-ALCHEMY_API_KEY=your_alchemy_api_key_here
-
-# Optional (defaults shown)
-ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable
-REDIS_ADDR=localhost:6379
-REDIS_PASSWORD=
-
-# AWS/LocalStack
-AWS_SNS_ENDPOINT=http://localhost:4566
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=test
-AWS_SECRET_ACCESS_KEY=test
-
-# SNS FIFO Topic (single topic for all event types)
-AWS_SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:stl-ethereum-blocks.fifo
-
-# Tracing
-JAEGER_ENDPOINT=localhost:4317
-ENVIRONMENT=development
-
-# Features
-ENABLE_BACKFILL=false
-```
-
-### 3. Run the Watcher
-
-```bash
-go run ./cmd/watcher -disable-blobs
-```
-
-Or with flags:
-
-```bash
-# Enable pprof profiling server
-go run ./cmd/watcher -disable-blobs -pprof :6060
-```
+This creates a local `kind` Kubernetes cluster and deploys the full pipeline, including a mock blockchain server that replaces Alchemy by default. No API keys or AWS credentials are needed to get started. See [k8s/README.md](k8s/README.md) for service ports, lifecycle commands, and configuration details.
 
 ## Command-Line Flags
 
@@ -82,13 +33,13 @@ go run ./cmd/watcher -disable-blobs -pprof :6060
 
 ## Environment Variables
 
-### Required
+### Optional
+
+All environment variables are optional for local development. The mock blockchain server is used by default.
 
 | Variable | Description |
 |----------|-------------|
-| `ALCHEMY_API_KEY` | Alchemy API key for Ethereum mainnet |
-
-### Optional
+| `ALCHEMY_API_KEY` | Alchemy API key for Ethereum mainnet (only needed when using real Alchemy via `make kind-use-alchemy`) |
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -127,6 +78,9 @@ make ci
 ```bash
 make tools
 ```
+### Changes to services in Infrastructure
+
+When you add a new service (e.g., a new worker or cmd entrypoint) that needs to run in AWS, provision the required AWS resources in the [Infrastructure repo](https://github.com/archon-research/infrastructure).
 
 ### View Traces
 

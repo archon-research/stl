@@ -1,10 +1,12 @@
 # Environment files
-.env
-.env.*
-!.env.local
+.env*
+!.env.default
+.envrc
+.direnv/
 
 # Binary
 /blockwatcher
+dist/mock-blockchain-server
 
 # Test artifacts
 *.test
@@ -17,26 +19,10 @@
 # OS
 .DS_Store
 
-# Terraform
-*.tfstate
-*.tfstate.*
-*.tfstate.backup
-.terraform/
-.terraform.tfstate.*
-terraform.tfvars
-*.auto.tfvars
-crash.log
-crash.*.log
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-*.tfplan
 *.pprof
 
 # Git worktrees
 .worktrees/
-.env.local
 
 # Claude
 settings.local.json
@@ -49,3 +35,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Go
+.gopath/

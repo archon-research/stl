@@ -34,11 +34,17 @@ type Reader struct {
 
 // NewReader creates a new S3 Reader with the given AWS config.
 func NewReader(cfg aws.Config, logger *slog.Logger) *Reader {
+	return NewReaderWithOptions(cfg, logger)
+}
+
+// NewReaderWithOptions creates a new S3 Reader with optional S3 client options.
+// Use this to pass options like UsePathStyle for LocalStack compatibility.
+func NewReaderWithOptions(cfg aws.Config, logger *slog.Logger, optFns ...func(*s3.Options)) *Reader {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Reader{
-		client: s3.NewFromConfig(cfg),
+		client: s3.NewFromConfig(cfg, optFns...),
 		logger: logger,
 	}
 }

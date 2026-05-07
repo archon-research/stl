@@ -1,0 +1,165 @@
+// Package main provides a CLI tool for bulk-fetching historical oracle prices
+// from an Erigon node and storing price changes in PostgreSQL.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/oracle_backfill"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		slog.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("completed successfully")
+}
+
+type cliConfig struct {
+	chainID     int64
+	rpcURL      string
+	fromBlock   int64
+	toBlock     int64
+	concurrency int
+	batchSize   int
+	dbURL       string
+}
+
+func parseFlags(args []string) (cliConfig, error) {
+	fs := flag.NewFlagSet("oracle-pricing-backfill", flag.ContinueOnError)
+	chainID := fs.Int64("chain-id", 1, "Chain ID to backfill oracles for (default: 1 for Ethereum mainnet)")
+	rpcURL := fs.String("rpc-url", "", "Erigon HTTP RPC endpoint (e.g., http://erigon:8545)")
+	fromBlock := fs.Int64("from", 0, "Start block number (required)")
+	toBlock := fs.Int64("to", 0, "End block number (required)")
+	concurrency := fs.Int("concurrency", 100, "Number of concurrent workers")
+	batchSize := fs.Int("batch-size", 1000, "Batch size for DB inserts")
+	dbURL := fs.String("db", "", "PostgreSQL connection URL")
+	if err := fs.Parse(args); err != nil {
+		return cliConfig{}, err
+	}
+
+	cfg := cliConfig{
+		chainID:     *chainID,
+		rpcURL:      *rpcURL,
+		fromBlock:   *fromBlock,
+		toBlock:     *toBlock,
+		concurrency: *concurrency,
+		batchSize:   *batchSize,
+		dbURL:       *dbURL,
+	}
+
+	if cfg.rpcURL == "" {
+		return cliConfig{}, fmt.Errorf("--rpc-url is required")
+	}
+	if cfg.fromBlock == 0 {
+		return cliConfig{}, fmt.Errorf("--from is required")
+	}
+	if cfg.toBlock == 0 {
+		return cliConfig{}, fmt.Errorf("--to is required")
+	}
+	if cfg.toBlock < cfg.fromBlock {
+		return cliConfig{}, fmt.Errorf("--to must be >= --from")
+	}
+
+	if cfg.dbURL == "" {
+		cfg.dbURL = env.Get("DATABASE_URL", "")
+	}
+	if cfg.dbURL == "" {
+		return cliConfig{}, fmt.Errorf("database URL not provided (use --db flag or DATABASE_URL env var)")
+	}
+
+	return cfg, nil
+}
+
+func run(args []string) error {
+	cfg, err := parseFlags(args)
+	if err != nil {
+		return err
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: env.ParseLogLevel(slog.LevelInfo),
+	}))
+	slog.SetDefault(logger)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		logger.Info("received signal, shutting down...", "signal", sig)
+		cancel()
+	}()
+
+	// Create Ethereum client with connection pooling. Retry 429/5xx/network
+	// errors via rpchttp so transient RPC failures don't mark blocks bad.
+	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(cfg.concurrency)))
+	if err != nil {
+		return fmt.Errorf("connecting to RPC: %w", err)
+	}
+	defer rpcClient.Close()
+	ethClient := ethclient.NewClient(rpcClient)
+	logger.Info("Ethereum RPC connected", "url", cfg.rpcURL)
+
+	newMulticaller := func(oracleType entity.OracleType) (outbound.Multicaller, error) {
+		if oracleType == entity.OracleTypeChronicle {
+			return multicall.NewDirectCaller(rpcClient)
+		}
+		return multicall.NewClient(ethClient, blockchain.Multicall3)
+	}
+
+	// Connect to PostgreSQL
+	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer pool.Close()
+	logger.Info("PostgreSQL connected")
+
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), cfg.batchSize)
+	if err != nil {
+		return fmt.Errorf("creating repository: %w", err)
+	}
+
+	service, err := oracle_backfill.NewService(
+		oracle_backfill.Config{
+			ChainID:     cfg.chainID,
+			Concurrency: cfg.concurrency,
+			BatchSize:   cfg.batchSize,
+			Logger:      logger,
+		},
+		ethClient,
+		newMulticaller,
+		repo,
+	)
+	if err != nil {
+		return fmt.Errorf("creating service: %w", err)
+	}
+
+	return service.Run(ctx, cfg.fromBlock, cfg.toBlock)
+}

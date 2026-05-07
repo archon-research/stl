@@ -1,0 +1,54 @@
+pillar,subsection_ref,title,score
+,,SECTION A: GENERAL INFORMATION,
+A,A.1,Information On Asset/Entity To Be Assessed,
+A,A.2,Further Entities Involved,
+A,A.3,High-level asset type classification,
+A,A.4,Risk Type Classification,
+A,A.5,Credit Facility Details,
+,,PILLAR I: ASSET & COLLATERAL ASSESSMENT,
+,,THE ASSET,
+1,1.A,Asset Composition & Eligibility,1
+1,1.B,Asset Cashflow Structure,2
+1,1.C,Asset Liquidity Analysis,1
+1,1.D,Asset: Basel III-Aligned Risk Weight Self-Classification,4
+1,1.E,Asset Valuation Sources & Infrastructure,2
+1,1.F,"Asset pricing, valuation and risk assessment proxies",
+,,THE COLLATERAL,
+1,1.G,Collateral Issuer Analysis,1
+1,1.H,Collateral Asset Valuation & Loss Analysis,2
+1,1.J,Collateral Liquidity Analysis,1
+1,1.K,Collateral: Basel III-Aligned Risk Weight Self-Classification,3
+1,1.L,Collateral Valuation Sources & Infrastructure,2
+1,1.M,"Collateral pricing, valuation and risk assessment proxies",
+,,PILLAR II: ASSET CONTROL & SAFEKEEPING,
+2,2.A,Recoverability & Custody,5
+2,2.B,SPV & Bankruptcy Remoteness/Funds Segregation,4
+2,2.C,Lien Perfection & Enforcement,3
+2,2.D,Legal Framework,1
+2,2.E,Representations & Warranties,2
+2,2.F,Cash Control Infrastructure,1
+,,PILLAR III: COUNTERPARTY ASSESSMENT,
+3,3.A,Financial Strength & Capitalization,2
+3,3.B,Regulatory & Licensing,3
+3,3.C,Operational Track Record,5
+3,3.D,Reputation & Leadership,1
+3,3.E,"Insurance, Guarantees & Alignment",1
+,,PILLAR IV: TRANSACTION STRUCTURE & MECHANICS,
+4,4.A,Transaction Structure Snapshot,1
+4,4.B,Credit Enhancement & Loss Absorption,1
+4,4.C,Surveillance Triggers & Structural Response,2
+4,4.D,Waterfall & Payment Priority,
+4,4.E,Facility Terms & Optionality,2
+4,4.F,"Refinance, Takeout & Run-Off",2
+,,PILLAR V: MANAGEMENT & OPERATIONS,
+5,5.A,Entity & Process Scoping,3
+5,5.B,Transaction Data & Systems Integrity,1
+5,5.C,Underwriting & Origination Process,3
+5,5.D,Servicing & Entity Financial Health,3
+5,5.E,Ongoing Monitoring & Surveillance,1
+5,5.F,Regulatory Compliance,1
+,,SECTION F: OVERALL ASSESSMENT & DECLARATIONS,
+F,F.1,Ongoing Monitoring Commitments,
+F,F.2,Review Triggers,
+F,F.3,Declarations & Attestations,
+F,F.4,Authorized Signatures,

@@ -138,9 +138,9 @@ func unpackAssetPrice(oracleABI *abi.ABI, data []byte) (*big.Int, error) {
 	return unpacked[0].(*big.Int), nil
 }
 
-// ConvertOraclePriceToUSD converts a raw oracle price to USD.
+// ScaleByDecimals converts a raw oracle price from fixed-point to float64.
 // decimals specifies the oracle's price precision (e.g., 8 for Chainlink/Aave: 1e8 = $1.00).
-func ConvertOraclePriceToUSD(rawPrice *big.Int, decimals int) float64 {
+func ScaleByDecimals(rawPrice *big.Int, decimals int) float64 {
 	if rawPrice == nil || rawPrice.Sign() == 0 {
 		return 0
 	}

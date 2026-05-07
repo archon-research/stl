@@ -1,0 +1,272 @@
+# ConfigMaps for prod — non-secret environment variables matching ECS parity
+# Sensitive values (Redis, SQS, S3, SNS) are in ExternalSecrets via stl-sentinelprod-infra-config
+---
+# Shared OpenTelemetry configuration — all services reference this via envFrom.
+# Points to the OTel Collector gateway in the observability namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-config
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+  JAEGER_ENDPOINT: "otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watcher-config
+data:
+  CHAIN_ID: "1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://eth-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-worker-config
+data:
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-indexer-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-watcher-config
+data:
+  CHAIN_ID: "43114"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://avax-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-backup-worker-config
+data:
+  CHAIN_ID: "43114"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-sparklend-position-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "43114"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prime-debt-indexer
+data:
+  CHAIN_ID: "1"
+  AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/030797368798/stl-sentinelprod-ethereum-prime-debt.fifo"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spark-anchorage-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  ANCHORAGE_API_URL: "https://api.anchorage.com"
+  ANCHORAGE_PRIME: "spark"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: offchain-price-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-watcher-config
+data:
+  CHAIN_ID: "8453"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://base-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-watcher-config
+data:
+  CHAIN_ID: "10"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://opt-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-watcher-config
+data:
+  CHAIN_ID: "130"
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://unichain-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-watcher-config
+data:
+  CHAIN_ID: "42161"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  ALCHEMY_WS_URL: "wss://arb-mainnet.g.alchemy.com/v2"
+  AWS_REGION: "eu-west-1"
+  AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
+  ENVIRONMENT: "sentinelprod"
+  ENABLE_BACKFILL: "true"
+  # Arbitrum produces ~4 blocks/s; the 10/30s defaults can't keep up with live,
+  # let alone drain a backlog. 100 blocks every 5s = ~20 blk/s, ~5x live.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-backup-worker-config
+data:
+  CHAIN_ID: "8453"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-backup-worker-config
+data:
+  CHAIN_ID: "10"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-backup-worker-config
+data:
+  CHAIN_ID: "130"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-backup-worker-config
+data:
+  CHAIN_ID: "42161"
+  AWS_REGION: "eu-west-1"
+  WORKERS: "4"
+  DEPLOY_ENV: "prod"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "43114"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: python-api-config
+data:
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+  OTEL_SERVICE_NAME: "stl-verify-python-api"

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 )
 
 // --- Test: NewBlockCache ---
@@ -390,7 +392,7 @@ func TestDecompress_DecompressesGzipData(t *testing.T) {
 		t.Fatalf("compress failed: %v", err)
 	}
 
-	decompressed, err := decompress(compressed)
+	decompressed, err := gziputil.Decompress(compressed)
 	if err != nil {
 		t.Fatalf("decompress failed: %v", err)
 	}
@@ -405,7 +407,7 @@ func TestDecompress_BackwardCompatibility_UncompressedData(t *testing.T) {
 	uncompressedJSON := []byte(`{"block": {"number": "0x12345"}, "receipts": []}`)
 
 	// decompress should detect it's not gzipped and return as-is
-	result, err := decompress(uncompressedJSON)
+	result, err := gziputil.Decompress(uncompressedJSON)
 	if err != nil {
 		t.Fatalf("decompress should not fail on uncompressed data: %v", err)
 	}
@@ -430,9 +432,9 @@ func TestIsGzipped_DetectsMagicBytes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isGzipped(tt.data)
+			result := gziputil.IsGzipped(tt.data)
 			if result != tt.expected {
-				t.Errorf("isGzipped(%v) = %v, want %v", tt.data, result, tt.expected)
+				t.Errorf("gziputil.IsGzipped(%v) = %v, want %v", tt.data, result, tt.expected)
 			}
 		})
 	}
@@ -463,7 +465,7 @@ func TestCompressDecompress_LargeData(t *testing.T) {
 	}
 
 	// Verify round-trip
-	decompressed, err := decompress(compressed)
+	decompressed, err := gziputil.Decompress(compressed)
 	if err != nil {
 		t.Fatalf("decompress failed: %v", err)
 	}

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optimism-watcher
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: optimism-watcher
+  template:
+    metadata:
+      labels:
+        app: optimism-watcher
+    spec:
+      serviceAccountName: optimism-watcher
+      containers:
+        - name: optimism-watcher
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: optimism-watcher
+          args: ["--enable-traces=false"]
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: optimism-watcher-config
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: optimism-watcher
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "100m"
+              memory: "1024Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f watcher"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

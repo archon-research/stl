@@ -240,10 +240,7 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 			}
 
 			// Increase backoff for next attempt
-			backoff = time.Duration(float64(backoff) * s.config.BackoffFactor)
-			if backoff > s.config.MaxBackoff {
-				backoff = s.config.MaxBackoff
-			}
+			backoff = min(time.Duration(float64(backoff)*s.config.BackoffFactor), s.config.MaxBackoff)
 		}
 
 		// Create a timeout context for this publish attempt to prevent indefinite blocking
@@ -271,6 +268,8 @@ func (s *EventSink) publishWithRetry(ctx context.Context, input *sns.PublishInpu
 		"error", lastErr,
 		"eventType", event.EventType(),
 		"blockNumber", event.GetBlockNumber(),
+		"chainId", event.GetChainID(),
+		"topicArn", s.config.TopicARN,
 	)
 
 	return fmt.Errorf("failed to publish to SNS after %d retries: %w", s.config.MaxRetries, lastErr)

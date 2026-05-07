@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sparklend-position-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sparklend-position-tracker
+  template:
+    metadata:
+      labels:
+        app: sparklend-position-tracker
+    spec:
+      serviceAccountName: sparklend-position-tracker
+      containers:
+        - name: sparklend-position-tracker
+          image: sparklend-position-tracker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: sparklend-position-tracker-config
+            - secretRef:
+                name: sparklend-position-tracker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f sparklend"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

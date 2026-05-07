@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -24,7 +26,7 @@ func CacheKey(chainID, blockNumber int64, version int, dataType string) string {
 }
 
 // ParseCompressedJSON decompresses gzipped data (if needed) and unmarshals it
-func ParseCompressedJSON(data []byte, v interface{}) error {
+func ParseCompressedJSON(data []byte, v any) error {
 	// Check for gzip magic bytes (0x1f 0x8b)
 	if len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b {
 		gr, err := gzip.NewReader(bytes.NewReader(data))
@@ -47,4 +49,37 @@ func ParseCompressedJSON(data []byte, v interface{}) error {
 	}
 
 	return json.Unmarshal(data, v)
+}
+
+// FormatAmount converts a raw big.Int token amount to a human-readable
+// decimal-adjusted string. For example, 1500000 with 6 decimals becomes "1.5".
+func FormatAmount(rawAmount *big.Int, decimals int) string {
+	if rawAmount == nil {
+		return "0"
+	}
+	if decimals == 0 {
+		return rawAmount.String()
+	}
+
+	negative := rawAmount.Sign() < 0
+	absAmount := new(big.Int).Abs(rawAmount)
+
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(decimals)), nil)
+	integerPart := new(big.Int).Div(absAmount, divisor)
+	remainder := new(big.Int).Mod(absAmount, divisor)
+
+	prefix := ""
+	if negative {
+		prefix = "-"
+	}
+
+	if remainder.Cmp(big.NewInt(0)) == 0 {
+		return prefix + integerPart.String()
+	}
+
+	remainderStr := remainder.String()
+	padded := strings.Repeat("0", decimals-len(remainderStr)) + remainderStr
+	padded = strings.TrimRight(padded, "0")
+
+	return fmt.Sprintf("%s%s.%s", prefix, integerPart.String(), padded)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,10 +78,7 @@ func (m *mockSQSConsumer) ReceiveMessages(ctx context.Context, maxMessages int) 
 	}
 
 	// Return up to maxMessages
-	count := maxMessages
-	if count > len(m.messages) {
-		count = len(m.messages)
-	}
+	count := min(maxMessages, len(m.messages))
 
 	result := m.messages[:count]
 	m.messages = m.messages[count:]
@@ -540,13 +538,7 @@ func TestProcessMessage_Success(t *testing.T) {
 	}
 
 	for _, expectedKey := range expectedKeys {
-		found := false
-		for _, key := range keys {
-			if key == expectedKey {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(keys, expectedKey)
 		if !found {
 			t.Errorf("expected key %s not found in %v", expectedKey, keys)
 		}
@@ -1363,7 +1355,7 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 	ctx := context.Background()
 
 	// Add multiple messages
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		event := createBlockEvent(1, int64(100+i), 0)
 		_ = cache.SetBlock(ctx, 1, int64(100+i), 0, json.RawMessage(fmt.Sprintf(`{"block": %d}`, 100+i)))
 		consumer.AddMessage(createSQSMessage(fmt.Sprintf("msg%d", i), event))
@@ -1386,10 +1378,7 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 			return nil, ctx.Err()
 		}
 
-		count := maxMessages
-		if count > len(consumer.messages) {
-			count = len(consumer.messages)
-		}
+		count := min(maxMessages, len(consumer.messages))
 		msgs := consumer.messages[:count]
 		consumer.messages = consumer.messages[count:]
 		consumer.mu.Unlock()
@@ -1670,13 +1659,7 @@ func TestProcessMessage_AvalancheSkipsTracesAndBlobs(t *testing.T) {
 		"avax-bucket/0-999/500_0_receipts.json.gz",
 	}
 	for _, expectedKey := range expectedKeys {
-		found := false
-		for _, key := range keys {
-			if key == expectedKey {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(keys, expectedKey)
 		if !found {
 			t.Errorf("expected key %s not found in %v", expectedKey, keys)
 		}
@@ -1886,7 +1869,7 @@ func TestRun_ContextCancelledDuringMessageSend(t *testing.T) {
 	}, consumer, cache, writer)
 
 	// Create many messages
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		event := createBlockEvent(1, int64(i), 0)
 		consumer.AddMessage(createSQSMessage(fmt.Sprintf("msg%d", i), event))
 	}

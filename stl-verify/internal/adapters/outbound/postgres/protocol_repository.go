@@ -1,17 +1,19 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -24,6 +26,7 @@ type ProtocolRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
 	batchSize int
+	buildID   buildregistry.BuildID
 }
 
 // NewProtocolRepository creates a new PostgreSQL Protocol repository.
@@ -32,7 +35,7 @@ type ProtocolRepository struct {
 //
 // Note: This function does not verify that the database connection is alive.
 // Use a separate health check or call pool.Ping() if connection validation is needed.
-func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*ProtocolRepository, error) {
+func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*ProtocolRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -46,6 +49,7 @@ func NewProtocolRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize in
 		pool:      pool,
 		logger:    logger,
 		batchSize: batchSize,
+		buildID:   buildID,
 	}, nil
 }
 
@@ -53,54 +57,23 @@ func (r *ProtocolRepository) GetOrCreateProtocol(ctx context.Context, tx pgx.Tx,
 	var protocolID int64
 	addressBytes := address.Bytes()
 
+	// Upsert: on conflict preserve the earliest created_at_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same protocol —
+	// whichever worker wins the INSERT race, subsequent LEAST() merges still produce
+	// the correct minimum created_at_block.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		chainID, addressBytes).Scan(&protocolID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		r.logger.Info("auto-creating protocol", "address", address.Hex(), "name", name)
-		err = tx.QueryRow(ctx,
-			`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id`,
-			chainID, addressBytes, name, "lending", createdAtBlock).Scan(&protocolID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create protocol: %w", err)
-		}
-		return protocolID, nil
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get protocol: %w", err)
-	}
-
-	return protocolID, nil
-}
-
-// GetProtocolByAddress retrieves a protocol by its chain ID and address.
-func (r *ProtocolRepository) GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error) {
-	// Convert address to lowercase hex without 0x prefix for bytea comparison
-	addressHex := strings.ToLower(address.Hex()[2:])
-
-	var protocol entity.Protocol
-	err := r.pool.QueryRow(ctx,
-		`SELECT id, chain_id, address, name, protocol_type, created_at_block
-         FROM protocol
-         WHERE chain_id = $1 AND address = decode($2, 'hex')`,
-		chainID, addressHex).Scan(
-		&protocol.ID,
-		&protocol.ChainID,
-		&protocol.Address,
-		&protocol.Name,
-		&protocol.ProtocolType,
-		&protocol.CreatedAtBlock,
-	)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     created_at_block = LEAST(protocol.created_at_block, EXCLUDED.created_at_block)
+		 RETURNING id`,
+		chainID, addressBytes, name, protocolType, createdAtBlock).Scan(&protocolID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil // Protocol not found
-		}
-		return nil, fmt.Errorf("failed to get protocol by address: %w", err)
+		return 0, fmt.Errorf("failed to get or create protocol: %w", err)
 	}
 
-	return &protocol, nil
+	r.logger.Debug("protocol upserted", "address", address.Hex(), "name", name, "id", protocolID)
+	return protocolID, nil
 }
 
 // UpsertSparkLendReserveData upserts SparkLend reserve data records atomically.
@@ -110,11 +83,20 @@ func (r *ProtocolRepository) UpsertReserveData(ctx context.Context, tx pgx.Tx, d
 		return nil
 	}
 
+	// Sort by natural key once, before chunking, so the per-row advisory lock
+	// in assign_processing_version_sparklend_reserve_data is acquired in a
+	// transaction-stable order across concurrent callers. See ADR-0002 §3.
+	slices.SortFunc(data, func(a, b *entity.SparkLendReserveData) int {
+		return cmp.Or(
+			cmp.Compare(a.ProtocolID, b.ProtocolID),
+			cmp.Compare(a.TokenID, b.TokenID),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+		)
+	})
+
 	for i := 0; i < len(data); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(data) {
-			end = len(data)
-		}
+		end := min(i+r.batchSize, len(data))
 		batch := data[i:end]
 
 		if err := r.upsertSparkLendReserveDataBatch(ctx, tx, batch); err != nil {
@@ -133,7 +115,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	var sb strings.Builder
 	sb.WriteString(`
 		INSERT INTO sparklend_reserve_data (
-			protocol_id, token_id, block_number, block_version,
+			protocol_id, token_id, block_number, block_version, build_id,
 			unbacked, accrued_to_treasury_scaled, total_a_token, total_stable_debt, total_variable_debt,
 			liquidity_rate, variable_borrow_rate, stable_borrow_rate, average_stable_borrow_rate,
 			liquidity_index, variable_borrow_index, last_update_timestamp,
@@ -141,18 +123,18 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 			usage_as_collateral_enabled, borrowing_enabled, stable_borrow_rate_enabled, is_active, is_frozen
 		) VALUES `)
 
-	args := make([]any, 0, len(data)*26)
+	args := make([]any, 0, len(data)*27)
 	for i, d := range data {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 26
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		baseIdx := i * 27
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
 			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7, baseIdx+8,
 			baseIdx+9, baseIdx+10, baseIdx+11, baseIdx+12, baseIdx+13, baseIdx+14, baseIdx+15, baseIdx+16,
 			baseIdx+17, baseIdx+18, baseIdx+19, baseIdx+20, baseIdx+21, baseIdx+22, baseIdx+23, baseIdx+24,
-			baseIdx+25, baseIdx+26))
-		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion)
+			baseIdx+25, baseIdx+26, baseIdx+27))
+		args = append(args, d.ProtocolID, d.TokenID, d.BlockNumber, d.BlockVersion, int(r.buildID))
 
 		for _, valToConvert := range []*big.Int{
 			d.Unbacked,
@@ -195,29 +177,7 @@ func (r *ProtocolRepository) upsertSparkLendReserveDataBatch(ctx context.Context
 	}
 
 	sb.WriteString(`
-		ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE SET
-			unbacked = EXCLUDED.unbacked,
-			accrued_to_treasury_scaled = EXCLUDED.accrued_to_treasury_scaled,
-			total_a_token = EXCLUDED.total_a_token,
-			total_stable_debt = EXCLUDED.total_stable_debt,
-			total_variable_debt = EXCLUDED.total_variable_debt,
-			liquidity_rate = EXCLUDED.liquidity_rate,
-			variable_borrow_rate = EXCLUDED.variable_borrow_rate,
-			stable_borrow_rate = EXCLUDED.stable_borrow_rate,
-			average_stable_borrow_rate = EXCLUDED.average_stable_borrow_rate,
-			liquidity_index = EXCLUDED.liquidity_index,
-			variable_borrow_index = EXCLUDED.variable_borrow_index,
-			last_update_timestamp = EXCLUDED.last_update_timestamp,
-			decimals = EXCLUDED.decimals,
-			ltv = EXCLUDED.ltv,
-			liquidation_threshold = EXCLUDED.liquidation_threshold,
-			liquidation_bonus = EXCLUDED.liquidation_bonus,
-			reserve_factor = EXCLUDED.reserve_factor,
-			usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
-			borrowing_enabled = EXCLUDED.borrowing_enabled,
-			stable_borrow_rate_enabled = EXCLUDED.stable_borrow_rate_enabled,
-			is_active = EXCLUDED.is_active,
-			is_frozen = EXCLUDED.is_frozen
+		ON CONFLICT (protocol_id, token_id, block_number, block_version, processing_version) DO NOTHING
 	`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unichain-backup-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unichain-backup-worker
+  template:
+    metadata:
+      labels:
+        app: unichain-backup-worker
+    spec:
+      serviceAccountName: unichain-backup-worker
+      containers:
+        - name: unichain-backup-worker
+          image: unichain-backup-worker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: unichain-backup-worker-config
+            - secretRef:
+                name: unichain-backup-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f raw-data-backup"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

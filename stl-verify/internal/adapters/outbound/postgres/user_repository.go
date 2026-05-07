@@ -2,11 +2,11 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -47,100 +47,70 @@ func NewUserRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (
 	}, nil
 }
 
+func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users []entity.User) (map[common.Address]int64, error) {
+	if len(users) == 0 {
+		return make(map[common.Address]int64), nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, u := range users {
+		batch.Queue(
+			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+			 ON CONFLICT (chain_id, address) DO UPDATE SET
+			     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
+			     updated_at = CASE
+			         WHEN EXCLUDED.first_seen_block < "user".first_seen_block THEN NOW()
+			         ELSE "user".updated_at
+			     END
+			 RETURNING id`,
+			u.ChainID, u.Address.Bytes(), u.FirstSeenBlock, u.Metadata,
+		)
+	}
+
+	br := tx.SendBatch(ctx, batch)
+
+	result := make(map[common.Address]int64, len(users))
+	for i, u := range users {
+		var id int64
+		if err := br.QueryRow().Scan(&id); err != nil {
+			br.Close()
+			return nil, fmt.Errorf("failed to get or create user %d (%s): %w", i, u.Address.Hex(), err)
+		}
+		result[u.Address] = id
+	}
+
+	if err := br.Close(); err != nil {
+		return nil, fmt.Errorf("closing user batch: %w", err)
+	}
+
+	return result, nil
+}
+
 func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
 	var userID int64
 
+	// Upsert: on conflict preserve the earliest first_seen_block via LEAST().
+	// This is safe for concurrent workers processing different blocks for the same user —
+	// whichever worker wins the INSERT race, the loser's LEAST() merge still produces
+	// the correct minimum first_seen_block.
 	err := tx.QueryRow(ctx,
-		`SELECT id FROM "user" WHERE chain_id = $1 AND address = $2`,
-		user.ChainID, user.Address.Bytes()).Scan(&userID)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(ctx,
-			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
-			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
-			 RETURNING id`,
-			user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to create user: %w", err)
-		}
-
-		r.logger.Debug("user created", "address", user.Address.Hex(), "id", userID)
-	} else if err != nil {
-		return 0, fmt.Errorf("failed to get user: %w", err)
+		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+		 VALUES ($1, $2, $3, NOW(), NOW(), $4)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
+		     updated_at = CASE
+		         WHEN EXCLUDED.first_seen_block < "user".first_seen_block THEN NOW()
+		         ELSE "user".updated_at
+		     END
+		 RETURNING id`,
+		user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, user.Metadata).Scan(&userID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get or create user: %w", err)
 	}
 
+	r.logger.Debug("user upserted", "address", user.Address.Hex(), "id", userID)
 	return userID, nil
-}
-
-// UpsertUsers upserts user records atomically.
-// All records are inserted in a single transaction - if any batch fails, all changes are rolled back.
-func (r *UserRepository) UpsertUsers(ctx context.Context, users []*entity.User) error {
-	if len(users) == 0 {
-		return nil
-	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer rollback(ctx, tx, r.logger)
-
-	for i := 0; i < len(users); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(users) {
-			end = len(users)
-		}
-		batch := users[i:end]
-
-		if err := r.upsertUserBatch(ctx, tx, batch); err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
-}
-
-func (r *UserRepository) upsertUserBatch(ctx context.Context, tx pgx.Tx, users []*entity.User) error {
-	if len(users) == 0 {
-		return nil
-	}
-
-	var sb strings.Builder
-	sb.WriteString(`
-		INSERT INTO "user" (chain_id, address, first_seen_block, metadata, updated_at)
-		VALUES `)
-
-	args := make([]any, 0, len(users)*4)
-	for i, user := range users {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		baseIdx := i * 4
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, NOW())",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4))
-
-		metadata, err := marshalMetadata(user.Metadata)
-		if err != nil {
-			return fmt.Errorf("failed to marshal user metadata for chain %d, address %x: %w", user.ChainID, user.Address, err)
-		}
-		args = append(args, user.ChainID, user.Address.Bytes(), user.FirstSeenBlock, metadata)
-	}
-
-	sb.WriteString(`
-		ON CONFLICT (chain_id, address) DO UPDATE SET
-			first_seen_block = LEAST("user".first_seen_block, EXCLUDED.first_seen_block),
-			metadata = EXCLUDED.metadata,
-			updated_at = NOW()
-	`)
-
-	_, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("failed to upsert user batch: %w", err)
-	}
-	return nil
 }
 
 // UpsertUserProtocolMetadata upserts user protocol metadata records atomically atomically.
@@ -157,10 +127,7 @@ func (r *UserRepository) UpsertUserProtocolMetadata(ctx context.Context, metadat
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(metadata); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(metadata) {
-			end = len(metadata)
-		}
+		end := min(i+r.batchSize, len(metadata))
 		batch := metadata[i:end]
 
 		if err := r.upsertUserProtocolMetadataBatch(ctx, tx, batch); err != nil {

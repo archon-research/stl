@@ -191,17 +191,13 @@ func (t *Telemetry) RecordReconnection(ctx context.Context) {
 }
 
 // RecordBlockReceived records a block header being received.
-func (t *Telemetry) RecordBlockReceived(ctx context.Context, blockNum int64) {
-	t.blocksReceivedTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.Int64("block.number", blockNum),
-	))
+func (t *Telemetry) RecordBlockReceived(ctx context.Context) {
+	t.blocksReceivedTotal.Add(ctx, 1)
 }
 
 // RecordBlockDropped records a block header being dropped due to full channel.
-func (t *Telemetry) RecordBlockDropped(ctx context.Context, blockNum int64) {
-	t.blocksDroppedTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.Int64("block.number", blockNum),
-	))
+func (t *Telemetry) RecordBlockDropped(ctx context.Context) {
+	t.blocksDroppedTotal.Add(ctx, 1)
 }
 
 // RecordConnectionUp records the connection becoming established.

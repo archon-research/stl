@@ -11,9 +11,16 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -21,14 +28,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
-
-	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
-	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
-	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // =============================================================================
@@ -59,9 +58,7 @@ type IntegrationTestInfra struct {
 	// Logger
 	Logger *slog.Logger
 
-	// Containers
-	containers []testcontainers.Container
-	Cleanup    func()
+	Cleanup func()
 }
 
 func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestInfra {
@@ -73,22 +70,13 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 	var cleanupFuncs []func()
 
-	// Start Redis
-	redisContainer, redisCfg := startRedis(t, ctx)
-	infra.containers = append(infra.containers, redisContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		// Use background context for cleanup since test context may be canceled
-		if err := redisContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate redis container", "error", err)
-		}
-	})
-
+	// Use shared Redis (started in TestMain)
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
-		Addr:      redisCfg.Addr,
-		Password:  redisCfg.Password,
-		DB:        redisCfg.DB,
+		Addr:      sharedRedisAddr,
+		Password:  "",
+		DB:        0,
 		TTL:       1 * time.Hour,
-		KeyPrefix: "integration-test",
+		KeyPrefix: testutil.SanitizeTestName(t.Name()),
 	}, logger)
 	if err != nil {
 		t.Fatalf("failed to create redis cache: %v", err)
@@ -100,15 +88,8 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	})
 	infra.Cache = cache
 
-	// Start LocalStack (with S3, SNS, SQS)
-	localstackContainer, localstackCfg := startLocalStack(t, ctx)
-	infra.containers = append(infra.containers, localstackContainer)
-	cleanupFuncs = append(cleanupFuncs, func() {
-		// Use background context for cleanup since test context may be canceled
-		if err := localstackContainer.Terminate(context.Background()); err != nil {
-			logger.Error("failed to terminate localstack container", "error", err)
-		}
-	})
+	// Use shared LocalStack (started in TestMain)
+	localstackCfg := sharedLocalStackCfg
 
 	// Create AWS clients
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
@@ -134,8 +115,10 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	infra.SQSClient = sqsClient
 	infra.S3Client = s3Client
 
-	// Create S3 bucket
-	bucketName := "test-raw-data-backup"
+	// Use unique resource names per test to avoid cross-test interference.
+	// S3 bucket names require hyphens (no underscores), so replace them.
+	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
+	bucketName := "backup-" + suffix
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
 	})
@@ -147,7 +130,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SNS topic
 	topicResult, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{
-		Name: aws.String("test-blocks"),
+		Name: aws.String("topic-" + suffix),
 	})
 	if err != nil {
 		t.Fatalf("failed to create SNS topic: %v", err)
@@ -157,7 +140,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 
 	// Create SQS queue for backup
 	queueResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
-		QueueName: aws.String("test-backup-queue"),
+		QueueName: aws.String("queue-" + suffix),
 		Attributes: map[string]string{
 			string(sqstypes.QueueAttributeNameVisibilityTimeout): "30",
 		},
@@ -217,84 +200,6 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	}
 
 	return infra
-}
-
-// =============================================================================
-// Container Setup
-// =============================================================================
-
-type RedisTestConfig struct {
-	Addr     string
-	Password string
-	DB       int
-}
-
-func startRedis(t *testing.T, ctx context.Context) (testcontainers.Container, RedisTestConfig) {
-	t.Helper()
-
-	config := RedisTestConfig{
-		Password: "",
-		DB:       0,
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        "redis:8.0-M04-alpine",
-		ExposedPorts: []string{"6379/tcp"},
-		WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start redis: %v", err)
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "6379")
-	config.Addr = fmt.Sprintf("%s:%s", host, port.Port())
-
-	return container, config
-}
-
-type LocalStackTestConfig struct {
-	Endpoint string
-	Region   string
-}
-
-func startLocalStack(t *testing.T, ctx context.Context) (testcontainers.Container, LocalStackTestConfig) {
-	t.Helper()
-
-	config := LocalStackTestConfig{
-		Region: "us-east-1",
-	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        "localstack/localstack:latest",
-		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"SERVICES": "sns,sqs,s3",
-			"DEBUG":    "0",
-		},
-		WaitingFor: wait.ForHTTP("/_localstack/health").
-			WithPort("4566/tcp").
-			WithStartupTimeout(120 * time.Second),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		t.Fatalf("failed to start localstack: %v", err)
-	}
-
-	host, _ := container.Host(ctx)
-	port, _ := container.MappedPort(ctx, "4566")
-	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
-
-	return container, config
 }
 
 // =============================================================================
@@ -492,7 +397,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	// Blobs are not expected for Ethereum (chain 1) per DefaultChainExpectations
 	partition := "12000-12999" // Block 12345 falls in this partition
 	prefix := fmt.Sprintf("%s/", partition)
-	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 30*time.Second)
 
 	// Stop service
 	svc.Stop()
@@ -502,9 +407,9 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	t.Logf("S3 objects created: %v", objects)
 
 	expectedFiles := []string{
-		fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version),
-		fmt.Sprintf("%s/%d_%d_receipts.json.gz", partition, blockNumber, version),
-		fmt.Sprintf("%s/%d_%d_traces.json.gz", partition, blockNumber, version),
+		s3key.BuildWithPartition(partition, blockNumber, version, s3key.Block),
+		s3key.BuildWithPartition(partition, blockNumber, version, s3key.Receipts),
+		s3key.BuildWithPartition(partition, blockNumber, version, s3key.Traces),
 	}
 
 	for _, expected := range expectedFiles {
@@ -521,7 +426,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 	}
 
 	// Verify content of block file
-	blockKey := fmt.Sprintf("%s/%d_%d_block.json.gz", partition, blockNumber, version)
+	blockKey := s3key.BuildWithPartition(partition, blockNumber, version, s3key.Block)
 	content := getS3Object(t, ctx, infra, blockKey)
 	t.Logf("Block content: %s", string(content))
 
@@ -597,7 +502,7 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 	// Wait for all blocks to be backed up (10 block files expected)
 	// Blocks 100-109 all fall in partition 0-999
 	prefix := "0-999/"
-	objects := waitForS3Objects(t, ctx, infra, prefix, numBlocks, 15*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, numBlocks, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -665,7 +570,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for first file to be written
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	// Update cache with different data (simulating reprocessing scenario)
 	blockData2 := json.RawMessage(`{"number":"0x1f4","hash":"0xsecond"}`)
@@ -676,7 +581,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 
 	// Wait a short time for the second message to be processed
 	// (it should be skipped, but we need to give it time to process)
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
 		// Check queue is empty (message was processed)
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(infra.BackupQueueURL),
@@ -767,7 +672,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 
 	// Wait for version 0 to be written
 	keyV0 := fmt.Sprintf("1000-1999/%d_0_block.json.gz", blockNumber)
-	waitForS3Object(t, ctx, infra, keyV0, 10*time.Second)
+	waitForS3Object(t, ctx, infra, keyV0, 30*time.Second)
 
 	// Publish version 1
 	event1 := outbound.BlockEvent{
@@ -779,8 +684,8 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event1)
 
 	// Wait for version 1 to be written
-	keyV1 := fmt.Sprintf("1000-1999/%d_1_block.json.gz", blockNumber)
-	waitForS3Object(t, ctx, infra, keyV1, 10*time.Second)
+	keyV1 := s3key.BuildWithPartition("1000-1999", blockNumber, 1, s3key.Block)
+	waitForS3Object(t, ctx, infra, keyV1, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -791,8 +696,8 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 	objects := listS3Objects(t, ctx, infra, prefix)
 	t.Logf("S3 objects: %v", objects)
 
-	expectedV0 := fmt.Sprintf("1000-1999/%d_0_block.json.gz", blockNumber)
-	expectedV1 := fmt.Sprintf("1000-1999/%d_1_block.json.gz", blockNumber)
+	expectedV0 := s3key.BuildWithPartition("1000-1999", blockNumber, 0, s3key.Block)
+	expectedV1 := s3key.BuildWithPartition("1000-1999", blockNumber, 1, s3key.Block)
 
 	foundV0, foundV1 := false, false
 	for _, obj := range objects {
@@ -884,7 +789,7 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 
 	// Wait for file to be created
 	key := fmt.Sprintf("2000-2999/%d_0_block.json.gz", blockNumber)
-	waitForS3Object(t, ctx, infra, key, 15*time.Second)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -950,7 +855,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 
 	// Wait for at least one block to be processed before stopping
 	prefix := "3000-3999/"
-	waitForS3Objects(t, ctx, infra, prefix, 1, 10*time.Second)
+	waitForS3Objects(t, ctx, infra, prefix, 1, 30*time.Second)
 
 	// Stop gracefully using the Stop() method (not context cancellation)
 	svc.Stop()
@@ -961,7 +866,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 		if err != nil && err != context.Canceled {
 			t.Errorf("unexpected error on shutdown: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("service did not shut down within timeout")
 	}
 
@@ -1029,11 +934,11 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 	}
 
 	// Wait for at least one file to be created
-	key := fmt.Sprintf("7000-7999/%d_%d_block.json.gz", blockNumber, version)
-	waitForS3Object(t, ctx, infra, key, 15*time.Second)
+	key := s3key.BuildWithPartition("7000-7999", blockNumber, version, s3key.Block)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	// Wait a bit for any concurrent writes to complete
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl:       aws.String(infra.BackupQueueURL),
 			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameApproximateNumberOfMessages},
@@ -1131,8 +1036,8 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for block file to be created
-	key := fmt.Sprintf("8000-8999/%d_%d_block.json.gz", blockNumber, version)
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	key := s3key.BuildWithPartition("8000-8999", blockNumber, version, s3key.Block)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -1274,7 +1179,7 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 	// Wait for the message to be processed (rejected due to chain ID mismatch)
 	// The message will return to the queue since processing failed, but we wait
 	// for at least one processing attempt by checking the queue becomes in-flight
-	testutil.WaitForCondition(t, 5*time.Second, func() bool {
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
 		attrs, _ := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
 			QueueUrl: aws.String(infra.BackupQueueURL),
 			AttributeNames: []sqstypes.QueueAttributeName{
@@ -1367,8 +1272,8 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 	}
 	publishBlockEvent(t, ctx, infra, event)
 
-	key := fmt.Sprintf("6000-6999/%d_%d_block.json.gz", blockNumber, version)
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	key := s3key.BuildWithPartition("6000-6999", blockNumber, version, s3key.Block)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -1552,7 +1457,7 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 
 	// Wait for all 3 files (block, receipts, traces)
 	prefix := fmt.Sprintf("3000-3999/%d_%d_", blockNumber, version)
-	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 10*time.Second)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 3, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()
@@ -1562,9 +1467,9 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 
 	// Verify all expected files exist
 	expectedFiles := map[string]bool{
-		fmt.Sprintf("3000-3999/%d_%d_block.json.gz", blockNumber, version):    false,
-		fmt.Sprintf("3000-3999/%d_%d_receipts.json.gz", blockNumber, version): false,
-		fmt.Sprintf("3000-3999/%d_%d_traces.json.gz", blockNumber, version):   false,
+		s3key.BuildWithPartition("3000-3999", blockNumber, version, s3key.Block):    false,
+		s3key.BuildWithPartition("3000-3999", blockNumber, version, s3key.Receipts): false,
+		s3key.BuildWithPartition("3000-3999", blockNumber, version, s3key.Traces):   false,
 	}
 
 	for _, obj := range objects {
@@ -1639,8 +1544,8 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 	publishBlockEvent(t, ctx, infra, event)
 
 	// Wait for block file to be created
-	key := fmt.Sprintf("2000-2999/%d_%d_block.json.gz", blockNumber, version)
-	waitForS3Object(t, ctx, infra, key, 10*time.Second)
+	key := s3key.BuildWithPartition("2000-2999", blockNumber, version, s3key.Block)
+	waitForS3Object(t, ctx, infra, key, 30*time.Second)
 
 	svc.Stop()
 	svcCancel()

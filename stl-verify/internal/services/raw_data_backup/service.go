@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -386,12 +387,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 
 // generateKey creates the S3 key for a given data type.
 func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataType string) string {
-	return fmt.Sprintf("%s/%d_%d_%s.json.gz",
-		partition,
-		event.BlockNumber,
-		event.Version,
-		dataType,
-	)
+	return s3key.BuildWithPartition(partition, event.BlockNumber, event.Version, s3key.DataType(dataType))
 }
 
 // writeToS3 writes data to S3 with the appropriate key structure.

@@ -1,0 +1,1127 @@
+package aavelike
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"strings"
+	"sync"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+)
+
+// ErrReserveNotFound is returned when reserve data cannot be fetched at the queried block.
+// This typically happens when the configured PoolDataProvider contract didn't exist at
+// the historical block (e.g., the contract was upgraded/redeployed after that block).
+var ErrReserveNotFound = errors.New("reserve not found at block")
+
+type TokenMetadata struct {
+	Symbol   string
+	Decimals int
+	Name     string
+}
+
+type UserReserveData struct {
+	UnderlyingAsset                common.Address
+	ScaledATokenBalance            *big.Int
+	UsageAsCollateralEnabledOnUser bool
+	ScaledVariableDebt             *big.Int
+	// Aave V3 specific fields (will be zero for Sparklend and V2)
+	StableBorrowRate                *big.Int
+	PrincipalStableDebt             *big.Int
+	StableBorrowLastUpdateTimestamp *big.Int
+}
+
+type ActualUserReserveData struct {
+	Asset                    common.Address
+	CurrentATokenBalance     *big.Int
+	UsageAsCollateralEnabled bool
+	CurrentStableDebt        *big.Int
+	CurrentVariableDebt      *big.Int
+	PrincipalStableDebt      *big.Int
+	ScaledVariableDebt       *big.Int
+	StableBorrowRate         *big.Int
+	LiquidityRate            *big.Int
+	StableRateLastUpdated    uint64
+}
+
+// ErrNoPoolDataProvider is returned when no PoolDataProvider exists for the queried block.
+var ErrNoPoolDataProvider = errors.New("no PoolDataProvider available for block")
+
+type BlockchainService struct {
+	mu                                         sync.RWMutex
+	chainID                                    int64
+	ethClient                                  *ethclient.Client
+	multicallClient                            outbound.Multicaller
+	erc20ABI                                   *abi.ABI
+	getUserReservesABI                         *abi.ABI
+	getUserReserveDataABI                      *abi.ABI
+	getPoolDataProviderReserveConfigurationABI *abi.ABI
+	getPoolDataProviderReserveDataABI          *abi.ABI
+	getReserveTokensAddressesABI               *abi.ABI
+	uiPoolDataProvider                         common.Address
+	poolAddress                                common.Address
+	poolAddressesProvider                      common.Address
+	protocolVersion                            blockchain.ProtocolVersion
+	metadataCache                              map[common.Address]TokenMetadata
+	logger                                     *slog.Logger
+}
+
+// ReserveConfigData holds parsed data from PoolDataProvider.getReserveConfigurationData
+type ReserveConfigData struct {
+	Decimals                 *big.Int
+	LTV                      *big.Int
+	LiquidationThreshold     *big.Int
+	LiquidationBonus         *big.Int
+	ReserveFactor            *big.Int
+	UsageAsCollateralEnabled bool
+	BorrowingEnabled         bool
+	StableBorrowRateEnabled  bool
+	IsActive                 bool
+	IsFrozen                 bool
+}
+
+// ReserveTokenAddresses holds the aToken and debt token addresses for a reserve.
+type ReserveTokenAddresses struct {
+	ATokenAddress            common.Address
+	StableDebtTokenAddress   common.Address
+	VariableDebtTokenAddress common.Address
+}
+
+// ReserveData holds parsed data from ProtocolDataProvider.getReserveData
+type ReserveData struct {
+	Unbacked                *big.Int
+	AccruedToTreasuryScaled *big.Int
+	TotalAToken             *big.Int
+	TotalStableDebt         *big.Int
+	TotalVariableDebt       *big.Int
+	LiquidityRate           *big.Int
+	VariableBorrowRate      *big.Int
+	StableBorrowRate        *big.Int
+	AverageStableBorrowRate *big.Int
+	LiquidityIndex          *big.Int
+	VariableBorrowIndex     *big.Int
+	LastUpdateTimestamp     int64
+}
+
+func newBlockchainService(
+	chainID int64,
+	ethClient *ethclient.Client,
+	multicallClient outbound.Multicaller,
+	erc20ABI *abi.ABI,
+	uiPoolDataProvider common.Address,
+	poolAddress common.Address,
+	poolAddressesProvider common.Address,
+	protocolVersion blockchain.ProtocolVersion,
+	logger *slog.Logger,
+) (*BlockchainService, error) {
+	service := &BlockchainService{
+		chainID:               chainID,
+		ethClient:             ethClient,
+		multicallClient:       multicallClient,
+		erc20ABI:              erc20ABI,
+		uiPoolDataProvider:    uiPoolDataProvider,
+		poolAddress:           poolAddress,
+		poolAddressesProvider: poolAddressesProvider,
+		protocolVersion:       protocolVersion,
+		metadataCache:         make(map[common.Address]TokenMetadata),
+		logger:                logger.With("component", "blockchain-service"),
+	}
+
+	if err := service.loadABIs(protocolVersion); err != nil {
+		return nil, err
+	}
+
+	return service, nil
+}
+
+// getPoolDataProviderForBlock returns the correct PoolDataProvider address for the given block.
+// Returns an error if no PoolDataProvider was active at that block.
+func (s *BlockchainService) getPoolDataProviderForBlock(blockNumber uint64) (common.Address, error) {
+	provider, ok := blockchain.GetPoolDataProviderForBlock(s.chainID, s.poolAddress, blockNumber)
+	if !ok {
+		return common.Address{}, fmt.Errorf("%w: chain=%d pool=%s block=%d", ErrNoPoolDataProvider, s.chainID, s.poolAddress.Hex(), blockNumber)
+	}
+	return provider, nil
+}
+
+func (s *BlockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion) error {
+	var err error
+
+	// Load getUserReservesData ABI based on protocol version
+	switch protocolVersion {
+	case blockchain.ProtocolVersionAaveV2:
+		s.getUserReservesABI, err = abis.GetAaveUserReservesDataABI()
+	case blockchain.ProtocolVersionAaveV3:
+		s.getUserReservesABI, err = abis.GetAaveUserReservesDataABI()
+	case blockchain.ProtocolVersionSparkLend:
+		s.getUserReservesABI, err = abis.GetSparklendUserReservesDataABI()
+	default:
+		return fmt.Errorf("unknown protocol version: %s", protocolVersion)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to load getUserReservesData ABI: %w", err)
+	}
+
+	s.getUserReserveDataABI, err = abis.GetPoolDataProviderUserReserveDataABI()
+	if err != nil {
+		return fmt.Errorf("failed to load getUserReserveData ABI: %w", err)
+	}
+
+	s.getPoolDataProviderReserveConfigurationABI, err = abis.GetPoolDataProviderReserveConfigurationABI()
+	if err != nil {
+		return fmt.Errorf("failed to load getReserveConfigurationData ABI: %w", err)
+	}
+
+	switch protocolVersion {
+	case blockchain.ProtocolVersionAaveV2:
+		s.getPoolDataProviderReserveDataABI, err = abis.GetAaveV2PoolDataProviderReserveDataABI()
+	case blockchain.ProtocolVersionAaveV3:
+		s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
+	case blockchain.ProtocolVersionSparkLend:
+		s.getPoolDataProviderReserveDataABI, err = abis.GetSparklendPoolDataProviderReserveDataABI()
+	default:
+		return fmt.Errorf("unknown protocol version: %s", protocolVersion)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to load getReserveData ABI: %w", err)
+	}
+
+	s.getReserveTokensAddressesABI, err = abis.GetPoolDataProviderReserveTokensAddressesABI()
+	if err != nil {
+		return fmt.Errorf("failed to load getReserveTokensAddresses ABI: %w", err)
+	}
+
+	return nil
+}
+
+func (s *BlockchainService) getUserReservesData(
+	ctx context.Context,
+	user common.Address,
+	blockNumber int64,
+) ([]UserReserveData, error) {
+	data, err := s.getUserReservesABI.Pack(
+		"getUserReservesData",
+		s.poolAddressesProvider,
+		user,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack getUserReservesData call: %w", err)
+	}
+
+	msg := ethereum.CallMsg{
+		To:   &s.uiPoolDataProvider,
+		Data: data,
+	}
+
+	result, err := s.ethClient.CallContract(ctx, msg, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, fmt.Errorf("failed to call UiPoolDataProvider: %w", err)
+	}
+
+	return s.decodeUserReservesResult(result)
+}
+
+// decodeUserReservesResult decodes the raw bytes returned by a getUserReservesData call
+// into a slice of UserReserveData. It handles both ABI-decoded and raw-decoded formats
+// (the latter for chains like Avalanche that encode booleans as uint256).
+// This is shared by both the single-user and batch code paths.
+func (s *BlockchainService) decodeUserReservesResult(result []byte) ([]UserReserveData, error) {
+	if len(result) == 0 {
+		return []UserReserveData{}, nil
+	}
+
+	unpacked, err := s.getUserReservesABI.Unpack("getUserReservesData", result)
+	if err != nil {
+		// Fallback: some chains (e.g. Avalanche C-Chain) encode booleans as uint256,
+		// which the strict Go ABI decoder rejects. Try raw decoding.
+		reserves, rawErr := decodeUserReservesRaw(result)
+		if rawErr != nil {
+			return nil, fmt.Errorf(
+				"failed to decode getUserReservesData: %w",
+				errors.Join(err, fmt.Errorf("raw fallback decode failed: %w", rawErr)),
+			)
+		}
+		return reserves, nil
+	}
+	if len(unpacked) == 0 {
+		return []UserReserveData{}, nil
+	}
+
+	// Handle both Aave (7-field UserReserveData) and SparkLend (4-field UserReserveData).
+	switch v := unpacked[0].(type) {
+
+	// Aave V2/V3 layout (7 fields)
+	case []struct {
+		UnderlyingAsset                 common.Address `json:"underlyingAsset"`
+		ScaledATokenBalance             *big.Int       `json:"scaledATokenBalance"`
+		UsageAsCollateralEnabledOnUser  bool           `json:"usageAsCollateralEnabledOnUser"`
+		ScaledVariableDebt              *big.Int       `json:"scaledVariableDebt"`
+		StableBorrowRate                *big.Int       `json:"stableBorrowRate"`
+		PrincipalStableDebt             *big.Int       `json:"principalStableDebt"`
+		StableBorrowLastUpdateTimestamp *big.Int       `json:"stableBorrowLastUpdateTimestamp"`
+	}:
+		reserves := make([]UserReserveData, 0, len(v))
+		for _, r := range v {
+			if (r.UnderlyingAsset == common.Address{}) {
+				continue
+			}
+			reserves = append(reserves, UserReserveData{
+				UnderlyingAsset:                 r.UnderlyingAsset,
+				ScaledATokenBalance:             r.ScaledATokenBalance,
+				UsageAsCollateralEnabledOnUser:  r.UsageAsCollateralEnabledOnUser,
+				ScaledVariableDebt:              r.ScaledVariableDebt,
+				StableBorrowRate:                r.StableBorrowRate,
+				PrincipalStableDebt:             r.PrincipalStableDebt,
+				StableBorrowLastUpdateTimestamp: r.StableBorrowLastUpdateTimestamp,
+			})
+		}
+		return reserves, nil
+
+	// SparkLend layout (4 fields)
+	case []struct {
+		UnderlyingAsset                common.Address `json:"underlyingAsset"`
+		ScaledATokenBalance            *big.Int       `json:"scaledATokenBalance"`
+		UsageAsCollateralEnabledOnUser bool           `json:"usageAsCollateralEnabledOnUser"`
+		ScaledVariableDebt             *big.Int       `json:"scaledVariableDebt"`
+	}:
+		reserves := make([]UserReserveData, 0, len(v))
+		for _, r := range v {
+			if (r.UnderlyingAsset == common.Address{}) {
+				continue
+			}
+			reserves = append(reserves, UserReserveData{
+				UnderlyingAsset:                 r.UnderlyingAsset,
+				ScaledATokenBalance:             r.ScaledATokenBalance,
+				UsageAsCollateralEnabledOnUser:  r.UsageAsCollateralEnabledOnUser,
+				ScaledVariableDebt:              r.ScaledVariableDebt,
+				StableBorrowRate:                big.NewInt(0),
+				PrincipalStableDebt:             big.NewInt(0),
+				StableBorrowLastUpdateTimestamp: big.NewInt(0),
+			})
+		}
+		return reserves, nil
+
+	default:
+		return nil, fmt.Errorf("unexpected getUserReservesData return type: %T", unpacked[0])
+	}
+}
+
+// getUserReservesDataBatch packs getUserReservesData calls for multiple users
+// into a single Multicall3 call. Returns a map from user address to their
+// reserves. If an individual user's sub-call fails, that user's entry will
+// be absent from the results map and the error recorded in the errors map.
+// The top-level error is only for multicall-level failures (gas limit, network).
+func (s *BlockchainService) getUserReservesDataBatch(
+	ctx context.Context,
+	users []common.Address,
+	blockNumber int64,
+) (map[common.Address][]UserReserveData, map[common.Address]error, error) {
+	if len(users) == 0 {
+		return make(map[common.Address][]UserReserveData), nil, nil
+	}
+
+	calls := make([]outbound.Call, 0, len(users))
+	for _, user := range users {
+		data, err := s.getUserReservesABI.Pack(
+			"getUserReservesData",
+			s.poolAddressesProvider,
+			user,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to pack getUserReservesData for %s: %w", user.Hex(), err)
+		}
+		calls = append(calls, outbound.Call{
+			Target:       s.uiPoolDataProvider,
+			AllowFailure: true,
+			CallData:     data,
+		})
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	reservesMap := make(map[common.Address][]UserReserveData, len(users))
+	errorsMap := make(map[common.Address]error)
+
+	for i, result := range results {
+		user := users[i]
+		if !result.Success {
+			errorsMap[user] = fmt.Errorf("getUserReservesData sub-call failed for %s", user.Hex())
+			continue
+		}
+
+		reserves, decodeErr := s.decodeUserReservesResult(result.ReturnData)
+		if decodeErr != nil {
+			errorsMap[user] = fmt.Errorf("failed to decode reserves for %s: %w", user.Hex(), decodeErr)
+			continue
+		}
+
+		reservesMap[user] = reserves
+	}
+
+	return reservesMap, errorsMap, nil
+}
+
+func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets []common.Address, user common.Address, blockNumber int64) (map[common.Address]ActualUserReserveData, error) {
+	if len(assets) == 0 {
+		return make(map[common.Address]ActualUserReserveData), nil
+	}
+
+	// Get the correct PoolDataProvider for this block
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, err
+	}
+
+	calls := make([]outbound.Call, 0, len(assets))
+	for _, asset := range assets {
+		callData, err := s.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
+		if err != nil {
+			s.logger.Warn("failed to pack getUserReserveData call", "asset", asset.Hex(), "error", err)
+			continue
+		}
+
+		calls = append(calls, outbound.Call{
+			Target:       poolDataProvider,
+			AllowFailure: true,
+			CallData:     callData,
+		})
+	}
+
+	if len(calls) == 0 {
+		return make(map[common.Address]ActualUserReserveData), nil
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	dataMap := make(map[common.Address]ActualUserReserveData)
+	for i, result := range results {
+		if !result.Success || len(result.ReturnData) == 0 {
+			return nil, fmt.Errorf("getUserReserveData call failed for asset %s", assets[i].Hex())
+		}
+
+		data, err := s.decodeUserReserveDataResult(assets[i], result.ReturnData)
+		if err != nil {
+			return nil, fmt.Errorf("decoding getUserReserveData for asset %s: %w", assets[i].Hex(), err)
+		}
+
+		dataMap[assets[i]] = data
+	}
+
+	return dataMap, nil
+}
+
+// decodeUserReserveDataResult decodes the raw bytes returned by a getUserReserveData call
+// into an ActualUserReserveData. This is shared by both the single-user and batch code paths.
+func (s *BlockchainService) decodeUserReserveDataResult(asset common.Address, returnData []byte) (ActualUserReserveData, error) {
+	unpacked, err := s.getUserReserveDataABI.Unpack("getUserReserveData", returnData)
+	if err != nil {
+		return ActualUserReserveData{}, fmt.Errorf("failed to unpack: %w", err)
+	}
+
+	if len(unpacked) < 9 {
+		return ActualUserReserveData{}, fmt.Errorf("expected 9 values, got %d", len(unpacked))
+	}
+
+	bi, ok := unpacked[7].(*big.Int)
+	if !ok || bi == nil {
+		return ActualUserReserveData{}, fmt.Errorf("unexpected type for stableRateLastUpdated: %T", unpacked[7])
+	}
+
+	return ActualUserReserveData{
+		Asset:                    asset,
+		CurrentATokenBalance:     unpacked[0].(*big.Int),
+		CurrentStableDebt:        unpacked[1].(*big.Int),
+		CurrentVariableDebt:      unpacked[2].(*big.Int),
+		PrincipalStableDebt:      unpacked[3].(*big.Int),
+		ScaledVariableDebt:       unpacked[4].(*big.Int),
+		StableBorrowRate:         unpacked[5].(*big.Int),
+		LiquidityRate:            unpacked[6].(*big.Int),
+		StableRateLastUpdated:    bi.Uint64(),
+		UsageAsCollateralEnabled: unpacked[8].(bool),
+	}, nil
+}
+
+// userAssetKey tracks which user and asset a multicall sub-call belongs to,
+// so results can be mapped back after batch execution.
+type userAssetKey struct {
+	User  common.Address
+	Asset common.Address
+}
+
+// batchGetUserReserveDataMultiUser packs getUserReserveData calls for
+// multiple user×asset pairs into a single Multicall3 call. Returns a nested
+// map: user → asset → ActualUserReserveData. Per-call failures are silently
+// skipped (same behavior as batchGetUserReserveData).
+func (s *BlockchainService) batchGetUserReserveDataMultiUser(
+	ctx context.Context,
+	userAssets map[common.Address][]common.Address,
+	blockNumber int64,
+) (map[common.Address]map[common.Address]ActualUserReserveData, error) {
+	if len(userAssets) == 0 {
+		return make(map[common.Address]map[common.Address]ActualUserReserveData), nil
+	}
+
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, err
+	}
+
+	var totalCalls int
+	for _, assets := range userAssets {
+		totalCalls += len(assets)
+	}
+
+	calls := make([]outbound.Call, 0, totalCalls)
+	keys := make([]userAssetKey, 0, totalCalls)
+
+	for user, assets := range userAssets {
+		for _, asset := range assets {
+			callData, err := s.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
+			if err != nil {
+				return nil, fmt.Errorf("packing getUserReserveData for user=%s asset=%s: %w", user.Hex(), asset.Hex(), err)
+			}
+
+			calls = append(calls, outbound.Call{
+				Target:       poolDataProvider,
+				AllowFailure: true,
+				CallData:     callData,
+			})
+			keys = append(keys, userAssetKey{User: user, Asset: asset})
+		}
+	}
+
+	if len(calls) == 0 {
+		return make(map[common.Address]map[common.Address]ActualUserReserveData), nil
+	}
+
+	// Split into chunks to avoid exceeding gas limits. Each getUserReserveData
+	// call uses ~25-30k gas; a 500-call chunk stays well under typical limits.
+	const maxCallsPerChunk = 500
+
+	dataMap := make(map[common.Address]map[common.Address]ActualUserReserveData)
+	for start := 0; start < len(calls); start += maxCallsPerChunk {
+		end := min(start+maxCallsPerChunk, len(calls))
+
+		results, err := s.multicallClient.Execute(ctx, calls[start:end], big.NewInt(blockNumber))
+		if err != nil {
+			return nil, fmt.Errorf("multicall failed (chunk %d-%d): %w", start, end, err)
+		}
+
+		for i, result := range results {
+			key := keys[start+i]
+			if !result.Success || len(result.ReturnData) == 0 {
+				return nil, fmt.Errorf("getUserReserveData call failed for user=%s asset=%s", key.User.Hex(), key.Asset.Hex())
+			}
+
+			data, err := s.decodeUserReserveDataResult(key.Asset, result.ReturnData)
+			if err != nil {
+				return nil, fmt.Errorf("decoding getUserReserveData for user=%s asset=%s: %w", key.User.Hex(), key.Asset.Hex(), err)
+			}
+
+			if dataMap[key.User] == nil {
+				dataMap[key.User] = make(map[common.Address]ActualUserReserveData)
+			}
+			dataMap[key.User][key.Asset] = data
+		}
+	}
+
+	return dataMap, nil
+}
+
+func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool, blockNumber *big.Int) (map[common.Address]TokenMetadata, error) {
+	tokensToFetch := make([]common.Address, 0)
+	result := make(map[common.Address]TokenMetadata)
+
+	s.mu.RLock()
+	for token := range tokens {
+		if cached, ok := s.metadataCache[token]; ok {
+			result[token] = cached
+		} else {
+			tokensToFetch = append(tokensToFetch, token)
+		}
+	}
+	s.mu.RUnlock()
+
+	if len(tokensToFetch) == 0 {
+		return result, nil
+	}
+
+	calls := make([]outbound.Call, 0, len(tokensToFetch)*3)
+	for _, token := range tokensToFetch {
+		decimalsData, _ := s.erc20ABI.Pack("decimals")
+		symbolData, _ := s.erc20ABI.Pack("symbol")
+		nameData, _ := s.erc20ABI.Pack("name")
+
+		calls = append(calls,
+			outbound.Call{Target: token, AllowFailure: true, CallData: decimalsData},
+			outbound.Call{Target: token, AllowFailure: true, CallData: symbolData},
+			outbound.Call{Target: token, AllowFailure: true, CallData: nameData},
+		)
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	// Each token contributes 3 sub-calls (decimals, symbol, name) — keep
+	// the constant near its consumer so a future change adding/removing
+	// sub-calls trips this assertion immediately rather than silently
+	// shifting the slice math below.
+	const subCallsPerToken = 3
+	if len(results) != len(tokensToFetch)*subCallsPerToken {
+		return result, fmt.Errorf("BatchGetTokenMetadata: expected %d results (%d tokens × %d sub-calls), got %d",
+			len(tokensToFetch)*subCallsPerToken, len(tokensToFetch), subCallsPerToken, len(results))
+	}
+
+	var incomplete []common.Address
+	for i := 0; i < len(tokensToFetch); i++ {
+		token := tokensToFetch[i]
+		decimalsIdx := i * subCallsPerToken
+		symbolIdx := i*subCallsPerToken + 1
+		nameIdx := i*subCallsPerToken + 2
+
+		// Per VEC-188: every sub-call for a token must succeed, otherwise we
+		// refuse to cache or surface partial metadata — zero-valued entries
+		// can silently poison the cache for the process lifetime, causing
+		// retries to keep failing until DLQ.
+		tokenResults := results[decimalsIdx : nameIdx+1]
+		if err := rpcerr.RequireAllSucceeded(tokenResults, fmt.Sprintf("BatchGetTokenMetadata(%s)", token.Hex())); err != nil {
+			incomplete = append(incomplete, token)
+			continue
+		}
+
+		// Per VEC-188 PR review: an Unpack error or wrong-typed payload
+		// must also disqualify the token from being cached. A pre-fix
+		// no-op fall-through would persist a zero-valued metadata row in
+		// the cache and poison every subsequent read.
+		decimalsUnpacked, err := s.erc20ABI.Unpack("decimals", results[decimalsIdx].ReturnData)
+		if err != nil || len(decimalsUnpacked) == 0 {
+			incomplete = append(incomplete, token)
+			continue
+		}
+		decimals, ok := decimalsUnpacked[0].(uint8)
+		if !ok {
+			incomplete = append(incomplete, token)
+			continue
+		}
+
+		// Decode symbol/name with the bytes32 fallback so legacy ERC20s
+		// like MKR (which return bytes32 instead of string) are accepted.
+		symbol, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "symbol", results[symbolIdx].ReturnData)
+		if err != nil {
+			incomplete = append(incomplete, token)
+			continue
+		}
+		name, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "name", results[nameIdx].ReturnData)
+		if err != nil {
+			incomplete = append(incomplete, token)
+			continue
+		}
+
+		metadata := TokenMetadata{Symbol: symbol, Decimals: int(decimals), Name: name}
+
+		// Token metadata (symbol, decimals, name) is immutable, so a
+		// concurrent cache miss producing duplicate fetches is safe — both
+		// writes produce the same value.
+		s.mu.Lock()
+		s.metadataCache[token] = metadata
+		s.mu.Unlock()
+		result[token] = metadata
+	}
+
+	if len(incomplete) > 0 {
+		addrs := make([]string, len(incomplete))
+		for i, a := range incomplete {
+			addrs[i] = a.Hex()
+		}
+		return result, fmt.Errorf("token metadata incomplete for %d tokens (sub-call reverts): %s",
+			len(incomplete), strings.Join(addrs, ","))
+	}
+
+	return result, nil
+}
+
+// GetFullReserveData fetches reserve data, configuration data, and token addresses from ProtocolDataProvider.
+func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*ReserveData, *ReserveConfigData, *ReserveTokenAddresses, error) {
+	// Get the correct PoolDataProvider for this block
+	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Build multicall requests for getReserveData, getReserveConfigurationData, and getReserveTokensAddresses
+	getReserveDataCallData, err := s.getPoolDataProviderReserveDataABI.Pack("getReserveData", asset)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to pack getReserveData: %w", err)
+	}
+
+	getConfigCallData, err := s.getPoolDataProviderReserveConfigurationABI.Pack("getReserveConfigurationData", asset)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to pack getReserveConfigurationData: %w", err)
+	}
+
+	getTokenAddrsCallData, err := s.getReserveTokensAddressesABI.Pack("getReserveTokensAddresses", asset)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to pack getReserveTokensAddresses: %w", err)
+	}
+
+	calls := []outbound.Call{
+		{
+			Target:       poolDataProvider,
+			AllowFailure: true,
+			CallData:     getReserveDataCallData,
+		},
+		{
+			Target:       poolDataProvider,
+			AllowFailure: true,
+			CallData:     getConfigCallData,
+		},
+		{
+			Target:       poolDataProvider,
+			AllowFailure: true,
+			CallData:     getTokenAddrsCallData,
+		},
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("multicall failed: %w", err)
+	}
+
+	if len(results) < 3 {
+		return nil, nil, nil, fmt.Errorf("expected 3 results, got %d", len(results))
+	}
+
+	// Parse getReserveData result
+	if !results[0].Success {
+		return nil, nil, nil, fmt.Errorf("getReserveData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	if len(results[0].ReturnData) == 0 {
+		return nil, nil, nil, fmt.Errorf("%w: getReserveData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
+	}
+	reserveData, err := s.parseReserveData(results[0].ReturnData)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse reserve data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+	}
+
+	// Parse getReserveConfigurationData result
+	if !results[1].Success {
+		return nil, nil, nil, fmt.Errorf("getReserveConfigurationData call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	if len(results[1].ReturnData) == 0 {
+		return nil, nil, nil, fmt.Errorf("%w: getReserveConfigurationData returned empty data for asset %s at block %d", ErrReserveNotFound, asset.Hex(), blockNumber)
+	}
+	configData, err := s.parseReserveConfigurationData(results[1].ReturnData)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse configuration data for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+	}
+
+	// Parse getReserveTokensAddresses result
+	if !results[2].Success {
+		return nil, nil, nil, fmt.Errorf("getReserveTokensAddresses call failed for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	if len(results[2].ReturnData) == 0 {
+		return nil, nil, nil, fmt.Errorf("getReserveTokensAddresses returned empty data for asset %s at block %d", asset.Hex(), blockNumber)
+	}
+	tokenAddresses, err := s.parseReserveTokenAddresses(results[2].ReturnData)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to parse reserve token addresses for asset %s at block %d: %w", asset.Hex(), blockNumber, err)
+	}
+
+	return reserveData, configData, tokenAddresses, nil
+}
+
+func (s *BlockchainService) parseReserveTokenAddresses(data []byte) (*ReserveTokenAddresses, error) {
+	unpacked, err := s.getReserveTokensAddressesABI.Unpack("getReserveTokensAddresses", data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack getReserveTokensAddresses: %w", err)
+	}
+	if len(unpacked) < 3 {
+		return nil, fmt.Errorf("expected 3 values from getReserveTokensAddresses, got %d", len(unpacked))
+	}
+
+	aToken, ok := unpacked[0].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("aTokenAddress: expected common.Address, got %T", unpacked[0])
+	}
+	stableDebt, ok := unpacked[1].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("stableDebtTokenAddress: expected common.Address, got %T", unpacked[1])
+	}
+	variableDebt, ok := unpacked[2].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("variableDebtTokenAddress: expected common.Address, got %T", unpacked[2])
+	}
+
+	return &ReserveTokenAddresses{
+		ATokenAddress:            aToken,
+		StableDebtTokenAddress:   stableDebt,
+		VariableDebtTokenAddress: variableDebt,
+	}, nil
+}
+
+func (s *BlockchainService) parseReserveData(data []byte) (*ReserveData, error) {
+	unpacked, err := s.getPoolDataProviderReserveDataABI.Unpack("getReserveData", data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack getReserveData: %w", err)
+	}
+
+	outputs := s.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs
+	fieldIndex := buildFieldIndexMap(outputs)
+
+	switch s.protocolVersion {
+	case blockchain.ProtocolVersionAaveV2:
+		return parseReserveDataAaveV2(unpacked, fieldIndex)
+	case blockchain.ProtocolVersionAaveV3:
+		return parseReserveDataAaveV3(unpacked, fieldIndex)
+	case blockchain.ProtocolVersionSparkLend:
+		return parseReserveDataSparklend(unpacked, fieldIndex)
+	default:
+		return nil, fmt.Errorf("unknown protocol version: %s", s.protocolVersion)
+	}
+}
+
+// parseReserveDataAaveV2 parses Aave V2 reserve data (10 fields).
+func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
+	if len(unpacked) < 10 {
+		return nil, fmt.Errorf("expected 10 values from getReserveData (Aave V2), got %d", len(unpacked))
+	}
+
+	result := &ReserveData{
+		Unbacked:                big.NewInt(0), // Not available in V2
+		AccruedToTreasuryScaled: big.NewInt(0), // Not available in V2
+	}
+
+	var err error
+
+	// Map availableLiquidity to TotalAToken as proxy
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "availableLiquidity")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
+// parseReserveDataAaveV3 parses Aave V3 reserve data (12 fields).
+func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
+	if len(unpacked) < 12 {
+		return nil, fmt.Errorf("expected 12 values from getReserveData (Aave V3), got %d", len(unpacked))
+	}
+
+	result := &ReserveData{}
+	var err error
+
+	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "averageStableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
+// parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
+func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
+	result := &ReserveData{}
+	var err error
+
+	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
+	if err != nil {
+		return nil, err
+	}
+
+	result.AverageStableBorrowRate = big.NewInt(0) // Not available in Sparklend
+
+	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
+	result.LastUpdateTimestamp = timestamp.Int64()
+
+	return result, nil
+}
+
+func (s *BlockchainService) parseReserveConfigurationData(data []byte) (*ReserveConfigData, error) {
+	unpacked, err := s.getPoolDataProviderReserveConfigurationABI.Unpack("getReserveConfigurationData", data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unpack getReserveConfigurationData: %w", err)
+	}
+
+	if len(unpacked) < 10 {
+		return nil, fmt.Errorf("expected 10 values from getReserveConfigurationData, got %d", len(unpacked))
+	}
+
+	outputs := s.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs
+	fieldIndex := buildFieldIndexMap(outputs)
+
+	result := &ReserveConfigData{}
+
+	result.Decimals, err = getBigIntByName(unpacked, fieldIndex, "decimals")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LTV, err = getBigIntByName(unpacked, fieldIndex, "ltv")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidationThreshold, err = getBigIntByName(unpacked, fieldIndex, "liquidationThreshold")
+	if err != nil {
+		return nil, err
+	}
+
+	result.LiquidationBonus, err = getBigIntByName(unpacked, fieldIndex, "liquidationBonus")
+	if err != nil {
+		return nil, err
+	}
+
+	result.ReserveFactor, err = getBigIntByName(unpacked, fieldIndex, "reserveFactor")
+	if err != nil {
+		return nil, err
+	}
+
+	result.UsageAsCollateralEnabled, err = getBoolByName(unpacked, fieldIndex, "usageAsCollateralEnabled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.BorrowingEnabled, err = getBoolByName(unpacked, fieldIndex, "borrowingEnabled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.StableBorrowRateEnabled, err = getBoolByName(unpacked, fieldIndex, "stableBorrowRateEnabled")
+	if err != nil {
+		return nil, err
+	}
+
+	result.IsActive, err = getBoolByName(unpacked, fieldIndex, "isActive")
+	if err != nil {
+		return nil, err
+	}
+
+	result.IsFrozen, err = getBoolByName(unpacked, fieldIndex, "isFrozen")
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// buildFieldIndexMap returns a map from each ABI output name to its index in the provided Arguments slice.
+// If an output has an empty name the map will contain an entry with the empty string key.
+func buildFieldIndexMap(outputs abi.Arguments) map[string]int {
+	fieldIndex := make(map[string]int, len(outputs))
+	for i, arg := range outputs {
+		fieldIndex[arg.Name] = i
+	}
+	return fieldIndex
+}
+
+// getBigIntByName retrieves a *big.Int value from an ABI unpacked output slice by field name.
+// It uses fieldIndex to resolve the field's index and returns the corresponding *big.Int.
+// Returns an error if the field name is not present, the index is out of range, or the value is not a *big.Int.
+func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string) (*big.Int, error) {
+	idx, ok := fieldIndex[fieldName]
+	if !ok {
+		return nil, fmt.Errorf("field %s not found in ABI", fieldName)
+	}
+
+	if idx >= len(unpacked) {
+		return nil, fmt.Errorf("index %d out of range for %s", idx, fieldName)
+	}
+
+	v, ok := unpacked[idx].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("field %s expected *big.Int, got %T", fieldName, unpacked[idx])
+	}
+
+	return v, nil
+}
+
+// getBoolByName extracts a boolean value identified by fieldName from an unpacked ABI output using fieldIndex.
+// It returns the boolean or an error if the field is not present, the index is out of range, or the value is not a bool.
+func getBoolByName(unpacked []any, fieldIndex map[string]int, fieldName string) (bool, error) {
+	idx, ok := fieldIndex[fieldName]
+	if !ok {
+		return false, fmt.Errorf("field %s not found in ABI", fieldName)
+	}
+
+	if idx >= len(unpacked) {
+		return false, fmt.Errorf("index %d out of range for %s", idx, fieldName)
+	}
+
+	v, ok := unpacked[idx].(bool)
+	if !ok {
+		return false, fmt.Errorf("field %s expected bool, got %T", fieldName, unpacked[idx])
+	}
+
+	return v, nil
+}

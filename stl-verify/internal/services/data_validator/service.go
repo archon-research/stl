@@ -396,7 +396,7 @@ func selectRandomBlocks(fromBlock, toBlock int64, n int) []int64 {
 	if int64(n) >= blockRange {
 		// Return all blocks in range
 		blocks := make([]int64, blockRange)
-		for i := int64(0); i < blockRange; i++ {
+		for i := range blockRange {
 			blocks[i] = fromBlock + i
 		}
 		return blocks

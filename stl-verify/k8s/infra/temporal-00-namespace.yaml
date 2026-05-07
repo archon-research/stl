@@ -1,0 +1,10 @@
+# =============================================================================
+# LOCAL DEV ONLY — mirrors the temporal namespace created by the infrastructure
+# repo in EKS. Required so that temporal-db and temporal-server land in the
+# correct namespace and are reachable at temporal-server.temporal:7233.
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: temporal

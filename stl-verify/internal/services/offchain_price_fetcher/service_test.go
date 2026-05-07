@@ -18,9 +18,7 @@ import (
 // Test Helpers
 // =============================================================================
 
-func ptr[T any](v T) *T {
-	return &v
-}
+//go:fix inline
 
 // =============================================================================
 // Mock PriceProvider
@@ -194,7 +192,7 @@ func createPriceData(assetID string, price float64, ts time.Time) outbound.Price
 	return outbound.PriceData{
 		SourceAssetID: assetID,
 		PriceUSD:      price,
-		MarketCapUSD:  ptr(price * 1000000),
+		MarketCapUSD:  new(price * 1000000),
 		Timestamp:     ts,
 	}
 }

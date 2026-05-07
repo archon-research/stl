@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ import (
 func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	repo := postgres.NewBlockStateRepository(pool, 1, nil)
 	return repo, cleanup
 }
@@ -29,11 +30,12 @@ func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 func saveBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepository, number int64) {
 	t.Helper()
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     number,
-		Hash:       fmt.Sprintf("0x%064x", number),
-		ParentHash: fmt.Sprintf("0x%064x", number-1),
-		ReceivedAt: time.Now().Unix(),
-		IsOrphaned: false,
+		Number:         number,
+		Hash:           fmt.Sprintf("0x%064x", number),
+		ParentHash:     fmt.Sprintf("0x%064x", number-1),
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+		IsOrphaned:     false,
 	})
 	if err != nil {
 		t.Fatalf("failed to save block %d: %v", number, err)
@@ -41,6 +43,7 @@ func saveBlock(t *testing.T, ctx context.Context, repo *postgres.BlockStateRepos
 }
 
 func TestFindGaps_NoGaps(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -62,6 +65,7 @@ func TestFindGaps_NoGaps(t *testing.T) {
 }
 
 func TestFindGaps_SingleGapInMiddle(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -87,6 +91,7 @@ func TestFindGaps_SingleGapInMiddle(t *testing.T) {
 }
 
 func TestFindGaps_MultipleGaps(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -121,6 +126,7 @@ func TestFindGaps_MultipleGaps(t *testing.T) {
 }
 
 func TestFindGaps_GapAtBeginning(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -146,6 +152,7 @@ func TestFindGaps_GapAtBeginning(t *testing.T) {
 }
 
 func TestFindGaps_AlternatingMissing(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -180,6 +187,7 @@ func TestFindGaps_AlternatingMissing(t *testing.T) {
 }
 
 func TestFindGaps_OnlyOneBlock(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -205,6 +213,7 @@ func TestFindGaps_OnlyOneBlock(t *testing.T) {
 }
 
 func TestFindGaps_EmptyTable(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -228,6 +237,7 @@ func TestFindGaps_EmptyTable(t *testing.T) {
 }
 
 func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -260,6 +270,7 @@ func TestFindGaps_IgnoresOrphanedBlocks(t *testing.T) {
 }
 
 func TestFindGaps_LargeGap(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -284,6 +295,7 @@ func TestFindGaps_LargeGap(t *testing.T) {
 }
 
 func TestGetMinMaxBlockNumber(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -329,6 +341,7 @@ func TestGetMinMaxBlockNumber(t *testing.T) {
 }
 
 func TestGetMinMaxBlockNumber_IgnoresOrphaned(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 
@@ -361,6 +374,7 @@ func TestGetMinMaxBlockNumber_IgnoresOrphaned(t *testing.T) {
 }
 
 func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
+
 	// This test demonstrates the TOCTOU (Time-of-Check-Time-of-Use) race condition
 	// when two goroutines try to save blocks at the same height concurrently.
 	//
@@ -393,11 +407,12 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 			// 1. Get version count
 			// 2. Save block - version is now assigned atomically by SaveBlock
 			_, err := repo.SaveBlock(ctx, outbound.BlockState{
-				Number:     blockNum,
-				Hash:       fmt.Sprintf("0x%064x_%d", blockNum, id),
-				ParentHash: fmt.Sprintf("0x%064x", blockNum-1),
-				ReceivedAt: time.Now().Unix(),
-				IsOrphaned: false,
+				Number:         blockNum,
+				Hash:           fmt.Sprintf("0x%064x_%d", blockNum, id),
+				ParentHash:     fmt.Sprintf("0x%064x", blockNum-1),
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
+				IsOrphaned:     false,
 			})
 			if err != nil {
 				doneCh <- fmt.Errorf("goroutine %d: SaveBlock failed: %w", id, err)
@@ -477,6 +492,7 @@ func TestSaveBlock_ConcurrentVersionRaceCondition(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -494,6 +510,7 @@ func TestVerifyChainIntegrity_ValidChain(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -505,11 +522,12 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 
 	// Save block 6 with WRONG parent_hash (points to block 3 instead of 5)
 	_, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     6,
-		Hash:       fmt.Sprintf("0x%064x", 6),
-		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
-		ReceivedAt: time.Now().Unix(),
-		IsOrphaned: false,
+		Number:         6,
+		Hash:           fmt.Sprintf("0x%064x", 6),
+		ParentHash:     fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+		IsOrphaned:     false,
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 6: %v", err)
@@ -529,6 +547,7 @@ func TestVerifyChainIntegrity_BrokenChain(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -547,6 +566,7 @@ func TestVerifyChainIntegrity_EmptyRange(t *testing.T) {
 }
 
 func TestVerifyChainIntegrity_WithGaps(t *testing.T) {
+
 	repo, cleanup := setupPostgres(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -595,6 +615,7 @@ func (m *integrationMockEventSink) Publish(ctx context.Context, event outbound.E
 func (m *integrationMockEventSink) Close() error { return nil }
 
 func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
+
 	// 1. Setup
 	// Use the real Postgres repository to confirm the race condition affects the production implementation.
 	pgRepo, cleanup := setupPostgres(t)
@@ -619,9 +640,10 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 
 	// 2. Initial State: Block 99 exists with Hash A
 	block99 := outbound.BlockState{
-		Number:  99,
-		Hash:    "0xAAAAAAAAAAAAAAAA",
-		Version: 0,
+		Number:         99,
+		Hash:           "0xAAAAAAAAAAAAAAAA",
+		Version:        0,
+		BlockTimestamp: time.Now().Unix(),
 	}
 	if _, err := pgRepo.SaveBlock(ctx, block99); err != nil {
 		t.Fatalf("failed to save initial block: %v", err)
@@ -644,9 +666,10 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 			// Force update Block 99 to "0xCCCCCCCCCCCCCCCC" (Hash C)
 			pgRepo.MarkBlockOrphaned(ctx, "0xAAAAAAAAAAAAAAAA") // Orphan A
 			pgRepo.SaveBlock(ctx, outbound.BlockState{          // Save C
-				Number:     99,
-				Hash:       "0xCCCCCCCCCCCCCCCC",
-				ParentHash: "0xOLD_PARENT",
+				Number:         99,
+				Hash:           "0xCCCCCCCCCCCCCCCC",
+				ParentHash:     "0xOLD_PARENT",
+				BlockTimestamp: time.Now().Unix(),
 			})
 		}
 	}
@@ -682,5 +705,99 @@ func TestIntegration_ProcessBlockData_LinkageRaceCondition(t *testing.T) {
 	orphaned100Val, _ := pgRepo.GetBlockByHash(ctx, "0xBBBBBBBBBBBBBBBB")
 	if orphaned100Val != nil && !orphaned100Val.IsOrphaned {
 		t.Errorf("Block 100 should reside in DB as orphaned")
+	}
+}
+
+// TestBackfillService_AdvancesWatermark_OnUnseededChain verifies that a chain
+// added to the `chain` table AFTER the schema migrations have run — and whose
+// backfill_watermark row therefore does not exist yet — still gets a watermark
+// row created by SetBackfillWatermark's UPSERT on the first successful pass.
+//
+// Pre-fix (VEC-149 schema bug), the INSERT inside the UPSERT fails with
+//
+//	ERROR: duplicate key value violates unique constraint "backfill_watermark_pkey" (SQLSTATE 23505)
+//
+// because the vestigial `id INTEGER PRIMARY KEY DEFAULT 1` column collides with
+// the seeded Ethereum row (id=1) before the `ON CONFLICT (chain_id)` arbiter is
+// evaluated. Post-fix, `chain_id` is the PK, there is no `id` column, and the
+// UPSERT resolves cleanly.
+func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
+
+	ctx := context.Background()
+
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	// Insert a fresh chain that was NOT in the `chain` table when the
+	// VEC-149 migration's seed ran. This guarantees the watermark row must be
+	// created by SetBackfillWatermark's UPSERT, not the seed.
+	const testChainID int64 = 999
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES ($1, $2)`,
+		testChainID, "VEC-149 Test Chain",
+	); err != nil {
+		t.Fatalf("failed to insert test chain: %v", err)
+	}
+
+	// Sanity: no watermark row exists for chain 999 yet.
+	var preCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM backfill_watermark WHERE chain_id = $1`, testChainID,
+	).Scan(&preCount); err != nil {
+		t.Fatalf("failed to count watermark rows before pass: %v", err)
+	}
+	if preCount != 0 {
+		t.Fatalf("expected 0 watermark rows for chain %d before pass, got %d "+
+			"(did the migration seed pick it up somehow?)", testChainID, preCount)
+	}
+
+	// Save a contiguous run of blocks 1..5 for chain 999, and mark each
+	// published so GetMinUnpublishedBlock doesn't cap the new watermark to 0.
+	repo := postgres.NewBlockStateRepository(pool, testChainID, nil)
+	const lastBlock int64 = 5
+	for i := int64(1); i <= lastBlock; i++ {
+		saveBlock(t, ctx, repo, i)
+		hash := fmt.Sprintf("0x%064x", i)
+		if err := repo.MarkPublishComplete(ctx, hash); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	// BoundaryCheckDepth = -1 disables the RPC boundary check — our mock
+	// client has no blocks and would otherwise spam Warn logs for each check.
+	// advanceWatermark still runs regardless of the boundary-check outcome.
+	svc, err := NewBackfillService(
+		BackfillConfig{
+			ChainID:            testChainID,
+			BoundaryCheckDepth: -1,
+			Logger:             slog.Default(),
+		},
+		newMockClient(),
+		repo,
+		memory.NewBlockCache(),
+		&integrationMockEventSink{},
+	)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+
+	// After one pass with no gaps, the watermark for chain 999 should be
+	// the max block we saved. Under the pre-fix schema, no row exists at all
+	// because the UPSERT's INSERT collided on `id`.
+	var watermark int64
+	if err := pool.QueryRow(ctx,
+		`SELECT watermark FROM backfill_watermark WHERE chain_id = $1`, testChainID,
+	).Scan(&watermark); err != nil {
+		t.Fatalf("expected a watermark row for chain %d after RunOnce, got: %v "+
+			"(this is the failure mode VEC-149 fixes — "+
+			"look for 'duplicate key value violates unique constraint \"backfill_watermark_pkey\"' "+
+			"earlier in the log)", testChainID, err)
+	}
+	if watermark != lastBlock {
+		t.Errorf("expected watermark %d, got %d", lastBlock, watermark)
 	}
 }

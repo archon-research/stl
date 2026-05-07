@@ -26,14 +26,14 @@ func NewProtocol(id int64, chainID int, address []byte, name, protocolType strin
 		CreatedAtBlock: createdAtBlock,
 		Metadata:       make(map[string]any),
 	}
-	if err := p.validate(); err != nil {
-		return nil, err
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("NewProtocol: %w", err)
 	}
 	return p, nil
 }
 
 // validate checks that all fields have valid values.
-func (p *Protocol) validate() error {
+func (p *Protocol) Validate() error {
 	if p.ID <= 0 {
 		return fmt.Errorf("id must be positive, got %d", p.ID)
 	}

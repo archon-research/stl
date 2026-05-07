@@ -1,0 +1,32 @@
+# =============================================================================
+# LOCAL DEV ONLY — mirrors the CNPG Cluster in the infrastructure repo
+# (gitops/tooling/archon-prod/temporal/temporal-db.yaml).
+#
+# Differences from prod:
+#   - storageClass: standard (kind default, not gp2)
+#   - No ArgoCD sync-wave annotations
+#
+# Primary endpoint (read/write): temporal-db-rw.temporal.svc.cluster.local:5432
+# Generated credentials secret:  temporal-db-app (keys: username, password)
+# =============================================================================
+
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: temporal-db
+  namespace: temporal
+spec:
+  instances: 1
+
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.13
+
+  bootstrap:
+    initdb:
+      database: temporal
+      owner: temporal
+      postInitSQL:
+        - ALTER USER temporal CREATEDB;
+
+  storage:
+    storageClass: standard
+    size: 1Gi

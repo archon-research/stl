@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+early_access: false
+tone_instructions: >-
+  Maintain a formal tone, highlighting issues, and suggesting production-grade, elegant, and concise solutions.
+
+reviews:
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  review_details: false
+  in_progress_fortune: false
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+
+  path_filters:
+    - "!stl-verify/dist/**"
+    - "!stl-verify/coverage.out"
+    - "!stl-verify/**/*.test"
+    - "!stl-verify/go.sum"
+    - "!docs/**"
+
+  path_instructions:
+    - path: "stl-verify/internal/ports/**"
+      instructions: |
+        This is the ports layer (interface definitions only).
+        Interfaces should be small and focused — flag large interfaces that could be split.
+        Use the -er suffix for behavior interfaces (Reader, Publisher, etc.).
+        No implementation logic should appear here.
+
+    - path: "stl-verify/internal/services/**"
+      instructions: |
+        This is the application/services layer. It must only depend on domain entities and port interfaces.
+        Flag any direct import of `internal/adapters/` as a CRITICAL architecture violation.
+        Flag any business logic that belongs in the domain layer.
+        All new or modified service files should have corresponding tests.
+
+    - path: "stl-verify/internal/adapters/**"
+      instructions: |
+        This is the adapters layer. Adapters implement port interfaces and may use external dependencies.
+        Flag any business logic that belongs in the domain or services layer.
+        Check for resource leaks: unclosed DB connections, HTTP response bodies, file handles.
+        Ensure errors are wrapped with context using fmt.Errorf("doing X: %w", err).
+
+    - path: "stl-verify/cmd/**/main.go"
+      instructions: |
+        main() should be at the top of the file.
+        main() should be thin — delegate to well-named helper functions.
+        Flag any business logic that belongs in services or domain.
+
+    - path: "stl-verify/db/migrations/**"
+      instructions: |
+        Flag any migration that adds a foreign key column without a corresponding index.
+        Flag destructive operations (DROP COLUMN, DROP TABLE, TRUNCATE) without a clear comment explaining the rollback strategy.
+        Prefer additive migrations; flag migrations that may cause downtime on a live database.
+        Flag any migration that is not inserting its file name into the `migrations` table as a CRITICAL issue.
+
+    - path: "**/*_test.go"
+      instructions: |
+        Tests should be table-driven for multiple cases.
+        Mock outbound ports for unit tests; use testcontainers/integration setup for integration tests.
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    ignore_title_keywords:
+      - "wip"
+      - "WIP"
+      - "draft"
+      - "Draft"
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # CodeRabbit will automatically pick up CLAUDE.md, AGENTS.md, and
+    # .github/copilot-instructions.md via its default file patterns.

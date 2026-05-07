@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Build Stage
 # -----------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.2-alpine AS builder
 
 # Build arguments for cross-compilation and versioning
 ARG TARGETARCH
@@ -28,9 +28,9 @@ COPY . .
 
 # Build the binary for target architecture (ARM64 for Fargate)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
-    -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME}" \
+    -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.GitCommit=${GIT_COMMIT} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
     -o /watcher \
-    ./cmd/watcher
+    ./cmd/base/watcher
 
 # -----------------------------------------------------------------------------
 # Runtime Stage

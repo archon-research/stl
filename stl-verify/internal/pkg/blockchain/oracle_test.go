@@ -509,7 +509,7 @@ func TestFetchOraclePricesIndividual_VerifiesCallTargets(t *testing.T) {
 	}
 }
 
-func TestConvertOraclePriceToUSD(t *testing.T) {
+func TestScaleByDecimals(t *testing.T) {
 	tests := []struct {
 		name     string
 		rawPrice *big.Int
@@ -567,9 +567,9 @@ func TestConvertOraclePriceToUSD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ConvertOraclePriceToUSD(tt.rawPrice, 8)
+			got := ScaleByDecimals(tt.rawPrice, 8)
 			if !floatEquals(got, tt.want) {
-				t.Errorf("ConvertOraclePriceToUSD(%v, 8) = %v, want %v", tt.rawPrice, got, tt.want)
+				t.Errorf("ScaleByDecimals(%v, 8) = %v, want %v", tt.rawPrice, got, tt.want)
 			}
 		})
 	}

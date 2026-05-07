@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,10 +39,11 @@ func TestBackfillService_FillsGaps(t *testing.T) {
 	// Seed the state repo with blocks 1, 50, and 100 (leaving gaps 2-49 and 51-99)
 	for _, num := range []int64{1, 50, 100} {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
 		}
@@ -123,11 +125,12 @@ func TestBackfillService_VersionIsSavedToDatabase(t *testing.T) {
 	// Seed blocks 1 and 10 to create a gap at 2-9
 	for _, num := range []int64{1, 10} {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
-			Version:    0,
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+			Version:        0,
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", num, err)
 		}
@@ -190,9 +193,10 @@ func TestVerifyChainIntegrity_MemoryAdapter_ValidChain(t *testing.T) {
 	// Save a contiguous chain with correct parent_hash links
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -213,9 +217,10 @@ func TestVerifyChainIntegrity_MemoryAdapter_BrokenChain(t *testing.T) {
 	// Save blocks 1-5 with correct links
 	for i := int64(1); i <= 5; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -224,9 +229,10 @@ func TestVerifyChainIntegrity_MemoryAdapter_BrokenChain(t *testing.T) {
 
 	// Save block 6 with WRONG parent_hash (points to block 3 instead of 5)
 	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     6,
-		Hash:       fmt.Sprintf("0x%064x", 6),
-		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		Number:         6,
+		Hash:           fmt.Sprintf("0x%064x", 6),
+		ParentHash:     fmt.Sprintf("0x%064x", 3), // Wrong! Should be 5
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 6: %v", err)
@@ -259,9 +265,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 	// Blocks 1-5 correct, block 6 has wrong parent
 	for i := int64(1); i <= 5; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -270,9 +277,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 
 	// Block 6 with wrong parent_hash
 	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     6,
-		Hash:       fmt.Sprintf("0x%064x", 6),
-		ParentHash: fmt.Sprintf("0x%064x", 3), // Wrong! Points to block 3
+		Number:         6,
+		Hash:           fmt.Sprintf("0x%064x", 6),
+		ParentHash:     fmt.Sprintf("0x%064x", 3), // Wrong! Points to block 3
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 6: %v", err)
@@ -281,9 +289,10 @@ func TestAdvanceWatermark_RefusesOnBrokenChain(t *testing.T) {
 	// Blocks 7-10 continue (even though 6 is broken)
 	for i := int64(7); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -522,10 +531,11 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 	// Pre-populate state repo with blocks 1-8 and 10 (leaving gap at 9)
 	for i := int64(1); i <= 8; i++ {
 		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       client.GetHeader(i).Hash,
-			ParentHash: client.GetHeader(i).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}); err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
 		}
@@ -533,10 +543,11 @@ func TestBackfillService_RejectsNonCanonicalBlock(t *testing.T) {
 
 	// Save block 10 with parent_hash pointing to ORIGINAL block 9 hash
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     10,
-		Hash:       client.GetHeader(10).Hash,
-		ParentHash: originalBlock9Hash, // This is A9, but client returns B9
-		ReceivedAt: time.Now().Unix(),
+		Number:         10,
+		Hash:           client.GetHeader(10).Hash,
+		ParentHash:     originalBlock9Hash, // This is A9, but client returns B9
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block 10: %v", err)
 	}
@@ -609,10 +620,11 @@ func saveBlockState(t *testing.T, ctx context.Context, repo outbound.BlockStateR
 	t.Helper()
 
 	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
-		Number:     num,
-		Hash:       hash,
-		ParentHash: parentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         num,
+		Hash:           hash,
+		ParentHash:     parentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block %d: %v", num, err)
 	}
@@ -776,7 +788,7 @@ func TestBackfillService_SkipsStaleBlockWhenLiveAlreadyProcessed(t *testing.T) {
 	// but processes it after live service has already saved the canonical block.
 	staleBlockData := outbound.BlockData{
 		BlockNumber: 100,
-		Block:       []byte(fmt.Sprintf(`{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99)),
+		Block:       fmt.Appendf(nil, `{"number":"0x64","hash":"%s","parentHash":"0x%064x","timestamp":"0x0"}`, staleHash, 99),
 	}
 
 	// This should skip the block, not save it
@@ -959,10 +971,11 @@ func TestVerifyBoundaryBlocks_DetectsUncleReorg(t *testing.T) {
 
 	// 2. Initial State: Repo has Block 100 (Hash A)
 	block100 := outbound.BlockState{
-		Number:     100,
-		Hash:       "0xHASH_A",
-		ParentHash: "0xHASH_99",
-		Version:    0,
+		Number:         100,
+		Hash:           "0xHASH_A",
+		ParentHash:     "0xHASH_99",
+		Version:        0,
+		BlockTimestamp: time.Now().Unix(),
 	}
 	if _, err := repo.SaveBlock(ctx, block100); err != nil {
 		t.Fatalf("failed to save block: %v", err)
@@ -1027,11 +1040,11 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 	// Canonical: 100A, 101A
 	block100A := outbound.BlockState{
 		Number: 100, Hash: "0xHASH_100A", ParentHash: "0xHASH_99",
-		IsOrphaned: false, ReceivedAt: time.Now().Unix(),
+		IsOrphaned: false, ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix(),
 	}
 	block101A := outbound.BlockState{
 		Number: 101, Hash: "0xHASH_101A", ParentHash: "0xHASH_100A",
-		IsOrphaned: false, ReceivedAt: time.Now().Unix(),
+		IsOrphaned: false, ReceivedAt: time.Now().Unix(), BlockTimestamp: time.Now().Unix(),
 	}
 
 	if _, err := stateRepo.SaveBlock(ctx, block100A); err != nil {
@@ -1049,10 +1062,11 @@ func TestVerifyBoundaryBlocks_RecoverFromDeepReorgCorrected(t *testing.T) {
 
 	// Pre-populate ancestor 99 in DB so 100B binds correctly
 	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     99,
-		Hash:       "0xHASH_99",
-		ParentHash: "0xHASH_98",
-		IsOrphaned: false,
+		Number:         99,
+		Hash:           "0xHASH_99",
+		ParentHash:     "0xHASH_98",
+		IsOrphaned:     false,
+		BlockTimestamp: time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("failed to save block: %v", err)
 	}
@@ -1160,10 +1174,11 @@ func TestRetry_CacheFailureIsRetried(t *testing.T) {
 	// Save blocks 1 and 5 to create a gap (blocks 2-4 missing)
 	for _, num := range []int64{1, 5} {
 		block := outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}
 		_, _ = stateRepo.SaveBlock(ctx, block)
 		_ = stateRepo.MarkPublishComplete(ctx, block.Hash)
@@ -1235,10 +1250,11 @@ func TestRetry_PublishFailureIsRetried(t *testing.T) {
 	// Create gap: save blocks 1 and 5
 	for _, num := range []int64{1, 5} {
 		block := outbound.BlockState{
-			Number:     num,
-			Hash:       client.GetHeader(num).Hash,
-			ParentHash: client.GetHeader(num).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         num,
+			Hash:           client.GetHeader(num).Hash,
+			ParentHash:     client.GetHeader(num).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		}
 		_, _ = stateRepo.SaveBlock(ctx, block)
 		_ = stateRepo.MarkPublishComplete(ctx, block.Hash)
@@ -1319,10 +1335,11 @@ func TestAdvanceWatermark_StopsAtUnpublishedBlock(t *testing.T) {
 	// Save all 10 blocks to the state repo
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1376,10 +1393,11 @@ func TestAdvanceWatermark_AdvancesWhenAllPublished(t *testing.T) {
 	// Save all 10 blocks
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       fmt.Sprintf("0x%064x", i),
-			ParentHash: fmt.Sprintf("0x%064x", i-1),
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           fmt.Sprintf("0x%064x", i),
+			ParentHash:     fmt.Sprintf("0x%064x", i-1),
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1442,10 +1460,11 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 	// Save blocks 1-10 to the state repo (simulating live service having processed them)
 	for i := int64(1); i <= 10; i++ {
 		_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-			Number:     i,
-			Hash:       client.GetHeader(i).Hash,
-			ParentHash: client.GetHeader(i).ParentHash,
-			ReceivedAt: time.Now().Unix(),
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
 		})
 		if err != nil {
 			t.Fatalf("failed to save block %d: %v", i, err)
@@ -1455,10 +1474,11 @@ func TestWatermarkAlreadyPastUnpublished_RetryFixesThem(t *testing.T) {
 	// Save block 12 (live service jumped ahead), leaving a gap at 11.
 	// This gap ensures retryIncompletePublishes is reached during findAndFillGaps.
 	_, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:     12,
-		Hash:       client.GetHeader(12).Hash,
-		ParentHash: client.GetHeader(12).ParentHash,
-		ReceivedAt: time.Now().Unix(),
+		Number:         12,
+		Hash:           client.GetHeader(12).Hash,
+		ParentHash:     client.GetHeader(12).ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
 	})
 	if err != nil {
 		t.Fatalf("failed to save block 12: %v", err)
@@ -1612,5 +1632,470 @@ func TestPublishNeverHappensWithoutCache(t *testing.T) {
 				t.Logf("correctly rejected: %v", err)
 			}
 		})
+	}
+}
+
+// blockingBatchClient wraps MockBlockchainClient and makes GetBlocksBatch block
+// on releaseCh (or ctx cancellation), so a test can hold gap-fill in flight
+// while asserting the retry loop makes progress independently.
+type blockingBatchClient struct {
+	*testutil.MockBlockchainClient
+	releaseCh chan struct{}
+}
+
+func (b *blockingBatchClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
+	select {
+	case <-b.releaseCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.MockBlockchainClient.GetBlocksBatch(ctx, blockNums, fullTx)
+}
+
+// TestBackfillService_RetryLoopIsIndependentOfGapFill verifies that the retry
+// loop publishes a saved-but-unpublished block even while the gap-fill loop is
+// blocked waiting for a batch fetch — proving the two loops are decoupled.
+func TestBackfillService_RetryLoopIsIndependentOfGapFill(t *testing.T) {
+	ctx := t.Context()
+
+	base := newMockClient()
+	// Populate enough blocks to create a big gap range: 1..1001.
+	for i := int64(1); i <= 1001; i++ {
+		base.AddBlock(i, "")
+	}
+
+	releaseGapFill := make(chan struct{})
+	client := &blockingBatchClient{
+		MockBlockchainClient: base,
+		releaseCh:            releaseGapFill,
+	}
+
+	stateRepo := memory.NewBlockStateRepository()
+	cacheStore := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Seed block 1 as saved-but-unpublished (SaveBlock sets block_published=false).
+	hdr1 := base.GetHeader(1)
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         1,
+		Hash:           hdr1.Hash,
+		ParentHash:     hdr1.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 1: %v", err)
+	}
+
+	// Seed block 1001 as already-published to bound the gap range at 2..1000.
+	hdr1001 := base.GetHeader(1001)
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         1001,
+		Hash:           hdr1001.Hash,
+		ParentHash:     hdr1001.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 1001: %v", err)
+	}
+	if err := stateRepo.MarkPublishComplete(ctx, hdr1001.Hash); err != nil {
+		t.Fatalf("mark 1001 published: %v", err)
+	}
+
+	// Signal when block 1 is published (i.e. the retry loop processed it).
+	block1Published := make(chan struct{}, 1)
+	eventSink.OnPublish(func(e outbound.Event) {
+		be, ok := e.(outbound.BlockEvent)
+		if !ok || be.BlockNumber != 1 {
+			return
+		}
+		select {
+		case block1Published <- struct{}{}:
+		default:
+		}
+	})
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		PollInterval:       20 * time.Millisecond,
+		BoundaryCheckDepth: -1, // disable boundary RPC chatter for this test
+		Logger:             slog.Default(),
+	}
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	if err := service.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := service.Stop(); err != nil {
+			t.Errorf("stop: %v", err)
+		}
+		// Unblock any goroutine that selected ctx.Done() before clearing its
+		// select arm. Safe because service.Stop() above called wg.Wait(), which
+		// guarantees no goroutine remains blocked on this channel.
+		close(releaseGapFill)
+	})
+
+	// The retry loop must publish block 1 while gap-fill is blocked on the wrapper.
+	select {
+	case <-block1Published:
+		// Expected: retry fired independently.
+	case <-time.After(2 * time.Second):
+		t.Fatal("block 1 retry did not fire within 2s while gap-fill was blocked — loops are still coupled")
+	}
+
+	// Gap-fill must still be blocked: no events for the gap range 2..1000.
+	for _, be := range eventSink.GetBlockEvents() {
+		if be.BlockNumber >= 2 && be.BlockNumber <= 1000 {
+			t.Fatalf("unexpected event for gap block %d while gap-fill should be blocked", be.BlockNumber)
+		}
+	}
+
+	// Block 1 should now be marked published.
+	blk, err := stateRepo.GetBlockByHash(ctx, hdr1.Hash)
+	if err != nil {
+		t.Fatalf("get block 1: %v", err)
+	}
+	if blk == nil {
+		t.Fatal("block 1 missing from state repo after retry")
+	}
+	if !blk.BlockPublished {
+		t.Fatal("block 1 should be marked block_published=true after retry")
+	}
+}
+
+// TestBackfillService_RetriesIncompletePublishes_WhenNoGaps reproduces the bug where
+// blocks saved to DB but not published (block_published=false) are never retried
+// when there are no missing block numbers (no gaps).
+//
+// Scenario:
+// 1. LiveService saves blocks 1-10 to DB
+// 2. Cache/SNS publish fails for blocks 3,5,7 → block_published=false
+// 3. Backfill runs, FindGaps() returns 0 gaps (all block numbers exist)
+// 4. BUG: retryIncompletePublishes() is never called due to early return
+// 5. Blocks 3,5,7 remain unpublished forever
+func TestBackfillService_RetriesIncompletePublishes_WhenNoGaps(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Pre-populate client with blocks 1-10
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+
+	// Save ALL blocks 1-10 to DB (simulating LiveService saved them)
+	for i := int64(1); i <= 10; i++ {
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           client.GetHeader(i).Hash,
+			ParentHash:     client.GetHeader(i).ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("failed to save block %d: %v", i, err)
+		}
+	}
+
+	// Mark most blocks as published (simulating successful cache+SNS)
+	for i := int64(1); i <= 10; i++ {
+		if i == 3 || i == 5 || i == 7 {
+			continue // Leave these UNpublished (simulating cache/SNS failure)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, client.GetHeader(i).Hash); err != nil {
+			t.Fatalf("failed to mark block %d published: %v", i, err)
+		}
+	}
+
+	// Verify precondition: blocks 3,5,7 are unpublished
+	incomplete, err := stateRepo.GetBlocksWithIncompletePublish(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get incomplete publishes: %v", err)
+	}
+	if len(incomplete) != 3 {
+		t.Fatalf("expected 3 incomplete publishes, got %d", len(incomplete))
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1, // Disable boundary check (not relevant to this test)
+		Logger:             slog.Default(),
+	}
+
+	service, err := NewBackfillService(config, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Run a single backfill pass
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("backfill failed: %v", err)
+	}
+
+	// After backfill, ALL blocks should be published (blocks 3,5,7 should have been retried)
+	stillIncomplete, err := stateRepo.GetBlocksWithIncompletePublish(ctx, 100)
+	if err != nil {
+		t.Fatalf("failed to get incomplete publishes after backfill: %v", err)
+	}
+	if len(stillIncomplete) != 0 {
+		unpublishedNums := make([]int64, len(stillIncomplete))
+		for i, b := range stillIncomplete {
+			unpublishedNums[i] = b.Number
+		}
+		t.Errorf("expected 0 incomplete publishes after backfill, got %d (blocks: %v)",
+			len(stillIncomplete), unpublishedNums)
+	}
+
+	// Verify events were published for the retried blocks
+	blockEvents := eventSink.GetBlockEvents()
+	retriedBlocks := map[int64]bool{}
+	for _, e := range blockEvents {
+		retriedBlocks[e.BlockNumber] = true
+	}
+	for _, num := range []int64{3, 5, 7} {
+		if !retriedBlocks[num] {
+			t.Errorf("block %d was not retried/published", num)
+		}
+	}
+}
+
+// TestBackfillService_RetryOrphansReorgedBlock verifies that when the retry
+// loop cannot fetch a stored block by hash (because the chain reorged it
+// away) but the canonical chain has a different hash at that number, the
+// stored block is marked orphaned so it drops out of the retry queue (VEC-146).
+func TestBackfillService_RetryOrphansReorgedBlock(t *testing.T) {
+	ctx := t.Context()
+
+	client := newMockClient()
+	// Block 1 is canonical and published — anchors the chain for advanceWatermark.
+	client.AddBlock(1, "")
+	hdr1 := client.GetHeader(1)
+	// Block 2: canonical chain has some hash Y. Set it explicitly to a value
+	// that differs from the stored-but-reorged-away hash X below.
+	canonicalY := "0x" + strings.Repeat("c", 64)
+	client.SetBlockHeader(2, canonicalY, hdr1.Hash)
+
+	stateRepo := memory.NewBlockStateRepository()
+	cacheStore := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Seed block 1 as published (chain anchor).
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         1,
+		Hash:           hdr1.Hash,
+		ParentHash:     hdr1.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 1: %v", err)
+	}
+	if err := stateRepo.MarkPublishComplete(ctx, hdr1.Hash); err != nil {
+		t.Fatalf("mark 1 published: %v", err)
+	}
+	// Seed block 2 with a stored hash X that is NOT the canonical hash Y.
+	// This simulates the state after a reorg: we stored the pre-reorg block,
+	// the chain advanced past us, and now our hash is un-fetchable.
+	storedX := "0x" + strings.Repeat("a", 64)
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         2,
+		Hash:           storedX,
+		ParentHash:     hdr1.Hash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 2: %v", err)
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		PollInterval:       30 * time.Second,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.Default(),
+	}
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	if err := service.RunOnce(ctx); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+
+	blk, err := stateRepo.GetBlockByHash(ctx, storedX)
+	if err != nil {
+		t.Fatalf("get block X: %v", err)
+	}
+	if blk == nil {
+		t.Fatal("block X missing from state repo")
+	}
+	if !blk.IsOrphaned {
+		t.Fatal("block X should be orphaned after retry verification found canonical hash mismatch")
+	}
+	if blk.BlockPublished {
+		t.Fatal("block X should not be marked published")
+	}
+
+	// No block events should have been published for block 2.
+	for _, be := range eventSink.GetBlockEvents() {
+		if be.BlockNumber == 2 {
+			t.Fatalf("unexpected block event for orphaned block 2: %+v", be)
+		}
+	}
+
+	// Safety net: confirm the test setup has distinct hashes.
+	if storedX == canonicalY {
+		t.Fatal("test setup bug: stored and canonical hashes are equal")
+	}
+}
+
+// TestBackfillService_RetryDoesNotOrphanOnTransientHashFailure verifies that
+// if GetBlockDataByHash fails but the canonical chain still has our stored
+// hash at that number, the block is NOT orphaned — the failure was transient
+// and the retry loop will try again later.
+func TestBackfillService_RetryDoesNotOrphanOnTransientHashFailure(t *testing.T) {
+	ctx := t.Context()
+
+	client := newMockClient()
+	client.AddBlock(1, "")
+	hdr1 := client.GetHeader(1)
+	// Block 2 in the canonical chain has hash X — same as our stored hash.
+	storedX := "0x" + strings.Repeat("a", 64)
+	client.SetBlockHeader(2, storedX, hdr1.Hash)
+	// Force GetBlockDataByHash to fail for hash X (simulating a transient RPC
+	// error such as an upstream timeout). HashLookupErr affects *ByHash
+	// methods on the client; GetBlockByNumber is unaffected.
+	client.HashLookupErr = fmt.Errorf("transient RPC failure")
+	client.HashLookupErrFor = storedX
+
+	stateRepo := memory.NewBlockStateRepository()
+	cacheStore := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         1,
+		Hash:           hdr1.Hash,
+		ParentHash:     hdr1.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 1: %v", err)
+	}
+	if err := stateRepo.MarkPublishComplete(ctx, hdr1.Hash); err != nil {
+		t.Fatalf("mark 1 published: %v", err)
+	}
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         2,
+		Hash:           storedX,
+		ParentHash:     hdr1.Hash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 2: %v", err)
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		PollInterval:       30 * time.Second,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.Default(),
+	}
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	// RunOnce may return an error from the retry pass because the fetch
+	// ultimately failed — that's expected and fine for this test.
+	_ = service.RunOnce(ctx)
+
+	blk, err := stateRepo.GetBlockByHash(ctx, storedX)
+	if err != nil {
+		t.Fatalf("get block X: %v", err)
+	}
+	if blk == nil {
+		t.Fatal("block X missing from state repo")
+	}
+	if blk.IsOrphaned {
+		t.Fatal("block X should NOT be orphaned — canonical hash still matches stored hash")
+	}
+	if blk.BlockPublished {
+		t.Fatal("block X should not be marked published")
+	}
+}
+
+// TestBackfillService_RetryDoesNotOrphanWhenCanonicalVerificationFails verifies
+// that if both GetBlockDataByHash AND GetBlockByNumber error, the block is
+// NOT orphaned — verification was inconclusive, so we leave the block in the
+// retry queue for a later pass.
+func TestBackfillService_RetryDoesNotOrphanWhenCanonicalVerificationFails(t *testing.T) {
+	ctx := t.Context()
+
+	client := newMockClient()
+	client.AddBlock(1, "")
+	hdr1 := client.GetHeader(1)
+	// Deliberately do NOT register block 2 in the client — GetBlockByNumber(2)
+	// will return "block 2 not found". GetBlockDataByHash(2, X) will also
+	// fail because hash X is not in the mock's blocks map.
+
+	stateRepo := memory.NewBlockStateRepository()
+	cacheStore := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         1,
+		Hash:           hdr1.Hash,
+		ParentHash:     hdr1.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 1: %v", err)
+	}
+	if err := stateRepo.MarkPublishComplete(ctx, hdr1.Hash); err != nil {
+		t.Fatalf("mark 1 published: %v", err)
+	}
+	storedX := "0x" + strings.Repeat("a", 64)
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         2,
+		Hash:           storedX,
+		ParentHash:     hdr1.Hash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed block 2: %v", err)
+	}
+
+	config := BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		PollInterval:       30 * time.Second,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.Default(),
+	}
+	service, err := NewBackfillService(config, client, stateRepo, cacheStore, eventSink)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	_ = service.RunOnce(ctx)
+
+	blk, err := stateRepo.GetBlockByHash(ctx, storedX)
+	if err != nil {
+		t.Fatalf("get block X: %v", err)
+	}
+	if blk == nil {
+		t.Fatal("block X missing from state repo")
+	}
+	if blk.IsOrphaned {
+		t.Fatal("block X should NOT be orphaned — canonical verification failed (inconclusive)")
 	}
 }

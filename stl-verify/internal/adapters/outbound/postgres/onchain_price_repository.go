@@ -1,15 +1,19 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -21,12 +25,13 @@ var _ outbound.OnchainPriceRepository = (*OnchainPriceRepository)(nil)
 type OnchainPriceRepository struct {
 	pool      *pgxpool.Pool
 	logger    *slog.Logger
+	buildID   buildregistry.BuildID
 	batchSize int
 }
 
 // NewOnchainPriceRepository creates a new PostgreSQL onchain price repository.
 // If batchSize is <= 0, a default batch size of 1000 is used.
-func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSize int) (*OnchainPriceRepository, error) {
+func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildregistry.BuildID, batchSize int) (*OnchainPriceRepository, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("database pool cannot be nil")
 	}
@@ -39,6 +44,7 @@ func NewOnchainPriceRepository(pool *pgxpool.Pool, logger *slog.Logger, batchSiz
 	return &OnchainPriceRepository{
 		pool:      pool,
 		logger:    logger,
+		buildID:   buildID,
 		batchSize: batchSize,
 	}, nil
 }
@@ -48,12 +54,12 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	var o entity.Oracle
 	var addrBytes []byte
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, name, display_name, chain_id, address,
+		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
 		WHERE name = $1
 	`, name).Scan(
-		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
+		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes, &o.OracleType,
 		&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -69,7 +75,7 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 // GetEnabledAssets retrieves all enabled assets for a given oracle.
 func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, oracle_id, token_id, enabled, created_at
+		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
 		FROM oracle_asset
 		WHERE oracle_id = $1 AND enabled = true
 		ORDER BY id
@@ -82,8 +88,17 @@ func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID 
 	var assets []*entity.OracleAsset
 	for rows.Next() {
 		var oa entity.OracleAsset
-		if err := rows.Scan(&oa.ID, &oa.OracleID, &oa.TokenID, &oa.Enabled, &oa.CreatedAt); err != nil {
+		var feedAddrBytes []byte
+		var feedDecimals *int
+		if err := rows.Scan(&oa.ID, &oa.OracleID, &oa.TokenID, &oa.Enabled,
+			&feedAddrBytes, &feedDecimals, &oa.QuoteCurrency, &oa.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning oracle asset: %w", err)
+		}
+		if len(feedAddrBytes) > 0 {
+			oa.FeedAddress = common.BytesToAddress(feedAddrBytes)
+		}
+		if feedDecimals != nil {
+			oa.FeedDecimals = *feedDecimals
 		}
 		assets = append(assets, &oa)
 	}
@@ -100,7 +115,7 @@ func (r *OnchainPriceRepository) GetLatestPrices(ctx context.Context, oracleID i
 		SELECT DISTINCT ON (token_id) token_id, price_usd
 		FROM onchain_token_price
 		WHERE oracle_id = $1
-		ORDER BY token_id, block_number DESC, block_version DESC
+		ORDER BY token_id, block_number DESC, block_version DESC, processing_version DESC
 	`, oracleID)
 	if err != nil {
 		return nil, fmt.Errorf("querying latest onchain prices: %w", err)
@@ -176,6 +191,18 @@ func (r *OnchainPriceRepository) UpsertPrices(ctx context.Context, prices []*ent
 		return nil
 	}
 
+	// Sort by natural key once, before chunking; same rationale as
+	// PriceRepository.UpsertPrices. See ADR-0002 §3.
+	slices.SortFunc(prices, func(a, b *entity.OnchainTokenPrice) int {
+		return cmp.Or(
+			cmp.Compare(a.TokenID, b.TokenID),
+			cmp.Compare(a.OracleID, b.OracleID),
+			cmp.Compare(a.BlockNumber, b.BlockNumber),
+			cmp.Compare(a.BlockVersion, b.BlockVersion),
+			a.Timestamp.Compare(b.Timestamp),
+		)
+	})
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -183,10 +210,7 @@ func (r *OnchainPriceRepository) UpsertPrices(ctx context.Context, prices []*ent
 	defer rollback(ctx, tx, r.logger)
 
 	for i := 0; i < len(prices); i += r.batchSize {
-		end := i + r.batchSize
-		if end > len(prices) {
-			end = len(prices)
-		}
+		end := min(i+r.batchSize, len(prices))
 		batch := prices[i:end]
 
 		if err := r.upsertPriceBatch(ctx, tx, batch); err != nil {
@@ -207,22 +231,22 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 
 	var sb strings.Builder
 	sb.WriteString(`
-		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
+		INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd, build_id)
 		VALUES `)
 
-	args := make([]any, 0, len(prices)*6)
+	args := make([]any, 0, len(prices)*7)
 	for i, price := range prices {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		baseIdx := i * 6
-		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d)",
-			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6))
+		baseIdx := i * 7
+		sb.WriteString(fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			baseIdx+1, baseIdx+2, baseIdx+3, baseIdx+4, baseIdx+5, baseIdx+6, baseIdx+7))
 
-		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD)
+		args = append(args, price.TokenID, price.OracleID, price.BlockNumber, price.BlockVersion, price.Timestamp, price.PriceUSD, int(r.buildID))
 	}
 
-	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, timestamp) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (token_id, oracle_id, block_number, block_version, processing_version, timestamp) DO NOTHING`)
 
 	_, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
@@ -231,17 +255,17 @@ func (r *OnchainPriceRepository) upsertPriceBatch(ctx context.Context, tx pgx.Tx
 	return nil
 }
 
-// GetAllEnabledOracles retrieves all enabled oracles.
-func (r *OnchainPriceRepository) GetAllEnabledOracles(ctx context.Context) ([]*entity.Oracle, error) {
+// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
+func (r *OnchainPriceRepository) GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, name, display_name, chain_id, address,
+		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
-		WHERE enabled = true
+		WHERE enabled = true AND chain_id = $1
 		ORDER BY id
-	`)
+	`, chainID)
 	if err != nil {
-		return nil, fmt.Errorf("querying enabled oracles: %w", err)
+		return nil, fmt.Errorf("querying enabled oracles by chain: %w", err)
 	}
 	defer rows.Close()
 
@@ -250,12 +274,12 @@ func (r *OnchainPriceRepository) GetAllEnabledOracles(ctx context.Context) ([]*e
 		var o entity.Oracle
 		var addrBytes []byte
 		if err := rows.Scan(
-			&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
+			&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes, &o.OracleType,
 			&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning oracle: %w", err)
 		}
-		copy(o.Address[:], addrBytes)
+		o.Address = common.BytesToAddress(addrBytes)
 		oracles = append(oracles, &o)
 	}
 	if err := rows.Err(); err != nil {
@@ -269,12 +293,12 @@ func (r *OnchainPriceRepository) GetOracleByAddress(ctx context.Context, chainID
 	var o entity.Oracle
 	var addrBytes []byte
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, name, display_name, chain_id, address,
+		SELECT id, name, display_name, chain_id, address, oracle_type,
 		       deployment_block, enabled, price_decimals, created_at, updated_at
 		FROM oracle
 		WHERE chain_id = $1 AND address = $2
 	`, chainID, address).Scan(
-		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes,
+		&o.ID, &o.Name, &o.DisplayName, &o.ChainID, &addrBytes, &o.OracleType,
 		&o.DeploymentBlock, &o.Enabled, &o.PriceDecimals, &o.CreatedAt, &o.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -289,12 +313,15 @@ func (r *OnchainPriceRepository) GetOracleByAddress(ctx context.Context, chainID
 
 // InsertOracle inserts a new oracle and returns it with the generated ID.
 func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error) {
+	if oracle.OracleType == "" {
+		return nil, fmt.Errorf("inserting oracle: oracle_type is required")
+	}
 	err := r.pool.QueryRow(ctx, `
-		INSERT INTO oracle (name, display_name, chain_id, address, deployment_block, enabled, price_decimals)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at, updated_at
-	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address[:],
-		oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
+	`, oracle.Name, oracle.DisplayName, oracle.ChainID, oracle.Address.Bytes(),
+		oracle.OracleType, oracle.DeploymentBlock, oracle.Enabled, oracle.PriceDecimals,
 	).Scan(&oracle.ID, &oracle.CreatedAt, &oracle.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting oracle: %w", err)
@@ -372,11 +399,11 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 // CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-		SELECT $2, token_id, enabled
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
+		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency
 		FROM oracle_asset
 		WHERE oracle_id = $1 AND enabled = true
-		ON CONFLICT (oracle_id, token_id) DO NOTHING
+		ON CONFLICT DO NOTHING
 	`, fromOracleID, toOracleID)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)

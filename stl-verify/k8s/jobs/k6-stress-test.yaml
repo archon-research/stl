@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-stress-test
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          image: grafana/k6:1.6.1
+          env:
+            - name: ADMIN_URL
+              value: "http://mock-blockchain-server:8547"
+            - name: INTERVAL_MS
+              value: "${INTERVAL_MS}"
+            - name: DURATION
+              value: "${DURATION}"
+            - name: REORG
+              value: "${REORG}"
+            - name: REORG_DEPTH
+              value: "${REORG_DEPTH}"
+            - name: REORG_INTERVAL_S
+              value: "${REORG_INTERVAL_S}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - k6
+            - run
+            - /scripts/${SCENARIO}.js
+          volumeMounts:
+            - name: k6-scripts
+              mountPath: /scripts
+      volumes:
+        - name: k6-scripts
+          configMap:
+            name: k6-scripts

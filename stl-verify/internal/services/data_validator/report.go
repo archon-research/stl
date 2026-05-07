@@ -122,8 +122,8 @@ func (r *Report) FormatText() string {
 
 		if check.Message != "" {
 			// Indent multi-line messages
-			lines := strings.Split(check.Message, "\n")
-			for _, line := range lines {
+			lines := strings.SplitSeq(check.Message, "\n")
+			for line := range lines {
 				sb.WriteString(fmt.Sprintf("         %s\n", line))
 			}
 		}

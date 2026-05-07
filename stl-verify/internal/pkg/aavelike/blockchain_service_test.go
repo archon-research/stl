@@ -1,0 +1,1036 @@
+package aavelike
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+)
+
+func TestBlockchainService_LoadABIs(t *testing.T) {
+	// Load ERC20 ABI first since it's passed in via constructor
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
+	}
+
+	err = service.loadABIs("sparklend")
+	if err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		abi        *abi.ABI
+		abiName    string
+		methodName string
+	}{
+		{
+			name:       "getUserReservesABI loaded",
+			abi:        service.getUserReservesABI,
+			abiName:    "getUserReservesABI",
+			methodName: "getUserReservesData",
+		},
+		{
+			name:       "getUserReserveDataABI loaded",
+			abi:        service.getUserReserveDataABI,
+			abiName:    "getUserReserveDataABI",
+			methodName: "getUserReserveData",
+		},
+		{
+			name:       "erc20ABI loaded",
+			abi:        service.erc20ABI,
+			abiName:    "erc20ABI",
+			methodName: "decimals",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.abi == nil {
+				t.Fatalf("%s is nil after loading", tt.abiName)
+			}
+
+			method, ok := tt.abi.Methods[tt.methodName]
+			if !ok {
+				t.Errorf("method %s not found in %s", tt.methodName, tt.abiName)
+			} else if method.Name != tt.methodName {
+				t.Errorf("method name mismatch: got %s, want %s", method.Name, tt.methodName)
+			}
+		})
+	}
+}
+
+func TestBlockchainService_LoadABIs_AllProtocols(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	protocols := []blockchain.ProtocolVersion{
+		blockchain.ProtocolVersionAaveV2,
+		blockchain.ProtocolVersionAaveV3,
+		blockchain.ProtocolVersionSparkLend,
+	}
+
+	for _, protocol := range protocols {
+		t.Run(string(protocol), func(t *testing.T) {
+			service := &BlockchainService{
+				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+				metadataCache:   make(map[common.Address]TokenMetadata),
+				erc20ABI:        erc20ABI,
+				protocolVersion: protocol,
+			}
+
+			err := service.loadABIs(protocol)
+			if err != nil {
+				t.Fatalf("loadABIs(%s) failed: %v", protocol, err)
+			}
+
+			if service.getUserReservesABI == nil {
+				t.Error("getUserReservesABI is nil")
+			}
+			if service.getUserReserveDataABI == nil {
+				t.Error("getUserReserveDataABI is nil")
+			}
+			if service.getPoolDataProviderReserveDataABI == nil {
+				t.Error("getPoolDataProviderReserveDataABI is nil")
+			}
+			if service.getPoolDataProviderReserveConfigurationABI == nil {
+				t.Error("getPoolDataProviderReserveConfigurationABI is nil")
+			}
+		})
+	}
+}
+
+func TestBlockchainService_LoadABIs_InvalidProtocol(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &BlockchainService{
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache: make(map[common.Address]TokenMetadata),
+		erc20ABI:      erc20ABI,
+	}
+
+	err = service.loadABIs("invalid-protocol")
+	if err == nil {
+		t.Error("loadABIs() should fail with invalid protocol version")
+	}
+	if !strings.Contains(err.Error(), "unknown protocol version") {
+		t.Errorf("expected 'unknown protocol version' error, got: %v", err)
+	}
+}
+
+func TestBlockchainService_ERC20ABI_Methods(t *testing.T) {
+	// Load ERC20 ABI first
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
+	}
+
+	err = service.loadABIs("sparklend")
+	if err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	requiredMethods := []string{"decimals", "symbol", "name"}
+	for _, methodName := range requiredMethods {
+		method, ok := service.erc20ABI.Methods[methodName]
+		if !ok {
+			t.Errorf("ERC20 method %s not found", methodName)
+			continue
+		}
+
+		if !method.IsConstant() {
+			t.Errorf("ERC20 method %s should be a view/pure function", methodName)
+		}
+	}
+}
+
+func TestBlockchainService_GetUserReservesDataABI_Structure(t *testing.T) {
+	// Load ERC20 ABI
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
+	}
+
+	err = service.loadABIs("sparklend")
+	if err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	method, ok := service.getUserReservesABI.Methods["getUserReservesData"]
+	if !ok {
+		t.Fatal("getUserReservesData method not found")
+	}
+
+	if len(method.Inputs) != 2 {
+		t.Errorf("getUserReservesData should have 2 inputs, got %d", len(method.Inputs))
+	}
+
+	expectedInputs := []struct {
+		name string
+		typ  string
+	}{
+		{"provider", "address"},
+		{"user", "address"},
+	}
+
+	for i, expected := range expectedInputs {
+		if i >= len(method.Inputs) {
+			t.Errorf("missing input %d: %s", i, expected.name)
+			continue
+		}
+		if method.Inputs[i].Name != expected.name {
+			t.Errorf("input %d name = %s, want %s", i, method.Inputs[i].Name, expected.name)
+		}
+		if method.Inputs[i].Type.String() != expected.typ {
+			t.Errorf("input %d type = %s, want %s", i, method.Inputs[i].Type.String(), expected.typ)
+		}
+	}
+
+	if len(method.Outputs) != 2 {
+		t.Errorf("getUserReservesData should have 2 outputs, got %d", len(method.Outputs))
+	}
+}
+
+func TestBlockchainService_GetUserReserveDataABI_Structure(t *testing.T) {
+	// Load ERC20 ABI
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		protocolVersion: "sparklend",
+	}
+
+	err = service.loadABIs("sparklend")
+	if err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	method, ok := service.getUserReserveDataABI.Methods["getUserReserveData"]
+	if !ok {
+		t.Fatal("getUserReserveData method not found")
+	}
+
+	if len(method.Inputs) != 2 {
+		t.Errorf("getUserReserveData should have 2 inputs, got %d", len(method.Inputs))
+	}
+
+	expectedInputs := []struct {
+		name string
+		typ  string
+	}{
+		{"asset", "address"},
+		{"user", "address"},
+	}
+
+	for i, expected := range expectedInputs {
+		if i >= len(method.Inputs) {
+			t.Errorf("missing input %d: %s", i, expected.name)
+			continue
+		}
+		if method.Inputs[i].Name != expected.name {
+			t.Errorf("input %d name = %s, want %s", i, method.Inputs[i].Name, expected.name)
+		}
+		if method.Inputs[i].Type.String() != expected.typ {
+			t.Errorf("input %d type = %s, want %s", i, method.Inputs[i].Type.String(), expected.typ)
+		}
+	}
+
+	if len(method.Outputs) != 9 {
+		t.Errorf("getUserReserveData should have 9 outputs, got %d", len(method.Outputs))
+	}
+}
+
+func TestABI_PackingDoesNotPanic(t *testing.T) {
+	// Load ERC20 ABI
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	service := &BlockchainService{
+		logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:         make(map[common.Address]TokenMetadata),
+		erc20ABI:              erc20ABI,
+		poolAddressesProvider: common.HexToAddress("0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"),
+		protocolVersion:       "sparklend",
+	}
+
+	if err := service.loadABIs("sparklend"); err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	t.Run("pack getUserReservesData", func(t *testing.T) {
+		user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+		_, err := service.getUserReservesABI.Pack("getUserReservesData", service.poolAddressesProvider, user)
+		if err != nil {
+			t.Errorf("failed to pack getUserReservesData: %v", err)
+		}
+	})
+
+	t.Run("pack getUserReserveData", func(t *testing.T) {
+		asset := common.HexToAddress("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+		user := common.HexToAddress("0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb0")
+		_, err := service.getUserReserveDataABI.Pack("getUserReserveData", asset, user)
+		if err != nil {
+			t.Errorf("failed to pack getUserReserveData: %v", err)
+		}
+	})
+
+	t.Run("pack ERC20 methods", func(t *testing.T) {
+		methods := []string{"decimals", "symbol", "name"}
+		for _, method := range methods {
+			_, err := service.erc20ABI.Pack(method)
+			if err != nil {
+				t.Errorf("failed to pack %s: %v", method, err)
+			}
+		}
+	})
+}
+
+func TestBlockchainService_ParseUserReservesData(t *testing.T) {
+	tests := []struct {
+		name        string
+		collaterals int
+	}{
+		{"no collaterals", 0},
+		{"few collaterals", 5},
+		{"many collaterals", 20},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			arrayLength := tt.collaterals
+			const structSize = 128
+			totalSize := 64 + (arrayLength * structSize)
+			result := make([]byte, totalSize)
+
+			offsetValue := big.NewInt(32)
+			copy(result[0:32], common.LeftPadBytes(offsetValue.Bytes(), 32))
+
+			length := big.NewInt(int64(arrayLength))
+			copy(result[32:64], common.LeftPadBytes(length.Bytes(), 32))
+
+			for i := range arrayLength {
+				structStart := 64 + (i * structSize)
+
+				asset := common.HexToAddress(fmt.Sprintf("0x%040x", i+1))
+				copy(result[structStart:structStart+32], common.LeftPadBytes(asset.Bytes(), 32))
+
+				balance := new(big.Int).Mul(big.NewInt(1000), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+				copy(result[structStart+32:structStart+64], common.LeftPadBytes(balance.Bytes(), 32))
+
+				copy(result[structStart+64:structStart+96], common.LeftPadBytes(big.NewInt(1).Bytes(), 32))
+
+				variableDebt := big.NewInt(500)
+				copy(result[structStart+96:structStart+128], common.LeftPadBytes(variableDebt.Bytes(), 32))
+			}
+
+			if len(result) < 64 {
+				t.Fatal("invalid result: too short")
+			}
+
+			parsedOffset := new(big.Int).SetBytes(result[0:32]).Uint64()
+			arrayLengthClaimed := new(big.Int).SetBytes(result[parsedOffset : parsedOffset+32]).Uint64()
+
+			dataStart := parsedOffset + 32
+			availableBytes := uint64(len(result)) - dataStart
+			actualArrayLength := availableBytes / structSize
+
+			arrayLen := min(actualArrayLength, arrayLengthClaimed)
+
+			reserves := make([]UserReserveData, 0, arrayLen)
+
+			for i := range arrayLen {
+				structOffset := dataStart + (i * structSize)
+				structData := result[structOffset : structOffset+structSize]
+
+				underlyingAsset := common.BytesToAddress(structData[0:32])
+				if underlyingAsset == (common.Address{}) {
+					continue
+				}
+
+				reserves = append(reserves, UserReserveData{
+					UnderlyingAsset:                 underlyingAsset,
+					ScaledATokenBalance:             new(big.Int).SetBytes(structData[32:64]),
+					UsageAsCollateralEnabledOnUser:  new(big.Int).SetBytes(structData[64:96]).Uint64() != 0,
+					ScaledVariableDebt:              new(big.Int).SetBytes(structData[96:128]),
+					StableBorrowRate:                big.NewInt(0),
+					PrincipalStableDebt:             big.NewInt(0),
+					StableBorrowLastUpdateTimestamp: big.NewInt(0),
+				})
+			}
+
+			if len(reserves) != tt.collaterals {
+				t.Errorf("parsed %d collaterals, want %d", len(reserves), tt.collaterals)
+			}
+
+			for i, reserve := range reserves {
+				if reserve.UnderlyingAsset == (common.Address{}) {
+					t.Errorf("reserve[%d] has empty address", i)
+				}
+				if reserve.ScaledATokenBalance == nil {
+					t.Errorf("reserve[%d] has nil balance", i)
+				}
+			}
+		})
+	}
+}
+
+func TestBlockchainService_ParseReserveData(t *testing.T) {
+	protocols := []struct {
+		name    string
+		version blockchain.ProtocolVersion
+	}{
+		{"Sparklend", blockchain.ProtocolVersionSparkLend},
+		{"Aave V3", blockchain.ProtocolVersionAaveV3},
+		{"Aave V2", blockchain.ProtocolVersionAaveV2},
+	}
+
+	for _, proto := range protocols {
+		t.Run(proto.name, func(t *testing.T) {
+			service := &BlockchainService{
+				logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+				metadataCache:   make(map[common.Address]TokenMetadata),
+				protocolVersion: proto.version,
+			}
+
+			if err := service.loadABIs(proto.version); err != nil {
+				t.Fatalf("loadABIs() failed: %v", err)
+			}
+
+			tests := []struct {
+				name        string
+				mockData    func() []byte
+				wantErr     bool
+				errContains string
+			}{
+				{
+					name: "valid reserve data",
+					mockData: func() []byte {
+						var values []any
+
+						// Different protocols have different field counts
+						if proto.version == "aave-v2" {
+							// Aave V2: 10 fields
+							values = []any{
+								big.NewInt(1000),       // availableLiquidity
+								big.NewInt(4000),       // totalStableDebt
+								big.NewInt(5000),       // totalVariableDebt
+								big.NewInt(6000),       // liquidityRate
+								big.NewInt(7000),       // variableBorrowRate
+								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(9000),       // averageStableBorrowRate
+								big.NewInt(10000),      // liquidityIndex
+								big.NewInt(11000),      // variableBorrowIndex
+								big.NewInt(1640995200), // lastUpdateTimestamp
+							}
+						} else if proto.version == "sparklend" {
+							// Sparklend: 11 fields (no averageStableBorrowRate)
+							values = []any{
+								big.NewInt(1000),       // unbacked
+								big.NewInt(2000),       // accruedToTreasuryScaled
+								big.NewInt(3000),       // totalAToken
+								big.NewInt(4000),       // totalStableDebt
+								big.NewInt(5000),       // totalVariableDebt
+								big.NewInt(6000),       // liquidityRate
+								big.NewInt(7000),       // variableBorrowRate
+								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(10000),      // liquidityIndex
+								big.NewInt(11000),      // variableBorrowIndex
+								big.NewInt(1640995200), // lastUpdateTimestamp
+							}
+						} else {
+							// Aave V3: 12 fields
+							values = []any{
+								big.NewInt(1000),       // unbacked
+								big.NewInt(2000),       // accruedToTreasuryScaled
+								big.NewInt(3000),       // totalAToken
+								big.NewInt(4000),       // totalStableDebt
+								big.NewInt(5000),       // totalVariableDebt
+								big.NewInt(6000),       // liquidityRate
+								big.NewInt(7000),       // variableBorrowRate
+								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(9000),       // averageStableBorrowRate
+								big.NewInt(10000),      // liquidityIndex
+								big.NewInt(11000),      // variableBorrowIndex
+								big.NewInt(1640995200), // lastUpdateTimestamp
+							}
+						}
+
+						packed, _ := service.getPoolDataProviderReserveDataABI.Methods["getReserveData"].Outputs.Pack(values...)
+						return packed
+					},
+					wantErr: false,
+				},
+				{
+					name: "unpack error - insufficient data",
+					mockData: func() []byte {
+						return []byte{0x00, 0x01, 0x02}
+					},
+					wantErr:     true,
+					errContains: "failed to unpack getReserveData",
+				},
+			}
+
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					data := tt.mockData()
+					result, err := service.parseReserveData(data)
+
+					if tt.wantErr {
+						if err == nil {
+							t.Errorf("parseReserveData() expected error, got nil")
+							return
+						}
+						if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+							t.Errorf("parseReserveData() error = %v, want error containing %q", err, tt.errContains)
+						}
+						return
+					}
+
+					if err != nil {
+						t.Errorf("parseReserveData() unexpected error: %v", err)
+						return
+					}
+
+					if result == nil {
+						t.Error("parseReserveData() returned nil result")
+						return
+					}
+
+					// Verify expected values for valid case
+					if tt.name == "valid reserve data" {
+						if result.LastUpdateTimestamp != 1640995200 {
+							t.Errorf("LastUpdateTimestamp = %v, want 1640995200", result.LastUpdateTimestamp)
+						}
+
+						// Check protocol-specific fields
+						if proto.version == "aave-v2" {
+							// For V2, TotalAToken gets mapped from availableLiquidity
+							if result.TotalAToken.Cmp(big.NewInt(1000)) != 0 {
+								t.Errorf("TotalAToken = %v, want 1000", result.TotalAToken)
+							}
+						} else {
+							// For V3 and Sparklend, check unbacked
+							if result.Unbacked.Cmp(big.NewInt(1000)) != 0 {
+								t.Errorf("Unbacked = %v, want 1000", result.Unbacked)
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestBlockchainService_ParseReserveConfigurationData(t *testing.T) {
+	service := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		protocolVersion: "sparklend",
+	}
+
+	if err := service.loadABIs("sparklend"); err != nil {
+		t.Fatalf("loadABIs() failed: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		mockData    func() []byte
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "valid configuration data",
+			mockData: func() []byte {
+				values := []any{
+					big.NewInt(18),    // decimals
+					big.NewInt(8000),  // ltv (80%)
+					big.NewInt(8250),  // liquidationThreshold
+					big.NewInt(10500), // liquidationBonus
+					big.NewInt(2000),  // reserveFactor
+					true,              // usageAsCollateralEnabled
+					true,              // borrowingEnabled
+					false,             // stableBorrowRateEnabled
+					true,              // isActive
+					false,             // isFrozen
+				}
+				packed, _ := service.getPoolDataProviderReserveConfigurationABI.Methods["getReserveConfigurationData"].Outputs.Pack(values...)
+				return packed
+			},
+			wantErr: false,
+		},
+		{
+			name: "unpack error - insufficient data",
+			mockData: func() []byte {
+				return []byte{0x00, 0x01, 0x02}
+			},
+			wantErr:     true,
+			errContains: "failed to unpack getReserveConfigurationData",
+		},
+		{
+			name: "unpack error - empty data",
+			mockData: func() []byte {
+				return []byte{}
+			},
+			wantErr:     true,
+			errContains: "failed to unpack getReserveConfigurationData",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := tt.mockData()
+			result, err := service.parseReserveConfigurationData(data)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseReserveConfigurationData() expected error, got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("parseReserveConfigurationData() error = %v, want error containing %q", err, tt.errContains)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("parseReserveConfigurationData() unexpected error: %v", err)
+				return
+			}
+
+			if result == nil {
+				t.Error("parseReserveConfigurationData() returned nil result")
+				return
+			}
+
+			// Verify expected values for valid case
+			if tt.name == "valid configuration data" {
+				if result.Decimals.Cmp(big.NewInt(18)) != 0 {
+					t.Errorf("Decimals = %v, want 18", result.Decimals)
+				}
+				if result.LTV.Cmp(big.NewInt(8000)) != 0 {
+					t.Errorf("LTV = %v, want 8000", result.LTV)
+				}
+				if !result.UsageAsCollateralEnabled {
+					t.Error("UsageAsCollateralEnabled = false, want true")
+				}
+				if result.IsFrozen {
+					t.Error("IsFrozen = true, want false")
+				}
+			}
+		})
+	}
+}
+
+// TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess verifies that
+// concurrent calls to BatchGetTokenMetadata on a shared BlockchainService do
+// not race on the metadataCache map. Run with -race to detect violations.
+//
+// Post-VEC-188 Finding 4: when every sub-call reverts, BatchGetTokenMetadata
+// returns a non-nil error (listing the incomplete tokens) rather than
+// silently caching zero-valued metadata. Assert the error is non-nil so this
+// test codifies the post-fix invariant rather than the pre-fix bug.
+func TestBlockchainService_BatchGetTokenMetadata_ConcurrentAccess(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	token := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	// Mock returns 3 failure results per token (no unpacking, but write still occurs).
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: false}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			tokens := map[common.Address]bool{token: true}
+			_, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+			if err == nil {
+				t.Errorf("BatchGetTokenMetadata() expected error when every sub-call reverts, got nil")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// packUint8ForTest ABI-encodes a uint8 value (used for ERC20 decimals()
+// return data). Local helper because the aavelike package has no shared
+// test helpers like morpho_indexer's testhelpers_test.go.
+func packUint8ForTest(t *testing.T, v uint8) []byte {
+	t.Helper()
+	ty, err := abi.NewType("uint8", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType uint8: %v", err)
+	}
+	data, err := abi.Arguments{{Type: ty}}.Pack(v)
+	if err != nil {
+		t.Fatalf("packing uint8: %v", err)
+	}
+	return data
+}
+
+// packStringForTest ABI-encodes a string value (used for ERC20 symbol() /
+// name() return data).
+func packStringForTest(t *testing.T, s string) []byte {
+	t.Helper()
+	ty, err := abi.NewType("string", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType string: %v", err)
+	}
+	data, err := abi.Arguments{{Type: ty}}.Pack(s)
+	if err != nil {
+		t.Fatalf("packing string: %v", err)
+	}
+	return data
+}
+
+// TestBatchGetTokenMetadata_DoesNotCacheWhenAnySubCallFails codifies
+// VEC-188 Finding 4: a partial sub-call failure for a token must NOT leave
+// a zero-valued entry in the cache. Otherwise a stuck message loops until
+// the pod restarts — retries keep hitting the poisoned cache entry and
+// never see the real revert signal.
+//
+// Three tokens are probed: A (all 3 sub-calls succeed), B (decimals()
+// reverts), C (name() reverts). Assertions:
+//   - Token A IS in the returned result map and IS in the metadataCache.
+//   - Tokens B and C are NOT in the returned result map.
+//   - Tokens B and C are NOT in the metadataCache.
+//   - The function returns a non-nil error naming B and C (or at least
+//     referencing the number of incomplete tokens and their addresses).
+//
+// FAILS against unfixed code (which caches zero-valued entries
+// unconditionally and returns nil error).
+func TestBatchGetTokenMetadata_DoesNotCacheWhenAnySubCallFails(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	tokenA := common.HexToAddress("0xaaAAAAaaaAAAAaaAaaAAaaAAaaAaAAAAAaAaaaAA")
+	tokenB := common.HexToAddress("0xbBBBBBbBBbbBBbbbBBBbBbbBBbBBbbBBBBbbbbbB")
+	tokenC := common.HexToAddress("0xcCcCcCCCCccCCCCCCccCcccCCcCCcCCCCCccccCc")
+
+	// Map each token's decimals sub-call target address to the token
+	// identity, so the mock can produce failures per token regardless of
+	// the non-deterministic map iteration order in BatchGetTokenMetadata.
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls)%3 != 0 {
+			t.Errorf("expected call count to be a multiple of 3, got %d", len(calls))
+			return nil, fmt.Errorf("bad call count %d", len(calls))
+		}
+		results := make([]outbound.Result, len(calls))
+		// Every token produces 3 sequential calls: decimals, symbol, name.
+		for i := 0; i < len(calls); i += 3 {
+			// All three sub-calls target the same token (calls[i].Target).
+			token := calls[i].Target
+			switch token {
+			case tokenA:
+				// All three succeed.
+				results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "AAA")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Alpha")}
+			case tokenB:
+				// decimals() reverts.
+				results[i] = outbound.Result{Success: false}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "BBB")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Beta")}
+			case tokenC:
+				// name() reverts.
+				results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 6)}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "CCC")}
+				results[i+2] = outbound.Result{Success: false}
+			default:
+				t.Errorf("unexpected target token: %s", token.Hex())
+				return nil, fmt.Errorf("unexpected token %s", token.Hex())
+			}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{
+		tokenA: true,
+		tokenB: true,
+		tokenC: true,
+	}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected non-nil error when any sub-call reverts for any token")
+	}
+
+	// Error must reference the incomplete tokens (B and C) so operators
+	// can see which addresses to investigate. The exact wording is
+	// implementation-defined but must include both hex addresses.
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, tokenB.Hex()) {
+		t.Errorf("error message should reference tokenB %s, got: %s", tokenB.Hex(), errMsg)
+	}
+	if !strings.Contains(errMsg, tokenC.Hex()) {
+		t.Errorf("error message should reference tokenC %s, got: %s", tokenC.Hex(), errMsg)
+	}
+
+	// Token A succeeded in full: must be returned AND cached.
+	mdA, okA := result[tokenA]
+	if !okA {
+		t.Fatal("tokenA should be present in result map (all sub-calls succeeded)")
+	}
+	if mdA.Symbol != "AAA" {
+		t.Errorf("tokenA Symbol = %q, want %q", mdA.Symbol, "AAA")
+	}
+	if mdA.Decimals != 18 {
+		t.Errorf("tokenA Decimals = %d, want 18", mdA.Decimals)
+	}
+	if mdA.Name != "Alpha" {
+		t.Errorf("tokenA Name = %q, want %q", mdA.Name, "Alpha")
+	}
+
+	// Tokens B and C had at least one sub-call revert: must NOT appear
+	// in the result map.
+	if _, ok := result[tokenB]; ok {
+		t.Error("tokenB must NOT be in result map (decimals() reverted)")
+	}
+	if _, ok := result[tokenC]; ok {
+		t.Error("tokenC must NOT be in result map (name() reverted)")
+	}
+
+	// Cache must contain A and only A — B and C must not pollute it.
+	svc.mu.RLock()
+	_, cachedA := svc.metadataCache[tokenA]
+	_, cachedB := svc.metadataCache[tokenB]
+	_, cachedC := svc.metadataCache[tokenC]
+	svc.mu.RUnlock()
+
+	if !cachedA {
+		t.Error("tokenA should be cached (all sub-calls succeeded)")
+	}
+	if cachedB {
+		t.Error("tokenB must NOT be cached (decimals() reverted; zero-value entry would poison future retries)")
+	}
+	if cachedC {
+		t.Error("tokenC must NOT be cached (name() reverted; zero-value entry would poison future retries)")
+	}
+}
+
+// TestBatchGetTokenMetadata_AcceptsBytes32SymbolAndName verifies that
+// legacy ERC20s like MKR — which return `bytes32` for symbol() and name()
+// instead of the modern `string` — are tracked correctly. Pre-fix this
+// caused a regression: every position event touching MKR NACK'd because
+// the strict `string`-only decode failed. Post-fix the bytes32 fallback
+// produces "MKR" / "Maker DAO" and the token row is cached.
+func TestBatchGetTokenMetadata_AcceptsBytes32SymbolAndName(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	mkr := common.HexToAddress("0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2")
+
+	// Build the bytes32-style returns: 32 raw bytes, ASCII left-aligned,
+	// null-padded.
+	bytes32Of := func(s string) []byte {
+		b := make([]byte, 32)
+		copy(b, []byte(s))
+		return b
+	}
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := 0; i < len(calls); i += 3 {
+			// decimals: standard uint8 → 32 bytes ABI-encoded
+			results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+			// symbol & name: bytes32 (MKR-style), 32 raw bytes
+			results[i+1] = outbound.Result{Success: true, ReturnData: bytes32Of("MKR")}
+			results[i+2] = outbound.Result{Success: true, ReturnData: bytes32Of("Maker DAO")}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{mkr: true}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("expected no error for MKR-style bytes32 metadata; got %v", err)
+	}
+
+	md, ok := result[mkr]
+	if !ok {
+		t.Fatal("MKR must be in the result map")
+	}
+	if md.Symbol != "MKR" {
+		t.Errorf("Symbol = %q; want %q", md.Symbol, "MKR")
+	}
+	if md.Name != "Maker DAO" {
+		t.Errorf("Name = %q; want %q", md.Name, "Maker DAO")
+	}
+	if md.Decimals != 18 {
+		t.Errorf("Decimals = %d; want 18", md.Decimals)
+	}
+
+	svc.mu.RLock()
+	cached, cachedOK := svc.metadataCache[mkr]
+	svc.mu.RUnlock()
+	if !cachedOK || cached.Symbol != "MKR" {
+		t.Errorf("MKR must be cached with symbol=MKR; got cached=%v meta=%+v", cachedOK, cached)
+	}
+}
+
+// TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure codifies the
+// follow-on VEC-188 invariant flagged in PR review: even when every
+// sub-call reports `Success: true`, an `Unpack` error or wrong-typed
+// payload must NOT result in a zero-valued cache entry. A non-standard
+// token returning bytes that don't decode as the expected ABI type would
+// otherwise persist a {Symbol:"", Decimals:0, Name:""} row in the cache
+// and poison every subsequent read for the pod's lifetime.
+//
+// FAILS against pre-fix code (which silently fell through Unpack errors
+// to zero values and cached them).
+func TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("failed to load ERC20 ABI: %v", err)
+	}
+
+	tokenA := common.HexToAddress("0xaaAAAAaaaAAAAaaAaaAAaaAAaaAaAAAAAaAaaaAA")
+	tokenBadDecimals := common.HexToAddress("0xbBBBBBbBBbbBBbbbBBBbBbbBBbBBbbBBBBbbbbbB")
+
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := 0; i < len(calls); i += 3 {
+			token := calls[i].Target
+			switch token {
+			case tokenA:
+				results[i] = outbound.Result{Success: true, ReturnData: packUint8ForTest(t, 18)}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "AAA")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Alpha")}
+			case tokenBadDecimals:
+				// decimals() returns "Success: true" but the bytes are
+				// garbage that the ABI decoder cannot unpack as uint8.
+				// This simulates a non-standard / malicious contract
+				// pretending to implement the interface.
+				results[i] = outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02}}
+				results[i+1] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "BAD")}
+				results[i+2] = outbound.Result{Success: true, ReturnData: packStringForTest(t, "Bad Token")}
+			default:
+				return nil, fmt.Errorf("unexpected token %s", token.Hex())
+			}
+		}
+		return results, nil
+	}
+
+	svc := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		erc20ABI:        erc20ABI,
+		multicallClient: mock,
+		protocolVersion: "sparklend",
+	}
+
+	tokens := map[common.Address]bool{
+		tokenA:           true,
+		tokenBadDecimals: true,
+	}
+
+	result, err := svc.BatchGetTokenMetadata(context.Background(), tokens, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected non-nil error when a sub-call's payload fails to unpack")
+	}
+
+	if _, ok := result[tokenBadDecimals]; ok {
+		t.Error("tokenBadDecimals must NOT be in result map (decimals() didn't unpack)")
+	}
+
+	svc.mu.RLock()
+	_, cachedBad := svc.metadataCache[tokenBadDecimals]
+	svc.mu.RUnlock()
+	if cachedBad {
+		t.Error("tokenBadDecimals must NOT be cached when sub-call payload fails to unpack — would poison future reads")
+	}
+
+	// The good token's metadata is still returned and cached.
+	if md, ok := result[tokenA]; !ok || md.Symbol != "AAA" || md.Decimals != 18 {
+		t.Errorf("tokenA metadata wrong: present=%v meta=%+v", ok, md)
+	}
+}

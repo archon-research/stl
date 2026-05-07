@@ -1,0 +1,375 @@
+package anchorage_tracker
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+)
+
+// ---------------------------------------------------------------------------
+// Mocks
+// ---------------------------------------------------------------------------
+
+type mockClient struct {
+	packages   []Package
+	operations []Operation
+	fetchErr   error
+}
+
+func (m *mockClient) FetchPackages(_ context.Context) ([]Package, error) {
+	if m.fetchErr != nil {
+		return nil, m.fetchErr
+	}
+	return m.packages, nil
+}
+
+func (m *mockClient) ForEachOperationsPage(_ context.Context, _ string, fn func([]Operation) error) error {
+	if m.fetchErr != nil {
+		return m.fetchErr
+	}
+	if len(m.operations) > 0 {
+		return fn(m.operations)
+	}
+	return nil
+}
+
+type mockSnapshotRepo struct {
+	mu        sync.Mutex
+	snapshots []entity.AnchoragePackageSnapshot
+	saveErr   error
+}
+
+func (m *mockSnapshotRepo) SaveSnapshots(_ context.Context, s []entity.AnchoragePackageSnapshot) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.snapshots = append(m.snapshots, s...)
+	return nil
+}
+
+func (m *mockSnapshotRepo) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.snapshots)
+}
+
+type mockOperationRepo struct {
+	mu         sync.Mutex
+	operations []entity.AnchorageOperation
+	cursor     string
+	saveErr    error
+}
+
+func (m *mockOperationRepo) SaveOperations(_ context.Context, ops []entity.AnchorageOperation) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.operations = append(m.operations, ops...)
+	return nil
+}
+
+func (m *mockOperationRepo) GetLastCursor(_ context.Context, _ int64) (string, error) {
+	return m.cursor, nil
+}
+
+func (m *mockOperationRepo) GetPrimeIDByName(_ context.Context, name string) (int64, error) {
+	if name == "" {
+		return 0, fmt.Errorf("prime name is required")
+	}
+	return 1, nil
+}
+
+func (m *mockOperationRepo) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.operations)
+}
+
+// ---------------------------------------------------------------------------
+// toSnapshots tests
+// ---------------------------------------------------------------------------
+
+func TestToSnapshots_FlattensCollateralAssets(t *testing.T) {
+	packages := []Package{
+		{
+			PackageID:      "pkg-1",
+			PledgorID:      "pledgor-1",
+			SecuredPartyID: "sp-1",
+			Active:         true,
+			State:          "HEALTHY",
+			CurrentLTV:     "0.68",
+			ExposureValue:  "50000000",
+			PackageValue:   "73000000",
+			LTVTimestamp:   "2026-03-16T20:34:11Z",
+			MarginCall:     MarginConfig{LTV: "0.8"},
+			Critical:       MarginConfig{LTV: "0.9"},
+			MarginReturn:   MarginReturnConfig{LTV: "0.6"},
+			CollateralAssets: []CollateralAsset{
+				{
+					Asset:         AssetInfo{AssetType: "BTC", Type: "AnchorageCustody"},
+					Price:         "74073.59",
+					Quantity:      "988.33",
+					Weight:        "1",
+					WeightedValue: "73000000",
+				},
+			},
+		},
+	}
+
+	now := time.Now().UTC()
+	snapshots, err := toSnapshots(packages, 1, now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d", len(snapshots))
+	}
+
+	expectedLTVTimestamp, _ := time.Parse(time.RFC3339, "2026-03-16T20:34:11Z")
+
+	want := entity.AnchoragePackageSnapshot{
+		PrimeID:            1,
+		PackageID:          "pkg-1",
+		PledgorID:          "pledgor-1",
+		SecuredPartyID:     "sp-1",
+		Active:             true,
+		State:              "HEALTHY",
+		CurrentLTV:         "0.68",
+		ExposureValue:      "50000000",
+		PackageValue:       "73000000",
+		MarginCallLTV:      "0.8",
+		CriticalLTV:        "0.9",
+		MarginReturnLTV:    "0.6",
+		AssetType:          "BTC",
+		CustodyType:        "AnchorageCustody",
+		AssetPrice:         "74073.59",
+		AssetQuantity:      "988.33",
+		AssetWeightedValue: "73000000",
+		LTVTimestamp:       expectedLTVTimestamp,
+		SnapshotTime:       now,
+	}
+
+	got := snapshots[0]
+
+	assertField(t, "PrimeID", got.PrimeID, want.PrimeID)
+	assertField(t, "PackageID", got.PackageID, want.PackageID)
+	assertField(t, "PledgorID", got.PledgorID, want.PledgorID)
+	assertField(t, "SecuredPartyID", got.SecuredPartyID, want.SecuredPartyID)
+	assertField(t, "Active", got.Active, want.Active)
+	assertField(t, "State", got.State, want.State)
+	assertField(t, "CurrentLTV", got.CurrentLTV, want.CurrentLTV)
+	assertField(t, "ExposureValue", got.ExposureValue, want.ExposureValue)
+	assertField(t, "PackageValue", got.PackageValue, want.PackageValue)
+	assertField(t, "MarginCallLTV", got.MarginCallLTV, want.MarginCallLTV)
+	assertField(t, "CriticalLTV", got.CriticalLTV, want.CriticalLTV)
+	assertField(t, "MarginReturnLTV", got.MarginReturnLTV, want.MarginReturnLTV)
+	assertField(t, "AssetType", got.AssetType, want.AssetType)
+	assertField(t, "CustodyType", got.CustodyType, want.CustodyType)
+	assertField(t, "AssetPrice", got.AssetPrice, want.AssetPrice)
+	assertField(t, "AssetQuantity", got.AssetQuantity, want.AssetQuantity)
+	assertField(t, "AssetWeightedValue", got.AssetWeightedValue, want.AssetWeightedValue)
+
+	if !got.LTVTimestamp.Equal(want.LTVTimestamp) {
+		t.Errorf("LTVTimestamp: got %v, want %v", got.LTVTimestamp, want.LTVTimestamp)
+	}
+	if !got.SnapshotTime.Equal(want.SnapshotTime) {
+		t.Errorf("SnapshotTime: got %v, want %v", got.SnapshotTime, want.SnapshotTime)
+	}
+}
+
+func TestToSnapshots_MultipleAssetsPerPackage(t *testing.T) {
+	packages := []Package{
+		{
+			PackageID:      "pkg-multi",
+			PledgorID:      "p1",
+			SecuredPartyID: "sp1",
+			Active:         true,
+			State:          "HEALTHY",
+			CurrentLTV:     "0.5",
+			ExposureValue:  "100000000",
+			PackageValue:   "200000000",
+			LTVTimestamp:   "2026-03-16T12:00:00Z",
+			MarginCall:     MarginConfig{LTV: "0.8"},
+			Critical:       MarginConfig{LTV: "0.9"},
+			MarginReturn:   MarginReturnConfig{LTV: "0.6"},
+			CollateralAssets: []CollateralAsset{
+				{Asset: AssetInfo{AssetType: "BTC", Type: "AnchorageCustody"}, Price: "70000", Quantity: "1000", WeightedValue: "70000000"},
+				{Asset: AssetInfo{AssetType: "ETH", Type: "AnchorageCustody"}, Price: "3000", Quantity: "43333", WeightedValue: "130000000"},
+			},
+		},
+	}
+
+	snapshots, err := toSnapshots(packages, 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(snapshots) != 2 {
+		t.Fatalf("expected 2 snapshots (one per asset), got %d", len(snapshots))
+	}
+
+	assertField(t, "[0].PackageID", snapshots[0].PackageID, "pkg-multi")
+	assertField(t, "[1].PackageID", snapshots[1].PackageID, "pkg-multi")
+	assertField(t, "[0].AssetType", snapshots[0].AssetType, "BTC")
+	assertField(t, "[1].AssetType", snapshots[1].AssetType, "ETH")
+	assertField(t, "[0].AssetPrice", snapshots[0].AssetPrice, "70000")
+	assertField(t, "[1].AssetPrice", snapshots[1].AssetPrice, "3000")
+}
+
+func TestToSnapshots_EmptyCollateral(t *testing.T) {
+	packages := []Package{
+		{
+			PackageID:        "pkg-empty",
+			PledgorID:        "p1",
+			SecuredPartyID:   "sp1",
+			Active:           false,
+			State:            "CLOSED",
+			CurrentLTV:       "0",
+			ExposureValue:    "0",
+			PackageValue:     "0",
+			LTVTimestamp:     "2026-01-01T00:00:00Z",
+			MarginCall:       MarginConfig{LTV: "0.8"},
+			Critical:         MarginConfig{LTV: "0.9"},
+			MarginReturn:     MarginReturnConfig{LTV: "0.6"},
+			CollateralAssets: []CollateralAsset{},
+		},
+	}
+
+	snapshots, err := toSnapshots(packages, 1, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(snapshots) != 0 {
+		t.Fatalf("expected 0 snapshots for empty collateral package, got %d", len(snapshots))
+	}
+}
+
+func TestToSnapshots_BadTimestamp(t *testing.T) {
+	packages := []Package{
+		{
+			PackageID:    "pkg-bad",
+			LTVTimestamp: "not-a-timestamp",
+		},
+	}
+
+	_, err := toSnapshots(packages, 1, time.Now().UTC())
+	if err == nil {
+		t.Fatal("expected error for bad timestamp")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Service tests
+// ---------------------------------------------------------------------------
+
+func newTestPackage() Package {
+	return Package{
+		PackageID:      "pkg-1",
+		PledgorID:      "p1",
+		SecuredPartyID: "sp1",
+		Active:         true,
+		State:          "HEALTHY",
+		CurrentLTV:     "0.5",
+		ExposureValue:  "50000000",
+		PackageValue:   "100000000",
+		LTVTimestamp:   "2026-03-16T20:34:11Z",
+		MarginCall:     MarginConfig{LTV: "0.8"},
+		Critical:       MarginConfig{LTV: "0.9"},
+		MarginReturn:   MarginReturnConfig{LTV: "0.6"},
+		CollateralAssets: []CollateralAsset{
+			{Asset: AssetInfo{AssetType: "BTC", Type: "AnchorageCustody"}, Price: "100000", Quantity: "1000", WeightedValue: "100000000"},
+		},
+	}
+}
+
+func newTestOperation() Operation {
+	return Operation{
+		ID:        "op-1",
+		Action:    "INITIAL_DEPOSIT",
+		Type:      "COLLATERAL_PACKAGE",
+		TypeID:    "pkg-1",
+		Asset:     AssetInfo{AssetType: "BTC", Type: "ANCHORAGECUSTODY"},
+		Quantity:  "1000",
+		Notes:     "test",
+		CreatedAt: "2025-12-19T12:00:00.000000Z",
+	}
+}
+
+func TestService_Run(t *testing.T) {
+	client := &mockClient{
+		packages:   []Package{newTestPackage()},
+		operations: []Operation{newTestOperation()},
+	}
+	snapRepo := &mockSnapshotRepo{}
+	opRepo := &mockOperationRepo{}
+
+	svc := NewService(client, snapRepo, opRepo, 1, nil)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if snapRepo.count() != 1 {
+		t.Errorf("expected 1 snapshot, got %d", snapRepo.count())
+	}
+	if opRepo.count() != 1 {
+		t.Errorf("expected 1 operation, got %d", opRepo.count())
+	}
+}
+
+func TestService_RunFailsOnAPIError(t *testing.T) {
+	client := &mockClient{fetchErr: fmt.Errorf("api down")}
+	svc := NewService(client, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, nil)
+
+	err := svc.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error when API fails")
+	}
+}
+
+func TestService_BackfillOperations(t *testing.T) {
+	client := &mockClient{
+		operations: []Operation{newTestOperation()},
+	}
+	opRepo := &mockOperationRepo{}
+
+	svc := NewService(client, &mockSnapshotRepo{}, opRepo, 1, nil)
+
+	n, err := svc.BackfillOperations(context.Background())
+	if err != nil {
+		t.Fatalf("BackfillOperations failed: %v", err)
+	}
+
+	if n != 1 {
+		t.Errorf("expected 1 operation backfilled, got %d", n)
+	}
+	if opRepo.count() != 1 {
+		t.Errorf("expected 1 operation in repo, got %d", opRepo.count())
+	}
+
+	opRepo.mu.Lock()
+	assertField(t, "OperationID", opRepo.operations[0].OperationID, "op-1")
+	assertField(t, "OperationType", opRepo.operations[0].OperationType, "COLLATERAL_PACKAGE")
+	opRepo.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func assertField[T comparable](t *testing.T, name string, got, want T) {
+	t.Helper()
+	if got != want {
+		t.Errorf("%s: got %v, want %v", name, got, want)
+	}
+}

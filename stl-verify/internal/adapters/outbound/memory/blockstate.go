@@ -38,6 +38,7 @@ func NewBlockStateRepository() *BlockStateRepository {
 }
 
 // SaveBlock persists a block's state with atomic version assignment.
+// If a block with the same hash already exists, returns its existing version (idempotent).
 // Returns the assigned version number.
 // If a block with the same hash already exists, returns its existing version
 // without modification (idempotent), matching the Postgres adapter behavior.
@@ -45,7 +46,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// If block with this hash already exists, return existing version (idempotent)
+	// Check if block with this hash already exists (matches postgres behavior)
 	if existing, ok := r.blocks[state.Hash]; ok {
 		return existing.Version, nil
 	}

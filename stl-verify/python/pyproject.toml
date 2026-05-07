@@ -10,7 +10,14 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings",
     "python-dotenv",
-    "web3",
+    "httpx>=0.28.1",
+    "axis-synome==0.1.dev188",
+    "opentelemetry-sdk>=1.41.0,<2",
+    "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
+    "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
+    "opentelemetry-exporter-otlp>=1.41.0,<2",
+    "pandas>=2.2.0",
+    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +28,9 @@ dev = [
     "ruff",
     "testcontainers[postgres]",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

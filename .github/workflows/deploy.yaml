@@ -1,0 +1,439 @@
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to deploy (defaults to HEAD of selected branch)"
+        required: false
+        type: string
+
+jobs:
+  build-push-staging:
+    name: Build & Push Images (Staging)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: deploy-build-staging
+      cancel-in-progress: false
+    env:
+      AWS_REGION: eu-west-1
+      STAGING_REGISTRY: 579039992622.dkr.ecr.eu-west-1.amazonaws.com
+      STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Configure AWS credentials (staging)
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        with:
+          role-to-assume: ${{ env.STAGING_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to staging ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$STAGING_REGISTRY"
+
+      - name: Build and push all images to staging ECR
+        working-directory: stl-verify
+        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }}
+
+  update-staging:
+    name: Update Staging Image Tags
+    needs: build-push-staging
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-update-staging
+      cancel-in-progress: false
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+
+      - name: Commit and push to main (via API for verified commits)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          SHA=${{ inputs.sha || github.sha }}
+          REPO="${{ github.repository }}"
+
+          # Retry loop to handle concurrent updates to main
+          MAX_RETRIES=3
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt ${attempt}/${MAX_RETRIES}"
+
+            # Fetch latest main and apply the tag update on top of it
+            git fetch origin main
+            git checkout FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml
+            # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
+            sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/staging/kustomization.yaml
+
+            # Check if the file actually changed vs current main
+            if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
+              echo "No changes to commit"
+              exit 0
+            fi
+
+            # Get current main HEAD and its tree
+            MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+
+            # Create a new tree with the updated file
+            NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
+              --method POST \
+              --input - <<TREE_EOF | jq -r '.sha'
+          {
+            "base_tree": "${BASE_TREE}",
+            "tree": [{
+              "path": "k8s/overlays/staging/kustomization.yaml",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(cat k8s/overlays/staging/kustomization.yaml | jq -Rs .)
+            }]
+          }
+          TREE_EOF
+            )
+
+            # Create a verified commit via the API
+            NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
+              --method POST \
+              --field "message=deploy(staging): update image tags to ${SHA}" \
+              --field "tree=${NEW_TREE}" \
+              --field "parents[]=${MAIN_SHA}" \
+              --jq '.sha')
+
+            # Try to fast-forward main — fails if main moved since we read MAIN_SHA
+            REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
+              --method PATCH \
+              --field "sha=${NEW_COMMIT}" 2>&1) && {
+              echo "Successfully updated main to ${NEW_COMMIT}"
+              exit 0
+            }
+
+            echo "Ref update failed: ${REF_OUTPUT}"
+            echo "Retrying..."
+            sleep 1
+          done
+
+          echo "Failed to update main after ${MAX_RETRIES} attempts"
+          exit 1
+
+  build-push-prod:
+    name: Build & Push Images (Prod)
+    needs: build-push-staging
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: deploy-build-prod
+      cancel-in-progress: false
+    env:
+      AWS_REGION: eu-west-1
+      STAGING_REGISTRY: 579039992622.dkr.ecr.eu-west-1.amazonaws.com
+      STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+      PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
+      PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer migrate python-api
+      CRONJOBS: anchorage-indexer offchain-price-indexer watcher-data-validator
+    permissions:
+      id-token: write
+    steps:
+      # Pull images from staging ECR, retag and push to prod (no build needed)
+      - name: Configure AWS credentials (staging)
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        with:
+          role-to-assume: ${{ env.STAGING_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to staging ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$STAGING_REGISTRY"
+
+      - name: Pull all images from staging ECR
+        run: |
+          SHA=${{ inputs.sha || github.sha }}
+          for service in $SERVICES; do
+            docker pull "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA"
+          done
+          for cj in $CRONJOBS; do
+            docker pull "$STAGING_REGISTRY/stl-sentinelstaging-cronjob:$cj-$SHA"
+          done
+
+      # Retag and push to prod ECR
+      - name: Configure AWS credentials (prod)
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        with:
+          role-to-assume: ${{ env.PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to prod ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$PROD_REGISTRY"
+
+      - name: Retag and push all images to prod ECR
+        run: |
+          SHA=${{ inputs.sha || github.sha }}
+          for service in $SERVICES; do
+            docker tag "$STAGING_REGISTRY/stl-sentinelstaging-$service:$SHA" "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
+            docker push "$PROD_REGISTRY/stl-sentinelprod-$service:$SHA"
+          done
+          for cj in $CRONJOBS; do
+            docker tag "$STAGING_REGISTRY/stl-sentinelstaging-cronjob:$cj-$SHA" "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
+            docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
+          done
+
+  create-prod-pr:
+    name: Create Prod Deploy PR
+    needs: build-push-prod
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-prod-pr
+      cancel-in-progress: false
+    outputs:
+      pr_url: ${{ steps.create-pr.outputs.pr_url }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: main
+          fetch-depth: 0
+
+      - name: Build changelog
+        id: changelog
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -o pipefail
+          SHA=${{ inputs.sha || github.sha }}
+          SHORT_SHA=${SHA:0:7}
+          REPO="${{ github.repository }}"
+
+          # Get the SHA currently deployed in prod
+          PROD_SHA=$(grep -m1 -oP '[a-f0-9]{40}' k8s/overlays/prod/kustomization.yaml || echo "")
+          PROD_SHORT=${PROD_SHA:0:7}
+
+          if [ -z "$PROD_SHA" ]; then
+            echo "::error::Could not parse current prod SHA from kustomization.yaml"
+            exit 1
+          fi
+
+          CHANGELOG=""
+
+          if [ "$PROD_SHA" = "$SHA" ]; then
+            CHANGELOG="No code changes (same SHA as current prod)."
+          else
+            # List merged PRs between the two SHAs
+            TOTAL_PRS=0
+            MERGED_PRS=$(git log --merges --format="%s" "${PROD_SHA}..${SHA}" \
+              | grep -oP '#\d+' | sort -u || echo "")
+            TOTAL_PRS=$(echo "$MERGED_PRS" | grep -c . || echo 0)
+            DISPLAY_PRS=$(echo "$MERGED_PRS" | head -15)
+
+            PR_LIST=""
+            for pr_num in $DISPLAY_PRS; do
+              num=${pr_num#\#}
+              PR_INFO=$(gh pr view "$num" --json title,url,author --jq '"- [#'"$num"' \(.title)](\(.url)) by @\(.author.login)"' 2>/dev/null || echo "")
+              if [ -n "$PR_INFO" ]; then
+                PR_LIST="${PR_LIST}${PR_INFO}\n"
+              fi
+            done
+
+            # List commits between current prod and new SHA (stl-verify/ only)
+            TOTAL_COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | wc -l | tr -d ' ')
+            COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | head -20)
+
+            CHANGELOG="### Changes: \`${PROD_SHORT}\` → \`${SHORT_SHA}\`"
+            if [ -n "$PR_LIST" ]; then
+              CHANGELOG="${CHANGELOG}\n\n**Merged PRs:**\n${PR_LIST}"
+              if [ "$TOTAL_PRS" -gt 15 ]; then
+                CHANGELOG="${CHANGELOG}…and $((TOTAL_PRS - 15)) more"
+              fi
+            fi
+            if [ -n "$COMMITS" ]; then
+              CHANGELOG="${CHANGELOG}\n\n**Commits (stl-verify):**\n\`\`\`\n${COMMITS}\n\`\`\`"
+              if [ "$TOTAL_COMMITS" -gt 20 ]; then
+                CHANGELOG="${CHANGELOG}\n…and $((TOTAL_COMMITS - 20)) more"
+              fi
+            fi
+          fi
+
+          # Write to file to avoid quoting issues, then set output
+          echo -e "$CHANGELOG" > /tmp/changelog.md
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            cat /tmp/changelog.md
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update prod kustomization image tags
+        run: |
+          SHA=${{ inputs.sha || github.sha }}
+          # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
+          sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/prod/kustomization.yaml
+
+      - name: Create or update prod PR
+        id: create-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          SHA=${{ inputs.sha || github.sha }}
+          SHORT_SHA=${SHA:0:7}
+          BRANCH="deploy/prod-${SHORT_SHA}"
+          REPO="${{ github.repository }}"
+
+          # Get current main HEAD and its tree
+          MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+          BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+
+          # Create a new tree with the updated file
+          NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
+            --method POST \
+            --input - <<TREE_EOF | jq -r '.sha'
+          {
+            "base_tree": "${BASE_TREE}",
+            "tree": [{
+              "path": "k8s/overlays/prod/kustomization.yaml",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(cat k8s/overlays/prod/kustomization.yaml | jq -Rs .)
+            }]
+          }
+          TREE_EOF
+          )
+
+          # Create a verified commit via the API
+          NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
+            --method POST \
+            --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
+            --field "tree=${NEW_TREE}" \
+            --field "parents[]=${MAIN_SHA}" \
+            --jq '.sha')
+
+          # Create the branch pointing to the new commit
+          gh api "repos/${REPO}/git/refs" \
+            --method POST \
+            --field "ref=refs/heads/${BRANCH}" \
+            --field "sha=${NEW_COMMIT}" || \
+          gh api "repos/${REPO}/git/refs/heads/${BRANCH}" \
+            --method PATCH \
+            --field "sha=${NEW_COMMIT}" \
+            --field "force=true"
+
+          # Create the new prod deploy PR FIRST, so that if `gh pr create`
+          # fails transiently we don't end up with no open prod-deploy PR
+          # (older PRs would have already been closed).
+          gh pr create \
+            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
+            --body "$(cat <<EOF
+          Automated prod image tag update.
+
+          **Deploy SHA:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${SHA})
+          **Images pushed to:** prod ECR (\`030797368798\`)
+          **Triggered by:** @${{ github.actor }}
+
+          ${{ steps.changelog.outputs.changelog }}
+
+          ---
+          Merge this PR to update prod kustomization, then sync in ArgoCD.
+          EOF
+          )" \
+            --head "$BRANCH" \
+            --base main
+
+          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+          # Now that the new PR exists, close any older open deploy/prod-* PRs
+          # (excluding the one we just created). Branch protection's "strict"
+          # rule plus our concurrency group make this defensive, but it keeps
+          # the PR list clean and removes ambiguity about which deploy is
+          # current.
+          # NOTE: filter by branch prefix — `gh pr list --search` treats `:` as
+          # a search qualifier so the previous title-based search returned 0.
+          EXISTING_PRS=$(gh pr list \
+            --state open \
+            --base main \
+            --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("deploy/prod-")) | select(.headRefName != "'"$BRANCH"'") | .number')
+          for pr in $EXISTING_PRS; do
+            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
+          done
+
+  notify-prod-pr-created:
+    name: Notify Prod Deploy Awaiting Approval
+    needs: create-prod-pr
+    if: ${{ needs.create-prod-pr.result == 'success' }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: pending
+      context: Prod Deploy
+      pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
+      body: ${{ needs.create-prod-pr.outputs.changelog }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  notify-staging-failure:
+    name: Notify Staging Deploy Failure
+    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
+    needs: [build-push-staging, update-staging]
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Staging Deploy
+      failed-jobs: |
+        Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
+        Update Staging Image Tags=${{ needs.update-staging.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  notify-prod-failure:
+    name: Notify Prod Deploy Failure
+    if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.create-prod-pr.result == 'failure') }}
+    needs: [build-push-prod, create-prod-pr]
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Deploy
+      failed-jobs: |
+        Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
+        Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

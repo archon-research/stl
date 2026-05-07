@@ -12,10 +12,11 @@ import (
 // This aggregate includes chains, protocols, and protocol-specific reserve data.
 // Note: Protocols are pre-seeded via database migrations and are read-only at runtime.
 type ProtocolRepository interface {
+	// GetOrCreateProtocol retrieves a protocol by chain ID and address, or creates it if it doesn't exist.
+	// This method participates in an external transaction.
+	GetOrCreateProtocol(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, name string, protocolType string, createdAtBlock int64) (int64, error)
 	// UpsertReserveData upserts SparkLend/aave reserve data records.
 	// This stores protocol-level market data (rates, indexes, totals) per token per block.
 	// Conflict resolution: ON CONFLICT (protocol_id, token_id, block_number, block_version) DO UPDATE
 	UpsertReserveData(ctx context.Context, tx pgx.Tx, data []*entity.SparkLendReserveData) error
-	// GetProtocolByAddress retrieves a protocol by its chain ID and address.
-	GetProtocolByAddress(ctx context.Context, chainID int64, address common.Address) (*entity.Protocol, error)
 }
