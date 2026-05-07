@@ -9,7 +9,6 @@ from app.api.deps import (
     get_crypto_lending_risk_service,
     get_model_registry,
     get_receipt_token_lookup,
-    get_suraf_rrc_service,
 )
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import RrcResult
@@ -22,7 +21,6 @@ from app.domain.exceptions import (
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
-from app.services.suraf_rrc_service import SurafRrcService
 
 router = APIRouter()
 
@@ -50,21 +48,6 @@ class RiskBreakdownItemResponse(BaseModel):
 class RiskBreakdownResponse(BaseModel):
     receipt_token_id: int
     items: list[RiskBreakdownItemResponse]
-
-
-class ScenarioRrcRequest(BaseModel):
-    receipt_token_id: int
-    usd_exposure: Decimal
-
-
-class ScenarioRrcResponse(BaseModel):
-    receipt_token_id: int
-    usd_exposure: Decimal
-    rating_id: str
-    rating_version: str
-    crr_pct: Decimal
-    rrc_usd: Decimal
-    source_commit_sha: str
 
 
 def _share_error_503(exc: AllocationShareError) -> HTTPException:
@@ -133,25 +116,6 @@ async def get_risk_breakdown(
             for item in breakdown.items
         ],
     )
-
-
-@router.post("/risk/rrc/scenario", response_model=ScenarioRrcResponse)
-async def post_rrc_scenario(
-    body: ScenarioRrcRequest,
-    service: SurafRrcService = Depends(get_suraf_rrc_service),
-) -> ScenarioRrcResponse:
-    """Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
-
-    ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-    for the receipt token. Pure scenario calculation — no position state.
-    """
-    if body.usd_exposure <= _ZERO:
-        raise HTTPException(status_code=422, detail="usd_exposure must be positive")
-
-    result = service.compute_legacy(body.receipt_token_id, body.usd_exposure)
-    if result is None:
-        raise HTTPException(status_code=404, detail=f"no rating mapped for receipt_token_id: {body.receipt_token_id}")
-    return ScenarioRrcResponse(**result.model_dump())
 
 
 # ---------------------------------------------------------------------------

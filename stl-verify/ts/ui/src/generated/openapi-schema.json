@@ -805,78 +805,6 @@
         "title": "RrcResult",
         "type": "object"
       },
-      "ScenarioRrcRequest": {
-        "properties": {
-          "receipt_token_id": {
-            "title": "Receipt Token Id",
-            "type": "integer"
-          },
-          "usd_exposure": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              }
-            ],
-            "title": "Usd Exposure"
-          }
-        },
-        "required": [
-          "receipt_token_id",
-          "usd_exposure"
-        ],
-        "title": "ScenarioRrcRequest",
-        "type": "object"
-      },
-      "ScenarioRrcResponse": {
-        "properties": {
-          "crr_pct": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Crr Pct",
-            "type": "string"
-          },
-          "rating_id": {
-            "title": "Rating Id",
-            "type": "string"
-          },
-          "rating_version": {
-            "title": "Rating Version",
-            "type": "string"
-          },
-          "receipt_token_id": {
-            "title": "Receipt Token Id",
-            "type": "integer"
-          },
-          "rrc_usd": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Rrc Usd",
-            "type": "string"
-          },
-          "source_commit_sha": {
-            "title": "Source Commit Sha",
-            "type": "string"
-          },
-          "usd_exposure": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Usd Exposure",
-            "type": "string"
-          }
-        },
-        "required": [
-          "receipt_token_id",
-          "usd_exposure",
-          "rating_id",
-          "rating_version",
-          "crr_pct",
-          "rrc_usd",
-          "source_commit_sha"
-        ],
-        "title": "ScenarioRrcResponse",
-        "type": "object"
-      },
       "SourceAccessModel": {
         "description": "Classification of data source accessibility and terms of use.",
         "enum": [
@@ -1736,45 +1664,6 @@
           }
         },
         "summary": "Post Rrc"
-      }
-    },
-    "/v1/risk/rrc/scenario": {
-      "post": {
-        "description": "Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.\n\n``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating\nfor the receipt token. Pure scenario calculation \u2014 no position state.",
-        "operationId": "post_rrc_scenario_v1_risk_rrc_scenario_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ScenarioRrcRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ScenarioRrcResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Post Rrc Scenario"
       }
     },
     "/v1/risk/{receipt_token_id}/bad-debt": {
