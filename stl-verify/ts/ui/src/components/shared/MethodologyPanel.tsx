@@ -405,8 +405,9 @@ export function MethodologyPanel({
                     <>
                       <div>
                         Source:{' '}
-                        {tokenPrice.source_display_name ?? tokenPrice.source_name} (
-                        {tokenPrice.source_type})
+                        {tokenPrice.source_display_name ??
+                          tokenPrice.source_name}{' '}
+                        ({tokenPrice.source_type})
                       </div>
                       <div>Source ID: {tokenPrice.source_id}</div>
                     </>

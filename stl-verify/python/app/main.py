@@ -196,12 +196,14 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             # to avoid reflecting potentially sensitive user-provided data.
             if "input" in error:
                 try:
+                    raw = error["input"]
                     logger.debug(
                         "Validation error input",
                         extra={
                             "path": request.url.path,
                             "method": request.method,
-                            "input": str(error["input"]),
+                            "input_type": type(raw).__name__,
+                            "input_len": len(str(raw)),
                         },
                     )
                 except Exception:  # noqa: BLE001 - best-effort diagnostic logging
