@@ -352,7 +352,13 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Get Token Price */
+    /**
+     * Get Token Price
+     * @description Return latest token price state.
+     *
+     *     Returns `404` only when the token does not exist.
+     *     Returns `200` with stale indicators when token exists but no quote is available.
+     */
     get: operations['get_token_price_v1_tokens__token_id__price_get'];
     put?: never;
     post?: never;
@@ -799,29 +805,70 @@ export interface components {
       /** Unadjusted Crr Pct */
       unadjusted_crr_pct: string;
     };
-    /** TokenPriceResponse */
+    /**
+     * TokenPriceResponse
+     * @description Latest token price state.
+     *
+     *     The endpoint returns `200` when the token exists even if no quote is currently
+     *     available. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and
+     *     quote fields are `null`.
+     */
     TokenPriceResponse: {
-      /** Price Usd */
-      price_usd: string;
-      /** Source Display Name */
-      source_display_name: string | null;
-      /** Source Id */
-      source_id: number;
-      /** Source Name */
-      source_name: string;
-      /** Source Type */
-      source_type: string;
-      /** Staleness Seconds */
-      staleness_seconds: number;
+      /**
+       * Is Stale
+       * @description Whether quote data is stale or missing
+       */
+      is_stale: boolean;
+      /**
+       * Price Usd
+       * @description Latest USD price; null when no quote is available
+       */
+      price_usd?: string | null;
+      /**
+       * Source Display Name
+       * @description Human-friendly source name when available
+       */
+      source_display_name?: string | null;
+      /**
+       * Source Id
+       * @description Source identifier when available
+       */
+      source_id?: number | null;
+      /**
+       * Source Name
+       * @description Source machine name when available
+       */
+      source_name?: string | null;
+      /**
+       * Source Type
+       * @description Price source type (`onchain` or `offchain`) when available
+       */
+      source_type?: string | null;
+      /**
+       * Staleness Reason
+       * @description Reason for stale state, e.g. `missing_quote`
+       */
+      staleness_reason?: string | null;
+      /**
+       * Staleness Seconds
+       * @description Age of the latest quote in seconds; null when unavailable
+       */
+      staleness_seconds?: number | null;
       /**
        * Timestamp
-       * Format: date-time
+       * @description Timestamp of the latest quote; null when unavailable
        */
-      timestamp: string;
-      /** Token Id */
+      timestamp?: string | null;
+      /**
+       * Token Id
+       * @description Token identifier
+       */
       token_id: number;
     };
-    /** TokenResponse */
+    /**
+     * TokenResponse
+     * @description Token metadata entry from the token catalog.
+     */
     TokenResponse: {
       /** Address */
       address: string;

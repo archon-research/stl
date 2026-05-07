@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.token_catalog_repository import PostgresTokenCatalogRepository
@@ -14,6 +14,8 @@ router = APIRouter()
 
 
 class TokenResponse(BaseModel):
+    """Token metadata entry from the token catalog."""
+
     id: int
     chain_id: int
     address: str
@@ -24,14 +26,27 @@ class TokenResponse(BaseModel):
 
 
 class TokenPriceResponse(BaseModel):
-    token_id: int
-    source_type: str
-    source_id: int
-    source_name: str
-    source_display_name: str | None
-    price_usd: Decimal
-    timestamp: datetime
-    staleness_seconds: int
+    """Latest token price state.
+
+    The endpoint returns `200` when the token exists even if no quote is currently
+    available. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and
+    quote fields are `null`.
+    """
+
+    token_id: int = Field(description="Token identifier")
+    source_type: str | None = Field(
+        default=None, description="Price source type (`onchain` or `offchain`) when available"
+    )
+    source_id: int | None = Field(default=None, description="Source identifier when available")
+    source_name: str | None = Field(default=None, description="Source machine name when available")
+    source_display_name: str | None = Field(default=None, description="Human-friendly source name when available")
+    price_usd: Decimal | None = Field(default=None, description="Latest USD price; null when no quote is available")
+    timestamp: datetime | None = Field(default=None, description="Timestamp of the latest quote; null when unavailable")
+    staleness_seconds: int | None = Field(
+        default=None, description="Age of the latest quote in seconds; null when unavailable"
+    )
+    is_stale: bool = Field(description="Whether quote data is stale or missing")
+    staleness_reason: str | None = Field(default=None, description="Reason for stale state, e.g. `missing_quote`")
 
 
 def _to_token_response(row) -> TokenResponse:
@@ -72,13 +87,29 @@ async def get_token(token_id: int, service: TokenCatalogService = Depends(_get_s
 
 @router.get("/tokens/{token_id}/price", response_model=TokenPriceResponse)
 async def get_token_price(token_id: int, service: TokenCatalogService = Depends(_get_service)) -> TokenPriceResponse:
+    """Return latest token price state.
+
+    Returns `404` only when the token does not exist.
+    Returns `200` with stale indicators when token exists but no quote is available.
+    """
     token = await service.get_token(token_id)
     if token is None:
         raise HTTPException(status_code=404, detail="Token not found")
 
     quote = await service.get_latest_price(token_id)
     if quote is None:
-        raise HTTPException(status_code=404, detail="No price quote found for token")
+        return TokenPriceResponse(
+            token_id=token_id,
+            source_type=None,
+            source_id=None,
+            source_name=None,
+            source_display_name=None,
+            price_usd=None,
+            timestamp=None,
+            staleness_seconds=None,
+            is_stale=True,
+            staleness_reason="missing_quote",
+        )
 
     return TokenPriceResponse(
         token_id=quote.token_id,
@@ -89,4 +120,6 @@ async def get_token_price(token_id: int, service: TokenCatalogService = Depends(
         price_usd=quote.price_usd,
         timestamp=quote.timestamp,
         staleness_seconds=quote.staleness_seconds,
+        is_stale=False,
+        staleness_reason=None,
     )

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -69,6 +70,8 @@ class PostgresAllocationRepository:
                 rows = result.fetchall()
 
             return [ChainMetadata(chain_id=row.chain_id, name=row.name) for row in rows]
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch chains from database",
@@ -101,6 +104,8 @@ class PostgresAllocationRepository:
                 )
                 for row in rows
             ]
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch protocols from database",
@@ -110,74 +115,135 @@ class PostgresAllocationRepository:
             raise ValueError(f"Database query failed while fetching protocols: {exc}") from exc
 
     async def list_primes(self) -> list[Prime]:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                text(
-                    """
-                    SELECT DISTINCT ON (proxy_address)
-                        p.name,
-                        encode(proxy_address, 'hex') AS address
-                    FROM allocation_position ap
-                    JOIN prime p ON p.id = ap.prime_id
-                    ORDER BY proxy_address, block_number DESC
-                    """
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT DISTINCT ON (proxy_address)
+                            p.name,
+                            encode(proxy_address, 'hex') AS address
+                        FROM allocation_position ap
+                        JOIN prime p ON p.id = ap.prime_id
+                        ORDER BY proxy_address, block_number DESC
+                        """
+                    )
                 )
+                return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch primes from database",
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
             )
-            return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+            raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                _RECEIPT_TOKEN_POSITIONS_SQL,
-                {"proxy_hex": prime_id.hex},
-            )
-            return [
-                ReceiptTokenPosition(
-                    chain_id=row.chain_id,
-                    receipt_token_id=row.receipt_token_id,
-                    receipt_token_address="0x" + row.receipt_token_address,
-                    underlying_token_id=row.underlying_token_id,
-                    underlying_token_address="0x" + row.underlying_token_address,
-                    symbol=row.symbol,
-                    underlying_symbol=row.underlying_symbol,
-                    protocol_name=row.protocol_name,
-                    balance=_safe_decimal(row.balance, "balance", row.receipt_token_id),
-                    amount_usd=(
-                        _safe_decimal(row.amount_usd, "amount_usd", row.receipt_token_id)
-                        if row.amount_usd is not None
-                        else None
-                    ),
-                    latest_activity_at=row.latest_activity_at,
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    _RECEIPT_TOKEN_POSITIONS_SQL,
+                    {"proxy_hex": prime_id.hex},
                 )
-                for row in result
-            ]
+                return [
+                    ReceiptTokenPosition(
+                        chain_id=row.chain_id,
+                        receipt_token_id=row.receipt_token_id,
+                        receipt_token_address="0x" + row.receipt_token_address,
+                        underlying_token_id=row.underlying_token_id,
+                        underlying_token_address="0x" + row.underlying_token_address,
+                        symbol=row.symbol,
+                        underlying_symbol=row.underlying_symbol,
+                        protocol_name=row.protocol_name,
+                        balance=_safe_decimal(row.balance, "balance", row.receipt_token_id),
+                        amount_usd=(
+                            _safe_decimal(row.amount_usd, "amount_usd", row.receipt_token_id)
+                            if row.amount_usd is not None
+                            else None
+                        ),
+                        latest_activity_at=row.latest_activity_at,
+                    )
+                    for row in result
+                ]
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch receipt token positions from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching receipt token positions: {exc}") from exc
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                _USD_EXPOSURE_SQL,
-                {"receipt_token_id": receipt_token_id, "proxy_hex": prime_id.hex},
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    _USD_EXPOSURE_SQL,
+                    {"receipt_token_id": receipt_token_id, "proxy_hex": prime_id.hex},
+                )
+                row = result.fetchone()
+
+            if row is None:
+                raise ValueError(
+                    f"no position or price found for receipt_token_id={receipt_token_id} prime_id={prime_id}"
+                )
+
+            balance = _safe_decimal(row.balance, "balance", f"receipt_token_id={receipt_token_id}")
+            price_usd = _safe_decimal(row.price_usd, "price_usd", f"receipt_token_id={receipt_token_id}")
+            return balance * price_usd
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch USD exposure from database",
+                extra={
+                    "receipt_token_id": receipt_token_id,
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
             )
-            row = result.fetchone()
-
-        if row is None:
-            raise ValueError(f"no position or price found for receipt_token_id={receipt_token_id} prime_id={prime_id}")
-
-        balance = _safe_decimal(row.balance, "balance", f"receipt_token_id={receipt_token_id}")
-        price_usd = _safe_decimal(row.price_usd, "price_usd", f"receipt_token_id={receipt_token_id}")
-        return balance * price_usd
+            raise ValueError(f"Database query failed while fetching USD exposure: {exc}") from exc
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         """Return total priced USD exposure across all current receipt-token positions."""
-        async with self._engine.connect() as conn:
-            result = await conn.execute(_TOTAL_USD_EXPOSURE_SQL, {"proxy_hex": prime_id.hex})
-            row = result.fetchone()
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_TOTAL_USD_EXPOSURE_SQL, {"proxy_hex": prime_id.hex})
+                row = result.fetchone()
 
-        if row is None or row.total_usd_exposure is None:
-            return Decimal("0")
+            if row is None or row.total_usd_exposure is None:
+                return Decimal("0")
 
-        return _safe_decimal(row.total_usd_exposure, "total_usd_exposure", f"prime_id={prime_id}")
+            return _safe_decimal(row.total_usd_exposure, "total_usd_exposure", f"prime_id={prime_id}")
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch total USD exposure from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching total USD exposure: {exc}") from exc
 
     async def list_allocation_activity(
         self,
@@ -219,6 +285,8 @@ class PostgresAllocationRepository:
             async with self._engine.connect() as conn:
                 result = await conn.execute(_ALLOCATION_ACTIVITY_SQL, params)
                 rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Allocation activity query failed",

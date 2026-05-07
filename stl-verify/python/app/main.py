@@ -2,9 +2,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -171,6 +172,46 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application = FastAPI(title="stl-verify", lifespan=lifespan, docs_url=None)
     application.add_middleware(RequestIdMiddleware)
     application.state.tracer_provider = setup_telemetry(application, settings)
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        errors = exc.errors()
+        logger.warning(
+            "Request validation failed",
+            extra={
+                "path": request.url.path,
+                "method": request.method,
+                "validation_error_count": len(errors),
+            },
+        )
+        # Convert validation errors to JSON-serializable format
+        serializable_errors = []
+        for error in errors:
+            serializable_error = {
+                "loc": error.get("loc", []),
+                "msg": error.get("msg", ""),
+                "type": error.get("type", ""),
+            }
+            # Log input for diagnostics but do not echo it in the response body
+            # to avoid reflecting potentially sensitive user-provided data.
+            if "input" in error:
+                try:
+                    raw = error["input"]
+                    logger.debug(
+                        "Validation error input",
+                        extra={
+                            "path": request.url.path,
+                            "method": request.method,
+                            "input_type": type(raw).__name__,
+                            "input_len": len(str(raw)),
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - best-effort diagnostic logging
+                    pass
+            serializable_errors.append(serializable_error)
+
+        return JSONResponse(status_code=422, content={"detail": serializable_errors})
+
     application.include_router(status.router, prefix="/v1")
     application.include_router(allocations.router, prefix="/v1")
     application.include_router(tokens.router, prefix="/v1")
