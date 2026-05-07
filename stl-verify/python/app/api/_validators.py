@@ -15,7 +15,7 @@ from pydantic import AfterValidator
 from app.domain.entities.allocation import EthAddress
 
 # Regex patterns for common validation
-TX_HASH_PATTERN = r"^(?:0[xX])?[0-9a-fA-F]{64}$"
+TX_HASH_PATTERN = r"(?:0[xX])?[0-9a-fA-F]{64}"
 """Ethereum transaction hash pattern. Accepts optional 0x/0X prefix followed by 64 hex chars."""
 
 
@@ -35,7 +35,7 @@ def _validate_tx_hash(value: str) -> str:
     Accepts optional 0x/0X prefix followed by 64 hexadecimal characters.
     Returns the original string unchanged if valid.
     """
-    if not re.match(TX_HASH_PATTERN, value):
+    if not re.fullmatch(TX_HASH_PATTERN, value):
         raise ValueError(f"Invalid transaction hash format: {value}")
     return value
 

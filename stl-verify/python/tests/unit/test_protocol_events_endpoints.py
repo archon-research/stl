@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.domain.entities.protocol_event import ProtocolEvent
@@ -9,6 +10,12 @@ from app.main import app
 from app.services.protocol_event_service import ProtocolEventService
 
 _VALID_TX_HASH = "0x" + "ab" * 32
+
+
+@pytest.fixture(autouse=True)
+def _clear_dependency_overrides():
+    yield
+    app.dependency_overrides.clear()
 
 
 def _make_service(

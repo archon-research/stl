@@ -2,11 +2,18 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 from app.main import app
 from app.services.token_catalog_service import TokenCatalogService
+
+
+@pytest.fixture(autouse=True)
+def _clear_dependency_overrides():
+    yield
+    app.dependency_overrides.clear()
 
 
 def _make_service(

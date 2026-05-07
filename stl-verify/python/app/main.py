@@ -196,8 +196,12 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             if "input" in error:
                 try:
                     serializable_error["input"] = str(error["input"])
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - best-effort serialization for diagnostics
+                    logger.debug(
+                        "Skipping non-serializable validation error input",
+                        extra={"path": request.url.path, "method": request.method},
+                        exc_info=True,
+                    )
             serializable_errors.append(serializable_error)
 
         return JSONResponse(status_code=422, content={"detail": serializable_errors})

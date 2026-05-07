@@ -52,7 +52,7 @@ class TokenPriceQuote:
             raise ValueError(f"source_id must be positive, got {self.source_id}")
         if not self.source_name or not self.source_name.strip():
             raise ValueError("source_name must be non-empty")
-        if self.price_usd < 0:
-            raise ValueError(f"price_usd must be non-negative, got {self.price_usd}")
+        if self.price_usd.is_nan() or self.price_usd < 0:
+            raise ValueError(f"price_usd must be a non-negative finite Decimal, got {self.price_usd}")
         if self.staleness_seconds < 0:
             raise ValueError(f"staleness_seconds must be non-negative, got {self.staleness_seconds}")

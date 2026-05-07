@@ -476,7 +476,16 @@ export function RiskBreakdownTab({
                 ? 'Fetching price metadata'
                 : tokenPrice
                   ? tokenPrice.timestamp != null
-                    ? `${tokenPrice.source_name} (${tokenPrice.source_type}) · ${formatDurationFromSeconds(tokenPrice.staleness_seconds!)} stale · ${formatFreshnessLabel(tokenPrice.timestamp)} · ${formatDateTime(tokenPrice.timestamp)}`
+                    ? [
+                        `${tokenPrice.source_name} (${tokenPrice.source_type})`,
+                        tokenPrice.staleness_seconds != null
+                          ? `${formatDurationFromSeconds(tokenPrice.staleness_seconds)} stale`
+                          : null,
+                        formatFreshnessLabel(tokenPrice.timestamp),
+                        formatDateTime(tokenPrice.timestamp),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
                     : 'Price data currently unavailable'
                   : 'Price metadata unavailable'
             }

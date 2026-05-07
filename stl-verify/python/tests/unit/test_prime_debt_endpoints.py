@@ -49,7 +49,7 @@ def test_list_prime_debt_snapshots_returns_rows():
     service = _make_service(snapshots=[snap])
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
     try:
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(app)
 
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=25")
 
@@ -142,7 +142,7 @@ def test_list_prime_debt_snapshots_returns_422_for_address_without_prefix():
     try:
         client = TestClient(app)
 
-        response = client.get("/v1/primes/abababababababababababababababababababab/debt")
+        response = client.get(f"/v1/primes/{'ab' * 20}/debt")
 
         assert response.status_code == 422
         service.prime_exists.assert_not_awaited()

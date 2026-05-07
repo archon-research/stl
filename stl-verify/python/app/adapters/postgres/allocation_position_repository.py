@@ -160,6 +160,8 @@ class PostgresAllocationRepository:
                     )
                     for row in result
                 ]
+        except ValueError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch receipt token positions from database",
@@ -216,6 +218,8 @@ class PostgresAllocationRepository:
                 return Decimal("0")
 
             return _safe_decimal(row.total_usd_exposure, "total_usd_exposure", f"prime_id={prime_id}")
+        except ValueError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch total USD exposure from database",

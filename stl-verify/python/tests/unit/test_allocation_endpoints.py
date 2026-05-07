@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,12 @@ from app.services.allocation_service import AllocationService
 from tests.conftest import make_receipt_token_position
 
 _VALID_ADDR = "0x" + "ab" * 20
+
+
+@pytest.fixture(autouse=True)
+def _clear_dependency_overrides():
+    yield
+    app.dependency_overrides.clear()
 
 
 def _make_service(primes=None, positions=None) -> AllocationService:

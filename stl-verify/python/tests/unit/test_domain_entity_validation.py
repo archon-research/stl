@@ -168,7 +168,7 @@ class TestTokenMetadataValidation:
         )
         assert token.id == 1
 
-    def test_negative_id_raises(self):
+    def test_non_positive_id_raises(self):
         with pytest.raises(ValueError, match="id must be positive"):
             TokenMetadata(
                 id=0,
