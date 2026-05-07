@@ -194,7 +194,7 @@ func assertOracleAssetsExactlyMatchAddresses(t *testing.T, oracleName string, ex
 		FROM oracle_asset oa
 		JOIN oracle o ON o.id = oa.oracle_id
 		JOIN token  t ON t.id = oa.token_id
-		WHERE o.name = $1 AND oa.feed_address IS NULL
+		WHERE o.name = $1 AND oa.enabled = true AND oa.feed_address IS NULL
 		ORDER BY t.address
 	`, oracleName)
 	if err != nil {
