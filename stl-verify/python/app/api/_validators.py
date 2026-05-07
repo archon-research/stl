@@ -33,10 +33,14 @@ def _validate_tx_hash(value: str) -> str:
     """Validate ``value`` as an Ethereum transaction hash; raises ``ValueError`` -> 422.
 
     Accepts optional 0x/0X prefix followed by 64 hexadecimal characters.
-    Returns the original string unchanged if valid.
+    The prefix is canonicalized to lowercase ``0x`` before returning so
+    downstream consumers receive a consistent format.
     """
     if not re.fullmatch(TX_HASH_PATTERN, value):
         raise ValueError(f"Invalid transaction hash format: {value}")
+    # Normalize uppercase 0X prefix to lowercase 0x for consistent downstream handling
+    if value.startswith("0X"):
+        value = "0x" + value[2:]
     return value
 
 

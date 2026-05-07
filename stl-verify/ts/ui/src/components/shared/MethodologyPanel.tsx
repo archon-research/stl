@@ -397,14 +397,20 @@ export function MethodologyPanel({
                     >
                       Latest Price:
                     </span>{' '}
-                    {formatUsdValue(tokenPrice.price_usd)}
+                    {tokenPrice.is_stale
+                      ? 'Price unavailable'
+                      : formatUsdValue(tokenPrice.price_usd)}
                   </div>
-                  <div>
-                    Source:{' '}
-                    {tokenPrice.source_display_name ?? tokenPrice.source_name} (
-                    {tokenPrice.source_type})
-                  </div>
-                  <div>Source ID: {tokenPrice.source_id}</div>
+                  {!tokenPrice.is_stale && (
+                    <>
+                      <div>
+                        Source:{' '}
+                        {tokenPrice.source_display_name ?? tokenPrice.source_name} (
+                        {tokenPrice.source_type})
+                      </div>
+                      <div>Source ID: {tokenPrice.source_id}</div>
+                    </>
+                  )}
                   {tokenPrice.timestamp != null && (
                     <div>
                       Timestamp: {formatDateTime(tokenPrice.timestamp)} (

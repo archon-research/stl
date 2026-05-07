@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -69,6 +70,8 @@ class PostgresAllocationRepository:
                 rows = result.fetchall()
 
             return [ChainMetadata(chain_id=row.chain_id, name=row.name) for row in rows]
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch chains from database",
@@ -101,6 +104,8 @@ class PostgresAllocationRepository:
                 )
                 for row in rows
             ]
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch protocols from database",
@@ -125,6 +130,8 @@ class PostgresAllocationRepository:
                     )
                 )
                 return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Failed to fetch primes from database",
@@ -160,6 +167,8 @@ class PostgresAllocationRepository:
                     )
                     for row in result
                 ]
+        except asyncio.CancelledError:
+            raise
         except ValueError:
             raise
         except Exception as exc:
@@ -192,6 +201,8 @@ class PostgresAllocationRepository:
             balance = _safe_decimal(row.balance, "balance", f"receipt_token_id={receipt_token_id}")
             price_usd = _safe_decimal(row.price_usd, "price_usd", f"receipt_token_id={receipt_token_id}")
             return balance * price_usd
+        except asyncio.CancelledError:
+            raise
         except ValueError:
             raise
         except Exception as exc:
@@ -218,6 +229,8 @@ class PostgresAllocationRepository:
                 return Decimal("0")
 
             return _safe_decimal(row.total_usd_exposure, "total_usd_exposure", f"prime_id={prime_id}")
+        except asyncio.CancelledError:
+            raise
         except ValueError:
             raise
         except Exception as exc:
@@ -272,6 +285,8 @@ class PostgresAllocationRepository:
             async with self._engine.connect() as conn:
                 result = await conn.execute(_ALLOCATION_ACTIVITY_SQL, params)
                 rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(
                 "Allocation activity query failed",

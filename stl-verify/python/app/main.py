@@ -192,16 +192,20 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 "msg": error.get("msg", ""),
                 "type": error.get("type", ""),
             }
-            # Include input if present and serializable
+            # Log input for diagnostics but do not echo it in the response body
+            # to avoid reflecting potentially sensitive user-provided data.
             if "input" in error:
                 try:
-                    serializable_error["input"] = str(error["input"])
-                except Exception:  # noqa: BLE001 - best-effort serialization for diagnostics
                     logger.debug(
-                        "Skipping non-serializable validation error input",
-                        extra={"path": request.url.path, "method": request.method},
-                        exc_info=True,
+                        "Validation error input",
+                        extra={
+                            "path": request.url.path,
+                            "method": request.method,
+                            "input": str(error["input"]),
+                        },
                     )
+                except Exception:  # noqa: BLE001 - best-effort diagnostic logging
+                    pass
             serializable_errors.append(serializable_error)
 
         return JSONResponse(status_code=422, content={"detail": serializable_errors})

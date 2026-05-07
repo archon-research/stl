@@ -18,7 +18,7 @@ def test_validate_tx_hash_accepts_unprefixed_hash():
 def test_tx_hash_pattern_accepts_uppercase_prefix():
     value = "0X" + "AB" * 32
 
-    assert _validate_tx_hash(value) == value
+    assert _validate_tx_hash(value) == "0x" + "AB" * 32
 
 
 @pytest.mark.parametrize(

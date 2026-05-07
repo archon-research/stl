@@ -30,7 +30,8 @@ def test_format_percentage(value: Decimal, expected: str) -> None:
 
 
 def test_format_token_amount_raw_scales_by_decimals() -> None:
-    assert UnitsFormatter.format_token_amount(Decimal("1500000"), symbol="USDC", decimals=6, is_raw=True) == "1.5 USDC"
+    result = UnitsFormatter.format_token_amount(Decimal("1500000"), symbol="USDC", decimals=6, is_raw=True)
+    assert result == "1.5 USDC"
 
 
 @pytest.mark.parametrize(
