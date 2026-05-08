@@ -525,7 +525,7 @@ if (claimable.shares > 0) {
 ### Retrieving Key Data
 
 **Centrifuge Architecture Quick Reference:**
-- **PoolManager** (`0x9c8454A506263549f07c80698E276e3622077098` on Ethereum): `getVault(poolId, trancheId, assetAddress)` returns vault
+- **PoolManager** (`0x91808B5E2F6d7483D41A681034D7c9DbB64B9E29` on Ethereum): `getVault(poolId, trancheId, assetAddress)` returns vault
 - **ShareToken**: Restricted ERC-20 representing pool shares
 - **Vault**: ERC-7540 `AsyncVault` (extends ERC-4626) - use standard methods: `convertToAssets()`, `totalAssets()`
 
@@ -546,7 +546,7 @@ If you need to find poolId, trancheId, or ShareToken addresses, use one of these
 ```typescript
 // PoolManager emits DeployTranche event when ShareToken is deployed
 const poolManager = new ethers.Contract(
-  "0x9c8454A506263549f07c80698E276e3622077098",
+  "0x91808B5E2F6d7483D41A681034D7c9DbB64B9E29",
   ["event DeployTranche(uint64 indexed poolId, bytes16 indexed trancheId, address indexed tranche)"],
   provider
 );
@@ -610,7 +610,7 @@ Endpoint: `https://api.centrifuge.io/`
 
 ```typescript
 // 1. Get vault address for this pool/tranche/asset
-const poolManager = new ethers.Contract("0x9c8454A506263549f07c80698E276e3622077098", [
+const poolManager = new ethers.Contract("0x91808B5E2F6d7483D41A681034D7c9DbB64B9E29", [
     "function getVault(uint64,bytes16,address) view returns (address)"
 ], provider);
 const vaultAddress = await poolManager.getVault(poolId, trancheId, assetAddress);
@@ -811,6 +811,7 @@ All Centrifuge contracts are deployed at the same address across all supported c
 | Contract | Address | Networks |
 |----------|---------|----------|
 | Root | `0x7Ed48C31f2fdC40d37407cBaBf0870B2b688368f` | All |
+| PoolManager | `0x91808B5E2F6d7483D41A681034D7c9DbB64B9E29` | All |
 | Hub | `0x9c8454A506263549f07c80698E276e3622077098` | All |
 | Spoke | `0xd30Da1d7F964E5f6C2D9fE2AAA97517F6B23FA2B` | All |
 | Vault Router | `0xdbCcee499563D4AC2D3788DeD3acb14FB92B175D` | All |
