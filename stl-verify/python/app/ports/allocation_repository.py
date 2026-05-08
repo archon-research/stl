@@ -26,11 +26,15 @@ class AllocationRepository(Protocol):
         ...
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
-        """Return whether a prime exists for the given address.
+        """Return whether ``prime_address`` is a known allocation proxy.
 
-        Accepts either the prime's ``vault_address`` or any
-        ``proxy_address`` recorded in ``allocation_position``, mirroring
-        the dual-identity convention used elsewhere in the API.
+        Identity matches ``/v1/primes`` (and the rest of this repository's
+        position queries): a prime "exists" iff it has at least one row in
+        ``allocation_position.proxy_address``. ``prime.vault_address`` is
+        intentionally not accepted here — downstream position queries are
+        keyed on ``proxy_address`` only, so allowing vault-address inputs
+        would produce false-positive existence checks followed by empty
+        results.
         """
         ...
 

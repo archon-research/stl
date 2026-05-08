@@ -141,21 +141,15 @@ class PostgresAllocationRepository:
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
-        # Accept either prime.vault_address or any allocation_position.proxy_address.
-        # Matches the dual-identity convention in PostgresPrimeDebtRepository so
-        # /v1/primes/{prime_id}/* contracts behave the same regardless of which
-        # address form the caller uses.
+        # Match what list_receipt_token_positions / get_*_usd_exposure can actually
+        # answer: presence in allocation_position.proxy_address. /v1/primes also
+        # defines "prime" as "has any allocation_position row", so this is the
+        # same identity the public API exposes.
         query = text(
             """
             SELECT 1
-            FROM prime p
-            WHERE p.vault_address = decode(:address_hex, 'hex')
-               OR EXISTS (
-                   SELECT 1
-                   FROM allocation_position ap
-                   WHERE ap.prime_id = p.id
-                     AND ap.proxy_address = decode(:address_hex, 'hex')
-               )
+            FROM allocation_position
+            WHERE proxy_address = decode(:address_hex, 'hex')
             LIMIT 1
             """
         )
