@@ -1,8 +1,10 @@
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.risk_engine.suraf.result import SurafResult
-from app.services.suraf_rrc_service import SurafRrcService
+from app.services.crypto_lending_risk_service import CryptoLendingRiskService
+from app.services.model_registry import ModelRegistry
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -20,6 +22,16 @@ def get_asset_to_rating(request: Request) -> dict[int, str]:
     return request.app.state.asset_to_rating
 
 
-def get_suraf_rrc_service(request: Request) -> SurafRrcService:
-    """Extract the SURAF RRC service built at startup."""
-    return request.app.state.suraf_rrc_service
+def get_crypto_lending_risk_service(request: Request) -> CryptoLendingRiskService:
+    """Extract the crypto-lending risk service built at startup."""
+    return request.app.state.crypto_lending_risk_service
+
+
+def get_model_registry(request: Request) -> ModelRegistry:
+    """Extract the model registry built at startup."""
+    return request.app.state.model_registry
+
+
+def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
+    """Extract the receipt-token lookup built at startup."""
+    return request.app.state.receipt_token_lookup

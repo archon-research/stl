@@ -12,8 +12,11 @@ import {
   buildRowSearchString,
   matchesSearchQuery,
 } from '../../../data-table/utils';
-import { getRiskBreakdown } from '../../../lib/api';
+import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
+  formatDateTime,
+  formatDurationFromSeconds,
+  formatFreshnessLabel,
   formatMultiplier,
   formatPercentValue,
   formatRatioPercent,
@@ -22,10 +25,17 @@ import {
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
-import type { Allocation, RiskBreakdown } from '../../../types/allocation';
-import { SummaryMetric } from '../../shared';
+import type {
+  Allocation,
+  RiskBreakdown,
+  Token,
+  TokenPrice,
+} from '../../../types/allocation';
+import { ChainLogo, SummaryMetric } from '../../shared';
+import { MethodologyPanel } from '../../shared/MethodologyPanel';
 
 type RiskBreakdownTabProps = {
+  isEnabled: boolean;
   searchQuery?: string;
   selectedReceiptToken: Allocation | null;
 };
@@ -33,10 +43,12 @@ type RiskBreakdownTabProps = {
 type RiskItem = RiskBreakdown['items'][number];
 
 function RiskTable({
+  chainId,
   items,
   isLoading,
   searchQuery,
 }: {
+  chainId: number;
   items: RiskItem[];
   isLoading: boolean;
   searchQuery: string;
@@ -66,8 +78,21 @@ function RiskTable({
         id: 'symbol',
         header: 'Symbol',
         accessorKey: 'symbol',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          info.getValue() as string,
+        cell: (info: CellContext<RiskItem, unknown>) => {
+          const symbol = info.getValue() as string;
+          return (
+            <div
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '2',
+              })}
+            >
+              <ChainLogo chainId={chainId} size="6" />
+              <span>{symbol}</span>
+            </div>
+          );
+        },
       },
       {
         id: 'amount',
@@ -122,7 +147,7 @@ function RiskTable({
           ),
       },
     ],
-    [],
+    [chainId],
   );
 
   const table = useDataTable(filteredItems, columns, {
@@ -137,30 +162,34 @@ function RiskTable({
       skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
       minWidth="76rem"
       renderCell={(children) => (
-        <p
+        <div
           className={css({
-            m: 0,
             fontSize: 'sm',
             color: 'text.strong',
           })}
         >
           {children}
-        </p>
+        </div>
       )}
     />
   );
 }
 
 export function RiskBreakdownTab({
+  isEnabled,
   searchQuery = '',
   selectedReceiptToken,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
+  const [tokenCatalog, setTokenCatalog] = useState<Token | null>(null);
+  const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
+  const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
   useEffect(() => {
-    if (!selectedReceiptToken) {
+    if (!isEnabled || !selectedReceiptToken) {
       setBreakdown(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -202,7 +231,64 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [selectedReceiptToken]);
+  }, [isEnabled, selectedReceiptToken]);
+
+  useEffect(() => {
+    if (!isEnabled || !selectedReceiptToken) {
+      setTokenCatalog(null);
+      setTokenPrice(null);
+      setIsTokenMetaLoading(false);
+      return;
+    }
+
+    const tokenId = Number(selectedReceiptToken.underlying_token_id);
+    if (!Number.isFinite(tokenId)) {
+      setTokenCatalog(null);
+      setTokenPrice(null);
+      setIsTokenMetaLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsTokenMetaLoading(true);
+
+    void Promise.allSettled([
+      getToken(tokenId, controller.signal),
+      getTokenPrice(tokenId, controller.signal),
+    ])
+      .then(([tokenResult, priceResult]) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        if (tokenResult.status === 'fulfilled') {
+          setTokenCatalog(tokenResult.value);
+        } else {
+          setTokenCatalog(null);
+          logging.warn('Token catalog metadata unavailable for risk summary', {
+            error: tokenResult.reason,
+            tokenId,
+          });
+        }
+
+        if (priceResult.status === 'fulfilled') {
+          setTokenPrice(priceResult.value);
+        } else {
+          setTokenPrice(null);
+          logging.warn('Token price metadata unavailable for risk summary', {
+            error: priceResult.reason,
+            tokenId,
+          });
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsTokenMetaLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [isEnabled, selectedReceiptToken]);
 
   const totalUsd = useMemo(() => {
     if (!breakdown) {
@@ -349,6 +435,64 @@ export function RiskBreakdownTab({
         </div>
       ) : null}
 
+      {!errorMessage ? (
+        <div
+          className={css({
+            display: 'grid',
+            gridTemplateColumns: {
+              base: '1fr',
+              md: 'repeat(2, minmax(0, 1fr))',
+            },
+            gap: '3',
+          })}
+        >
+          <SummaryMetric
+            label="Token catalog"
+            value={
+              isTokenMetaLoading
+                ? 'Loading...'
+                : (tokenCatalog?.symbol ??
+                  selectedReceiptToken.underlying_symbol)
+            }
+            detail={
+              isTokenMetaLoading
+                ? 'Fetching token metadata'
+                : tokenCatalog
+                  ? `${tokenCatalog.address} · ${tokenCatalog.decimals ?? 'Unknown'} decimals`
+                  : 'Token metadata unavailable'
+            }
+          />
+          <SummaryMetric
+            label="Current price"
+            value={
+              isTokenMetaLoading
+                ? 'Loading...'
+                : tokenPrice
+                  ? formatUsdValue(tokenPrice.price_usd)
+                  : 'Unavailable'
+            }
+            detail={
+              isTokenMetaLoading
+                ? 'Fetching price metadata'
+                : tokenPrice
+                  ? tokenPrice.timestamp != null
+                    ? [
+                        `${tokenPrice.source_name} (${tokenPrice.source_type})`,
+                        tokenPrice.staleness_seconds != null
+                          ? `${formatDurationFromSeconds(tokenPrice.staleness_seconds)} stale`
+                          : null,
+                        formatFreshnessLabel(tokenPrice.timestamp),
+                        formatDateTime(tokenPrice.timestamp),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
+                    : 'Price data currently unavailable'
+                  : 'Price metadata unavailable'
+            }
+          />
+        </div>
+      ) : null}
+
       {!errorMessage && isLoading && !summary ? (
         <SkeletonStack count={4} itemHeight={88} />
       ) : null}
@@ -376,11 +520,21 @@ export function RiskBreakdownTab({
 
       {!errorMessage && (isLoading || breakdown) ? (
         <RiskTable
+          chainId={selectedReceiptToken.chain_id}
           items={breakdown?.items ?? []}
           isLoading={isLoading}
           searchQuery={searchQuery}
         />
       ) : null}
+
+      {/* Data Sources & Methodology Footer */}
+      <MethodologyPanel
+        isOpen={isMethodologyOpen}
+        onToggle={() => setIsMethodologyOpen(!isMethodologyOpen)}
+        selectedChainId={selectedReceiptToken.chain_id}
+        selectedTokenId={selectedReceiptToken.underlying_token_id}
+        selectedTokenSymbol={selectedReceiptToken.underlying_symbol}
+      />
     </div>
   );
 }

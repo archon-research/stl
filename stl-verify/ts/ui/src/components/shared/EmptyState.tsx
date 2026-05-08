@@ -7,6 +7,8 @@ type EmptyStateProps = {
   description: string;
   icon?: React.ReactNode;
   action?: React.ReactNode;
+  size?: 'default' | 'compact';
+  stretch?: boolean;
 };
 
 export function EmptyState({
@@ -14,12 +16,16 @@ export function EmptyState({
   description,
   icon = <Inbox size={24} />,
   action,
+  size = 'default',
+  stretch = false,
 }: EmptyStateProps) {
+  const isCompact = size === 'compact';
+
   return (
     <div
       className={css({
         display: 'grid',
-        gap: '3',
+        gap: isCompact ? '2.5' : '3',
         justifyItems: 'center',
         textAlign: 'center',
         borderRadius: 'md',
@@ -27,9 +33,10 @@ export function EmptyState({
         borderWidth: '1px',
         borderColor: 'border.subtle',
         bg: 'surface.subtle',
-        p: { base: '8', md: '12' },
-        maxWidth: '32rem',
-        mx: 'auto',
+        p: isCompact ? { base: '4', md: '5' } : { base: '8', md: '12' },
+        width: stretch ? 'full' : undefined,
+        maxWidth: stretch ? 'none' : '32rem',
+        mx: stretch ? '0' : 'auto',
       })}
     >
       <div
@@ -37,8 +44,8 @@ export function EmptyState({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          width: '12',
-          height: '12',
+          width: isCompact ? '10' : '12',
+          height: isCompact ? '10' : '12',
           borderRadius: 'full',
           bg: { _dark: 'gray.800', base: 'gray.100' },
           color: 'text.muted',
@@ -50,7 +57,7 @@ export function EmptyState({
         <h3
           className={css({
             m: 0,
-            fontSize: 'lg',
+            fontSize: isCompact ? 'md' : 'lg',
             fontWeight: 'semibold',
             color: 'text.strong',
           })}
@@ -60,7 +67,7 @@ export function EmptyState({
         <p
           className={css({
             m: 0,
-            fontSize: 'sm',
+            fontSize: isCompact ? 'xs' : 'sm',
             color: 'text.muted',
             lineHeight: '1.6',
           })}

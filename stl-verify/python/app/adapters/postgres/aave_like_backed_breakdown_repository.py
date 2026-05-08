@@ -133,16 +133,15 @@ ORDER BY backing_usd DESC;
 class AaveLikeBackedBreakdownRepository:
     """Postgres implementation of the backed breakdown repository for Aave-like protocols."""
 
-    def __init__(self, engine: AsyncEngine, protocol_id: int) -> None:
+    def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
-        self._protocol_id = protocol_id
 
-    async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
+    async def get_backed_breakdown(self, protocol_id: int, backed_asset_id: int) -> BackedBreakdown:
         """Execute the backed breakdown query and return domain objects."""
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_BACKED_BREAKDOWN_SQL),
-                {"protocol_id": self._protocol_id, "backed_asset_id": backed_asset_id},
+                {"protocol_id": protocol_id, "backed_asset_id": backed_asset_id},
             )
             rows = result.fetchall()
 

@@ -4,6 +4,91 @@
  */
 
 export interface paths {
+  '/v1/allocations/activity': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Allocation Activity
+     * @description Retrieve allocation activity events with optional URL filters.
+     *
+     *     Query parameters:
+     *     - prime_id: Filter by prime address (0x-prefixed Ethereum address)
+     *     - chain_id: Filter by chain ID
+     *     - protocol_name: Filter by protocol name (case-insensitive substring)
+     *     - action_type: Filter by action type (`in`, `out`, `sweep`)
+     *     - token_symbol: Filter by token symbol (case-insensitive substring)
+     *     - tx_hash: Filter by transaction hash (0x-prefixed)
+     *     - from_timestamp: Inclusive lower timestamp bound (ISO-8601)
+     *     - to_timestamp: Inclusive upper timestamp bound (ISO-8601)
+     *     - limit: Max results (default 100, max 1000)
+     */
+    get: operations['list_allocation_activity_v1_allocations_activity_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/capital-metrics': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Capital Metrics */
+    get: operations['list_capital_metrics_v1_capital_metrics_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/chains': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Chains */
+    get: operations['list_chains_v1_chains_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/data-sources': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Data Sources
+     * @description Retrieve the registry of data sources used by STL.
+     */
+    get: operations['get_data_sources_v1_data_sources_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/primes': {
     parameters: {
       query?: never;
@@ -38,6 +123,60 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/primes/{prime_id}/debt': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Prime Debt Snapshots */
+    get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/protocol-events': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Protocol Events
+     * @description List protocol events with optional filtering.
+     */
+    get: operations['list_protocol_events_v1_protocol_events_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/protocols': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Protocols */
+    get: operations['list_protocols_v1_protocols_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/ready': {
     parameters: {
       query?: never;
@@ -55,25 +194,37 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/risk/rrc/scenario': {
+  '/v1/risk/rrc': {
     parameters: {
       query?: never;
       header?: never;
       path?: never;
       cookie?: never;
     };
-    get?: never;
+    /**
+     * Get Rrc
+     * @description Compute RRC at default stress for every model that applies to ``(asset_id, prime_id)``.
+     *
+     *     Errors:
+     *     - 404 if ``asset_id`` is not a known receipt token, or no models apply.
+     *     - 422 if ``prime_id`` is malformed or ``asset_id`` < 1.
+     *     - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
+     *       share-data lookup fails.
+     */
+    get: operations['get_rrc_v1_risk_rrc_get'];
     put?: never;
     /**
-     * Post Rrc Scenario
-     * @description Return SURAF RRC for a hypothetical ``(asset, usd_exposure)`` pair.
+     * Post Rrc
+     * @description Compute RRC with per-model scenario overrides for every applicable model.
      *
-     *     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-     *     for the asset. Pure scenario calculation — no DB lookup, no position
-     *     state. Position-level RRC (``GET /risk/{receipt_token_id}/rrc``) is
-     *     deferred pending a decision on how to derive USD exposure from holdings.
+     *     Errors:
+     *     - 404 if ``asset_id`` is not a known receipt token, or no models apply.
+     *     - 422 if ``prime_id``/``asset_id`` invalid, an unknown override model key
+     *       is present, or any model rejects its overrides.
+     *     - 503 with ``share_data_missing`` / ``share_data_stale`` codes if the
+     *       share-data lookup fails.
      */
-    post: operations['post_rrc_scenario_v1_risk_rrc_scenario_post'];
+    post: operations['post_rrc_v1_risk_rrc_post'];
     delete?: never;
     options?: never;
     head?: never;
@@ -137,16 +288,141 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/tokens': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List Tokens */
+    get: operations['list_tokens_v1_tokens_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tokens/{token_id}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Token */
+    get: operations['get_token_v1_tokens__token_id__get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tokens/{token_id}/price': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Token Price
+     * @description Return latest token price state.
+     *
+     *     Returns `404` only when the token does not exist.
+     *     Returns `200` with stale indicators when token exists but no quote is available.
+     */
+    get: operations['get_token_price_v1_tokens__token_id__price_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/tx/{tx_hash}/events': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get Tx Events
+     * @description Get all events for a transaction.
+     */
+    get: operations['get_tx_events_v1_tx__tx_hash__events_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
-    /** AllocationResponse */
-    AllocationResponse: {
+    /**
+     * AllocationActivityResponse
+     * @description Allocation activity event record for timeline feeds.
+     */
+    AllocationActivityResponse: {
+      /** Action Type */
+      action_type: string;
       /** Balance */
       balance: string;
+      /** Block Number */
+      block_number: number;
+      /** Block Version */
+      block_version: number;
       /** Chain Id */
       chain_id: number;
+      /** Created At */
+      created_at: string;
+      /** Log Index */
+      log_index: number;
+      /** Prime Address */
+      prime_address: string;
+      /** Prime Name */
+      prime_name: string;
+      /** Protocol Name */
+      protocol_name: string | null;
+      /** Token Id */
+      token_id: number;
+      /** Token Symbol */
+      token_symbol: string | null;
+      /** Tx Amount */
+      tx_amount: string;
+      /** Tx Hash */
+      tx_hash: string | null;
+    };
+    /**
+     * AllocationCategory
+     * @description Classification of allocation position types across primes.
+     * @enum {string}
+     */
+    AllocationCategory: 'allocation' | 'pol' | 'psm3' | 'asset';
+    /**
+     * AllocationResponse
+     * @description Enriched allocation response with category and metadata.
+     */
+    AllocationResponse: {
+      /** Amount Usd */
+      amount_usd?: string | null;
+      /** Balance */
+      balance: string;
+      category: components['schemas']['AllocationCategory'];
+      /** Chain Id */
+      chain_id: number;
+      /** Latest Activity At */
+      latest_activity_at?: string | null;
       /** Protocol Name */
       protocol_name: string;
       /** Receipt Token Address */
@@ -171,10 +447,120 @@ export interface components {
       /** Receipt Token Id */
       receipt_token_id: number;
     };
+    /**
+     * CapitalMetricsResponse
+     * @description Prime-level capital metrics for risk and alert management.
+     */
+    CapitalMetricsResponse: {
+      /** Benchmark Source */
+      benchmark_source?: string | null;
+      /** Capital Buffer */
+      capital_buffer: string;
+      /** First Loss Capital */
+      first_loss_capital: string;
+      /**
+       * Is Validated
+       * @default false
+       */
+      is_validated: boolean;
+      /** Prime Id */
+      prime_id: string;
+      /** Prime Name */
+      prime_name: string;
+      /** Risk Capital */
+      risk_capital: string;
+      /** Risk To Capital Ratio */
+      risk_to_capital_ratio: string | null;
+      /** Timestamp */
+      timestamp: string;
+      /** Total Capital */
+      total_capital: string;
+      /** Validation Note */
+      validation_note?: string | null;
+    };
+    /** ChainResponse */
+    ChainResponse: {
+      /** Chain Id */
+      chain_id: number;
+      /** Name */
+      name: string;
+    };
+    /**
+     * DataSourceResponse
+     * @description Data source metadata for the transparency panel.
+     */
+    DataSourceResponse: {
+      access_model: components['schemas']['SourceAccessModel'];
+      /**
+       * Attribution Required
+       * @default false
+       */
+      attribution_required: boolean;
+      /** Caveat */
+      caveat?: string | null;
+      /** Host */
+      host: string;
+      /** Name */
+      name: string;
+      /** Role */
+      role: string;
+    };
+    /**
+     * DataSourcesResponse
+     * @description Registered data sources used by STL.
+     */
+    DataSourcesResponse: {
+      /** Sources */
+      sources: components['schemas']['DataSourceResponse'][];
+    };
+    /**
+     * GapSweepDetails
+     * @description Gap-sweep model-specific output embedded in an RrcResult.
+     *
+     *     ``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal("0.15")``
+     *     means a 15% collateral price drop) — note this is a different scale
+     *     from ``SurafDetails.crr_pct`` which is on 0–100. ``loss_usd`` is the
+     *     engine-native expected loss in USD under that price drop; equal in
+     *     magnitude to the envelope-level ``rrc_usd`` for this model and rounded
+     *     to USD cents. The cross-model comparable capital ratio is exposed on
+     *     ``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure
+     *     basis, not the collateral backing basis.
+     */
+    GapSweepDetails: {
+      /** Gap Pct */
+      gap_pct: string;
+      /** Loss Usd */
+      loss_usd: string;
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      risk_model: 'gap_sweep';
+    };
     /** HTTPValidationError */
     HTTPValidationError: {
       /** Detail */
       detail?: components['schemas']['ValidationError'][];
+    };
+    /** PrimeDebtSnapshotResponse */
+    PrimeDebtSnapshotResponse: {
+      /** Block Number */
+      block_number: number;
+      /** Block Version */
+      block_version: number;
+      /** Debt Wad */
+      debt_wad: string;
+      /** Ilk Name */
+      ilk_name: string;
+      /** Prime Address */
+      prime_address: string;
+      /** Prime Name */
+      prime_name: string;
+      /**
+       * Synced At
+       * Format: date-time
+       */
+      synced_at: string;
     };
     /** PrimeResponse */
     PrimeResponse: {
@@ -182,6 +568,48 @@ export interface components {
       address: string;
       /** Id */
       id: string;
+      /** Name */
+      name: string;
+    };
+    /**
+     * ProtocolEventResponse
+     * @description Response model for protocol event.
+     */
+    ProtocolEventResponse: {
+      /** Block Number */
+      block_number: number;
+      /** Block Version */
+      block_version: number;
+      /** Chain Id */
+      chain_id: number;
+      /** Contract Address */
+      contract_address: string;
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /** Event Data */
+      event_data: {
+        [key: string]: unknown;
+      } | null;
+      /** Event Name */
+      event_name: string;
+      /** Log Index */
+      log_index: number;
+      /** Protocol Name */
+      protocol_name: string;
+      /** Tx Hash */
+      tx_hash: string;
+    };
+    /** ProtocolResponse */
+    ProtocolResponse: {
+      /** Chain Id */
+      chain_id: number;
+      /** Encode */
+      encode: string;
+      /** Id */
+      id: number;
       /** Name */
       name: string;
     };
@@ -211,29 +639,209 @@ export interface components {
       /** Receipt Token Id */
       receipt_token_id: number;
     };
-    /** ScenarioRrcRequest */
-    ScenarioRrcRequest: {
-      /** Asset */
-      asset: string;
-      /** Usd Exposure */
-      usd_exposure: number | string;
+    /**
+     * RrcEnvelope
+     * @description Response wrapper carrying one RrcResult per applicable model.
+     *
+     *     On-chain identifiers (``chain_id``, ``receipt_token_address``) are echoed
+     *     so consumers can resolve the surrogate ``asset_id`` without a second call.
+     *
+     *     ``max_rrc_usd`` and ``max_crr_pct`` collapse every applicable model to a
+     *     single conservative number. Use these when you need one capital figure
+     *     rather than a per-model breakdown: ``max_rrc_usd`` is the largest USD
+     *     figure across results; ``max_crr_pct`` is the largest
+     *     ``results[].comparable_crr_pct``. Each model computes that value on the
+     *     same receipt-token USD exposure basis, so it is safe to compare across
+     *     models.
+     *
+     *     Per-model values in ``results`` are *not* additive — SURAF capital and
+     *     gap-sweep expected-loss overlap economically. Pick a single result, or
+     *     use the ``max_*`` fields; do not sum across results. The two ``max_*``
+     *     fields may come from different models.
+     */
+    RrcEnvelope: {
+      /** Asset Id */
+      asset_id: number;
+      /** Chain Id */
+      chain_id: number;
+      /** Max Crr Pct */
+      max_crr_pct: string;
+      /** Max Rrc Usd */
+      max_rrc_usd: string;
+      /** Prime Id */
+      prime_id: string;
+      /** Receipt Token Address */
+      receipt_token_address: string;
+      /** Results */
+      results: components['schemas']['RrcResult'][];
     };
-    /** ScenarioRrcResponse */
-    ScenarioRrcResponse: {
-      /** Asset */
-      asset: string;
+    /**
+     * RrcRequest
+     * @description POST /v1/risk/rrc body — overrides keyed by model name.
+     */
+    RrcRequest: {
+      /** Asset Id */
+      asset_id: number;
+      /** Overrides */
+      overrides?: {
+        [key: string]: {
+          [key: string]: unknown;
+        };
+      };
+      /** Prime Id */
+      prime_id: string;
+    };
+    /**
+     * RrcResult
+     * @description Shared result type returned by every RiskModel implementation.
+     *
+     *     ``risk_model`` identifies which model produced the result (e.g.
+     *     ``"suraf"``, ``"gap_sweep"``).  ``details`` carries model-specific
+     *     output — use ``isinstance`` to narrow. The same value also appears
+     *     on ``details.risk_model`` and serves as the OpenAPI discriminator.
+     *     ``comparable_crr_pct`` is the model's effective capital ratio on the
+     *     shared receipt-token USD exposure basis, expressed on a 0–100 scale.
+     */
+    RrcResult: {
+      /** Asset Id */
+      asset_id: number;
+      /** Comparable Crr Pct */
+      comparable_crr_pct: string;
+      /** Details */
+      details:
+        | components['schemas']['SurafDetails']
+        | components['schemas']['GapSweepDetails'];
+      /** Prime Id */
+      prime_id: string;
+      /**
+       * Risk Model
+       * @enum {string}
+       */
+      risk_model: 'suraf' | 'gap_sweep';
+      /** Rrc Usd */
+      rrc_usd: string;
+    };
+    /**
+     * SourceAccessModel
+     * @description Classification of data source accessibility and terms of use.
+     * @enum {string}
+     */
+    SourceAccessModel: 'open' | 'public' | 'closed';
+    /**
+     * SurafDetails
+     * @description SURAF model-specific output embedded in an RrcResult.
+     *
+     *     ``crr_pct`` is the adjusted CRR (i.e. ``unadjusted_crr_pct + penalty_pp``,
+     *     capped at 100). All three are percentages on a 0–100 scale (e.g.
+     *     ``Decimal("33.7")`` means 33.7%, not 0.337). The relation
+     *     ``crr_pct == unadjusted_crr_pct + penalty_pp`` holds up to ~1e-10 only —
+     *     the underlying scorer caps to 100 in float before Decimal conversion;
+     *     consumers should always trust ``crr_pct`` over a recomputation from
+     *     parts.
+     */
+    SurafDetails: {
       /** Crr Pct */
       crr_pct: string;
+      /** Penalty Pp */
+      penalty_pp: string;
       /** Rating Id */
       rating_id: string;
       /** Rating Version */
       rating_version: string;
-      /** Rrc Usd */
-      rrc_usd: string;
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      risk_model: 'suraf';
       /** Source Commit Sha */
       source_commit_sha: string;
-      /** Usd Exposure */
-      usd_exposure: string;
+      /** Unadjusted Crr Pct */
+      unadjusted_crr_pct: string;
+    };
+    /**
+     * TokenPriceResponse
+     * @description Latest token price state.
+     *
+     *     The endpoint returns `200` when the token exists even if no quote is currently
+     *     available. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and
+     *     quote fields are `null`.
+     */
+    TokenPriceResponse: {
+      /**
+       * Is Stale
+       * @description Whether quote data is stale or missing
+       */
+      is_stale: boolean;
+      /**
+       * Price Usd
+       * @description Latest USD price; null when no quote is available
+       */
+      price_usd?: string | null;
+      /**
+       * Source Display Name
+       * @description Human-friendly source name when available
+       */
+      source_display_name?: string | null;
+      /**
+       * Source Id
+       * @description Source identifier when available
+       */
+      source_id?: number | null;
+      /**
+       * Source Name
+       * @description Source machine name when available
+       */
+      source_name?: string | null;
+      /**
+       * Source Type
+       * @description Price source type (`onchain` or `offchain`) when available
+       */
+      source_type?: string | null;
+      /**
+       * Staleness Reason
+       * @description Reason for stale state, e.g. `missing_quote`
+       */
+      staleness_reason?: string | null;
+      /**
+       * Staleness Seconds
+       * @description Age of the latest quote in seconds; null when unavailable
+       */
+      staleness_seconds?: number | null;
+      /**
+       * Timestamp
+       * @description Timestamp of the latest quote; null when unavailable
+       */
+      timestamp?: string | null;
+      /**
+       * Token Id
+       * @description Token identifier
+       */
+      token_id: number;
+    };
+    /**
+     * TokenResponse
+     * @description Token metadata entry from the token catalog.
+     */
+    TokenResponse: {
+      /** Address */
+      address: string;
+      /** Chain Id */
+      chain_id: number;
+      /** Decimals */
+      decimals: number | null;
+      /** Id */
+      id: number;
+      /** Metadata */
+      metadata?: {
+        [key: string]: unknown;
+      } | null;
+      /** Symbol */
+      symbol: string | null;
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string;
     };
     /** ValidationError */
     ValidationError: {
@@ -257,6 +865,105 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+  list_allocation_activity_v1_allocations_activity_get: {
+    parameters: {
+      query?: {
+        prime_id?: string | null;
+        chain_id?: number | null;
+        protocol_name?: string | null;
+        action_type?: string | null;
+        token_symbol?: string | null;
+        tx_hash?: string | null;
+        from_timestamp?: string | null;
+        to_timestamp?: string | null;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AllocationActivityResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_capital_metrics_v1_capital_metrics_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CapitalMetricsResponse'][];
+        };
+      };
+    };
+  };
+  list_chains_v1_chains_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ChainResponse'][];
+        };
+      };
+    };
+  };
+  get_data_sources_v1_data_sources_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['DataSourcesResponse'];
+        };
+      };
+    };
+  };
   list_primes_v1_primes_get: {
     parameters: {
       query?: never;
@@ -308,6 +1015,95 @@ export interface operations {
       };
     };
   };
+  list_prime_debt_snapshots_v1_primes__prime_id__debt_get: {
+    parameters: {
+      query?: {
+        limit?: number;
+      };
+      header?: never;
+      path: {
+        prime_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['PrimeDebtSnapshotResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_protocol_events_v1_protocol_events_get: {
+    parameters: {
+      query?: {
+        /** @description Filter by transaction hash */
+        tx_hash?: string | null;
+        /** @description Filter by protocol name */
+        protocol_name?: string | null;
+        /** @description Limit number of results */
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProtocolEventResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_protocols_v1_protocols_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProtocolResponse'][];
+        };
+      };
+    };
+  };
   get_ready_v1_ready_get: {
     parameters: {
       query?: never;
@@ -328,7 +1124,39 @@ export interface operations {
       };
     };
   };
-  post_rrc_scenario_v1_risk_rrc_scenario_post: {
+  get_rrc_v1_risk_rrc_get: {
+    parameters: {
+      query: {
+        asset_id: number;
+        prime_id: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['RrcEnvelope'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  post_rrc_v1_risk_rrc_post: {
     parameters: {
       query?: never;
       header?: never;
@@ -337,7 +1165,7 @@ export interface operations {
     };
     requestBody: {
       content: {
-        'application/json': components['schemas']['ScenarioRrcRequest'];
+        'application/json': components['schemas']['RrcRequest'];
       };
     };
     responses: {
@@ -347,7 +1175,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ScenarioRrcResponse'];
+          'application/json': components['schemas']['RrcEnvelope'];
         };
       };
       /** @description Validation Error */
@@ -441,6 +1269,132 @@ export interface operations {
         };
         content: {
           'application/json': unknown;
+        };
+      };
+    };
+  };
+  list_tokens_v1_tokens_get: {
+    parameters: {
+      query?: {
+        chain_id?: number | null;
+        symbol?: string | null;
+        limit?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TokenResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_token_v1_tokens__token_id__get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        token_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TokenResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_token_price_v1_tokens__token_id__price_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        token_id: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TokenPriceResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_tx_events_v1_tx__tx_hash__events_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        tx_hash: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProtocolEventResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
         };
       };
     };

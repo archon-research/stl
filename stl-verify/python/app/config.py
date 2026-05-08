@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Maximum age (in seconds) of a token_total_supply row before the risk API
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
+    star_risk_capital_upstream_url: str = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
 
     @property
     def async_database_url(self) -> str:

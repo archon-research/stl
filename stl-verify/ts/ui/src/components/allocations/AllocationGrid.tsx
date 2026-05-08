@@ -8,23 +8,51 @@ import { flex } from '#styled-system/patterns';
 import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
+  formatDateTime,
+  formatFreshnessLabel,
+  formatRawWadLabel,
+  formatRatioPercent,
   formatTokenAmount,
+  formatUsdValue,
+  formatWadValue,
   getAllocationKey,
+  getCategoryLabel,
   getChainLabel,
   getProtocolLabel,
+  parseNumericValue,
 } from '../../lib/dashboard';
-import type { Allocation, Prime } from '../../types/allocation';
+import type {
+  Allocation,
+  AllocationCategory,
+  CapitalMetrics,
+  Prime,
+  PrimeDebtSnapshot,
+} from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { Address, EmptyState, ErrorState } from '../shared';
+import {
+  AppTooltip,
+  ChainLogo,
+  EmptyState,
+  ErrorState,
+  ProtocolLogo,
+  SummaryMetric,
+  TokenAddress,
+  TokenLogo,
+} from '../shared';
 
 type AllocationGridProps = {
   allocations: Allocation[];
+  capitalMetrics: CapitalMetrics | null;
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: Allocation[];
+  topMetricsAllocations: Allocation[];
   isLoading: boolean;
+  isCapitalMetricsLoading: boolean;
+  isPrimeDebtLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
+  primeDebtSnapshot: PrimeDebtSnapshot | null;
   onSearchChange: (value: string) => void;
   onSortingChange: (
     sorting: SortingState | ((old: SortingState) => SortingState),
@@ -35,14 +63,51 @@ type AllocationGridProps = {
   sorting: SortingState;
 };
 
+function getCategoryColor(category: AllocationCategory | undefined): string {
+  switch (category) {
+    case 'allocation':
+      return 'bg.success';
+    case 'pol':
+      return 'bg.warning';
+    case 'psm3':
+      return 'bg.interactive';
+    case 'asset':
+      return 'bg.info';
+    default:
+      return 'bg.subtle';
+  }
+}
+
+function getCategoryTextColor(
+  category: AllocationCategory | undefined,
+): string {
+  switch (category) {
+    case 'allocation':
+      return 'text.success';
+    case 'pol':
+      return 'text.warning';
+    case 'psm3':
+      return 'text.interactive';
+    case 'asset':
+      return 'text.info';
+    default:
+      return 'text.default';
+  }
+}
+
 export function AllocationGrid({
   allocations,
+  capitalMetrics,
   chainLabels,
   errorMessage,
   filteredAllocations,
+  topMetricsAllocations,
   isLoading,
+  isCapitalMetricsLoading,
+  isPrimeDebtLoading,
   localProtocols,
   onSelectAllocation,
+  primeDebtSnapshot,
   onSearchChange,
   onSortingChange,
   searchValue,
@@ -68,6 +133,60 @@ export function AllocationGrid({
     return () => window.clearTimeout(timeoutId);
   }, [localSearchValue, onSearchChange, searchValue]);
 
+  const summary = useMemo(() => {
+    if (topMetricsAllocations.length === 0) {
+      return null;
+    }
+
+    const totalUsd = topMetricsAllocations.reduce(
+      (sum, allocation) =>
+        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      0,
+    );
+
+    const latestActivityAt = topMetricsAllocations.reduce<string | null>(
+      (latest, allocation) => {
+        if (!allocation.latest_activity_at) {
+          return latest;
+        }
+
+        if (!latest) {
+          return allocation.latest_activity_at;
+        }
+
+        return new Date(allocation.latest_activity_at) > new Date(latest)
+          ? allocation.latest_activity_at
+          : latest;
+      },
+      null,
+    );
+
+    return {
+      allocationCount: topMetricsAllocations.length,
+      latestActivityAt,
+      totalUsd,
+    };
+  }, [topMetricsAllocations]);
+
+  const overallSummary = useMemo(() => {
+    if (allocations.length === 0) {
+      return null;
+    }
+
+    const totalUsd = allocations.reduce(
+      (sum, allocation) =>
+        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+      0,
+    );
+
+    return {
+      allocationCount: allocations.length,
+      totalUsd,
+    };
+  }, [allocations]);
+
+  const hasSearchQuery = searchValue.trim().length > 0;
+
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () => [
       {
@@ -76,61 +195,61 @@ export function AllocationGrid({
         accessorFn: (allocation) => allocation.symbol,
         cell: ({ row }) => {
           const allocation = row.original;
-          const isSelected =
-            getAllocationKey(allocation) === selectedAllocationKey;
 
           return (
-            <div className={flex({ align: 'center', gap: '3' })}>
-              <div
+            <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
+              <p
                 className={css({
-                  width: '10',
-                  height: '10',
-                  borderRadius: 'full',
-                  bg: isSelected ? 'interactive.accent' : 'surface.subtle',
-                  color: isSelected ? 'white' : 'text.strong',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 'xs',
+                  m: 0,
+                  fontSize: 'sm',
                   fontWeight: 'semibold',
-                  flexShrink: 0,
+                  color: 'text.strong',
                 })}
               >
-                {allocation.symbol.slice(0, 2).toUpperCase()}
-              </div>
-              <div className={css({ display: 'grid', gap: '1' })}>
-                <p
+                {allocation.symbol}
+              </p>
+              <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
+                <span
                   className={css({
-                    m: 0,
-                    fontSize: 'sm',
-                    fontWeight: 'semibold',
-                    color: 'text.strong',
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    whiteSpace: 'nowrap',
                   })}
                 >
-                  {allocation.symbol}
-                </p>
-                <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
-                  <span
-                    className={css({
-                      fontSize: 'xs',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {getProtocolLabel(
+                  <ProtocolLogo
+                    protocolName={getProtocolLabel(
                       allocation.protocol_name,
                       localProtocols,
                       allocation.chain_id,
                     )}
-                  </span>
-                  <span
-                    className={css({
-                      fontSize: 'xs',
-                      color: 'text.muted',
-                    })}
-                  >
-                    {getChainLabel(allocation.chain_id, chainLabels)}
-                  </span>
-                </div>
+                    size="5"
+                  />
+                  {getProtocolLabel(
+                    allocation.protocol_name,
+                    localProtocols,
+                    allocation.chain_id,
+                  )}
+                </span>
+                <span
+                  className={css({
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    whiteSpace: 'nowrap',
+                  })}
+                >
+                  <ChainLogo
+                    chainId={allocation.chain_id}
+                    label={getChainLabel(allocation.chain_id, chainLabels)}
+                    size="5"
+                  />
+                  {getChainLabel(allocation.chain_id, chainLabels)}
+                </span>
               </div>
             </div>
           );
@@ -144,18 +263,39 @@ export function AllocationGrid({
           const allocation = row.original;
 
           return (
-            <div>
-              <p
-                className={css({
-                  m: 0,
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                })}
-              >
-                {allocation.underlying_symbol}
-              </p>
-              <Address value={allocation.underlying_token_address} />
+            <div
+              className={css({
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1',
+              })}
+            >
+              <div className={flex({ align: 'center', gap: '2' })}>
+                <TokenLogo
+                  address={allocation.underlying_token_address}
+                  chainId={allocation.chain_id}
+                  size="6"
+                  symbol={allocation.underlying_symbol}
+                />
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    m: 0,
+                  })}
+                >
+                  {allocation.underlying_symbol}
+                </span>
+              </div>
+              <TokenAddress
+                address={allocation.underlying_token_address}
+                chainId={allocation.chain_id}
+                style={{ fontSize: '0.8rem' }}
+              />
             </div>
           );
         },
@@ -166,6 +306,71 @@ export function AllocationGrid({
         accessorFn: (allocation) => Number(allocation.balance),
         cell: ({ row }) => {
           const allocation = row.original;
+          const amountUsd = allocation.amount_usd;
+
+          return (
+            <div
+              className={css({
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '1',
+              })}
+            >
+              <div className={flex({ align: 'center', gap: '2' })}>
+                <TokenLogo
+                  address={allocation.receipt_token_address}
+                  chainId={allocation.chain_id}
+                  size="6"
+                  symbol={allocation.symbol}
+                />
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    m: 0,
+                  })}
+                >
+                  {amountUsd !== undefined && amountUsd !== null
+                    ? formatUsdValue(amountUsd)
+                    : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+                </span>
+              </div>
+              <TokenAddress
+                address={allocation.receipt_token_address}
+                chainId={allocation.chain_id}
+                style={{ fontSize: '0.8rem' }}
+              />
+            </div>
+          );
+        },
+      },
+      {
+        id: 'latest_activity_at',
+        header: 'Latest activity',
+        accessorFn: (allocation) => {
+          const latestActivityAt = allocation.latest_activity_at;
+          return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
+        },
+        cell: ({ row }) => {
+          const allocation = row.original;
+
+          if (!allocation.latest_activity_at) {
+            return (
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'sm',
+                  color: 'text.muted',
+                })}
+              >
+                —
+              </p>
+            );
+          }
 
           return (
             <div>
@@ -177,15 +382,52 @@ export function AllocationGrid({
                   color: 'text.strong',
                 })}
               >
-                {formatTokenAmount(allocation.balance)} {allocation.symbol}
+                {formatFreshnessLabel(allocation.latest_activity_at)}
               </p>
-              <Address value={allocation.receipt_token_address} />
+              <p
+                className={css({
+                  m: 0,
+                  fontSize: 'xs',
+                  color: 'text.muted',
+                })}
+              >
+                {formatDateTime(allocation.latest_activity_at)}
+              </p>
+            </div>
+          );
+        },
+      },
+      {
+        id: 'category',
+        header: 'Category',
+        accessorFn: (allocation) => allocation.category,
+        cell: ({ row }) => {
+          const allocation = row.original;
+          const category = allocation.category;
+          const categoryBg = getCategoryColor(category);
+          const categoryText = getCategoryTextColor(category);
+
+          return (
+            <div
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                px: '2',
+                py: '1',
+                borderRadius: 'md',
+                fontSize: 'xs',
+                fontWeight: 'semibold',
+                bg: categoryBg,
+                color: categoryText,
+              })}
+            >
+              {getCategoryLabel(category)}
             </div>
           );
         },
       },
     ],
-    [chainLabels, localProtocols, selectedAllocationKey],
+    [chainLabels, localProtocols],
   );
 
   const table = useDataTable(filteredAllocations, columns, {
@@ -193,6 +435,12 @@ export function AllocationGrid({
     onSortingChange,
     sorting,
   });
+
+  const showTopMetricsSkeleton =
+    selectedPrime !== null && (isLoading || isCapitalMetricsLoading);
+
+  const hasTopMetrics =
+    capitalMetrics !== null || summary !== null || selectedPrime !== null;
 
   return (
     <div
@@ -215,24 +463,267 @@ export function AllocationGrid({
         })}
       >
         <div className={css({ display: 'grid', gap: '4' })}>
-          <span
-            className={css({
-              display: 'inline-flex',
-              width: 'fit-content',
-              alignItems: 'center',
-              borderRadius: 'full',
-              bg: { _dark: 'gray.800', base: 'gray.100' },
-              px: '3',
-              py: '1',
-              fontSize: 'xs',
-              fontWeight: 'semibold',
-              letterSpacing: '0.14em',
-              textTransform: 'uppercase',
-              color: 'text.muted',
+          <div
+            className={flex({
+              align: 'flex-end',
+              justify: 'space-between',
+              gap: '3',
+              wrap: 'wrap',
             })}
           >
-            Allocations
-          </span>
+            <div
+              className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
+            >
+              <div className={flex({ align: 'center', gap: '2.5' })}>
+                {selectedPrime ? (
+                  <ProtocolLogo protocolName={selectedPrime.name} size="8" />
+                ) : null}
+                <h1
+                  className={css({
+                    m: 0,
+                    fontSize: { base: '2xl', md: '3xl' },
+                    lineHeight: 'tight',
+                    color: 'text.strong',
+                  })}
+                >
+                  {selectedPrime ? selectedPrime.name : 'Select a prime'}
+                </h1>
+              </div>
+              {selectedPrime ? (
+                <TokenAddress address={selectedPrime.id} />
+              ) : null}
+            </div>
+            {!showTopMetricsSkeleton ? (
+              <div
+                className={css({
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '4',
+                  justifyContent: 'flex-end',
+                  textAlign: 'right',
+                })}
+              >
+                {summary ? (
+                  <div
+                    className={css({
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: '1.5',
+                      flexWrap: 'wrap',
+                      justifyContent: 'flex-end',
+                    })}
+                  >
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Latest activity{' '}
+                      {summary.latestActivityAt
+                        ? formatFreshnessLabel(summary.latestActivityAt)
+                        : '—'}
+                    </span>
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                      })}
+                    >
+                      {summary.latestActivityAt
+                        ? formatDateTime(summary.latestActivityAt)
+                        : 'No indexed activity'}
+                    </span>
+                  </div>
+                ) : null}
+                {selectedPrime ? (
+                  <div
+                    className={css({
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: '1.5',
+                      flexWrap: 'wrap',
+                      justifyContent: 'flex-end',
+                    })}
+                  >
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Debt sync{' '}
+                      {isPrimeDebtLoading
+                        ? 'Loading...'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                          : '—'}
+                    </span>
+                    <span
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.muted',
+                      })}
+                    >
+                      {isPrimeDebtLoading
+                        ? 'Waiting for sync timestamp'
+                        : primeDebtSnapshot?.synced_at
+                          ? formatDateTime(primeDebtSnapshot.synced_at)
+                          : 'No debt sync timestamp'}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {showTopMetricsSkeleton ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: 'repeat(2, minmax(0, 1fr))',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div
+                  key={`metrics-skeleton-${index}`}
+                  className={css({
+                    height: '88px',
+                    borderRadius: 'md',
+                    borderStyle: 'solid',
+                    borderWidth: '1px',
+                    borderColor: 'border.subtle',
+                    bg: 'surface.subtle',
+                  })}
+                />
+              ))}
+            </div>
+          ) : null}
+          {!showTopMetricsSkeleton && hasTopMetrics ? (
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: 'repeat(2, minmax(0, 1fr))',
+                  md: 'repeat(4, minmax(0, 1fr))',
+                },
+                gap: '3',
+              })}
+            >
+              {summary ? (
+                <SummaryMetric
+                  label="Total allocation"
+                  value={
+                    hasSearchQuery && overallSummary
+                      ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+                      : formatUsdValue(summary.totalUsd)
+                  }
+                  detail={
+                    hasSearchQuery && overallSummary
+                      ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                      : `${summary.allocationCount} allocations`
+                  }
+                />
+              ) : null}
+
+              {capitalMetrics ? (
+                <>
+                  <SummaryMetric
+                    label="Risk capital"
+                    value={formatUsdValue(capitalMetrics.risk_capital)}
+                    detail={
+                      parseNumericValue(
+                        capitalMetrics.risk_to_capital_ratio,
+                      ) !== null
+                        ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
+                        : undefined
+                    }
+                  />
+                </>
+              ) : null}
+
+              {capitalMetrics ? (
+                <SummaryMetric
+                  label="Total capital"
+                  value={formatUsdValue(capitalMetrics.total_capital)}
+                  detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                />
+              ) : null}
+
+              {selectedPrime ? (
+                <>
+                  <SummaryMetric
+                    label="Prime debt exposure"
+                    value={
+                      isPrimeDebtLoading
+                        ? 'Loading...'
+                        : formatWadValue(primeDebtSnapshot?.debt_wad)
+                    }
+                    detail={
+                      isPrimeDebtLoading ? (
+                        'Fetching latest debt snapshot'
+                      ) : (
+                        <div
+                          className={css({
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: '1',
+                          })}
+                        >
+                          <span>
+                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <AppTooltip
+                            ariaLabel={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                            trigger={
+                              <span
+                                className={css({
+                                  textDecoration: 'underline',
+                                  textDecorationStyle: 'dotted',
+                                  textUnderlineOffset: '2px',
+                                })}
+                              >
+                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                              </span>
+                            }
+                            content={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                          />
+                        </div>
+                      )
+                    }
+                  />
+                </>
+              ) : null}
+            </div>
+          ) : null}
+          {!showTopMetricsSkeleton && capitalMetrics?.validation_note ? (
+            <p
+              className={css({
+                m: 0,
+                fontSize: 'xs',
+                color: 'text.muted',
+                fontStyle: 'italic',
+                textAlign: 'left',
+              })}
+            >
+              {capitalMetrics.validation_note}
+            </p>
+          ) : null}
           <div
             className={flex({
               align: 'flex-end',
@@ -241,31 +732,24 @@ export function AllocationGrid({
               wrap: 'wrap',
             })}
           >
-            <div
-              className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
+            <span
+              className={css({
+                display: 'inline-flex',
+                width: 'fit-content',
+                alignItems: 'center',
+                borderRadius: 'full',
+                bg: { _dark: 'gray.800', base: 'gray.100' },
+                px: '3',
+                py: '1',
+                fontSize: 'xs',
+                fontWeight: 'semibold',
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                color: 'text.muted',
+              })}
             >
-              <h1
-                className={css({
-                  m: 0,
-                  fontSize: { base: '2xl', md: '3xl' },
-                  lineHeight: 'tight',
-                  color: 'text.strong',
-                })}
-              >
-                {selectedPrime ? selectedPrime.name : 'Select a prime'}
-              </h1>
-              {selectedPrime ? (
-                <p
-                  className={css({
-                    m: 0,
-                    fontSize: 'sm',
-                    color: 'text.muted',
-                  })}
-                >
-                  {selectedPrime.id}
-                </p>
-              ) : null}
-            </div>
+              Allocations
+            </span>
             <div
               className={css({
                 flex: '0 1 24rem',
@@ -290,6 +774,7 @@ export function AllocationGrid({
             <EmptyState
               title="Choose a prime to load positions"
               description="The main grid activates once a prime is selected from the sidebar."
+              stretch
             />
           ) : null}
 
@@ -308,6 +793,7 @@ export function AllocationGrid({
             <EmptyState
               title="No allocations returned"
               description="The selected prime did not return any allocation rows from the API."
+              stretch
             />
           ) : null}
 
@@ -319,6 +805,7 @@ export function AllocationGrid({
             <EmptyState
               title="No rows match the active filters"
               description="Clear one of the filters in the top bar to restore the allocation grid."
+              stretch
             />
           ) : null}
 

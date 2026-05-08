@@ -10,8 +10,19 @@ export type LocalProtocolRow = {
   name: string;
 };
 
-export type LocalCostRow = {
-  service: string;
-  total_costs_usd: number | null;
-  line_items: Record<string, number | null>;
+export type StarRiskCapitalRow = {
+  star: string;
+  exposure: string;
+  total_rc: string;
+  financial_rrc: string;
+  exposure_share: string;
+  risk_tolerance_ratio: string;
+};
+
+export type StarRiskCapitalResponse = {
+  data?: {
+    results?: StarRiskCapitalRow[];
+  };
+  status?: number;
+  success?: boolean;
 };

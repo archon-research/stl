@@ -1,5 +1,6 @@
 import type { Allocation } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
 
 export type FilterOption = {
@@ -11,17 +12,6 @@ export type FilterOption = {
 type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
-
-const CHAIN_NAMES: Record<number, string> = {
-  1: 'Ethereum',
-  10: 'Optimism',
-  137: 'Polygon',
-  324: 'zkSync Era',
-  130: 'Unichain',
-  8453: 'Base',
-  42161: 'Arbitrum',
-  43114: 'Avalanche',
-};
 
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
@@ -161,9 +151,7 @@ export function getChainLabel(
   chainId: number,
   chainLabels?: ChainLabelLookup,
 ): string {
-  return (
-    chainLabels?.get(chainId) ?? CHAIN_NAMES[chainId] ?? `Chain ${chainId}`
-  );
+  return chainLabels?.get(chainId) ?? getChainName(chainId);
 }
 
 export function getProtocolLabel(
@@ -294,6 +282,22 @@ export function formatRatioPercent(
   return `${(numeric * 100).toFixed(digits)}%`;
 }
 
+export function truncateMiddle(
+  value: string | null | undefined,
+  prefixLength = 8,
+  suffixLength = 6,
+): string {
+  if (!value) {
+    return '—';
+  }
+
+  if (value.length <= prefixLength + suffixLength + 3) {
+    return value;
+  }
+
+  return `${value.slice(0, prefixLength)}...${value.slice(-suffixLength)}`;
+}
+
 export function formatMultiplier(
   value: number | string | null | undefined,
 ): string {
@@ -306,6 +310,48 @@ export function formatMultiplier(
   return `${numeric.toFixed(3)}x`;
 }
 
+export function formatDeltaSign(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+
+  if (numeric === null) {
+    return '—';
+  }
+
+  const sign = numeric >= 0 ? '+' : '−';
+  const formattedAmount =
+    Math.abs(numeric) >= 1_000_000
+      ? COMPACT_NUMBER_FORMAT.format(Math.abs(numeric))
+      : TOKEN_NUMBER_FORMAT.format(Math.abs(numeric));
+
+  return `${sign}${formattedAmount}`;
+}
+
+export function formatFreshnessLabel(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  const timestamp = date.getTime();
+
+  if (Number.isNaN(timestamp)) {
+    return isoTimestamp;
+  }
+
+  const diffMs = Math.max(0, Date.now() - timestamp);
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  if (diffMins < 60) {
+    return diffMins === 0 ? 'Just now' : `${diffMins}m ago`;
+  } else if (diffHours < 24) {
+    return `${diffHours}h ago`;
+  } else if (diffDays < 7) {
+    return `${diffDays}d ago`;
+  }
+
+  return date.toLocaleDateString();
+}
+
 export function formatDateTime(value: string): string {
   const date = new Date(value);
 
@@ -314,6 +360,84 @@ export function formatDateTime(value: string): string {
   }
 
   return DATE_TIME_FORMAT.format(date);
+}
+
+export function formatDurationFromSeconds(
+  seconds: number | null | undefined,
+): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return 'Unknown';
+  }
+
+  if (seconds < 60) {
+    return `${Math.max(0, Math.floor(seconds))}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+export function formatWadValue(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return '—';
+  }
+
+  try {
+    const normalized =
+      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
+    const wei = BigInt(normalized.split('.')[0]);
+    const wad = 10n ** 18n;
+    const whole = wei / wad;
+    const fraction = wei % wad;
+    const fraction6 = ((fraction * 1_000_000n) / wad)
+      .toString()
+      .padStart(6, '0');
+
+    return formatTokenAmount(`${whole.toString()}.${fraction6}`);
+  } catch {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
+}
+
+export function formatRawWadLabel(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return 'Raw WAD unavailable';
+  }
+
+  return `Raw WAD ${truncateMiddle(String(value))}`;
+}
+
+/**
+ * Get human-readable label for allocation category.
+ */
+export function getCategoryLabel(
+  category: 'allocation' | 'pol' | 'psm3' | 'asset' | '' | undefined,
+  fallback: string = 'Unknown',
+): string {
+  const labels: Record<string, string> = {
+    allocation: 'Allocation',
+    pol: 'Protocol Owned Liquidity',
+    psm3: 'PSM3',
+    asset: 'Asset',
+  };
+  return category ? (labels[category] ?? fallback) : fallback;
 }
 
 export function getBadDebtTone(
@@ -348,4 +472,36 @@ export function sortAllocations(allocations: Allocation[]): Allocation[] {
 
     return left.symbol.localeCompare(right.symbol);
   });
+}
+
+/**
+ * Returns an Etherscan/block-explorer URL for the given chain + address,
+ * or null if the chain is not recognised.
+ */
+export function getExplorerUrl(
+  chainId: number,
+  address: string,
+  type: 'address' | 'tx' = 'address',
+): string | null {
+  const base = getChainExplorerUrl(chainId);
+  if (!base) {
+    return null;
+  }
+  return `${base}/${type}/${address}`;
+}
+
+/**
+ * Lookup table of well-known contract addresses to human-readable labels.
+ * Keys are lowercased hex addresses (without checksum).
+ * Extend as needed — used as a best-effort enrichment layer on top of
+ * protocol/symbol fields already available from the API.
+ */
+const KNOWN_ADDRESS_LABELS: Record<string, string> = {};
+
+/**
+ * Returns a human-readable label for a known contract address, or null
+ * if the address is not in the local dictionary.
+ */
+export function getAddressLabel(address: string): string | null {
+  return KNOWN_ADDRESS_LABELS[address.toLowerCase()] ?? null;
 }
