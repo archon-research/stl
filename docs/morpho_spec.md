@@ -748,10 +748,12 @@ function setManagementFee(uint256 newFee)
 function setPerformanceFeeRecipient(address newRecipient)
 function setManagementFeeRecipient(address newRecipient)
 
-// Read adapter state
-function adapters() returns (address[] memory)
-function adapterTotalAssets(address adapter) returns (uint256)
+// Read state — verified on the deployed VaultV2 (sparkUSDTbc, mainnet, 2026-05-06):
+function curator() returns (address)
+function liquidityAdapter() returns (address)
 ```
+
+> **Note on the V2 read surface.** Earlier drafts of this spec listed `adapters()` (returning `address[]`) and `adapterTotalAssets(address)` as the V2 read functions. Chain-side verification against the deployed `sparkUSDTbc` at `0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22` (verified 2026-05-06 via `eth_call` on mainnet) shows that `adapters()` and `adapterTotalAssets(address)` revert. The functions that actually respond on the deployed contract are `curator()` and `liquidityAdapter()`. Indexers that need to discriminate V2 from V1.x should use one of these — see `docs/vec-198-morpho-v2-implementation-summary.md` for the implementation choice.
 
 **Key V2 Concepts:**
 
@@ -1521,69 +1523,98 @@ This section describes how to comprehensively index Morpho to track protocol sta
 
 #### MetaMorpho V2 Events
 
-**Vault Operations:**
+> **Source.** This list was reconciled against the deployed `morpho-org/vault-v2`
+> source (`src/libraries/EventsLib.sol`) and verified against on-chain log emissions
+> from `sparkUSDTbc` (`0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22`) on 2026-05-06.
+> Earlier drafts of this spec used `AdapterAdded` / `AdapterRemoved` event names
+> and omitted several Set* / timelock / extended-ERC20 events; the table below
+> reflects what the deployed contract actually emits.
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `Deposit` | User deposits assets | sender, onBehalf, assets, shares |
-| `Withdraw` | User withdraws assets | sender, receiver, onBehalf, assets, shares |
-| `Transfer` | Shares transferred | from, to, shares |
+**ERC20 (extended):**
 
-**Interest & Fees:**
+| Event | Signature | Notes |
+|-------|-----------|-------|
+| `Transfer` | `Transfer(address indexed from, address indexed to, uint256 shares)` | |
+| `Approval` | `Approval(address indexed owner, address indexed spender, uint256 shares)` | |
+| `AllowanceUpdatedByTransferFrom` | `AllowanceUpdatedByTransferFrom(address indexed owner, address indexed spender, uint256 shares)` | Allowance debited via `transferFrom`. |
+| `Permit` | `Permit(address indexed owner, address indexed spender, uint256 shares, uint256 nonce, uint256 deadline)` | |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `AccrueInterest` | Interest accrues (V2) | previousTotalAssets, newTotalAssets, performanceFeeShares, managementFeeShares |
+**ERC4626:**
 
-**Adapter Allocation:**
+| Event | Signature |
+|-------|-----------|
+| `Deposit` | `Deposit(address indexed sender, address indexed onBehalf, uint256 assets, uint256 shares)` |
+| `Withdraw` | `Withdraw(address indexed sender, address indexed receiver, address indexed onBehalf, uint256 assets, uint256 shares)` |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `Allocate` | Capital allocated to adapter | sender, adapter, assets, ids[], change |
-| `Deallocate` | Capital withdrawn from adapter | sender, adapter, assets, ids[], change |
-| `ForceDeallocate` | Forced deallocation with penalty | sender, adapter, assets, onBehalf, ids[], penaltyAssets |
+**Vault creation:**
 
-**Adapter Management:**
+| Event | Signature |
+|-------|-----------|
+| `Constructor` | `Constructor(address indexed owner, address indexed asset)` |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `AdapterAdded` | Adapter added to vault | adapter |
-| `AdapterRemoved` | Adapter removed from vault | adapter |
+**Allocation:**
 
-**Configuration (Cap Events):**
+| Event | Signature |
+|-------|-----------|
+| `Allocate` | `Allocate(address indexed sender, address indexed adapter, uint256 assets, bytes32[] ids, int256 change)` |
+| `Deallocate` | `Deallocate(address indexed sender, address indexed adapter, uint256 assets, bytes32[] ids, int256 change)` |
+| `ForceDeallocate` | `ForceDeallocate(address indexed sender, address adapter, uint256 assets, address indexed onBehalf, bytes32[] ids, uint256 penaltyAssets)` |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `IncreaseAbsoluteCap` | Absolute cap increased | id, idData, newCap |
-| `DecreaseAbsoluteCap` | Absolute cap decreased | sender, id, idData, newCap |
-| `IncreaseRelativeCap` | Relative cap increased | id, idData, newCap |
-| `DecreaseRelativeCap` | Relative cap decreased | sender, id, idData, newCap |
+**Interest & fees:**
 
-**Fee Events:**
+| Event | Signature |
+|-------|-----------|
+| `AccrueInterest` | `AccrueInterest(uint256 previousTotalAssets, uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares)` |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `SetPerformanceFee` | Performance fee changed | newFee |
-| `SetManagementFee` | Management fee changed | newFee |
-| `SetPerformanceFeeRecipient` | Performance fee recipient changed | newRecipient |
-| `SetManagementFeeRecipient` | Management fee recipient changed | newRecipient |
+**Timelock:**
 
-**Role Events:**
+| Event | Signature |
+|-------|-----------|
+| `Submit` | `Submit(bytes4 indexed selector, bytes data, uint256 executableAt)` |
+| `Accept` | `Accept(bytes4 indexed selector, bytes data)` |
+| `Revoke` | `Revoke(address indexed sender, bytes4 indexed selector, bytes data)` |
+| `IncreaseTimelock` | `IncreaseTimelock(bytes4 indexed selector, uint256 newDuration)` |
+| `DecreaseTimelock` | `DecreaseTimelock(bytes4 indexed selector, uint256 newDuration)` |
+| `Abdicate` | `Abdicate(bytes4 indexed selector)` |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `SetOwner` | Owner changed | newOwner |
-| `SetCurator` | Curator changed | newCurator |
-| `SetIsAllocator` | Allocator status changed | allocator, newIsAllocator |
-| `SetIsSentinel` | Sentinel status changed | sentinel, newIsSentinel |
+**Configuration:**
 
-**Timelock Events:**
+| Event | Signature |
+|-------|-----------|
+| `SetOwner` | `SetOwner(address indexed newOwner)` |
+| `SetCurator` | `SetCurator(address indexed newCurator)` |
+| `SetIsSentinel` | `SetIsSentinel(address indexed account, bool newIsSentinel)` |
+| `SetIsAllocator` | `SetIsAllocator(address indexed account, bool newIsAllocator)` |
+| `SetName` | `SetName(string newName)` |
+| `SetSymbol` | `SetSymbol(string newSymbol)` |
+| `SetReceiveSharesGate` | `SetReceiveSharesGate(address indexed newReceiveSharesGate)` |
+| `SetSendSharesGate` | `SetSendSharesGate(address indexed newSendSharesGate)` |
+| `SetReceiveAssetsGate` | `SetReceiveAssetsGate(address indexed newReceiveAssetsGate)` |
+| `SetSendAssetsGate` | `SetSendAssetsGate(address indexed newSendAssetsGate)` |
+| `SetAdapterRegistry` | `SetAdapterRegistry(address indexed newAdapterRegistry)` |
+| `SetLiquidityAdapterAndData` | `SetLiquidityAdapterAndData(address indexed sender, address indexed newLiquidityAdapter, bytes indexed newLiquidityData)` |
+| `AddAdapter` | `AddAdapter(address indexed account)` |
+| `RemoveAdapter` | `RemoveAdapter(address indexed account)` |
+| `SetMaxRate` | `SetMaxRate(uint256 newMaxRate)` |
+| `SetForceDeallocatePenalty` | `SetForceDeallocatePenalty(address indexed adapter, uint256 forceDeallocatePenalty)` |
 
-| Event | Emitted When | Key Data |
-|-------|--------------|----------|
-| `Submit` | Timelocked action submitted | selector, data, executableAt |
-| `Accept` | Timelocked action executed | selector, data |
-| `Revoke` | Timelocked action revoked | sender, selector, data |
+**Fees:**
+
+| Event | Signature |
+|-------|-----------|
+| `SetPerformanceFee` | `SetPerformanceFee(uint256 newPerformanceFee)` |
+| `SetManagementFee` | `SetManagementFee(uint256 newManagementFee)` |
+| `SetPerformanceFeeRecipient` | `SetPerformanceFeeRecipient(address indexed newPerformanceFeeRecipient)` |
+| `SetManagementFeeRecipient` | `SetManagementFeeRecipient(address indexed newManagementFeeRecipient)` |
+
+**Caps:**
+
+| Event | Signature |
+|-------|-----------|
+| `IncreaseAbsoluteCap` | `IncreaseAbsoluteCap(bytes32 indexed id, bytes idData, uint256 newAbsoluteCap)` |
+| `DecreaseAbsoluteCap` | `DecreaseAbsoluteCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newAbsoluteCap)` |
+| `IncreaseRelativeCap` | `IncreaseRelativeCap(bytes32 indexed id, bytes idData, uint256 newRelativeCap)` |
+| `DecreaseRelativeCap` | `DecreaseRelativeCap(address indexed sender, bytes32 indexed id, bytes idData, uint256 newRelativeCap)` |
 
 **Implementation:**
 

@@ -454,23 +454,49 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 }
 
 // processMetaMorphoLog handles a MetaMorpho vault event log.
+//
+// Every recognised vault event lands in protocol_event as an audit-log row,
+// keyed by (tx_hash, log_index). The four events with state-affecting typed
+// handlers — Deposit, Withdraw, Transfer, AccrueInterest — also produce
+// structured snapshot rows in morpho_vault_state / morpho_vault_position via
+// the dispatch below. The full V2 governance / allocation / cap / fee / role
+// / timelock surface (Allocate, Deallocate, AddAdapter, IncreaseAbsoluteCap,
+// SetPerformanceFee, SetCurator, Submit, …) is registered in the event
+// extractor so it lands in the audit log; structured tables for those events
+// are deferred per docs/vec-198-morpho-v2-followup-plan.md.
 func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	eventName, ok := s.eventExtractor.MetaMorphoEventName(log)
+	if !ok {
+		// Caller already filtered via IsMetaMorphoEvent; this shouldn't
+		// happen unless the topic registration drifted.
+		return fmt.Errorf("MetaMorpho event has unrecognised topic: %v", log.Topics)
+	}
+
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processMetaMorphoEvent",
+		attribute.String("event.type", eventName),
+		attribute.String("vault.address", vaultAddress.Hex()))
+	defer span.End()
+	s.telemetry.RecordEventProcessed(ctx, eventName)
+
+	s.logger.Info("MetaMorpho event detected",
+		"event", eventName,
+		"vault", vaultAddress.Hex(),
+		"tx", log.TransactionHash,
+		"block", blockNumber)
+
+	if err := s.saveMetaMorphoProtocolEvent(ctx, log, vaultAddress, eventName, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+		return fmt.Errorf("saving MetaMorpho protocol_event: %w", err)
+	}
+
 	event, err := s.eventExtractor.ExtractMetaMorphoEvent(log)
 	if err != nil {
 		return fmt.Errorf("extracting MetaMorpho event: %w", err)
 	}
-
-	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processMetaMorphoEvent",
-		attribute.String("event.type", string(event.Type())),
-		attribute.String("vault.address", vaultAddress.Hex()))
-	defer span.End()
-	s.telemetry.RecordEventProcessed(ctx, string(event.Type()))
-
-	s.logger.Info("MetaMorpho event detected",
-		"event", event.Type(),
-		"vault", vaultAddress.Hex(),
-		"tx", event.TxHash(),
-		"block", blockNumber)
+	if event == nil {
+		// Registered topic without a typed handler — audit-log save above
+		// is the only side effect.
+		return nil
+	}
 
 	switch e := event.(type) {
 	case *VaultDepositEvent:
@@ -484,6 +510,59 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	default:
 		return nil
 	}
+}
+
+// saveMetaMorphoProtocolEvent writes a protocol_event audit-log row for any
+// MetaMorpho event emitted by a known vault. Used both by the typed Deposit /
+// Withdraw / Transfer / AccrueInterest paths and by the V2 governance /
+// allocation / cap / fee / role / timelock surface that doesn't yet have
+// structured tables.
+//
+// EventData is a JSON snapshot of the raw log: { eventType, vault, topics,
+// data }. ABI decoding of args is intentionally skipped — operators can decode
+// downstream from the canonical signatures in
+// stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go if needed.
+// This keeps the writer cheap and avoids encoding-bug failure modes for
+// event shapes the indexer doesn't yet structurally consume.
+func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Log, vaultAddress common.Address, eventName string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+	if err != nil {
+		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"eventType": eventName,
+		"vault":     vaultAddress.Hex(),
+		"tx":        log.TransactionHash,
+		"topics":    log.Topics,
+		"data":      log.Data,
+	})
+	if err != nil {
+		return fmt.Errorf("marshalling MetaMorpho event payload: %w", err)
+	}
+
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
+		if err != nil {
+			return fmt.Errorf("getting protocol: %w", err)
+		}
+		protocolEvent, err := entity.NewProtocolEvent(
+			int(chainID),
+			protocolID,
+			blockNumber,
+			blockVersion,
+			common.FromHex(log.TransactionHash),
+			int(logIndex),
+			vaultAddress.Bytes(),
+			eventName,
+			payload,
+			blockTimestamp,
+		)
+		if err != nil {
+			return fmt.Errorf("creating MetaMorpho protocol event entity: %w", err)
+		}
+		return s.eventRepo.SaveEvent(ctx, tx, protocolEvent)
+	})
 }
 
 // tryDiscoverVault attempts to discover a new MetaMorpho vault from an event log.

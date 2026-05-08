@@ -93,6 +93,28 @@ func (e *EventExtractor) loadABIs() error {
 	e.metaMorphoSignatures[v2Event.ID] = &v2Event
 	e.vaultActivitySignatures[v2Event.ID] = &v2Event
 
+	// Register the full VaultV2 governance / allocation / cap / fee / role /
+	// timelock event surface. These are persisted as protocol_event audit-log
+	// rows when emitted by a known vault; structured handling (adapter table,
+	// cap table, fee config columns) is deferred per
+	// docs/vec-198-morpho-v2-followup-plan.md. Without this registration the
+	// events would silently fall through IsMetaMorphoEvent's filter.
+	v2EventsABI, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		return fmt.Errorf("failed to parse VaultV2 events ABI: %w", err)
+	}
+	for name, event := range v2EventsABI.Events {
+		// Skip names already registered above to avoid clobbering the existing
+		// MetaMorpho V1 / V1.1 entries (Deposit, Withdraw, Transfer,
+		// AccrueInterest are inherited ERC20/ERC4626 surface).
+		if _, present := e.metaMorphoSignatures[event.ID]; present {
+			continue
+		}
+		ev := event
+		e.metaMorphoSignatures[ev.ID] = &ev
+		_ = name
+	}
+
 	return nil
 }
 
@@ -126,6 +148,21 @@ func (e *EventExtractor) IsVaultActivityEvent(log shared.Log) bool {
 	}
 	_, ok := e.vaultActivitySignatures[common.HexToHash(log.Topics[0])]
 	return ok
+}
+
+// MetaMorphoEventName returns the registered event name for the log's topic[0].
+// Returns "", false if the topic is not registered. Used by audit-log saving
+// in service.go to label every MetaMorpho event row with its event_type
+// without requiring per-event typed extraction.
+func (e *EventExtractor) MetaMorphoEventName(log shared.Log) (string, bool) {
+	if len(log.Topics) == 0 {
+		return "", false
+	}
+	ev, ok := e.metaMorphoSignatures[common.HexToHash(log.Topics[0])]
+	if !ok {
+		return "", false
+	}
+	return ev.Name, true
 }
 
 // ExtractMorphoBlueEvent parses a Morpho Blue event from a log entry.
@@ -187,6 +224,20 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 		return nil, fmt.Errorf("not a tracked MetaMorpho event")
 	}
 
+	// Only the events with state-affecting typed handlers are extracted into
+	// strongly-typed structs. The full V2 governance / allocation / cap / fee
+	// / role / timelock surface is registered in metaMorphoSignatures so the
+	// indexer recognises and audit-logs them, but typed extraction is
+	// deferred per docs/vec-198-morpho-v2-followup-plan.md. Returning (nil,
+	// nil) signals "registered topic, no typed extraction" — the caller saves
+	// the audit-log row regardless.
+	switch event.Name {
+	case "Deposit", "Withdraw", "Transfer", "AccrueInterest":
+		// fall through to typed extraction below
+	default:
+		return nil, nil
+	}
+
 	eventData := make(map[string]any)
 
 	if err := parseTopics(event, log.Topics, eventData); err != nil {
@@ -206,7 +257,8 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 	case "AccrueInterest":
 		return extractVaultAccrueInterest(eventData, log.TransactionHash)
 	default:
-		return nil, fmt.Errorf("unknown MetaMorpho event: %s", event.Name)
+		// Unreachable — gated by the switch above.
+		return nil, nil
 	}
 }
 

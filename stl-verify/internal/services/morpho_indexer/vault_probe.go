@@ -59,6 +59,31 @@ type VaultDetails struct {
 // VaultProber probes candidate addresses to determine if they are Morpho-family
 // vaults (MetaMorpho V1/V1.1 or Morpho VaultV2) and fetches their metadata.
 // Call data is pre-packed for efficient batching.
+//
+// Divergence vs docs/morpho_spec.md (recorded deliberately):
+//
+//   - Spec line 114–118 prescribes version detection by AccrueInterest event
+//     signature shape (V1.1 = 2-field, V2 = 4-field). We use a probe instead:
+//     `MORPHO()` succeeds → MetaMorpho (V1, optionally V1.1 if `skimRecipient()`
+//     succeeds in the details phase); `MORPHO()` reverts but `curator()` and
+//     `liquidityAdapter()` succeed → VaultV2; else not a vault.
+//
+//     Why: signature-shape detection only works after a vault has emitted at
+//     least one AccrueInterest event. The indexer registers vaults at first
+//     interaction (Deposit / Withdraw / Transfer) so `vault_version` must be
+//     final at insert time. Combined with the project's append-only
+//     convention on `morpho_vault` rows (see ON CONFLICT pattern in
+//     stl-verify/internal/adapters/outbound/postgres/morpho_repository.go),
+//     lazy-update from a later AccrueInterest is awkward. The probe is the
+//     chosen mechanism; the result matches spec semantics, just classified
+//     up-front.
+//
+//   - Spec line 752 lists `adapters() returns (address[])` as the V2 read
+//     surface for discrimination. Chain-side verification on 2026-05-06
+//     confirmed `adapters()` reverts on the deployed sparkUSDTbc; the working
+//     V2 selectors are `curator()` and `liquidityAdapter()` (both real V2
+//     functions, just absent from the spec text). The spec was corrected in
+//     the same commit as this comment to match chain.
 type VaultProber struct {
 	metaMorphoABI *abi.ABI
 	vaultV2ABI    *abi.ABI
