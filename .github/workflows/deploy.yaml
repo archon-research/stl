@@ -354,12 +354,9 @@ jobs:
             --field "sha=${NEW_COMMIT}" \
             --field "force=true"
 
-          # Close any existing deploy/prod-* PRs
-          EXISTING_PRS=$(gh pr list --search "deploy(prod): update image tags" --json number --jq '.[].number' 2>/dev/null || echo "")
-          for pr in $EXISTING_PRS; do
-            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
-          done
-
+          # Create the new prod deploy PR FIRST, so that if `gh pr create`
+          # fails transiently we don't end up with no open prod-deploy PR
+          # (older PRs would have already been closed).
           gh pr create \
             --title "deploy(prod): update image tags to ${SHORT_SHA}" \
             --body "$(cat <<EOF
@@ -380,6 +377,22 @@ jobs:
 
           PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+          # Now that the new PR exists, close any older open deploy/prod-* PRs
+          # (excluding the one we just created). Branch protection's "strict"
+          # rule plus our concurrency group make this defensive, but it keeps
+          # the PR list clean and removes ambiguity about which deploy is
+          # current.
+          # NOTE: filter by branch prefix — `gh pr list --search` treats `:` as
+          # a search qualifier so the previous title-based search returned 0.
+          EXISTING_PRS=$(gh pr list \
+            --state open \
+            --base main \
+            --json number,headRefName \
+            --jq '.[] | select(.headRefName | startswith("deploy/prod-")) | select(.headRefName != "'"$BRANCH"'") | .number')
+          for pr in $EXISTING_PRS; do
+            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
+          done
 
   notify-prod-pr-created:
     name: Notify Prod Deploy Awaiting Approval
