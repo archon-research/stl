@@ -43,10 +43,34 @@ $(LEFTHOOK_BIN): ## Download lefthook CLI to ./bin from GitHub Releases
 	mkdir -p ./bin; \
 	ASSET="lefthook_$(LEFTHOOK_VERSION_NO_V)_$(LEFTHOOK_OS)_$(LEFTHOOK_ARCH)"; \
 	URL="https://github.com/evilmartians/lefthook/releases/download/$(LEFTHOOK_VERSION)/$$ASSET"; \
+	CHECKSUMS_URL="https://github.com/evilmartians/lefthook/releases/download/$(LEFTHOOK_VERSION)/lefthook_checksums.txt"; \
+	CHECKSUMS_FILE=$$(mktemp); \
+	trap 'rm -f "$$CHECKSUMS_FILE"' EXIT; \
 	echo "Downloading $$URL"; \
 	curl -fsSL "$$URL" -o "$(LEFTHOOK_BIN)"; \
+	echo "Downloading $$CHECKSUMS_URL"; \
+	curl -fsSL "$$CHECKSUMS_URL" -o "$$CHECKSUMS_FILE"; \
+	EXPECTED_HASH=$$(awk -v asset="$$ASSET" '$$2==asset {print $$1}' "$$CHECKSUMS_FILE"); \
+	if [ -z "$$EXPECTED_HASH" ]; then \
+		echo "Failed to find checksum for $$ASSET in lefthook_checksums.txt"; \
+		exit 1; \
+	fi; \
+	if command -v sha256sum >/dev/null 2>&1; then \
+		ACTUAL_HASH=$$(sha256sum "$(LEFTHOOK_BIN)" | awk '{print $$1}'); \
+	elif command -v shasum >/dev/null 2>&1; then \
+		ACTUAL_HASH=$$(shasum -a 256 "$(LEFTHOOK_BIN)" | awk '{print $$1}'); \
+	else \
+		echo "No SHA-256 tool found (need sha256sum or shasum)"; \
+		exit 1; \
+	fi; \
+	if [ "$$ACTUAL_HASH" != "$$EXPECTED_HASH" ]; then \
+		echo "Checksum mismatch for $$ASSET"; \
+		echo "Expected: $$EXPECTED_HASH"; \
+		echo "Actual:   $$ACTUAL_HASH"; \
+		exit 1; \
+	fi; \
 	chmod +x "$(LEFTHOOK_BIN)"; \
-	echo "Installed $(LEFTHOOK_BIN)"
+	echo "Installed $(LEFTHOOK_BIN) (checksum verified)"
 
 lefthook-update-cli: ## Re-download pinned lefthook CLI into ./bin
 	@rm -f "$(LEFTHOOK_BIN)"
