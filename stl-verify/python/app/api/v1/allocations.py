@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,7 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
-from app.api._validators import EthAddressParam
+from app.api._validators import EthAddressParam, OptionalEthAddressParam
 from app.api.deps import get_engine
 from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
@@ -445,7 +446,17 @@ async def list_allocations(
     prime_id: EthAddressParam,
     service: AllocationService = Depends(_get_service),
 ):
-    positions = await service.list_receipt_token_positions(EthAddress(prime_id))
+    """Return current receipt-token holdings for ``prime_id``.
+
+    Errors:
+    - 422 if ``prime_id`` is malformed.
+    - 404 if ``prime_id`` is well-formed but no such prime exists.
+    """
+    prime_address = EthAddress(prime_id)
+    if not await service.prime_exists(prime_address):
+        raise HTTPException(status_code=404, detail="Prime not found")
+
+    positions = await service.list_receipt_token_positions(prime_address)
     category_service = AllocationCategoryService()
 
     return [
@@ -479,11 +490,13 @@ async def list_allocations(
     ),
 )
 async def list_allocation_activity(
-    prime_id: str | None = Query(
-        default=None,
-        description="Filter by prime address (0x-prefixed Ethereum address).",
-        examples=["0x1234567890abcdef1234567890abcdef12345678"],
-    ),
+    prime_id: Annotated[
+        OptionalEthAddressParam,
+        Query(
+            description="Filter by prime address (0x-prefixed Ethereum address).",
+            examples=["0x1234567890abcdef1234567890abcdef12345678"],
+        ),
+    ] = None,
     chain_id: int | None = Query(default=None, description="Filter by EVM chain id.", examples=[1]),
     protocol_name: str | None = Query(
         default=None,
@@ -510,21 +523,14 @@ async def list_allocation_activity(
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
 ):
-    if prime_id is None:
-        parsed_prime_id = None
-    else:
-        try:
-            parsed_prime_id = EthAddress(prime_id)
-        except ValueError as exc:
-            logger.warning(
-                "Invalid Ethereum address provided to allocation activity endpoint",
-                extra={
-                    "prime_id_input": prime_id,
-                    "validation_error": str(exc),
-                    "endpoint": "/v1/allocations/activity",
-                },
-            )
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    """Errors:
+
+    - 422 if ``prime_id`` is malformed (or ``limit`` is out of range).
+    - 200 with an empty list if filters match no rows — including when
+      ``prime_id`` is well-formed but unknown. ``prime_id`` is treated as
+      a filter here, not a path resource.
+    """
+    parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
 
     try:
         events = await service.list_allocation_activity(
