@@ -5,7 +5,6 @@ from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.risk_engine.suraf.result import SurafResult
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
-from app.services.suraf_rrc_service import SurafRrcService
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -21,11 +20,6 @@ def get_suraf_ratings(request: Request) -> dict[str, SurafResult]:
 def get_asset_to_rating(request: Request) -> dict[int, str]:
     """Extract the receipt_token_id -> rating_id mapping built at startup."""
     return request.app.state.asset_to_rating
-
-
-def get_suraf_rrc_service(request: Request) -> SurafRrcService:
-    """Extract the SURAF RRC service built at startup."""
-    return request.app.state.suraf_rrc_service
 
 
 def get_crypto_lending_risk_service(request: Request) -> CryptoLendingRiskService:

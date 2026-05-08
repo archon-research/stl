@@ -231,29 +231,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/risk/rrc/scenario': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    /**
-     * Post Rrc Scenario
-     * @description Return SURAF RRC for a hypothetical ``(receipt_token_id, usd_exposure)`` pair.
-     *
-     *     ``RRC = usd_exposure * CRR``, where CRR is the pre-computed SURAF rating
-     *     for the receipt token. Pure scenario calculation — no position state.
-     */
-    post: operations['post_rrc_scenario_v1_risk_rrc_scenario_post'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/risk/{receipt_token_id}/bad-debt': {
     parameters: {
       query?: never;
@@ -744,30 +721,6 @@ export interface components {
       /** Rrc Usd */
       rrc_usd: string;
     };
-    /** ScenarioRrcRequest */
-    ScenarioRrcRequest: {
-      /** Receipt Token Id */
-      receipt_token_id: number;
-      /** Usd Exposure */
-      usd_exposure: number | string;
-    };
-    /** ScenarioRrcResponse */
-    ScenarioRrcResponse: {
-      /** Crr Pct */
-      crr_pct: string;
-      /** Rating Id */
-      rating_id: string;
-      /** Rating Version */
-      rating_version: string;
-      /** Receipt Token Id */
-      receipt_token_id: number;
-      /** Rrc Usd */
-      rrc_usd: string;
-      /** Source Commit Sha */
-      source_commit_sha: string;
-      /** Usd Exposure */
-      usd_exposure: string;
-    };
     /**
      * SourceAccessModel
      * @description Classification of data source accessibility and terms of use.
@@ -1223,39 +1176,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['RrcEnvelope'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  post_rrc_scenario_v1_risk_rrc_scenario_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['ScenarioRrcRequest'];
-      };
-    };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ScenarioRrcResponse'];
         };
       };
       /** @description Validation Error */

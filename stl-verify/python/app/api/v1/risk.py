@@ -9,7 +9,6 @@ from app.api.deps import (
     get_crypto_lending_risk_service,
     get_model_registry,
     get_receipt_token_lookup,
-    get_suraf_rrc_service,
 )
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import RrcResult
@@ -22,7 +21,6 @@ from app.domain.exceptions import (
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
-from app.services.suraf_rrc_service import SurafRrcService
 
 router = APIRouter(tags=["risk"])
 
@@ -103,51 +101,6 @@ class RiskBreakdownResponse(BaseModel):
                         "liquidation_bonus": "1.05",
                     }
                 ],
-            }
-        }
-    }
-
-
-class ScenarioRrcRequest(BaseModel):
-    """Request body for the legacy SURAF scenario RRC endpoint."""
-
-    receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
-    usd_exposure: Decimal = Field(
-        description="Hypothetical USD exposure to the receipt token. Must be positive.",
-        examples=["1000000"],
-    )
-
-
-class ScenarioRrcResponse(BaseModel):
-    """Result of a legacy SURAF scenario RRC computation."""
-
-    receipt_token_id: int = Field(description="Echo of the requested receipt token id.")
-    usd_exposure: Decimal = Field(description="Echo of the requested USD exposure.")
-    rating_id: str = Field(description="SURAF rating id used for this asset.", examples=["aave-v3-eth-usdc"])
-    rating_version: str = Field(description="SURAF rating version string.", examples=["2026-04-15"])
-    crr_pct: Decimal = Field(
-        description="Capital risk ratio as a 0–100 percentage (e.g. `33.7` for 33.7%).",
-        examples=["1.23"],
-    )
-    rrc_usd: Decimal = Field(
-        description="Risk capital in USD: `usd_exposure * crr_pct / 100`.",
-        examples=["12300"],
-    )
-    source_commit_sha: str = Field(
-        description="Git commit sha of the rating source used at startup.",
-        examples=["abc123def456"],
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "receipt_token_id": 42,
-                "usd_exposure": "1000000",
-                "rating_id": "aave-v3-eth-usdc",
-                "rating_version": "2026-04-15",
-                "crr_pct": "1.23",
-                "rrc_usd": "12300",
-                "source_commit_sha": "abc123def456",
             }
         }
     }
@@ -240,30 +193,6 @@ async def get_risk_breakdown(
             for item in breakdown.items
         ],
     )
-
-
-@router.post(
-    "/risk/rrc/scenario",
-    response_model=ScenarioRrcResponse,
-    summary="Legacy SURAF scenario RRC",
-    description=(
-        "Return SURAF RRC for a hypothetical `(receipt_token_id, usd_exposure)` pair: "
-        "`RRC = usd_exposure * CRR`, where `CRR` is the pre-computed SURAF rating for the "
-        "receipt token. Pure scenario calculation — no position state. Prefer `POST /v1/risk/rrc` "
-        "for new integrations; this endpoint is retained for backwards compatibility."
-    ),
-)
-async def post_rrc_scenario(
-    body: ScenarioRrcRequest,
-    service: SurafRrcService = Depends(get_suraf_rrc_service),
-) -> ScenarioRrcResponse:
-    if body.usd_exposure <= _ZERO:
-        raise HTTPException(status_code=422, detail="usd_exposure must be positive")
-
-    result = service.compute_legacy(body.receipt_token_id, body.usd_exposure)
-    if result is None:
-        raise HTTPException(status_code=404, detail=f"no rating mapped for receipt_token_id: {body.receipt_token_id}")
-    return ScenarioRrcResponse(**result.model_dump())
 
 
 # ---------------------------------------------------------------------------
