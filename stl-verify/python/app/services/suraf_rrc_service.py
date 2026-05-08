@@ -12,8 +12,6 @@ from collections.abc import Mapping
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
-
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import RrcResult, SurafDetails
 from app.domain.exceptions import InvalidOverrideError
@@ -34,19 +32,6 @@ _USD_EXPOSURE_MAX = Decimal("1e15")
 # multi-megabyte numeric literal is the actual CPU-burn vector; the bound
 # check above only fires after parse.
 _DECIMAL_STR_MAX_LEN = 64
-
-
-# Legacy result type — used by old /risk/rrc/scenario endpoint until VEC-183.
-class LegacyRrcResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    receipt_token_id: int
-    usd_exposure: Decimal
-    rating_id: str
-    rating_version: str
-    crr_pct: Decimal
-    rrc_usd: Decimal
-    source_commit_sha: str
 
 
 class SurafRrcService:
@@ -146,27 +131,3 @@ class SurafRrcService:
         if rating is None:
             raise ValueError(f"rating_id={rating_id!r} not found in suraf_ratings (asset_id={asset_id})")
         return rating_id, rating
-
-    # ------------------------------------------------------------------
-    # Legacy API — used by old /risk/rrc/scenario endpoint, will be removed in VEC-183.
-    # ------------------------------------------------------------------
-
-    def compute_legacy(self, receipt_token_id: int, usd_exposure: Decimal) -> LegacyRrcResult | None:
-        """Return the RRC for ``receipt_token_id`` at the given USD exposure, or ``None`` if unmapped."""
-        rating_id = self._asset_to_rating.get(receipt_token_id)
-        if rating_id is None:
-            return None
-        rating = self._suraf_ratings.get(rating_id)
-        if rating is None:
-            raise ValueError(
-                f"rating_id={rating_id!r} not found in suraf_ratings (receipt_token_id={receipt_token_id})"
-            )
-        return LegacyRrcResult(
-            receipt_token_id=receipt_token_id,
-            usd_exposure=usd_exposure,
-            rating_id=rating_id,
-            rating_version=rating.version,
-            crr_pct=rating.crr_pct,
-            rrc_usd=usd_exposure * rating.crr_pct / _HUNDRED,
-            source_commit_sha=rating.source_commit_sha,
-        )
