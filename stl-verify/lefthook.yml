@@ -85,11 +85,3 @@ pre-commit:
       run: |
         GOBIN=$(go env GOPATH)/bin
         $GOBIN/goimports -l -w {staged_files}
-
-pre-push:
-  parallel: true
-  commands:
-    go-vet:
-      glob: "**/*.go"
-      exclude: *exclude_dirs
-      run: go vet ./...

@@ -195,7 +195,6 @@ Quality is enforced at three levels:
 ```bash
 # Run git hooks manually without committing
 lefthook run pre-commit   # Run all pre-commit hooks
-lefthook run pre-push     # Run all pre-push hooks
 
 # Format and lint locally before committing
 make format
