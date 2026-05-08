@@ -1,17 +1,61 @@
 # Linting and formatting targets for stl-verify (local development)
-# 
+#
 # For CI: See .github/workflows/ (go-ci.yml, python-ci.yml, ts-ci.yml)
 # Git hooks: See lefthook.yml, python/lefthook.yml, ts/lefthook.yml
 #
 # Note: Lefthook automatically handles changed-file workflow on git commit/push
 
-.PHONY: install-hooks format lint help
+.PHONY: install-hooks format lint help lefthook-update-cli
+
+LEFTHOOK_BIN := ./bin/lefthook
+LEFTHOOK_VERSION ?= v2.1.6
+LEFTHOOK_VERSION_NO_V := $(patsubst v%,%,$(LEFTHOOK_VERSION))
+
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+ifeq ($(UNAME_S),Darwin)
+LEFTHOOK_OS := MacOS
+else ifeq ($(UNAME_S),Linux)
+LEFTHOOK_OS := Linux
+else
+LEFTHOOK_OS := unsupported
+endif
+
+ifeq ($(UNAME_M),arm64)
+LEFTHOOK_ARCH := arm64
+else ifeq ($(UNAME_M),aarch64)
+LEFTHOOK_ARCH := arm64
+else ifeq ($(UNAME_M),x86_64)
+LEFTHOOK_ARCH := x86_64
+else ifeq ($(UNAME_M),amd64)
+LEFTHOOK_ARCH := x86_64
+else
+LEFTHOOK_ARCH := unsupported
+endif
+
+$(LEFTHOOK_BIN): ## Download lefthook CLI to ./bin from GitHub Releases
+	@set -e; \
+	if [ "$(LEFTHOOK_OS)" = "unsupported" ] || [ "$(LEFTHOOK_ARCH)" = "unsupported" ]; then \
+		echo "Unsupported platform: $(UNAME_S)/$(UNAME_M)"; \
+		exit 1; \
+	fi; \
+	mkdir -p ./bin; \
+	ASSET="lefthook_$(LEFTHOOK_VERSION_NO_V)_$(LEFTHOOK_OS)_$(LEFTHOOK_ARCH)"; \
+	URL="https://github.com/evilmartians/lefthook/releases/download/$(LEFTHOOK_VERSION)/$$ASSET"; \
+	echo "Downloading $$URL"; \
+	curl -fsSL "$$URL" -o "$(LEFTHOOK_BIN)"; \
+	chmod +x "$(LEFTHOOK_BIN)"; \
+	echo "Installed $(LEFTHOOK_BIN)"
+
+lefthook-update-cli: ## Re-download pinned lefthook CLI into ./bin
+	@rm -f "$(LEFTHOOK_BIN)"
+	@$(MAKE) "$(LEFTHOOK_BIN)"
 
 # Install lefthook git hooks
-install-hooks: ## Install lefthook pre-commit/push hooks
+install-hooks: $(LEFTHOOK_BIN) ## Install lefthook pre-commit/push hooks
 	@echo "==> Installing lefthook git hooks..."
-	@command -v lefthook >/dev/null 2>&1 || go install github.com/evilmartians/lefthook@latest
-	@lefthook install
+	@$(LEFTHOOK_BIN) install
 
 # Local development helpers — just delegate to language-specific tooling
 
