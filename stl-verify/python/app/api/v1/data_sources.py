@@ -1,33 +1,51 @@
 """Data sources transparency endpoint."""
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.services.data_provenance_service import DataProvenanceService, SourceAccessModel
 
-router = APIRouter()
+router = APIRouter(tags=["data sources"])
 
 
 class DataSourceResponse(BaseModel):
     """Data source metadata for the transparency panel."""
 
-    name: str
-    host: str
-    access_model: SourceAccessModel
-    role: str
-    caveat: str | None = None
-    attribution_required: bool = False
+    name: str = Field(description="Human-readable name of the data source.", examples=["Alchemy"])
+    host: str = Field(description="Hostname or base URL of the source.", examples=["alch.api.example.com"])
+    access_model: SourceAccessModel = Field(description="How the source is accessed (e.g. `paid_api`, `public_rpc`).")
+    role: str = Field(
+        description="The role this source plays in the system (e.g. block ingestion, price feed).",
+        examples=["block ingestion"],
+    )
+    caveat: str | None = Field(
+        default=None,
+        description="Operational caveat callers should be aware of, when present.",
+        examples=["Rate-limited to 300 req/s"],
+    )
+    attribution_required: bool = Field(
+        default=False,
+        description="Whether downstream displays must attribute the source.",
+    )
 
 
 class DataSourcesResponse(BaseModel):
     """Registered data sources used by STL."""
 
-    sources: list[DataSourceResponse]
+    sources: list[DataSourceResponse] = Field(description="All registered upstream data sources.")
 
 
-@router.get("/data-sources", response_model=DataSourcesResponse)
+@router.get(
+    "/data-sources",
+    response_model=DataSourcesResponse,
+    summary="List registered data sources",
+    description=(
+        "Return the registry of upstream data sources the verify service depends on, "
+        "with access model, role, and any operational caveats. Useful for UI transparency "
+        "panels and for auditing where on-chain and off-chain data ultimately originate."
+    ),
+)
 async def get_data_sources():
-    """Retrieve the registry of data sources used by STL."""
     service = DataProvenanceService()
     return DataSourcesResponse(
         sources=[
