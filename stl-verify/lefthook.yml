@@ -3,7 +3,7 @@
 # Run manually: lefthook run pre-commit
 #
 # Extends language-specific configs from python/ and ts/ subdirectories
-# Includes generic file checks and Go-specific linting
+# Includes stl-verify-specific validation and Go-specific linting
 
 # Use doublestar glob matcher for standard recursive behavior
 glob_matcher: doublestar
@@ -20,35 +20,14 @@ pre-commit:
   exclude: "bin/**|dist/**"
 
   commands:
-    # =================================================================
-    # Generic file checks (all languages)
-    # =================================================================
-
-    trailing-whitespace:
-      glob: "**/*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
-      exclude: 'lefthook.*\.yml'
-      stage_fixed: true
-      run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
-
-    end-of-file-fixer:
-      glob: "**/*.{go,py,pyi,ts,tsx,yml,yaml,json,toml,md,sh}"
-      exclude: 'lefthook.*\.yml'
-      stage_fixed: true
-      run: |
-        for file in {staged_files}; do
-          [ -f "$file" ] || continue
-          # Add newline at end if missing
-          [ -n "$(tail -c1 "$file")" ] && echo >> "$file"
-          # Remove multiple trailing newlines, keep exactly one
-          perl -i -0pe 's/\n+$/\n/' "$file"
-        done
-
     check-yaml:
       glob: "**/*.{yml,yaml}"
       exclude: *exclude_dirs
       run: |
         if command -v yamllint > /dev/null 2>&1; then
           yamllint {staged_files}
+        else
+          echo "Warning: yamllint not found, skipping YAML validation. Install yamllint to enable this check."
         fi
 
     check-json:
@@ -88,15 +67,6 @@ pre-commit:
             exit 1
           fi
         done
-
-    check-merge-conflict:
-      glob: "**/*"
-      exclude: *exclude_dirs
-      run: |
-        if grep -r -E '^(<<<<<<<|=======|>>>>>>>)' {staged_files}; then
-          echo "Error: Merge conflict markers found"
-          exit 1
-        fi
 
     # =================================================================
     # Go-specific linting
