@@ -264,6 +264,10 @@ WAD-precision (18 decimals):
 sharePrice = (totalAssets * 10^18) / totalSupply
 ```
 
+> **Simplified formula — two caveats for real use:**
+> 1. **`totalAssets()` is dynamic, not stored.** In MetaMorpho, `totalAssets()` queries Morpho Blue markets live on every call. It "runs ahead" of `totalSupply` as market interest accumulates between fee accruals, then causes a visible ratio dip when fee shares are minted. The Morpho docs call this a "false drop." To avoid it, use `newTotalAssets` from an `AccrueInterest` event (which is captured at a consistent moment after fee shares are minted), or call `convertToAssets(10^18)` which handles consistency internally.
+> 2. **Virtual offsets.** The full ERC-4626 formula adds `+1` to assets and `+10^DECIMALS_OFFSET` to supply to prevent inflation attacks. For production vault sizes these are negligible, but `convertToAssets(10^18)` applies them correctly.
+
 Share price starts at 1.0 and grows as interest accrues.
 
 **ERC-4626 Security Considerations:**
@@ -331,74 +335,102 @@ Unlike Aave where rates are stored in events, Morpho Blue calculates rates on-de
 - Call `market()` to get market state at any block (requires archive node for historical queries)
 - Calculate borrow rate using IRM contract with market parameters
 - No `ReserveDataUpdated` equivalent (rates calculated on-demand, not stored in events)
-- For efficient historical rate indexing, use Morpho API or implement periodic snapshots
+- For efficient historical rate indexing, implement periodic snapshots (or use Morpho API if external data is acceptable)
 - See [Data Availability & Indexing Constraints](#data-availability--indexing-constraints) for indexing strategies
 
 ### Liquidation Mechanics (Morpho Blue)
 
-**When Liquidations Occur:**
+**LTV and Liquidation Threshold:**
 
-Liquidations trigger when a borrower's collateral value falls below the LLTV threshold:
-
-```
-liquidatable if: (collateralValue × LLTV) < debtValue
-
-LLTV (Liquidation Loan-to-Value) is the maximum allowed:
-- 86% LLTV = Can borrow up to 86% of collateral value
-- If debt reaches 86% of collateral, position is liquidatable
-```
-
-**Liquidation Process:**
-
-1. **Liquidator calls** `liquidate(marketParams, borrower, seizedAssets, repaidShares, data)`
-
-2. **Protocol validates:**
-   - Position is liquidatable (debt ≥ collateral × LLTV)
-   - Liquidator has assets to repay
-   - Market has sufficient collateral to seize
-
-3. **Protocol executes:**
-   - Repays specified debt shares
-   - Transfers collateral to liquidator (with bonus)
-   - Calculates bad debt if collateral insufficient
-   - Emits `Liquidate` event
-
-**Liquidation Incentive:**
-
-The liquidation bonus is built into the LLTV:
+The Loan-to-Value (LTV) ratio measures debt relative to collateral value:
 
 ```
-LLTV = 86% means:
-- Liquidation Threshold: 86%
-- Liquidation Bonus: ~14% buffer
+LTV = borrowedAmount / collateralValueInLoanToken
 
-If collateralValue = $1000, debtValue = $860:
-- Position is liquidatable
-- Liquidator repays $860
-- Liquidator receives: collateral worth more than $860
+Where:
+  collateralValueInLoanToken = (collateralAmount × oraclePrice) / ORACLE_PRICE_SCALE
+  ORACLE_PRICE_SCALE = 10^36  (constant in Morpho Blue)
+  oraclePrice       = value returned by the market's oracle.price() function
 ```
 
-**Bad Debt:**
+A position becomes liquidatable when its LTV exceeds the market's LLTV:
 
-Unlike Aave, Morpho Blue explicitly tracks bad debt:
+```
+liquidatable if: LTV > LLTV
+equivalently:   borrowedAmount × WAD > collateralValueInLoanToken × LLTV
+```
+
+**Health Factor:**
+
+The health factor is a WAD-scaled metric indicating how close a position is to liquidation:
+
+```
+healthFactor = (collateralValueInLoanToken × LLTV) / borrowedAmount
+```
+
+Where LLTV is WAD-scaled (e.g., 86% is stored as `860000000000000000`). The result is also WAD-scaled:
+- `healthFactor ≥ WAD (1e18)`: position is healthy
+- `healthFactor < WAD (1e18)`: position is liquidatable
+
+**Liquidation Incentive Factor (LIF):**
+
+The LIF determines the collateral bonus received by the liquidator. The **entire LIF goes to the liquidator** — Morpho takes no protocol fee:
+
+```
+LIF = min(M, 1 / (β × LLTV + (1 − β)))
+
+Where:
+  β    = 0.3
+  M    = 1.15  (cap — maximum possible LIF)
+  LLTV = market LLTV as a decimal (e.g., 0.86 for 86% LLTV)
+```
+
+Example LIF values by LLTV:
+
+| LLTV   | LIF   | Liquidator Bonus |
+|--------|-------|-----------------|
+| 77.0%  | ~1.15 | ~15% (capped at M) |
+| 86.0%  | ~1.05 | ~5%  |
+| 91.5%  | ~1.02 | ~2%  |
+| 98.0%  | ~1.01 | ~1%  |
+
+Higher LLTV markets have a lower LIF — positions are closer to the liquidation threshold, so less incentive is needed for liquidators to act.
+
+**Seized Collateral:**
+
+The value of collateral seized equals the debt repaid scaled by the LIF:
+
+```
+seizedCollateralValue (in loan token terms) = repaidAssets × LIF
+```
+
+This is reflected in the `seizedAssets` field of the `Liquidate` event, denominated in collateral token base units.
+
+**Liquidate Event:**
 
 ```solidity
 event Liquidate(
     bytes32 indexed id,
-    address indexed caller,
-    address indexed borrower,
-    uint256 repaidAssets,
-    uint256 repaidShares,
-    uint256 seizedAssets,
-    uint256 badDebtAssets,   // Non-zero if collateral insufficient
+    address indexed caller,       // Liquidator address
+    address indexed borrower,     // Borrower being liquidated
+    uint256 repaidAssets,         // Debt repaid (loan token base units)
+    uint256 repaidShares,         // Borrow shares burned
+    uint256 seizedAssets,         // Collateral transferred to liquidator (collateral token base units)
+    uint256 badDebtAssets,        // Non-zero if collateral was insufficient to cover remaining debt
     uint256 badDebtShares
 );
 ```
 
-When collateral is insufficient to cover debt:
-- `badDebtAssets` and `badDebtShares` are non-zero
-- Suppliers absorb the loss proportionally
-- Market continues operating normally
+Liquidators can repay any amount up to 100% of the borrower's debt in a single transaction — partial liquidations are permitted.
+
+**Bad Debt:**
+
+When collateral is exhausted before the debt is fully covered, `badDebtAssets` and `badDebtShares` will be non-zero. How bad debt is handled depends on the vault version supplying to the market:
+
+- **Morpho Blue direct suppliers**: Bad debt is socialized proportionally across all suppliers in that market at the time of liquidation.
+- **MetaMorpho V1.0 vaults** (`FactoryV1.0`): Bad debt is realized and socialized immediately across vault depositors — markets can continue operating in perpetuity.
+- **MetaMorpho V1.1 vaults** (`FactoryV1.1`): Bad debt is **not** realized — it accumulates in the market indefinitely until manual intervention, similar to other pooled lending protocols.
+- **MetaMorpho V2 vaults**: Automatic loss socialization — each adapter reports its current value via `realAssets()`; when that value drops (e.g., due to bad debt in an underlying market), the loss is distributed proportionally to all vault shareholders through share price depreciation. Note: because V1.1 vaults do not realize bad debt, a V2 vault supplying to a V1.1 vault via `MorphoVaultV1Adapter` will **not** reflect those losses.
 
 ### MetaMorpho Vault Mechanics
 
@@ -705,10 +737,34 @@ function setCap(MarketParams memory params, uint256 newSupplyCap)
 function setFee(uint256 newFee)
 function setFeeRecipient(address newFeeRecipient)
 
-// Read market allocations
+// Vault state reads
+function totalAssets() returns (uint256)
+function totalSupply() returns (uint256)
+function lastTotalAssets() returns (uint256)         // Last stored total assets (before latest accrue)
+function MORPHO() returns (address)                  // Returns Morpho Blue singleton address
+
+// Market allocation reads
 function config(bytes32 id) returns (uint256 cap, bool enabled, uint64 removableAt)
+function supplyQueueLength() returns (uint256)
+function withdrawQueueLength() returns (uint256)
 function supplyQueue(uint256 index) returns (bytes32 marketId)
 function withdrawQueue(uint256 index) returns (bytes32 marketId)
+
+// Governance reads
+function owner() returns (address)
+function curator() returns (address)
+function guardian() returns (address)
+function feeRecipient() returns (address)
+function skimRecipient() returns (address)
+function isAllocator(address allocator) returns (bool)
+
+// Fee / config reads
+function fee() returns (uint96)                      // Performance fee (WAD)
+function timelock() returns (uint256)                // Global timelock duration (seconds)
+
+// Pending governance changes
+function pendingTimelock() returns (uint192 value, uint64 validAt)
+function pendingGuardian() returns (address value, uint64 validAt)
 ```
 
 **Events:** See "Event-Based Indexing" section below.
@@ -748,9 +804,35 @@ function setManagementFee(uint256 newFee)
 function setPerformanceFeeRecipient(address newRecipient)
 function setManagementFeeRecipient(address newRecipient)
 
-// Read adapter state
-function adapters() returns (address[] memory)
-function adapterTotalAssets(address adapter) returns (uint256)
+// Vault state reads
+function totalAssets() returns (uint256)
+function totalSupply() returns (uint256)
+function MORPHO() returns (address)
+function skimRecipient() returns (address)           // Used for V2 detection (reverts on V1)
+
+// Adapter enumeration reads
+function adaptersLength() returns (uint256)
+function adapters(uint256 index) returns (address)
+function adapterRegistry() returns (address)         // Registry contract that whitelists valid adapters
+function liquidityAdapter() returns (address)        // Adapter used as idle liquidity buffer
+
+// Vault gate reads (access control for deposits/withdrawals/transfers)
+function receiveAssetsGate() returns (address)       // Controls who can deposit
+function sendSharesGate() returns (address)          // Controls who can transfer shares out
+function receiveSharesGate() returns (address)       // Controls who can receive shares
+
+// Governance reads
+function owner() returns (address)
+function curator() returns (address)
+
+// Fee / config reads
+function performanceFee() returns (uint256)          // WAD
+function managementFee() returns (uint256)           // WAD (annual, accrued continuously)
+function maxRate() returns (uint256)                 // Maximum borrow rate this vault will supply to (per-second WAD)
+
+// Per-function timelock reads (timelocks are per-selector in V2, unlike V1's global timelock)
+function timelock(bytes4 selector) returns (uint256) // Timelock duration for a given function selector (seconds)
+function abdicated(bytes4 selector) returns (bool)   // Whether the owner has permanently abdicated control of this function
 ```
 
 **Key V2 Concepts:**
@@ -773,6 +855,133 @@ V2 uses a more granular allocation system:
 - `relativeCap`: Percentage-based cap relative to total assets
 
 **Events:** See "Event-Based Indexing" section below.
+
+### Vault Configuration — Fetching All Parameters
+
+**Purpose:** Read the complete current configuration of a vault (roles, fees, queues, caps, timelocks). Needed for verification, monitoring, and computing derived metrics.
+
+**V1/V1.1 Configuration Fetch (single Multicall3 batch):**
+
+```typescript
+const [
+  name, symbol, decimals, assetAddress,
+  totalAssets, totalSupply, lastTotalAssets,
+  owner, curator, guardian, feeRecipient, skimRecipient,
+  fee, timelock, morphoAddress,
+  supplyQueueLength, withdrawQueueLength,
+  pendingTimelock, pendingGuardian,
+] = await client.multicall({
+  contracts: [
+    { functionName: "name" },
+    { functionName: "symbol" },
+    { functionName: "decimals" },
+    { functionName: "asset" },
+    { functionName: "totalAssets" },
+    { functionName: "totalSupply" },
+    { functionName: "lastTotalAssets" },     // Assets as of last AccrueInterest
+    { functionName: "owner" },
+    { functionName: "curator" },
+    { functionName: "guardian" },
+    { functionName: "feeRecipient" },
+    { functionName: "skimRecipient" },
+    { functionName: "fee" },                  // Performance fee (WAD)
+    { functionName: "timelock" },             // Global timelock duration (seconds)
+    { functionName: "MORPHO" },
+    { functionName: "supplyQueueLength" },
+    { functionName: "withdrawQueueLength" },
+    { functionName: "pendingTimelock" },      // → (uint192 value, uint64 validAt)
+    { functionName: "pendingGuardian" },      // → (address value, uint64 validAt)
+  ],
+  allowFailure: false,
+});
+// Then separately: withdrawQueue(0)..withdrawQueue(withdrawQueueLength-1) via multicall
+```
+
+**V1/V1.1 Configuration Fields:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | Vault name |
+| `symbol` | string | Vault ERC-20 symbol |
+| `decimals` | uint8 | Share token decimals |
+| `asset` | address | Underlying token |
+| `totalAssets` | uint256 | Current total assets (live, includes accrued interest) |
+| `totalSupply` | uint256 | Current total shares in circulation |
+| `lastTotalAssets` | uint256 | Total assets as stored at the last `AccrueInterest` call |
+| `owner` | address | Ultimate authority |
+| `curator` | address | Sets queues and caps |
+| `guardian` | address | Emergency guardian (can veto pending changes) |
+| `feeRecipient` | address | Receives fee shares |
+| `skimRecipient` | address | Receives skimmed idle assets |
+| `fee` | uint96 | Performance fee in WAD (e.g. `0.1e18` = 10%) |
+| `timelock` | uint256 | Global timelock duration in seconds |
+| `pendingTimelock` | tuple | Pending timelock change: `(value, validAt)` |
+| `pendingGuardian` | tuple | Pending guardian change: `(value, validAt)` |
+| `supplyQueueLength` | uint256 | Number of markets in the supply queue |
+| `withdrawQueueLength` | uint256 | Number of markets in the withdraw queue |
+
+---
+
+**V2 Configuration Fetch (two Multicall3 batches — basic info, then variable-length adapters):**
+
+```typescript
+// Batch 1: all fixed-size fields
+const [
+  name, symbol, decimals, assetAddress,
+  totalAssets, totalSupply,
+  owner, curator,
+  adaptersLength, adapterRegistry, liquidityAdapter,
+  receiveAssetsGate, sendSharesGate, receiveSharesGate,
+  maxRate, performanceFee, managementFee,
+] = await client.multicall({ contracts: [ /* ... */ ], allowFailure: false });
+
+// Batch 2: per-index adapter addresses
+const adapters: Address[] = await multicall(
+  Array.from({ length: Number(adaptersLength) }, (_, i) =>
+    ({ functionName: "adapters", args: [BigInt(i)] })
+  )
+);
+
+// Batch 3: per-function-selector timelocks (one query per critical selector)
+const CRITICAL_SELECTORS = {
+  addAdapter:               "0x60d54d41",
+  removeAdapter:            "0x585cd34b",
+  increaseAbsoluteCap:      "0xf6f98fd5",
+  increaseRelativeCap:      "0x2438525b",
+  increaseTimelock:         "0x47966291",
+  setAdapterRegistry:       "0x5b34b823",
+  setReceiveAssetsGate:     "0x04dbf0ce",
+  setReceiveSharesGate:     "0x2cb19f98",
+  setSendSharesGate:        "0xc21ad028",
+  setForceDeallocatePenalty:"0x3e9d2ac7",
+};
+```
+
+**V2 Configuration Fields:**
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` / `symbol` / `decimals` | — | Standard ERC-20 metadata |
+| `asset` | address | Underlying token |
+| `totalAssets` / `totalSupply` | uint256 | Current vault state |
+| `owner` | address | Ultimate authority |
+| `curator` | address | Sets caps |
+| `adaptersLength` | uint256 | Number of active adapters |
+| `adapters(i)` | address | Adapter address at index `i` |
+| `adapterRegistry` | address | Registry that whitelists valid adapters |
+| `liquidityAdapter` | address | Adapter used as idle liquidity buffer |
+| `receiveAssetsGate` | address | Access control for deposits (zero = open) |
+| `sendSharesGate` | address | Access control for share transfers out (zero = open) |
+| `receiveSharesGate` | address | Access control for receiving shares (zero = open) |
+| `maxRate` | uint256 | Max borrow rate (per-second WAD) the vault will allocate to |
+| `performanceFee` | uint256 | Performance fee in WAD |
+| `managementFee` | uint256 | Management fee as a **per-second** WAD rate (same encoding as `maxRate`). To display as annual %: `managementFee * SECONDS_PER_YEAR / 1e18 * 100` |
+| `timelock(selector)` | uint256 | Timelock duration (seconds) for the given function selector |
+| `abdicated(selector)` | bool | Whether owner has permanently surrendered control of this function |
+
+**Key V2 difference from V1:** Timelocks are **per function selector** (not a single global timelock). Query `timelock(bytes4)` for each critical function to understand governance delay.
+
+---
 
 ### Oracle Contracts
 
@@ -798,11 +1007,16 @@ Returns the price with 36 - loan decimals - collateral decimals precision.
 **Key Function:**
 
 ```solidity
-function borrowRate(MarketParams memory params, Market memory market) 
+// View function — use this for off-chain queries and indexing snapshots
+function borrowRateView(MarketParams memory params, Market memory market)
     external view returns (uint256);
+
+// State-modifying variant — called internally by Morpho Blue during on-chain transactions
+function borrowRate(MarketParams memory params, Market memory market)
+    external returns (uint256);
 ```
 
-Returns the current borrow rate for the market (annual rate in WAD precision).
+Returns the current borrow rate for the market as a **per-second rate in WAD precision**. To obtain the annual APY, apply `taylorCompound(rate, SECONDS_PER_YEAR)`.
 
 ---
 
@@ -849,40 +1063,44 @@ Before implementing an indexer, it's critical to understand **what data sources 
 
 | Function | Contract | Historical Access | Practical Approach |
 |----------|----------|-------------------|-------------------|
-| `market(marketId)` | Morpho Blue | ✅ Yes (via archive node + block number) | Use events or Morpho API for bulk historical data |
+| `market(marketId)` | Morpho Blue | ✅ Yes (via archive node + block number) | Use events for bulk historical data; archive node for specific blocks |
 | `position(marketId, user)` | Morpho Blue | ✅ Yes (via archive node + block number) | Use events to track position changes |
 | `totalAssets()` | MetaMorpho | ✅ Yes (via archive node + block number) | Derive from `AccrueInterest` events |
 | `adapters()` / `realAssets()` | MetaMorpho V2 | ✅ Yes (via archive node + block number) | Store periodic snapshots if needed |
-| `borrowRate()` | IRM Contract | ✅ Yes (via archive node + block number) | Use Morpho API or IRM event data |
+| `borrowRate()` | IRM Contract | ✅ Yes (via archive node + block number) | Call `borrowRateView()` on the IRM at each snapshot block |
 
 ### APY & Rate Indexing
 
-**MetaMorpho Vault APY:**
+**MetaMorpho Vault Supply APY:**
+
+> MetaMorpho vaults are supply-side only. Depositors supply assets and earn yield; there is no vault-level borrow APY. All vault APY figures below refer to **supply APY** (what depositors earn).
 
 | Method | V1/V1.1 | V2 | Practical Approach |
 |--------|---------|----|----|
-| Historical native APY from events | ✅ Yes | ⚠️ Partial* | Calculate from `AccrueInterest` share price changes |
-| Historical native APY via archive node | ✅ Yes | ✅ Yes | Query `totalAssets()`/`totalSupply()` at intervals, compute from changes |
-| Morpho API (native + rewards) | ✅ Yes | ✅ Yes** | Pre-indexed, includes rewards APR (only source for rewards) |
+| Historical supply APY from events (Method 1) | ✅ Yes | ⚠️ Partial* | Calculate from `AccrueInterest` share price changes |
+| Instantaneous supply APY via archive node (Methods 2/3) | ✅ Yes | ✅ Yes | V1/V1.1: market-weighted via withdraw queue; V2: adapter-weighted |
+| Morpho API (native supply APY + rewards) | ✅ Yes | ✅ Yes** | Pre-indexed, includes rewards APR (only source for rewards) |
 
-\* **V2 Event-Based APY Limitation:** The `AccrueInterest` event provides `previousTotalAssets` and `newTotalAssets`, enabling native APY calculation from share price changes. However, this captures yield from the vault as a whole without breaking down which adapters contributed what yield. For adapter-specific yield attribution, alternative approaches are needed.
+\* **V2 Event-Based APY Limitation:** The `AccrueInterest` event provides `previousTotalAssets` and `newTotalAssets`, enabling supply APY calculation from share price changes. However, this captures yield from the vault as a whole without breaking down which adapters contributed what yield. For adapter-specific yield attribution, alternative approaches are needed.
 
-\*\* **V2 Morpho API Limitation:** V2 vaults do not support `historicalState` queries (unlike V1 vaults). The API provides current APY (`avgApy`, `avgNetApy`) but not historical APY time series for V2.
+\*\* **V2 Morpho API Limitation:** V2 vaults do not support `historicalState` queries (unlike V1 vaults). The API provides current supply APY (`avgApy`, `avgNetApy`) but not historical APY time series for V2.
 
-**Recommendations:**
-1. **V1/V1.1 vaults**: Event-based native APY calculation works perfectly
+**Approaches:**
+1. **V1/V1.1 vaults**: Event-based native supply APY calculation works perfectly
 2. **V2 vaults**: 
-   - For **current native APY**: Use Morpho API or calculate from latest `AccrueInterest`
-   - For **historical native APY**: Derive from `AccrueInterest` events (vault-level yield only) OR take periodic snapshots
+   - For **current native supply APY**: Calculate from latest `AccrueInterest` event (Method 3 for instantaneous rate)
+   - For **historical native supply APY**: Derive from `AccrueInterest` events (vault-level yield only) OR take periodic snapshots
 3. **Rewards APR (all vault versions)**: Never available onchain - always requires Morpho API
 
-**Morpho Blue Market APY:**
+**Morpho Blue Market APY (Borrow and Supply):**
+
+> Morpho Blue markets are two-sided. **Borrow APY** is what borrowers pay; **supply APY** is what suppliers earn. They are related by: `supplyAPY = borrowAPY × utilization × (1 − fee)`. The IRM directly computes the borrow rate; supply APY is always derived from it.
 
 | Method | Available | Practical Approach |
 |--------|-----------|-------|
-| Historical from events | ⚠️ Partial | `AccrueInterest` includes `prevBorrowRate` but not supply rate |
-| Historical via archive node | ✅ Yes | Query `market()` + call `IRM.borrowRate()` at intervals |
-| Morpho API historical | ✅ Yes | Pre-indexed via `historicalState.borrowApy()` / `supplyApy()` |
+| Borrow APY from events (partial) | ⚠️ Partial | `AccrueInterest` includes `prevBorrowRate`; supply APY not directly emitted |
+| Both APYs via archive node | ✅ Yes | Query `market()` + call `IRM.borrowRateView()` at intervals; derive supply APY from borrow APY |
+| Both APYs via Morpho API | ✅ Yes | Pre-indexed via `historicalState.borrowApy()` / `supplyApy()` |
 
 **Market APY Considerations:**
 
@@ -891,12 +1109,24 @@ The `AccrueInterest` event provides:
 event AccrueInterest(bytes32 indexed id, uint256 prevBorrowRate, uint256 interest, uint256 feeShares);
 ```
 
-This gives you borrow rate but not supply rate. To calculate supply APY historically:
-- **Option A**: Use `prevBorrowRate` from events + reconstruct utilization from tracked supply/borrow amounts
-- **Option B**: Query market state via archive node at intervals and call IRM contract
-- **Option C**: Use Morpho API (recommended for simplicity)
+This gives you the **previous** borrow rate (what was just used) but neither the **current** borrow rate nor the supply rate. To get both APYs historically:
 
-The Morpho API is recommended because it handles IRM curve calculations and provides both borrow and supply APY series.
+- **Option A (Partial — borrow APY only)**: Annualize `prevBorrowRate` from events using `taylorCompound(prevBorrowRate, SECONDS_PER_YEAR)`. To then derive supply APY, also reconstruct utilization from the tracked `totalSupplyAssets` / `totalBorrowAssets`.
+  - ⚠️ `AccrueInterest` only fires when the market is touched (borrow, repay, supply, withdraw, liquidate). Between interactions there are **no events** and therefore no rate data — gaps can be hours or days long
+  - ⚠️ `prevBorrowRate` is the rate that was active at the moment of the event, not the rate going forward
+  - ⚠️ Utilization must be tracked separately to compute supply APY
+  - ⚠️ **This approach is fundamentally sparse.** For continuous APY monitoring, use Option B instead
+  
+- **Option B (Complete — both APYs)**: Query market state via archive node and call `borrowRateView()` on the IRM
+  - ✅ Provides instantaneous borrow rate at any block
+  - ✅ Supply APY derived as `borrowAPY × utilization × (1 − fee)` using accrued state
+  - ⚠️ `market()` returns stale state — must accrue interest to snapshot block first
+  - See [APY Calculation from Snapshots](#apy-calculation-from-events) section for the full algorithm
+  
+- **Option C**: Use Morpho API
+  - ✅ Pre-calculated borrow and supply APY time series
+  - ✅ Handles IRM calculations and interest accrual automatically
+  - ❌ External dependency; not suitable if avoiding third-party APIs
 
 ### Rewards: Understanding Availability and Calculation
 
@@ -1366,17 +1596,16 @@ The **Morpho API** (`api.morpho.org/graphql`) provides comprehensive pre-indexed
 **What's Efficient to Index from Events:**
 - ✅ User positions (vault shares, market positions)
 - ✅ Transaction history (deposits, withdrawals, borrows, repays)
-- ✅ Configuration changes (fees, caps, queues, roles)
-- ✅ V1/V1.1 vault allocations (complete market breakdown)
-- ✅ V2 adapter allocations (adapter-level totals)
-- ✅ V1/V1.1 vault native APY (from share price changes)
+- ✅ V1/V1.1 vault native APY (from share price changes via AccrueInterest)
 - ⚠️ V2 vault native APY (vault-level only, not per-adapter)
+- Configuration changes (fees, caps, queues, roles) — events exist and are straightforward to index *(not yet implemented)*
 
-**What Requires Archive Node Snapshots:**
-- Market state at specific blocks (supply, borrow, utilization)
-- User positions at specific blocks (for health factor calculations)
-- V2 adapter composition breakdown (per-market within adapters)
-- Historical rates at specific moments
+**What Requires Archive Node State Calls:**
+- V1 vault allocation breakdown (which markets, how much) — see [Vault Allocation Tracking](#vault-allocation-tracking)
+- V2 adapter enumeration and per-adapter allocation amounts — see [Vault Allocation Tracking](#vault-allocation-tracking)
+- Vault config params (curator, owner, fee, timelock) — readable via `curator()`, `owner()`, `fee()`
+- Market supply caps (per vault) — readable via V1 `config(marketId)`, V2 `absoluteCap(id)`
+- Current borrow rate without waiting for AccrueInterest — requires IRM `borrowRateView()`
 
 **What Morpho API Provides (Easier Than DIY):**
 - ✅ Current native APY for all vaults and markets
@@ -1389,26 +1618,7 @@ The **Morpho API** (`api.morpho.org/graphql`) provides comprehensive pre-indexed
 - ❌ **User claimable rewards** - Merkl API + Morpho Rewards API required
 - ❌ **Reward token distributions** - No onchain record
 
-**Recommended Indexing Approach:**
-
-**For V1/V1.1 Vaults:**
-- **Primary**: Event-based indexing (sufficient for native APY and positions)
-- **Required for rewards**: See [Rewards section](#rewards-understanding-availability-and-calculation) - all rewards via external APIs
-- **Optional**: Morpho API for USD values
-
-**For V2 Vaults:**
-- **Primary**: Event-based indexing for positions, transactions, adapter-level allocations
-- **Required for rewards**: See [Rewards section](#rewards-understanding-availability-and-calculation) - all rewards via external APIs
-- **Secondary**: Morpho API for current native APY and USD values
-- **Optional**: Archive node snapshots if you need per-market adapter composition history
-
-**For Morpho Blue Markets:**
-- **Primary**: Event-based indexing for positions and transactions
-- **Required for rewards**: See [Rewards section](#rewards-understanding-availability-and-calculation) - all rewards via external APIs
-- **Secondary**: Morpho API for historical APY and rates
-- **Optional**: Archive node + IRM calls for real-time rate calculations
-
-**Key Insight:** Almost everything CAN be indexed historically (via events or archive nodes), but the Morpho API provides pre-calculated metrics that save significant development effort for native APY, rates, and USD valuations. **For complete guidance on rewards (APRs, user claimables, historical data), see the dedicated [Rewards section](#rewards-understanding-availability-and-calculation)**.
+**Key Insight:** For user position tracking, the event-based approach captures all required data. Archive node state calls are only needed for allocation breakdown queries (which markets a vault allocates to) and vault config. These are read-on-demand rather than indexed, as the `adapters[]` array and `withdrawQueue` are enumerable directly from contract state at any historical block.
 
 ---
 
@@ -1595,6 +1805,100 @@ For each event, the indexer should:
 
 **Important:** See [Data Availability & Indexing Constraints](#data-availability--indexing-constraints) for understanding what can be derived from events vs. what requires alternative approaches (API, snapshots).
 
+### Vault Discovery from Events
+
+**The core challenge:** MetaMorpho vaults are permissionlessly deployed contracts. There is no registry of all vaults — any address that passes a specific on-chain check is a vault.
+
+**Approach: Opportunistic discovery from event logs**
+
+Rather than maintaining a curated list or polling a factory, vaults are discovered by observing events in every block. The event topic signatures for MetaMorpho `Deposit`, `Withdraw`, `Transfer`, and `AccrueInterest` are known in advance. Any contract emitting a log that matches one of these topic signatures is a candidate vault.
+
+**Version Detection via `AccrueInterest` Topic:**
+
+V1 and V2 emit `AccrueInterest` with different signatures (different fields), so they produce different topic[0] hashes:
+
+| Version | Event Signature | Use |
+|---------|----------------|-----|
+| V1/V1.1 | `AccrueInterest(uint256 newTotalAssets, uint256 feeShares)` | Registered as V1 topic |
+| V2 | `AccrueInterest(uint256 previousTotalAssets, uint256 newTotalAssets, uint256 performanceFeeShares, uint256 managementFeeShares)` | Registered as separate V2 topic |
+
+Both topic hashes are registered in the extractor's signature map, so both are matched.
+
+**`getVaultMetadata` — On-chain vault validation:**
+
+When an unknown address emits a MetaMorpho-shaped event, before registering it as a vault, a single Multicall3 batch confirms it is a genuine MetaMorpho vault and reads all needed metadata:
+
+```
+calls batched to candidate address:
+  1. name()              → vault name string
+  2. symbol()            → vault symbol string
+  3. asset()             → underlying ERC-20 asset address
+  4. decimals()          → vault decimals (uint8)
+  5. MORPHO()            → must return 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb
+  6. skimRecipient()     → AllowFailure: true (only exists on V2)
+```
+
+The `MORPHO()` check is the discriminator: only genuine MetaMorpho vaults return the Morpho Blue singleton address. This correctly rejects:
+- Other ERC-4626 vaults (Yearn, Aave) that share the same `Deposit`/`Withdraw`/`Transfer` topic hashes
+- Arbitrary contracts that happen to emit matching events
+
+**Version detection:** If call 6 (`skimRecipient()`) succeeds → **V2**. If it reverts → **V1/V1.1**.
+
+**Discovery flow per block:**
+
+```
+for each log in block:
+  if topic[0] matches a Morpho Blue event AND log.address == MorphoBlueAddress:
+    → process as market event
+
+  else if topic[0] matches a MetaMorpho event:
+    if log.address is a known vault:
+      → process as vault event
+    else if log.address is cached as not-vault:
+      → skip
+    else (unknown address):
+      a. attempt ABI decode of the event
+      b. call getVaultMetadata (Multicall3 batch, 6 calls)
+      c. if MORPHO() returns wrong address → cache as not-vault, skip forever
+      d. if MORPHO() returns MorphoBlue address → register vault, process event
+```
+
+**V1 vaults wrapped by V2 are auto-discovered:** When a V2 vault allocates to a V1 vault via an adapter, the V1 vault emits a `Deposit` event with `owner = V2_vault_address`. The V1 vault's address appears in `log.Address`. If not yet known, `tryDiscoverVault` is called for it — it passes the `MORPHO()` check and is registered as a V1 vault.
+
+**Important: `not-vault` caching:** Addresses that are definitively rejected (event decode failure, or `MORPHO()` returning the wrong address) are cached in-memory as "not a vault" so discovery is never attempted again for them within the process lifetime. Transient failures (network errors, DB errors) are intentionally not cached, so discovery will be retried on the next event from that address.
+
+**Alternative approach — factory event tracking:**
+
+Instead of opportunistic discovery from vault events, vaults can alternatively be discovered by tracking `CreateMetaMorpho` events emitted by the MetaMorpho factory contract(s):
+
+```
+event CreateMetaMorpho(
+    address indexed metaMorpho,   // the new vault address
+    address indexed caller,
+    address initialOwner,
+    uint256 initialTimelock,
+    address indexed asset,
+    string name,
+    string symbol,
+    bytes32 salt
+)
+```
+
+This event provides the vault address and all metadata in a single log — no `getVaultMetadata` call needed. However, **some chains have multiple factory contracts** (e.g. a V1 factory and a V1.1 factory deployed separately), so all factory addresses for a given chain must be tracked. Any vault deployed outside a known factory (e.g. direct deployment or a V2 factory) would also be missed. The opportunistic event-based discovery approach avoids this fragility.
+
+**ABIs required:**
+
+| ABI | Purpose |
+|-----|---------|
+| MetaMorpho events (V1 signature) | Deposit, Withdraw, Transfer, AccrueInterest |
+| MetaMorpho AccrueInterest (V2 signature) | V2 uses a different topic hash; registered separately |
+| MetaMorpho read functions | name, symbol, asset, decimals, MORPHO, skimRecipient — used in `getVaultMetadata` |
+| Morpho Blue events | All market events (CreateMarket, Supply, Borrow, Repay, Liquidate, etc.) |
+| Morpho Blue read functions | market(), position(), idToMarketParams() — used for market state snapshots |
+| ERC-20 read functions | symbol, decimals — used for token metadata on discovered tokens |
+
+---
+
 ### Vault Share Transfer Tracking
 
 **Critical Issue:** Like Aave's aTokens, MetaMorpho vault shares are **transferable ERC-20 tokens**.
@@ -1650,10 +1954,12 @@ Users can receive vault shares via `transfer()` without calling `deposit()`:
 | `totalSupplyShares` | bigint | Total supply shares | Token decimals |
 | `totalBorrowAssets` | bigint | Total borrowed from market | Token decimals |
 | `totalBorrowShares` | bigint | Total borrow shares | Token decimals |
-| `supplyAPY` | integer | Current supply APY | Basis points |
-| `borrowAPY` | integer | Current borrow APY | Basis points |
+| `supplyAPY` | integer | Current supply APY (calculated) | Basis points |
+| `borrowAPY` | integer | Current borrow APY (calculated) | Basis points |
 | `utilization` | integer | Utilization rate | Basis points (10000 = 100%) |
 | `totalCollateral` | bigint | Sum of all user collateral | Token decimals |
+
+**APY Calculation Note:** `borrowAPY` and `supplyAPY` are not directly returned by `market()`. They must be calculated by calling the IRM's `borrowRateView()` function and accruing interest from the market's `lastUpdate` timestamp. See [APY Calculation from Snapshots](#apy-calculation-from-events) for the calculation process.
 
 **Use Cases:**
 - Track market growth over time
@@ -1695,15 +2001,17 @@ borrowAssets = (borrowShares * market.totalBorrowAssets) / market.totalBorrowSha
 **Health Factor Calculation:**
 
 ```typescript
-// Get price from oracle (36 - loan decimals - collateral decimals precision)
+// ORACLE_PRICE_SCALE is always 1e36 in Morpho Blue (protocol constant)
+const ORACLE_PRICE_SCALE = 10n ** 36n;
 const price = await oracle.price();
 
-// Calculate collateral value in loan token terms
-const collateralValue = (collateral * price) / (10 ** pricePrecision);
+// Collateral value in loan token base units
+const collateralValueInLoan = (collateral * price) / ORACLE_PRICE_SCALE;
 
-// Health factor = collateral value / (borrow value / LLTV)
-// Or equivalently: (collateral value * LLTV) / borrow value
-const healthFactor = (collateralValue * lltv * 1e18) / (borrowAssets * 10000);
+// Health factor = (collateralValueInLoan × LLTV) / borrowAssets
+// LLTV is WAD-scaled (e.g., 860000000000000000n for 86%)
+// Result is WAD-scaled: < WAD (1e18) means liquidatable
+const healthFactor = (collateralValueInLoan * lltv) / borrowAssets;
 
 // healthFactor < 1e18 means liquidatable
 ```
@@ -1780,17 +2088,40 @@ userAssets = (userShares * vaultTotalAssets) / vaultTotalSupply
 
 ### APY Calculation from Events
 
-**MetaMorpho Vault APY:**
+> **Terminology note:** This section covers three distinct APY concepts:
+> - **Vault supply APY** — what depositors earn from a MetaMorpho vault (Methods 1–3 below). Vaults are supply-side only; there is no vault borrow APY.
+> - **Market borrow APY** — what Morpho Blue borrowers pay; derived directly from the IRM's per-second rate.
+> - **Market supply APY** — what direct Morpho Blue suppliers earn; derived from borrow APY, utilization, and the protocol fee.
 
-Unlike Aave which stores rates in events, Morpho vault APY must be **calculated from share price changes** over time.
+**MetaMorpho Vault Supply APY — Three Methods:**
 
-**Method: Historical Share Price Analysis**
+There are three distinct approaches for computing vault supply APY, each giving a different answer:
+
+| Method | Applies to | What it measures | Requires |
+|---|---|---|---|
+| **Method 1 — Historical share price change** | V1/V1.1/V2 | What the vault *actually earned* between two `AccrueInterest` events (backward-looking) | Two consecutive `AccrueInterest` snapshots |
+| **Method 2 — Instantaneous market-weighted** | V1/V1.1 only | What the vault is *currently earning* — per-market supply APY weighted by allocation (forward-looking) | Archive node + `borrowRateView` on IRM for each market in the withdraw queue |
+| **Method 3 — Instantaneous adapter-weighted** | V2 only | What the vault is *currently earning* — per-adapter supply APY weighted by allocation (forward-looking) | Archive node + adapter enumeration + recursive Method 2 per V1 adapter |
+
+The **historical method (Method 1)** is derived purely from events and requires no extra RPC calls. **Methods 2 and 3** are what Morpho's official documentation demonstrates for reporting a vault's current supply APY — they better represent the rate depositors are earning right now.
+
+---
+
+**Method 1 — Historical Vault Supply APY via Share Price Analysis (event-based, all versions):**
 
 ```typescript
-// Step 1: Calculate share price at each AccrueInterest event (using formula from Share-Based Accounting section)
-const sharePrice = (totalAssets * WAD) / totalSupply;
+// Step 1: Calculate share price at each AccrueInterest event
+// ⚠️  Do NOT use a live totalAssets() RPC call here — it is a dynamic function that
+// queries Morpho Blue markets fresh and runs ahead of totalSupply between fee accruals,
+// causing false dips at fee-share mints. Use newTotalAssets from the event instead,
+// or call convertToAssets(10^18) on the vault at the event's block (the contract
+// handles consistency and virtual offsets correctly).
+const sharePrice = (totalAssets * WAD) / totalSupply;  // totalAssets = newTotalAssets from event
 
-// Step 2: Get time delta since last AccrueInterest
+// Step 2: Get time delta between consecutive AccrueInterest events
+// NOTE: timeDelta must come from block timestamps, not block numbers.
+// Block timestamps are NOT stored in morpho_vault_state — query the block header
+// or store block_timestamp alongside each snapshot.
 const timeDelta = currentTimestamp - previousTimestamp;
 
 // Step 3: Calculate annualized return
@@ -1842,6 +2173,214 @@ Store APY snapshots linked to each `AccrueInterest` event:
 
 See [Data Availability & Indexing Constraints](#data-availability--indexing-constraints) for complete details on V2 APY limitations and alternative approaches.
 
+---
+
+**Method 2 — Instantaneous Vault Supply APY via Market-Weighted Average (archive node, V1/V1.1 only):**
+
+The official Morpho documentation demonstrates this approach for computing a V1 vault's current native supply APY. It gives a live, forward-looking rate by computing the supply APY of every market the vault is allocated to and weighting by allocation size.
+
+```typescript
+const WAD = 10n ** 18n;
+const SECONDS_PER_YEAR = 31536000n;
+const VIRTUAL_ASSETS = 1n;
+const VIRTUAL_SHARES = 10n ** 6n;
+
+// Helpers (WAD-precision arithmetic)
+const wMulDown  = (x: bigint, y: bigint) => (x * y) / WAD;
+const wDivUp    = (x: bigint, y: bigint) => (x * WAD + y - 1n) / y;  // rounds up (conservative utilization)
+
+// shares → assets with virtual offset (prevents division by zero, mirrors Morpho contracts)
+const toAssetsDown = (shares: bigint, totalAssets: bigint, totalShares: bigint) =>
+  (shares * (totalAssets + VIRTUAL_ASSETS)) / (totalShares + VIRTUAL_SHARES);
+
+// Accrue stale market state to the current block timestamp
+function accrueInterests(market: MarketState, borrowRate: bigint, blockTimestamp: bigint): MarketState {
+  const elapsed = blockTimestamp - market.lastUpdate;
+  if (elapsed === 0n || market.totalBorrowAssets === 0n) return market;
+  const interest = wMulDown(market.totalBorrowAssets, taylorCompound(borrowRate, elapsed));  // See implementation note*
+  return { ...market, totalSupplyAssets: market.totalSupplyAssets + interest,
+                      totalBorrowAssets: market.totalBorrowAssets + interest };
+}
+
+// Per-market supply APY
+async function getMarketSupplyApy(marketId, blockTimestamp): Promise<{ state, apy }> {
+  const [staleMarket, params] = await multicall([market(marketId), idToMarketParams(marketId)]);
+  if (params.irm === ZERO_ADDRESS) return { state: staleMarket, apy: 0n };
+
+  const borrowRate = await irm(params.irm).borrowRateView(params, staleMarket);
+  const state      = accrueInterests(staleMarket, borrowRate, blockTimestamp);
+  const borrowAPY  = taylorCompound(borrowRate, SECONDS_PER_YEAR);
+  // Use wDivUp for utilization — slightly conservative, matches Morpho's reference implementation
+  const utilization = state.totalSupplyAssets > 0n ? wDivUp(state.totalBorrowAssets, state.totalSupplyAssets) : 0n;
+  const apy = wMulDown(wMulDown(borrowAPY, utilization), WAD - state.fee);
+  return { state, apy };
+}
+
+// Vault APY = allocation-weighted average of market supply APYs
+async function calculateV1VaultApy(vaultAddress, blockTimestamp): Promise<bigint> {
+  const queueLength = await vault.withdrawQueueLength();
+  const marketIds   = await multicall(
+    Array.from({ length: Number(queueLength) }, (_, i) => withdrawQueue(i))
+  );
+
+  let totalWeightedApy = 0n;
+  let totalAllocation  = 0n;
+
+  await Promise.all(marketIds.map(async (marketId) => {
+    const [{ state, apy }, position] = await Promise.all([
+      getMarketSupplyApy(marketId, blockTimestamp),
+      morphoBlue.position(marketId, vaultAddress),
+    ]);
+    const allocation = toAssetsDown(position.supplyShares, state.totalSupplyAssets, state.totalSupplyShares);
+    if (allocation > 0n) {
+      totalWeightedApy += apy * allocation;
+      totalAllocation  += allocation;
+    }
+  }));
+
+  return totalAllocation === 0n ? 0n : totalWeightedApy / totalAllocation;
+}
+```
+
+**Key differences from Method 1:**
+- Does **not** require two consecutive `AccrueInterest` events — computes from current on-chain state
+- Calls `borrowRateView` on the IRM for every market (requires archive node or current block)
+- `utilization` uses `wDivUp` (round-up) to match Morpho's reference implementation
+- Returns a WAD-scaled value (divide by `10^16` to get a percentage, e.g. `32576470788039398 / 10^16 = 3.26%`)
+- **V1/V1.1 only** — see Method 3 below for V2
+
+\* **`taylorCompound()` Implementation:** See [Mathematical Helper Functions](#mathematical-helper-functions) appendix for the 3-term Taylor expansion implementation.
+
+---
+
+**Method 3 — Instantaneous V2 Vault Supply APY (archive node):**
+
+V2 vaults use adapters rather than a direct withdraw queue, so the APY calculation iterates adapters and recurses into each one. The algorithm mirrors the official Morpho reference implementation (`supplyAPYVaultV2` in the Morpho Vault V2 Snippets repository):
+
+```typescript
+async function supplyAPYVaultV2(vaultAddress: Address, blockTimestamp: bigint): Promise<bigint> {
+  const totalAssets = await vault(vaultAddress).totalAssets();
+  if (totalAssets === 0n) return 0n;
+
+  const adapterCount = await vault(vaultAddress).adaptersLength();
+  let weightedSum = 0n;
+
+  for (let i = 0n; i < adapterCount; i++) {
+    const adapterAddress = await vault(vaultAddress).adapters(i);
+
+    // Detect adapter type: MorphoVaultV1Adapter exposes morphoVaultV1()
+    const v1VaultAddress = await tryCall(adapter(adapterAddress).morphoVaultV1);
+    if (v1VaultAddress) {
+      // Recurse: compute the underlying V1 vault's supply APY (Method 2)
+      const adapterRealAssets = await adapter(adapterAddress).realAssets();
+      const vaultV1APY = await supplyAPYVaultV1(v1VaultAddress, blockTimestamp);
+      weightedSum += wMulDown(vaultV1APY, adapterRealAssets);
+    }
+    // MorphoMarketV1AdapterV2: skip — see limitation note below
+  }
+
+  // Step 1: Weighted average gross APY across all adapters
+  const grossAPY = (weightedSum * WAD) / totalAssets;
+
+  // Step 2: Cap at annualized maxRate
+  // maxRate is a per-second WAD rate; annualize by multiplying by SECONDS_PER_YEAR
+  const maxRate = await vault(vaultAddress).maxRate();
+  const annualizedMaxRate = maxRate * SECONDS_PER_YEAR;
+  const cappedAPY = grossAPY < annualizedMaxRate ? grossAPY : annualizedMaxRate;
+
+  // Step 3: Apply performance fee (applied only to the capped yield)
+  const performanceFee = await vault(vaultAddress).performanceFee();
+  const apyAfterPerformanceFee = wMulDown(cappedAPY, WAD - performanceFee);
+
+  // Step 4: Subtract management fee
+  // managementFee is also a per-second WAD rate — annualize it first.
+  // The fee is applied to total assets including yield: (1 + APY) × annualFeeRate
+  const managementFee = await vault(vaultAddress).managementFee();
+  const annualManagementFee = managementFee * SECONDS_PER_YEAR;
+  const netAnnualManagementFee = wMulDown(WAD + cappedAPY, annualManagementFee);
+
+  return apyAfterPerformanceFee >= netAnnualManagementFee
+    ? apyAfterPerformanceFee - netAnnualManagementFee
+    : 0n;
+}
+```
+
+**Fee encoding note:** Both `maxRate` and `managementFee` on V2 vaults are stored as **per-second WAD rates**, not annual rates. Annualizing: `rate * SECONDS_PER_YEAR`. The display values (e.g. "15% APR") are derived by this conversion.
+
+**APY components:**
+```
+Net APY = min(grossAPY, annualizedMaxRate) × (1 − performanceFee) − (1 + cappedAPY) × annualManagementFee
+```
+
+**Current limitation (from official Morpho docs):** The V2 APY algorithm only fully supports vaults that allocate to **MetaMorpho V1 vaults** via `MorphoVaultV1Adapter`. Vaults that allocate directly to Morpho Blue markets via `MorphoMarketV1AdapterV2` are **excluded** from the APY calculation in the current reference implementation — those adapters are silently skipped. For production use with full adapter support, refer to the [Morpho Vault V2 Snippets repository](https://github.com/morpho-org/vault-v2). In practice, many V2 vaults in the wild use only the `MorphoVaultV1Adapter` path (V2 → V1 → markets), so this limitation may not affect them. Check a vault's adapter list before deciding whether this matters.
+
+If external data is acceptable, the **Morpho API** provides `avgApy` and `avgNetApy` for V2 vaults with full adapter support and rewards included.
+
+---
+
+**Morpho Blue Market Borrow and Supply APY from Snapshots:**
+
+For Morpho Blue markets, both APY values must be calculated using archive node snapshots. The `AccrueInterest` event only provides `prevBorrowRate` (a single historical rate, not the current rate). The IRM is the source of truth for the current borrow rate; supply APY is always derived from it:
+
+```
+borrowAPY  = taylorCompound(borrowRate, SECONDS_PER_YEAR)
+supplyAPY  = borrowAPY × utilization × (1 − fee)
+```
+
+See [Data Availability & Indexing Constraints](#data-availability--indexing-constraints) for the partial event-based approach.
+
+**Method: Periodic Market State Snapshots with IRM Calls**
+
+```typescript
+// Step 1: Fetch market state and parameters
+const staleMarket = await morpho.market(marketId);
+const params = await morpho.idToMarketParams(marketId);
+const blockTimestamp = (await client.getBlock()).timestamp;
+
+// Step 2: Get instantaneous borrow rate from IRM
+const borrowRate = await irm(params.irm).borrowRateView(params, staleMarket);
+
+// Step 3: Accrue interest to current block
+// CRITICAL: market() returns stale state from last on-chain update
+const elapsed = blockTimestamp - staleMarket.lastUpdate;
+const interest = staleMarket.totalBorrowAssets * taylorCompound(borrowRate, elapsed) / WAD;  // See implementation note*
+const accruedMarket = {
+  ...staleMarket,
+  totalSupplyAssets: staleMarket.totalSupplyAssets + interest,
+  totalBorrowAssets: staleMarket.totalBorrowAssets + interest,
+};
+
+// Step 4: Calculate borrow APY (annualized)
+const borrowAPY = taylorCompound(borrowRate, SECONDS_PER_YEAR);
+
+// Step 5: Calculate utilization (use accrued state, not stale)
+// Use wDivUp to match Morpho's reference implementation: (x * WAD + y - 1) / y
+const utilization = accruedMarket.totalSupplyAssets > 0n
+  ? (accruedMarket.totalBorrowAssets * WAD + accruedMarket.totalSupplyAssets - 1n) / accruedMarket.totalSupplyAssets
+  : 0n;
+
+// Step 6: Calculate supply APY
+// Supply APY = Borrow APY × Utilization × (1 - Fee)
+const supplyAPY = borrowAPY * utilization * (WAD - accruedMarket.fee) / WAD / WAD;
+```
+
+**Key Points:**
+
+- **Market state is stale:** `market()` returns the state from the last on-chain interaction, not current block
+- **Always accrue interest first:** Calculate interest from `lastUpdate` to snapshot block before using market state
+- **Use accrued state for utilization:** Don't use stale `totalBorrowAssets` and `totalSupplyAssets` directly
+- **Taylor compounding:** Use Taylor expansion (3-term series) for precise compounding calculations
+- **Supply rate depends on borrow rate:** Supply APY is derived from borrow APY, utilization, and protocol fees
+- **Utilization rounding:** Use `wDivUp` (round-up) to match Morpho's reference implementation
+
+\* **`taylorCompound()` Implementation:** See [Mathematical Helper Functions](#mathematical-helper-functions) appendix for the 3-term Taylor expansion implementation.
+
+**Snapshot Frequency:**
+
+- More frequent snapshots = more granular historical APY data
+- Common intervals: hourly, daily, or per-block for critical monitoring
+- Balance API cost (IRM calls) against data granularity needs
+
 **Quick Reference - Morpho API for APY:**
 
 ```graphql
@@ -1878,90 +2417,143 @@ query {
 
 ### Vault Allocation Tracking
 
-**Purpose:** Track how vault assets are allocated across markets/adapters. This is **essential for position backing analysis** - understanding what underlying markets and collateral back a supplier's vault position.
+> **Note:** This section describes the planned implementation. The ABIs and query logic are not yet implemented.
+
+**Purpose:** Determine what markets a vault's assets are currently deployed to. This is **essential for position backing analysis** — understanding what underlying markets and collateral back a supplier's vault position.
 
 For MetaMorpho suppliers, vault allocation directly determines position backing:
 - If a vault allocates 60% to Market A and 40% to Market B
 - A supplier's position is backed by the same 60%/40% split of those markets' borrower collateral
 
-This is much simpler than pooled lending protocols (Aave/Sparklend) where backing analysis requires examining all individual borrower collateral compositions.
+**Approach: Archive node state calls, not events**
 
-**V1/V1.1 Allocation Discovery:**
+Allocation breakdown is implemented via on-demand archive node state calls rather than event tracking. This is possible because:
+- V1 vaults expose `withdrawQueueLength()` + `withdrawQueue(i)` — a fully enumerable list of allocated markets
+- V2 vaults expose `adaptersLength()` + `adapters(i)` — a fully enumerable list of adapters (storage is `address[] public adapters`)
+- Morpho Blue exposes `position(marketId, vaultAddress)` — vault's supply shares in any market
 
-Track `ReallocateSupply` and `ReallocateWithdraw` events:
+All of these are `view` functions that work with archive nodes at any historical block number. No events need to be indexed for allocation queries.
+
+**ABIs needed (not yet added, planned):**
 
 ```typescript
-VaultMarketAllocation {
-  id: `${vault}-${marketId}`,
-  vault: hex,
-  marketId: hex,
-  currentAssets: bigint,           // Current allocation
-  currentShares: bigint,
-  supplyCap: bigint,               // Maximum allowed
-  totalSupplied: bigint,           // Lifetime supplied
-  totalWithdrawn: bigint,          // Lifetime withdrawn
-  lastUpdateBlock: bigint,
-  lastUpdateTimestamp: bigint,
+// V1 vault read functions
+withdrawQueueLength()              // → uint256
+withdrawQueue(uint256 index)       // → bytes32 marketId
+config(bytes32 marketId)           // → (uint256 cap, bool enabled, uint64 removableAt)
+curator()                          // → address
+owner()                            // → address
+fee()                              // → uint256
+balanceOf(address)                 // → uint256 (shares; used when querying adapter's position in a V1 vault)
+convertToAssets(uint256 shares)    // → uint256 (used when querying adapter's position in a V1 vault)
+
+// V2 vault read functions
+adaptersLength()                   // → uint256
+adapters(uint256 index)            // → address
+curator()                          // → address
+owner()                            // → address
+performanceFee()                   // → uint96
+managementFee()                    // → uint96
+
+// Adapter interface (both adapter types)
+realAssets()                       // → uint256 (total assets held by this adapter)
+morpho()                           // → address (present on MorphoMarketV1AdapterV2; used for type detection)
+morphoVaultV1()                    // → address (present on MorphoVaultV1Adapter; returns the wrapped V1 vault address)
+marketParamsListLength()           // → uint256 (MorphoMarketV1AdapterV2 only; number of markets in adapter)
+marketParamsList(uint256 index)    // → MarketParams tuple (MorphoMarketV1AdapterV2 only; needed to compute marketId)
+
+// IRM contract
+borrowRateView(marketParams, market) // → uint256 (instantaneous borrow rate; used for interest accrual)
+```
+
+**V1 vault allocation query (archive node, any block):**
+
+```typescript
+async function getV1VaultAllocations(vaultAddress: Address, blockNumber: bigint) {
+  // 1. Get withdraw queue
+  const length = await vault.withdrawQueueLength({ blockNumber });
+  const marketIds = await multicall(
+    Array.from({ length }, (_, i) => vault.withdrawQueue(i)),
+    { blockNumber }
+  );
+
+  // 2. For each market, fetch vault's supply shares + market state (with interest accrual)
+  return Promise.all(marketIds.map(async (marketId) => {
+    const [staleMarket, marketParams, position] = await multicall([
+      morphoBlue.market(marketId),
+      morphoBlue.idToMarketParams(marketId),
+      morphoBlue.position(marketId, vaultAddress),
+    ], { blockNumber });
+
+    // Accrue interest: call IRM to get current borrow rate, then apply Taylor compounding
+    // This gives the real-time market state rather than the stale on-chain snapshot
+    const borrowRate = await irm(marketParams.irm).borrowRateView(marketParams, staleMarket, { blockNumber });
+    const elapsed = blockTimestamp - staleMarket.lastUpdate;
+    const interest = staleMarket.totalBorrowAssets * taylorCompound(borrowRate, elapsed) / WAD;
+    const market = { ...staleMarket, totalSupplyAssets: staleMarket.totalSupplyAssets + interest };
+
+    // shares → assets (virtual assets = 1, virtual shares = 1e6)
+    const allocatedAssets =
+      (position.supplyShares * (market.totalSupplyAssets + 1n)) /
+      (market.totalSupplyShares + 1_000_000n);
+
+    return { marketId, allocatedAssets };
+  }));
 }
 ```
 
-**Update Logic:**
+**V2 vault allocation query (archive node, any block):**
+
+Adapter type detection uses two probe calls:
+- `morphoVaultV1()` succeeds → `MorphoVaultV1Adapter` (wraps a V1 vault)
+- `morpho()` succeeds → `MorphoMarketV1AdapterV2` (holds Morpho Blue supply shares directly)
 
 ```typescript
-// On ReallocateSupply
-allocation.currentAssets += event.suppliedAssets
-allocation.currentShares += event.suppliedShares
-allocation.totalSupplied += event.suppliedAssets
+async function getV2VaultAllocations(vaultAddress: Address, blockNumber: bigint) {
+  // 1. Get all adapters
+  const length = await vault.adaptersLength({ blockNumber });
+  const adapterAddresses = await multicall(
+    Array.from({ length }, (_, i) => vault.adapters(i)),
+    { blockNumber }
+  );
 
-// On ReallocateWithdraw
-allocation.currentAssets -= event.withdrawnAssets
-allocation.currentShares -= event.withdrawnShares
-allocation.totalWithdrawn += event.withdrawnAssets
-```
+  // 2. Also get vault's idle balance (assets held directly, not in any adapter)
+  const idleAssets = await token.balanceOf(vaultAddress, { blockNumber });
 
-**V2 Adapter Allocation Discovery:**
+  // 3. For each adapter: detect type and resolve allocations
+  const adapterResults = await Promise.all(adapterAddresses.map(async (adapterAddress) => {
 
-Track `Allocate` and `Deallocate` events:
-
-```typescript
-VaultAdapterAllocation {
-  id: `${vault}-${adapter}`,
-  vault: hex,
-  adapter: hex,
-  adapterType: string,             // "MorphoMarketV1AdapterV2", "MorphoVaultV1Adapter", etc.
-  currentAssets: bigint,
-  // For adapter with multiple IDs (markets/sub-vaults)
-  allocations: {
-    [id: string]: {
-      assets: bigint,
-      cap: bigint,
+    // Probe for vault adapter first
+    const v1VaultAddress = await tryCall(adapter(adapterAddress).morphoVaultV1, { blockNumber });
+    if (v1VaultAddress) {
+      // MorphoVaultV1Adapter — resolve the adapter's position in the V1 vault
+      const shares = await metamorpho(v1VaultAddress).balanceOf(adapterAddress, { blockNumber });
+      const allocatedAssets = await metamorpho(v1VaultAddress).convertToAssets(shares, { blockNumber });
+      // Returns the V1 vault as the allocation destination.
+      // To get per-market breakdown of that V1 vault, call getV1VaultAllocations(v1VaultAddress, blockNumber).
+      return [{ type: "Vault", address: v1VaultAddress, allocatedAssets }];
     }
-  },
-  lastUpdateBlock: bigint,
+
+    // Otherwise assume MorphoMarketV1AdapterV2 — enumerate its market list
+    const marketCount = await adapter(adapterAddress).marketParamsListLength({ blockNumber });
+    return Promise.all(
+      Array.from({ length: Number(marketCount) }, async (_, i) => {
+        const params = await adapter(adapterAddress).marketParamsList(i, { blockNumber });
+        // Market ID is keccak256 of the ABI-encoded params tuple
+        const marketId = keccak256(encodeAbiParameters([...], [params]));
+        const position = await morphoBlue.position(marketId, adapterAddress, { blockNumber });
+        const market = await morphoBlue.market(marketId, { blockNumber }); // + interest accrual as above
+        const allocatedAssets = toAssetsDown(position.supplyShares, market.totalSupplyAssets, market.totalSupplyShares);
+        return { type: "Market", marketId, allocatedAssets };
+      })
+    );
+  }));
+
+  return { idle: idleAssets, adapters: adapterResults };
 }
 ```
 
-**Adapter Type Detection:**
-
-Read adapter contract to determine type:
-
-```typescript
-// Check if it implements specific interfaces
-const supportsV1Adapter = await checkInterface(adapter, "MORPHO_VAULT_V1_ADAPTER");
-const supportsMarketAdapter = await checkInterface(adapter, "MORPHO_MARKET_V1_ADAPTER_V2");
-```
-
-**Reading Adapter Allocations:**
-
-For detailed composition, call adapter contracts:
-
-```typescript
-// V2 adapters report current value
-const realAssets = await adapter.realAssets();
-
-// Market adapters expose underlying positions
-const positions = await adapter.positions(); // market IDs and amounts
-```
+**Double-counting note (TVL aggregation only):** This is not relevant when querying a specific user's deposits — each deposit they made directly is a separate, correct position record. It only matters if aggregating TVL across all vaults: when a V2 vault allocates to a V1 vault, the V2 vault's address appears as a "user" in the V1 vault's `morpho_vault_position` table. Naively summing all position values across all vaults would count the same assets twice. To compute total TVL, only include vaults that are not themselves wrapped by another vault (i.e. exclude V1 vaults that have a V2 vault as a depositor).
 
 ### Market Discovery and Metadata
 
@@ -1978,7 +2570,7 @@ MarketMetadata {
   collateralTokenDecimals: integer,
   oracle: hex,
   irm: hex,
-  lltv: bigint,                     // Basis points
+  lltv: bigint,                     // WAD (1e18 = 100%, e.g. 860000000000000000 for 86%)
   marketName: string,               // "WETH/USDC 86%"
   createdAt: bigint,
   createdAtBlock: bigint,
@@ -1993,7 +2585,7 @@ function generateMarketName(
   loanSymbol: string,
   lltv: bigint
 ): string {
-  const lltvPercent = Number(lltv) / 100; // Convert from basis points
+  const lltvPercent = Number(lltv) / 1e16; // Convert from WAD to percentage (e.g. 860000000000000000 → 86)
   return `${collateralSymbol} / ${loanSymbol} ${lltvPercent}%`;
 }
 
@@ -2234,36 +2826,75 @@ function normalizeAccrueInterest(event, version) {
 
 ### Price Oracle Integration
 
-**Optional Enhancement:**
+**Optional Enhancement:** Not yet implemented. Required for USD valuations and health factor calculations.
 
-For USD valuations and health factor calculations, integrate oracle prices:
+#### IOracle Interface
 
-```typescript
-AssetPrice {
-  id: `${asset}-${blockNumber}`,
-  asset: hex,
-  blockNumber: bigint,
-  timestamp: bigint,
-  priceUSD: bigint,                 // 8 decimals (standard)
-  source: string,                   // "chainlink", "morpho-oracle", etc.
+All Morpho Blue oracles implement a single function:
+
+```solidity
+interface IOracle {
+    function price() external view returns (uint256);
 }
 ```
 
-**Price Snapshot Strategy:**
+**What it returns:** The price of 1 unit of collateral token quoted in loan token, scaled by `1e36`.
 
-1. **On-demand**: Query oracle when calculating metrics
-2. **Periodic**: Store prices at fixed intervals (e.g., hourly)
-3. **Event-based**: Store prices on AccrueInterest or user transactions
+More precisely: the price of `10^(collateralDecimals)` collateral token units quoted in `10^(loanDecimals)` loan token units, with `36 + loanDecimals - collateralDecimals` decimals of precision.
 
-**Oracle Contract Calls:**
+**This is NOT a USD price.** It prices collateral in terms of the loan token. To obtain USD values, you additionally need the loan token's USD price from an external source (Morpho API, Chainlink USD feed, etc.).
+
+#### Converting Oracle Price to Collateral USD Value
 
 ```typescript
-// Morpho oracle (36 - loan decimals - collateral decimals precision)
-const price = await oracle.price();
+// ORACLE_PRICE_SCALE is always 1e36 in Morpho Blue (protocol constant).
+// The oracle price value itself has (36 + loanDecimals - collateralDecimals) digits of precision,
+// but the divisor in every collateral-value calculation is always 1e36.
+const ORACLE_PRICE_SCALE = 10n ** 36n;
 
-// Convert to standard 8 decimal USD price
-const priceUSD = convertToUSD(price, loanDecimals, collateralDecimals);
+// Collateral value in loan token base units
+const collateralValueInLoan = (collateralAmount * oraclePrice) / ORACLE_PRICE_SCALE;
+
+// Health factor = (collateralValueInLoan × LLTV) / borrowAssets
+// LLTV is WAD-scaled (e.g., 860000000000000000n for 86%)
+// Result is WAD-scaled: < WAD (1e18) means liquidatable
+const healthFactor = (collateralValueInLoan * lltv) / borrowAssets;
+
+// USD value requires a separate loan token USD price (from API or another oracle)
+const collateralValueUSD = collateralValueInLoan * loanTokenPriceUSD / 10n**BigInt(loanDecimals);
 ```
+
+#### MorphoChainlinkOracleV2
+
+The most commonly used Morpho oracle. It composes up to **two base feeds** and **two quote feeds** (Chainlink-compatible) to price any pair, including indirect routes:
+
+| Example pair | Feed configuration |
+|---|---|
+| stETH/ETH | Single direct feed |
+| ETH/USDC | Single inverse feed (B/A) |
+| stETH/USDC | stETH/ETH + ETH/USD (two feeds) |
+| WBTC/USDC | WBTC/BTC + BTC/USD (two feeds) |
+| sDAI/USDC | sDAI↔DAI exchange rate (ERC4626) + DAI/USD |
+
+It also natively supports **yield-bearing collateral** (ERC4626 vaults) via `BASE_VAULT` and `QUOTE_VAULT` immutables — e.g. pricing sDAI collateral correctly by first converting sDAI shares to DAI via `convertToAssets`.
+
+**Key immutables:**
+
+| Immutable | Purpose |
+|---|---|
+| `BASE_VAULT` / `BASE_VAULT_CONVERSION_SAMPLE` | ERC4626 vault for collateral (zero = not a vault) |
+| `BASE_FEED_1` / `BASE_FEED_2` | Chainlink feeds for collateral side (zero = price of 1) |
+| `BASE_TOKEN_DECIMALS` | Collateral token decimals |
+| `QUOTE_VAULT` / `QUOTE_VAULT_CONVERSION_SAMPLE` | ERC4626 vault for loan token (zero = not a vault) |
+| `QUOTE_FEED_1` / `QUOTE_FEED_2` | Chainlink feeds for loan token side (zero = price of 1) |
+| `QUOTE_TOKEN_DECIMALS` | Loan token decimals |
+| `SCALE_FACTOR` | Precomputed scaling constant (set in constructor) |
+
+**Discovery:** The `MorphoChainlinkOracleV2Factory` deploys all instances. Individual oracle configurations (which feeds are used) are readable from the immutables of each oracle contract.
+
+#### Indexing Note
+
+The Morpho oracle price is directly useful for **health factor calculations** (already included in the Morpho Blue User Position Snapshots section). For **USD TVL and borrow amounts**, the Morpho API provides `totalAssetsUsd`, `borrowAssetsUsd`, and per-asset prices via `assetByAddress { priceUsd }` as an alternative to maintaining a separate price feed integration.
 
 ---
 
@@ -2311,6 +2942,35 @@ const priceUSD = convertToUSD(price, loanDecimals, collateralDecimals);
 - **Market IDs:** Generated via `keccak256(abi.encode(marketParams))`
 
 Use blockchain explorers (Etherscan, Basescan) to verify contracts and find deployments on other chains.
+
+---
+
+## Mathematical Helper Functions
+
+### Taylor Expansion for Interest Compounding
+
+Morpho uses a 3-term Taylor expansion to approximate continuous compounding: `e^(x*n) ≈ x*n + (x*n)²/2 + (x*n)³/6`
+
+```typescript
+const WAD = 10n ** 18n;
+
+function taylorCompound(x: bigint, n: bigint): bigint {
+  const firstTerm = x * n;
+  const secondTerm = (firstTerm * firstTerm) / (2n * WAD);
+  const thirdTerm = (secondTerm * firstTerm) / (3n * WAD);
+  return firstTerm + secondTerm + thirdTerm;
+}
+```
+
+**Usage:**
+
+```typescript
+// Accrue interest over elapsed time
+const interest = principal * taylorCompound(borrowRate, elapsed) / WAD;
+
+// Calculate annual APY
+const borrowAPY = taylorCompound(borrowRate, SECONDS_PER_YEAR);
+```
 
 ---
 
