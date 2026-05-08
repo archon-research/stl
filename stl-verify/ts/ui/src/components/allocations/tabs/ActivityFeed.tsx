@@ -1,12 +1,17 @@
 import { SkeletonStack } from '@archon-research/design-system';
 import { ArrowDownRight, ArrowRightLeft, ArrowUpLeft } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getAllocationActivity } from '../../../lib/api';
 import {
+  getAllocationActivity,
+  getProtocolEvents,
+  getTxProtocolEvents,
+} from '../../../lib/api';
+import {
+  formatDateTime,
   formatTokenAmount,
   formatFreshnessLabel,
 } from '../../../lib/dashboard';
@@ -16,6 +21,7 @@ import type {
   AllocationActivity,
   AllocationActivityResponse,
   Prime,
+  ProtocolEvent,
 } from '../../../types/allocation';
 import { ChainLogo, ProtocolLogo } from '../../shared';
 import { TokenAddress } from '../../shared';
@@ -61,9 +67,158 @@ function getActionColor(actionType: string | null | undefined): string {
   }
 }
 
-function ActivityEventRow({ event }: { event: AllocationActivity }) {
+function formatEventData(eventData: ProtocolEvent['event_data']): string {
+  if (eventData === null) {
+    return 'No event data payload.';
+  }
+
+  try {
+    return JSON.stringify(eventData, null, 2);
+  } catch {
+    return 'Unable to serialize event payload.';
+  }
+}
+
+function buildActivityEventKey(event: AllocationActivity): string {
+  return [
+    event.chain_id,
+    event.tx_hash ?? 'no-tx',
+    event.log_index ?? 'no-log-index',
+    event.protocol_name ?? 'no-protocol',
+    event.action_type ?? 'no-action',
+    event.block_number,
+    event.created_at,
+  ].join(':');
+}
+
+function buildTxCacheKey(txHash: string, chainId: number): string {
+  return `${chainId}:${txHash.toLowerCase()}`;
+}
+
+function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
+  return (
+    <div
+      className={css({
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: 'border.subtle',
+        borderRadius: 'sm',
+        bg: 'surface.default',
+        padding: '2.5',
+        display: 'grid',
+        gap: '1',
+      })}
+    >
+      <div
+        className={flex({
+          align: 'center',
+          gap: '2',
+          wrap: 'wrap',
+        })}
+      >
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.strong',
+            fontWeight: 'semibold',
+          })}
+        >
+          {event.protocol_name}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          •
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.default',
+          })}
+        >
+          {event.event_name}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          log #{event.log_index}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          block {event.block_number} v{event.block_version}
+        </span>
+      </div>
+
+      <div
+        className={flex({
+          gap: '2',
+          wrap: 'wrap',
+          align: 'center',
+        })}
+      >
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.default',
+          })}
+        >
+          {formatDateTime(event.created_at)}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          •
+        </span>
+        <TokenAddress
+          address={event.contract_address}
+          chainId={event.chain_id}
+        />
+      </div>
+
+      <pre
+        className={css({
+          margin: 0,
+          borderRadius: 'sm',
+          bg: 'surface.subtle',
+          padding: '2',
+          fontFamily: 'mono',
+          fontSize: 'xs',
+          color: 'text.default',
+          overflowX: 'auto',
+          maxHeight: '10rem',
+        })}
+      >
+        {formatEventData(event.event_data)}
+      </pre>
+    </div>
+  );
+}
+
+function ActivityEventRow({
+  event,
+  isExpanded,
+  onSelectTx,
+}: {
+  event: AllocationActivity;
+  isExpanded: boolean;
+  onSelectTx: (event: AllocationActivity) => void;
+}) {
   const actionColor = getActionColor(event.action_type);
   const actionIcon = getActionIcon(event.action_type);
+  const txHash = event.tx_hash;
 
   return (
     <div
@@ -180,9 +335,27 @@ function ActivityEventRow({ event }: { event: AllocationActivity }) {
           fontSize: 'xs',
           color: 'text.subtle',
           whiteSpace: 'nowrap',
+          textAlign: 'right',
         })}
       >
         {formatFreshnessLabel(event.created_at)}
+        {txHash ? (
+          <button
+            type="button"
+            onClick={() => onSelectTx(event)}
+            className={css({
+              display: 'block',
+              mt: '0.5',
+              fontSize: '2xs',
+              color: 'interactive.accent',
+              bg: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+            })}
+          >
+            {isExpanded ? 'Hide tx events' : 'Inspect tx events'}
+          </button>
+        ) : null}
       </span>
     </div>
   );
@@ -193,18 +366,38 @@ export function ActivityFeed({
   selectedPrime,
   searchQuery = '',
 }: ActivityFeedProps) {
+  const txRequestControllersRef = useRef<Record<string, AbortController>>({});
+
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [selectedEventKey, setSelectedEventKey] = useState<string | null>(null);
+  const [txEventsByHash, setTxEventsByHash] = useState<
+    Record<string, ProtocolEvent[]>
+  >({});
+  const [txEventErrorsByHash, setTxEventErrorsByHash] = useState<
+    Record<string, string>
+  >({});
+  const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
+    Record<string, boolean>
+  >({});
   const [filters] = useState<ActivityFilters>({
     limit: 50,
   });
 
   useEffect(() => {
     if (!isEnabled || !selectedPrime) {
+      Object.values(txRequestControllersRef.current).forEach((controller) => {
+        controller.abort();
+      });
+      txRequestControllersRef.current = {};
       setEvents([]);
       setError(null);
       setIsLoading(false);
+      setSelectedEventKey(null);
+      setTxEventsByHash({});
+      setTxEventErrorsByHash({});
+      setTxEventsLoadingByHash({});
       return;
     }
 
@@ -247,6 +440,124 @@ export function ActivityFeed({
     return () => abortController.abort();
   }, [filters, isEnabled, selectedPrime]);
 
+  useEffect(() => {
+    return () => {
+      Object.values(txRequestControllersRef.current).forEach((controller) => {
+        controller.abort();
+      });
+      txRequestControllersRef.current = {};
+    };
+  }, []);
+
+  const handleSelectTx = (event: AllocationActivity) => {
+    if (!event.tx_hash) {
+      return;
+    }
+
+    const eventKey = buildActivityEventKey(event);
+    const txCacheKey = buildTxCacheKey(event.tx_hash, event.chain_id);
+
+    if (selectedEventKey === eventKey) {
+      txRequestControllersRef.current[txCacheKey]?.abort();
+      delete txRequestControllersRef.current[txCacheKey];
+      setTxEventsLoadingByHash((previous) => {
+        if (!previous[txCacheKey]) {
+          return previous;
+        }
+
+        const { [txCacheKey]: _, ...rest } = previous;
+        return rest;
+      });
+      setSelectedEventKey(null);
+      return;
+    }
+
+    setSelectedEventKey(eventKey);
+
+    if (txEventsByHash[txCacheKey] || txEventErrorsByHash[txCacheKey]) {
+      return;
+    }
+
+    if (txEventsLoadingByHash[txCacheKey]) {
+      return;
+    }
+
+    setTxEventsLoadingByHash((previous) => ({
+      ...previous,
+      [txCacheKey]: true,
+    }));
+    setTxEventErrorsByHash((previous) => {
+      if (!previous[txCacheKey]) {
+        return previous;
+      }
+
+      const { [txCacheKey]: _, ...rest } = previous;
+      return rest;
+    });
+
+    const abortController = new AbortController();
+    txRequestControllersRef.current[txCacheKey] = abortController;
+
+    void getTxProtocolEvents(event.tx_hash, abortController.signal)
+      .then((result) => {
+        setTxEventsByHash((previous) => ({
+          ...previous,
+          [txCacheKey]: result,
+        }));
+      })
+      .catch(async (err) => {
+        if (isAbortError(err)) {
+          return;
+        }
+
+        try {
+          const fallbackResult = await getProtocolEvents(
+            {
+              tx_hash: event.tx_hash ?? undefined,
+              limit: 200,
+            },
+            abortController.signal,
+          );
+
+          setTxEventsByHash((previous) => ({
+            ...previous,
+            [txCacheKey]: fallbackResult,
+          }));
+          return;
+        } catch (fallbackErr) {
+          if (isAbortError(fallbackErr)) {
+            return;
+          }
+
+          const errorMsg = toErrorMessage(fallbackErr);
+          setTxEventErrorsByHash((previous) => ({
+            ...previous,
+            [txCacheKey]: errorMsg,
+          }));
+          logging.error('Failed to fetch tx protocol events', {
+            error: err,
+            fallbackError: fallbackErr,
+            errorMessage: errorMsg,
+            txHash: event.tx_hash,
+          });
+        }
+      })
+      .finally(() => {
+        if (txRequestControllersRef.current[txCacheKey] === abortController) {
+          delete txRequestControllersRef.current[txCacheKey];
+        }
+
+        setTxEventsLoadingByHash((previous) => {
+          if (!previous[txCacheKey]) {
+            return previous;
+          }
+
+          const { [txCacheKey]: _, ...rest } = previous;
+          return rest;
+        });
+      });
+  };
+
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {
       return events;
@@ -267,6 +578,7 @@ export function ActivityFeed({
       <EmptyState
         title="Open Activity Tab"
         description="Activity loads when the drawer is open and the Activity tab is selected."
+        stretch
       />
     );
   }
@@ -276,6 +588,7 @@ export function ActivityFeed({
       <EmptyState
         title="No Prime Selected"
         description="Select a prime to view its activity feed."
+        stretch
       />
     );
   }
@@ -299,6 +612,7 @@ export function ActivityFeed({
       <EmptyState
         title="No Activity Found"
         description="No allocation activity events match your filters."
+        stretch
       />
     );
   }
@@ -322,12 +636,94 @@ export function ActivityFeed({
           bg: 'surface.default',
         })}
       >
-        {filteredEvents.map((event, idx) => (
-          <ActivityEventRow
-            key={`${event.tx_hash}:${event.log_index}:${idx}`}
-            event={event}
-          />
-        ))}
+        {filteredEvents.map((event, idx) => {
+          const eventKey = buildActivityEventKey(event);
+          const txHash = event.tx_hash;
+          const txCacheKey = txHash
+            ? buildTxCacheKey(txHash, event.chain_id)
+            : null;
+          const isExpanded = selectedEventKey === eventKey;
+          const txEvents = txCacheKey ? txEventsByHash[txCacheKey] : undefined;
+          const txError = txCacheKey
+            ? txEventErrorsByHash[txCacheKey]
+            : undefined;
+          const isTxLoading =
+            txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
+
+          return (
+            <div key={`${eventKey}:${idx}`}>
+              <ActivityEventRow
+                event={event}
+                isExpanded={isExpanded}
+                onSelectTx={handleSelectTx}
+              />
+
+              {isExpanded && txHash ? (
+                <div
+                  className={css({
+                    marginX: '3',
+                    marginBottom: '3',
+                    borderWidth: '1px',
+                    borderStyle: 'solid',
+                    borderColor: 'border.subtle',
+                    borderRadius: 'md',
+                    bg: 'surface.subtle',
+                    padding: '3',
+                    display: 'grid',
+                    gap: '2',
+                  })}
+                >
+                  <div
+                    className={css({
+                      fontSize: 'xs',
+                      color: 'text.strong',
+                      fontWeight: 'semibold',
+                    })}
+                  >
+                    Protocol Events For TX
+                  </div>
+
+                  {isTxLoading ? (
+                    <span
+                      className={css({ fontSize: 'xs', color: 'text.default' })}
+                    >
+                      Loading protocol events...
+                    </span>
+                  ) : null}
+
+                  {!isTxLoading && txError ? (
+                    <span
+                      className={css({ fontSize: 'xs', color: 'text.warning' })}
+                    >
+                      Failed to load protocol events: {txError}
+                    </span>
+                  ) : null}
+
+                  {!isTxLoading &&
+                  !txError &&
+                  txEvents &&
+                  txEvents.length === 0 ? (
+                    <EmptyState
+                      title="No Protocol Events"
+                      description="No protocol events were indexed for this transaction."
+                      size="compact"
+                      stretch
+                    />
+                  ) : null}
+
+                  {!isTxLoading && !txError && txEvents && txEvents.length > 0
+                    ? txEvents.map((protocolEvent) => (
+                        <ProtocolEventCard
+                          key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
+                          event={protocolEvent}
+                        />
+                      ))
+                    : null}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
 
       <div

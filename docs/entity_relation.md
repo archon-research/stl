@@ -218,6 +218,9 @@ erDiagram
         boolean is_orphaned
         int version "UK1"
         boolean block_published
+        boolean receipts_published
+        boolean traces_published
+        boolean blobs_published
         int chain_id PK "UK1"
         timestamptz created_at PK "UK1, hypertable: 1d chunks, hash(chain_id,4), retain 30d"
     }
@@ -233,16 +236,22 @@ erDiagram
     }
 
     BackfillWatermark {
-        int id PK
         bigint watermark
-        int chain_id FK "UK"
+        int chain_id PK "FK"
+    }
+
+    Prime {
+        bigint id PK
+        text name "UK"
+        bytea vault_address "UK"
+        timestamptz created_at
     }
 
     AllocationPosition {
         bigint id PK
         int chain_id FK "UK1"
         bigint token_id FK "UK1"
-        text star
+        bigint prime_id FK "UK1"
         bytea proxy_address "UK1"
         numeric balance
         numeric scaled_balance
@@ -252,6 +261,64 @@ erDiagram
         int log_index "UK1"
         numeric tx_amount
         text direction "UK1"
+        timestamptz created_at
+    }
+
+    PrimeDebt {
+        bigint prime_id FK "UK1"
+        text ilk_name
+        numeric debt_wad
+        bigint block_number "UK1"
+        int block_version "UK1"
+        timestamptz synced_at PK "UK1, hypertable: 1d chunks"
+    }
+
+    AnchoragePackageSnapshot {
+        bigint prime_id FK "UK1"
+        varchar package_id "UK1"
+        varchar pledgor_id
+        varchar secured_party_id
+        boolean active
+        varchar state
+        numeric current_ltv
+        numeric exposure_value
+        numeric package_value
+        numeric margin_call_ltv
+        numeric critical_ltv
+        numeric margin_return_ltv
+        varchar asset_type "UK1"
+        varchar custody_type "UK1"
+        numeric asset_price
+        numeric asset_quantity
+        numeric asset_weighted_value
+        timestamptz ltv_timestamp
+        timestamptz snapshot_time PK "UK1, hypertable: 1d chunks"
+    }
+
+    AnchorageOperation {
+        bigint prime_id FK
+        varchar operation_id "UK1"
+        varchar action
+        varchar operation_type
+        varchar type_id
+        varchar asset_type
+        varchar custody_type
+        numeric quantity
+        text notes
+        timestamptz created_at PK "UK1, hypertable: 1d chunks"
+    }
+
+    TokenTotalSupply {
+        int chain_id FK "PK"
+        bigint token_id FK "PK"
+        numeric total_supply
+        numeric scaled_total_supply
+        bigint block_number "PK"
+        int block_version "PK"
+        timestamptz block_timestamp PK "hypertable: 7d chunks"
+        text source
+        int processing_version PK
+        int build_id
         timestamptz created_at
     }
 
@@ -342,8 +409,13 @@ erDiagram
     Chain ||--o{ ReorgEvents : ""
     Chain ||--o{ BackfillWatermark : ""
     Chain ||--o{ AllocationPosition : ""
+    Chain ||--o{ TokenTotalSupply : ""
     Chain ||--o{ MorphoMarket : ""
     Chain ||--o{ MorphoVault : ""
+    Prime ||--o{ AllocationPosition : ""
+    Prime ||--o{ PrimeDebt : ""
+    Prime ||--o{ AnchoragePackageSnapshot : ""
+    Prime ||--o{ AnchorageOperation : ""
     Token ||--o{ ReceiptToken : ""
     Token ||--o{ DebtToken : ""
     Token ||--o{ SparklendReserveData : ""
@@ -351,6 +423,7 @@ erDiagram
     Token ||--o{ BorrowerCollateral : ""
     Token ||--o{ OffchainPriceAsset : ""
     Token ||--o{ AllocationPosition : ""
+    Token ||--o{ TokenTotalSupply : ""
     Token ||--o{ MorphoMarket : ""
     Token ||--o{ MorphoVault : ""
     Protocol ||--o{ ReceiptToken : ""
@@ -366,6 +439,11 @@ erDiagram
     User ||--o{ MorphoMarketPosition : ""
     User ||--o{ MorphoVaultPosition : ""
     OffchainPriceSource ||--o{ OffchainPriceAsset : ""
+    OffchainPriceSource ||--o{ OffchainTokenPrice : ""
+    Oracle ||--o{ OracleAsset : ""
+    Oracle ||--o{ OnchainTokenPrice : ""
+    Token ||--o{ OnchainTokenPrice : ""
+    Token ||--o{ OffchainTokenPrice : ""
     MorphoMarket ||--o{ MorphoMarketPosition : ""
     MorphoMarket ||--o{ MorphoMarketState : ""
     MorphoVault ||--o{ MorphoVaultPosition : ""

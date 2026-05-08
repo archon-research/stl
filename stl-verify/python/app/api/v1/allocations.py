@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -15,7 +15,6 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
-from app.services.capital_metrics_service import CapitalMetricsService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -112,10 +111,6 @@ class StarRiskCapitalResponse(BaseModel):
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(PostgresAllocationRepository(engine))
-
-
-async def _get_capital_metrics_service(engine: AsyncEngine = Depends(get_engine)) -> CapitalMetricsService:
-    return CapitalMetricsService(PostgresAllocationRepository(engine))
 
 
 async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
@@ -223,6 +218,29 @@ async def list_capital_metrics(
             None,
         )
         if not row:
+            logger.warning(
+                "No upstream risk capital data found for prime",
+                extra={
+                    "prime_id": prime.id,
+                    "prime_name": prime.name,
+                    "upstream_url": settings.star_risk_capital_upstream_url,
+                },
+            )
+            metrics.append(
+                CapitalMetricsResponse(
+                    prime_id=prime.id,
+                    prime_name=prime.name,
+                    risk_capital=Decimal("0"),
+                    capital_buffer=Decimal("0"),
+                    first_loss_capital=Decimal("0"),
+                    total_capital=Decimal("0"),
+                    risk_to_capital_ratio=None,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    benchmark_source=settings.star_risk_capital_upstream_url,
+                    is_validated=False,
+                    validation_note="No upstream Star risk-capital row matched this prime.",
+                )
+            )
             continue
 
         total_rc = _to_decimal(row.total_rc, field="total_rc", prime_name=prime.name)
@@ -309,7 +327,7 @@ async def list_allocation_activity(
     tx_hash: str | None = None,
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)"),
     service: AllocationService = Depends(_get_service),
 ):
     """Retrieve allocation activity events with optional URL filters.
@@ -341,17 +359,30 @@ async def list_allocation_activity(
             )
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    events = await service.list_allocation_activity(
-        prime_id=parsed_prime_id,
-        chain_id=chain_id,
-        protocol_name=protocol_name,
-        action_type=action_type,
-        token_symbol=token_symbol,
-        tx_hash=tx_hash,
-        from_timestamp=from_timestamp,
-        to_timestamp=to_timestamp,
-        limit=limit,
-    )
+    try:
+        events = await service.list_allocation_activity(
+            prime_id=parsed_prime_id,
+            chain_id=chain_id,
+            protocol_name=protocol_name,
+            action_type=action_type,
+            token_symbol=token_symbol,
+            tx_hash=tx_hash,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            limit=limit,
+        )
+    except ValueError as exc:
+        logger.error(
+            "Failed to retrieve allocation activity",
+            extra={
+                "prime_id": str(parsed_prime_id) if parsed_prime_id else None,
+                "chain_id": chain_id,
+                "protocol_name": protocol_name,
+                "error": str(exc),
+            },
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="Failed to retrieve allocation activity") from exc
 
     return [
         AllocationActivityResponse(
@@ -372,44 +403,3 @@ async def list_allocation_activity(
         )
         for e in events
     ]
-
-
-@router.get("/primes/{prime_id}/capital-metrics", response_model=CapitalMetricsResponse)
-async def get_capital_metrics(
-    prime_id: EthAddressParam,
-    service: CapitalMetricsService = Depends(_get_capital_metrics_service),
-):
-    """Retrieve capital metrics for a prime.
-
-    Responds with:
-    - risk_capital: Total risk-bearing capital
-    - capital_buffer: Baseline protective capital
-    - first_loss_capital: Prime-owned first-loss layer
-    - total_capital: Sum of capital tiers
-    - risk_to_capital_ratio: Risk / Capital (use for alert thresholds, e.g., >1.0)
-    - is_validated: Whether reconciled against external benchmark
-    - validation_note: Any caveats or pending work on this endpoint
-    """
-    metrics = await service.get_capital_metrics(EthAddress(prime_id))
-    if not metrics:
-        raise HTTPException(status_code=404, detail="Prime not found")
-
-    return CapitalMetricsResponse(
-        prime_id=metrics.prime_id,
-        prime_name=metrics.prime_name,
-        risk_capital=metrics.risk_capital,
-        capital_buffer=metrics.capital_buffer,
-        first_loss_capital=metrics.first_loss_capital,
-        total_capital=metrics.total_capital,
-        risk_to_capital_ratio=metrics.risk_to_capital_ratio,
-        timestamp=metrics.timestamp.isoformat(),
-        benchmark_source=metrics.benchmark_source,
-        is_validated=metrics.is_validated,
-        validation_note=metrics.validation_note,
-    )
-
-
-@router.get("/star-risk-capital/primes", response_model=StarRiskCapitalResponse)
-async def get_star_risk_capital_requirements():
-    """Proxy published Star risk capital payload through backend to avoid browser CORS issues."""
-    return await _fetch_star_risk_capital_payload()

@@ -7,8 +7,14 @@ import type {
   BadDebt,
   CapitalMetricsListResponse,
   DataSourcesResponse,
+  PrimeDebtSnapshot,
   PrimesResponse,
+  ProtocolEventsResponse,
   RiskBreakdown,
+  Token,
+  TokenPrice,
+  TokensResponse,
+  TxProtocolEventsResponse,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { isAbortError } from './errors';
@@ -192,4 +198,123 @@ export function getDataSources(
     apiClient.GET('/v1/data-sources', { signal }),
     'GET /v1/data-sources',
   );
+}
+
+export function getProtocolEvents(
+  filters?: {
+    tx_hash?: string;
+    protocol_name?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<ProtocolEventsResponse> {
+  return requestData(
+    apiClient.GET('/v1/protocol-events', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/protocol-events',
+  );
+}
+
+export function getTxProtocolEvents(
+  txHash: string,
+  signal?: AbortSignal,
+): Promise<TxProtocolEventsResponse> {
+  return requestData(
+    apiClient.GET('/v1/tx/{tx_hash}/events', {
+      params: {
+        path: {
+          tx_hash: txHash,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tx/{tx_hash}/events',
+  );
+}
+
+export function getTokens(
+  filters?: {
+    chain_id?: number;
+    symbol?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<TokensResponse> {
+  return requestData(
+    apiClient.GET('/v1/tokens', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/tokens',
+  );
+}
+
+export function getToken(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<Token> {
+  return requestData(
+    apiClient.GET('/v1/tokens/{token_id}', {
+      params: {
+        path: {
+          token_id: tokenId,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tokens/{token_id}',
+  );
+}
+
+export function getTokenPrice(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<TokenPrice> {
+  return requestData(
+    apiClient.GET('/v1/tokens/{token_id}/price', {
+      params: {
+        path: {
+          token_id: tokenId,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tokens/{token_id}/price',
+  );
+}
+
+export async function getPrimeDebtSnapshots(
+  primeId: string,
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot[]> {
+  const query =
+    typeof limit === 'number'
+      ? ({
+          limit,
+        } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
+      : undefined;
+
+  return requestData(
+    apiClient.GET('/v1/primes/{prime_id}/debt', {
+      params: {
+        path: {
+          prime_id: primeId,
+        },
+        query,
+      },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/debt',
+  );
+}
+
+export async function getLatestPrimeDebtSnapshot(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot | null> {
+  const snapshots = await getPrimeDebtSnapshots(primeId, 1, signal);
+  return snapshots[0] ?? null;
 }

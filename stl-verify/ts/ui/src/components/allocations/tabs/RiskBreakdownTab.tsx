@@ -12,8 +12,11 @@ import {
   buildRowSearchString,
   matchesSearchQuery,
 } from '../../../data-table/utils';
-import { getRiskBreakdown } from '../../../lib/api';
+import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
+  formatDateTime,
+  formatDurationFromSeconds,
+  formatFreshnessLabel,
   formatMultiplier,
   formatPercentValue,
   formatRatioPercent,
@@ -22,7 +25,12 @@ import {
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
-import type { Allocation, RiskBreakdown } from '../../../types/allocation';
+import type {
+  Allocation,
+  RiskBreakdown,
+  Token,
+  TokenPrice,
+} from '../../../types/allocation';
 import { ChainLogo, SummaryMetric } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
 
@@ -176,6 +184,9 @@ export function RiskBreakdownTab({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isMethodologyOpen, setIsMethodologyOpen] = useState(false);
+  const [tokenCatalog, setTokenCatalog] = useState<Token | null>(null);
+  const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
+  const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -216,6 +227,63 @@ export function RiskBreakdownTab({
       .finally(() => {
         if (!controller.signal.aborted) {
           setIsLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [isEnabled, selectedReceiptToken]);
+
+  useEffect(() => {
+    if (!isEnabled || !selectedReceiptToken) {
+      setTokenCatalog(null);
+      setTokenPrice(null);
+      setIsTokenMetaLoading(false);
+      return;
+    }
+
+    const tokenId = Number(selectedReceiptToken.underlying_token_id);
+    if (!Number.isFinite(tokenId)) {
+      setTokenCatalog(null);
+      setTokenPrice(null);
+      setIsTokenMetaLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsTokenMetaLoading(true);
+
+    void Promise.allSettled([
+      getToken(tokenId, controller.signal),
+      getTokenPrice(tokenId, controller.signal),
+    ])
+      .then(([tokenResult, priceResult]) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        if (tokenResult.status === 'fulfilled') {
+          setTokenCatalog(tokenResult.value);
+        } else {
+          setTokenCatalog(null);
+          logging.warn('Token catalog metadata unavailable for risk summary', {
+            error: tokenResult.reason,
+            tokenId,
+          });
+        }
+
+        if (priceResult.status === 'fulfilled') {
+          setTokenPrice(priceResult.value);
+        } else {
+          setTokenPrice(null);
+          logging.warn('Token price metadata unavailable for risk summary', {
+            error: priceResult.reason,
+            tokenId,
+          });
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsTokenMetaLoading(false);
         }
       });
 
@@ -367,6 +435,64 @@ export function RiskBreakdownTab({
         </div>
       ) : null}
 
+      {!errorMessage ? (
+        <div
+          className={css({
+            display: 'grid',
+            gridTemplateColumns: {
+              base: '1fr',
+              md: 'repeat(2, minmax(0, 1fr))',
+            },
+            gap: '3',
+          })}
+        >
+          <SummaryMetric
+            label="Token catalog"
+            value={
+              isTokenMetaLoading
+                ? 'Loading...'
+                : (tokenCatalog?.symbol ??
+                  selectedReceiptToken.underlying_symbol)
+            }
+            detail={
+              isTokenMetaLoading
+                ? 'Fetching token metadata'
+                : tokenCatalog
+                  ? `${tokenCatalog.address} · ${tokenCatalog.decimals ?? 'Unknown'} decimals`
+                  : 'Token metadata unavailable'
+            }
+          />
+          <SummaryMetric
+            label="Current price"
+            value={
+              isTokenMetaLoading
+                ? 'Loading...'
+                : tokenPrice
+                  ? formatUsdValue(tokenPrice.price_usd)
+                  : 'Unavailable'
+            }
+            detail={
+              isTokenMetaLoading
+                ? 'Fetching price metadata'
+                : tokenPrice
+                  ? tokenPrice.timestamp != null
+                    ? [
+                        `${tokenPrice.source_name} (${tokenPrice.source_type})`,
+                        tokenPrice.staleness_seconds != null
+                          ? `${formatDurationFromSeconds(tokenPrice.staleness_seconds)} stale`
+                          : null,
+                        formatFreshnessLabel(tokenPrice.timestamp),
+                        formatDateTime(tokenPrice.timestamp),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')
+                    : 'Price data currently unavailable'
+                  : 'Price metadata unavailable'
+            }
+          />
+        </div>
+      ) : null}
+
       {!errorMessage && isLoading && !summary ? (
         <SkeletonStack count={4} itemHeight={88} />
       ) : null}
@@ -405,6 +531,9 @@ export function RiskBreakdownTab({
       <MethodologyPanel
         isOpen={isMethodologyOpen}
         onToggle={() => setIsMethodologyOpen(!isMethodologyOpen)}
+        selectedChainId={selectedReceiptToken.chain_id}
+        selectedTokenId={selectedReceiptToken.underlying_token_id}
+        selectedTokenSymbol={selectedReceiptToken.underlying_symbol}
       />
     </div>
   );

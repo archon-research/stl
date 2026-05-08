@@ -5,15 +5,28 @@ import ReactMarkdown from 'react-markdown';
 
 import { css } from '#styled-system/css';
 
-import { getDataSources } from '../../lib/api';
+import {
+  getDataSources,
+  getToken,
+  getTokenPrice,
+  getTokens,
+} from '../../lib/api';
+import {
+  formatDateTime,
+  formatFreshnessLabel,
+  formatUsdValue,
+} from '../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
-import type { DataSource } from '../../types/allocation';
+import type { DataSource, Token, TokenPrice } from '../../types/allocation';
 import { ErrorState } from './index';
 
 type MethodologyPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
+  selectedTokenId?: number | null;
+  selectedTokenSymbol?: string | null;
+  selectedChainId?: number;
 };
 
 const METHODOLOGY_MARKDOWN = `## Internal Data (STL)
@@ -27,11 +40,22 @@ const METHODOLOGY_MARKDOWN = `## Internal Data (STL)
 - Activity/event feed surfaces indexed allocation events and supports URL filtering
 `;
 
-export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
+export function MethodologyPanel({
+  isOpen,
+  onToggle,
+  selectedTokenId,
+  selectedTokenSymbol,
+  selectedChainId,
+}: MethodologyPanelProps) {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [methodologyText] = useState<string>(METHODOLOGY_MARKDOWN);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [catalogPreviewCount, setCatalogPreviewCount] = useState<number>(0);
+  const [selectedToken, setSelectedToken] = useState<Token | null>(null);
+  const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
+  const [isTokenLoading, setIsTokenLoading] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
@@ -67,6 +91,103 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
 
     return () => abortController.abort();
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    if (selectedTokenId === null || selectedTokenId === undefined) {
+      setSelectedToken(null);
+      setTokenPrice(null);
+      setCatalogPreviewCount(0);
+      setTokenError(null);
+      setIsTokenLoading(false);
+      return;
+    }
+
+    const tokenId = Number(selectedTokenId);
+    if (!Number.isFinite(tokenId)) {
+      setSelectedToken(null);
+      setTokenPrice(null);
+      setCatalogPreviewCount(0);
+      setTokenError('Invalid token identifier');
+      setIsTokenLoading(false);
+      return;
+    }
+
+    const abortController = new AbortController();
+
+    async function fetchTokenTransparency() {
+      setIsTokenLoading(true);
+      setTokenError(null);
+      setSelectedToken(null);
+      setTokenPrice(null);
+      setCatalogPreviewCount(0);
+
+      const [tokenResult, tokenPriceResult, tokensResult] =
+        await Promise.allSettled([
+          getToken(tokenId, abortController.signal),
+          getTokenPrice(tokenId, abortController.signal),
+          getTokens(
+            {
+              chain_id: selectedChainId,
+              symbol: selectedTokenSymbol ?? undefined,
+              limit: 200,
+            },
+            abortController.signal,
+          ),
+        ]);
+
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      if (tokenResult.status === 'fulfilled') {
+        setSelectedToken(tokenResult.value);
+      } else {
+        setSelectedToken(null);
+        const errorMsg = toErrorMessage(tokenResult.reason);
+        setTokenError(errorMsg);
+        logging.error('Failed to fetch selected token from catalog', {
+          error: tokenResult.reason,
+          errorMessage: errorMsg,
+          selectedTokenId: tokenId,
+          selectedChainId,
+        });
+      }
+
+      if (tokenPriceResult.status === 'fulfilled') {
+        setTokenPrice(tokenPriceResult.value);
+      } else {
+        setTokenPrice(null);
+        const errorMsg = toErrorMessage(tokenPriceResult.reason);
+        setTokenError((previous) => previous ?? errorMsg);
+        logging.error('Failed to fetch selected token price', {
+          error: tokenPriceResult.reason,
+          errorMessage: errorMsg,
+          selectedTokenId: tokenId,
+        });
+      }
+
+      if (tokensResult.status === 'fulfilled') {
+        setCatalogPreviewCount(tokensResult.value.length);
+      } else {
+        logging.warn('Failed to fetch token catalog preview', {
+          error: tokensResult.reason,
+          selectedChainId,
+          selectedTokenSymbol,
+        });
+        setCatalogPreviewCount(0);
+      }
+
+      setIsTokenLoading(false);
+    }
+
+    void fetchTokenTransparency();
+
+    return () => abortController.abort();
+  }, [isOpen, selectedChainId, selectedTokenId, selectedTokenSymbol]);
 
   return (
     <div
@@ -164,6 +285,144 @@ export function MethodologyPanel({ isOpen, onToggle }: MethodologyPanelProps) {
               >
                 <ReactMarkdown>{methodologyText}</ReactMarkdown>
               </div>
+            </div>
+
+            <div className={css({ display: 'grid', gap: '3' })}>
+              <h3
+                className={css({
+                  fontSize: 'sm',
+                  fontWeight: 'semibold',
+                  color: 'text.strong',
+                  mb: '2',
+                })}
+              >
+                Token Catalog & Price
+              </h3>
+
+              {!selectedTokenId ? (
+                <p
+                  className={css({
+                    m: 0,
+                    fontSize: 'xs',
+                    color: 'text.default',
+                  })}
+                >
+                  Select a receipt token to view matching token-catalog metadata
+                  and latest indexed token price.
+                </p>
+              ) : null}
+
+              {selectedTokenId && isTokenLoading ? (
+                <SkeletonStack count={2} />
+              ) : null}
+
+              {selectedTokenId && tokenError ? (
+                <p
+                  className={css({
+                    m: 0,
+                    fontSize: 'xs',
+                    color: 'text.warning',
+                  })}
+                >
+                  Failed to load token transparency metadata: {tokenError}
+                </p>
+              ) : null}
+
+              {selectedTokenId && !isTokenLoading && selectedToken ? (
+                <div
+                  className={css({
+                    borderWidth: '1px',
+                    borderStyle: 'solid',
+                    borderColor: 'border.subtle',
+                    borderRadius: 'md',
+                    bg: 'surface.subtle',
+                    p: '3',
+                    display: 'grid',
+                    gap: '1.5',
+                    fontSize: 'xs',
+                    color: 'text.default',
+                  })}
+                >
+                  <div>
+                    <span
+                      className={css({
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Catalog Token:
+                    </span>{' '}
+                    {selectedToken.symbol ?? 'Unknown'} (ID {selectedToken.id})
+                  </div>
+                  <div>Address: {selectedToken.address}</div>
+                  <div>Chain: {selectedToken.chain_id}</div>
+                  <div>Decimals: {selectedToken.decimals ?? 'Unknown'}</div>
+                  <div>
+                    Catalog updated: {formatDateTime(selectedToken.updated_at)}
+                  </div>
+                  <div>
+                    Metadata keys:{' '}
+                    {selectedToken.metadata
+                      ? Object.keys(selectedToken.metadata).join(', ') || 'None'
+                      : 'None'}
+                  </div>
+                  <div>
+                    Matching catalog rows (chain/symbol preview):{' '}
+                    {catalogPreviewCount}
+                  </div>
+                </div>
+              ) : null}
+
+              {selectedTokenId && !isTokenLoading && tokenPrice ? (
+                <div
+                  className={css({
+                    borderWidth: '1px',
+                    borderStyle: 'solid',
+                    borderColor: 'border.subtle',
+                    borderRadius: 'md',
+                    bg: 'surface.default',
+                    p: '3',
+                    display: 'grid',
+                    gap: '1.5',
+                    fontSize: 'xs',
+                    color: 'text.default',
+                  })}
+                >
+                  <div>
+                    <span
+                      className={css({
+                        fontWeight: 'semibold',
+                        color: 'text.strong',
+                      })}
+                    >
+                      Latest Price:
+                    </span>{' '}
+                    {tokenPrice.is_stale || tokenPrice.price_usd == null
+                      ? 'Price unavailable'
+                      : formatUsdValue(tokenPrice.price_usd)}
+                  </div>
+                  {!tokenPrice.is_stale && (
+                    <>
+                      <div>
+                        Source:{' '}
+                        {tokenPrice.source_display_name ??
+                          tokenPrice.source_name}{' '}
+                        ({tokenPrice.source_type})
+                      </div>
+                      <div>Source ID: {tokenPrice.source_id}</div>
+                    </>
+                  )}
+                  {tokenPrice.timestamp != null && (
+                    <div>
+                      Timestamp: {formatDateTime(tokenPrice.timestamp)} (
+                      {formatFreshnessLabel(tokenPrice.timestamp)})
+                    </div>
+                  )}
+                  {tokenPrice.staleness_seconds != null && (
+                    <div>Staleness: {tokenPrice.staleness_seconds}s</div>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             {/* Data Sources table */}
