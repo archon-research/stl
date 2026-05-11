@@ -136,12 +136,13 @@ func TestIsMetaMorphoEvent(t *testing.T) {
 	}
 }
 
-// TestIsVaultActivityEvent codifies the invariant that Transfer is excluded
-// from the live-indexer discovery trigger. See VEC-198 multicall-gas-cap fix:
-// without this gate, plain ERC20 Transfer logs from legacy contracts (BAT,
-// STORJ, …) would route into tryDiscoverVault, where the 4-call probe blows
-// past Alchemy's 550M eth_call gas cap on contracts whose fallback runs
-// `INVALID` (0xfe).
+// TestIsVaultActivityEvent codifies the discovery-gate contract: only the
+// Morpho VaultV2 4-field AccrueInterest topic triggers a probe. V1/V1.1
+// vaults (Deposit, Withdraw, V1 2-field AccrueInterest) are discovered via
+// the Morpho Blue path instead, and Transfer is excluded so plain ERC20s
+// don't blow past Alchemy's 550M eth_call gas cap on legacy fallback
+// `INVALID` (0xfe) — see VEC-198 multicall-gas-cap fix and the
+// IsVaultActivityEvent docstring.
 func TestIsVaultActivityEvent(t *testing.T) {
 	e, err := NewEventExtractor()
 	if err != nil {
@@ -166,12 +167,15 @@ func TestIsVaultActivityEvent(t *testing.T) {
 		log    shared.Log
 		expect bool
 	}{
-		{name: "Deposit", log: shared.Log{Topics: []string{depositTopic}}, expect: true},
-		{name: "Withdraw", log: shared.Log{Topics: []string{withdrawTopic}}, expect: true},
-		{name: "AccrueInterest V1/V1.1 (2-field)", log: shared.Log{Topics: []string{accrueV1Topic}}, expect: true},
+		// The only discovery-trigger topic.
 		{name: "AccrueInterest V2 (4-field)", log: shared.Log{Topics: []string{accrueV2Topic}}, expect: true},
 
-		// The point of the gate — these must NOT trigger discovery.
+		// V1/V1.1 events are discovered via Morpho Blue, not via this gate.
+		{name: "Deposit (V1/V1.1, discovered via Morpho Blue)", log: shared.Log{Topics: []string{depositTopic}}, expect: false},
+		{name: "Withdraw (V1/V1.1, discovered via Morpho Blue)", log: shared.Log{Topics: []string{withdrawTopic}}, expect: false},
+		{name: "AccrueInterest V1/V1.1 (2-field, discovered via Morpho Blue)", log: shared.Log{Topics: []string{accrueV1Topic}}, expect: false},
+
+		// Excluded for gas-cap and family-of-events reasons.
 		{name: "ERC20 Transfer", log: shared.Log{Topics: []string{transferTopic}}, expect: false},
 		{name: "Morpho Blue Supply (different family)", log: shared.Log{Topics: []string{supplyTopic}}, expect: false},
 		{name: "unknown topic", log: shared.Log{Topics: []string{"0x0000000000000000000000000000000000000000000000000000000000000001"}}, expect: false},

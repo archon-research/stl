@@ -79,6 +79,17 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	}
 	svc.ctx, svc.cancel = context.WithCancel(context.Background())
 
+	// Pre-seed the not-vault cache with the canonical "user" addresses so the
+	// V1/V1.1 Morpho Blue caller/onBehalf discovery probe (added to close the
+	// post-IsVaultActivityEvent-narrowing gap) doesn't unexpectedly fire on
+	// every existing Supply/Withdraw/Borrow/etc. test that uses these
+	// addresses as positional users. Tests that want to exercise the Morpho
+	// Blue path discovery should pick a fresh address that is NOT pre-marked.
+	svc.vaultRegistry.MarkNotVault(testCaller)
+	svc.vaultRegistry.MarkNotVault(testOnBehalf)
+	svc.vaultRegistry.MarkNotVault(testReceiver)
+	svc.vaultRegistry.MarkNotVault(testBorrower)
+
 	// Load ABIs for packing return data.
 	morphoBlueReadABI, err := abis.GetMorphoBlueReadABI()
 	if err != nil {
@@ -643,6 +654,16 @@ func (h *serviceTestHarness) makeVaultAccrueInterestV1Log(vaultAddr common.Addre
 		TransactionHash: testTxHash,
 		LogIndex:        "0x0",
 	}
+}
+
+// makeDiscoveryTriggerLog returns a discovery-trigger log (Morpho VaultV2
+// 4-field AccrueInterest) for the given vault address with arbitrary but
+// valid payload. Use this in tests where the goal is to exercise the
+// unknown-vault discovery path; the specific event contents don't matter,
+// only the topic. Mirrors the live indexer's discovery gate (see
+// IsVaultActivityEvent).
+func (h *serviceTestHarness) makeDiscoveryTriggerLog(vaultAddr common.Address) shared.Log {
+	return h.makeVaultAccrueInterestV2Log(vaultAddr, big.NewInt(2900000), big.NewInt(3000000), big.NewInt(200), big.NewInt(150))
 }
 
 // makeVaultAccrueInterestV2Log creates a Morpho VaultV2 AccrueInterest event

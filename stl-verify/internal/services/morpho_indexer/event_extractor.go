@@ -22,10 +22,14 @@ type EventExtractor struct {
 	metaMorphoABI        *abi.ABI
 	metaMorphoSignatures map[common.Hash]*abi.Event
 
-	// vaultActivitySignatures is a subset of metaMorphoSignatures excluding
-	// the ERC20 Transfer topic, which every fungible token emits. Used by the
-	// backfiller to discover candidate vault contracts via their own logs
-	// without polluting the candidate set with every ERC20 in existence.
+	// vaultActivitySignatures is the discovery-trigger topic set: only the
+	// Morpho VaultV2 4-field AccrueInterest topic. See IsVaultActivityEvent
+	// for the rationale on narrowing — V1/V1.1 are discovered via Morpho
+	// Blue, V2 always emits AccrueInterest first in any state-changing
+	// transaction. Same set is consumed by the live indexer
+	// (service.go's processReceipt default branch and hasRelevantEvents)
+	// and by the morpho-vault-indexer backfiller, so changes apply
+	// uniformly.
 	vaultActivitySignatures map[common.Hash]*abi.Event
 }
 
@@ -74,9 +78,6 @@ func (e *EventExtractor) loadABIs() error {
 			return fmt.Errorf("metaMorpho %s event not found in ABI", name)
 		}
 		e.metaMorphoSignatures[event.ID] = &event
-		if name != "Transfer" {
-			e.vaultActivitySignatures[event.ID] = &event
-		}
 	}
 
 	// Register VaultV2 AccrueInterest (different topic hash from the V1/V1.1
@@ -91,6 +92,9 @@ func (e *EventExtractor) loadABIs() error {
 		return fmt.Errorf("VaultV2 AccrueInterest event not found in ABI")
 	}
 	e.metaMorphoSignatures[v2Event.ID] = &v2Event
+	// Discovery-trigger set: V2 4-field AccrueInterest only. See
+	// IsVaultActivityEvent for the why; deliberately not including V1/V1.1
+	// Deposit/Withdraw/AccrueInterest here.
 	e.vaultActivitySignatures[v2Event.ID] = &v2Event
 
 	// Register the full VaultV2 governance / allocation / cap / fee / role /
@@ -136,12 +140,39 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 	return ok
 }
 
-// IsVaultActivityEvent returns true if the log matches a vault-activity event
-// (ERC4626 Deposit/Withdraw or AccrueInterest) — i.e. an event that, when
-// emitted by an unknown contract, makes that contract a candidate vault.
+// IsVaultActivityEvent returns true if the log matches the discovery-trigger
+// event — Morpho VaultV2's 4-field AccrueInterest. An unknown contract emitting
+// this event becomes a candidate vault.
 //
-// Excludes ERC20 Transfer to avoid treating every fungible token as a vault
-// candidate during backfill discovery.
+// Why narrow to V2-only:
+//
+//   - V1/V1.1 vaults are discovered via the Morpho Blue path: their address
+//     appears as caller / onBehalf in Morpho Blue Supply / Withdraw / Borrow /
+//     Repay events when they allocate, and the live indexer (service.go's
+//     discoverV1V11VaultsInReceipt) plus the morpho-vault-indexer
+//     backfiller (emitMorphoBlueCandidates) probe those addresses. The V1/V1.1
+//     factories remain deployed and callable; the live indexer's coverage
+//     does not assume otherwise.
+//   - V2 contracts call _accrueInterest() unconditionally at the top of every
+//     state-changing entry point (deposit, withdraw, redeem, mint, allocate,
+//     deallocate, forceDeallocate). AccrueInterest fires before any other event
+//     in the same transaction's log_index order, so discovery on this single
+//     topic catches the vault before any subsequent log it might emit.
+//   - The 4-field AccrueInterest topic is unique to V2 (V1/V1.1 use a 2-field
+//     variant with a different keccak). The narrow gate keeps the live
+//     indexer's probe well clear of unrelated ERC4626 noise and legacy
+//     ERC20s whose fallback runs `INVALID` (0xfe) and trips Multicall3's
+//     gas budget — see VEC-198 multicall-gas-cap fix.
+//   - Same gate is used by both the live indexer (service.go's processReceipt
+//     default branch and hasRelevantEvents) and the morpho-vault-indexer
+//     backfiller's extractCandidatesFromReceipts. Single source of truth for
+//     "what makes an unknown contract worth probing" — narrowing here narrows
+//     both code paths uniformly.
+//
+// Trade-off: a V2 vault that's been deployed but has not yet taken its first
+// state-changing call (so AccrueInterest never fired) won't be discovered until
+// it does. Vaults without deposits have no positions to track, so this is
+// acceptable for VEC-198's TVL-finding goal.
 func (e *EventExtractor) IsVaultActivityEvent(log shared.Log) bool {
 	if len(log.Topics) == 0 {
 		return false

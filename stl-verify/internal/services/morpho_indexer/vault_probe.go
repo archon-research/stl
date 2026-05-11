@@ -111,6 +111,16 @@ const vaultProbeCallsPerAddress = 4
 // Number of details calls per address (name, symbol, decimals, skimRecipient).
 const vaultDetailsCallsPerAddress = 4
 
+// NumProbeCalls returns the number of multicall sub-calls a single
+// ProbeCalls(addr) batch contributes. Single source of truth for callers
+// that pack multi-address batches and need to slice the flat result array
+// back into per-address windows.
+func (p *VaultProber) NumProbeCalls() int { return vaultProbeCallsPerAddress }
+
+// NumDetailsCalls returns the number of multicall sub-calls a single
+// DetailsCalls(addr) batch contributes. Same rationale as NumProbeCalls.
+func (p *VaultProber) NumDetailsCalls() int { return vaultDetailsCallsPerAddress }
+
 // NewVaultProber creates a VaultProber with pre-packed ABI call data.
 func NewVaultProber() (*VaultProber, error) {
 	metaMorphoABI, err := abis.GetMetaMorphoReadABI()

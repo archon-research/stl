@@ -666,20 +666,33 @@ func downloadReceipts(
 }
 
 // extractCandidatesFromReceipts scans receipts for Morpho Blue events and
-// vault-activity events (Deposit/Withdraw/AccrueInterest), sending the
-// resulting candidate addresses to candidateCh.
+// VaultV2 4-field AccrueInterest events, sending the resulting candidate
+// addresses to candidateCh.
 //
 // Two discovery paths feed into the candidate set:
 //
 //  1. Morpho Blue events emitted by the singleton — caller/onBehalf addresses
 //     are candidates because MetaMorpho V1/V1.1 vaults call into Morpho Blue.
-//  2. Vault-activity events emitted by any other contract — the emitter
-//     itself is the candidate, regardless of who called it. This covers
-//     Morpho VaultV2 vaults (e.g. sparkUSDTbc) that do not interact with
-//     Morpho Blue and therefore never appear via path 1.
+//  2. VaultV2 AccrueInterest events emitted by any other contract — the
+//     emitter itself is the candidate. Morpho VaultV2 (e.g. sparkUSDTbc) does
+//     not interact with Morpho Blue and never appears via path 1, but every
+//     state-changing V2 transaction calls _accrueInterest() at the top of the
+//     entry point, so the 4-field AccrueInterest topic catches every V2 vault
+//     on its first observable activity.
 //
-// ERC20 Transfer is intentionally excluded from path 2 — every fungible
-// token emits it, and the on-chain probe is not free.
+// Path 2 is deliberately narrowed to the V2 4-field AccrueInterest topic only:
+//
+//   - Pre-V2 vaults (V1, V1.1) are already covered by path 1.
+//   - The V2 4-field AccrueInterest topic hash is unique to V2 and acts as an
+//     implicit "V2-deploy onwards" filter without an explicit block gate.
+//   - It keeps the candidate set free of every fungible token's ERC20 Transfer
+//     noise and unrelated ERC4626 vault activity. The on-chain probe is not
+//     free, and some legacy tokens consume all gas on unknown selectors
+//     (see VEC-198 multicall gas-cap fix).
+//
+// Both this backfiller and the live indexer share IsVaultActivityEvent (see
+// internal/services/morpho_indexer/event_extractor.go) so the discovery
+// contract stays uniform across the two code paths.
 func extractCandidatesFromReceipts(
 	logger *slog.Logger,
 	receipts []shared.TransactionReceipt,
@@ -721,34 +734,11 @@ func emitMorphoBlueCandidates(
 		return
 	}
 
-	for _, addr := range candidateAddresses(event) {
+	for _, addr := range morpho_indexer.MorphoBlueVaultCandidates(event) {
 		if addr == (common.Address{}) {
 			continue
 		}
 		candidateCh <- candidateEntry{address: addr, firstBlock: blockNumber}
-	}
-}
-
-// candidateAddresses returns addresses from a Morpho Blue event that could
-// be MetaMorpho vaults — the caller and onBehalf fields.
-func candidateAddresses(event morpho_indexer.MorphoBlueEvent) []common.Address {
-	switch e := event.(type) {
-	case *morpho_indexer.SupplyEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *morpho_indexer.WithdrawEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *morpho_indexer.BorrowEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *morpho_indexer.RepayEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *morpho_indexer.SupplyCollateralEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *morpho_indexer.WithdrawCollateralEvent:
-		return []common.Address{e.Caller, e.OnBehalf}
-	case *morpho_indexer.LiquidateEvent:
-		return []common.Address{e.Caller, e.Borrower}
-	default:
-		return nil
 	}
 }
 

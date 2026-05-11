@@ -37,16 +37,6 @@ type vaultProber struct {
 	logger       *slog.Logger
 }
 
-// callsPerProbe is how many sub-calls each candidate address consumes during
-// the probe phase. Mirrors the multicall layout in
-// morpho_indexer.VaultProber.ProbeCalls.
-const callsPerProbe = 4
-
-// callsPerMetadata is how many sub-calls each confirmed vault consumes during
-// the metadata phase: 4 details (name, symbol, decimals, skimRecipient) + 1
-// asset symbol from the underlying ERC20.
-const callsPerMetadata = 5
-
 // probeAllCandidates checks each candidate address by calling the shared probe
 // (MORPHO/asset/curator/liquidityAdapter) via multicall. Returns confirmed
 // vaults with their metadata.
@@ -140,14 +130,15 @@ type confirmedProbe struct {
 }
 
 // probeBatch probes a batch of candidate addresses. For each address, it calls
-// the shared 4-call probe in a single multicall. Confirmed vaults get their
-// metadata fetched in a follow-up multicall.
+// the shared probe in a single multicall. Confirmed vaults get their metadata
+// fetched in a follow-up multicall.
 func (p *vaultProber) probeBatch(
 	ctx context.Context,
 	batch []common.Address,
 	firstBlocks map[common.Address]int64,
 	blockNum *big.Int,
 ) ([]confirmedVault, error) {
+	callsPerProbe := p.sharedProber.NumProbeCalls()
 	calls := make([]outbound.Call, 0, len(batch)*callsPerProbe)
 	for _, addr := range batch {
 		calls = append(calls, p.sharedProber.ProbeCalls(addr)...)
@@ -182,6 +173,7 @@ func (p *vaultProber) probeBatch(
 // the caller can decide how to retry — silently dropping such errors causes
 // the candidate to disappear from the backfill run with no recoverable trail.
 func (p *vaultProber) collectProbeConfirmed(batch []common.Address, results []outbound.Result) ([]confirmedProbe, error) {
+	callsPerProbe := p.sharedProber.NumProbeCalls()
 	confirmed := make([]confirmedProbe, 0, len(batch))
 	for i, addr := range batch {
 		base := i * callsPerProbe
@@ -221,6 +213,10 @@ func (p *vaultProber) fetchVaultMetadata(
 		return nil, fmt.Errorf("packing asset symbol: %w", err)
 	}
 
+	// Per-vault window: the prober's details calls plus one trailing asset
+	// symbol call we tack on. Keep the +1 here as the only place that knows
+	// about the asset-symbol extension.
+	callsPerMetadata := p.sharedProber.NumDetailsCalls() + 1
 	calls := make([]outbound.Call, 0, len(probeConfirmed)*callsPerMetadata)
 	for _, pc := range probeConfirmed {
 		calls = append(calls, p.sharedProber.DetailsCalls(pc.address)...)
