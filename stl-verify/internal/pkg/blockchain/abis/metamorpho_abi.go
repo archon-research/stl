@@ -2,7 +2,14 @@ package abis
 
 import "github.com/ethereum/go-ethereum/accounts/abi"
 
-// GetMetaMorphoV1EventsABI returns the ABI for MetaMorpho V1 vault events.
+// GetMetaMorphoV1EventsABI returns the ABI for MetaMorpho V1 / V1.1 vault events.
+//
+// Both V1 and V1.1 emit the standard ERC4626 Deposit/Withdraw, ERC20 Transfer,
+// and a 2-arg AccrueInterest (same topic hash on both — V1.1 only differs on
+// the read surface, not on the AccrueInterest signature). Morpho VaultV2
+// inherits ERC4626 and ERC20 so its Deposit/Withdraw/Transfer logs use the
+// same topic hashes; its AccrueInterest is 4-field and lives in a separate
+// ABI (see GetMetaMorphoV2AccrueInterestABI).
 func GetMetaMorphoV1EventsABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -50,10 +57,12 @@ func GetMetaMorphoV1EventsABI() (*abi.ABI, error) {
 	]`)
 }
 
-// GetMetaMorphoV2AccrueInterestABI returns a separate ABI for the V2 AccrueInterest event.
-// V2 has a different signature: AccrueInterest(uint256,uint256,uint256,uint256) vs V1's AccrueInterest(uint256,uint256).
-// V2 fields: previousTotalAssets, newTotalAssets, performanceFeeShares, managementFeeShares.
-// Since go-ethereum can't have two events with the same name in one ABI, this must be a separate ABI.
+// GetMetaMorphoV2AccrueInterestABI returns a separate ABI for the Morpho
+// VaultV2 AccrueInterest event, which has 4 fields rather than V1/V1.1's 2.
+//
+// V2 fields: previousTotalAssets, newTotalAssets, performanceFeeShares,
+// managementFeeShares. Since go-ethereum can't have two events with the same
+// name in one ABI, this must live in its own ABI from V1 / V1.1.
 func GetMetaMorphoV2AccrueInterestABI() (*abi.ABI, error) {
 	return ParseABI(`[{
 		"anonymous": false,
@@ -68,7 +77,12 @@ func GetMetaMorphoV2AccrueInterestABI() (*abi.ABI, error) {
 	}]`)
 }
 
-// GetMetaMorphoReadABI returns the ABI for MetaMorpho vault read functions.
+// GetMetaMorphoReadABI returns the ABI for MetaMorpho V1 / V1.1 read functions.
+//
+// MORPHO() and skimRecipient() are MetaMorpho-only — VaultV2 reverts on these
+// (see GetVaultV2ReadABI for VaultV2 selectors). The shared selectors
+// (totalAssets, totalSupply, balanceOf, name, symbol, asset, decimals) are
+// included here so a single ABI handle can decode reads on any vault flavour.
 func GetMetaMorphoReadABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -130,6 +144,31 @@ func GetMetaMorphoReadABI() (*abi.ABI, error) {
 		{
 			"inputs": [],
 			"name": "skimRecipient",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`)
+}
+
+// GetVaultV2ReadABI returns the ABI for Morpho VaultV2-specific read functions.
+//
+// VaultV2 (deployed by 0xa1d94f746defa1928926b84fb2596c06926c0405 on mainnet)
+// shares the ERC4626/ERC20 surface with MetaMorpho but reverts on MORPHO() and
+// skimRecipient(). Its presence is identified by curator() and
+// liquidityAdapter() returning addresses successfully.
+func GetVaultV2ReadABI() (*abi.ABI, error) {
+	return ParseABI(`[
+		{
+			"inputs": [],
+			"name": "curator",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "liquidityAdapter",
 			"outputs": [{"name": "", "type": "address"}],
 			"stateMutability": "view",
 			"type": "function"

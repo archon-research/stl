@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -273,14 +274,13 @@ func TestGetVaultMetadata_AllCallsAllowFailure(t *testing.T) {
 				t.Errorf("call %d has AllowFailure=false; all calls must allow failure so Multicall3 does not revert on non-vault contracts", i)
 			}
 		}
-		switch len(calls) {
-		case 2:
-			return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-		case 4:
-			return h.vaultDetailResults("Vault", "V", 18, false), nil
-		default:
+		if len(calls) != 4 {
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
+		if h.isProbeMulticall(calls) {
+			return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+		}
+		return h.vaultDetailResults("Vault", "V", 18, false), nil
 	}
 
 	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
@@ -291,16 +291,14 @@ func TestGetVaultMetadata_AllCallsAllowFailure(t *testing.T) {
 
 func TestGetVaultMetadata_NonVaultContract(t *testing.T) {
 	h := newTestHarness(t)
-	// Simulate calling a plain ERC20 (e.g. USDC) — MORPHO() and asset() fail
-	// because they don't exist on ERC20 contracts. The probe multicall detects this.
+	// Simulate calling a plain ERC20 (e.g. USDC) — every probe selector
+	// (MORPHO, asset, curator, liquidityAdapter) reverts because none of them
+	// exist on ERC20 contracts.
 	erc20Addr := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
-			return []outbound.Result{
-				{Success: false, ReturnData: nil}, // MORPHO() reverts
-				{Success: false, ReturnData: nil}, // asset() reverts
-			}, nil
+		if h.isProbeMulticall(calls) {
+			return h.notAVaultProbeResults(), nil
 		}
 		t.Fatal("detail multicall should not be called for non-vault contract")
 		return nil, nil
@@ -310,8 +308,12 @@ func TestGetVaultMetadata_NonVaultContract(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-vault contract")
 	}
-	if !strings.Contains(err.Error(), "not a MetaMorpho vault") {
-		t.Errorf("error should indicate not a vault, got: %s", err.Error())
+	var nv *ErrNotVault
+	if !errors.As(err, &nv) {
+		t.Errorf("error should be ErrNotVault, got: %T %s", err, err.Error())
+	}
+	if nv != nil && nv.VaultShaped {
+		t.Error("plain ERC20 should not be flagged VaultShaped — every probe selector reverted")
 	}
 }
 
@@ -321,7 +323,7 @@ func TestGetVaultMetadata_WrongMorphoAddress(t *testing.T) {
 
 	wrongAddr := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
+		if h.isProbeMulticall(calls) {
 			return h.vaultProbeResults(wrongAddr, testLoanToken), nil
 		}
 		t.Fatal("detail multicall should not be called for wrong MORPHO address")
@@ -335,26 +337,85 @@ func TestGetVaultMetadata_WrongMorphoAddress(t *testing.T) {
 	if !strings.Contains(err.Error(), "not a MetaMorpho vault") {
 		t.Errorf("error should indicate not a vault, got: %s", err.Error())
 	}
+	// MORPHO returned an address — the contract is shape-confirmed, just not
+	// pointing at our singleton. The WARN-on-rejection signal must fire so a
+	// future foreign Morpho deployment doesn't sit invisible.
+	var nv *ErrNotVault
+	if !errors.As(err, &nv) {
+		t.Fatalf("error should unwrap to *ErrNotVault, got: %T", err)
+	}
+	if !nv.VaultShaped {
+		t.Error("VaultShaped must be true when MORPHO() returns an address")
+	}
 }
 
-func TestGetVaultMetadata_MorphoReverts(t *testing.T) {
+func TestGetVaultMetadata_MorphoReverts_WithoutV2Markers(t *testing.T) {
+	// MORPHO() reverts and there are no V2 markers either — should be rejected
+	// as a non-vault. (When MORPHO reverts but curator+liquidityAdapter
+	// succeed, the address is recognised as a Morpho VaultV2 instead — that
+	// path is covered by TestGetVaultMetadata_VaultV2.)
 	h := newTestHarness(t)
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
+		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
-				{Success: false, ReturnData: nil}, // MORPHO() reverts
-				{Success: true, ReturnData: h.packAddress(testLoanToken)},
+				{Success: false, ReturnData: nil},                         // MORPHO reverts
+				{Success: true, ReturnData: h.packAddress(testLoanToken)}, // asset succeeds
+				{Success: false, ReturnData: nil},                         // curator reverts
+				{Success: false, ReturnData: nil},                         // liquidityAdapter reverts
 			}, nil
 		}
-		t.Fatal("detail multicall should not be called when MORPHO() reverts")
+		t.Fatal("detail multicall should not be called when MORPHO() reverts and V2 markers also fail")
 		return nil, nil
 	}
 
 	_, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 20000000)
 	if err == nil {
-		t.Fatal("expected error when MORPHO() reverts")
+		t.Fatal("expected error when MORPHO() reverts and V2 markers also fail")
+	}
+	var nv *ErrNotVault
+	if !errors.As(err, &nv) {
+		t.Fatalf("error should unwrap to *ErrNotVault, got: %T", err)
+	}
+	if nv.VaultShaped {
+		t.Error("VaultShaped must be false when MORPHO() and all V2 markers fail")
+	}
+}
+
+// TestGetVaultMetadata_VaultV2 covers the new V2 probe fallback (VEC-198):
+// MORPHO() reverts but curator() and liquidityAdapter() succeed, so the
+// vault is recognised as a VaultV2 rather than rejected.
+func TestGetVaultMetadata_VaultV2(t *testing.T) {
+	h := newTestHarness(t)
+	vaultAddr := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22") // sparkUSDTbc
+	curator := common.HexToAddress("0x0f96000000000000000000000000000000000046A3")
+	liquidityAdapter := common.HexToAddress("0x7481000000000000000000000000000000007dC2")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if h.isProbeMulticall(calls) {
+			return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+		}
+		if len(calls) == 4 {
+			// skim revert here: V2 vaults have no skimRecipient, so the
+			// details phase should keep version at V2.
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 18, false), nil
+		}
+		return nil, fmt.Errorf("unexpected %d calls", len(calls))
+	}
+
+	md, err := h.svc.blockchainSvc.getVaultMetadata(context.Background(), vaultAddr, 24481834)
+	if err != nil {
+		t.Fatalf("getVaultMetadata for VaultV2: %v", err)
+	}
+	if md.Version != entity.MorphoVaultV2 {
+		t.Errorf("Version = %d, want VaultV2 (%d)", md.Version, entity.MorphoVaultV2)
+	}
+	if md.Symbol != "sparkUSDTbc" {
+		t.Errorf("Symbol = %q, want sparkUSDTbc", md.Symbol)
+	}
+	if md.Asset != testLoanToken {
+		t.Errorf("Asset = %s, want %s", md.Asset.Hex(), testLoanToken.Hex())
 	}
 }
 
@@ -383,7 +444,7 @@ func TestGetVaultMetadata_AssetZero(t *testing.T) {
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
+		if h.isProbeMulticall(calls) {
 			return h.vaultProbeResults(MorphoBlueAddress, common.Address{}), nil
 		}
 		t.Fatal("detail multicall should not be called for zero asset")
@@ -394,8 +455,19 @@ func TestGetVaultMetadata_AssetZero(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for zero asset address")
 	}
-	if !strings.Contains(err.Error(), "failed to get vault asset address") {
-		t.Errorf("error should mention asset, got: %s", err.Error())
+	if !strings.Contains(err.Error(), "asset() returned zero address") {
+		t.Errorf("error should mention zero-address asset, got: %s", err.Error())
+	}
+	// MORPHO succeeded with the canonical singleton, so the address is
+	// shape-confirmed even though asset() returned 0x0. The WARN-on-rejection
+	// signal must fire — this is the exact "future Morpho V3-or-similar
+	// exposes markers but reports asset() = 0" case the flag was added for.
+	var nv *ErrNotVault
+	if !errors.As(err, &nv) {
+		t.Fatalf("error should unwrap to *ErrNotVault, got: %T", err)
+	}
+	if !nv.VaultShaped {
+		t.Error("VaultShaped must be true when MORPHO succeeds and asset() returns 0x0")
 	}
 }
 
@@ -404,10 +476,12 @@ func TestGetVaultMetadata_AssetCallFailed(t *testing.T) {
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
+		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)}, // MORPHO() succeeds
 				{Success: false, ReturnData: nil},                             // asset() reverts
+				{Success: false, ReturnData: nil},                             // curator reverts (MetaMorpho)
+				{Success: false, ReturnData: nil},                             // liquidityAdapter reverts (MetaMorpho)
 			}, nil
 		}
 		t.Fatal("detail multicall should not be called when asset() fails")
@@ -428,10 +502,12 @@ func TestGetVaultMetadata_AssetUnpackError(t *testing.T) {
 	vaultAddr := common.HexToAddress("0xABCD")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
+		if h.isProbeMulticall(calls) {
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
 				{Success: true, ReturnData: []byte{0x01, 0x02}}, // garbage data that won't unpack
+				{Success: false, ReturnData: nil},               // curator reverts (MetaMorpho)
+				{Success: false, ReturnData: nil},               // liquidityAdapter reverts (MetaMorpho)
 			}, nil
 		}
 		t.Fatal("detail multicall should not be called when asset() unpack fails")
@@ -1303,5 +1379,136 @@ func TestGetMarketState_MarketCallFailed(t *testing.T) {
 	_, err := h.svc.blockchainSvc.getMarketState(context.Background(), testMarketID, 20000000)
 	if err == nil {
 		t.Fatal("expected error for failed market call")
+	}
+}
+
+// --- Idle-market support ---
+//
+// Morpho Blue allows markets where collateralToken = 0x0 ("idle markets" used as
+// liquidity buffers — vaults deposit assets without enabling borrowing). Calling
+// decimals() on the zero address returns empty data, which trips the
+// "decimals() returned no data" path in unpackTokenMetadataResults. The fix is
+// to short-circuit the zero address in getTokenMetadata / getTokenPairMetadata
+// to TokenMetadata{Symbol: "", Decimals: 0} without issuing any sub-call.
+//
+// See docs/morpho-indexer-idle-market-fix-plan.md.
+
+// TestGetTokenMetadata_ZeroAddressShortCircuits is the unit-level reproducer.
+// Pre-fix: this test fails because the multicall is invoked and the empty
+// decimals() return triggers an error. Post-fix: the zero address is recognised
+// up-front, the multicall is never issued, and an empty TokenMetadata is
+// returned.
+func TestGetTokenMetadata_ZeroAddressShortCircuits(t *testing.T) {
+	h := newTestHarness(t)
+
+	called := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		called = true
+		return nil, fmt.Errorf("multicaller should not be invoked for the zero address")
+	}
+
+	md, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), common.Address{}, 20000000)
+	if err != nil {
+		t.Fatalf("getTokenMetadata(0x0): %v", err)
+	}
+	if called {
+		t.Error("multicaller must not be invoked when token is the zero address")
+	}
+	if md.Symbol != "" {
+		t.Errorf("Symbol = %q, want empty string", md.Symbol)
+	}
+	if md.Decimals != 0 {
+		t.Errorf("Decimals = %d, want 0", md.Decimals)
+	}
+}
+
+// TestGetTokenPairMetadata_ZeroCollateral covers the canonical idle-market
+// shape: a real loan token on side A and the zero address on side B. The
+// multicall must be issued for tokenA only, never for tokenB. Returned tokenB
+// metadata must be the empty sentinel.
+func TestGetTokenPairMetadata_ZeroCollateral(t *testing.T) {
+	h := newTestHarness(t)
+
+	tokenA := common.HexToAddress("0x5F7827FDeb7c20b443265Fc2F40845B715385Ff2") // EURCV — same loan token as the production idle-market repro
+	tokenB := common.Address{}
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 2 {
+			return nil, fmt.Errorf("expected 2 calls (tokenA only), got %d", len(calls))
+		}
+		for i, c := range calls {
+			if c.Target != tokenA {
+				return nil, fmt.Errorf("call %d targets %s, want %s — zero side must be short-circuited", i, c.Target.Hex(), tokenA.Hex())
+			}
+		}
+		return h.tokenMetadataResults("EURCV", 18), nil
+	}
+
+	mdA, mdB, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), tokenA, tokenB, 20000000)
+	if err != nil {
+		t.Fatalf("getTokenPairMetadata(loan, 0x0): %v", err)
+	}
+	if mdA.Symbol != "EURCV" || mdA.Decimals != 18 {
+		t.Errorf("loan side: Symbol=%q Decimals=%d, want EURCV / 18", mdA.Symbol, mdA.Decimals)
+	}
+	if mdB.Symbol != "" || mdB.Decimals != 0 {
+		t.Errorf("collateral (zero) side: Symbol=%q Decimals=%d, want empty / 0", mdB.Symbol, mdB.Decimals)
+	}
+}
+
+// TestGetTokenPairMetadata_ZeroLoan symmetric counterpart — defensive coverage
+// even though Morpho Blue's createMarket does not appear to allow a zero
+// loan token in production. Establishes that the short-circuit is direction-
+// agnostic.
+func TestGetTokenPairMetadata_ZeroLoan(t *testing.T) {
+	h := newTestHarness(t)
+
+	tokenA := common.Address{}
+	tokenB := common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7") // USDT
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 2 {
+			return nil, fmt.Errorf("expected 2 calls (tokenB only), got %d", len(calls))
+		}
+		for i, c := range calls {
+			if c.Target != tokenB {
+				return nil, fmt.Errorf("call %d targets %s, want %s — zero side must be short-circuited", i, c.Target.Hex(), tokenB.Hex())
+			}
+		}
+		return h.tokenMetadataResults("USDT", 6), nil
+	}
+
+	mdA, mdB, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), tokenA, tokenB, 20000000)
+	if err != nil {
+		t.Fatalf("getTokenPairMetadata(0x0, USDT): %v", err)
+	}
+	if mdA.Symbol != "" || mdA.Decimals != 0 {
+		t.Errorf("loan (zero) side: Symbol=%q Decimals=%d, want empty / 0", mdA.Symbol, mdA.Decimals)
+	}
+	if mdB.Symbol != "USDT" || mdB.Decimals != 6 {
+		t.Errorf("collateral side: Symbol=%q Decimals=%d, want USDT / 6", mdB.Symbol, mdB.Decimals)
+	}
+}
+
+// TestGetTokenPairMetadata_BothZero — degenerate but should still not panic
+// or call the multicaller.
+func TestGetTokenPairMetadata_BothZero(t *testing.T) {
+	h := newTestHarness(t)
+
+	called := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		called = true
+		return nil, fmt.Errorf("multicaller should not be invoked when both tokens are zero")
+	}
+
+	mdA, mdB, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), common.Address{}, common.Address{}, 20000000)
+	if err != nil {
+		t.Fatalf("getTokenPairMetadata(0x0, 0x0): %v", err)
+	}
+	if called {
+		t.Error("multicaller must not be invoked when both tokens are the zero address")
+	}
+	if mdA.Symbol != "" || mdA.Decimals != 0 || mdB.Symbol != "" || mdB.Decimals != 0 {
+		t.Errorf("expected empty metadata on both sides, got mdA=%+v mdB=%+v", mdA, mdB)
 	}
 }

@@ -21,13 +21,24 @@ type EventExtractor struct {
 	morphoBlueSignatures map[common.Hash]*abi.Event
 	metaMorphoABI        *abi.ABI
 	metaMorphoSignatures map[common.Hash]*abi.Event
+
+	// vaultActivitySignatures is the discovery-trigger topic set: only the
+	// Morpho VaultV2 4-field AccrueInterest topic. See IsVaultActivityEvent
+	// for the rationale on narrowing — V1/V1.1 are discovered via Morpho
+	// Blue, V2 always emits AccrueInterest first in any state-changing
+	// transaction. Same set is consumed by the live indexer
+	// (service.go's processReceipt default branch and hasRelevantEvents)
+	// and by the morpho-vault-indexer backfiller, so changes apply
+	// uniformly.
+	vaultActivitySignatures map[common.Hash]*abi.Event
 }
 
 // NewEventExtractor creates a new EventExtractor with loaded ABIs.
 func NewEventExtractor() (*EventExtractor, error) {
 	e := &EventExtractor{
-		morphoBlueSignatures: make(map[common.Hash]*abi.Event),
-		metaMorphoSignatures: make(map[common.Hash]*abi.Event),
+		morphoBlueSignatures:    make(map[common.Hash]*abi.Event),
+		metaMorphoSignatures:    make(map[common.Hash]*abi.Event),
+		vaultActivitySignatures: make(map[common.Hash]*abi.Event),
 	}
 	if err := e.loadABIs(); err != nil {
 		return nil, err
@@ -69,13 +80,44 @@ func (e *EventExtractor) loadABIs() error {
 		e.metaMorphoSignatures[event.ID] = &event
 	}
 
-	// Register V2 AccrueInterest (different topic hash due to different signature)
+	// Register VaultV2 AccrueInterest (different topic hash from the V1/V1.1
+	// 2-field variant because of the 4-field signature). V1.1 shares its
+	// 2-field AccrueInterest with V1 by topic and is already covered above.
 	v2ABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
 	if err != nil {
-		return fmt.Errorf("failed to parse MetaMorpho V2 AccrueInterest ABI: %w", err)
+		return fmt.Errorf("failed to parse VaultV2 AccrueInterest ABI: %w", err)
 	}
-	v2Event := v2ABI.Events["AccrueInterest"]
+	v2Event, ok := v2ABI.Events["AccrueInterest"]
+	if !ok {
+		return fmt.Errorf("VaultV2 AccrueInterest event not found in ABI")
+	}
 	e.metaMorphoSignatures[v2Event.ID] = &v2Event
+	// Discovery-trigger set: V2 4-field AccrueInterest only. See
+	// IsVaultActivityEvent for the why; deliberately not including V1/V1.1
+	// Deposit/Withdraw/AccrueInterest here.
+	e.vaultActivitySignatures[v2Event.ID] = &v2Event
+
+	// Register the full VaultV2 governance / allocation / cap / fee / role /
+	// timelock event surface. These are persisted as protocol_event audit-log
+	// rows when emitted by a known vault; structured handling (adapter table,
+	// cap table, fee config columns) is deferred per
+	// docs/vec-198-morpho-v2-followup-plan.md. Without this registration the
+	// events would silently fall through IsMetaMorphoEvent's filter.
+	v2EventsABI, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		return fmt.Errorf("failed to parse VaultV2 events ABI: %w", err)
+	}
+	for _, event := range v2EventsABI.Events {
+		// Skip event signatures (topic hashes) already registered above to
+		// avoid clobbering the existing MetaMorpho V1 / V1.1 entries —
+		// Deposit, Withdraw, Transfer, AccrueInterest are inherited
+		// ERC20/ERC4626 surface and share their event.ID with V1/V1.1.
+		if _, present := e.metaMorphoSignatures[event.ID]; present {
+			continue
+		}
+		ev := event
+		e.metaMorphoSignatures[ev.ID] = &ev
+	}
 
 	return nil
 }
@@ -96,6 +138,62 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 	}
 	_, ok := e.metaMorphoSignatures[common.HexToHash(log.Topics[0])]
 	return ok
+}
+
+// IsVaultActivityEvent returns true if the log matches the discovery-trigger
+// event — Morpho VaultV2's 4-field AccrueInterest. An unknown contract emitting
+// this event becomes a candidate vault.
+//
+// Why narrow to V2-only:
+//
+//   - V1/V1.1 vaults are discovered via the Morpho Blue path: their address
+//     appears as caller / onBehalf in Morpho Blue Supply / Withdraw / Borrow /
+//     Repay events when they allocate, and the live indexer (service.go's
+//     discoverV1V11VaultsInReceipt) plus the morpho-vault-indexer
+//     backfiller (emitMorphoBlueCandidates) probe those addresses. The V1/V1.1
+//     factories remain deployed and callable; the live indexer's coverage
+//     does not assume otherwise.
+//   - V2 contracts call _accrueInterest() unconditionally at the top of every
+//     state-changing entry point (deposit, withdraw, redeem, mint, allocate,
+//     deallocate, forceDeallocate). AccrueInterest fires before any other event
+//     in the same transaction's log_index order, so discovery on this single
+//     topic catches the vault before any subsequent log it might emit.
+//   - The 4-field AccrueInterest topic is unique to V2 (V1/V1.1 use a 2-field
+//     variant with a different keccak). The narrow gate keeps the live
+//     indexer's probe well clear of unrelated ERC4626 noise and legacy
+//     ERC20s whose fallback runs `INVALID` (0xfe) and trips Multicall3's
+//     gas budget — see VEC-198 multicall-gas-cap fix.
+//   - Same gate is used by both the live indexer (service.go's processReceipt
+//     default branch and hasRelevantEvents) and the morpho-vault-indexer
+//     backfiller's extractCandidatesFromReceipts. Single source of truth for
+//     "what makes an unknown contract worth probing" — narrowing here narrows
+//     both code paths uniformly.
+//
+// Trade-off: a V2 vault that's been deployed but has not yet taken its first
+// state-changing call (so AccrueInterest never fired) won't be discovered until
+// it does. Vaults without deposits have no positions to track, so this is
+// acceptable for VEC-198's TVL-finding goal.
+func (e *EventExtractor) IsVaultActivityEvent(log shared.Log) bool {
+	if len(log.Topics) == 0 {
+		return false
+	}
+	_, ok := e.vaultActivitySignatures[common.HexToHash(log.Topics[0])]
+	return ok
+}
+
+// MetaMorphoEventName returns the registered event name for the log's topic[0].
+// Returns "", false if the topic is not registered. Used by audit-log saving
+// in service.go to label every MetaMorpho event row with its event_type
+// without requiring per-event typed extraction.
+func (e *EventExtractor) MetaMorphoEventName(log shared.Log) (string, bool) {
+	if len(log.Topics) == 0 {
+		return "", false
+	}
+	ev, ok := e.metaMorphoSignatures[common.HexToHash(log.Topics[0])]
+	if !ok {
+		return "", false
+	}
+	return ev.Name, true
 }
 
 // ExtractMorphoBlueEvent parses a Morpho Blue event from a log entry.
@@ -157,6 +255,20 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 		return nil, fmt.Errorf("not a tracked MetaMorpho event")
 	}
 
+	// Only the events with state-affecting typed handlers are extracted into
+	// strongly-typed structs. The full V2 governance / allocation / cap / fee
+	// / role / timelock surface is registered in metaMorphoSignatures so the
+	// indexer recognises and audit-logs them, but typed extraction is
+	// deferred per docs/vec-198-morpho-v2-followup-plan.md. Returning (nil,
+	// nil) signals "registered topic, no typed extraction" — the caller saves
+	// the audit-log row regardless.
+	switch event.Name {
+	case "Deposit", "Withdraw", "Transfer", "AccrueInterest":
+		// fall through to typed extraction below
+	default:
+		return nil, nil
+	}
+
 	eventData := make(map[string]any)
 
 	if err := parseTopics(event, log.Topics, eventData); err != nil {
@@ -176,7 +288,8 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 	case "AccrueInterest":
 		return extractVaultAccrueInterest(eventData, log.TransactionHash)
 	default:
-		return nil, fmt.Errorf("unknown MetaMorpho event: %s", event.Name)
+		// Unreachable — gated by the switch above.
+		return nil, nil
 	}
 }
 

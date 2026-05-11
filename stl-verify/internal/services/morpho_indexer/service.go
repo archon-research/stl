@@ -260,10 +260,16 @@ func (s *Service) hasRelevantEvents(receipt shared.TransactionReceipt) bool {
 		// MetaMorpho event from an address that isn't the MorphoBlue contract and
 		// isn't a known non-vault. This covers two cases:
 		//  1. Known vault emitting a MetaMorpho event (Deposit, Withdraw, Transfer, AccrueInterest).
-		//  2. Unknown address that needs vault discovery — processReceipt will call
-		//     tryDiscoverVault, which is real work worth tracing.
+		//     Always relevant — we already know it's a vault.
+		//  2. Unknown address. Only worth tracing if the event is vault-activity
+		//     (Deposit / Withdraw / AccrueInterest). Plain ERC20 Transfer from
+		//     an unknown address is not a discovery trigger; processReceipt
+		//     would otherwise skip it after gating, leaving an empty span.
+		//     Mirrors the gate in processReceipt's default branch.
 		if isMetaMorpho && logAddress != morphoBlueAddr {
-			return true
+			if s.vaultRegistry.IsKnownVault(logAddress) || s.eventExtractor.IsVaultActivityEvent(log) {
+				return true
+			}
 		}
 	}
 	return false
@@ -288,6 +294,29 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		}
 		span.End()
 	}()
+
+	// Pre-walk: probe Morpho Blue events' caller / onBehalf (or borrower
+	// for Liquidate) for V1/V1.1 vault discovery BEFORE the main loop
+	// processes any log. This mirrors the morpho-vault-indexer backfiller's
+	// V1/V1.1 path; it has to live in the live indexer because the
+	// backfiller is recovery-only and IsVaultActivityEvent is narrowed to
+	// the V2 4-field AccrueInterest topic, so V1/V1.1 vaults emitting their
+	// own Deposit/Withdraw/V1 AccrueInterest logs would otherwise be
+	// invisible to live indexing.
+	//
+	// Pre-walk-then-main-walk (rather than discover-during-main-walk +
+	// SQS redelivery) means by the time the main loop reaches a vault's
+	// Deposit log, the registry already has the vault. No reprocessing of
+	// the receipt or block is needed; transient probe failures still
+	// propagate naturally and SQS still redelivers them, but ordinary
+	// first-activity-for-a-brand-new-vault is a single-pass success path.
+	//
+	// The V2 IsVaultActivityEvent path stays inline in the default case
+	// below — V2 emits its 4-field AccrueInterest first in every
+	// state-changing transaction, so single-pass discovery there is correct.
+	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber); err != nil {
+		return err
+	}
 
 	var errs []error
 	// Track the FIRST transient vault discovery failure per address.
@@ -328,12 +357,43 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			}
 
 		default:
+			// Discovery gate: only a VaultV2 4-field AccrueInterest event from
+			// an unknown address triggers a probe. V1/V1.1 vaults are
+			// discovered via the Morpho Blue path (caller/onBehalf), so this
+			// path is V2-only. See IsVaultActivityEvent docstring for the
+			// full rationale.
+			//
+			// The narrow gate also keeps the probe well clear of legacy
+			// ERC20s (BAT, STORJ, deployed pre-Solidity-0.4.10) that
+			// terminate unrecognised selector calls with `INVALID` (0xfe)
+			// instead of `REVERT`. `INVALID` consumes all available gas,
+			// and Multicall3's `aggregate3` doesn't bound per-sub-call gas,
+			// so a 4-call probe (VEC-198) against such contracts blows past
+			// Alchemy's 550M `eth_call` cap and surfaces as a transient
+			// transport error — never reaches `ErrNotVault`, never enters
+			// the negative cache, retries forever.
+			//
+			// Same predicate is used by the morpho-vault-indexer backfiller
+			// (see cmd/backfillers/morpho-vault-indexer/main.go), so the
+			// live and offline discovery contracts stay aligned.
+			if !s.eventExtractor.IsVaultActivityEvent(log) {
+				continue
+			}
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
 			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 				var nv *ErrNotVault
 				if errors.As(err, &nv) {
 					s.vaultRegistry.MarkNotVault(logAddress)
-					s.logger.Debug("not a MetaMorpho vault", "address", logAddress.Hex(), "reason", err)
+					if nv.VaultShaped {
+						// Address exposes at least one of MORPHO/curator/liquidityAdapter
+						// but didn't match a known vault flavour. Surface at WARN —
+						// pre-VEC-198 this case (Morpho VaultV2) sat invisible for ~225
+						// days; if Morpho ships a V3 we want a signal in logs/dashboards.
+						s.logger.Warn("vault-shaped address rejected by probe — possible new vault flavour",
+							"address", logAddress.Hex(), "reason", err)
+					} else {
+						s.logger.Debug("not a Morpho-family vault", "address", logAddress.Hex(), "reason", err)
+					}
 				} else {
 					s.logger.Warn("vault discovery failed (will retry)", "address", logAddress.Hex(), "error", err)
 					// VEC-188: keep the first failure. A later success for the
@@ -416,23 +476,49 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 }
 
 // processMetaMorphoLog handles a MetaMorpho vault event log.
+//
+// Every recognised vault event lands in protocol_event as an audit-log row,
+// keyed by (tx_hash, log_index). The four events with state-affecting typed
+// handlers — Deposit, Withdraw, Transfer, AccrueInterest — also produce
+// structured snapshot rows in morpho_vault_state / morpho_vault_position via
+// the dispatch below. The full V2 governance / allocation / cap / fee / role
+// / timelock surface (Allocate, Deallocate, AddAdapter, IncreaseAbsoluteCap,
+// SetPerformanceFee, SetCurator, Submit, …) is registered in the event
+// extractor so it lands in the audit log; structured tables for those events
+// are deferred per docs/vec-198-morpho-v2-followup-plan.md.
 func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	eventName, ok := s.eventExtractor.MetaMorphoEventName(log)
+	if !ok {
+		// Caller already filtered via IsMetaMorphoEvent; this shouldn't
+		// happen unless the topic registration drifted.
+		return fmt.Errorf("MetaMorpho event has unrecognised topic: %v", log.Topics)
+	}
+
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processMetaMorphoEvent",
+		attribute.String("event.type", eventName),
+		attribute.String("vault.address", vaultAddress.Hex()))
+	defer span.End()
+	s.telemetry.RecordEventProcessed(ctx, eventName)
+
+	s.logger.Info("MetaMorpho event detected",
+		"event", eventName,
+		"vault", vaultAddress.Hex(),
+		"tx", log.TransactionHash,
+		"block", blockNumber)
+
+	if err := s.saveMetaMorphoProtocolEvent(ctx, log, vaultAddress, eventName, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+		return fmt.Errorf("saving MetaMorpho protocol_event: %w", err)
+	}
+
 	event, err := s.eventExtractor.ExtractMetaMorphoEvent(log)
 	if err != nil {
 		return fmt.Errorf("extracting MetaMorpho event: %w", err)
 	}
-
-	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processMetaMorphoEvent",
-		attribute.String("event.type", string(event.Type())),
-		attribute.String("vault.address", vaultAddress.Hex()))
-	defer span.End()
-	s.telemetry.RecordEventProcessed(ctx, string(event.Type()))
-
-	s.logger.Info("MetaMorpho event detected",
-		"event", event.Type(),
-		"vault", vaultAddress.Hex(),
-		"tx", event.TxHash(),
-		"block", blockNumber)
+	if event == nil {
+		// Registered topic without a typed handler — audit-log save above
+		// is the only side effect.
+		return nil
+	}
 
 	switch e := event.(type) {
 	case *VaultDepositEvent:
@@ -448,27 +534,118 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	}
 }
 
-// tryDiscoverVault attempts to discover a new MetaMorpho vault from an event log.
-func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	ctx, span := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
-		attribute.String("vault.address", vaultAddress.Hex()))
-	defer span.End()
-
-	// Validate this is a decodable MetaMorpho event before making on-chain calls.
-	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
-		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
+// saveMetaMorphoProtocolEvent writes a protocol_event audit-log row for any
+// MetaMorpho event emitted by a known vault. Used both by the typed Deposit /
+// Withdraw / Transfer / AccrueInterest paths and by the V2 governance /
+// allocation / cap / fee / role / timelock surface that doesn't yet have
+// structured tables.
+//
+// EventData is a JSON snapshot of the raw log: { eventType, vault, topics,
+// data }. ABI decoding of args is intentionally skipped — operators can decode
+// downstream from the canonical signatures in
+// stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go if needed.
+// This keeps the writer cheap and avoids encoding-bug failure modes for
+// event shapes the indexer doesn't yet structurally consume.
+func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Log, vaultAddress common.Address, eventName string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+	if err != nil {
+		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
 
-	// Fetch vault metadata (including version) from on-chain.
+	payload, err := json.Marshal(map[string]any{
+		"eventType": eventName,
+		"vault":     vaultAddress.Hex(),
+		"tx":        log.TransactionHash,
+		"topics":    log.Topics,
+		"data":      log.Data,
+	})
+	if err != nil {
+		return fmt.Errorf("marshalling MetaMorpho event payload: %w", err)
+	}
+
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
+		if err != nil {
+			return fmt.Errorf("getting protocol: %w", err)
+		}
+		protocolEvent, err := entity.NewProtocolEvent(
+			int(chainID),
+			protocolID,
+			blockNumber,
+			blockVersion,
+			common.FromHex(log.TransactionHash),
+			int(logIndex),
+			vaultAddress.Bytes(),
+			eventName,
+			payload,
+			blockTimestamp,
+		)
+		if err != nil {
+			return fmt.Errorf("creating MetaMorpho protocol event entity: %w", err)
+		}
+		return s.eventRepo.SaveEvent(ctx, tx, protocolEvent)
+	})
+}
+
+// MorphoBlueVaultCandidates returns the addresses from a Morpho Blue event
+// that could be MetaMorpho V1/V1.1 vaults — caller and onBehalf for the
+// position-changing events, caller and borrower for Liquidate. Used by both
+// the live indexer (this package) and the morpho-vault-indexer backfiller
+// for V1/V1.1 vault discovery, since those vaults are characterised by
+// their interaction with Morpho Blue rather than by emitting a uniquely
+// shaped event of their own.
+//
+// V2 vaults can also appear here when they use a Morpho Blue market adapter,
+// but the V2 4-field AccrueInterest topic catches them earlier via
+// IsVaultActivityEvent — most candidates surfaced through this function are
+// V1/V1.1.
+//
+// Borrower is included for Liquidate symmetry with the backfiller. In
+// practice MetaMorpho V1/V1.1 vaults don't borrow on Morpho Blue, so the
+// borrower slot almost always resolves to known-not-vault on first probe;
+// it's retained so the same selector contract holds for both code paths
+// even if a future vault flavour borrows.
+//
+// Caller-side filtering (zero address, MorphoBlueAddress, already-known)
+// happens at the call site.
+func MorphoBlueVaultCandidates(event MorphoBlueEvent) []common.Address {
+	switch e := event.(type) {
+	case *SupplyEvent:
+		return []common.Address{e.Caller, e.OnBehalf}
+	case *WithdrawEvent:
+		return []common.Address{e.Caller, e.OnBehalf}
+	case *BorrowEvent:
+		return []common.Address{e.Caller, e.OnBehalf}
+	case *RepayEvent:
+		return []common.Address{e.Caller, e.OnBehalf}
+	case *SupplyCollateralEvent:
+		return []common.Address{e.Caller, e.OnBehalf}
+	case *WithdrawCollateralEvent:
+		return []common.Address{e.Caller, e.OnBehalf}
+	case *LiquidateEvent:
+		return []common.Address{e.Caller, e.Borrower}
+	default:
+		return nil
+	}
+}
+
+// discoverAndRegisterVault probes vaultAddress on-chain, persists the vault
+// and its asset token, and registers the vault in the in-memory registry.
+// Returns *ErrNotVault if the address is definitively not a Morpho-family
+// vault; transient errors (RPC, DB) propagate as plain errors so the caller
+// can decide whether to retry.
+//
+// Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and
+// the Morpho Blue caller/onBehalf path (V1/V1.1) via
+// discoverV1V11VaultsInReceipt.
+func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64) error {
 	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
 	if err != nil {
 		return fmt.Errorf("fetching vault metadata: %w", err)
 	}
 
-	// Persist the vault
 	var vault *entity.MorphoVault
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		// Get or create the asset token
 		assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
 		if err != nil {
 			return fmt.Errorf("fetching asset token metadata: %w", err)
@@ -494,7 +671,6 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 			return fmt.Errorf("persisting vault: %w", err)
 		}
 
-		// Create receipt token entry — vault address IS the receipt token
 		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, metadata.Symbol)
 		if err != nil {
 			return fmt.Errorf("creating receipt token entity: %w", err)
@@ -510,9 +686,129 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 	}
 
 	s.vaultRegistry.RegisterVault(vaultAddress, vault)
+	return nil
+}
 
-	// Now process the event
+// tryDiscoverVault attempts to discover a new MetaMorpho/VaultV2 vault from
+// a vault-emitted log (currently only the V2 4-field AccrueInterest topic
+// per IsVaultActivityEvent). Validates the log decodes, then probes and
+// registers via discoverAndRegisterVault, then processes the triggering log
+// against the now-known vault.
+func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
+		attribute.String("vault.address", vaultAddress.Hex()),
+		attribute.String("discovery.path", "vaultActivity"))
+	defer span.End()
+
+	// Validate this is a decodable MetaMorpho event before making on-chain calls.
+	if _, err := s.eventExtractor.ExtractMetaMorphoEvent(log); err != nil {
+		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
+	}
+
+	if err := s.discoverAndRegisterVault(ctx, vaultAddress, chainID, blockNumber); err != nil {
+		return err
+	}
+
 	return s.processMetaMorphoLog(ctx, log, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
+}
+
+// discoverV1V11VaultsInReceipt is the pre-walk for V1/V1.1 vault discovery
+// via the Morpho Blue caller/onBehalf path. It iterates the receipt's
+// Morpho Blue logs once, extracts candidate addresses (caller, onBehalf —
+// or caller, borrower for Liquidate), and probes each unknown address.
+// Successful probes register the vault in the in-memory registry so the
+// caller's main loop sees it as a known vault when it reaches the vault's
+// own Deposit / Transfer / V1 AccrueInterest logs in the same receipt.
+//
+// Mirrors the morpho-vault-indexer backfiller's emitMorphoBlueCandidates,
+// keeping the live and offline V1/V1.1 discovery contracts uniform — the
+// backfiller is recovery-only, so the live indexer must cover V1/V1.1
+// discovery itself.
+//
+// ErrNotVault outcomes mark the address as known-not-vault (cached) so
+// repeat appearances of the same EOA / non-vault contract short-circuit.
+// Transient errors propagate so the receipt fails and SQS redelivers —
+// they must NOT mark the address as not-vault, or a real V1/V1.1 vault
+// that was momentarily unreachable would be permanently black-holed.
+//
+// The seen map dedupes within the receipt: if the same address appears
+// as caller AND onBehalf in one Supply, OR as caller in two Morpho Blue
+// logs in the same receipt, only one probe fires per receipt. After the
+// first probe the registry cache (IsKnownVault / IsKnownNotVault) handles
+// further short-circuiting.
+func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64) error {
+	morphoBlueAddr := MorphoBlueAddress
+	var errs []error
+	seen := make(map[common.Address]bool)
+
+	for _, log := range receipt.Logs {
+		if common.HexToAddress(log.Address) != morphoBlueAddr {
+			continue
+		}
+		if !s.eventExtractor.IsMorphoBlueEvent(log) {
+			continue
+		}
+
+		event, parseErr := s.eventExtractor.ExtractMorphoBlueEvent(log)
+		if parseErr != nil {
+			// Re-parse failure here is structurally impossible today —
+			// the same log will be extracted again in processMorphoBlueLog
+			// from the same extractor. If a future change introduces
+			// non-determinism (e.g. ABI fallback, caching), this branch
+			// becomes a silent discovery hole, so log a Warn rather than
+			// swallow.
+			s.logger.Warn("re-parse of Morpho Blue event failed in discovery pre-walk (should not happen — investigate)",
+				"tx", log.TransactionHash,
+				"topic", log.Topics[0],
+				"error", parseErr)
+			continue
+		}
+
+		for _, addr := range MorphoBlueVaultCandidates(event) {
+			if seen[addr] {
+				continue
+			}
+			seen[addr] = true
+			if addr == (common.Address{}) || addr == morphoBlueAddr {
+				continue
+			}
+			if s.vaultRegistry.IsKnownVault(addr) || s.vaultRegistry.IsKnownNotVault(addr) {
+				continue
+			}
+
+			probeCtx, probeSpan := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
+				attribute.String("vault.address", addr.Hex()),
+				attribute.String("discovery.path", "morphoBlue"))
+			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber)
+			probeSpan.End()
+			if probeErr == nil {
+				continue
+			}
+			var nv *ErrNotVault
+			if errors.As(probeErr, &nv) {
+				s.vaultRegistry.MarkNotVault(addr)
+				if nv.VaultShaped {
+					s.logger.Warn("vault-shaped address rejected by probe (Morpho Blue path) — possible new vault flavour",
+						"address", addr.Hex(),
+						"reason", probeErr)
+				} else {
+					s.logger.Debug("not a Morpho-family vault (Morpho Blue path)",
+						"address", addr.Hex(),
+						"reason", probeErr)
+				}
+				continue
+			}
+			s.logger.Warn("V1/V1.1 vault discovery via Morpho Blue path failed (will retry)",
+				"address", addr.Hex(),
+				"error", probeErr)
+			errs = append(errs, fmt.Errorf("V1/V1.1 discovery for %s in tx %s: %w", addr.Hex(), receipt.TransactionHash, probeErr))
+		}
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // handleCreateMarket handles a CreateMarket event.

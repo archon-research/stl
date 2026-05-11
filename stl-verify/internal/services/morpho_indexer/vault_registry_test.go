@@ -70,7 +70,7 @@ func TestVaultRegistry_LoadFromDB(t *testing.T) {
 			name: "loads multiple vaults",
 			vaults: map[common.Address]*entity.MorphoVault{
 				addr1: {ID: 1, Name: "Vault A", VaultVersion: entity.MorphoVaultV1},
-				addr2: {ID: 2, Name: "Vault B", VaultVersion: entity.MorphoVaultV2},
+				addr2: {ID: 2, Name: "Vault B", VaultVersion: entity.MorphoVaultV1_1},
 			},
 			wantCount: 2,
 		},

@@ -1,10 +1,13 @@
 package morpho_indexer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -409,6 +412,56 @@ func TestProcessBlockEvent_VaultDeposit(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_V2GovernanceEvent_AuditLogged verifies that a V2-only
+// event (AddAdapter — no typed handler today) emitted by a known vault still
+// produces a protocol_event audit-log row labelled with the correct event
+// name. The structured-handling pieces (adapter table etc.) are deferred per
+// docs/vec-198-morpho-v2-followup-plan.md, but operators must see these
+// events landing.
+func TestProcessBlockEvent_V2GovernanceEvent_AuditLogged(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	// Chain-verified topic for AddAdapter on sparkUSDTbc (2026-05-06).
+	const addAdapterTopic = "0x8f125a24838c4c23e893904b255b5c672d43d4cb8af7e3d15841eaeabc1e68aa"
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2") // sparkUSDTbc liquidityAdapter
+
+	log := shared.Log{
+		Address: testVaultAddr.Hex(),
+		Topics: []string{
+			addAdapterTopic,
+			common.BytesToHash(adapter.Bytes()).Hex(),
+		},
+		Data:            "0x",
+		TransactionHash: testTxHash,
+		LogIndex:        "0x0",
+	}
+
+	var savedEvent *entity.ProtocolEvent
+	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, e *entity.ProtocolEvent) error {
+		savedEvent = e
+		return nil
+	}
+
+	receipt := makeReceipt(testTxHash, log)
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if savedEvent == nil {
+		t.Fatal("SaveEvent not called for V2 governance event")
+	}
+	if savedEvent.EventName != "AddAdapter" {
+		t.Errorf("EventName = %q, want AddAdapter", savedEvent.EventName)
+	}
+	if !bytes.Equal(savedEvent.ContractAddress, testVaultAddr.Bytes()) {
+		t.Errorf("ContractAddress = %x, want %s", savedEvent.ContractAddress, testVaultAddr.Hex())
+	}
+	if !json.Valid(savedEvent.EventData) {
+		t.Errorf("EventData is not valid JSON: %s", savedEvent.EventData)
+	}
+}
+
 func TestProcessBlockEvent_VaultWithdraw(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV1)
@@ -602,11 +655,6 @@ func TestProcessBlockEvent_VaultDiscovery_Success(t *testing.T) {
 				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 			}
 			if calls[0].Target == unknownVault {
-				// Could be vault probe or vault state
-				if calls[1].Target == unknownVault {
-					// vault probe (MORPHO + asset)
-					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-				}
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
 			return h.tokenMetadataResults("WETH", 18), nil
@@ -614,7 +662,9 @@ func TestProcessBlockEvent_VaultDiscovery_Success(t *testing.T) {
 			// vault state + balance (after discovery, process the event)
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
-			// vault details (name, symbol, decimals, skimRecipient)
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -628,7 +678,7 @@ func TestProcessBlockEvent_VaultDiscovery_Success(t *testing.T) {
 	}
 
 	// Emit a Deposit event from the unknown vault address.
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
@@ -643,7 +693,7 @@ func TestProcessBlockEvent_VaultDiscovery_Success(t *testing.T) {
 	}
 }
 
-func TestProcessBlockEvent_VaultDiscovery_V2(t *testing.T) {
+func TestProcessBlockEvent_VaultDiscovery_V1_1(t *testing.T) {
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
@@ -651,16 +701,16 @@ func TestProcessBlockEvent_VaultDiscovery_V2(t *testing.T) {
 		switch len(calls) {
 		case 2:
 			if calls[0].Target == unknownVault {
-				if calls[1].Target == unknownVault {
-					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-				}
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 3:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
-			return h.vaultDetailResults("Morpho V2 Vault", "mV2", 18, true), nil
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.vaultDetailResults("Morpho V1.1 Vault", "mV1.1", 18, true), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
@@ -672,7 +722,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2(t *testing.T) {
 		return 99, nil
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
@@ -682,8 +732,8 @@ func TestProcessBlockEvent_VaultDiscovery_V2(t *testing.T) {
 	if savedVault == nil {
 		t.Fatal("vault not created")
 	}
-	if savedVault.VaultVersion != entity.MorphoVaultV2 {
-		t.Errorf("VaultVersion = %d, want V2 (%d)", savedVault.VaultVersion, entity.MorphoVaultV2)
+	if savedVault.VaultVersion != entity.MorphoVaultV1_1 {
+		t.Errorf("VaultVersion = %d, want V1.1 (%d)", savedVault.VaultVersion, entity.MorphoVaultV1_1)
 	}
 }
 
@@ -693,14 +743,14 @@ func TestProcessBlockEvent_VaultDiscovery_WrongMorphoAddress(t *testing.T) {
 
 	wrongMorpho := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
-			// Probe returns wrong MORPHO address.
+		if h.isProbeMulticall(calls) {
+			// Probe returns wrong MORPHO address (and curator/liquidityAdapter revert).
 			return h.vaultProbeResults(wrongMorpho, testLoanToken), nil
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	// Should not error (vault discovery failures are non-fatal, just marks as not-vault).
@@ -713,22 +763,22 @@ func TestProcessBlockEvent_VaultDiscovery_WrongMorphoAddress(t *testing.T) {
 	}
 }
 
-func TestProcessBlockEvent_VaultDiscovery_MorphoCallReverts(t *testing.T) {
+func TestProcessBlockEvent_VaultDiscovery_AllProbeSelectorsRevert(t *testing.T) {
+	// Previously named *_MorphoCallReverts. After VEC-198 a MORPHO() revert is
+	// no longer sufficient on its own — the address still needs curator() and
+	// liquidityAdapter() to fail to be classified as not-a-vault. (If those
+	// succeed, it's a Morpho VaultV2.)
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
-			// MORPHO() call fails in the probe.
-			return []outbound.Result{
-				{Success: false, ReturnData: nil},
-				{Success: true, ReturnData: h.packAddress(testLoanToken)},
-			}, nil
+		if h.isProbeMulticall(calls) {
+			return h.notAVaultProbeResults(), nil
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
@@ -736,7 +786,7 @@ func TestProcessBlockEvent_VaultDiscovery_MorphoCallReverts(t *testing.T) {
 	}
 
 	if !h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
-		t.Error("vault should be marked as not-vault after MORPHO() revert")
+		t.Error("vault should be marked as not-vault when all probe selectors revert")
 	}
 }
 
@@ -745,14 +795,14 @@ func TestProcessBlockEvent_VaultDiscovery_AssetZero(t *testing.T) {
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 {
+		if h.isProbeMulticall(calls) {
 			// Probe: MORPHO succeeds but asset returns zero address.
 			return h.vaultProbeResults(MorphoBlueAddress, common.Address{}), nil
 		}
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
@@ -764,7 +814,110 @@ func TestProcessBlockEvent_VaultDiscovery_AssetZero(t *testing.T) {
 	}
 }
 
-func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
+// TestProcessBlockEvent_VaultDiscovery_VaultV2 covers the new probe fallback:
+// MORPHO() reverts but curator() and liquidityAdapter() succeed, so the
+// address is recognised as a Morpho VaultV2 (e.g. sparkUSDTbc) rather than
+// silently rejected as a non-vault. See VEC-198.
+func TestProcessBlockEvent_VaultDiscovery_VaultV2(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22") // sparkUSDTbc address from VEC-198
+	curator := common.HexToAddress("0x0f96000000000000000000000000000000000046A3")
+	liquidityAdapter := common.HexToAddress("0x7481000000000000000000000000000000007dC2")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == unknownVault {
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			return h.tokenMetadataResults("USDT", 6), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+			}
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var savedVault *entity.MorphoVault
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, v *entity.MorphoVault) (int64, error) {
+		savedVault = v
+		return 99, nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if savedVault == nil {
+		t.Fatal("vault not created")
+	}
+	if savedVault.VaultVersion != entity.MorphoVaultV2 {
+		t.Errorf("VaultVersion = %d, want VaultV2 (%d)", savedVault.VaultVersion, entity.MorphoVaultV2)
+	}
+	if savedVault.Symbol != "sparkUSDTbc" {
+		t.Errorf("Symbol = %q, want sparkUSDTbc", savedVault.Symbol)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Error("VaultV2 should be registered in vault registry")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_TransferOnlyDoesNotProbe verifies that
+// a plain ERC20 Transfer log from an unknown address does NOT trigger
+// tryDiscoverVault.
+//
+// Without this gate, every tx that touches a popular ERC20 (BAT, STORJ, …)
+// would route into the 4-call probe path. Some legacy ERC20s terminate
+// unrecognised selector calls with `INVALID` (0xfe) instead of `REVERT`,
+// which consumes all available gas and pushes Multicall3's aggregate3 past
+// Alchemy's 550M eth_call cap. The discovery layer would then treat that as
+// a transient transport error (not ErrNotVault) and retry the SQS message
+// forever. See docs/vec-198-morpho-v2-multicall-gas-cap-fix-plan.md.
+func TestProcessBlockEvent_VaultDiscovery_TransferOnlyDoesNotProbe(t *testing.T) {
+	h := newTestHarness(t)
+	unknownAddr := common.HexToAddress("0x0D8775F648430679A709E98d2b0Cb6250d2887EF") // BAT — the original symptom
+
+	// Fail fast if any multicall fires: the gate should short-circuit before
+	// we ever reach the prober.
+	probeAttempted := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		probeAttempted = true
+		return nil, fmt.Errorf("multicall must not be called for Transfer-from-unknown")
+	}
+
+	log := h.makeVaultTransferLog(unknownAddr, testCaller, testReceiver, big.NewInt(1234))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if probeAttempted {
+		t.Error("probe must not be attempted for Transfer-from-unknown")
+	}
+	// And the address must NOT be persisted in the negative cache — that would
+	// hide a future legitimate Deposit/Withdraw discovery for the same address.
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownAddr) {
+		t.Error("address must not be marked as not-vault when only a Transfer was seen")
+	}
+	if h.svc.vaultRegistry.IsKnownVault(unknownAddr) {
+		t.Error("address must not be registered as a vault from a Transfer-only receipt")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V2AccrueInterestTriggersProbe is the
+// positive counterpart to *_TransferOnlyDoesNotProbe: a VaultV2 4-field
+// AccrueInterest from an unknown address must trigger discovery (and succeed,
+// in this case). See IsVaultActivityEvent for why this is the only triggering
+// topic.
+func TestProcessBlockEvent_VaultDiscovery_V2AccrueInterestTriggersProbe(t *testing.T) {
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
@@ -772,10 +925,50 @@ func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
 		switch len(calls) {
 		case 2:
 			if calls[0].Target == unknownVault {
-				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
 			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.vaultDetailResults("Vault", "VLT", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var vaultCreated bool
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		vaultCreated = true
+		return 99, nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !vaultCreated {
+		t.Error("V2 4-field AccrueInterest from unknown address must trigger discovery")
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.vaultDetailResults("Vault", "VLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -787,7 +980,7 @@ func TestProcessBlockEvent_VaultDiscovery_DBError(t *testing.T) {
 		return 0, dbErr
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	// DB errors are transient — processBlock should fail so the event can be reprocessed.
@@ -813,7 +1006,7 @@ func TestProcessBlockEvent_VaultDiscovery_RPCTransientError(t *testing.T) {
 		return nil, fmt.Errorf("unexpected %d calls", len(calls))
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	// Transient RPC failure should fail processBlock so the event can be reprocessed.
@@ -846,17 +1039,17 @@ func TestProcessBlockEvent_VaultDiscovery_TransientErrorThenSuccess(t *testing.T
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
-			if calls[0].Target == unknownVault {
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
 				probeCallCount++
 				if probeCallCount == 1 {
 					return nil, fmt.Errorf("connection timeout")
 				}
 				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
 			}
-			return h.tokenMetadataResults("WETH", 18), nil
-		case 3:
-			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
-		case 4:
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -867,10 +1060,10 @@ func TestProcessBlockEvent_VaultDiscovery_TransientErrorThenSuccess(t *testing.T
 		return 99, nil
 	}
 
-	// Two Deposit logs from the same vault in one receipt.
+	// Two discovery-trigger logs from the same vault in one receipt.
 	// First triggers discovery (fails transiently), second retries (succeeds).
-	log1 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
-	log2 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(3000), big.NewInt(2700))
+	log1 := h.makeDiscoveryTriggerLog(unknownVault)
+	log2 := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log1, log2)
 
 	// VEC-188: processBlock must FAIL even though the 2nd log's discovery
@@ -913,7 +1106,12 @@ func TestProcessReceipt_VaultDiscoveryRace_KeepsFirstError(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
-			if calls[0].Target == unknownVault {
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			// vault state + balance (after discovery, process the event)
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
 				probeCallCount++
 				if probeCallCount == 1 {
 					// Transient RPC error on the FIRST log's discovery attempt.
@@ -921,11 +1119,6 @@ func TestProcessReceipt_VaultDiscoveryRace_KeepsFirstError(t *testing.T) {
 				}
 				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
 			}
-			return h.tokenMetadataResults("WETH", 18), nil
-		case 3:
-			// vault state + balance (after discovery, process the event)
-			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
-		case 4:
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -936,13 +1129,13 @@ func TestProcessReceipt_VaultDiscoveryRace_KeepsFirstError(t *testing.T) {
 		return 99, nil
 	}
 
-	// Two Deposit logs from the same vault in one receipt.
+	// Two discovery-trigger logs from the same vault in one receipt.
 	// Log 1: triggers discovery → transient failure (event lost).
 	// Log 2: retries discovery → succeeds, vault registered.
 	// Per VEC-188, the first log's event was never saved, so processReceipt
 	// MUST return a non-nil error to force SQS redelivery.
-	log1 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
-	log2 := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(3000), big.NewInt(2700))
+	log1 := h.makeDiscoveryTriggerLog(unknownVault)
+	log2 := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log1, log2)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
@@ -972,7 +1165,7 @@ func TestProcessBlockEvent_VaultDiscovery_AlreadyKnownNotVault(t *testing.T) {
 		return nil, errors.New("should not be called")
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
@@ -981,6 +1174,561 @@ func TestProcessBlockEvent_VaultDiscovery_AlreadyKnownNotVault(t *testing.T) {
 
 	if atomic.LoadInt32(&multicallCalled) != 0 {
 		t.Error("multicall should not be called for known non-vaults")
+	}
+}
+
+// --- V1/V1.1 vault discovery via Morpho Blue caller/onBehalf path ---
+//
+// V1/V1.1 vaults call into Morpho Blue when allocating; their address appears
+// as `caller` and/or `onBehalf` in the singleton's Supply/Withdraw/Borrow/
+// Repay/SupplyCollateral/WithdrawCollateral/Liquidate events. With
+// IsVaultActivityEvent narrowed to the V2 4-field AccrueInterest topic only
+// (VEC-198 PR feedback), V1/V1.1 vaults can no longer be discovered via
+// their own Deposit / Withdraw / V1 AccrueInterest logs.
+//
+// The morpho-vault-indexer backfiller already handles this via
+// emitMorphoBlueCandidates, but the backfiller is recovery-only — operators
+// run it when they realise something was missed, not on a schedule. The
+// live indexer therefore has to cover V1/V1.1 discovery itself by mirroring
+// the same Morpho Blue caller/onBehalf probe path. Otherwise a brand-new
+// V1.x vault is invisible to live indexing until somebody manually triggers
+// a backfill.
+//
+// On first discovery via this path, processBlock returns an error to force
+// SQS redelivery. The redelivery lets the second pass process any
+// earlier-in-receipt vault logs (Deposit / Transfer / V1 AccrueInterest)
+// that were skipped while the vault was unknown. Handlers are idempotent
+// (`ON CONFLICT` on protocol_event, state-snapshot keys), so reprocessing
+// the Morpho Blue Supply on the second pass is safe. The V2 path doesn't
+// need this retry because V2 emits its 4-field AccrueInterest first in any
+// state-changing transaction — the discovery trigger always precedes
+// vault-state logs in log_index order.
+
+// TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueCaller verifies that
+// a V1 vault is discovered when it appears as `caller` in a Morpho Blue
+// Supply event. The probe identifies V1 (skimRecipient reverts on V1; V1.1
+// would succeed; V2's MORPHO() reverts).
+func TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueCaller(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	// Count probe-multicall invocations. unknownVault appears as both
+	// caller and onBehalf in the Supply log below; the dedup at
+	// service.go's `seen` map must keep this at exactly 1. Without the
+	// dedup, two probes would fire (and the test would still pass at the
+	// vault-registered assertion below — wasted RPC).
+	var probeCount int32
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == MorphoBlueAddress {
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				atomic.AddInt32(&probeCount, 1)
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.vaultDetailResults("V1 Vault", "v1V", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var savedVault *entity.MorphoVault
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, v *entity.MorphoVault) (int64, error) {
+		savedVault = v
+		return 99, nil
+	}
+
+	log := h.makeSupplyLog(testMarketID, unknownVault, unknownVault, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	// Single pass: pre-walk discovers the vault before the main loop reaches
+	// any vault-emitted log. No SQS redelivery needed for ordinary
+	// first-activity-for-a-brand-new-vault.
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("V1 vault must be registered in registry after Morpho Blue path discovery")
+	}
+	if savedVault == nil {
+		t.Fatal("V1 vault was not persisted to DB")
+	}
+	if savedVault.VaultVersion != entity.MorphoVaultV1 {
+		t.Errorf("VaultVersion = %d, want V1 (%d)", savedVault.VaultVersion, entity.MorphoVaultV1)
+	}
+	// Dedup verification: caller == onBehalf in the Supply log, so the
+	// `seen` map in discoverV1V11VaultsInReceipt must collapse the two
+	// candidates into a single probe. Two probes would mean wasted RPC +
+	// duplicate DB inserts (idempotent, but still wrong).
+	if got := atomic.LoadInt32(&probeCount); got != 1 {
+		t.Errorf("probe fired %d times for caller==onBehalf; want exactly 1 (caller/onBehalf must dedupe via seen[])", got)
+	}
+
+	// Replay: vault is now known, no further discovery, no error.
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	// Replay must also not re-probe — registry is consulted first.
+	if got := atomic.LoadInt32(&probeCount); got != 1 {
+		t.Errorf("probe fired %d times after replay; want still 1 (registry cache must short-circuit known vault)", got)
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V11ViaMorphoBlueOnBehalf verifies V1.1
+// discovery when the vault appears as `onBehalf` (not just `caller`) — covers
+// the case where the vault is the position owner but a separate router/
+// integrator routed the call (their address is `caller`). Probe identifies
+// V1.1 because skimRecipient succeeds.
+func TestProcessBlockEvent_VaultDiscovery_V11ViaMorphoBlueOnBehalf(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	router := common.HexToAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == MorphoBlueAddress {
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				if calls[0].Target == unknownVault {
+					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				}
+				// router probe → not a vault
+				return h.notAVaultProbeResults(), nil
+			}
+			return h.vaultDetailResults("V1.1 Vault", "v11V", 18, true), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var savedVault *entity.MorphoVault
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, v *entity.MorphoVault) (int64, error) {
+		savedVault = v
+		return 99, nil
+	}
+
+	log := h.makeSupplyLog(testMarketID, router, unknownVault, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("V1.1 vault must be registered after onBehalf-path discovery")
+	}
+	if savedVault == nil {
+		t.Fatal("V1.1 vault was not persisted")
+	}
+	if savedVault.VaultVersion != entity.MorphoVaultV1_1 {
+		t.Errorf("VaultVersion = %d, want V1.1 (%d)", savedVault.VaultVersion, entity.MorphoVaultV1_1)
+	}
+	if !h.svc.vaultRegistry.IsKnownNotVault(router) {
+		t.Error("router (caller, not a vault) must be marked known-not-vault after probe")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_EOA_MarkedNotVault
+// verifies that an EOA appearing in a Morpho Blue event is probed once,
+// fails the probe, and is cached as known-not-vault so subsequent events
+// from the same EOA short-circuit before incurring another multicall.
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_EOA_MarkedNotVault(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	eoa := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.notAVaultProbeResults(), nil
+			}
+			return nil, fmt.Errorf("unexpected non-probe 4-call")
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	log := h.makeSupplyLog(testMarketID, eoa, eoa, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock should not error when probe definitively rejects an EOA: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownNotVault(eoa) {
+		t.Error("EOA should be marked known-not-vault after probe rejection")
+	}
+	// Asymmetry guard: a sign-flip that swaps vault / not-vault classification
+	// would mark the EOA as a vault. Pin both sides.
+	if h.svc.vaultRegistry.IsKnownVault(eoa) {
+		t.Error("EOA must NOT be registered as a vault — probe definitively rejected it")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_KnownNotVault_SkipsProbe
+// verifies that an address already in the known-not-vault cache short-circuits
+// without firing a multicall — the cache is the only thing keeping the live
+// indexer from re-probing every Morpho Blue event's user addresses.
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_KnownNotVault_SkipsProbe(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	eoa := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	h.svc.vaultRegistry.MarkNotVault(eoa)
+
+	probeAttempted := false
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 4 && h.isProbeMulticall(calls) {
+			probeAttempted = true
+			return nil, fmt.Errorf("probe must not fire for known-not-vault address")
+		}
+		// 2-call market+position state for the Morpho Blue Supply.
+		return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+	}
+
+	log := h.makeSupplyLog(testMarketID, eoa, eoa, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if probeAttempted {
+		t.Error("probe must short-circuit for already-known-not-vault addresses")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_TransientError_RetriesViaSQS
+// verifies that a transient probe failure during Morpho Blue path discovery
+// surfaces as an error so SQS redelivers the receipt — the address must NOT
+// be marked known-not-vault on transient failure (that would be a permanent
+// black-hole for a real V1/V1.1 vault that's just temporarily unreachable).
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_TransientError_RetriesViaSQS(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return nil, fmt.Errorf("connection timeout")
+			}
+		}
+		return nil, fmt.Errorf("unexpected %d calls", len(calls))
+	}
+
+	log := h.makeSupplyLog(testMarketID, unknownVault, unknownVault, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
+	if err == nil {
+		t.Fatal("processBlock must fail on transient probe error so SQS redelivers")
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("address must NOT be marked known-not-vault on a transient error — that would black-hole a real vault that's just temporarily unreachable")
+	}
+	// Asymmetry guard: a swap of caching semantics (cache transient,
+	// surface ErrNotVault) would only fail one of the two existing tests.
+	// Assert the surfaced error is *not* an *ErrNotVault* so a future
+	// reclassification has to update this test alongside the EOA test.
+	var nv *ErrNotVault
+	if errors.As(err, &nv) {
+		t.Errorf("transient probe failure must surface as a plain error, not *ErrNotVault — wrapping it as ErrNotVault would silently mark the address as known-not-vault on the next retry: %v", err)
+	}
+}
+
+// TestProcessReceipt_VaultDiscovery_MorphoBluePath_DepositPlusSupplyInOnePass
+// is the contract test for the pre-walk: a typical user-deposit receipt for a
+// brand-new V1.1 vault has the vault's own Deposit log AT log[0] and its
+// allocation Morpho Blue Supply (vault as caller/onBehalf) at log[1]. The
+// pre-walk in processReceipt runs FIRST and registers the vault from the
+// Supply, so by the time the main loop reaches log[0] the vault is already
+// in the registry and the Deposit is processed via the IsKnownVault branch.
+// No SQS redelivery, no whole-block reprocessing.
+func TestProcessReceipt_VaultDiscovery_MorphoBluePath_DepositPlusSupplyInOnePass(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == MorphoBlueAddress {
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+			}
+			if calls[0].Target == unknownVault {
+				// vault state (totalAssets + totalSupply) on Deposit handling.
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			// asset token metadata
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			// vault state + balance for Deposit handling
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.vaultDetailResults("V1.1 Vault", "v11V", 18, true), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		return 99, nil
+	}
+
+	depositLog := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	supplyLog := h.makeSupplyLog(testMarketID, unknownVault, unknownVault, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, depositLog, supplyLog)
+
+	var depositPositionSaved bool
+	h.morphoRepo.SaveVaultPositionFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultPosition) error {
+		depositPositionSaved = true
+		return nil
+	}
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("vault must be registered by the pre-walk before the main loop reaches log[0]")
+	}
+	if !depositPositionSaved {
+		t.Error("Deposit at log[0] was not processed in the same pass — the pre-walk should have registered the vault BEFORE the main loop reached log[0], so the Deposit hits the IsKnownVault branch in processReceipt's switch")
+	}
+}
+
+// TestMorphoBlueVaultCandidates_TableDriven pins the contract that the live
+// indexer and the morpho-vault-indexer backfiller share via
+// MorphoBlueVaultCandidates. A future PR that, say, switches Liquidate to
+// return only {Caller} or replaces the type switch with reflection on field
+// names "Caller"+"OnBehalf" must fail this test rather than silently drift
+// the live/backfill discovery contracts apart.
+func TestMorphoBlueVaultCandidates_TableDriven(t *testing.T) {
+	caller := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	onBehalf := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	receiver := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	borrower := common.HexToAddress("0x4444444444444444444444444444444444444444")
+
+	tests := []struct {
+		name  string
+		event MorphoBlueEvent
+		want  []common.Address
+	}{
+		{"Supply", &SupplyEvent{Caller: caller, OnBehalf: onBehalf}, []common.Address{caller, onBehalf}},
+		{"Withdraw", &WithdrawEvent{Caller: caller, OnBehalf: onBehalf, Receiver: receiver}, []common.Address{caller, onBehalf}},
+		{"Borrow", &BorrowEvent{Caller: caller, OnBehalf: onBehalf, Receiver: receiver}, []common.Address{caller, onBehalf}},
+		{"Repay", &RepayEvent{Caller: caller, OnBehalf: onBehalf}, []common.Address{caller, onBehalf}},
+		{"SupplyCollateral", &SupplyCollateralEvent{Caller: caller, OnBehalf: onBehalf}, []common.Address{caller, onBehalf}},
+		{"WithdrawCollateral", &WithdrawCollateralEvent{Caller: caller, OnBehalf: onBehalf, Receiver: receiver}, []common.Address{caller, onBehalf}},
+		{"Liquidate", &LiquidateEvent{Caller: caller, Borrower: borrower}, []common.Address{caller, borrower}},
+		// Events without user candidates fall through to nil.
+		{"CreateMarket (no candidates)", &CreateMarketEvent{}, nil},
+		{"AccrueInterest (no candidates)", &AccrueInterestEvent{}, nil},
+		{"SetFee (no candidates)", &SetFeeEvent{}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MorphoBlueVaultCandidates(tt.event)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("MorphoBlueVaultCandidates() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueLiquidateBorrower
+// covers the Liquidate branch of MorphoBlueVaultCandidates, which uses
+// {Caller, Borrower} (not {Caller, OnBehalf} like the position events).
+// MetaMorpho V1/V1.1 vaults don't borrow on Morpho Blue in practice, but
+// the slot is included for symmetry — a regression that drops Liquidate
+// from the switch (or swaps borrower for receiver, etc.) would be invisible
+// without this test.
+func TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueLiquidateBorrower(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	liquidator := common.HexToAddress("0x5555555555555555555555555555555555555555")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			if calls[0].Target == MorphoBlueAddress {
+				// market+position state for handleLiquidateEvent. Two positions.
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+			}
+			return h.tokenMetadataResults("WETH", 18), nil
+		case 3:
+			// market state + borrower position + liquidator position
+			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult(), h.defaultPositionStateResult()}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				if calls[0].Target == unknownVault {
+					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				}
+				return h.notAVaultProbeResults(), nil
+			}
+			return h.vaultDetailResults("V1 Vault", "v1V", 18, false), nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	var savedVault *entity.MorphoVault
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, v *entity.MorphoVault) (int64, error) {
+		savedVault = v
+		return 99, nil
+	}
+
+	log := h.makeLiquidateLog(testMarketID, liquidator, unknownVault,
+		big.NewInt(1000), big.NewInt(900), big.NewInt(1100), big.NewInt(0), big.NewInt(0))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("V1 vault as Liquidate borrower must be registered after probe")
+	}
+	if savedVault == nil {
+		t.Fatal("V1 vault was not persisted")
+	}
+	if savedVault.VaultVersion != entity.MorphoVaultV1 {
+		t.Errorf("VaultVersion = %d, want V1 (%d)", savedVault.VaultVersion, entity.MorphoVaultV1)
+	}
+	if !h.svc.vaultRegistry.IsKnownNotVault(liquidator) {
+		t.Error("liquidator (caller, not a vault) must be marked known-not-vault after probe rejection")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_KnownVault_SkipsProbe
+// verifies that an already-registered vault appearing as caller/onBehalf
+// short-circuits without firing the probe. The IsKnownVault check at line
+// 752 of service.go guards the hot path — a regression that removes it
+// would re-probe every Morpho Blue Supply for already-discovered vaults
+// (silent perf regression).
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_KnownVault_SkipsProbe(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	knownVault := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	h.registerTestVault(knownVault, 77, entity.MorphoVaultV1)
+
+	probeAttempted := false
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 4 && h.isProbeMulticall(calls) {
+			probeAttempted = true
+			return nil, fmt.Errorf("probe must not fire for already-known vault address")
+		}
+		return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+	}
+
+	log := h.makeSupplyLog(testMarketID, knownVault, knownVault, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if probeAttempted {
+		t.Error("probe must short-circuit for already-known vault addresses")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_FreshUserCallerProbedExactlyOnce
+// is a canary against the harness's pre-marking of testCaller / testOnBehalf
+// / etc. as known-not-vault. Those pre-marks are an isolation convenience —
+// they keep existing Supply/Withdraw/Borrow tests from incidentally hitting
+// the V1/V1.1 probe path. But they also make those tests blind to one
+// regression: a change that stops calling discoverV1V11VaultsInReceipt
+// from processReceipt's Morpho Blue case would break NO existing test
+// because the pre-marked addresses short-circuit before the probe anyway.
+//
+// This test uses a fresh, un-pre-marked EOA address as the caller and
+// asserts the probe fires exactly once and resolves to known-not-vault.
+// If the wiring at service.go's Morpho Blue case is ever removed, this
+// test will fail with probe never fires AND eoa not cached.
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_FreshUserCallerProbedExactlyOnce(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	freshUser := common.HexToAddress("0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0")
+
+	var probeCount int32
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+		case 4:
+			if h.isProbeMulticall(calls) {
+				atomic.AddInt32(&probeCount, 1)
+				return h.notAVaultProbeResults(), nil
+			}
+		}
+		return nil, fmt.Errorf("unexpected %d calls", len(calls))
+	}
+
+	// caller == onBehalf so dedup ensures exactly one probe.
+	log := h.makeSupplyLog(testMarketID, freshUser, freshUser, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if got := atomic.LoadInt32(&probeCount); got != 1 {
+		t.Fatalf("probe fired %d times for fresh caller; want exactly 1 — if 0, the discoverV1V11VaultsInReceipt wiring is broken; if >1, the seen-map dedup is broken", got)
+	}
+	if !h.svc.vaultRegistry.IsKnownNotVault(freshUser) {
+		t.Error("freshUser must end up in not-vault cache after probe rejection — if missing, the cache write at service.go's ErrNotVault branch is broken")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_ZeroAddress_SkipsProbe
+// verifies the zero-address / MorphoBlueAddress filter at service.go:749.
+// Without it, a Borrow event with onBehalf=0x0 would route into the probe,
+// resolve to *ErrNotVault, and pollute the negative-cache with the zero
+// address — noise that survives across the process lifetime.
+func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_ZeroAddress_SkipsProbe(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	caller := common.HexToAddress("0x6666666666666666666666666666666666666666")
+
+	probeAttempted := false
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 4 && h.isProbeMulticall(calls) {
+			if calls[0].Target == (common.Address{}) {
+				probeAttempted = true
+				return nil, fmt.Errorf("probe must never fire on zero address")
+			}
+			// caller probe → not a vault
+			return h.notAVaultProbeResults(), nil
+		}
+		return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+	}
+
+	// Borrow with onBehalf == 0x0 — caller is a real address, onBehalf is zero.
+	log := h.makeBorrowLog(testMarketID, caller, common.Address{}, caller, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if probeAttempted {
+		t.Error("zero address must never reach the probe path")
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(common.Address{}) {
+		t.Error("zero address must never end up in the not-vault cache")
 	}
 }
 
@@ -2166,13 +2914,14 @@ func TestProcessBlockEvent_VaultDiscovery_EventDecodeError(t *testing.T) {
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9999999999999999999999999999999999999999")
 
-	// Create a log with a MetaMorpho event topic but completely invalid data that can't be decoded.
-	depositEvent := h.metaMorphoEventsABI.Events["Deposit"]
+	// Use a V2 4-field AccrueInterest topic (the only discovery trigger) with
+	// empty data so the non-indexed argument unpack fails and the event-decode
+	// guard inside tryDiscoverVault marks the address as not-vault.
+	v2AccrueEvent := h.metaMorphoV2AccrueABI.Events["AccrueInterest"]
 	log := shared.Log{
 		Address: unknownVault.Hex(),
 		Topics: []string{
-			depositEvent.ID.Hex(),
-			// Missing required topic for sender/owner
+			v2AccrueEvent.ID.Hex(),
 		},
 		Data:            "",
 		TransactionHash: testTxHash,
@@ -2197,19 +2946,19 @@ func TestProcessBlockEvent_VaultDiscovery_GetTokenMetadataError(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
-			if calls[0].Target == unknownVault {
-				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-			}
 			// getTokenMetadata call fails
 			return nil, errors.New("token metadata rpc error")
 		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
@@ -2229,11 +2978,11 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
-			if calls[0].Target == unknownVault {
-				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-			}
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -2244,7 +2993,7 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 		return 0, errors.New("token creation failed")
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
@@ -2339,6 +3088,106 @@ func TestProcessBlockEvent_EnsureMarket_TokenPairMetadataError(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_EnsureMarket_IdleMarket exercises the full
+// processReceipt → handleSupplyEvent → ensureMarket → getMarketParams →
+// getTokenPairMetadata path against a Morpho Blue idle market (collateral
+// token = 0x0). Pre-fix this triggered "decimals() returned no data" and the
+// SQS message retried indefinitely; post-fix the pair-metadata short-circuit
+// returns empty TokenMetadata for the collateral side and the market is
+// persisted normally with a token row at the zero address.
+//
+// See docs/morpho-indexer-idle-market-fix-plan.md.
+func TestProcessBlockEvent_EnsureMarket_IdleMarket(t *testing.T) {
+	h := newTestHarness(t)
+
+	// Realistic idle-market shape from mainnet:
+	//   loanToken       = EURCV (0x5F78…)
+	//   collateralToken = 0x0          ← idle
+	//   oracle          = 0x0
+	//   irm             = 0x0
+	//   lltv            = 0
+	loanToken := common.HexToAddress("0x5F7827FDeb7c20b443265Fc2F40845B715385Ff2")
+	collateralToken := common.Address{}
+	oracle := common.Address{}
+	irm := common.Address{}
+	lltv := big.NewInt(0)
+
+	// Market not in DB → ensureMarket goes through the slow path.
+	h.morphoRepo.GetMarketByMarketIDFn = func(_ context.Context, _ int64, _ common.Hash) (*entity.MorphoMarket, error) {
+		return nil, nil
+	}
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 2:
+			// Either getMarketAndPositionState OR token metadata for the loan
+			// side. Distinguish by target address: market+position targets
+			// MorphoBlueAddress; token metadata targets the loan token.
+			if calls[0].Target == MorphoBlueAddress {
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+			}
+			if calls[0].Target == loanToken {
+				return h.tokenMetadataResults("EURCV", 18), nil
+			}
+			return nil, fmt.Errorf("unexpected 2-call multicall to %s", calls[0].Target.Hex())
+		case 1:
+			// getMarketParams: idle market shape.
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packMarketParams(loanToken, collateralToken, oracle, irm, lltv)},
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls — the zero collateral side must be short-circuited, not batched", len(calls))
+		}
+	}
+
+	tokenAddrs := []common.Address{}
+	tokenSymbols := []string{}
+	tokenDecimals := []int{}
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, dec int, _ int64) (int64, error) {
+		tokenAddrs = append(tokenAddrs, addr)
+		tokenSymbols = append(tokenSymbols, sym)
+		tokenDecimals = append(tokenDecimals, dec)
+		return int64(len(tokenAddrs)), nil // 1 for loan, 2 for collateral
+	}
+
+	var savedMarket *entity.MorphoMarket
+	h.morphoRepo.GetOrCreateMarketFn = func(_ context.Context, _ pgx.Tx, m *entity.MorphoMarket) (int64, error) {
+		savedMarket = m
+		return 99, nil
+	}
+
+	log := h.makeSupplyLog(testMarketID, testCaller, testOnBehalf, big.NewInt(1000), big.NewInt(900))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock for idle-market Supply event: %v", err)
+	}
+
+	if savedMarket == nil {
+		t.Fatal("idle market should have been persisted via GetOrCreateMarket")
+	}
+	if savedMarket.LoanTokenID != 1 || savedMarket.CollateralTokenID != 2 {
+		t.Errorf("market token IDs: loan=%d collateral=%d, want 1 / 2", savedMarket.LoanTokenID, savedMarket.CollateralTokenID)
+	}
+
+	// Two token rows must have been upserted: loan with real metadata, collateral with empty metadata.
+	if len(tokenAddrs) != 2 {
+		t.Fatalf("expected 2 GetOrCreateToken calls, got %d", len(tokenAddrs))
+	}
+	if tokenAddrs[0] != loanToken {
+		t.Errorf("first token call addr = %s, want %s (loan token)", tokenAddrs[0].Hex(), loanToken.Hex())
+	}
+	if tokenSymbols[0] != "EURCV" || tokenDecimals[0] != 18 {
+		t.Errorf("loan token metadata: symbol=%q decimals=%d, want EURCV / 18", tokenSymbols[0], tokenDecimals[0])
+	}
+	if tokenAddrs[1] != (common.Address{}) {
+		t.Errorf("second token call addr = %s, want 0x0 (idle collateral)", tokenAddrs[1].Hex())
+	}
+	if tokenSymbols[1] != "" || tokenDecimals[1] != 0 {
+		t.Errorf("idle collateral metadata: symbol=%q decimals=%d, want empty / 0", tokenSymbols[1], tokenDecimals[1])
+	}
+}
+
 // --- Liquidate ensureMarket error ---
 
 func TestProcessBlockEvent_Liquidate_EnsureMarketError(t *testing.T) {
@@ -2408,15 +3257,15 @@ func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenCreated(t *testing.T) {
 		switch len(calls) {
 		case 2:
 			if calls[0].Target == unknownVault {
-				if calls[1].Target == unknownVault {
-					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-				}
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 3:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -2431,7 +3280,7 @@ func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenCreated(t *testing.T) {
 		return 1, nil
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})
@@ -2460,11 +3309,11 @@ func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenRepoError(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
-			if calls[0].Target == unknownVault {
-				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-			}
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
 			return h.vaultDetailResults("Morpho Vault", "mVLT", 18, false), nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -2475,7 +3324,7 @@ func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenRepoError(t *testing.T) {
 		return 0, errors.New("receipt token db error")
 	}
 
-	log := h.makeVaultDepositLog(unknownVault, testCaller, testOnBehalf, big.NewInt(5000), big.NewInt(4500))
+	log := h.makeDiscoveryTriggerLog(unknownVault)
 	receipt := makeReceipt(testTxHash, log)
 
 	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt})

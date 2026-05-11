@@ -2,15 +2,21 @@ package entity
 
 import "fmt"
 
-// MorphoVaultVersion represents the version of a MetaMorpho vault.
+// MorphoVaultVersion represents the version of a Morpho-family vault.
+//
+// Versions tracked here include the original MetaMorpho V1, the MetaMorpho V1.1
+// variant (adds skimRecipient()), and the new VaultV2 standard from
+// morpho-org/vault-v2 (different ABI: no MORPHO(), exposes curator() and
+// liquidityAdapter()).
 type MorphoVaultVersion int16
 
 const (
-	MorphoVaultV1 MorphoVaultVersion = 1 // MetaMorpho V1.1
-	MorphoVaultV2 MorphoVaultVersion = 2 // MetaMorpho V2
+	MorphoVaultV1   MorphoVaultVersion = 1 // MetaMorpho V1 (no skimRecipient)
+	MorphoVaultV1_1 MorphoVaultVersion = 2 // MetaMorpho V1.1 (adds skimRecipient)
+	MorphoVaultV2   MorphoVaultVersion = 3 // Morpho VaultV2 (new standard, MORPHO() reverts)
 )
 
-// MorphoVault represents a MetaMorpho vault.
+// MorphoVault represents a Morpho-family vault (MetaMorpho V1/V1.1 or VaultV2).
 type MorphoVault struct {
 	ID             int64
 	ChainID        int64
@@ -54,8 +60,8 @@ func (v *MorphoVault) Validate() error {
 	if v.AssetTokenID <= 0 {
 		return fmt.Errorf("assetTokenID must be positive, got %d", v.AssetTokenID)
 	}
-	if v.VaultVersion != MorphoVaultV1 && v.VaultVersion != MorphoVaultV2 {
-		return fmt.Errorf("vaultVersion must be 1 or 2, got %d", v.VaultVersion)
+	if v.VaultVersion != MorphoVaultV1 && v.VaultVersion != MorphoVaultV1_1 && v.VaultVersion != MorphoVaultV2 {
+		return fmt.Errorf("vaultVersion must be 1, 2, or 3, got %d", v.VaultVersion)
 	}
 	if v.CreatedAtBlock <= 0 {
 		return fmt.Errorf("createdAtBlock must be positive, got %d", v.CreatedAtBlock)
