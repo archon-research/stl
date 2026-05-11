@@ -9,15 +9,16 @@ from app.domain.entities.capital_metrics import CapitalMetrics
 from app.main import app
 from app.services.allocation_service import AllocationService
 from app.services.capital_metrics_service import CapitalMetricsService
-from tests.conftest import make_receipt_token_position
+from tests.conftest import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = "0x" + "ab" * 20
 
 
-def _make_service(primes=None, positions=None) -> AllocationService:
+def _make_service(primes=None, positions=None, direct_holdings=None) -> AllocationService:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
+    service.list_direct_asset_holdings.return_value = direct_holdings or []
     return service
 
 
@@ -91,6 +92,61 @@ def test_list_allocations_returns_200_with_enriched_holdings():
         }
     ]
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
+    """Direct holdings (e.g. raw PYUSD in a proxy) surface as their own rows.
+    receipt_token_id / receipt_token_address / protocol_name / amount_usd
+    are null; symbol and underlying_symbol both name the held asset; category
+    defaults to ASSET.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding()
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "chain_id": 1,
+            "receipt_token_id": None,
+            "receipt_token_address": None,
+            "underlying_token_id": 99,
+            "underlying_token_address": "0x" + "c" * 40,
+            "symbol": "PYUSD",
+            "underlying_symbol": "PYUSD",
+            "protocol_name": None,
+            "balance": "250.0",
+            "amount_usd": None,
+            "latest_activity_at": None,
+            "category": "asset",
+        }
+    ]
+    service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_combines_receipt_and_direct_rows():
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        positions=[make_receipt_token_position()],
+        direct_holdings=[make_direct_asset_holding()],
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 2
+    receipt_row, direct_row = rows
+    assert receipt_row["symbol"] == "aUSDC" and receipt_row["receipt_token_id"] == 1
+    assert direct_row["symbol"] == "PYUSD" and direct_row["receipt_token_id"] is None
 
 
 def test_list_allocations_returns_empty_when_no_holdings():

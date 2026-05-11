@@ -245,28 +245,46 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["protocol_name"] == "Aave V3"
 
 
-def test_direct_underlying_holdings_are_not_attributed_to_receipt_tokens(
+def test_direct_underlying_holdings_surface_as_their_own_rows(
     client: TestClient,
 ) -> None:
-    """obex holds raw USDC directly. A direct underlying holding must not
-    surface as a position in any receipt token that wraps that underlying:
-    attributing it to e.g. aUSDC double-counts the prime's actual exposure
-    and would fan out across every USDC-underlying receipt token.
+    """A prime holds raw USDC directly. It must not be attributed to any
+    USDC-wrapping receipt token (that would double-count and fan out), but
+    it should appear as a direct-asset row with null receipt_token fields
+    and ASSET category.
     """
     response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
-    assert response.json() == []
+    data = response.json()
+    assert len(data) == 1
+    row = data[0]
+    assert row["symbol"] == "USDC"
+    assert row["underlying_symbol"] == "USDC"
+    assert row["receipt_token_id"] is None
+    assert row["receipt_token_address"] is None
+    assert row["protocol_name"] is None
+    assert row["underlying_token_address"] == f"0x{_USDC_HEX}"
+    assert row["balance"] == "250"
+    assert row["category"] == "asset"
 
 
-def test_list_allocations_returns_empty_when_prime_has_no_receipt_token_holdings(
+def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     client: TestClient,
 ) -> None:
-    """grove holds only GNO, which has no receipt_token mapping."""
+    """A prime holds only GNO. There is no receipt_token wrapping GNO, so the
+    response contains exactly one direct-asset row and no receipt-token rows.
+    """
     response = client.get(f"/v1/primes/0x{_GROVE_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
-    assert response.json() == []
+    data = response.json()
+    assert len(data) == 1
+    row = data[0]
+    assert row["symbol"] == "GNO"
+    assert row["receipt_token_id"] is None
+    assert row["protocol_name"] is None
+    assert row["category"] == "asset"
 
 
 def test_list_allocations_returns_empty_for_unknown_prime(client: TestClient) -> None:

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.domain.entities.allocation import (
     ChainMetadata,
+    DirectAssetHolding,
     EthAddress,
     Prime,
     ProtocolMetadata,
@@ -27,6 +28,9 @@ class AllocationService:
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         return await self._repository.list_receipt_token_positions(prime_id)
+
+    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
+        return await self._repository.list_direct_asset_holdings(prime_id)
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)

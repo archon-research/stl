@@ -49,20 +49,29 @@ class ProtocolResponse(BaseModel):
 
 
 class AllocationResponse(BaseModel):
-    """Enriched allocation response with category and metadata."""
+    """Enriched allocation response with category and metadata.
+
+    Two row shapes share this model:
+    - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
+    - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
+      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
+      ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
+      the held asset; ``underlying_token_id`` / ``underlying_token_address``
+      point at it.
+    """
 
     chain_id: int
-    receipt_token_id: int
-    receipt_token_address: str
+    receipt_token_id: int | None = None
+    receipt_token_address: str | None = None
     underlying_token_id: int
     underlying_token_address: str
     symbol: str
     underlying_symbol: str
-    protocol_name: str
+    protocol_name: str | None = None
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: str | None = None
-    category: AllocationCategory  # New: allocation type (allocation/pol/psm3/asset)
+    category: AllocationCategory  # allocation/pol/psm3/asset
 
 
 class CapitalMetricsResponse(BaseModel):
@@ -140,9 +149,10 @@ async def list_allocations(
     service: AllocationService = Depends(_get_service),
 ):
     positions = await service.list_receipt_token_positions(prime_id)
+    direct_holdings = await service.list_direct_asset_holdings(prime_id)
     category_service = AllocationCategoryService()
 
-    return [
+    receipt_rows = [
         AllocationResponse(
             chain_id=p.chain_id,
             receipt_token_id=p.receipt_token_id,
@@ -159,6 +169,24 @@ async def list_allocations(
         )
         for p in positions
     ]
+    direct_rows = [
+        AllocationResponse(
+            chain_id=h.chain_id,
+            receipt_token_id=None,
+            receipt_token_address=None,
+            underlying_token_id=h.token_id,
+            underlying_token_address=h.token_address,
+            symbol=h.symbol,
+            underlying_symbol=h.symbol,
+            protocol_name=None,
+            balance=h.balance,
+            amount_usd=None,
+            latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
+            category=category_service.classify(None, h.symbol),
+        )
+        for h in direct_holdings
+    ]
+    return receipt_rows + direct_rows
 
 
 @router.get("/allocations/activity", response_model=list[AllocationActivityResponse])

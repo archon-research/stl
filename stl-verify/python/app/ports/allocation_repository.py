@@ -4,6 +4,7 @@ from typing import Protocol
 
 from app.domain.entities.allocation import (
     ChainMetadata,
+    DirectAssetHolding,
     EthAddress,
     Prime,
     ProtocolMetadata,
@@ -27,6 +28,10 @@ class AllocationRepository(Protocol):
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         """Return current receipt-token holdings for the given prime."""
+        ...
+
+    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
+        """Return tokens held directly by the prime that are not registered as receipt-token wrappers."""
         ...
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.allocation import (
     ChainMetadata,
+    DirectAssetHolding,
     EthAddress,
     Prime,
     ProtocolMetadata,
@@ -147,6 +148,24 @@ class PostgresAllocationRepository:
                         if row.amount_usd is not None
                         else None
                     ),
+                    latest_activity_at=row.latest_activity_at,
+                )
+                for row in result
+            ]
+
+    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                _DIRECT_ASSET_HOLDINGS_SQL,
+                {"proxy_hex": prime_id.hex},
+            )
+            return [
+                DirectAssetHolding(
+                    chain_id=row.chain_id,
+                    token_id=row.token_id,
+                    token_address="0x" + row.token_address,
+                    symbol=row.symbol,
+                    balance=_safe_decimal(row.balance, "balance", row.token_id),
                     latest_activity_at=row.latest_activity_at,
                 )
                 for row in result
@@ -303,6 +322,39 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         LIMIT 1
     ) lp ON TRUE
     ORDER BY p.balance DESC
+""")
+
+
+# A "direct asset holding" is a position whose token has no row in the
+# receipt_token table — i.e. the prime holds the token itself rather than
+# a registered protocol wrapper for it. Receipt-token positions are returned
+# by ``_RECEIPT_TOKEN_POSITIONS_SQL``; this query is the complementary set.
+_DIRECT_ASSET_HOLDINGS_SQL = text("""
+    WITH latest_positions AS (
+        SELECT DISTINCT ON (ap.token_id)
+            ap.chain_id,
+            ap.token_id,
+            ap.balance,
+            ap.created_at AS latest_activity_at
+        FROM allocation_position ap
+        WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+          AND ap.balance > 0
+        ORDER BY ap.token_id,
+                 ap.block_number DESC, ap.block_version DESC,
+                 ap.processing_version DESC, ap.log_index DESC
+    )
+    SELECT
+        lp.chain_id,
+        lp.token_id,
+        encode(t.address, 'hex') AS token_address,
+        t.symbol                 AS symbol,
+        lp.balance,
+        lp.latest_activity_at
+    FROM latest_positions lp
+    JOIN token t ON t.id = lp.token_id
+    LEFT JOIN receipt_token rt ON rt.receipt_token_address = t.address
+    WHERE rt.id IS NULL
+    ORDER BY lp.balance DESC
 """)
 
 
