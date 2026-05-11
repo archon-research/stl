@@ -26,8 +26,8 @@ class AllocationService:
     async def list_primes(self) -> list[Prime]:
         return await self._repository.list_primes()
 
-    async def prime_exists(self, prime_id: EthAddress) -> bool:
-        return await self._repository.prime_exists(prime_id)
+    async def prime_exists(self, prime_address: EthAddress) -> bool:
+        return await self._repository.prime_exists(prime_address)
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         return await self._repository.list_receipt_token_positions(prime_id)

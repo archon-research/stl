@@ -5,21 +5,22 @@ import type {
   AllocationActivityResponse,
   AllocationsResponse,
   BadDebt,
+  CapitalMetricsListResponse,
   DataSourcesResponse,
+  PrimeDebtSnapshot,
   PrimesResponse,
+  ProtocolEventsResponse,
   RiskBreakdown,
+  Token,
+  TokenPrice,
+  TokensResponse,
+  TxProtocolEventsResponse,
 } from '../types/allocation';
-import type {
-  LocalChainRow,
-  LocalProtocolRow,
-  StarRiskCapitalResponse,
-  StarRiskCapitalRow,
-} from '../types/local-data';
+import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import { isAbortError } from './errors';
 import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
-const STAR_RISK_CAPITAL_URL =
-  'https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/';
 const apiClient = createApiClient<paths>(API_BASE_URL);
 
 type BadDebtQuery =
@@ -163,79 +164,31 @@ export function getAllocationActivity(
   );
 }
 
-export async function getStarRiskCapitalRequirements(
+export function getCapitalMetrics(
   signal?: AbortSignal,
-): Promise<StarRiskCapitalRow[]> {
-  try {
-    // Create timeout signal (10s) that merges with provided signal
-    const timeoutController = new AbortController();
-    const timeoutId = setTimeout(() => timeoutController.abort(), 10000);
+): Promise<CapitalMetricsListResponse> {
+  const endpointPath = '/v1/capital-metrics';
+  const endpointUrl = API_BASE_URL
+    ? `${API_BASE_URL}${endpointPath}`
+    : endpointPath;
 
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, timeoutController.signal])
-      : timeoutController.signal;
+  return fetch(endpointUrl, { signal })
+    .then(async (response) => {
+      if (!response.ok) {
+        const responseText = await response.text().catch(() => '<no body>');
+        throw new Error(
+          `GET ${endpointPath} failed (${response.status}): ${responseText}`,
+        );
+      }
 
-    const response = await fetch(STAR_RISK_CAPITAL_URL, {
-      signal: combinedSignal,
+      return response.json() as Promise<CapitalMetricsListResponse>;
+    })
+    .catch((error: unknown) => {
+      if (!isAbortError(error)) {
+        logging.error('Failed to fetch capital metrics list', { error });
+      }
+      throw error;
     });
-
-    clearTimeout(timeoutId);
-
-    if (!response.ok) {
-      const responseText = await response.text().catch(() => '<no body>');
-
-      logging.error('Star risk capital API request failed', {
-        url: STAR_RISK_CAPITAL_URL,
-        status: response.status,
-        statusText: response.statusText,
-        responseBody: responseText.slice(0, 500), // Limit log size
-      });
-
-      throw new Error(
-        `Failed to fetch risk capital data (${response.status}): ${response.statusText}`,
-      );
-    }
-
-    let payload: StarRiskCapitalResponse;
-    try {
-      payload = (await response.json()) as StarRiskCapitalResponse;
-    } catch (jsonError) {
-      logging.error('Failed to parse Star risk capital response as JSON', {
-        error: jsonError,
-        url: STAR_RISK_CAPITAL_URL,
-      });
-      throw new Error(
-        'Received invalid JSON response from risk capital service',
-        {
-          cause: jsonError,
-        },
-      );
-    }
-
-    if (!payload.data?.results) {
-      logging.warn(
-        'Star risk capital response missing expected data structure',
-        {
-          hasData: !!payload.data,
-          hasResults: !!payload.data?.results,
-        },
-      );
-      return [];
-    }
-
-    return payload.data.results;
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw error; // Let abort errors propagate
-    }
-
-    // Network errors, timeouts, etc.
-    logging.error('Network error fetching Star risk capital', {
-      error,
-      url: STAR_RISK_CAPITAL_URL,
-    });
-    throw error;
-  }
 }
 
 export function getDataSources(
@@ -245,4 +198,123 @@ export function getDataSources(
     apiClient.GET('/v1/data-sources', { signal }),
     'GET /v1/data-sources',
   );
+}
+
+export function getProtocolEvents(
+  filters?: {
+    tx_hash?: string;
+    protocol_name?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<ProtocolEventsResponse> {
+  return requestData(
+    apiClient.GET('/v1/protocol-events', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/protocol-events',
+  );
+}
+
+export function getTxProtocolEvents(
+  txHash: string,
+  signal?: AbortSignal,
+): Promise<TxProtocolEventsResponse> {
+  return requestData(
+    apiClient.GET('/v1/tx/{tx_hash}/events', {
+      params: {
+        path: {
+          tx_hash: txHash,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tx/{tx_hash}/events',
+  );
+}
+
+export function getTokens(
+  filters?: {
+    chain_id?: number;
+    symbol?: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<TokensResponse> {
+  return requestData(
+    apiClient.GET('/v1/tokens', {
+      params: { query: filters },
+      signal,
+    }),
+    'GET /v1/tokens',
+  );
+}
+
+export function getToken(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<Token> {
+  return requestData(
+    apiClient.GET('/v1/tokens/{token_id}', {
+      params: {
+        path: {
+          token_id: tokenId,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tokens/{token_id}',
+  );
+}
+
+export function getTokenPrice(
+  tokenId: number,
+  signal?: AbortSignal,
+): Promise<TokenPrice> {
+  return requestData(
+    apiClient.GET('/v1/tokens/{token_id}/price', {
+      params: {
+        path: {
+          token_id: tokenId,
+        },
+      },
+      signal,
+    }),
+    'GET /v1/tokens/{token_id}/price',
+  );
+}
+
+export async function getPrimeDebtSnapshots(
+  primeId: string,
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot[]> {
+  const query =
+    typeof limit === 'number'
+      ? ({
+          limit,
+        } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
+      : undefined;
+
+  return requestData(
+    apiClient.GET('/v1/primes/{prime_id}/debt', {
+      params: {
+        path: {
+          prime_id: primeId,
+        },
+        query,
+      },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/debt',
+  );
+}
+
+export async function getLatestPrimeDebtSnapshot(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeDebtSnapshot | null> {
+  const snapshots = await getPrimeDebtSnapshots(primeId, 1, signal);
+  return snapshots[0] ?? null;
 }

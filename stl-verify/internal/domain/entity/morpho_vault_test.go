@@ -27,9 +27,14 @@ func TestNewMorphoVault(t *testing.T) {
 			version: MorphoVaultV1, block: 19000000,
 		},
 		{
-			name: "valid V2 vault", chainID: 1, protocolID: 1, address: validAddr,
+			name: "valid V1.1 vault", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "Gauntlet WETH", symbol: "gtWETH", assetToken: 2,
-			version: MorphoVaultV2, block: 20000000,
+			version: MorphoVaultV1_1, block: 20000000,
+		},
+		{
+			name: "valid V2 vault", chainID: 1, protocolID: 1, address: validAddr,
+			vaultName: "Spark Blue Chip USDT Vault", symbol: "sparkUSDTbc", assetToken: 3,
+			version: MorphoVaultV2, block: 24481834,
 		},
 		{
 			name: "zero chain ID", chainID: 0, protocolID: 1, address: validAddr,
@@ -58,8 +63,8 @@ func TestNewMorphoVault(t *testing.T) {
 		{
 			name: "invalid version", chainID: 1, protocolID: 1, address: validAddr,
 			vaultName: "test", symbol: "T", assetToken: 1,
-			version: MorphoVaultVersion(3), block: 1,
-			wantErr: true, errContains: "vaultVersion must be 1 or 2",
+			version: MorphoVaultVersion(4), block: 1,
+			wantErr: true, errContains: "vaultVersion must be 1, 2, or 3",
 		},
 		{
 			name: "zero block", chainID: 1, protocolID: 1, address: validAddr,

@@ -81,8 +81,10 @@ When it finishes:
 kubectl --context=kind-vector get pods -n vector
 ```
 
-Everything should be `Running`. Teardown with `make dev-down`; nuke
-persistent volumes too with `make dev-wipe`.
+Everything should be `Running`. For local-only pause/resume use
+`make dev-suspend` and `make dev-resume` (do not use these in CI/prod).
+Use `make dev-down` to delete the cluster; nuke persistent volumes too
+with `make dev-wipe`.
 
 > **⚠️ You need an Alchemy key for anything to actually work.** By
 > default `make dev-up` points the watcher at a **mock blockchain
@@ -714,13 +716,13 @@ app/api/v1/risk.py                # The two routes below. Never import risk_engi
 
 ### API contract — two routes cover every model
 
-Both return `{ asset_id, prime_id?, results: [{ version, model, rrc_usd, details }, ...] }`.
-Each `details` is a discriminated union keyed on `model`.
+Both return `{ asset_id, prime_id?, results: [{ version, risk_model, rrc_usd, details }, ...] }`.
+Each `details` is a discriminated union keyed on `risk_model` (the discriminator field is named `risk_model` to avoid collision with Pydantic's `model_*` protected namespace).
 Version is a reference to block_version and processing_version. These allow auditability of the results.
 
 - `GET /v1/risk/rrc?asset_id=…&prime_id=…` — every applicable model at
   its defaults.
-- `POST /v1/risk/rrc` with `{ asset_id, prime_id?, overrides: { <model>: {...knobs} } }`
+- `POST /v1/risk/rrc/scenario` with `{ asset_id, prime_id?, overrides: { <model>: {...knobs} } }`
   — same, with per-model scenario overrides. Unknown models/keys → 422.
 
 ### Model-side interface

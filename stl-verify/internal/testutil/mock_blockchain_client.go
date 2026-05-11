@@ -41,6 +41,17 @@ type MockBlockchainClient struct {
 	// UseBlockErrForMissing makes GetBlocksBatch set BlockErr on missing blocks
 	// instead of leaving them empty.
 	UseBlockErrForMissing bool
+
+	// getBlockByNumberErr keys block numbers to errors that
+	// GetBlockByNumber should return for that block. Used by tests that need
+	// to simulate transient RPC failures at specific heights.
+	getBlockByNumberErr map[int64]error
+
+	// getBlockByNumberHook keys block numbers to a callback that runs when
+	// GetBlockByNumber is invoked for that block. Used by tests to simulate
+	// concurrent state changes during the RPC call (e.g., a backfill writing
+	// to the DB during a live-side verification window).
+	getBlockByNumberHook map[int64]func()
 }
 
 func NewMockBlockchainClient() *MockBlockchainClient {
@@ -118,6 +129,19 @@ func (m *MockBlockchainClient) SetBlockHeader(num int64, hash, parentHash string
 }
 
 func (m *MockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
+	// Run the per-block hook (if any) before the lookup, holding no lock so
+	// the hook may freely mutate other state. We pop the hook so it fires at
+	// most once per configured invocation.
+	m.mu.Lock()
+	hook := m.getBlockByNumberHook[blockNum]
+	if hook != nil {
+		delete(m.getBlockByNumberHook, blockNum)
+	}
+	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -125,11 +149,48 @@ func (m *MockBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum in
 		time.Sleep(m.Delay)
 	}
 
+	if e, ok := m.getBlockByNumberErr[blockNum]; ok && e != nil {
+		return nil, e
+	}
+
 	if bd, ok := m.blocks[blockNum]; ok {
 		data, _ := json.Marshal(bd.Header)
 		return data, nil
 	}
 	return nil, fmt.Errorf("block %d not found", blockNum)
+}
+
+// SetGetBlockByNumberError configures GetBlockByNumber to return the given error
+// for a specific block number (overriding any stored block at that height).
+// Pass err=nil to clear a previously-set error for the block number.
+func (m *MockBlockchainClient) SetGetBlockByNumberError(blockNum int64, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getBlockByNumberErr == nil {
+		m.getBlockByNumberErr = make(map[int64]error)
+	}
+	if err == nil {
+		delete(m.getBlockByNumberErr, blockNum)
+		return
+	}
+	m.getBlockByNumberErr[blockNum] = err
+}
+
+// SetGetBlockByNumberHook installs a one-shot callback that fires when
+// GetBlockByNumber is next invoked for the given block number. The hook runs
+// before the response is constructed and is cleared after firing. Tests use
+// this to simulate concurrent writers landing during an RPC round-trip.
+func (m *MockBlockchainClient) SetGetBlockByNumberHook(blockNum int64, hook func()) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getBlockByNumberHook == nil {
+		m.getBlockByNumberHook = make(map[int64]func())
+	}
+	if hook == nil {
+		delete(m.getBlockByNumberHook, blockNum)
+		return
+	}
+	m.getBlockByNumberHook[blockNum] = hook
 }
 
 func (m *MockBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {

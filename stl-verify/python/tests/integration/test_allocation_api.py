@@ -288,13 +288,14 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
 
 
 def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:
-    """An address with no allocation_position history is not a registered
-    prime: the endpoint signals this with 404 rather than an ambiguous
-    empty list.
+    """A well-formed address with no allocation_position history is not a
+    registered prime: the endpoint signals this with 404 rather than an
+    ambiguous empty list.
     """
     response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/allocations")
 
     assert response.status_code == 404
+    assert response.json()["detail"] == "Prime not found"
 
 
 def test_list_allocations_returns_422_for_malformed_prime_id(client: TestClient) -> None:

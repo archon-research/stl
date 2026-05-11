@@ -26,10 +26,17 @@ class AllocationRepository(Protocol):
         """Return all distinct primes."""
         ...
 
-    async def prime_exists(self, prime_id: EthAddress) -> bool:
-        """Return True iff any allocation_position row has ever been recorded
-        for the given proxy address (registered prime, regardless of current
-        non-zero balances)."""
+    async def prime_exists(self, prime_address: EthAddress) -> bool:
+        """Return whether ``prime_address`` is a known allocation proxy.
+
+        Identity matches ``/v1/primes`` (and the rest of this repository's
+        position queries): a prime "exists" iff it has at least one row in
+        ``allocation_position.proxy_address``. ``prime.vault_address`` is
+        intentionally not accepted here — downstream position queries are
+        keyed on ``proxy_address`` only, so allowing vault-address inputs
+        would produce false-positive existence checks followed by empty
+        results.
+        """
         ...
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:

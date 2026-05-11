@@ -146,7 +146,7 @@ func TestIntegration_WorkerStartAndProcessBlock(t *testing.T) {
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestIntegration_WorkerMultipleBlocksWithPriceChanges(t *testing.T) {
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestIntegration_WorkerStartStop(t *testing.T) {
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestIntegration_WorkerWithSeededMigrationData(t *testing.T) {
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}
@@ -588,7 +588,7 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService failed: %v", err)
 	}

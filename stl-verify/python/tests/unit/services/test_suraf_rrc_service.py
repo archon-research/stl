@@ -29,58 +29,6 @@ def _mock_allocation_repo(return_value: Decimal = Decimal("1000")) -> AsyncMock:
     return mock
 
 
-class TestSurafRrcServiceLegacy:
-    """Legacy compute_legacy() API — will be removed in VEC-183."""
-
-    def test_mapped_receipt_token(self) -> None:
-        service = SurafRrcService(
-            asset_to_rating={1: "aave_ausdc"},
-            suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "33.7", version="v7")},
-            allocation_repo=_mock_allocation_repo(),
-        )
-
-        result = service.compute_legacy(1, Decimal("1000"))
-
-        assert result is not None
-        assert result.receipt_token_id == 1
-        assert result.usd_exposure == Decimal("1000")
-        assert result.rating_id == "aave_ausdc"
-        assert result.rating_version == "v7"
-        assert result.crr_pct == Decimal("33.7")
-        assert result.rrc_usd == Decimal("337.0")
-        assert result.source_commit_sha == "abc123"
-
-    def test_unmapped_receipt_token_returns_none(self) -> None:
-        service = SurafRrcService(
-            asset_to_rating={},
-            suraf_ratings={},
-            allocation_repo=_mock_allocation_repo(),
-        )
-        assert service.compute_legacy(999, Decimal("1000")) is None
-
-    def test_zero_crr(self) -> None:
-        service = SurafRrcService(
-            asset_to_rating={1: "aave_ausdc"},
-            suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "0")},
-            allocation_repo=_mock_allocation_repo(),
-        )
-
-        result = service.compute_legacy(1, Decimal("1000"))
-
-        assert result is not None
-        assert result.rrc_usd == Decimal("0")
-
-    def test_is_pure(self) -> None:
-        """Repeated calls with the same inputs produce identical results."""
-        service = SurafRrcService(
-            asset_to_rating={1: "aave_ausdc"},
-            suraf_ratings={"aave_ausdc": _rating("aave_ausdc", "25")},
-            allocation_repo=_mock_allocation_repo(),
-        )
-
-        assert service.compute_legacy(1, Decimal("500")) == service.compute_legacy(1, Decimal("500"))
-
-
 # ---------------------------------------------------------------------------
 # RiskModel protocol tests (VEC-179)
 # ---------------------------------------------------------------------------
@@ -108,7 +56,7 @@ def _service(
 
 class TestModelAttribute:
     def test_model_is_suraf(self) -> None:
-        assert _service().model == "suraf"
+        assert _service().risk_model == "suraf"
 
 
 class TestAppliesTo:
@@ -132,12 +80,15 @@ class TestRiskModelCompute:
         assert isinstance(result, RrcResult)
         assert result.asset_id == 1
         assert result.prime_id == str(DUMMY_PRIME)
-        assert result.model == "suraf"
+        assert result.risk_model == "suraf"
         assert result.rrc_usd == Decimal("337.0")
+        assert result.comparable_crr_pct == Decimal("33.7")
         assert isinstance(result.details, SurafDetails)
         assert result.details.rating_id == "aave_ausdc"
         assert result.details.rating_version == "v7"
         assert result.details.crr_pct == Decimal("33.7")
+        assert result.details.unadjusted_crr_pct == Decimal("33.7")
+        assert result.details.penalty_pp == Decimal("0")
         assert result.details.source_commit_sha == "abc123"
 
     async def test_compute_zero_crr_returns_zero_rrc(self) -> None:
@@ -181,6 +132,7 @@ class TestRiskModelCompute:
 
         mock_port.get_usd_exposure.assert_awaited_once_with(1, DUMMY_PRIME)
         assert result.rrc_usd == Decimal("5000") * Decimal("33.7") / Decimal("100")
+        assert result.comparable_crr_pct == Decimal("33.7")
 
     async def test_compute_override_takes_precedence_over_port(self) -> None:
         """Explicit usd_exposure override is used even if the port would return something else."""
@@ -240,12 +192,3 @@ class TestRiskModelCompute:
         )
         with pytest.raises(ValueError, match="not found in suraf_ratings"):
             await svc.compute(1, DUMMY_PRIME, overrides={"usd_exposure": Decimal("1000")})
-
-    def test_compute_legacy_missing_rating_raises_value_error(self) -> None:
-        """Legacy path also raises ValueError (not KeyError) on config mismatch."""
-        svc = _service(
-            asset_to_rating={1: "nonexistent_rating"},
-            suraf_ratings={},
-        )
-        with pytest.raises(ValueError, match="not found in suraf_ratings"):
-            svc.compute_legacy(1, Decimal("1000"))

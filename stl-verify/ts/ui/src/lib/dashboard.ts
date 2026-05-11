@@ -1,5 +1,6 @@
 import type { Allocation } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
+import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
 
 export type FilterOption = {
@@ -11,17 +12,6 @@ export type FilterOption = {
 type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
-
-const CHAIN_NAMES: Record<number, string> = {
-  1: 'Ethereum',
-  10: 'Optimism',
-  137: 'Polygon',
-  324: 'zkSync Era',
-  130: 'Unichain',
-  8453: 'Base',
-  42161: 'Arbitrum',
-  43114: 'Avalanche',
-};
 
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
@@ -161,9 +151,7 @@ export function getChainLabel(
   chainId: number,
   chainLabels?: ChainLabelLookup,
 ): string {
-  return (
-    chainLabels?.get(chainId) ?? CHAIN_NAMES[chainId] ?? `Chain ${chainId}`
-  );
+  return chainLabels?.get(chainId) ?? getChainName(chainId);
 }
 
 export function getProtocolLabel(
@@ -294,6 +282,22 @@ export function formatRatioPercent(
   return `${(numeric * 100).toFixed(digits)}%`;
 }
 
+export function truncateMiddle(
+  value: string | null | undefined,
+  prefixLength = 8,
+  suffixLength = 6,
+): string {
+  if (!value) {
+    return '—';
+  }
+
+  if (value.length <= prefixLength + suffixLength + 3) {
+    return value;
+  }
+
+  return `${value.slice(0, prefixLength)}...${value.slice(-suffixLength)}`;
+}
+
 export function formatMultiplier(
   value: number | string | null | undefined,
 ): string {
@@ -358,6 +362,68 @@ export function formatDateTime(value: string): string {
   return DATE_TIME_FORMAT.format(date);
 }
 
+export function formatDurationFromSeconds(
+  seconds: number | null | undefined,
+): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return 'Unknown';
+  }
+
+  if (seconds < 60) {
+    return `${Math.max(0, Math.floor(seconds))}s`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
+
+export function formatWadValue(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return '—';
+  }
+
+  try {
+    const normalized =
+      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
+    const wei = BigInt(normalized.split('.')[0]);
+    const wad = 10n ** 18n;
+    const whole = wei / wad;
+    const fraction = wei % wad;
+    const fraction6 = ((fraction * 1_000_000n) / wad)
+      .toString()
+      .padStart(6, '0');
+
+    return formatTokenAmount(`${whole.toString()}.${fraction6}`);
+  } catch {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
+}
+
+export function formatRawWadLabel(
+  value: number | string | null | undefined,
+): string {
+  if (value === null || value === undefined || value === '') {
+    return 'Raw WAD unavailable';
+  }
+
+  return `Raw WAD ${truncateMiddle(String(value))}`;
+}
+
 /**
  * Get human-readable label for allocation category.
  */
@@ -408,17 +474,6 @@ export function sortAllocations(allocations: Allocation[]): Allocation[] {
   });
 }
 
-const CHAIN_EXPLORERS: Record<number, string> = {
-  1: 'https://etherscan.io',
-  10: 'https://optimistic.etherscan.io',
-  137: 'https://polygonscan.com',
-  324: 'https://explorer.zksync.io',
-  130: 'https://unichain.blockscout.com',
-  8453: 'https://basescan.org',
-  42161: 'https://arbiscan.io',
-  43114: 'https://snowscan.xyz',
-};
-
 /**
  * Returns an Etherscan/block-explorer URL for the given chain + address,
  * or null if the chain is not recognised.
@@ -428,7 +483,7 @@ export function getExplorerUrl(
   address: string,
   type: 'address' | 'tx' = 'address',
 ): string | null {
-  const base = CHAIN_EXPLORERS[chainId];
+  const base = getChainExplorerUrl(chainId);
   if (!base) {
     return null;
   }

@@ -12,11 +12,11 @@ import { flex } from '#styled-system/patterns';
 
 type RiskDetailDrawerProps = {
   children: ReactNode;
-  detail?: string;
+  detail?: ReactNode;
   isOpen: boolean;
   onClose: () => void;
-  subtitle?: string;
-  title?: string;
+  subtitle?: ReactNode;
+  title?: ReactNode;
 };
 
 type DragState = {
@@ -134,6 +134,8 @@ export function RiskDetailDrawer({
     });
   };
 
+  const ariaTitle = typeof title === 'string' ? title : 'Risk details';
+
   return (
     <div
       aria-hidden={!isOpen}
@@ -160,7 +162,7 @@ export function RiskDetailDrawer({
       />
 
       <aside
-        aria-label={title}
+        aria-label={ariaTitle}
         style={drawerStyle}
         className={css({
           position: 'fixed',
@@ -247,7 +249,7 @@ export function RiskDetailDrawer({
                 {title}
               </h2>
               {subtitle ? (
-                <p
+                <div
                   className={css({
                     m: 0,
                     mt: '1',
@@ -256,7 +258,7 @@ export function RiskDetailDrawer({
                   })}
                 >
                   {subtitle}
-                </p>
+                </div>
               ) : null}
               {detail ? (
                 <p

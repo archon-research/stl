@@ -1,13 +1,13 @@
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.adapters.postgres.allocation_share_repository import MissingShareError
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, LiquidationParams, RiskBreakdown, RrcResult
+from app.domain.exceptions import MissingShareError
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -86,7 +86,7 @@ def service(reader: MagicMock) -> CryptoLendingRiskService:
 
 class TestModelAttribute:
     def test_model_attribute_is_gap_sweep(self, service: CryptoLendingRiskService) -> None:
-        assert service.model == "gap_sweep"
+        assert service.risk_model == "gap_sweep"
 
 
 class TestAppliesTo:
@@ -121,11 +121,17 @@ class TestCompute:
         assert isinstance(result, RrcResult)
         assert result.asset_id == RECEIPT_TOKEN_ID
         assert result.prime_id == str(DUMMY_PRIME)
-        assert result.model == "gap_sweep"
+        assert result.risk_model == "gap_sweep"
         assert result.rrc_usd >= Decimal("0")
+        # Comparable CRR uses the protocol's own collateral basis: the sum of
+        # backing_value * share across breakdown items (default fixture: a
+        # single item with backing_value=10000, share=1 -> 10000 USD).
+        assert result.comparable_crr_pct == (result.rrc_usd / Decimal("10000") * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_EVEN
+        )
         assert isinstance(result.details, GapSweepDetails)
         assert result.details.gap_pct == Decimal("0.15")
-        assert result.details.bad_debt_usd == result.rrc_usd
+        assert result.details.loss_usd == result.rrc_usd
         reader.get_receipt_token.assert_awaited_once_with(RECEIPT_TOKEN_ID)
         reader.get_breakdown.assert_awaited_once_with(info)
         reader.get_liquidation_params.assert_awaited_once_with(info, UNDERLYING_TOKEN_ID, [10])
@@ -263,7 +269,52 @@ class TestCompute:
 
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
+        # Item dropped (no price) -> empty enriched list -> rrc=0 and the
+        # collateral basis is also 0, so comparable CRR is 0 (not div-by-zero).
         assert result.rrc_usd == Decimal("0")
+        assert result.comparable_crr_pct == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_compute_comparable_crr_uses_collateral_sum(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # Two items totalling 7000 USD; quantization should hit fractional cents.
+        reader.get_breakdown.return_value = _breakdown(
+            (
+                _contrib(10, "USDC", "5000", "1"),
+                _contrib(11, "DAI", "2000", "1"),
+            ),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {
+            10: _params(10, "0.825", "1.05"),
+            11: _params(11, "0.825", "1.05"),
+        }
+
+        result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        expected_basis = Decimal("7000")
+        assert result.comparable_crr_pct == (result.rrc_usd / expected_basis * Decimal("100")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_EVEN
+        )
+
+    @pytest.mark.asyncio
+    async def test_compute_empty_breakdown_returns_zero_crr_without_dividing(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # No collateral items -> total amount_usd = 0; must NOT divide by zero,
+        # must NOT raise. Both rrc_usd and comparable_crr_pct collapse to 0.
+        reader.get_breakdown.return_value = _breakdown((), backed_asset_id=UNDERLYING_TOKEN_ID)
+        reader.get_liquidation_params.return_value = {}
+
+        result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        assert result.rrc_usd == Decimal("0")
+        assert result.comparable_crr_pct == Decimal("0.00")
 
 
 class TestLegacyMethods:

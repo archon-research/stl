@@ -7,17 +7,19 @@ import { css } from '#styled-system/css';
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
+import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
+  getCapitalMetrics,
   getChains,
   getDataSources,
+  getLatestPrimeDebtSnapshot,
   getPrimes,
   getProtocols,
-  getStarRiskCapitalRequirements,
 } from './lib/api';
 import {
   buildChainLabelLookup,
@@ -37,52 +39,9 @@ import type {
   CapitalMetrics,
   DataSource,
   Prime,
+  PrimeDebtSnapshot,
 } from './types/allocation';
-import type {
-  LocalChainRow,
-  LocalProtocolRow,
-  StarRiskCapitalRow,
-} from './types/local-data';
-
-function getStarRiskCapitalSource(
-  sources: DataSource[],
-): DataSource | undefined {
-  return sources.find((source) =>
-    source.role.toLowerCase().includes('risk capital requirements'),
-  );
-}
-
-function toPositiveDifference(total: string, current: string): string {
-  try {
-    const totalBigInt = BigInt(total.split('.')[0] || '0');
-    const currentBigInt = BigInt(current.split('.')[0] || '0');
-    const diff = totalBigInt - currentBigInt;
-    return diff > 0n ? diff.toString() : '0';
-  } catch {
-    return '0';
-  }
-}
-
-function mapRiskCapitalRowToMetrics(
-  row: StarRiskCapitalRow,
-  primeId: string,
-  primeName: string,
-  source: DataSource,
-): CapitalMetrics {
-  return {
-    prime_id: primeId,
-    prime_name: primeName,
-    risk_capital: row.exposure,
-    total_capital: row.total_rc,
-    first_loss_capital: row.financial_rrc,
-    capital_buffer: toPositiveDifference(row.total_rc, row.financial_rrc),
-    risk_to_capital_ratio: row.risk_tolerance_ratio,
-    timestamp: new Date().toISOString(),
-    benchmark_source: source.host,
-    is_validated: false,
-    validation_note: `Sourced from ${source.name}.`,
-  };
-}
+import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
@@ -96,12 +55,15 @@ function App() {
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
   const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
-  const [dataSources, setDataSources] = useState<DataSource[]>([]);
+  const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(
     null,
   );
+  const [primeDebtSnapshot, setPrimeDebtSnapshot] =
+    useState<PrimeDebtSnapshot | null>(null);
+  const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -279,49 +241,33 @@ function App() {
     const controller = new AbortController();
     setIsCapitalMetricsLoading(true);
 
-    const selectedPrime = primes.find((prime) => prime.id === selectedPrimeId);
-    if (!selectedPrime) {
+    if (!primes.some((prime) => prime.id === selectedPrimeId)) {
       setCapitalMetrics(null);
       setIsCapitalMetricsLoading(false);
       return () => controller.abort();
     }
 
-    const starRiskCapitalSource = getStarRiskCapitalSource(dataSources);
-    if (!starRiskCapitalSource) {
-      logging.warn('Missing provenance source for Star risk capital metrics');
-      setCapitalMetrics(null);
-      setIsCapitalMetricsLoading(false);
-      return () => controller.abort();
-    }
-
-    void getStarRiskCapitalRequirements(controller.signal)
-      .then((rows) => {
-        const selectedRow = rows.find(
-          (row) =>
-            row.star.trim().toLowerCase() ===
-            selectedPrime.name.trim().toLowerCase(),
+    void getCapitalMetrics(controller.signal)
+      .then((metrics) => {
+        const selectedMetric = metrics.find(
+          (metric) =>
+            metric.prime_id.trim().toLowerCase() ===
+            selectedPrimeId.trim().toLowerCase(),
         );
 
-        if (!selectedRow) {
+        if (!selectedMetric) {
           setCapitalMetrics(null);
           return;
         }
 
-        setCapitalMetrics(
-          mapRiskCapitalRowToMetrics(
-            selectedRow,
-            selectedPrime.id,
-            selectedPrime.name,
-            starRiskCapitalSource,
-          ),
-        );
+        setCapitalMetrics(selectedMetric);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        logging.error('Failed to load Star risk capital metrics', {
+        logging.error('Failed to load capital metrics', {
           error,
           primeId: selectedPrimeId,
         });
@@ -334,7 +280,45 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId, primes, dataSources]);
+  }, [selectedPrimeId, primes]);
+
+  useEffect(() => {
+    if (!selectedPrimeId) {
+      setPrimeDebtSnapshot(null);
+      setIsPrimeDebtLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+
+    setIsPrimeDebtLoading(true);
+    setPrimeDebtSnapshot(null);
+
+    void getLatestPrimeDebtSnapshot(selectedPrimeId, controller.signal)
+      .then((snapshot) => {
+        if (!controller.signal.aborted) {
+          setPrimeDebtSnapshot(snapshot);
+        }
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.warn('Prime debt snapshot unavailable for selected prime', {
+          error,
+          primeId: selectedPrimeId,
+        });
+        setPrimeDebtSnapshot(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsPrimeDebtLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [selectedPrimeId]);
 
   const selectedPrime = useMemo(
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
@@ -386,15 +370,9 @@ function App() {
     setSelectedProtocol,
   ]);
 
-  const filteredAllocations = useMemo(
+  const searchFilteredAllocations = useMemo(
     () =>
       allocations.filter((allocation) => {
-        const matchesNetwork =
-          selectedNetwork === null ||
-          String(allocation.chain_id) === selectedNetwork;
-        const matchesProtocol =
-          selectedProtocol === null ||
-          allocation.protocol_name === selectedProtocol;
         const matchesGlobalFilter = matchesSearchQuery(
           buildRowSearchString([
             allocation.symbol,
@@ -412,16 +390,24 @@ function App() {
           globalFilter,
         );
 
-        return matchesNetwork && matchesProtocol && matchesGlobalFilter;
+        return matchesGlobalFilter;
       }),
-    [
-      allocations,
-      chainLabels,
-      globalFilter,
-      localProtocols,
-      selectedNetwork,
-      selectedProtocol,
-    ],
+    [allocations, chainLabels, globalFilter, localProtocols],
+  );
+
+  const filteredAllocations = useMemo(
+    () =>
+      searchFilteredAllocations.filter((allocation) => {
+        const matchesNetwork =
+          selectedNetwork === null ||
+          String(allocation.chain_id) === selectedNetwork;
+        const matchesProtocol =
+          selectedProtocol === null ||
+          allocation.protocol_name === selectedProtocol;
+
+        return matchesNetwork && matchesProtocol;
+      }),
+    [searchFilteredAllocations, selectedNetwork, selectedProtocol],
   );
 
   useEffect(() => {
@@ -429,7 +415,7 @@ function App() {
       if (selectedAllocationKey !== null) {
         setSelectedAllocationKey(null);
       }
-      if (isDrawerOpen) {
+      if (isDrawerOpen && !isAllocationsLoading) {
         setIsDrawerOpenParam(null);
       }
       return;
@@ -445,6 +431,7 @@ function App() {
     }
   }, [
     filteredAllocations,
+    isAllocationsLoading,
     isDrawerOpen,
     selectedAllocationKey,
     setIsDrawerOpenParam,
@@ -455,17 +442,14 @@ function App() {
       return;
     }
 
-    if (selectedAllocationKey === null && filteredAllocations.length > 0) {
+    if (selectedAllocationKey === null) {
       return;
     }
 
     if (
-      isDrawerOpen &&
-      (!selectedAllocationKey ||
-        !filteredAllocations.some(
-          (allocation) =>
-            getAllocationKey(allocation) === selectedAllocationKey,
-        ))
+      !filteredAllocations.some(
+        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
+      )
     ) {
       setIsDrawerOpenParam(null);
     }
@@ -484,6 +468,18 @@ function App() {
     [filteredAllocations, selectedAllocationKey],
   );
 
+  const selectedProtocolLabel = selectedAllocation
+    ? getProtocolLabel(
+        selectedAllocation.protocol_name,
+        localProtocols,
+        selectedAllocation.chain_id,
+      )
+    : null;
+
+  const selectedChainLabel = selectedAllocation
+    ? getChainLabel(selectedAllocation.chain_id, chainLabels)
+    : null;
+
   return (
     <div
       className={css({
@@ -493,6 +489,32 @@ function App() {
         },
         '& [data-sidebar-layout] [role="separator"] > [aria-hidden="true"]': {
           opacity: 0,
+        },
+        '@media screen and (max-width: 64rem)': {
+          '& [data-sidebar-layout] > div': {
+            display: 'block !important',
+            height: 'auto !important',
+            overflow: 'visible !important',
+          },
+          '& [data-sidebar-layout] aside': {
+            width: '100% !important',
+            height: 'auto !important',
+            maxHeight: '22rem',
+            borderRight: 'none !important',
+            borderBottom: '1px solid var(--colors-border-subtle)',
+          },
+          '& [data-sidebar-layout] main': {
+            width: '100% !important',
+            height: 'auto !important',
+            minHeight: '0 !important',
+          },
+          '& [data-sidebar-layout] main > header': {
+            minHeight: '0 !important',
+            justifyContent: 'stretch !important',
+          },
+          '& [data-sidebar-layout] [role="separator"]': {
+            display: 'none !important',
+          },
         },
       })}
     >
@@ -525,13 +547,16 @@ function App() {
               chainLabels={chainLabels}
               errorMessage={allocationsErrorMessage}
               filteredAllocations={filteredAllocations}
+              topMetricsAllocations={searchFilteredAllocations}
               isLoading={isAllocationsLoading}
               isCapitalMetricsLoading={isCapitalMetricsLoading}
+              isPrimeDebtLoading={isPrimeDebtLoading}
               localProtocols={localProtocols}
               onSelectAllocation={(allocationKey) => {
                 setSelectedAllocationKey(allocationKey);
                 setIsDrawerOpenParam('1');
               }}
+              primeDebtSnapshot={primeDebtSnapshot}
               onSearchChange={setGlobalFilter}
               onSortingChange={setSorting}
               searchValue={globalFilter}
@@ -552,11 +577,78 @@ function App() {
         isOpen={isDrawerOpen}
         onClose={() => setIsDrawerOpenParam(null)}
         subtitle={
-          selectedAllocation
-            ? `${getProtocolLabel(selectedAllocation.protocol_name, localProtocols, selectedAllocation.chain_id)} · ${getChainLabel(selectedAllocation.chain_id, chainLabels)}`
-            : undefined
+          selectedAllocation ? (
+            <span
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '1.5',
+                flexWrap: 'wrap',
+                rowGap: '1',
+              })}
+            >
+              <span
+                className={css({
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '1',
+                  whiteSpace: 'nowrap',
+                })}
+              >
+                <ProtocolLogo
+                  protocolName={selectedProtocolLabel ?? 'Unknown'}
+                  size="4"
+                />
+                {selectedProtocolLabel}
+              </span>
+              <span
+                className={css({
+                  color: 'text.muted',
+                  fontSize: 'xs',
+                })}
+              >
+                ·
+              </span>
+              <span
+                className={css({
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '1',
+                  whiteSpace: 'nowrap',
+                })}
+              >
+                <ChainLogo
+                  chainId={selectedAllocation.chain_id}
+                  label={selectedChainLabel ?? undefined}
+                  size="4"
+                />
+                {selectedChainLabel}
+              </span>
+            </span>
+          ) : undefined
         }
-        title={selectedAllocation ? selectedAllocation.symbol : 'Risk details'}
+        title={
+          selectedAllocation ? (
+            <span
+              className={css({
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '1.5',
+                minWidth: 0,
+              })}
+            >
+              <TokenLogo
+                address={selectedAllocation.receipt_token_address}
+                chainId={selectedAllocation.chain_id}
+                size="7"
+                symbol={selectedAllocation.symbol}
+              />
+              <span>{selectedAllocation.symbol}</span>
+            </span>
+          ) : (
+            'Risk details'
+          )
+        }
       >
         <BottomPanel
           allocations={allocations}

@@ -18,11 +18,8 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from app.adapters.postgres.allocation_share_repository import (
-    MissingShareError,
-    StaleShareError,
-)
 from app.api.deps import get_crypto_lending_risk_service
+from app.domain.exceptions import MissingShareError, StaleShareError
 from app.main import app
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 

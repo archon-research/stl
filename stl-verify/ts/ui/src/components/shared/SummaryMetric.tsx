@@ -1,9 +1,12 @@
+import type { ReactNode } from 'react';
+
 import { css } from '#styled-system/css';
+import { flex } from '#styled-system/patterns';
 
 type SummaryMetricProps = {
   label: string;
-  value: string;
-  detail?: string;
+  value: ReactNode;
+  detail?: ReactNode;
   className?: string;
 };
 
@@ -38,28 +41,34 @@ export function SummaryMetric({
       >
         {label}
       </p>
-      <p
-        className={css({
-          m: 0,
+      <div
+        className={flex({
+          align: 'center',
+          gap: '2',
+          wrap: 'wrap',
           mt: '2',
           fontSize: 'lg',
           fontWeight: 'semibold',
           color: 'text.strong',
+          minWidth: 0,
+          overflowWrap: 'anywhere',
+          wordBreak: 'break-word',
         })}
       >
         {value}
-      </p>
+      </div>
       {detail ? (
-        <p
+        <div
           className={css({
-            m: 0,
             mt: '1',
             fontSize: 'xs',
             color: 'text.muted',
+            overflowWrap: 'anywhere',
+            wordBreak: 'break-word',
           })}
         >
           {detail}
-        </p>
+        </div>
       ) : null}
     </div>
   );

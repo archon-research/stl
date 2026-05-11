@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal, Union, get_args
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.entities.allocation import EthAddress
 
@@ -13,51 +13,89 @@ from app.domain.entities.allocation import EthAddress
 ModelName = Literal["suraf", "gap_sweep"]
 
 
-@dataclass(frozen=True)
-class SurafDetails:
-    """SURAF model-specific output embedded in an RrcResult."""
+class SurafDetails(BaseModel):
+    """SURAF model-specific output embedded in an RrcResult.
 
+    ``crr_pct`` is the adjusted CRR (i.e. ``unadjusted_crr_pct + penalty_pp``,
+    capped at 100). All three are percentages on a 0–100 scale (e.g.
+    ``Decimal("33.7")`` means 33.7%, not 0.337). The relation
+    ``crr_pct == unadjusted_crr_pct + penalty_pp`` holds up to ~1e-10 only —
+    the underlying scorer caps to 100 in float before Decimal conversion;
+    consumers should always trust ``crr_pct`` over a recomputation from
+    parts.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    risk_model: Literal["suraf"]
     rating_id: str
     rating_version: str
     crr_pct: Decimal
+    unadjusted_crr_pct: Decimal
+    penalty_pp: Decimal
     source_commit_sha: str
 
 
-@dataclass(frozen=True)
-class GapSweepDetails:
-    """Gap-sweep model-specific output embedded in an RrcResult."""
+class GapSweepDetails(BaseModel):
+    """Gap-sweep model-specific output embedded in an RrcResult.
 
+    ``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal("0.15")``
+    means a 15% collateral price drop) — note this is a different scale
+    from ``SurafDetails.crr_pct`` which is on 0–100. ``loss_usd`` is the
+    engine-native expected loss in USD under that price drop; equal in
+    magnitude to the envelope-level ``rrc_usd`` for this model and rounded
+    to USD cents. The cross-model comparable capital ratio is exposed on
+    ``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure
+    basis, not the collateral backing basis.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    risk_model: Literal["gap_sweep"]
     gap_pct: Decimal
-    bad_debt_usd: Decimal
+    loss_usd: Decimal
 
 
-RrcDetails = SurafDetails | GapSweepDetails
-"""Discriminated union of model-specific detail payloads."""
+RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails], Field(discriminator="risk_model")]
+"""Discriminated union of model-specific detail payloads keyed on ``risk_model``."""
 
-_MODEL_TO_DETAILS: dict[str, type] = {
+_RISK_MODEL_TO_DETAILS: dict[str, type] = {
     "suraf": SurafDetails,
     "gap_sweep": GapSweepDetails,
 }
+
+# Catch drift at import time: adding a literal to ``ModelName`` without
+# mapping it here would silently break ``_check_risk_model_details_pairing``
+# with a KeyError on the first request that uses the new variant.
+# Use ``raise`` rather than ``assert`` so ``python -O`` doesn't strip the
+# guard from production builds.
+_missing = set(get_args(ModelName)) - set(_RISK_MODEL_TO_DETAILS)
+_extra = set(_RISK_MODEL_TO_DETAILS) - set(get_args(ModelName))
+if _missing or _extra:
+    raise RuntimeError(
+        f"_RISK_MODEL_TO_DETAILS keys must match ModelName literals (missing: {_missing}, extra: {_extra})"
+    )
+del _missing, _extra
 
 
 class RrcResult(BaseModel):
     """Shared result type returned by every RiskModel implementation.
 
-    ``model`` identifies which risk model produced the result (e.g.
+    ``risk_model`` identifies which model produced the result (e.g.
     ``"suraf"``, ``"gap_sweep"``).  ``details`` carries model-specific
-    output — use ``isinstance`` to narrow.
-
-    Construction validates that ``model`` and ``details`` agree:
-    ``"suraf"`` requires ``SurafDetails``, ``"gap_sweep"`` requires
-    ``GapSweepDetails``.
+    output — use ``isinstance`` to narrow. The same value also appears
+    on ``details.risk_model`` and serves as the OpenAPI discriminator.
+    ``comparable_crr_pct`` is the model's effective capital ratio on the
+    shared receipt-token USD exposure basis, expressed on a 0–100 scale.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     asset_id: int
     prime_id: str
     rrc_usd: Decimal
-    model: ModelName
+    comparable_crr_pct: Decimal
+    risk_model: ModelName
     details: RrcDetails
 
     @field_validator("prime_id", mode="before")
@@ -72,10 +110,10 @@ class RrcResult(BaseModel):
         raise ValueError(f"expected EthAddress or hex string, got {type(v).__name__}")
 
     @model_validator(mode="after")
-    def _check_model_details_pairing(self) -> "RrcResult":
-        expected = _MODEL_TO_DETAILS[self.model]
+    def _check_risk_model_details_pairing(self) -> "RrcResult":
+        expected = _RISK_MODEL_TO_DETAILS[self.risk_model]
         if not isinstance(self.details, expected):
-            msg = f"model={self.model!r} requires {expected.__name__}, got {type(self.details).__name__}"
+            msg = f"risk_model={self.risk_model!r} requires {expected.__name__}, got {type(self.details).__name__}"
             raise ValueError(msg)
         return self
 
