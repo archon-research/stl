@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import (
     GapSweepDetails,
+    ModelName,
     RrcResult,
     SurafDetails,
 )
@@ -21,9 +22,11 @@ _PRIME_A = EthAddress("0x" + "aa" * 20)
 class FakeRiskModel:
     """Test-double that satisfies RiskModel with canned answers."""
 
+    risk_model: ModelName
+
     def __init__(
         self,
-        risk_model: str,
+        risk_model: ModelName,
         supported: set[tuple[int, EthAddress]],
         result: RrcResult,
     ) -> None:
@@ -42,7 +45,7 @@ _PRIME_B = EthAddress("0x" + "bb" * 20)
 
 _SURAF_RESULT = RrcResult(
     asset_id=1,
-    prime_id=_PRIME_A,
+    prime_id=str(_PRIME_A),
     rrc_usd=Decimal("337.00"),
     comparable_crr_pct=Decimal("33.7"),
     risk_model="suraf",
@@ -59,7 +62,7 @@ _SURAF_RESULT = RrcResult(
 
 _GAP_SWEEP_RESULT = RrcResult(
     asset_id=2,
-    prime_id=_PRIME_A,
+    prime_id=str(_PRIME_A),
     rrc_usd=Decimal("1200.50"),
     comparable_crr_pct=Decimal("12.00"),
     risk_model="gap_sweep",
@@ -151,25 +154,29 @@ class TestRrcResult:
     ]
 
     @pytest.mark.parametrize("risk_model,details", INVALID_CASES)
-    def test_mismatched_model_and_details_rejected(self, risk_model: str, details: object) -> None:
+    def test_mismatched_model_and_details_rejected(
+        self,
+        risk_model: ModelName,
+        details: SurafDetails | GapSweepDetails,
+    ) -> None:
         with pytest.raises(ValidationError):
             RrcResult(
                 asset_id=1,
-                prime_id=_PRIME_A,
+                prime_id=str(_PRIME_A),
                 rrc_usd=Decimal("100"),
                 comparable_crr_pct=Decimal("10"),
                 risk_model=risk_model,
-                details=details,  # type: ignore[arg-type]
+                details=details,
             )
 
     def test_unknown_model_string_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RrcResult(
                 asset_id=1,
-                prime_id=_PRIME_A,
+                prime_id=str(_PRIME_A),
                 rrc_usd=Decimal("100"),
                 comparable_crr_pct=Decimal("10"),
-                risk_model="typo_model",
+                risk_model=cast(ModelName, "typo_model"),
                 details=SurafDetails(
                     risk_model="suraf",
                     rating_id="x",

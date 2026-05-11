@@ -1,6 +1,7 @@
 import logging
+from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.protocol_event import ProtocolEvent
@@ -37,7 +38,7 @@ class PostgresProtocolEventRepository:
         return tx_hash[2:] if tx_hash.startswith("0x") else tx_hash
 
     @staticmethod
-    def _to_entity(row: object) -> ProtocolEvent:
+    def _to_entity(row: Row[Any]) -> ProtocolEvent:
         return ProtocolEvent(
             tx_hash="0x" + row.tx_hash,
             log_index=row.log_index,

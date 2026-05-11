@@ -21,7 +21,7 @@ def _make_service(
     tokens: list[TokenMetadata] | None = None,
     token: TokenMetadata | None = None,
     price: TokenPriceQuote | None = None,
-) -> TokenCatalogService:
+) -> AsyncMock:
     service = AsyncMock(spec=TokenCatalogService)
     service.list_tokens.return_value = tokens or []
     service.get_token.return_value = token
@@ -29,7 +29,7 @@ def _make_service(
     return service
 
 
-def _override_service(service: TokenCatalogService):
+def _override_service(service: AsyncMock):
     async def _dep():
         yield service
 

@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -35,10 +36,10 @@ def _reset_tracer_provider():
     trace._TRACER_PROVIDER_SET_ONCE._done = original_done
 
 
-def _make_settings(**overrides):
+def _make_settings(**overrides: Any):
     from app.config import Settings
 
-    defaults = {
+    defaults: dict[str, Any] = {
         "otel_enabled": False,
         "otel_exporter_otlp_endpoint": "http://localhost:4317",
         "otel_service_name": "test-service",
@@ -69,16 +70,16 @@ def test_shutdown_telemetry_noop_when_none():
     shutdown_telemetry(None)  # must not raise
 
 
-def test_shutdown_telemetry_only_affects_passed_provider():
+def test_shutdown_telemetry_only_affects_passed_provider(monkeypatch: pytest.MonkeyPatch):
     """Shutting down a provider must not touch an externally installed global."""
     global_provider = TracerProvider()
     global_shutdown = MagicMock(wraps=global_provider.shutdown)
-    global_provider.shutdown = global_shutdown
+    monkeypatch.setattr(global_provider, "shutdown", global_shutdown)
     trace.set_tracer_provider(global_provider)
 
     owned_provider = TracerProvider()
     owned_shutdown = MagicMock(wraps=owned_provider.shutdown)
-    owned_provider.shutdown = owned_shutdown
+    monkeypatch.setattr(owned_provider, "shutdown", owned_shutdown)
 
     shutdown_telemetry(owned_provider)
 

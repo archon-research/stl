@@ -4,8 +4,6 @@ Tests copy ``testdata/sample_rating`` into tmp_path so each test can
 mutate files without cross-test interference.
 """
 
-from __future__ import annotations
-
 import shutil
 from pathlib import Path
 

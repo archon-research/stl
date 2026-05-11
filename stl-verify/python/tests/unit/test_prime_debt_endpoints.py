@@ -16,14 +16,14 @@ def _make_service(
     *,
     exists: bool = True,
     snapshots: list[PrimeDebtSnapshot] | None = None,
-) -> PrimeDebtService:
+) -> AsyncMock:
     service = AsyncMock(spec=PrimeDebtService)
     service.prime_exists.return_value = exists
     service.list_debt_snapshots.return_value = snapshots or []
     return service
 
 
-def _override_service(service: PrimeDebtService):
+def _override_service(service: AsyncMock):
     async def _dep():
         yield service
 

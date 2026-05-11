@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_model_registry, get_receipt_token_lookup
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
-from app.domain.entities.risk import GapSweepDetails, RrcResult, SurafDetails
+from app.domain.entities.risk import GapSweepDetails, ModelName, RrcResult, SurafDetails
 from app.domain.exceptions import InvalidOverrideError, MissingShareError, StaleShareError
 from app.main import app
 from app.ports.allocation_repository import AllocationRepository
@@ -44,13 +44,13 @@ class _FakeRiskModel:
 
     def __init__(
         self,
-        risk_model: str,
+        risk_model: ModelName,
         result: RrcResult | None = None,
         *,
         applies: bool = True,
         raises: Exception | None = None,
     ) -> None:
-        self.risk_model = risk_model
+        self.risk_model: ModelName = risk_model
         self._result = result
         self._applies = applies
         self._raises = raises
@@ -456,13 +456,14 @@ def test_get_returns_503_share_data_stale_when_compute_raises(client: TestClient
 # ---------------------------------------------------------------------------
 
 
-def _real_gap_sweep_service() -> CryptoLendingRiskService:
+def _real_gap_sweep_service() -> tuple[CryptoLendingRiskService, AsyncMock]:
     reader = AsyncMock(spec=CryptoLendingReader)
-    return CryptoLendingRiskService(
+    service = CryptoLendingRiskService(
         reader=reader,
         default_gap_pct=Decimal("0.15"),
         supported_asset_ids=[_ASSET_ID],
     )
+    return service, reader
 
 
 @pytest.mark.parametrize(
@@ -481,8 +482,8 @@ def test_post_real_service_coerces_gap_pct_from_json_types(
     TypeError from a bad ``Decimal <= str`` comparison would short-circuit
     before the reader was ever called.
     """
-    service = _real_gap_sweep_service()
-    service._reader.get_receipt_token = AsyncMock(side_effect=MissingShareError("seeded"))
+    service, reader = _real_gap_sweep_service()
+    reader.get_receipt_token = AsyncMock(side_effect=MissingShareError("seeded"))
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
@@ -496,11 +497,11 @@ def test_post_real_service_coerces_gap_pct_from_json_types(
 
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "share_data_missing"
-    service._reader.get_receipt_token.assert_awaited_once()
+    reader.get_receipt_token.assert_awaited_once()
 
 
 def test_post_real_service_returns_422_on_out_of_range_gap_pct(client: TestClient) -> None:
-    service = _real_gap_sweep_service()
+    service, _ = _real_gap_sweep_service()
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
@@ -517,7 +518,7 @@ def test_post_real_service_returns_422_on_out_of_range_gap_pct(client: TestClien
 
 
 def test_post_real_service_returns_422_on_unparseable_gap_pct(client: TestClient) -> None:
-    service = _real_gap_sweep_service()
+    service, _ = _real_gap_sweep_service()
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
@@ -533,7 +534,7 @@ def test_post_real_service_returns_422_on_unparseable_gap_pct(client: TestClient
 
 
 def test_post_real_service_returns_422_on_unknown_override_key(client: TestClient) -> None:
-    service = _real_gap_sweep_service()
+    service, _ = _real_gap_sweep_service()
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
@@ -551,7 +552,7 @@ def test_post_real_service_returns_422_on_unknown_override_key(client: TestClien
 
 def test_post_real_service_returns_422_on_oversize_gap_pct_string(client: TestClient) -> None:
     """CPU-burn guard: the string is rejected before Decimal parses it."""
-    service = _real_gap_sweep_service()
+    service, _ = _real_gap_sweep_service()
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(

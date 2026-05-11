@@ -1,10 +1,11 @@
 from decimal import Decimal
+from typing import Any
 
 from app.domain.entities.allocation import ReceiptTokenPosition
 
 
-def make_receipt_token_position(**overrides) -> ReceiptTokenPosition:
-    defaults = dict(
+def make_receipt_token_position(**overrides: Any) -> ReceiptTokenPosition:
+    defaults: dict[str, Any] = dict(
         chain_id=1,
         receipt_token_id=1,
         receipt_token_address="0x" + "a" * 40,

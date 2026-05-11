@@ -12,8 +12,6 @@ is caught by the loader when it actually scores the package, and by CI's
 dry-run on PRs that add or change rating packages.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 
 SCORECARDS_DIR = "scorecards"
