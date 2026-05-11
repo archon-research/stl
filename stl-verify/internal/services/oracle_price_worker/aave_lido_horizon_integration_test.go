@@ -136,7 +136,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 		ChainID:      1,
 	}
 
-	svc, err := NewService(cfg, consumer, repo, multicallFactoryFor(mc))
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
