@@ -23,9 +23,12 @@ type confirmedVault struct {
 	Symbol      string
 	Asset       common.Address
 	AssetSymbol string
-	Decimals    uint8
-	Version     entity.MorphoVaultVersion
-	FirstBlock  int64
+	// AssetDecimals is the underlying asset ERC20's decimals(). It can differ
+	// from the vault's share decimals (especially for VaultV2), so we fetch it
+	// from the asset contract rather than reusing the vault's value.
+	AssetDecimals uint8
+	Version       entity.MorphoVaultVersion
+	FirstBlock    int64
 }
 
 // vaultProber probes candidate addresses on-chain to determine if they are
@@ -174,6 +177,10 @@ func (p *vaultProber) probeBatch(
 // the candidate to disappear from the backfill run with no recoverable trail.
 func (p *vaultProber) collectProbeConfirmed(batch []common.Address, results []outbound.Result) ([]confirmedProbe, error) {
 	callsPerProbe := p.sharedProber.NumProbeCalls()
+	expected := len(batch) * callsPerProbe
+	if len(results) != expected {
+		return nil, fmt.Errorf("expected %d probe results for batch of %d, got %d", expected, len(batch), len(results))
+	}
 	confirmed := make([]confirmedProbe, 0, len(batch))
 	for i, addr := range batch {
 		base := i * callsPerProbe
@@ -199,9 +206,9 @@ func (p *vaultProber) collectProbeConfirmed(batch []common.Address, results []ou
 	return confirmed, nil
 }
 
-// fetchVaultMetadata fetches name, symbol, decimals, version, and asset symbol
-// for confirmed vaults. The version may be upgraded from V1 → V1.1 here if
-// skimRecipient succeeds.
+// fetchVaultMetadata fetches name, symbol, decimals, version, and asset
+// symbol+decimals for confirmed vaults. The version may be upgraded from
+// V1 → V1.1 here if skimRecipient succeeds.
 func (p *vaultProber) fetchVaultMetadata(
 	ctx context.Context,
 	probeConfirmed []confirmedProbe,
@@ -212,20 +219,31 @@ func (p *vaultProber) fetchVaultMetadata(
 	if err != nil {
 		return nil, fmt.Errorf("packing asset symbol: %w", err)
 	}
+	assetDecimalsData, err := p.erc20ABI.Pack("decimals")
+	if err != nil {
+		return nil, fmt.Errorf("packing asset decimals: %w", err)
+	}
 
-	// Per-vault window: the prober's details calls plus one trailing asset
-	// symbol call we tack on. Keep the +1 here as the only place that knows
-	// about the asset-symbol extension.
-	callsPerMetadata := p.sharedProber.NumDetailsCalls() + 1
+	// Per-vault window: the prober's details calls plus two trailing asset
+	// calls we tack on (symbol then decimals). The append site below and the
+	// per-result reads downstream (assetSymbolOffset, assetDecimalsOffset)
+	// must move together — change one and the window arithmetic breaks.
+	callsPerMetadata := p.sharedProber.NumDetailsCalls() + numAssetExtensionCalls
 	calls := make([]outbound.Call, 0, len(probeConfirmed)*callsPerMetadata)
 	for _, pc := range probeConfirmed {
 		calls = append(calls, p.sharedProber.DetailsCalls(pc.address)...)
 		calls = append(calls, outbound.Call{Target: pc.asset, AllowFailure: true, CallData: assetSymbolData})
+		calls = append(calls, outbound.Call{Target: pc.asset, AllowFailure: true, CallData: assetDecimalsData})
 	}
 
 	results, err := p.multicaller.Execute(ctx, calls, blockNum)
 	if err != nil {
 		return nil, fmt.Errorf("multicall metadata: %w", err)
+	}
+
+	expected := len(probeConfirmed) * callsPerMetadata
+	if len(results) != expected {
+		return nil, fmt.Errorf("expected %d metadata results for %d confirmed vaults, got %d", expected, len(probeConfirmed), len(results))
 	}
 
 	var vaults []confirmedVault
@@ -242,13 +260,12 @@ func (p *vaultProber) fetchVaultMetadata(
 			Address:    pc.address,
 			Name:       details.Name,
 			Symbol:     details.Symbol,
-			Decimals:   details.Decimals,
 			Version:    details.Version,
 			Asset:      pc.asset,
 			FirstBlock: firstBlocks[pc.address],
 		}
 
-		assetSymbolResult := results[base+(callsPerMetadata-1)]
+		assetSymbolResult := results[base+(callsPerMetadata+assetSymbolOffset)]
 		if assetSymbolResult.Success && len(assetSymbolResult.ReturnData) > 0 {
 			if unpacked, err := p.erc20ABI.Unpack("symbol", assetSymbolResult.ReturnData); err == nil && len(unpacked) > 0 {
 				if sym, ok := unpacked[0].(string); ok {
@@ -265,12 +282,33 @@ func (p *vaultProber) fetchVaultMetadata(
 			continue
 		}
 
+		// Asset decimals failure → skip the vault, mirroring the asset-symbol
+		// skip above. Rationale: token_repository.GetOrCreateToken UPSERTs on
+		// (chain_id, address) and on conflict preserves the existing row's
+		// decimals (only created_at_block is reconciled via LEAST). So if we
+		// persist AssetDecimals=0 here, the live indexer's later correct
+		// value would be silently rejected. Skipping leaves the row absent;
+		// the next backfill cycle or the live indexer will pick it up with
+		// the correct decimals.
+		assetDecimalsResult := results[base+(callsPerMetadata+assetDecimalsOffset)]
+		dec, err := unpackAssetDecimals(p.erc20ABI, assetDecimalsResult)
+		if err != nil {
+			p.logger.Warn("skipping vault: asset decimals fetch failed",
+				"address", pc.address.Hex(),
+				"name", v.Name,
+				"asset", v.Asset.Hex(),
+				"error", err)
+			continue
+		}
+		v.AssetDecimals = dec
+
 		p.logger.Info("confirmed vault",
 			"address", pc.address.Hex(),
 			"name", v.Name,
 			"symbol", v.Symbol,
 			"asset", v.Asset.Hex(),
 			"assetSymbol", v.AssetSymbol,
+			"assetDecimals", v.AssetDecimals,
 			"version", v.Version,
 			"firstBlock", v.FirstBlock)
 
@@ -278,4 +316,49 @@ func (p *vaultProber) fetchVaultMetadata(
 	}
 
 	return vaults, nil
+}
+
+// numAssetExtensionCalls is the count of extra multicall sub-calls we append
+// after each vault's details window (asset symbol() then asset decimals()).
+// Keep this in sync with assetSymbolOffset / assetDecimalsOffset below.
+const numAssetExtensionCalls = 2
+
+// assetSymbolOffset and assetDecimalsOffset index the two asset-metadata
+// trailing calls within a per-vault window of size callsPerMetadata. They are
+// negative relative to the next vault's base, i.e. results[base + (callsPerMetadata + offset)].
+const (
+	assetSymbolOffset   = -2
+	assetDecimalsOffset = -1
+)
+
+// unpackAssetDecimals decodes an ERC20 decimals() multicall return and folds
+// the four failure modes (sub-call reverted, empty return data, unpack error,
+// type assertion failure) into a single error. The caller's only sensible
+// disposition is "skip this vault" — see fetchVaultMetadata's call site for
+// the rationale (token table UPSERT preserves the existing decimals on
+// conflict, so a wrong value here blocks the live indexer's correction).
+//
+// ERC20 decimals() is specified as uint8; we keep the strict assertion. A
+// type mismatch surfaces as a skip-with-Warn, which is the same observable
+// outcome as the live indexer's blockchain_service.getTokenMetadata where a
+// non-uint8 return wraps into a hard error.
+func unpackAssetDecimals(erc20ABI *abi.ABI, result outbound.Result) (uint8, error) {
+	if !result.Success {
+		return 0, errors.New("decimals call reverted")
+	}
+	if len(result.ReturnData) == 0 {
+		return 0, errors.New("decimals call returned no data")
+	}
+	unpacked, err := erc20ABI.Unpack("decimals", result.ReturnData)
+	if err != nil {
+		return 0, fmt.Errorf("unpacking decimals: %w", err)
+	}
+	if len(unpacked) == 0 {
+		return 0, errors.New("decimals unpack returned no values")
+	}
+	dec, ok := unpacked[0].(uint8)
+	if !ok {
+		return 0, fmt.Errorf("decimals type assertion: got %T", unpacked[0])
+	}
+	return dec, nil
 }

@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // TestCollectProbeConfirmed exercises every reachable disposition of
@@ -150,4 +154,189 @@ func concatResults(slices ...[]outbound.Result) []outbound.Result {
 		out = append(out, s...)
 	}
 	return out
+}
+
+// TestFetchVaultMetadata exercises the asset-decimals branch added by VEC-198
+// across three dispositions:
+//
+//   - happy path: every sub-call succeeds, vault lands with the asset's
+//     decimals (NOT the vault share's decimals).
+//   - decimals call reverts: vault is dropped to avoid persisting an
+//     AssetDecimals=0 row that would block the live indexer's later
+//     correction (token_repository UPSERT preserves existing decimals on
+//     conflict).
+//   - decimals returns malformed bytes: same skip-on-failure outcome.
+//
+// The fix is load-bearing: swapping the skip back to "persist with
+// AssetDecimals=0" makes the second and third cases produce a vault in the
+// returned slice, which is what these tests catch.
+func TestFetchVaultMetadata(t *testing.T) {
+	t.Parallel()
+
+	vaultAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	assetAddr := common.HexToAddress("0xaaaa000000000000000000000000000000000000")
+
+	tests := []struct {
+		name                string
+		assetSymbolResult   outbound.Result
+		assetDecimalsResult outbound.Result
+		wantConfirmed       bool
+		wantAssetSymbol     string
+		wantAssetDecimals   uint8
+	}{
+		{
+			name:                "happy path — asset symbol and decimals both decode",
+			assetSymbolResult:   okStringResult(t, "USDT"),
+			assetDecimalsResult: okUint8Result(t, 6),
+			wantConfirmed:       true,
+			wantAssetSymbol:     "USDT",
+			wantAssetDecimals:   6,
+		},
+		{
+			name:                "decimals call reverts → skip vault",
+			assetSymbolResult:   okStringResult(t, "USDT"),
+			assetDecimalsResult: outbound.Result{Success: false, ReturnData: nil},
+			wantConfirmed:       false,
+		},
+		{
+			name:                "decimals unpack fails on malformed bytes → skip vault",
+			assetSymbolResult:   okStringResult(t, "USDT"),
+			assetDecimalsResult: outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02, 0x03, 0x04}},
+			wantConfirmed:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			prober, mc := newTestVaultProberWithMock(t)
+			mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				// fetchVaultMetadata appends NumDetailsCalls + 2 calls per
+				// probed vault: name, symbol, decimals, skimRecipient,
+				// then asset.symbol(), asset.decimals().
+				if got, want := len(calls), prober.sharedProber.NumDetailsCalls()+2; got != want {
+					t.Fatalf("expected %d calls, got %d", want, got)
+				}
+				return concatResults(
+					vaultDetailsResults(t, "Vault Name", "vSYM", 18, false),
+					[]outbound.Result{tc.assetSymbolResult, tc.assetDecimalsResult},
+				), nil
+			}
+
+			confirmed := []confirmedProbe{{
+				address: vaultAddr,
+				asset:   assetAddr,
+				version: entity.MorphoVaultV1,
+			}}
+			firstBlocks := map[common.Address]int64{vaultAddr: 12345}
+
+			vaults, err := prober.fetchVaultMetadata(context.Background(), confirmed, firstBlocks, big.NewInt(100))
+			if err != nil {
+				t.Fatalf("fetchVaultMetadata: unexpected error: %v", err)
+			}
+
+			if tc.wantConfirmed {
+				if len(vaults) != 1 {
+					t.Fatalf("expected 1 confirmed vault, got %d", len(vaults))
+				}
+				v := vaults[0]
+				if v.Address != vaultAddr {
+					t.Errorf("address: want %s, got %s", vaultAddr.Hex(), v.Address.Hex())
+				}
+				if v.AssetSymbol != tc.wantAssetSymbol {
+					t.Errorf("AssetSymbol: want %q, got %q", tc.wantAssetSymbol, v.AssetSymbol)
+				}
+				if v.AssetDecimals != tc.wantAssetDecimals {
+					t.Errorf("AssetDecimals: want %d, got %d", tc.wantAssetDecimals, v.AssetDecimals)
+				}
+				return
+			}
+
+			if len(vaults) != 0 {
+				t.Fatalf("expected vault to be skipped, got %d vaults: %+v", len(vaults), vaults)
+			}
+		})
+	}
+}
+
+// newTestVaultProberWithMock builds a *vaultProber wired to a MockMulticaller
+// and a real ERC20 ABI — both required for fetchVaultMetadata to operate.
+// Returns the prober and the mock so tests can wire ExecuteFn.
+func newTestVaultProberWithMock(t *testing.T) (*vaultProber, *testutil.MockMulticaller) {
+	t.Helper()
+	shared, err := morpho_indexer.NewVaultProber()
+	if err != nil {
+		t.Fatalf("NewVaultProber: %v", err)
+	}
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("GetERC20ABI: %v", err)
+	}
+	mc := testutil.NewMockMulticaller()
+	return &vaultProber{
+		multicaller:  mc,
+		sharedProber: shared,
+		erc20ABI:     erc20ABI,
+		logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}, mc
+}
+
+// vaultDetailsResults builds the 4-result MetaMorpho details response
+// (name, symbol, decimals, skimRecipient). isV1_1 controls whether
+// skimRecipient succeeds — V1 reverts, V1.1 returns an address, V2 reverts.
+func vaultDetailsResults(t *testing.T, name, symbol string, decimals uint8, isV1_1 bool) []outbound.Result {
+	t.Helper()
+	skim := outbound.Result{Success: false, ReturnData: nil}
+	if isV1_1 {
+		skim = outbound.Result{Success: true, ReturnData: packAddress(t, common.HexToAddress("0x1"))}
+	}
+	return []outbound.Result{
+		{Success: true, ReturnData: packString(t, name)},
+		{Success: true, ReturnData: packString(t, symbol)},
+		{Success: true, ReturnData: packUint8(t, decimals)},
+		skim,
+	}
+}
+
+// okStringResult returns a successful result whose ReturnData is the ABI
+// encoding of a single string (used for ERC20 symbol() / name()).
+func okStringResult(t *testing.T, s string) outbound.Result {
+	t.Helper()
+	return outbound.Result{Success: true, ReturnData: packString(t, s)}
+}
+
+// okUint8Result returns a successful result whose ReturnData is the ABI
+// encoding of a single uint8 (used for ERC20 decimals()).
+func okUint8Result(t *testing.T, v uint8) outbound.Result {
+	t.Helper()
+	return outbound.Result{Success: true, ReturnData: packUint8(t, v)}
+}
+
+// packString ABI-encodes a string into multicall ReturnData form.
+func packString(t *testing.T, s string) []byte {
+	t.Helper()
+	strType, err := abi.NewType("string", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType(string): %v", err)
+	}
+	data, err := abi.Arguments{{Type: strType}}.Pack(s)
+	if err != nil {
+		t.Fatalf("packing string %q: %v", s, err)
+	}
+	return data
+}
+
+// packUint8 ABI-encodes a uint8 into multicall ReturnData form.
+func packUint8(t *testing.T, v uint8) []byte {
+	t.Helper()
+	u8Type, err := abi.NewType("uint8", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType(uint8): %v", err)
+	}
+	data, err := abi.Arguments{{Type: u8Type}}.Pack(v)
+	if err != nil {
+		t.Fatalf("packing uint8 %d: %v", v, err)
+	}
+	return data
 }

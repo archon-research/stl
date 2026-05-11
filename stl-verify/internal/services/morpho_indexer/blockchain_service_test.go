@@ -374,6 +374,13 @@ func TestGetVaultMetadata_MorphoReverts_WithoutV2Markers(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when MORPHO() reverts and V2 markers also fail")
 	}
+	var nv *ErrNotVault
+	if !errors.As(err, &nv) {
+		t.Fatalf("error should unwrap to *ErrNotVault, got: %T", err)
+	}
+	if nv.VaultShaped {
+		t.Error("VaultShaped must be false when MORPHO() and all V2 markers fail")
+	}
 }
 
 // TestGetVaultMetadata_VaultV2 covers the new V2 probe fallback (VEC-198):

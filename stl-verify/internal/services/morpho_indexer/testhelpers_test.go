@@ -278,6 +278,38 @@ func (h *serviceTestHarness) isProbeMulticall(calls []outbound.Call) bool {
 	return hasSameSelector(calls[0].CallData, morphoData)
 }
 
+// isVaultDetailsMulticall reports whether the 4-call multicall is the
+// name/symbol/decimals/skimRecipient details batch (first selector is name).
+//
+// Probe, details, and vault-state-with-two-balances all emit 4 calls all
+// targeting the same vault, so target equality is insufficient to discriminate.
+// Use the first call's selector instead.
+func (h *serviceTestHarness) isVaultDetailsMulticall(calls []outbound.Call) bool {
+	if len(calls) != 4 {
+		return false
+	}
+	nameData, err := h.metaMorphoReadABI.Pack("name")
+	if err != nil {
+		h.t.Fatalf("packing name selector: %v", err)
+	}
+	return hasSameSelector(calls[0].CallData, nameData)
+}
+
+// isVaultStateAndTwoBalancesMulticall reports whether the 4-call multicall is
+// the totalAssets/totalSupply/balanceOf/balanceOf batch (first selector is
+// totalAssets). See isVaultDetailsMulticall for why selector-based
+// discrimination is required.
+func (h *serviceTestHarness) isVaultStateAndTwoBalancesMulticall(calls []outbound.Call) bool {
+	if len(calls) != 4 {
+		return false
+	}
+	totalAssetsData, err := h.metaMorphoReadABI.Pack("totalAssets")
+	if err != nil {
+		h.t.Fatalf("packing totalAssets selector: %v", err)
+	}
+	return hasSameSelector(calls[0].CallData, totalAssetsData)
+}
+
 // vaultV2ProbeResults returns the 4-result Morpho VaultV2 probe response:
 // MORPHO (revert), asset, curator, liquidityAdapter.
 func (h *serviceTestHarness) vaultV2ProbeResults(asset, curator, liquidityAdapter common.Address) []outbound.Result {
@@ -784,31 +816,22 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 			// vault state + balance
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
-			// getTokenPairMetadata (4 calls: symbolA, decimalsA, symbolB, decimalsB)
-			// OR vault probe (MORPHO/asset/curator/liquidityAdapter)
-			// OR vault details (name, symbol, decimals, skimRecipient)
-			// OR vault state + 2 balances
-			if calls[0].Target == testLoanToken || calls[0].Target == testCollToken {
-				return []outbound.Result{
-					{Success: true, ReturnData: h.packString("LOAN")},
-					{Success: true, ReturnData: h.packUint8(18)},
-					{Success: true, ReturnData: h.packString("COLL")},
-					{Success: true, ReturnData: h.packUint8(18)},
-				}, nil
+			// Four-call multicalls fall into one of four shapes:
+			//  - vault probe              (MORPHO/asset/curator/liquidityAdapter)
+			//  - vault details            (name/symbol/decimals/skimRecipient)
+			//  - vault state + 2 balances (totalAssets/totalSupply/balanceOf/balanceOf)
+			//  - token pair metadata      (symbolA/decimalsA/symbolB/decimalsB)
+			//
+			// The first three all target the vault for every sub-call, so
+			// target equality cannot distinguish them. Discriminate by the
+			// first call's 4-byte selector instead.
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
 			}
-			if calls[0].Target != MorphoBlueAddress {
-				// Could be vault probe, vault details, or vault state + 2 balances.
-				// Probe and details target the same address for all 4 calls;
-				// state+2 balances mixes vault and token targets. Distinguish
-				// probe vs details by the leading call's selector.
-				if h.isProbeMulticall(calls) {
-					return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
-				}
-				if calls[0].Target == calls[1].Target && calls[1].Target == calls[2].Target && calls[2].Target == calls[3].Target {
-					// All same target → vault details
-					return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
-				}
-				// vault state + 2 balances
+			if h.isVaultDetailsMulticall(calls) {
+				return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
+			}
+			if h.isVaultStateAndTwoBalancesMulticall(calls) {
 				return []outbound.Result{
 					h.defaultVaultTotalAssetsResult(),
 					h.defaultVaultTotalSupplyResult(),
@@ -816,6 +839,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 					h.defaultBalanceOfResult(big.NewInt(200000)),
 				}, nil
 			}
+			// Default: token pair metadata (symbolA, decimalsA, symbolB, decimalsB).
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packString("LOAN")},
 				{Success: true, ReturnData: h.packUint8(18)},
