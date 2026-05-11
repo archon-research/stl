@@ -1,10 +1,30 @@
-"""Shared FastAPI parameter validators.
+"""Shared FastAPI parameter validators and the API's ID-error contract.
 
 These belong here (not in any single router) because multiple routers
 need them. The validators return ``str`` rather than richer value
 objects so the FastAPI-visible type matches the runtime type — keeping
 the OpenAPI schema accurate and Pyright/mypy happy. Routers that need
 the value object construct it explicitly at the call site.
+
+ID-error contract
+-----------------
+All endpoints follow these semantics for identifier handling:
+
+* **Malformed ID** (wrong format/length/charset, in any parameter — path,
+  query, or body): ``422 Unprocessable Entity``. Validation runs before
+  any business logic.
+* **Valid but unknown path resource** (a well-formed identifier that
+  does not correspond to a known entity, when the identifier names the
+  resource being addressed — e.g. ``/v1/primes/{prime_id}/...``):
+  ``404 Not Found``.
+* **Valid filter with no matching rows** (a well-formed identifier used
+  as a query filter rather than a path resource — e.g.
+  ``/v1/allocations/activity?prime_id=...``): ``200 []``. An empty
+  result is a valid answer to a filter query.
+
+Use :data:`EthAddressParam` and :data:`TxHashParam` for required fields
+and :data:`OptionalEthAddressParam` for optional query filters so
+malformed-ID rejection is uniform across the API.
 """
 
 import re
@@ -29,6 +49,18 @@ def _validate_eth_address(value: str) -> str:
     return value
 
 
+def _validate_optional_eth_address(value: str | None) -> str | None:
+    """Validate an optional EVM address; ``None`` passes through unchanged.
+
+    Use for query filters that accept an optional address. Reuses
+    :func:`_validate_eth_address` so malformed input still raises
+    ``ValueError`` and surfaces as ``422``.
+    """
+    if value is None:
+        return None
+    return _validate_eth_address(value)
+
+
 def _validate_tx_hash(value: str) -> str:
     """Validate ``value`` as an Ethereum transaction hash; raises ``ValueError`` -> 422.
 
@@ -46,6 +78,9 @@ def _validate_tx_hash(value: str) -> str:
 
 EthAddressParam = Annotated[str, AfterValidator(_validate_eth_address)]
 """Use as the type for any path/query/body field that holds an EVM address."""
+
+OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optional_eth_address)]
+"""Use as the type for optional query filters that hold an EVM address."""
 
 TxHashParam = Annotated[str, AfterValidator(_validate_tx_hash)]
 """Use as the type for any path/query/body field that holds a transaction hash."""
