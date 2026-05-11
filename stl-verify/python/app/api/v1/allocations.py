@@ -324,6 +324,7 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
     response_model=list[CapitalMetricsResponse],
     tags=["capital"],
     summary="List per-prime capital metrics",
+    include_in_schema=False,
     description=(
         "Join each tracked prime with the latest row from the upstream Star risk-capital monitor "
         "and return derived capital metrics: risk capital, first-loss capital, total capital, "

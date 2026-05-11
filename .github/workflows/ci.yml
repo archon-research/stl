@@ -59,17 +59,6 @@ jobs:
     uses: ./.github/workflows/ts-ci.yml
     secrets: inherit
 
-  call-deploy:
-    name: Deploy
-    needs:
-      - detect-changes
-      - go-ci
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.go-ci.result == 'success' || needs.go-ci.result == 'skipped')
-    uses: ./.github/workflows/deploy.yaml
-    secrets: inherit
-    with:
-      sha: ${{ github.sha }}
-
   success:
     name: Success
     needs:
@@ -85,3 +74,22 @@ jobs:
     steps:
       - name: Report success
         run: echo 'All required CI checks passed or were skipped.'
+
+  call-deploy:
+    name: Deploy
+    needs:
+      - detect-changes
+      - success
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.success.result == 'success' &&
+      (
+        needs.detect-changes.outputs.go == 'true' ||
+        needs.detect-changes.outputs.python == 'true' ||
+        needs.detect-changes.outputs.ts == 'true'
+      )
+    uses: ./.github/workflows/deploy.yaml
+    secrets: inherit
+    with:
+      sha: ${{ github.sha }}
