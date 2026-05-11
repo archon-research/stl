@@ -1,4 +1,4 @@
-"""Router-level tests for the unified ``/v1/risk/rrc`` endpoints.
+"""Router-level tests for the unified ``/v1/risk/rrc{,/scenario}`` endpoints.
 
 These tests pin the FastAPI translation contract on top of a fake
 ``ModelRegistry`` populated with stubbed ``RiskModel`` instances. They
@@ -269,7 +269,7 @@ def test_post_forwards_per_model_overrides(client: TestClient) -> None:
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf, gap]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -291,7 +291,7 @@ def test_post_omits_overrides_for_unmentioned_models(client: TestClient) -> None
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf, gap]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -314,7 +314,7 @@ def test_post_returns_422_on_unknown_top_level_override_model(client: TestClient
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -335,7 +335,7 @@ def test_post_returns_422_when_service_raises_on_unknown_per_model_key(client: T
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -364,7 +364,7 @@ def test_post_lets_invariant_breach_value_error_become_500() -> None:
         client = TestClient(app, raise_server_exceptions=False)
 
         response = client.post(
-            "/v1/risk/rrc",
+            "/v1/risk/rrc/scenario",
             json={"asset_id": _ASSET_ID, "prime_id": _PRIME_ID, "overrides": {}},
         )
 
@@ -396,7 +396,7 @@ def test_get_returns_422_when_prime_id_malformed(client: TestClient) -> None:
 def test_post_returns_422_when_asset_id_missing(client: TestClient) -> None:
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([]))
 
-    response = client.post("/v1/risk/rrc", json={"prime_id": _PRIME_ID})
+    response = client.post("/v1/risk/rrc/scenario", json={"prime_id": _PRIME_ID})
 
     assert response.status_code == 422
 
@@ -415,7 +415,7 @@ def test_post_returns_422_when_asset_id_not_positive(client: TestClient, bad_id:
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={"asset_id": bad_id, "prime_id": _PRIME_ID},
     )
 
@@ -486,7 +486,7 @@ def test_post_real_service_coerces_gap_pct_from_json_types(
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -504,7 +504,7 @@ def test_post_real_service_returns_422_on_out_of_range_gap_pct(client: TestClien
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -521,7 +521,7 @@ def test_post_real_service_returns_422_on_unparseable_gap_pct(client: TestClient
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -537,7 +537,7 @@ def test_post_real_service_returns_422_on_unknown_override_key(client: TestClien
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -555,7 +555,7 @@ def test_post_real_service_returns_422_on_oversize_gap_pct_string(client: TestCl
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -598,7 +598,7 @@ def test_post_real_suraf_returns_422_on_oversize_usd_exposure_string(client: Tes
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -616,7 +616,7 @@ def test_post_real_suraf_returns_422_when_usd_exposure_above_max(client: TestCli
     app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([service]))
 
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -636,7 +636,7 @@ def test_post_real_suraf_quantizes_rrc_to_usd_cents(client: TestClient) -> None:
     # 333.333... * 33.7 / 100 = 112.333... — would have a long decimal tail
     # without quantization.
     response = client.post(
-        "/v1/risk/rrc",
+        "/v1/risk/rrc/scenario",
         json={
             "asset_id": _ASSET_ID,
             "prime_id": _PRIME_ID,
@@ -650,3 +650,38 @@ def test_post_real_suraf_quantizes_rrc_to_usd_cents(client: TestClient) -> None:
     assert "." in rrc_usd
     decimals = rrc_usd.split(".", 1)[1]
     assert len(decimals) <= 2, f"expected 2 decimals max, got {rrc_usd!r}"
+
+
+# ---------------------------------------------------------------------------
+# Legacy POST /v1/risk/rrc alias — hidden from schema, still routes traffic.
+# ---------------------------------------------------------------------------
+
+
+def test_post_legacy_alias_still_serves_traffic(client: TestClient) -> None:
+    suraf = _FakeRiskModel("suraf", _suraf_result())
+    app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf]))
+
+    response = client.post(
+        "/v1/risk/rrc",
+        json={"asset_id": _ASSET_ID, "prime_id": _PRIME_ID, "overrides": {}},
+    )
+
+    assert response.status_code == 200
+    assert suraf.calls == [(_ASSET_ID, _PRIME, {})]
+
+
+def test_post_legacy_alias_is_hidden_from_openapi_schema() -> None:
+    schema = app.openapi()
+    paths = schema["paths"]
+    assert "/v1/risk/rrc/scenario" in paths
+    assert "post" in paths["/v1/risk/rrc/scenario"]
+    # GET stays on /v1/risk/rrc; POST is the hidden alias.
+    assert "get" in paths["/v1/risk/rrc"]
+    assert "post" not in paths["/v1/risk/rrc"]
+
+
+def test_hidden_endpoints_absent_from_openapi_schema() -> None:
+    schema = app.openapi()
+    paths = schema["paths"]
+    assert "/v1/capital-metrics" not in paths
+    assert "/v1/risk/{receipt_token_id}/bad-debt" not in paths
