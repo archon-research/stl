@@ -22,7 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestIntegration_SubproxyAndAlmProxy_AreIndexedAndQueryable feeds the service
+// TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable feeds the service
 // a block whose receipts contain two USDS Transfer logs — one to the Spark ALM
 // proxy, one to the Spark SubProxy — and verifies that:
 //
@@ -33,7 +33,7 @@ import (
 // AllocationRepository → Postgres path with a real DB; only the Alchemy RPC
 // (multicaller) and the block-cache reader are mocked, in line with the
 // "mock only what we cannot control" rule from CLAUDE.md.
-func TestIntegration_SubproxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
+func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	ctx := context.Background()
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-subproxy")
@@ -86,7 +86,7 @@ func TestIntegration_SubproxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	almBalance := new(big.Int).Mul(big.NewInt(50_000_000), wad)
 	subBalance := new(big.Int).Mul(big.NewInt(25_000_000), wad)
 
-	mc := newERC20BalanceMockMulticaller(t, erc20ABI, "USDS", 18, map[common.Address]*big.Int{
+	mc := newERC20BalanceMockMulticaller(t, erc20ABI, usds, "USDS", 18, map[common.Address]*big.Int{
 		almProxy: almBalance,
 		subProxy: subBalance,
 	})
@@ -176,7 +176,7 @@ func TestIntegration_SubproxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	}
 }
 
-// TestIntegration_UsdcTransferToSubproxy_IsIgnored is the negative complement
+// TestIntegration_UsdcTransferToSubProxy_IsIgnored is the negative complement
 // to the test above. The SubProxy is a tracked address (so the
 // TransferExtractor will emit a TransferEvent for transfers touching it), but
 // USDC is intentionally not registered as a TokenEntry for any proxy. The
@@ -185,7 +185,7 @@ func TestIntegration_SubproxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 //  1. No row is written to allocation_position.
 //  2. The Multicaller is never called — the filter happens at entry-lookup,
 //     before any on-chain fetch.
-func TestIntegration_UsdcTransferToSubproxy_IsIgnored(t *testing.T) {
+func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 	ctx := context.Background()
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-usdc-ignored")
@@ -315,10 +315,13 @@ func TestIntegration_UsdcTransferToSubproxy_IsIgnored(t *testing.T) {
 // selector: balanceOf(wallet) returns balances[wallet], decimals() returns
 // `decimals`, symbol() returns `symbol`. Any other call (or balanceOf for an
 // unknown wallet) fails the test loudly — silent zero-substitution would mask
-// real bugs in the call-building or routing path.
+// real bugs in the call-building or routing path. Calls whose Target is not
+// `tokenAddress` also fail the test, catching production-side targeting bugs
+// (e.g. balanceOf invoked against the wrong contract).
 func newERC20BalanceMockMulticaller(
 	t *testing.T,
 	erc20ABI *abi.ABI,
+	tokenAddress common.Address,
 	symbol string,
 	decimals uint8,
 	balances map[common.Address]*big.Int,
@@ -333,6 +336,11 @@ func newERC20BalanceMockMulticaller(
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		results := make([]outbound.Result, len(calls))
 		for i, c := range calls {
+			if c.Target != tokenAddress {
+				t.Errorf("unexpected Call.Target %s — expected %s", c.Target.Hex(), tokenAddress.Hex())
+				results[i] = outbound.Result{Success: false}
+				continue
+			}
 			if len(c.CallData) < 4 {
 				results[i] = outbound.Result{Success: false}
 				continue
