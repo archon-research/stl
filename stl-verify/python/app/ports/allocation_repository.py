@@ -26,6 +26,12 @@ class AllocationRepository(Protocol):
         """Return all distinct primes."""
         ...
 
+    async def prime_exists(self, prime_id: EthAddress) -> bool:
+        """Return True iff any allocation_position row has ever been recorded
+        for the given proxy address (registered prime, regardless of current
+        non-zero balances)."""
+        ...
+
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         """Return current receipt-token holdings for the given prime."""
         ...

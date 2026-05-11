@@ -14,11 +14,12 @@ from tests.conftest import make_direct_asset_holding, make_receipt_token_positio
 _VALID_ADDR = "0x" + "ab" * 20
 
 
-def _make_service(primes=None, positions=None, direct_holdings=None) -> AllocationService:
+def _make_service(primes=None, positions=None, direct_holdings=None, prime_exists=True) -> AllocationService:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
     service.list_direct_asset_holdings.return_value = direct_holdings or []
+    service.prime_exists.return_value = prime_exists
     return service
 
 
@@ -149,10 +150,13 @@ def test_list_allocations_combines_receipt_and_direct_rows():
     assert direct_row["symbol"] == "PYUSD" and direct_row["receipt_token_id"] is None
 
 
-def test_list_allocations_returns_empty_when_no_holdings():
+def test_list_allocations_returns_empty_when_registered_prime_has_no_holdings():
+    """A registered prime that has fully exited all positions returns 200+[],
+    not 404 — only unknown primes (no history at all) trigger 404.
+    """
     from app.api.v1 import allocations
 
-    service = _make_service(positions=[])
+    service = _make_service(positions=[], prime_exists=True)
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
@@ -160,6 +164,21 @@ def test_list_allocations_returns_empty_when_no_holdings():
 
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_list_allocations_returns_404_when_prime_is_unknown():
+    from app.api.v1 import allocations
+
+    service = _make_service(prime_exists=False)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 404
+    service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+    service.list_receipt_token_positions.assert_not_awaited()
+    service.list_direct_asset_holdings.assert_not_awaited()
 
 
 def test_list_allocations_returns_422_for_invalid_prime_id():

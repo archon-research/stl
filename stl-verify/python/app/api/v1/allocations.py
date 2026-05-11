@@ -148,6 +148,9 @@ async def list_allocations(
     prime_id: EthAddressPath,
     service: AllocationService = Depends(_get_service),
 ):
+    if not await service.prime_exists(prime_id):
+        raise HTTPException(status_code=404, detail=f"Prime not found: {prime_id}")
+
     positions = await service.list_receipt_token_positions(prime_id)
     direct_holdings = await service.list_direct_asset_holdings(prime_id)
     category_service = AllocationCategoryService()

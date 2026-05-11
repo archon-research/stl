@@ -126,6 +126,17 @@ class PostgresAllocationRepository:
             )
             return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
 
+    async def prime_exists(self, prime_id: EthAddress) -> bool:
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT 1 FROM allocation_position "
+                    "WHERE proxy_address = decode(:proxy_hex, 'hex') LIMIT 1"
+                ),
+                {"proxy_hex": prime_id.hex},
+            )
+            return result.first() is not None
+
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
         async with self._engine.connect() as conn:
             result = await conn.execute(
