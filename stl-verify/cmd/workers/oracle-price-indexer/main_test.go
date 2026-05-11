@@ -184,13 +184,52 @@ func TestParseConfig(t *testing.T) {
 			},
 			wantError: "DEPLOY_ENV",
 		},
+		{
+			name: "invalid CHAIN_ID",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost/db",
+				"-redis", "redis.example.com:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":      "staging",
+				"CHAIN_ID":        "not-a-number",
+			},
+			wantError: "parsing CHAIN_ID",
+		},
+		{
+			name: "non-default CHAIN_ID from env",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost/db",
+				"-redis", "redis.example.com:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelavalanche-avalanche-raw",
+				"DEPLOY_ENV":      "avalanche",
+				"CHAIN_ID":        "43114",
+			},
+			wantCfg: cliConfig{
+				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				dbURL:              "postgres://localhost/db",
+				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
+				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				redisAddr:          "redis.example.com:6379",
+				s3Bucket:           "stl-sentinelavalanche-avalanche-raw",
+				deployEnv:          "avalanche",
+				chainID:            43114,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Clear inherited values unless provided in envVars, so an
 			// existing shell env doesn't bleed into the test case.
-			for _, key := range []string{"ALCHEMY_API_KEY", "REDIS_ADDR", "S3_BUCKET", "DEPLOY_ENV", "AWS_SQS_QUEUE_URL", "DATABASE_URL", "ALCHEMY_HTTP_URL"} {
+			for _, key := range []string{"ALCHEMY_API_KEY", "REDIS_ADDR", "S3_BUCKET", "DEPLOY_ENV", "AWS_SQS_QUEUE_URL", "DATABASE_URL", "ALCHEMY_HTTP_URL", "CHAIN_ID"} {
 				if _, has := tt.envVars[key]; !has {
 					t.Setenv(key, "")
 				}
@@ -236,6 +275,9 @@ func TestParseConfig(t *testing.T) {
 			}
 			if cfg.deployEnv != tt.wantCfg.deployEnv {
 				t.Errorf("deployEnv: expected %q, got %q", tt.wantCfg.deployEnv, cfg.deployEnv)
+			}
+			if cfg.chainID != tt.wantCfg.chainID {
+				t.Errorf("chainID: expected %d, got %d", tt.wantCfg.chainID, cfg.chainID)
 			}
 		})
 	}

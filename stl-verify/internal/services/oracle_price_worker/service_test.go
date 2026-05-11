@@ -43,15 +43,10 @@ func multicallFactoryFor(mc outbound.Multicaller) MulticallerFactory {
 // interface. Defaults to a fixed timestamp (2024-01-01 UTC) matching the
 // value test fixtures put in BlockEvent.
 type mockBlockCacheReader struct {
-	mu         sync.Mutex
 	getBlockFn func(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error)
-	calls      int
 }
 
 func (m *mockBlockCacheReader) GetBlock(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
-	m.mu.Lock()
-	m.calls++
-	m.mu.Unlock()
 	if m.getBlockFn != nil {
 		return m.getBlockFn(ctx, chainID, blockNumber, version)
 	}
@@ -417,6 +412,9 @@ func TestNewService(t *testing.T) {
 			// Verify service fields
 			if svc.consumer == nil {
 				t.Error("consumer should not be nil")
+			}
+			if svc.cacheReader == nil {
+				t.Error("cacheReader should not be nil")
 			}
 			if svc.newMulticaller == nil {
 				t.Error("newMulticaller should not be nil")

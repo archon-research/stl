@@ -245,7 +245,5 @@ func run(ctx context.Context, args []string) error {
 	}
 	service.WithTelemetry(oracleTelemetry)
 
-	logger.Info("oracle price worker started, waiting for messages...")
-
 	return lifecycle.Run(ctx, logger, service)
 }
