@@ -152,9 +152,9 @@ def test_list_allocations_combines_receipt_and_direct_rows():
     assert response.status_code == 200
     rows = response.json()
     assert len(rows) == 2
-    receipt_row, direct_row = rows
-    assert receipt_row["symbol"] == "aUSDC" and receipt_row["receipt_token_id"] == 1
-    assert direct_row["symbol"] == "PYUSD" and direct_row["receipt_token_id"] is None
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["aUSDC"]["receipt_token_id"] == 1
+    assert by_symbol["PYUSD"]["receipt_token_id"] is None
 
 
 def test_list_allocations_returns_empty_when_prime_exists_with_no_holdings():

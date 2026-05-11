@@ -217,22 +217,38 @@ class PostgresAllocationRepository:
             raise ValueError(f"Database query failed while fetching receipt token positions: {exc}") from exc
 
     async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
-                _DIRECT_ASSET_HOLDINGS_SQL,
-                {"proxy_hex": prime_id.hex},
-            )
-            return [
-                DirectAssetHolding(
-                    chain_id=row.chain_id,
-                    token_id=row.token_id,
-                    token_address="0x" + row.token_address,
-                    symbol=row.symbol,
-                    balance=_safe_decimal(row.balance, "balance", row.token_id),
-                    latest_activity_at=row.latest_activity_at,
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    _DIRECT_ASSET_HOLDINGS_SQL,
+                    {"proxy_hex": prime_id.hex},
                 )
-                for row in result
-            ]
+                return [
+                    DirectAssetHolding(
+                        chain_id=row.chain_id,
+                        token_id=row.token_id,
+                        token_address="0x" + row.token_address,
+                        symbol=row.symbol,
+                        balance=_safe_decimal(row.balance, "balance", row.token_id),
+                        latest_activity_at=row.latest_activity_at,
+                    )
+                    for row in result
+                ]
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch direct asset holdings from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching direct asset holdings: {exc}") from exc
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
@@ -390,7 +406,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             ap.created_at                            AS latest_activity_at
         FROM allocation_position ap
         JOIN token t          ON t.id = ap.token_id
-        JOIN receipt_token rt ON rt.receipt_token_address = t.address
+        JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
@@ -452,7 +468,8 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         lp.latest_activity_at
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
-    LEFT JOIN receipt_token rt ON rt.receipt_token_address = t.address
+    LEFT JOIN receipt_token rt
+        ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
     WHERE rt.id IS NULL
     ORDER BY lp.balance DESC
 """)
@@ -495,7 +512,7 @@ WITH latest_receipt_positions AS (
         ap.balance
     FROM allocation_position ap
     JOIN token t          ON t.id = ap.token_id
-    JOIN receipt_token rt ON rt.receipt_token_address = t.address
+    JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
       AND ap.balance > 0

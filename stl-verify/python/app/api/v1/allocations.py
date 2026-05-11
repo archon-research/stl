@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -467,9 +468,12 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
     tags=["allocations"],
     summary="List a prime's current allocations",
     description=(
-        "Return every receipt-token position currently held by the given prime, enriched with "
-        "USD value (when a price is available), latest on-chain activity timestamp, and "
-        "a derived allocation `category` (`allocation` / `pol` / `psm3` / `asset`)."
+        "Return every current allocation held by the given prime — both receipt-token "
+        "positions (enriched with USD value when a price is available) and direct asset "
+        "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
+        "surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and "
+        "`amount_usd` set to `null`). Each row includes the latest on-chain activity "
+        "timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`)."
     ),
 )
 async def list_allocations(
@@ -492,8 +496,10 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    positions = await service.list_receipt_token_positions(prime_address)
-    direct_holdings = await service.list_direct_asset_holdings(prime_address)
+    positions, direct_holdings = await asyncio.gather(
+        service.list_receipt_token_positions(prime_address),
+        service.list_direct_asset_holdings(prime_address),
+    )
     category_service = AllocationCategoryService()
 
     receipt_rows = [
