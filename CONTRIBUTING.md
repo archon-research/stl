@@ -722,7 +722,7 @@ Version is a reference to block_version and processing_version. These allow audi
 
 - `GET /v1/risk/rrc?asset_id=…&prime_id=…` — every applicable model at
   its defaults.
-- `POST /v1/risk/rrc` with `{ asset_id, prime_id?, overrides: { <model>: {...knobs} } }`
+- `POST /v1/risk/rrc/scenario` with `{ asset_id, prime_id?, overrides: { <model>: {...knobs} } }`
   — same, with per-model scenario overrides. Unknown models/keys → 422.
 
 ### Model-side interface
