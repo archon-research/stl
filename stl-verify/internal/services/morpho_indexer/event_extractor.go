@@ -108,9 +108,10 @@ func (e *EventExtractor) loadABIs() error {
 		return fmt.Errorf("failed to parse VaultV2 events ABI: %w", err)
 	}
 	for _, event := range v2EventsABI.Events {
-		// Skip names already registered above to avoid clobbering the existing
-		// MetaMorpho V1 / V1.1 entries (Deposit, Withdraw, Transfer,
-		// AccrueInterest are inherited ERC20/ERC4626 surface).
+		// Skip event signatures (topic hashes) already registered above to
+		// avoid clobbering the existing MetaMorpho V1 / V1.1 entries —
+		// Deposit, Withdraw, Transfer, AccrueInterest are inherited
+		// ERC20/ERC4626 surface and share their event.ID with V1/V1.1.
 		if _, present := e.metaMorphoSignatures[event.ID]; present {
 			continue
 		}

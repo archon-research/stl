@@ -206,6 +206,20 @@ func (p *vaultProber) collectProbeConfirmed(batch []common.Address, results []ou
 	return confirmed, nil
 }
 
+// numAssetExtensionCalls is the count of extra multicall sub-calls we append
+// after each vault's details window (asset symbol() then asset decimals()).
+// Keep in sync with assetSymbolOffset / assetDecimalsOffset.
+const numAssetExtensionCalls = 2
+
+// assetSymbolOffset and assetDecimalsOffset index the two asset-metadata
+// trailing calls within a per-vault window of size callsPerMetadata. They are
+// negative relative to the NEXT vault's base, i.e.
+// results[base + (callsPerMetadata + offset)].
+const (
+	assetSymbolOffset   = -2
+	assetDecimalsOffset = -1
+)
+
 // fetchVaultMetadata fetches name, symbol, decimals, version, and asset
 // symbol+decimals for confirmed vaults. The version may be upgraded from
 // V1 → V1.1 here if skimRecipient succeeds.
@@ -317,19 +331,6 @@ func (p *vaultProber) fetchVaultMetadata(
 
 	return vaults, nil
 }
-
-// numAssetExtensionCalls is the count of extra multicall sub-calls we append
-// after each vault's details window (asset symbol() then asset decimals()).
-// Keep this in sync with assetSymbolOffset / assetDecimalsOffset below.
-const numAssetExtensionCalls = 2
-
-// assetSymbolOffset and assetDecimalsOffset index the two asset-metadata
-// trailing calls within a per-vault window of size callsPerMetadata. They are
-// negative relative to the next vault's base, i.e. results[base + (callsPerMetadata + offset)].
-const (
-	assetSymbolOffset   = -2
-	assetDecimalsOffset = -1
-)
 
 // unpackAssetDecimals decodes an ERC20 decimals() multicall return and folds
 // the four failure modes (sub-call reverted, empty return data, unpack error,

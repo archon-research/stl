@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -339,4 +340,312 @@ func packUint8(t *testing.T, v uint8) []byte {
 		t.Fatalf("packing uint8 %d: %v", v, err)
 	}
 	return data
+}
+
+// TestUnpackAssetDecimals exercises every explicit failure mode of
+// unpackAssetDecimals plus the happy path. The function folds four failure
+// dispositions into one error return; each branch is covered here so that an
+// accidental "return 0, nil" on any failure mode is caught directly rather
+// than via the indirect fetchVaultMetadata harness.
+//
+// The strict uint8 type assertion (unpacked[0].(uint8)) is unreachable through
+// the real ERC20 ABI — its decimals() output is typed uint8, so a successful
+// Unpack always yields uint8. Same for the zero-length unpack guard: a
+// successful ABI Unpack of a single-output method always returns at least one
+// value. Both guards stand as defense against future ABI tweaks; we leave
+// them uncovered rather than fake the call site to bypass the ABI.
+func TestUnpackAssetDecimals(t *testing.T) {
+	t.Parallel()
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("GetERC20ABI: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		result    outbound.Result
+		wantValue uint8
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:      "happy path — successful decimals decode",
+			result:    okUint8Result(t, 6),
+			wantValue: 6,
+			wantErr:   false,
+		},
+		{
+			name:      "revert — Success=false propagates as error",
+			result:    outbound.Result{Success: false, ReturnData: nil},
+			wantErr:   true,
+			errSubstr: "reverted",
+		},
+		{
+			name:      "empty return data — Success=true but zero bytes",
+			result:    outbound.Result{Success: true, ReturnData: nil},
+			wantErr:   true,
+			errSubstr: "no data",
+		},
+		{
+			name:      "malformed bytes — Unpack rejects short payload",
+			result:    outbound.Result{Success: true, ReturnData: []byte{0xff, 0xff, 0xff, 0xff}},
+			wantErr:   true,
+			errSubstr: "unpacking decimals",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := unpackAssetDecimals(erc20ABI, tc.result)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (returned value %d)", got)
+				}
+				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Errorf("error: want substring %q, got %q", tc.errSubstr, err.Error())
+				}
+				if got != 0 {
+					t.Errorf("on error, expected returned value to be 0, got %d", got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.wantValue {
+				t.Errorf("value: want %d, got %d", tc.wantValue, got)
+			}
+		})
+	}
+}
+
+// TestCollectProbeConfirmed_CardinalityMismatch verifies the guard at the top
+// of collectProbeConfirmed: when len(results) != len(batch) * callsPerProbe,
+// the function returns an error rather than indexing out of bounds.
+//
+// Why this matters: an inverted comparison (e.g. `>` instead of `!=`) would
+// surface only in production. The shorter-than-expected case is tested here;
+// the longer-than-expected case is symmetric and exercised below.
+func TestCollectProbeConfirmed_CardinalityMismatch(t *testing.T) {
+	t.Parallel()
+
+	prober := newTestVaultProber(t)
+	callsPerProbe := prober.sharedProber.NumProbeCalls()
+
+	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	addr2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	batch := []common.Address{addr1, addr2}
+	expected := len(batch) * callsPerProbe
+
+	t.Run("too few results", func(t *testing.T) {
+		t.Parallel()
+		// 1 result vs expected 8 (2 addrs * 4 calls).
+		short := []outbound.Result{{Success: false, ReturnData: nil}}
+
+		confirmed, err := prober.collectProbeConfirmed(batch, short)
+		if err == nil {
+			t.Fatalf("expected cardinality error, got nil (confirmed=%+v)", confirmed)
+		}
+		if !strings.Contains(err.Error(), "expected") || !strings.Contains(err.Error(), "probe results") {
+			t.Errorf("error message: want it to mention expected probe results, got %q", err.Error())
+		}
+		// Sanity: the message should embed the right counts.
+		for _, s := range []string{
+			"expected 8 probe results",
+			"batch of 2",
+			"got 1",
+		} {
+			if !strings.Contains(err.Error(), s) {
+				t.Errorf("error message: want substring %q, got %q", s, err.Error())
+			}
+		}
+	})
+
+	t.Run("too many results", func(t *testing.T) {
+		t.Parallel()
+		// 9 results vs expected 8 (2 addrs * 4 calls). One extra at the end.
+		long := make([]outbound.Result, expected+1)
+		for i := range long {
+			long[i] = outbound.Result{Success: false, ReturnData: nil}
+		}
+
+		confirmed, err := prober.collectProbeConfirmed(batch, long)
+		if err == nil {
+			t.Fatalf("expected cardinality error, got nil (confirmed=%+v)", confirmed)
+		}
+		if !strings.Contains(err.Error(), "expected 8 probe results") {
+			t.Errorf("error message: want substring %q, got %q", "expected 8 probe results", err.Error())
+		}
+		if !strings.Contains(err.Error(), "got 9") {
+			t.Errorf("error message: want substring %q, got %q", "got 9", err.Error())
+		}
+	})
+}
+
+// TestFetchVaultMetadata_CardinalityMismatch verifies the guard immediately
+// after Execute in fetchVaultMetadata. The multicaller is mocked to return a
+// result slice of the wrong length; the function must surface the error
+// rather than panic on out-of-bounds slice access downstream.
+//
+// Covers both shorter-than-expected and longer-than-expected, mirroring the
+// collectProbeConfirmed test so an inverted comparison in either direction
+// fails the test.
+func TestFetchVaultMetadata_CardinalityMismatch(t *testing.T) {
+	t.Parallel()
+
+	vaultAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	assetAddr := common.HexToAddress("0xaaaa000000000000000000000000000000000000")
+
+	confirmed := []confirmedProbe{{
+		address: vaultAddr,
+		asset:   assetAddr,
+		version: entity.MorphoVaultV1,
+	}}
+	firstBlocks := map[common.Address]int64{vaultAddr: 12345}
+
+	t.Run("too few results", func(t *testing.T) {
+		t.Parallel()
+
+		prober, mc := newTestVaultProberWithMock(t)
+		expected := prober.sharedProber.NumDetailsCalls() + numAssetExtensionCalls
+		mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			// Return one fewer than expected.
+			out := make([]outbound.Result, expected-1)
+			for i := range out {
+				out[i] = outbound.Result{Success: false, ReturnData: nil}
+			}
+			return out, nil
+		}
+
+		vaults, err := prober.fetchVaultMetadata(context.Background(), confirmed, firstBlocks, big.NewInt(100))
+		if err == nil {
+			t.Fatalf("expected cardinality error, got nil (vaults=%+v)", vaults)
+		}
+		if !strings.Contains(err.Error(), "expected") || !strings.Contains(err.Error(), "metadata results") {
+			t.Errorf("error message: want it to mention expected metadata results, got %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "for 1 confirmed vaults") {
+			t.Errorf("error message: want substring %q, got %q", "for 1 confirmed vaults", err.Error())
+		}
+	})
+
+	t.Run("too many results", func(t *testing.T) {
+		t.Parallel()
+
+		prober, mc := newTestVaultProberWithMock(t)
+		expected := prober.sharedProber.NumDetailsCalls() + numAssetExtensionCalls
+		mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			// Return one more than expected.
+			out := make([]outbound.Result, expected+1)
+			for i := range out {
+				out[i] = outbound.Result{Success: false, ReturnData: nil}
+			}
+			return out, nil
+		}
+
+		vaults, err := prober.fetchVaultMetadata(context.Background(), confirmed, firstBlocks, big.NewInt(100))
+		if err == nil {
+			t.Fatalf("expected cardinality error, got nil (vaults=%+v)", vaults)
+		}
+		if !strings.Contains(err.Error(), "expected") || !strings.Contains(err.Error(), "metadata results") {
+			t.Errorf("error message: want it to mention expected metadata results, got %q", err.Error())
+		}
+	})
+}
+
+// TestFetchVaultMetadata_MultiVault locks in the per-vault offset arithmetic
+// when len(probeConfirmed) > 1. The single-vault TestFetchVaultMetadata cases
+// always run with base == 0, which would mask a bug that uses a fixed offset
+// instead of i * callsPerMetadata for the second vault's reads.
+//
+// Two vaults are run through fetchVaultMetadata with distinct asset symbols
+// and decimals (USDT/6 then USDC/8). If the loop arithmetic regresses to a
+// constant offset, vault B's AssetSymbol/AssetDecimals will be wrong (or vault
+// A's reads will spill into vault B's, etc.), and the assertions below fire.
+func TestFetchVaultMetadata_MultiVault(t *testing.T) {
+	t.Parallel()
+
+	vaultA := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	vaultB := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	assetA := common.HexToAddress("0xaaaa000000000000000000000000000000000000")
+	assetB := common.HexToAddress("0xbbbb000000000000000000000000000000000000")
+
+	prober, mc := newTestVaultProberWithMock(t)
+	callsPerMetadata := prober.sharedProber.NumDetailsCalls() + numAssetExtensionCalls
+
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		// Two vaults × callsPerMetadata each.
+		if got, want := len(calls), 2*callsPerMetadata; got != want {
+			t.Fatalf("expected %d calls, got %d", want, got)
+		}
+		return concatResults(
+			// Vault A window: details (Vault A / vSYMA / 18 / no skim) then USDT/6.
+			vaultDetailsResults(t, "Vault A", "vSYMA", 18, false),
+			[]outbound.Result{okStringResult(t, "USDT"), okUint8Result(t, 6)},
+			// Vault B window: details (Vault B / vSYMB / 18 / no skim) then USDC/8.
+			vaultDetailsResults(t, "Vault B", "vSYMB", 18, false),
+			[]outbound.Result{okStringResult(t, "USDC"), okUint8Result(t, 8)},
+		), nil
+	}
+
+	confirmed := []confirmedProbe{
+		{address: vaultA, asset: assetA, version: entity.MorphoVaultV1},
+		{address: vaultB, asset: assetB, version: entity.MorphoVaultV1},
+	}
+	firstBlocks := map[common.Address]int64{
+		vaultA: 12345,
+		vaultB: 67890,
+	}
+
+	vaults, err := prober.fetchVaultMetadata(context.Background(), confirmed, firstBlocks, big.NewInt(100))
+	if err != nil {
+		t.Fatalf("fetchVaultMetadata: unexpected error: %v", err)
+	}
+	if len(vaults) != 2 {
+		t.Fatalf("expected 2 confirmed vaults, got %d: %+v", len(vaults), vaults)
+	}
+
+	// Locked-in: order preserved and per-vault windows distinct.
+	if got, want := vaults[0].Address, vaultA; got != want {
+		t.Errorf("vaults[0].Address: want %s, got %s", want.Hex(), got.Hex())
+	}
+	if got, want := vaults[0].Name, "Vault A"; got != want {
+		t.Errorf("vaults[0].Name: want %q, got %q", want, got)
+	}
+	if got, want := vaults[0].Asset, assetA; got != want {
+		t.Errorf("vaults[0].Asset: want %s, got %s", want.Hex(), got.Hex())
+	}
+	if got, want := vaults[0].AssetSymbol, "USDT"; got != want {
+		t.Errorf("vaults[0].AssetSymbol: want %q, got %q", want, got)
+	}
+	if got, want := vaults[0].AssetDecimals, uint8(6); got != want {
+		t.Errorf("vaults[0].AssetDecimals: want %d, got %d", want, got)
+	}
+	if got, want := vaults[0].FirstBlock, int64(12345); got != want {
+		t.Errorf("vaults[0].FirstBlock: want %d, got %d", want, got)
+	}
+
+	if got, want := vaults[1].Address, vaultB; got != want {
+		t.Errorf("vaults[1].Address: want %s, got %s", want.Hex(), got.Hex())
+	}
+	if got, want := vaults[1].Name, "Vault B"; got != want {
+		t.Errorf("vaults[1].Name: want %q, got %q", want, got)
+	}
+	if got, want := vaults[1].Asset, assetB; got != want {
+		t.Errorf("vaults[1].Asset: want %s, got %s", want.Hex(), got.Hex())
+	}
+	if got, want := vaults[1].AssetSymbol, "USDC"; got != want {
+		t.Errorf("vaults[1].AssetSymbol: want %q, got %q", want, got)
+	}
+	if got, want := vaults[1].AssetDecimals, uint8(8); got != want {
+		t.Errorf("vaults[1].AssetDecimals: want %d, got %d", want, got)
+	}
+	if got, want := vaults[1].FirstBlock, int64(67890); got != want {
+		t.Errorf("vaults[1].FirstBlock: want %d, got %d", want, got)
+	}
 }
