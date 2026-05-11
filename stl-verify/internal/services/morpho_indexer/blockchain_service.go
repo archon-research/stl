@@ -560,11 +560,19 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	return vs, balA, balB, nil
 }
 
-// getVaultMetadata identifies whether a contract is a MetaMorpho vault, then fetches its metadata.
+// getVaultMetadata identifies whether a contract is a Morpho-family vault
+// (MetaMorpho V1 / V1.1 or VaultV2), then fetches its metadata.
 //
 // Split into two multicalls to keep the probe cheap for non-vault contracts:
-//  1. Probe: MORPHO() + asset() — determines if this is a real MetaMorpho vault.
-//  2. Metadata: name, symbol, decimals, skimRecipient — only runs for confirmed vaults.
+//  1. Probe: MORPHO + asset + curator + liquidityAdapter — identifies the
+//     vault flavour (or rejects with ErrNotVault).
+//  2. Metadata: name, symbol, decimals, skimRecipient — only runs for
+//     confirmed vaults.
+//
+// MetaMorpho V1/V1.1 vaults must reference the canonical Morpho Blue
+// singleton; we reject any MetaMorpho probe whose MORPHO() points elsewhere.
+// VaultV2 has no MORPHO() function and is identified by curator() and
+// liquidityAdapter() in vault_probe.go.
 func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retMD *VaultMetadata, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultMetadata",
 		attribute.String("vault.address", vaultAddress.Hex()))
@@ -578,40 +586,36 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	}()
 
 	block := big.NewInt(blockNumber)
-	morphoAddr, asset, err := s.probeVault(ctx, vaultAddress, block)
+	probe, err := s.vaultProber.ProbeVault(ctx, s.multicallClient, vaultAddress, block)
 	if err != nil {
 		return nil, fmt.Errorf("fetching vault probe: %w", err)
 	}
-	if morphoAddr != MorphoBlueAddress {
-		return nil, &ErrNotVault{Err: fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", morphoAddr.Hex(), MorphoBlueAddress.Hex())}
-	}
-	if asset == (common.Address{}) {
-		return nil, &ErrNotVault{Err: fmt.Errorf("failed to get vault asset address for %s", vaultAddress.Hex())}
+
+	// MetaMorpho variants must point at the canonical Morpho Blue singleton.
+	// VaultV2 has no MORPHO() and is exempt from this check. (Zero-address
+	// asset is rejected upstream in ParseProbeResults with VaultShaped set
+	// from the probe context, so no explicit check is needed here.)
+	if probe.Version != entity.MorphoVaultV2 && probe.MorphoAddr != MorphoBlueAddress {
+		return nil, &ErrNotVault{
+			Err:         fmt.Errorf("MORPHO() returned %s, expected %s — not a MetaMorpho vault", probe.MorphoAddr.Hex(), MorphoBlueAddress.Hex()),
+			VaultShaped: true, // MORPHO() returned an address — it's vault-shaped, just not ours.
+		}
 	}
 
-	md, err := s.fetchVaultDetails(ctx, vaultAddress, block)
+	md, err := s.fetchVaultDetails(ctx, vaultAddress, probe.Version, block)
 	if err != nil {
 		return nil, fmt.Errorf("fetching vault details: %w", err)
 	}
-	md.Asset = asset
+	md.Asset = probe.AssetAddr
 
 	return md, nil
 }
 
-// probeVault calls MORPHO() and asset() to determine if the contract is a MetaMorpho vault.
-// Returns blockchain.ErrNotVault if the calls fail (e.g. non-vault contract), or the MORPHO
-// address and asset address on success.
-func (s *blockchainService) probeVault(ctx context.Context, vaultAddress common.Address, blockNumber *big.Int) (common.Address, common.Address, error) {
-	result, err := s.vaultProber.ProbeVault(ctx, s.multicallClient, vaultAddress, blockNumber)
-	if err != nil {
-		return common.Address{}, common.Address{}, err
-	}
-	return result.MorphoAddr, result.AssetAddr, nil
-}
-
-// fetchVaultDetails fetches name, symbol, decimals, and version for a confirmed vault.
-func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress common.Address, blockNumber *big.Int) (*VaultMetadata, error) {
-	details, err := s.vaultProber.FetchVaultDetails(ctx, s.multicallClient, vaultAddress, blockNumber)
+// fetchVaultDetails fetches name, symbol, decimals, and version for a
+// confirmed vault. tentativeVersion comes from the probe phase: V1 may be
+// upgraded to V1.1 here if skimRecipient succeeds; V2 is preserved.
+func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress common.Address, tentativeVersion entity.MorphoVaultVersion, blockNumber *big.Int) (*VaultMetadata, error) {
+	details, err := s.vaultProber.FetchVaultDetails(ctx, s.multicallClient, vaultAddress, tentativeVersion, blockNumber)
 	if err != nil {
 		return nil, err
 	}
@@ -623,6 +627,14 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 	}, nil
 }
 
+// zeroAddressTokenMetadata is the canonical metadata returned for the zero
+// address. Morpho Blue allows markets where collateralToken = 0x0 ("idle
+// markets" used as liquidity buffers); calling decimals() / symbol() on the
+// zero address returns empty data, which is otherwise treated as an error.
+// Short-circuiting at the metadata layer keeps the rest of the indexer from
+// having to special-case 0x0 downstream.
+var zeroAddressTokenMetadata = TokenMetadata{Symbol: "", Decimals: 0}
+
 // getTokenMetadata fetches token symbol and decimals via ERC20 calls.
 //
 // Post-VEC-188: any sub-call revert (Success: false) surfaces as an error so
@@ -630,7 +642,14 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 // Decimals) into the token table. A non-string symbol() return (e.g. MKR-style
 // bytes32) is still tolerated with an empty Symbol — that's an unpack concern,
 // not a revert.
+//
+// The zero address is short-circuited to zeroAddressTokenMetadata without
+// issuing any sub-call. See zeroAddressTokenMetadata for the rationale.
 func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress common.Address, blockNumber int64) (retMD TokenMetadata, retErr error) {
+	if tokenAddress == (common.Address{}) {
+		return zeroAddressTokenMetadata, nil
+	}
+
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getTokenMetadata",
 		attribute.String("token.address", tokenAddress.Hex()))
 	defer span.End()
@@ -716,7 +735,26 @@ func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsRes
 // getTokenPairMetadata fetches metadata for two tokens in a single Multicall3 batch.
 // Respects the metadata cache — if both are cached, no RPC call is made; if one is cached,
 // only the uncached token's calls are included in the batch.
+//
+// Either token may be the zero address (Morpho Blue idle markets use
+// collateralToken = 0x0); the zero side is short-circuited to
+// zeroAddressTokenMetadata, and the non-zero side is fetched via a single
+// per-token call rather than a 4-call pair batch.
 func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, tokenB common.Address, blockNumber int64) (retMDA TokenMetadata, retMDB TokenMetadata, retErr error) {
+	zeroA := tokenA == (common.Address{})
+	zeroB := tokenB == (common.Address{})
+
+	switch {
+	case zeroA && zeroB:
+		return zeroAddressTokenMetadata, zeroAddressTokenMetadata, nil
+	case zeroA:
+		mdB, err := s.getTokenMetadata(ctx, tokenB, blockNumber)
+		return zeroAddressTokenMetadata, mdB, err
+	case zeroB:
+		mdA, err := s.getTokenMetadata(ctx, tokenA, blockNumber)
+		return mdA, zeroAddressTokenMetadata, err
+	}
+
 	cachedA, hasCacheA := s.metadataCache[tokenA]
 	cachedB, hasCacheB := s.metadataCache[tokenB]
 
