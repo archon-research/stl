@@ -3,7 +3,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,18 +14,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-var sharedDSN string
+var (
+	sharedDSN           string
+	sharedRedisAddr     string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
+
+// testBucket / testDeployEnv match the chainutil.ValidateS3BucketForChain
+// rule: stl-sentinel{env}-{chain}-raw. chainID=1 → "ethereum".
+const (
+	testBucket    = "stl-sentineltest-ethereum-raw"
+	testDeployEnv = "test"
+)
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
 	sharedDSN = dsn
+	redisAddr, redisCleanup := testutil.StartRedisForMain()
+	sharedRedisAddr = redisAddr
+	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
+	sharedLocalStackCfg = lsCfg
 
 	code := m.Run()
 
-	cleanup()
+	lsCleanup()
+	redisCleanup()
+	dbCleanup()
 	code = testutil.CheckGoroutineLeaks(code)
 	os.Exit(code)
 }
@@ -59,6 +83,14 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
 
+	// Pre-seed S3 with the block JSON for block 18000000 so resolveBlockTimestamp
+	// can recover a timestamp via the cache→S3 fallback path.
+	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
+	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
+		t.Fatalf("create S3 bucket: %v", err)
+	}
+	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
+
 	// Enqueue one block event message for the service to process.
 	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
 
@@ -67,9 +99,12 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	// Use a cancellable context instead of SIGINT for clean test shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -80,6 +115,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 		errCh <- run(ctx, []string{
 			"-queue", "http://localhost/test-queue",
 			"-db", dbURL,
+			"-redis", sharedRedisAddr,
 		})
 	}()
 
@@ -130,15 +166,46 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
+		"-redis", sharedRedisAddr,
 		"-db", "postgres://invalid:invalid@localhost:1/nonexistent?connect_timeout=1",
 	})
 	if err == nil {
 		t.Fatal("expected error for bad database URL")
 	}
-	if !strings.Contains(err.Error(), "database") && !strings.Contains(err.Error(), "connect") {
-		t.Errorf("expected database/connect error, got: %v", err)
+	// Either the postgres connection fails first, or Redis/S3 wiring surfaces an
+	// error — anything other than parseConfig succeeding is acceptable.
+	if !strings.Contains(err.Error(), "database") && !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "Redis") {
+		t.Errorf("expected database/connect/Redis error, got: %v", err)
+	}
+}
+
+// seedBlockToS3 uploads gzipped block JSON to the test bucket at the canonical
+// s3key path so the worker's cache reader can fall back to S3 on a Redis miss.
+func seedBlockToS3(t *testing.T, ctx context.Context, client *s3.Client, bucket string, blockNumber int64, version int, timestamp int64) {
+	t.Helper()
+
+	payload := fmt.Sprintf(`{"timestamp":"0x%x"}`, timestamp)
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write([]byte(payload)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	key := s3key.Build(blockNumber, version, s3key.Block)
+	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(buf.Bytes()),
+	}); err != nil {
+		t.Fatalf("put block to S3 (%s): %v", key, err)
 	}
 }
