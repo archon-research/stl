@@ -56,6 +56,7 @@ def strip_internal_operations(schema: dict[str, Any]) -> dict[str, Any]:
             filtered_paths[path] = kept_methods
     return {**schema, "paths": filtered_paths}
 
+
 OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "status", "description": "Liveness and readiness probes."},
     {"name": "primes", "description": "Primes (capital allocators) and their on-chain debt snapshots."},
