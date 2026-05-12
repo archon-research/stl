@@ -20,8 +20,8 @@ def make_receipt_token_position(**overrides: Any) -> ReceiptTokenPosition:
     return ReceiptTokenPosition(**defaults)
 
 
-def make_direct_asset_holding(**overrides) -> DirectAssetHolding:
-    defaults = dict(
+def make_direct_asset_holding(**overrides: Any) -> DirectAssetHolding:
+    defaults: dict[str, Any] = dict(
         chain_id=1,
         token_id=99,
         token_address="0x" + "c" * 40,

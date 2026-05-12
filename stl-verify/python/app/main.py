@@ -280,7 +280,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
         application.openapi_schema = strip_internal_operations(full)
         return application.openapi_schema
 
-    application.openapi = public_openapi
+    setattr(application, "openapi", public_openapi)
 
     configure_docs(application)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
