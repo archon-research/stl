@@ -11,6 +11,7 @@ import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
 import {
+  getAllocationKey,
   getCategoryLabel,
   getProtocolLabel,
   sortAllocations,
@@ -69,8 +70,8 @@ export function BottomPanel({
   );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
-  const previousSelectedAllocationIdRef = useRef<number | null>(
-    selectedAllocation?.receipt_token_id ?? null,
+  const previousSelectedAllocationIdRef = useRef<string | null>(
+    selectedAllocation ? getAllocationKey(selectedAllocation) : null,
   );
 
   const activeTab: ActiveTab =
@@ -137,25 +138,26 @@ export function BottomPanel({
     if (
       receiptTokenParam &&
       filteredAllocations.some(
-        (allocation) =>
-          String(allocation.receipt_token_id) === receiptTokenParam,
+        (allocation) => getAllocationKey(allocation) === receiptTokenParam,
       )
     ) {
       return;
     }
 
+    const selectedKey = selectedAllocation
+      ? getAllocationKey(selectedAllocation)
+      : null;
     const selectedInFiltered =
-      selectedAllocation &&
+      selectedKey !== null &&
       filteredAllocations.some(
-        (allocation) =>
-          allocation.receipt_token_id === selectedAllocation.receipt_token_id,
+        (allocation) => getAllocationKey(allocation) === selectedKey,
       )
         ? selectedAllocation
         : null;
 
     const fallback = selectedInFiltered ?? filteredAllocations[0];
     if (fallback) {
-      setReceiptTokenParam(String(fallback.receipt_token_id));
+      setReceiptTokenParam(getAllocationKey(fallback));
     }
   }, [
     receiptTokenParam,
@@ -171,27 +173,28 @@ export function BottomPanel({
   // dropdown → receiptTokenParam changes → this effect would otherwise fire
   // and overwrite the pick back to the grid row's id).
   useEffect(() => {
-    const currentId = selectedAllocation?.receipt_token_id ?? null;
+    const currentKey = selectedAllocation
+      ? getAllocationKey(selectedAllocation)
+      : null;
 
-    if (currentId === previousSelectedAllocationIdRef.current) {
+    if (currentKey === previousSelectedAllocationIdRef.current) {
       return;
     }
 
-    previousSelectedAllocationIdRef.current = currentId;
+    previousSelectedAllocationIdRef.current = currentKey;
 
-    if (currentId === null) {
+    if (currentKey === null) {
       return;
     }
 
-    const nextTokenId = String(currentId);
-    if (receiptTokenParam !== nextTokenId) {
-      setReceiptTokenParam(nextTokenId);
+    if (receiptTokenParam !== currentKey) {
+      setReceiptTokenParam(currentKey);
     }
   }, [receiptTokenParam, selectedAllocation, setReceiptTokenParam]);
 
   const focusedAllocation =
     filteredAllocations.find(
-      (allocation) => String(allocation.receipt_token_id) === receiptTokenParam,
+      (allocation) => getAllocationKey(allocation) === receiptTokenParam,
     ) ?? null;
 
   useEffect(() => {
@@ -340,14 +343,14 @@ export function BottomPanel({
             }
           >
             <option value="">Choose a receipt token</option>
-            {filteredAllocations.map((allocation) => (
-              <option
-                key={allocation.receipt_token_id}
-                value={allocation.receipt_token_id}
-              >
-                {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
-              </option>
-            ))}
+            {filteredAllocations.map((allocation) => {
+              const key = getAllocationKey(allocation);
+              return (
+                <option key={key} value={key}>
+                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
+                </option>
+              );
+            })}
           </StyledSelect>
         </label>
 

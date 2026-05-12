@@ -175,7 +175,11 @@ export function getProtocolLabel(
 }
 
 export function getAllocationKey(allocation: Allocation): string {
-  return String(allocation.receipt_token_id);
+  if (allocation.receipt_token_id != null) {
+    return String(allocation.receipt_token_id);
+  }
+  // Direct holdings have no receipt token; identify by chain + underlying.
+  return `direct:${allocation.chain_id}:${allocation.underlying_token_id}`;
 }
 
 export function buildNetworkOptions(
