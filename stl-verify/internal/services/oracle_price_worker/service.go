@@ -5,6 +5,7 @@ package oracle_price_worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -41,6 +44,7 @@ type oracleUnit struct {
 type Service struct {
 	config         shared.SQSConsumerConfig
 	consumer       outbound.SQSConsumer
+	cacheReader    outbound.BlockCacheReader
 	repo           outbound.OnchainPriceRepository
 	newMulticaller MulticallerFactory
 
@@ -63,14 +67,20 @@ func (s *Service) WithTelemetry(t *Telemetry) {
 }
 
 // NewService creates a new oracle price worker service.
+// cacheReader supplies raw block JSON; the worker derives each block's
+// timestamp from it (cache miss falls back to S3 inside the reader).
 func NewService(
 	config shared.SQSConsumerConfig,
 	consumer outbound.SQSConsumer,
+	cacheReader outbound.BlockCacheReader,
 	repo outbound.OnchainPriceRepository,
 	newMulticaller MulticallerFactory,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer cannot be nil")
+	}
+	if cacheReader == nil {
+		return nil, fmt.Errorf("cacheReader cannot be nil")
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
@@ -97,6 +107,7 @@ func NewService(
 	return &Service{
 		config:         config,
 		consumer:       consumer,
+		cacheReader:    cacheReader,
 		repo:           repo,
 		newMulticaller: newMulticaller,
 		oracleABI:      oracleABI,
@@ -235,9 +246,14 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (
 		s.decimalsValidated = true
 	}
 
+	blockTimestamp, err := s.resolveBlockTimestamp(ctx, event)
+	if err != nil {
+		return fmt.Errorf("resolving block timestamp: %w", err)
+	}
+
 	var errs []error
 	for _, unit := range s.units {
-		if err := s.processBlockForOracle(ctx, event, unit); err != nil {
+		if err := s.processBlockForOracle(ctx, event, blockTimestamp, unit); err != nil {
 			s.logger.Error("failed to process oracle",
 				"oracle", unit.Oracle.Name,
 				"block", event.BlockNumber,
@@ -251,7 +267,42 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (
 	return nil
 }
 
-func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) (retErr error) {
+// resolveBlockTimestamp fetches the block JSON from the cache (Redis →
+// S3 fallback) and returns the timestamp. A miss in both stores is a hard
+// error so SQS retries pick it up once the watcher has finished backing the
+// block up.
+func (s *Service) resolveBlockTimestamp(ctx context.Context, event outbound.BlockEvent) (time.Time, error) {
+	data, err := s.cacheReader.GetBlock(ctx, event.ChainID, event.BlockNumber, event.Version)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("getting block %d (version %d) from cache: %w", event.BlockNumber, event.Version, err)
+	}
+	// `data == nil` covers a plain miss. `IsNullOrEmpty` also catches a
+	// poisoned cache row written by a pre-VEC-242 watcher (literal []byte("null")):
+	// unmarshalling that into the timestamp struct silently succeeds with an
+	// empty hex string, which then misattributes the failure as "parsing block N
+	// timestamp \"\"" instead of the truthful "cache returned null payload".
+	// We surface a clear error and let SQS retry — the watcher's fix will have
+	// overwritten the row with valid data by the time the retry fires.
+	if rpcutil.IsNullOrEmpty(data) {
+		return time.Time{}, fmt.Errorf("block %d (version %d) not found in cache or s3 (or cached value is null)", event.BlockNumber, event.Version)
+	}
+
+	var block struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(data, &block); err != nil {
+		return time.Time{}, fmt.Errorf("unmarshalling block %d: %w", event.BlockNumber, err)
+	}
+
+	ts, err := hexutil.ParseInt64(block.Timestamp)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing block %d timestamp %q: %w", event.BlockNumber, block.Timestamp, err)
+	}
+
+	return time.Unix(ts, 0).UTC(), nil
+}
+
+func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) (retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "oracle.processBlockForOracle",
 		attribute.String("oracle.name", unit.Oracle.Name),
 		attribute.String("oracle.type", string(unit.Oracle.OracleType)))
@@ -264,15 +315,15 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 
 	switch unit.Oracle.OracleType {
 	case entity.OracleTypeChainlinkFeed, entity.OracleTypeChronicle, entity.OracleTypeRedstone:
-		return s.processBlockForFeedOracle(ctx, event, unit)
+		return s.processBlockForFeedOracle(ctx, event, blockTimestamp, unit)
 	case entity.OracleTypeAave:
-		return s.processBlockForAaveOracle(ctx, event, unit)
+		return s.processBlockForAaveOracle(ctx, event, blockTimestamp, unit)
 	default:
 		return fmt.Errorf("unsupported oracle type: %s", unit.Oracle.OracleType)
 	}
 }
 
-func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "getAssetsPrices"))
@@ -295,7 +346,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	// Detect changes
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(prices)))
-	changed, err := s.detectChanges(prices, event, unit)
+	changed, err := s.detectChanges(prices, event, blockTimestamp, unit)
 	if err != nil {
 		SetSpanError(detectSpan, err, "detect changes failed")
 		detectSpan.End()
@@ -333,7 +384,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	return nil
 }
 
-func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, unit *oracleUnit) error {
+func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "latestRoundData"))
@@ -354,7 +405,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	// Detect changes
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))
-	changed, err := s.detectFeedChanges(results, event, unit)
+	changed, err := s.detectFeedChanges(results, event, blockTimestamp, unit)
 	if err != nil {
 		SetSpanError(detectSpan, err, "detect feed changes failed")
 		detectSpan.End()
@@ -392,8 +443,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	return nil
 }
 
-func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent, unit *oracleUnit) ([]*entity.OnchainTokenPrice, error) {
-	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
+func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) ([]*entity.OnchainTokenPrice, error) {
 	oracleID := unit.OracleID
 	priceDecimals := unit.Oracle.PriceDecimals
 	if priceDecimals == 0 {
@@ -427,8 +477,7 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent,
 	return changed, nil
 }
 
-func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event outbound.BlockEvent, unit *oracleUnit) ([]*entity.OnchainTokenPrice, error) {
-	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
+func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) ([]*entity.OnchainTokenPrice, error) {
 	oracleID := unit.OracleID
 
 	var changed []*entity.OnchainTokenPrice

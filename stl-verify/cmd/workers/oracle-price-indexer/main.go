@@ -13,12 +13,17 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	redisadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -56,6 +61,9 @@ type cliConfig struct {
 	dbURL              string
 	alchemyURL         string
 	alchemyHTTPBaseURL string
+	redisAddr          string
+	s3Bucket           string
+	deployEnv          string
 	chainID            int64
 }
 
@@ -63,13 +71,15 @@ func parseConfig(args []string) (cliConfig, error) {
 	fs := flag.NewFlagSet("oracle-price-worker", flag.ContinueOnError)
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
+	redisAddr := fs.String("redis", "", "Redis address")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
 	}
 
 	cfg := cliConfig{
-		queueURL: *queueURL,
-		dbURL:    *dbURL,
+		queueURL:  *queueURL,
+		dbURL:     *dbURL,
+		redisAddr: *redisAddr,
 	}
 
 	if cfg.queueURL == "" {
@@ -92,6 +102,23 @@ func parseConfig(args []string) (cliConfig, error) {
 	}
 	cfg.alchemyHTTPBaseURL = env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 	cfg.alchemyURL = fmt.Sprintf("%s/%s", cfg.alchemyHTTPBaseURL, alchemyAPIKey)
+
+	if cfg.redisAddr == "" {
+		cfg.redisAddr = env.Get("REDIS_ADDR", "")
+	}
+	if cfg.redisAddr == "" {
+		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
+	}
+
+	cfg.s3Bucket = env.Get("S3_BUCKET", "")
+	if cfg.s3Bucket == "" {
+		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
+
+	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
+	if cfg.deployEnv == "" {
+		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
@@ -131,10 +158,37 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
 
+	cacheCfg := redisadapter.ConfigDefaults()
+	cacheCfg.Addr = cfg.redisAddr
+	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
+	blockCache, err := redisadapter.NewBlockCache(cacheCfg, logger)
+	if err != nil {
+		return fmt.Errorf("creating block cache: %w", err)
+	}
+	defer blockCache.Close()
+	if err := blockCache.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
+	logger.Info("Redis connected", "addr", cfg.redisAddr)
+
+	s3Opts := []func(*awss3.Options){}
+	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
+		s3Opts = append(s3Opts, func(o *awss3.Options) {
+			o.BaseEndpoint = aws.String(s3Endpoint)
+			o.UsePathStyle = true
+		})
+	}
+	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache reader: %w", err)
+	}
+
 	ethClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
 		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
+	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
@@ -178,6 +232,7 @@ func run(ctx context.Context, args []string) error {
 			ChainID: cfg.chainID,
 		},
 		consumer,
+		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
 			if oracleType == entity.OracleTypeChronicle {
@@ -190,8 +245,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 	service.WithTelemetry(oracleTelemetry)
-
-	logger.Info("oracle price worker started, waiting for messages...")
 
 	return lifecycle.Run(ctx, logger, service)
 }

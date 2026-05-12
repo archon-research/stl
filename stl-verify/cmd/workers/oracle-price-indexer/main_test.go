@@ -15,44 +15,66 @@ func TestParseConfig(t *testing.T) {
 	}{
 		{
 			name: "all flags provided via CLI",
-			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue", "-db", "postgres://localhost:5432/testdb"},
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost:5432/testdb",
+				"-redis", "redis.example.com:6379",
+			},
 			envVars: map[string]string{
 				"ALCHEMY_API_KEY":  "test-key",
 				"ALCHEMY_HTTP_URL": "https://eth.example.com",
+				"S3_BUCKET":        "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":       "staging",
 			},
 			wantCfg: cliConfig{
 				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/my-queue",
 				dbURL:              "postgres://localhost:5432/testdb",
 				alchemyHTTPBaseURL: "https://eth.example.com",
 				alchemyURL:         "https://eth.example.com/test-key",
+				redisAddr:          "redis.example.com:6379",
+				s3Bucket:           "stl-sentinelstaging-ethereum-raw",
+				deployEnv:          "staging",
+				chainID:            1,
 			},
 		},
 		{
 			name: "queue from env var",
-			args: []string{"-db", "postgres://localhost:5432/testdb"},
+			args: []string{"-db", "postgres://localhost:5432/testdb", "-redis", "redis.example.com:6379"},
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				"ALCHEMY_API_KEY":   "test-key",
+				"S3_BUCKET":         "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":        "staging",
 			},
 			wantCfg: cliConfig{
 				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				dbURL:              "postgres://localhost:5432/testdb",
 				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
 				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				redisAddr:          "redis.example.com:6379",
+				s3Bucket:           "stl-sentinelstaging-ethereum-raw",
+				deployEnv:          "staging",
+				chainID:            1,
 			},
 		},
 		{
 			name: "db from env var",
-			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue"},
+			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue", "-redis", "redis.example.com:6379"},
 			envVars: map[string]string{
 				"DATABASE_URL":    "postgres://localhost:5432/envdb",
 				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":      "staging",
 			},
 			wantCfg: cliConfig{
 				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/my-queue",
 				dbURL:              "postgres://localhost:5432/envdb",
 				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
 				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				redisAddr:          "redis.example.com:6379",
+				s3Bucket:           "stl-sentinelstaging-ethereum-raw",
+				deployEnv:          "staging",
+				chainID:            1,
 			},
 		},
 		{
@@ -74,17 +96,28 @@ func TestParseConfig(t *testing.T) {
 		},
 		{
 			name: "CLI flag takes precedence over env var",
-			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/cli-queue", "-db", "postgres://localhost/cli-db"},
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/cli-queue",
+				"-db", "postgres://localhost/cli-db",
+				"-redis", "redis.cli:6379",
+			},
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				"DATABASE_URL":      "postgres://localhost/env-db",
+				"REDIS_ADDR":        "redis.env:6379",
 				"ALCHEMY_API_KEY":   "test-key",
+				"S3_BUCKET":         "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":        "staging",
 			},
 			wantCfg: cliConfig{
 				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/cli-queue",
 				dbURL:              "postgres://localhost/cli-db",
 				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
 				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				redisAddr:          "redis.cli:6379",
+				s3Bucket:           "stl-sentinelstaging-ethereum-raw",
+				deployEnv:          "staging",
+				chainID:            1,
 			},
 		},
 		{
@@ -93,13 +126,20 @@ func TestParseConfig(t *testing.T) {
 			envVars: map[string]string{
 				"AWS_SQS_QUEUE_URL": "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				"DATABASE_URL":      "postgres://localhost/env-db",
+				"REDIS_ADDR":        "redis.env:6379",
 				"ALCHEMY_API_KEY":   "test-key",
+				"S3_BUCKET":         "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":        "staging",
 			},
 			wantCfg: cliConfig{
 				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/env-queue",
 				dbURL:              "postgres://localhost/env-db",
 				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
 				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				redisAddr:          "redis.env:6379",
+				s3Bucket:           "stl-sentinelstaging-ethereum-raw",
+				deployEnv:          "staging",
+				chainID:            1,
 			},
 		},
 		{
@@ -108,13 +148,91 @@ func TestParseConfig(t *testing.T) {
 			// No ALCHEMY_API_KEY set
 			wantError: "ALCHEMY_API_KEY",
 		},
+		{
+			name: "missing redis address",
+			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue", "-db", "postgres://localhost/db"},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":      "staging",
+			},
+			wantError: "redis address not provided",
+		},
+		{
+			name: "missing S3_BUCKET",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost/db",
+				"-redis", "redis.example.com:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"DEPLOY_ENV":      "staging",
+			},
+			wantError: "S3_BUCKET",
+		},
+		{
+			name: "missing DEPLOY_ENV",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost/db",
+				"-redis", "redis.example.com:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+			},
+			wantError: "DEPLOY_ENV",
+		},
+		{
+			name: "invalid CHAIN_ID",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost/db",
+				"-redis", "redis.example.com:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":      "staging",
+				"CHAIN_ID":        "not-a-number",
+			},
+			wantError: "parsing CHAIN_ID",
+		},
+		{
+			name: "non-default CHAIN_ID from env",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				"-db", "postgres://localhost/db",
+				"-redis", "redis.example.com:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelavalanche-avalanche-raw",
+				"DEPLOY_ENV":      "avalanche",
+				"CHAIN_ID":        "43114",
+			},
+			wantCfg: cliConfig{
+				queueURL:           "https://sqs.us-east-1.amazonaws.com/123/my-queue",
+				dbURL:              "postgres://localhost/db",
+				alchemyHTTPBaseURL: "https://eth-mainnet.g.alchemy.com/v2",
+				alchemyURL:         "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				redisAddr:          "redis.example.com:6379",
+				s3Bucket:           "stl-sentinelavalanche-avalanche-raw",
+				deployEnv:          "avalanche",
+				chainID:            43114,
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Ensure ALCHEMY_API_KEY is empty unless provided in envVars.
-			if _, has := tt.envVars["ALCHEMY_API_KEY"]; !has {
-				t.Setenv("ALCHEMY_API_KEY", "")
+			// Clear inherited values unless provided in envVars, so an
+			// existing shell env doesn't bleed into the test case.
+			for _, key := range []string{"ALCHEMY_API_KEY", "REDIS_ADDR", "S3_BUCKET", "DEPLOY_ENV", "AWS_SQS_QUEUE_URL", "DATABASE_URL", "ALCHEMY_HTTP_URL", "CHAIN_ID"} {
+				if _, has := tt.envVars[key]; !has {
+					t.Setenv(key, "")
+				}
 			}
 
 			for k, v := range tt.envVars {
@@ -148,6 +266,18 @@ func TestParseConfig(t *testing.T) {
 			}
 			if cfg.alchemyHTTPBaseURL != tt.wantCfg.alchemyHTTPBaseURL {
 				t.Errorf("alchemyHTTPBaseURL: expected %q, got %q", tt.wantCfg.alchemyHTTPBaseURL, cfg.alchemyHTTPBaseURL)
+			}
+			if cfg.redisAddr != tt.wantCfg.redisAddr {
+				t.Errorf("redisAddr: expected %q, got %q", tt.wantCfg.redisAddr, cfg.redisAddr)
+			}
+			if cfg.s3Bucket != tt.wantCfg.s3Bucket {
+				t.Errorf("s3Bucket: expected %q, got %q", tt.wantCfg.s3Bucket, cfg.s3Bucket)
+			}
+			if cfg.deployEnv != tt.wantCfg.deployEnv {
+				t.Errorf("deployEnv: expected %q, got %q", tt.wantCfg.deployEnv, cfg.deployEnv)
+			}
+			if cfg.chainID != tt.wantCfg.chainID {
+				t.Errorf("chainID: expected %d, got %d", tt.wantCfg.chainID, cfg.chainID)
 			}
 		})
 	}

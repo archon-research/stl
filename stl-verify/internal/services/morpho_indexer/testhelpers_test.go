@@ -79,6 +79,17 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	}
 	svc.ctx, svc.cancel = context.WithCancel(context.Background())
 
+	// Pre-seed the not-vault cache with the canonical "user" addresses so the
+	// V1/V1.1 Morpho Blue caller/onBehalf discovery probe (added to close the
+	// post-IsVaultActivityEvent-narrowing gap) doesn't unexpectedly fire on
+	// every existing Supply/Withdraw/Borrow/etc. test that uses these
+	// addresses as positional users. Tests that want to exercise the Morpho
+	// Blue path discovery should pick a fresh address that is NOT pre-marked.
+	svc.vaultRegistry.MarkNotVault(testCaller)
+	svc.vaultRegistry.MarkNotVault(testOnBehalf)
+	svc.vaultRegistry.MarkNotVault(testReceiver)
+	svc.vaultRegistry.MarkNotVault(testBorrower)
+
 	// Load ABIs for packing return data.
 	morphoBlueReadABI, err := abis.GetMorphoBlueReadABI()
 	if err != nil {
@@ -236,17 +247,97 @@ func (h *serviceTestHarness) tokenMetadataResults(symbol string, decimals uint8)
 	}
 }
 
-// vaultProbeResults returns 2 results for the probe multicall: MORPHO, asset.
+// vaultProbeResults returns the 4-result MetaMorpho probe response: MORPHO,
+// asset, curator (revert), liquidityAdapter (revert).
+//
+// MetaMorpho V1 vs V1.1 is distinguished only at details-fetch time (via
+// skimRecipient), so this single helper works for both. For VaultV2-shaped
+// probes, use vaultV2ProbeResults instead.
 func (h *serviceTestHarness) vaultProbeResults(morphoAddr, asset common.Address) []outbound.Result {
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packAddress(morphoAddr)},
 		{Success: true, ReturnData: h.packAddress(asset)},
+		{Success: false, ReturnData: nil}, // curator reverts on MetaMorpho
+		{Success: false, ReturnData: nil}, // liquidityAdapter reverts on MetaMorpho
 	}
 }
 
-func (h *serviceTestHarness) vaultDetailResults(name, symbol string, decimals uint8, isV2 bool) []outbound.Result {
+// isProbeMulticall returns true if the multicall calls match the probe
+// signature (4 calls whose first call uses the MORPHO() selector).
+//
+// Both probe and details emit 4 calls per vault, so callers must use this to
+// distinguish them in mocked ExecuteFn handlers.
+func (h *serviceTestHarness) isProbeMulticall(calls []outbound.Call) bool {
+	if len(calls) != 4 {
+		return false
+	}
+	morphoData, err := h.metaMorphoReadABI.Pack("MORPHO")
+	if err != nil {
+		h.t.Fatalf("packing MORPHO selector: %v", err)
+	}
+	return hasSameSelector(calls[0].CallData, morphoData)
+}
+
+// isVaultDetailsMulticall reports whether the 4-call multicall is the
+// name/symbol/decimals/skimRecipient details batch (first selector is name).
+//
+// Probe, details, and vault-state-with-two-balances all emit 4 calls all
+// targeting the same vault, so target equality is insufficient to discriminate.
+// Use the first call's selector instead.
+func (h *serviceTestHarness) isVaultDetailsMulticall(calls []outbound.Call) bool {
+	if len(calls) != 4 {
+		return false
+	}
+	nameData, err := h.metaMorphoReadABI.Pack("name")
+	if err != nil {
+		h.t.Fatalf("packing name selector: %v", err)
+	}
+	return hasSameSelector(calls[0].CallData, nameData)
+}
+
+// isVaultStateAndTwoBalancesMulticall reports whether the 4-call multicall is
+// the totalAssets/totalSupply/balanceOf/balanceOf batch (first selector is
+// totalAssets). See isVaultDetailsMulticall for why selector-based
+// discrimination is required.
+func (h *serviceTestHarness) isVaultStateAndTwoBalancesMulticall(calls []outbound.Call) bool {
+	if len(calls) != 4 {
+		return false
+	}
+	totalAssetsData, err := h.metaMorphoReadABI.Pack("totalAssets")
+	if err != nil {
+		h.t.Fatalf("packing totalAssets selector: %v", err)
+	}
+	return hasSameSelector(calls[0].CallData, totalAssetsData)
+}
+
+// vaultV2ProbeResults returns the 4-result Morpho VaultV2 probe response:
+// MORPHO (revert), asset, curator, liquidityAdapter.
+func (h *serviceTestHarness) vaultV2ProbeResults(asset, curator, liquidityAdapter common.Address) []outbound.Result {
+	return []outbound.Result{
+		{Success: false, ReturnData: nil}, // MORPHO reverts on VaultV2
+		{Success: true, ReturnData: h.packAddress(asset)},
+		{Success: true, ReturnData: h.packAddress(curator)},
+		{Success: true, ReturnData: h.packAddress(liquidityAdapter)},
+	}
+}
+
+// notAVaultProbeResults returns a 4-result probe response where every probe
+// selector reverts — i.e. the address is not a Morpho-family vault.
+func (h *serviceTestHarness) notAVaultProbeResults() []outbound.Result {
+	return []outbound.Result{
+		{Success: false, ReturnData: nil},
+		{Success: false, ReturnData: nil},
+		{Success: false, ReturnData: nil},
+		{Success: false, ReturnData: nil},
+	}
+}
+
+// vaultDetailResults returns the 4-result details response (name, symbol,
+// decimals, skimRecipient). isV1_1 controls whether skimRecipient succeeds —
+// MetaMorpho V1 reverts on skim, V1.1 returns an address, VaultV2 reverts.
+func (h *serviceTestHarness) vaultDetailResults(name, symbol string, decimals uint8, isV1_1 bool) []outbound.Result {
 	skimResult := outbound.Result{Success: false, ReturnData: nil}
-	if isV2 {
+	if isV1_1 {
 		skimResult = outbound.Result{Success: true, ReturnData: h.packAddress(common.HexToAddress("0x1"))}
 	}
 	return []outbound.Result{
@@ -257,19 +348,41 @@ func (h *serviceTestHarness) vaultDetailResults(name, symbol string, decimals ui
 	}
 }
 
-// vaultMetadataExecuteFn returns a mock ExecuteFn that handles both the probe (2 calls)
-// and detail (4 calls) multicalls for a valid vault.
-func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset common.Address, decimals uint8, isV2 bool) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+// vaultMetadataExecuteFn returns a mock ExecuteFn that handles both the probe
+// (4 calls: MORPHO/asset/curator/liquidityAdapter) and detail (4 calls:
+// name/symbol/decimals/skimRecipient) multicalls for a valid MetaMorpho vault.
+//
+// Probe and details both have 4 calls; they're distinguished by the first
+// call's selector (the 4-byte function ID). The probe's first call is MORPHO;
+// the details' first call is name.
+func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset common.Address, decimals uint8, isV1_1 bool) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+	morphoSelector, err := h.metaMorphoReadABI.Pack("MORPHO")
+	if err != nil {
+		h.t.Fatalf("packing MORPHO selector: %v", err)
+	}
 	return func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		switch len(calls) {
-		case 2:
-			return h.vaultProbeResults(MorphoBlueAddress, asset), nil
-		case 4:
-			return h.vaultDetailResults(name, symbol, decimals, isV2), nil
-		default:
+		if len(calls) != 4 {
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
 		}
+		if hasSameSelector(calls[0].CallData, morphoSelector) {
+			return h.vaultProbeResults(MorphoBlueAddress, asset), nil
+		}
+		return h.vaultDetailResults(name, symbol, decimals, isV1_1), nil
 	}
+}
+
+// hasSameSelector returns true if a and b share the same first 4 bytes (the
+// ABI function selector).
+func hasSameSelector(a, b []byte) bool {
+	if len(a) < 4 || len(b) < 4 {
+		return false
+	}
+	for i := range 4 {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // --- Event log construction helpers ---
@@ -575,7 +688,19 @@ func (h *serviceTestHarness) makeVaultAccrueInterestV1Log(vaultAddr common.Addre
 	}
 }
 
-// makeVaultAccrueInterestV2Log creates a MetaMorpho V2 AccrueInterest event log.
+// makeDiscoveryTriggerLog returns a discovery-trigger log (Morpho VaultV2
+// 4-field AccrueInterest) for the given vault address with arbitrary but
+// valid payload. Use this in tests where the goal is to exercise the
+// unknown-vault discovery path; the specific event contents don't matter,
+// only the topic. Mirrors the live indexer's discovery gate (see
+// IsVaultActivityEvent).
+func (h *serviceTestHarness) makeDiscoveryTriggerLog(vaultAddr common.Address) shared.Log {
+	return h.makeVaultAccrueInterestV2Log(vaultAddr, big.NewInt(2900000), big.NewInt(3000000), big.NewInt(200), big.NewInt(150))
+}
+
+// makeVaultAccrueInterestV2Log creates a Morpho VaultV2 AccrueInterest event
+// log (4-field signature). MetaMorpho V1 and V1.1 share the 2-field AccrueInterest
+// log; see makeVaultAccrueInterestV1Log.
 func (h *serviceTestHarness) makeVaultAccrueInterestV2Log(vaultAddr common.Address, previousTotalAssets, newTotalAssets, performanceFeeShares, managementFeeShares *big.Int) shared.Log {
 	event := h.metaMorphoV2AccrueABI.Events["AccrueInterest"]
 	data, err := event.Inputs.NonIndexed().Pack(previousTotalAssets, newTotalAssets, performanceFeeShares, managementFeeShares)
@@ -671,7 +796,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, testutils.BigFromStr(h.t, "800000000000000000"))},
 			}, nil
 		case 2:
-			// Could be market+position, vault probe, or token metadata.
+			// Could be market+position or token metadata.
 			if calls[0].Target == MorphoBlueAddress {
 				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 			}
@@ -682,8 +807,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 					{Success: true, ReturnData: h.packUint8(18)},
 				}, nil
 			}
-			// Vault probe (MORPHO + asset)
-			return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			return nil, fmt.Errorf("unexpected 2-call multicall to %s", calls[0].Target.Hex())
 		case 3:
 			// market + 2 positions (Liquidate) OR vault state + balance
 			if calls[0].Target == MorphoBlueAddress {
@@ -692,26 +816,22 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 			// vault state + balance
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
 		case 4:
-			// getTokenPairMetadata (4 calls: symbolA, decimalsA, symbolB, decimalsB)
-			// OR vault details (name, symbol, decimals, skimRecipient)
-			// OR vault state + 2 balances
-			if calls[0].Target == testLoanToken || calls[0].Target == testCollToken {
-				return []outbound.Result{
-					{Success: true, ReturnData: h.packString("LOAN")},
-					{Success: true, ReturnData: h.packUint8(18)},
-					{Success: true, ReturnData: h.packString("COLL")},
-					{Success: true, ReturnData: h.packUint8(18)},
-				}, nil
+			// Four-call multicalls fall into one of four shapes:
+			//  - vault probe              (MORPHO/asset/curator/liquidityAdapter)
+			//  - vault details            (name/symbol/decimals/skimRecipient)
+			//  - vault state + 2 balances (totalAssets/totalSupply/balanceOf/balanceOf)
+			//  - token pair metadata      (symbolA/decimalsA/symbolB/decimalsB)
+			//
+			// The first three all target the vault for every sub-call, so
+			// target equality cannot distinguish them. Discriminate by the
+			// first call's 4-byte selector instead.
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
 			}
-			if calls[0].Target != MorphoBlueAddress {
-				// Could be vault details or vault state + 2 balances.
-				// Vault details targets the vault address for all 4 calls.
-				// Vault state + 2 balances mixes vault and token targets.
-				if calls[0].Target == calls[1].Target && calls[1].Target == calls[2].Target && calls[2].Target == calls[3].Target {
-					// All same target → vault details
-					return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
-				}
-				// vault state + 2 balances
+			if h.isVaultDetailsMulticall(calls) {
+				return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
+			}
+			if h.isVaultStateAndTwoBalancesMulticall(calls) {
 				return []outbound.Result{
 					h.defaultVaultTotalAssetsResult(),
 					h.defaultVaultTotalSupplyResult(),
@@ -719,6 +839,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 					h.defaultBalanceOfResult(big.NewInt(200000)),
 				}, nil
 			}
+			// Default: token pair metadata (symbolA, decimalsA, symbolB, decimalsB).
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packString("LOAN")},
 				{Success: true, ReturnData: h.packUint8(18)},

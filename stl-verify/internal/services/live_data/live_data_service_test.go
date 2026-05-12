@@ -1429,6 +1429,132 @@ func TestCacheAndPublishBlockData_ReorgFlag_SetsIsReorg(t *testing.T) {
 	}
 }
 
+// TestCacheAndPublishBlockData_RejectsLiteralNullBytes is a defense-in-depth
+// guard against the regression described in VEC-242. When the alchemy adapter
+// regression caused JSON `null` results to flow through as the 4-byte slice
+// `[]byte("null")` instead of nil, the existing `bd.X == nil` checks failed to
+// catch it and the watcher cached & published a broken payload. We assert that
+// `cacheAndPublishBlockData` rejects `[]byte("null")` for every data field, so
+// any future drift in the adapter is contained at the watcher boundary.
+func TestCacheAndPublishBlockData_RejectsLiteralNullBytes(t *testing.T) {
+	literalNull := json.RawMessage("null")
+	validReceipts := json.RawMessage(`[]`)
+	validTraces := json.RawMessage(`[]`)
+	validBlobs := json.RawMessage(`[]`)
+	validBlock := json.RawMessage(`{"hash":"0xabc","number":"0x64","timestamp":"0x67c00000"}`)
+
+	cases := []struct {
+		name         string
+		enableTraces bool
+		enableBlobs  bool
+		bd           outbound.BlockData
+		wantContain  string
+	}{
+		{
+			name:         "null_block",
+			enableTraces: false,
+			enableBlobs:  false,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       literalNull,
+				Receipts:    validReceipts,
+			},
+			wantContain: "missing block data",
+		},
+		{
+			name:         "null_receipts",
+			enableTraces: false,
+			enableBlobs:  false,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    literalNull,
+			},
+			wantContain: "missing receipts data",
+		},
+		{
+			name:         "null_traces_when_enabled",
+			enableTraces: true,
+			enableBlobs:  false,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    validReceipts,
+				Traces:      literalNull,
+			},
+			wantContain: "missing traces data",
+		},
+		{
+			name:         "null_blobs_when_enabled",
+			enableTraces: false,
+			enableBlobs:  true,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    validReceipts,
+				Blobs:       literalNull,
+			},
+			wantContain: "missing blobs data",
+		},
+		{
+			name:         "all_valid_should_not_error_baseline",
+			enableTraces: true,
+			enableBlobs:  true,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    validReceipts,
+				Traces:      validTraces,
+				Blobs:       validBlobs,
+			},
+			wantContain: "", // success
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			stateRepo := newMockStateRepo()
+			cache := memory.NewBlockCache()
+			eventSink := memory.NewEventSink()
+
+			client := newMockFailingClient()
+			client.AddBlock(100, "")
+			header := client.GetHeader(100)
+
+			svc, err := NewLiveService(LiveConfig{
+				EnableTraces: tc.enableTraces,
+				EnableBlobs:  tc.enableBlobs,
+			}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("NewLiveService: %v", err)
+			}
+
+			err = svc.cacheAndPublishBlockData(ctx, header, 100, 0, time.Now(), false, tc.bd)
+
+			if tc.wantContain == "" {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+				if len(eventSink.GetBlockEvents()) != 1 {
+					t.Errorf("expected exactly 1 BlockEvent on success, got %d", len(eventSink.GetBlockEvents()))
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantContain)
+			}
+			if !strings.Contains(err.Error(), tc.wantContain) {
+				t.Errorf("expected error containing %q, got %q", tc.wantContain, err.Error())
+			}
+			if len(eventSink.GetBlockEvents()) != 0 {
+				t.Errorf("expected no BlockEvents when rejecting null payload, got %d", len(eventSink.GetBlockEvents()))
+			}
+		})
+	}
+}
+
 // ============================================================================
 // Start/Stop lifecycle tests
 // ============================================================================
