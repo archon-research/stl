@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -996,26 +997,28 @@ func (s *LiveService) cacheAndPublishBlockData(ctx context.Context, header outbo
 		return fmt.Errorf("failed to fetch blobs for block %d: %w", blockNum, bd.BlobsErr)
 	}
 
-	// Verify all required data is present (defensive check against nil data without error)
-	if bd.Block == nil {
+	// Verify all required data is present and non-null. The `[]byte("null")`
+	// case is the VEC-242 regression: an upstream JSON-RPC null response
+	// surfaced as a non-nil 4-byte slice and slipped past the prior nil-check.
+	if rpcutil.IsNullOrEmpty(bd.Block) {
 		err := fmt.Errorf("missing block data for block %d (no error reported)", blockNum)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "missing block data")
 		return err
 	}
-	if bd.Receipts == nil {
+	if rpcutil.IsNullOrEmpty(bd.Receipts) {
 		err := fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "missing receipts data")
 		return err
 	}
-	if s.config.EnableTraces && bd.Traces == nil {
+	if s.config.EnableTraces && rpcutil.IsNullOrEmpty(bd.Traces) {
 		err := fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "missing traces data")
 		return err
 	}
-	if s.config.EnableBlobs && bd.Blobs == nil {
+	if s.config.EnableBlobs && rpcutil.IsNullOrEmpty(bd.Blobs) {
 		err := fmt.Errorf("missing blobs data for block %d (no error reported)", blockNum)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "missing blobs data")

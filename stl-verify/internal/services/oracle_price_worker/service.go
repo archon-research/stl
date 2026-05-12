@@ -21,6 +21,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -275,8 +276,15 @@ func (s *Service) resolveBlockTimestamp(ctx context.Context, event outbound.Bloc
 	if err != nil {
 		return time.Time{}, fmt.Errorf("getting block %d (version %d) from cache: %w", event.BlockNumber, event.Version, err)
 	}
-	if data == nil {
-		return time.Time{}, fmt.Errorf("block %d (version %d) not found in cache or s3", event.BlockNumber, event.Version)
+	// `data == nil` covers a plain miss. `IsNullOrEmpty` also catches a
+	// poisoned cache row written by a pre-VEC-242 watcher (literal []byte("null")):
+	// unmarshalling that into the timestamp struct silently succeeds with an
+	// empty hex string, which then misattributes the failure as "parsing block N
+	// timestamp \"\"" instead of the truthful "cache returned null payload".
+	// We surface a clear error and let SQS retry — the watcher's fix will have
+	// overwritten the row with valid data by the time the retry fires.
+	if rpcutil.IsNullOrEmpty(data) {
+		return time.Time{}, fmt.Errorf("block %d (version %d) not found in cache or s3 (or cached value is null)", event.BlockNumber, event.Version)
 	}
 
 	var block struct {
