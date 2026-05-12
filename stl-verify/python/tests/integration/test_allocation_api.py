@@ -187,13 +187,10 @@ async def _seed(async_url: str) -> None:
                 },
             )
 
-            # obex holds raw USDC. This exercises branch 1 of the receipt-token
-            # SQL (``rt.underlying_token_id = t.id``): a position recorded in
-            # the underlying token is mapped onto every receipt token whose
-            # underlying is that token. Today that surfaces aUSDC — a single
-            # holding, which also covers the single-holding acceptance case.
-            # If a second USDC-underlying receipt_token is ever seeded, this
-            # will fan out (see T2 review issue #2).
+            # obex holds raw USDC directly (not wrapped in any receipt token).
+            # The endpoint should not surface this under aUSDC or any other
+            # receipt token whose underlying is USDC: a direct underlying
+            # holding is its own asset, not a position in a wrapper.
             await conn.execute(
                 text(
                     "INSERT INTO allocation_position "
@@ -274,43 +271,53 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["protocol_name"] == "Aave V3"
 
 
-def test_list_allocations_returns_single_holding_via_underlying_branch(
+def test_direct_underlying_holdings_surface_as_their_own_rows(
     client: TestClient,
 ) -> None:
-    """obex holds raw USDC — exercises the ``rt.underlying_token_id = t.id``
-    branch of the receipt-token SQL, which maps a position in the underlying
-    onto every receipt token whose underlying is that token. Today this
-    surfaces aUSDC (one row). Doubles as the single-holding case required
-    by T2's acceptance criteria.
+    """A prime holds raw USDC directly. It must not be attributed to any
+    USDC-wrapping receipt token (that would double-count and fan out), but
+    it should appear as a direct-asset row with null receipt_token fields
+    and ASSET category.
     """
     response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
+    row = data[0]
+    assert row["symbol"] == "USDC"
+    assert row["underlying_symbol"] == "USDC"
+    assert row["receipt_token_id"] is None
+    assert row["receipt_token_address"] is None
+    assert row["protocol_name"] is None
+    assert row["underlying_token_address"] == f"0x{_USDC_HEX}"
+    assert row["balance"] == "250"
+    assert row["category"] == "asset"
 
-    ausdc = data[0]
-    assert ausdc["chain_id"] == 1
-    assert ausdc["symbol"] == "aUSDC"
-    assert ausdc["balance"] == "250"
-    assert ausdc["receipt_token_address"] == f"0x{_AUSDC_HEX}"
-    assert ausdc["underlying_token_address"] == f"0x{_USDC_HEX}"
-    assert ausdc["underlying_symbol"] == "USDC"
-    assert ausdc["protocol_name"] == "Aave V3"
 
-
-def test_list_allocations_returns_empty_when_prime_has_no_receipt_token_holdings(
+def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     client: TestClient,
 ) -> None:
-    """grove holds only GNO, which has no receipt_token mapping."""
+    """A prime holds only GNO. There is no receipt_token wrapping GNO, so the
+    response contains exactly one direct-asset row and no receipt-token rows.
+    """
     response = client.get(f"/v1/primes/0x{_GROVE_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
-    assert response.json() == []
+    data = response.json()
+    assert len(data) == 1
+    row = data[0]
+    assert row["symbol"] == "GNO"
+    assert row["receipt_token_id"] is None
+    assert row["protocol_name"] is None
+    assert row["category"] == "asset"
 
 
 def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:
-    """A well-formed but unknown prime_id is a missing path resource → 404."""
+    """A well-formed address with no allocation_position history is not a
+    registered prime: the endpoint signals this with 404 rather than an
+    ambiguous empty list.
+    """
     response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/allocations")
 
     assert response.status_code == 404

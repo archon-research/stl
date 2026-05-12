@@ -54,6 +54,18 @@ class ReceiptTokenPosition:
 
 
 @dataclass(frozen=True)
+class DirectAssetHolding:
+    """A token held directly by a prime that is not a registered receipt-token wrapper."""
+
+    chain_id: int
+    token_id: int
+    token_address: str
+    symbol: str
+    balance: Decimal
+    latest_activity_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class Prime:
     id: str
     name: str
