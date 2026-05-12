@@ -7,7 +7,6 @@
 # Binary
 /blockwatcher
 dist/mock-blockchain-server
-/stl-verify/bin/
 
 # Test artifacts
 *.test

@@ -43,13 +43,13 @@ Why this is preferable here:
 
 Security and supply-chain posture:
 
-- The binary-install change introduced in commit 0c454c3 reduces dependency expansion versus package-manager-based hook tooling.
-- We use a pinned Lefthook release version in local setup.
-- We verify the downloaded binary against the release SHA-256 checksums before execution in commit ff31041.
-- A standalone binary avoids postinstall script exposure common in npm-style installs.
+- We use a pinned Lefthook version in local setup (`go install ...@vX.Y.Z`) for deterministic tool behavior.
+- Compared with npm-based hook managers, this approach reduces package-manager script surface (for example, no npm `postinstall` chain).
+- We explicitly acknowledge that source-based builds add a build-time attack surface (compiler/toolchain/dependency resolution side effects). A relevant example is discussed here: [Go fixes its 7th code execution bug in the same feature](https://mattermost.com/blog/go-fixes-its-7th-code-execution-bug-in-the-same-feature/).
+- This trade-off is accepted for developer ergonomics and portability in our Go-first environment, while keeping the version pinned and reviewable in-repo.
 
-Why pinned binary download over go install in this setup:
+Why pinned go install in this setup:
 
-- It avoids build-time variability and transitive source fetch during local install.
-- Checksum verification gives artifact-integrity validation at install time.
-- It provides a deterministic, frozen artifact that is easier to reason about in constrained or security-sensitive environments.
+- It aligns with the existing Go tool bootstrap workflow used in this repository.
+- It keeps setup simple across developer environments without managing repository-local binaries.
+- It still gives reproducibility at the tool version layer via explicit version pinning.

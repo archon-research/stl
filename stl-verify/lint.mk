@@ -5,81 +5,13 @@
 #
 # Note: Lefthook automatically handles changed-file workflow on git commit/push
 
-.PHONY: install-hooks format lint help lefthook-update-cli
-
-LEFTHOOK_BIN := ./bin/lefthook
-LEFTHOOK_VERSION ?= v2.1.6
-LEFTHOOK_VERSION_NO_V := $(patsubst v%,%,$(LEFTHOOK_VERSION))
-
-UNAME_S := $(shell uname -s)
-UNAME_M := $(shell uname -m)
-
-ifeq ($(UNAME_S),Darwin)
-LEFTHOOK_OS := MacOS
-else ifeq ($(UNAME_S),Linux)
-LEFTHOOK_OS := Linux
-else
-LEFTHOOK_OS := unsupported
-endif
-
-ifeq ($(UNAME_M),arm64)
-LEFTHOOK_ARCH := arm64
-else ifeq ($(UNAME_M),aarch64)
-LEFTHOOK_ARCH := arm64
-else ifeq ($(UNAME_M),x86_64)
-LEFTHOOK_ARCH := x86_64
-else ifeq ($(UNAME_M),amd64)
-LEFTHOOK_ARCH := x86_64
-else
-LEFTHOOK_ARCH := unsupported
-endif
-
-$(LEFTHOOK_BIN): ## Download lefthook CLI to ./bin from GitHub Releases
-	@set -e; \
-	if [ "$(LEFTHOOK_OS)" = "unsupported" ] || [ "$(LEFTHOOK_ARCH)" = "unsupported" ]; then \
-		echo "Unsupported platform: $(UNAME_S)/$(UNAME_M)"; \
-		exit 1; \
-	fi; \
-	mkdir -p ./bin; \
-	ASSET="lefthook_$(LEFTHOOK_VERSION_NO_V)_$(LEFTHOOK_OS)_$(LEFTHOOK_ARCH)"; \
-	URL="https://github.com/evilmartians/lefthook/releases/download/$(LEFTHOOK_VERSION)/$$ASSET"; \
-	CHECKSUMS_URL="https://github.com/evilmartians/lefthook/releases/download/$(LEFTHOOK_VERSION)/lefthook_checksums.txt"; \
-	CHECKSUMS_FILE=$$(mktemp); \
-	trap 'rm -f "$$CHECKSUMS_FILE"' EXIT; \
-	echo "Downloading $$URL"; \
-	curl -fsSL "$$URL" -o "$(LEFTHOOK_BIN)"; \
-	echo "Downloading $$CHECKSUMS_URL"; \
-	curl -fsSL "$$CHECKSUMS_URL" -o "$$CHECKSUMS_FILE"; \
-	EXPECTED_HASH=$$(awk -v asset="$$ASSET" '$$2==asset {print $$1}' "$$CHECKSUMS_FILE"); \
-	if [ -z "$$EXPECTED_HASH" ]; then \
-		echo "Failed to find checksum for $$ASSET in lefthook_checksums.txt"; \
-		exit 1; \
-	fi; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		ACTUAL_HASH=$$(sha256sum "$(LEFTHOOK_BIN)" | awk '{print $$1}'); \
-	elif command -v shasum >/dev/null 2>&1; then \
-		ACTUAL_HASH=$$(shasum -a 256 "$(LEFTHOOK_BIN)" | awk '{print $$1}'); \
-	else \
-		echo "No SHA-256 tool found (need sha256sum or shasum)"; \
-		exit 1; \
-	fi; \
-	if [ "$$ACTUAL_HASH" != "$$EXPECTED_HASH" ]; then \
-		echo "Checksum mismatch for $$ASSET"; \
-		echo "Expected: $$EXPECTED_HASH"; \
-		echo "Actual:   $$ACTUAL_HASH"; \
-		exit 1; \
-	fi; \
-	chmod +x "$(LEFTHOOK_BIN)"; \
-	echo "Installed $(LEFTHOOK_BIN) (checksum verified)"
-
-lefthook-update-cli: ## Re-download pinned lefthook CLI into ./bin
-	@rm -f "$(LEFTHOOK_BIN)"
-	@$(MAKE) "$(LEFTHOOK_BIN)"
+.PHONY: install-hooks format lint help
 
 # Install lefthook git hooks
-install-hooks: $(LEFTHOOK_BIN) ## Install lefthook pre-commit/push hooks
+install-hooks: ## Install lefthook pre-commit/push hooks
 	@echo "==> Installing lefthook git hooks..."
-	@$(LEFTHOOK_BIN) install
+	@command -v lefthook >/dev/null 2>&1 || go install github.com/evilmartians/lefthook@latest
+	@lefthook install
 
 # Local development helpers — just delegate to language-specific tooling
 
