@@ -19,19 +19,19 @@ We will standardize on Lefthook for git hooks in this repository.
 
 Why Lefthook:
 
-- It is a widely used, Go-native, zero-dependency binary maintained by Evil Martians.
+- It is a widely used, Go-native tool maintained by Evil Martians and distributed as a precompiled static binary.
 - It fits our mixed-language stack while keeping local setup lightweight.
 - It supports fast staged-file checks and parallel execution, which aligns with our developer workflow goals.
 
 Alternatives considered:
 
-| Tool | Language | Backed By / Creator | Stars | Popularity | Stability / Reliability | Zero-dependency binary | Notable trade-off |
+| Tool | Language | Backed By / Creator | Stars | Popularity | Stability / Reliability | Runtime model | Notable trade-off |
 |---|---|---|---:|---|---|---|---|
-| Lefthook | Go | Evil Martians, a well-known consultancy with a strong OSS track record across frontend and developer tooling | ~8k+ | High | High: mature project, many releases, broad adoption, large contributor base, and active maintenance | Yes | Smaller hook-sharing ecosystem than pre-commit |
-| pre-commit | Python | Maintained by Anthony Sottile and the broader pre-commit community; heavily used across major OSS projects | ~15k+ | Very high | Very high: long-lived, broadly adopted, low issue count relative to usage, and highly battle-tested | No | Requires Python runtime and managed hook environments |
-| Hk | Rust | Klaus Post, a highly respected performance-focused systems engineer in the Go ecosystem | ~500+ | Medium | Medium: strong author reputation, but smaller ecosystem and lower adoption than Lefthook/pre-commit | Yes | Lower adoption and smaller integration footprint |
-| GetHooky | Go | Community-maintained lightweight Go alternative | Small | Low | Lower: simple and promising, but with much less evidence of long-term adoption and maintenance at scale | Yes | Less battle-tested at large OSS scale |
-| Husky | JavaScript | typicode / JavaScript ecosystem; widely used in frontend projects | ~35k+ | Very high | High: very mature and broadly adopted, but centered on Node/npm workflows rather than language-agnostic binaries | No | Pulls npm workflow assumptions and package-manager surface into hook setup |
+| Lefthook | Go | Evil Martians, a well-known consultancy with a strong OSS track record across frontend and developer tooling | ~8k+ | High | High: mature project, many releases, broad adoption, large contributor base, and active maintenance | Precompiled static binary | Smaller hook-sharing ecosystem than pre-commit |
+| pre-commit | Python | Maintained by Anthony Sottile and the broader pre-commit community; heavily used across major OSS projects | ~15k+ | Very high | Very high: long-lived, broadly adopted, low issue count relative to usage, and highly battle-tested | Python runtime + managed hook envs | Requires Python runtime and managed hook environments |
+| Hk | Rust | Klaus Post, a highly respected performance-focused systems engineer in the Go ecosystem | ~500+ | Medium | Medium: strong author reputation, but smaller ecosystem and lower adoption than Lefthook/pre-commit | Precompiled static binary | Lower adoption and smaller integration footprint |
+| GetHooky | Go | Community-maintained lightweight Go alternative | Small | Low | Lower: simple and promising, but with much less evidence of long-term adoption and maintenance at scale | Precompiled binary | Less battle-tested at large OSS scale |
+| Husky | JavaScript | typicode / JavaScript ecosystem; widely used in frontend projects | ~35k+ | Very high | High: very mature and broadly adopted, but centered on Node/npm workflows rather than language-agnostic binaries | Node/npm package | Pulls npm workflow assumptions and package-manager surface into hook setup |
 
 These comparisons are intended as a practical engineering snapshot rather than a formal benchmark. Stars are only one signal; creator reputation, contributor breadth, release cadence, issue volume, and time in production use all inform the stability assessment.
 
