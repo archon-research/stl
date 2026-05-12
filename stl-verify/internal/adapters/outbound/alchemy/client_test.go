@@ -3,11 +3,14 @@ package alchemy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 )
 
 // testClient creates a client for testing with the given URL.
@@ -294,8 +297,14 @@ func TestGetBlockByHash_NotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "block not found") {
-		t.Errorf("expected 'block not found' error, got %v", err)
+	// Post-VEC-242: a JSON null result is now reported as a wrapped
+	// rpcutil.ErrUpstreamNullResult so callers can distinguish a propagation race
+	// from a real RPC error via errors.Is.
+	if !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected error to wrap rpcutil.ErrUpstreamNullResult, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "eth_getBlockByHash") {
+		t.Errorf("expected error to identify the RPC method, got %v", err)
 	}
 }
 

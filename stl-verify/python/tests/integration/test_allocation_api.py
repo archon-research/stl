@@ -22,6 +22,9 @@ _SPARK_PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
 _GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
 _OBEX_PROXY_HEX = "fedcba9876543210fedcba9876543210fedcba98"
 _UNKNOWN_PROXY_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+# Real Spark SubProxy address — used to exercise the ALM-only filter in
+# /v1/primes. Must match app.domain.proxy_kind._SUB_PROXY_HEX.
+_SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
 
 # Underlying tokens seeded by the sparklend migration (all chain_id=1).
 _USDC_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -166,6 +169,24 @@ async def _seed(async_url: str) -> None:
                 {"tid": gno_id, "pid": grove_id, "proxy": _GROVE_PROXY_HEX, "tx": _TX4_HEX},
             )
 
+            # Spark also has an entry under its SubProxy wallet (risk capital).
+            # /v1/primes must NOT surface this as a separate prime — it shares
+            # spark_id with the ALM proxy above.
+            await conn.execute(
+                text(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, tx_hash, log_index, tx_amount, direction) "
+                    "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), 42, 2000, decode(:tx, 'hex'), 1, 42, 'in')"
+                ),
+                {
+                    "tid": ausdc_token_id,
+                    "pid": spark_id,
+                    "proxy": _SPARK_SUB_PROXY_HEX,
+                    "tx": _TX2_HEX,
+                },
+            )
+
             # obex holds raw USDC directly (not wrapped in any receipt token).
             # The endpoint should not surface this under aUSDC or any other
             # receipt token whose underlying is USDC: a direct underlying
@@ -205,6 +226,11 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
     assert response.status_code == 200
     data = response.json()
+    # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
+    # filtered out — only the ALM proxy per prime should appear.
+    assert len(data) == 3
+    addresses = {item["address"] for item in data}
+    assert f"0x{_SPARK_SUB_PROXY_HEX}" not in addresses
     by_name = {item["name"]: item for item in data}
     assert set(by_name.keys()) == {"spark", "grove", "obex"}
     assert by_name["spark"]["id"] == f"0x{_SPARK_PROXY_HEX}"

@@ -71,6 +71,11 @@ func mainnetEntries() []*TokenEntry {
 	spark := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
 	grove := common.HexToAddress("0x491edfb0b8b608044e227225c715981a30f3a44e")
 
+	// SubProxy accounts (Atlas A.6.*.2.1.1.3.1.1.2) hold risk capital separately
+	// from the ALM proxies above.
+	sparkSubProxy := common.HexToAddress("0x3300f198988e4c9c63f75df86de36421f06af8c4")
+	groveSubProxy := common.HexToAddress("0x1369f7b2b38c76b6478c0f0e66d94923421891ba")
+
 	usdc := addr("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
 	dai := addr("0x6b175474e89094c44da98b954eedeac495271d0f")
 	usds := addr("0xdc035d45d973e3ec169d2276ddab16f1e407384f")
@@ -141,6 +146,9 @@ func mainnetEntries() []*TokenEntry {
 		{ContractAddress: common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), WalletAddress: spark, Star: "spark", Chain: "mainnet", Protocol: "sky", AllocationType: "pol", TokenType: "erc20"},
 		{ContractAddress: common.HexToAddress("0x6c3ea9036406852006290770bedfcaba0e23a0e8"), WalletAddress: spark, Star: "spark", Chain: "mainnet", Protocol: "paypal", AllocationType: "asset", TokenType: "erc20", CreatedAtBlock: new(int64(23118264))},
 
+		// ── Spark: SubProxy risk capital ──
+		{ContractAddress: common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), WalletAddress: sparkSubProxy, Star: "spark", Chain: "mainnet", Protocol: "sky", AllocationType: "risk_capital", TokenType: "erc20"},
+
 		// ── Grove: Aave atokens (skip — existing worker) ──
 		{ContractAddress: common.HexToAddress("0xfa82580c16a31d0c1bc632a36f82e83efef3eec0"), WalletAddress: grove, AssetAddress: rlusd, Star: "grove", Chain: "mainnet", Protocol: "aave", AllocationType: "allocation", TokenType: "atoken", CreatedAtBlock: new(int64(22319334))},
 		{ContractAddress: common.HexToAddress("0xe3190143eb552456f88464662f0c0c4ac67a77eb"), WalletAddress: grove, AssetAddress: rlusd, Star: "grove", Chain: "mainnet", Protocol: "aave", AllocationType: "allocation", TokenType: "atoken", CreatedAtBlock: new(int64(23132230))},
@@ -172,6 +180,9 @@ func mainnetEntries() []*TokenEntry {
 		{ContractAddress: common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), WalletAddress: grove, Star: "grove", Chain: "mainnet", Protocol: "sky", AllocationType: "pol", TokenType: "erc20"},
 		{ContractAddress: common.HexToAddress("0x8292bb45bf1ee4d140127049757c2e0ff06317ed"), WalletAddress: grove, Star: "grove", Chain: "mainnet", Protocol: "ripple", AllocationType: "asset", TokenType: "erc20"},
 		{ContractAddress: common.HexToAddress("0x00000000efe302beaa2b3e6e1b18d08d69a9012a"), WalletAddress: grove, Star: "grove", Chain: "mainnet", Protocol: "agora", AllocationType: "asset", TokenType: "erc20"},
+
+		// ── Grove: SubProxy risk capital ──
+		{ContractAddress: common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f"), WalletAddress: groveSubProxy, Star: "grove", Chain: "mainnet", Protocol: "sky", AllocationType: "risk_capital", TokenType: "erc20"},
 	}
 }
 

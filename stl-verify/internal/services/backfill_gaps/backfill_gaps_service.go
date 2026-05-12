@@ -3,6 +3,7 @@ package backfill_gaps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -34,6 +36,12 @@ type BackfillConfig struct {
 
 	// PollInterval is how often to check for gaps when running continuously.
 	PollInterval time.Duration
+
+	// RetryMinAge is the minimum age a row must have in block_states before
+	// the retry loop will pick it up. Prevents the retry loop from
+	// republishing blocks that are still being processed by the live service.
+	// Default: 30s.
+	RetryMinAge time.Duration
 
 	// BoundaryCheckDepth is how many recent blocks to verify against RPC before backfilling.
 	// This detects reorgs that happened while the service was down.
@@ -55,6 +63,7 @@ func BackfillConfigDefaults() BackfillConfig {
 		ChainID:            1,
 		BatchSize:          10,
 		PollInterval:       30 * time.Second,
+		RetryMinAge:        30 * time.Second,
 		BoundaryCheckDepth: 10,
 		Logger:             slog.Default(),
 	}
@@ -107,6 +116,9 @@ func NewBackfillService(
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
+	}
+	if config.RetryMinAge == 0 {
+		config.RetryMinAge = defaults.RetryMinAge
 	}
 	// BoundaryCheckDepth: 0 = use default, > 0 = use value, < 0 = disabled
 	if config.BoundaryCheckDepth == 0 {
@@ -437,8 +449,15 @@ func (s *BackfillService) processBatch(ctx context.Context, from, to int64) erro
 func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.BlockData) error {
 	blockNum := bd.BlockNumber
 
-	if bd.Block == nil {
-		return fmt.Errorf("missing block data")
+	// Surface the upstream null / fetch error early so we never advance into
+	// SaveBlock with a zero-valued header. Pre-VEC-242 the bare bd.Block == nil
+	// check could not see through []byte("null") and a row with Hash=""
+	// could be persisted.
+	if bd.BlockErr != nil {
+		return fmt.Errorf("block fetch failed for block %d: %w", blockNum, bd.BlockErr)
+	}
+	if rpcutil.IsNullOrEmpty(bd.Block) {
+		return fmt.Errorf("missing block data for block %d", blockNum)
 	}
 
 	var header outbound.BlockHeader
@@ -608,11 +627,18 @@ func (s *BackfillService) verifyBoundaryBlocks(ctx context.Context) ([]outbound.
 		// that are present on the node but not canonical.
 		blockJSON, err := s.client.GetBlockByNumber(ctx, dbBlock.Number, false)
 		if err != nil {
-			// RPC error - log and continue checking other blocks
-			s.logger.Warn("failed to verify block against RPC",
-				"block", dbBlock.Number,
-				"hash", truncateHash(dbBlock.Hash),
-				"error", err)
+			// Upstream propagation race surfaces as ErrUpstreamNullResult; treat
+			// it as "unverifiable right now" and skip — never flag the block as
+			// stale on a null reply (pre-VEC-242 this orphaned canonical blocks
+			// because the empty-hash parse path compared `"" != dbBlock.Hash`).
+			level := slog.LevelWarn
+			if errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+				level = slog.LevelDebug
+			}
+			s.logger.LogAttrs(ctx, level, "skipping boundary verification (upstream not ready)",
+				slog.Int64("block", dbBlock.Number),
+				slog.String("hash", truncateHash(dbBlock.Hash)),
+				slog.Any("error", err))
 			continue
 		}
 
@@ -715,14 +741,22 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		return fmt.Errorf("failed to parse block timestamp for block %d: %w", blockNum, err)
 	}
 
-	// Validate all required data before caching
-	if bd.Block == nil {
+	// Validate all required data before caching. The `[]byte("null")` case is
+	// the VEC-242 regression: an upstream JSON-RPC null surfaced as a non-nil
+	// 4-byte slice and slipped past the prior nil-check, allowing the retry
+	// loop to flip block_published=true on bad data. We check BlockErr before
+	// the null guard to surface the precise error chain when the adapter has
+	// already classified the failure, mirroring live_data's order.
+	if bd.BlockErr != nil {
+		return fmt.Errorf("block fetch failed for block %d: %w", blockNum, bd.BlockErr)
+	}
+	if rpcutil.IsNullOrEmpty(bd.Block) {
 		return fmt.Errorf("missing block data for block %d", blockNum)
 	}
 	if bd.ReceiptsErr != nil {
 		return fmt.Errorf("receipts fetch failed for block %d: %w", blockNum, bd.ReceiptsErr)
 	}
-	if bd.Receipts == nil {
+	if rpcutil.IsNullOrEmpty(bd.Receipts) {
 		return fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
 	}
 	// Validate traces if enabled
@@ -730,7 +764,7 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		if bd.TracesErr != nil {
 			return fmt.Errorf("traces fetch failed for block %d: %w", blockNum, bd.TracesErr)
 		}
-		if bd.Traces == nil {
+		if rpcutil.IsNullOrEmpty(bd.Traces) {
 			return fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
 		}
 	}
@@ -741,7 +775,7 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		if bd.BlobsErr != nil {
 			return fmt.Errorf("blobs fetch failed for block %d: %w", blockNum, bd.BlobsErr)
 		}
-		if bd.Blobs == nil {
+		if rpcutil.IsNullOrEmpty(bd.Blobs) {
 			return fmt.Errorf("missing blobs data for block %d (no error reported)", blockNum)
 		}
 		blobs = bd.Blobs
@@ -918,7 +952,7 @@ func (s *BackfillService) retryIncompletePublishes(ctx context.Context) error {
 	)
 	defer span.End()
 
-	// Get blocks with incomplete publishes (limit to batch size to avoid overwhelming the system)
+	// Get blocks with incomplete publishes (limit to batch size to avoid overwhelming the system).
 	incompleteBlocks, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, s.config.BatchSize)
 	if err != nil {
 		span.RecordError(err)
@@ -1024,19 +1058,19 @@ func (s *BackfillService) retryBlockPublish(ctx context.Context, block outbound.
 // after we saved it. It queries the canonical chain by number and compares
 // the hash to our stored hash. Returns (true, nil) when the row was orphaned
 // (hash differs — row drops out of the retry set via the NOT is_orphaned
-// filter). Returns (false, err) when verification itself failed — caller
-// should treat the original retry error as transient and try again later.
-// Returns (false, nil) when the canonical chain still matches our hash (the
-// by-hash fetch failure was transient).
+// filter). Returns (false, err) when verification itself failed (transport,
+// parse, or [rpcutil.ErrUpstreamNullResult]) — caller should treat the
+// original retry error as transient and try again later. Returns (false, nil)
+// when the canonical chain still matches our hash (the by-hash fetch failure
+// was transient). It is critical that a propagation-race null result from
+// `eth_getBlockByNumber` does NOT orphan a canonical block — pre-VEC-242 the
+// nil-only guard below let a literal []byte("null") flow into
+// ParseBlockHeader, producing an empty hash that compared `!=` to the real
+// stored hash and permanently orphaned the row.
 func (s *BackfillService) reconcileOrphanedRetry(ctx context.Context, block outbound.BlockState) (bool, error) {
 	blockJSON, err := s.client.GetBlockByNumber(ctx, block.Number, false)
 	if err != nil {
 		return false, fmt.Errorf("get canonical block %d: %w", block.Number, err)
-	}
-	if blockJSON == nil {
-		// No canonical block at this height. Don't orphan on this alone —
-		// could be chain pruning, RPC inconsistency, or a very recent reorg.
-		return false, nil
 	}
 
 	var header outbound.BlockHeader
