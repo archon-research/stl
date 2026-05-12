@@ -37,6 +37,13 @@ func DefaultProxies() []ProxyConfig {
 			Chain:   "mainnet",
 			Address: common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e"),
 		},
+		// Spark SubProxy — Atlas A.6.1.1.1.2.1.1.3.1.1.2. Holds risk capital
+		// (treasury) separately from the ALM proxy above.
+		{
+			Star:    "spark",
+			Chain:   "mainnet",
+			Address: common.HexToAddress("0x3300f198988e4c9c63f75df86de36421f06af8c4"),
+		},
 		{
 			Star:    "spark",
 			Chain:   "base",
@@ -66,6 +73,12 @@ func DefaultProxies() []ProxyConfig {
 			Star:    "grove",
 			Chain:   "mainnet",
 			Address: common.HexToAddress("0x491edfb0b8b608044e227225c715981a30f3a44e"),
+		},
+		// Grove SubProxy — Atlas A.6.1.1.2.2.1.1.3.1.1.2.
+		{
+			Star:    "grove",
+			Chain:   "mainnet",
+			Address: common.HexToAddress("0x1369f7b2b38c76b6478c0f0e66d94923421891ba"),
 		},
 		{
 			Star:    "grove",
