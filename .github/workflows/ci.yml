@@ -41,6 +41,31 @@ jobs:
         with:
           files_yaml_from_source_file: .github/changed-files.yml
 
+  verify-signatures:
+    name: Verify Signed Commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all PR commits are signed and verified
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          unsigned=$(gh api \
+            --paginate \
+            "repos/${REPO}/pulls/${PR_NUMBER}/commits" \
+            --jq '.[] | select(.commit.verification.verified == false) | "\(.sha) by \(.commit.author.name) <\(.commit.author.email)>: \(.commit.verification.reason)"')
+          if [ -n "$unsigned" ]; then
+            echo "::error::Unsigned or unverified commits found in this PR. All commits must be signed."
+            echo "$unsigned"
+            echo ""
+            echo "See: https://docs.github.com/en/authentication/managing-commit-signature-verification"
+            exit 1
+          fi
+          echo "All commits are signed and verified."
+
   go-ci:
     needs: detect-changes
     if: needs.detect-changes.outputs.go == 'true'
@@ -63,6 +88,7 @@ jobs:
     name: Success
     needs:
       - detect-changes
+      - verify-signatures
       - go-ci
       - python-ci
       - ts-ci
