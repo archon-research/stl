@@ -273,9 +273,12 @@ jobs:
               fi
             done
 
-            # List commits between current prod and new SHA (stl-verify/ only)
+            # List commits between current prod and new SHA (stl-verify/ only).
+            # Use git's -n flag to limit at the source — piping through `head` can
+            # SIGPIPE the upstream `git log`, which `set -o pipefail` + `bash -e`
+            # turn into exit 141.
             TOTAL_COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | wc -l | tr -d ' ')
-            COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | head -20)
+            COMMITS=$(git log --oneline --no-merges -n 20 "${PROD_SHA}..${SHA}" -- stl-verify/)
 
             CHANGELOG="### Changes: \`${PROD_SHORT}\` → \`${SHORT_SHA}\`"
             if [ -n "$PR_LIST" ]; then
