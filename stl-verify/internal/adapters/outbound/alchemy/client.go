@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/trace"
@@ -349,6 +350,8 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 			result.BlockErr = err
 		} else if resp.Error != nil {
 			result.BlockErr = fmt.Errorf("block %s: %w", hash, resp.Error)
+		} else if rpcutil.IsNullOrEmpty(resp.Result) {
+			result.BlockErr = fmt.Errorf("eth_getBlockByHash %s: %w", hash, ErrUpstreamNullResult)
 		} else {
 			result.Block = resp.Result
 		}
@@ -364,6 +367,8 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 			result.ReceiptsErr = err
 		} else if resp.Error != nil {
 			result.ReceiptsErr = fmt.Errorf("block %s receipts: %w", hash, resp.Error)
+		} else if rpcutil.IsNullOrEmpty(resp.Result) {
+			result.ReceiptsErr = fmt.Errorf("eth_getBlockReceipts %s: %w", hash, ErrUpstreamNullResult)
 		} else {
 			result.Receipts = resp.Result
 		}
@@ -380,6 +385,8 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 				result.TracesErr = err
 			} else if resp.Error != nil {
 				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
+			} else if rpcutil.IsNullOrEmpty(resp.Result) {
+				result.TracesErr = fmt.Errorf("trace_block %s: %w", hash, ErrUpstreamNullResult)
 			} else {
 				result.Traces = resp.Result
 			}
@@ -397,6 +404,8 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 				result.BlobsErr = err
 			} else if resp.Error != nil {
 				result.BlobsErr = fmt.Errorf("block %s blobs: %w", hash, resp.Error)
+			} else if rpcutil.IsNullOrEmpty(resp.Result) {
+				result.BlobsErr = fmt.Errorf("eth_getBlobSidecars %s: %w", hash, ErrUpstreamNullResult)
 			} else {
 				result.Blobs = resp.Result
 			}
@@ -453,6 +462,8 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	if resp := respMap[0]; resp != nil {
 		if resp.Error != nil {
 			result.BlockErr = fmt.Errorf("block %s: %w", hash, resp.Error)
+		} else if rpcutil.IsNullOrEmpty(resp.Result) {
+			result.BlockErr = fmt.Errorf("eth_getBlockByHash %s: %w", hash, ErrUpstreamNullResult)
 		} else {
 			result.Block = resp.Result
 		}
@@ -464,6 +475,8 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 	if resp := respMap[1]; resp != nil {
 		if resp.Error != nil {
 			result.ReceiptsErr = fmt.Errorf("block %s receipts: %w", hash, resp.Error)
+		} else if rpcutil.IsNullOrEmpty(resp.Result) {
+			result.ReceiptsErr = fmt.Errorf("eth_getBlockReceipts %s: %w", hash, ErrUpstreamNullResult)
 		} else {
 			result.Receipts = resp.Result
 		}
@@ -476,6 +489,8 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 		if resp := respMap[2]; resp != nil {
 			if resp.Error != nil {
 				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
+			} else if rpcutil.IsNullOrEmpty(resp.Result) {
+				result.TracesErr = fmt.Errorf("trace_block %s: %w", hash, ErrUpstreamNullResult)
 			} else {
 				result.Traces = resp.Result
 			}
@@ -489,6 +504,8 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 		if resp := respMap[3]; resp != nil {
 			if resp.Error != nil {
 				result.BlobsErr = fmt.Errorf("block %s blobs: %w", hash, resp.Error)
+			} else if rpcutil.IsNullOrEmpty(resp.Result) {
+				result.BlobsErr = fmt.Errorf("eth_getBlobSidecars %s: %w", hash, ErrUpstreamNullResult)
 			} else {
 				result.Blobs = resp.Result
 			}

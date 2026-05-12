@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -34,6 +35,12 @@ type BackfillConfig struct {
 
 	// PollInterval is how often to check for gaps when running continuously.
 	PollInterval time.Duration
+
+	// RetryMinAge is the minimum age a row must have in block_states before
+	// the retry loop will pick it up. Prevents the retry loop from
+	// republishing blocks that are still being processed by the live service.
+	// Default: 30s.
+	RetryMinAge time.Duration
 
 	// BoundaryCheckDepth is how many recent blocks to verify against RPC before backfilling.
 	// This detects reorgs that happened while the service was down.
@@ -55,6 +62,7 @@ func BackfillConfigDefaults() BackfillConfig {
 		ChainID:            1,
 		BatchSize:          10,
 		PollInterval:       30 * time.Second,
+		RetryMinAge:        30 * time.Second,
 		BoundaryCheckDepth: 10,
 		Logger:             slog.Default(),
 	}
@@ -107,6 +115,9 @@ func NewBackfillService(
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = defaults.PollInterval
+	}
+	if config.RetryMinAge == 0 {
+		config.RetryMinAge = defaults.RetryMinAge
 	}
 	// BoundaryCheckDepth: 0 = use default, > 0 = use value, < 0 = disabled
 	if config.BoundaryCheckDepth == 0 {
@@ -715,14 +726,17 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		return fmt.Errorf("failed to parse block timestamp for block %d: %w", blockNum, err)
 	}
 
-	// Validate all required data before caching
-	if bd.Block == nil {
+	// Validate all required data before caching. The `[]byte("null")` case is
+	// the VEC-242 regression: an upstream JSON-RPC null surfaced as a non-nil
+	// 4-byte slice and slipped past the prior nil-check, allowing the retry
+	// loop to flip block_published=true on bad data.
+	if rpcutil.IsNullOrEmpty(bd.Block) {
 		return fmt.Errorf("missing block data for block %d", blockNum)
 	}
 	if bd.ReceiptsErr != nil {
 		return fmt.Errorf("receipts fetch failed for block %d: %w", blockNum, bd.ReceiptsErr)
 	}
-	if bd.Receipts == nil {
+	if rpcutil.IsNullOrEmpty(bd.Receipts) {
 		return fmt.Errorf("missing receipts data for block %d (no error reported)", blockNum)
 	}
 	// Validate traces if enabled
@@ -730,7 +744,7 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		if bd.TracesErr != nil {
 			return fmt.Errorf("traces fetch failed for block %d: %w", blockNum, bd.TracesErr)
 		}
-		if bd.Traces == nil {
+		if rpcutil.IsNullOrEmpty(bd.Traces) {
 			return fmt.Errorf("missing traces data for block %d (no error reported)", blockNum)
 		}
 	}
@@ -741,7 +755,7 @@ func (s *BackfillService) cacheAndPublishBlockData(ctx context.Context, bd outbo
 		if bd.BlobsErr != nil {
 			return fmt.Errorf("blobs fetch failed for block %d: %w", blockNum, bd.BlobsErr)
 		}
-		if bd.Blobs == nil {
+		if rpcutil.IsNullOrEmpty(bd.Blobs) {
 			return fmt.Errorf("missing blobs data for block %d (no error reported)", blockNum)
 		}
 		blobs = bd.Blobs
@@ -918,7 +932,7 @@ func (s *BackfillService) retryIncompletePublishes(ctx context.Context) error {
 	)
 	defer span.End()
 
-	// Get blocks with incomplete publishes (limit to batch size to avoid overwhelming the system)
+	// Get blocks with incomplete publishes (limit to batch size to avoid overwhelming the system).
 	incompleteBlocks, err := s.stateRepo.GetBlocksWithIncompletePublish(ctx, s.config.BatchSize)
 	if err != nil {
 		span.RecordError(err)

@@ -2,9 +2,23 @@
 package rpcutil
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 )
+
+// IsNullOrEmpty reports whether a JSON-RPC result payload is missing or the
+// literal `null` token. Trims surrounding whitespace so pretty-printed
+// upstream responses are handled correctly. Necessary because
+// `encoding/json` materialises a wire `null` into a `json.RawMessage` as the
+// 4-byte slice "null" — a plain `r == nil` check cannot distinguish that from
+// real data.
+func IsNullOrEmpty(r json.RawMessage) bool {
+	if len(r) == 0 {
+		return true
+	}
+	return bytes.Equal(bytes.TrimSpace(r), []byte("null"))
+}
 
 // Request represents a JSON-RPC 2.0 request.
 type Request struct {

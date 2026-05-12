@@ -14,16 +14,20 @@ func TestLoadBackfillConfig(t *testing.T) {
 		name             string
 		batchSizeEnv     string
 		pollIntervalEnv  string
+		retryMinAgeEnv   string
 		setBatchSize     bool
 		setPollInterval  bool
+		setRetryMinAge   bool
 		wantBatchSize    int
 		wantPollInterval time.Duration
+		wantRetryMinAge  time.Duration
 		wantErrSubstring string
 	}{
 		{
-			name:             "defaults when both unset",
+			name:             "defaults when all unset",
 			wantBatchSize:    10,
 			wantPollInterval: 30 * time.Second,
+			wantRetryMinAge:  30 * time.Second,
 		},
 		{
 			name:             "arbitrum override",
@@ -33,6 +37,7 @@ func TestLoadBackfillConfig(t *testing.T) {
 			pollIntervalEnv:  "5s",
 			wantBatchSize:    100,
 			wantPollInterval: 5 * time.Second,
+			wantRetryMinAge:  30 * time.Second,
 		},
 		{
 			name:             "negative batch size rejected",
@@ -70,6 +75,24 @@ func TestLoadBackfillConfig(t *testing.T) {
 			pollIntervalEnv:  "not-a-duration",
 			wantErrSubstring: "BACKFILL_POLL_INTERVAL",
 		},
+		{
+			name:             "negative retry min age rejected",
+			setRetryMinAge:   true,
+			retryMinAgeEnv:   "-1s",
+			wantErrSubstring: "BACKFILL_RETRY_MIN_AGE must be > 0",
+		},
+		{
+			name:             "zero retry min age rejected",
+			setRetryMinAge:   true,
+			retryMinAgeEnv:   "0s",
+			wantErrSubstring: "BACKFILL_RETRY_MIN_AGE must be > 0",
+		},
+		{
+			name:             "unparseable retry min age rejected",
+			setRetryMinAge:   true,
+			retryMinAgeEnv:   "not-a-duration",
+			wantErrSubstring: "BACKFILL_RETRY_MIN_AGE",
+		},
 	}
 
 	for _, tc := range tests {
@@ -79,6 +102,9 @@ func TestLoadBackfillConfig(t *testing.T) {
 			}
 			if tc.setPollInterval {
 				t.Setenv("BACKFILL_POLL_INTERVAL", tc.pollIntervalEnv)
+			}
+			if tc.setRetryMinAge {
+				t.Setenv("BACKFILL_RETRY_MIN_AGE", tc.retryMinAgeEnv)
 			}
 
 			cfg, err := loadBackfillConfig(42161, false, false, logger)
@@ -99,6 +125,9 @@ func TestLoadBackfillConfig(t *testing.T) {
 			}
 			if cfg.PollInterval != tc.wantPollInterval {
 				t.Errorf("PollInterval = %s, want %s", cfg.PollInterval, tc.wantPollInterval)
+			}
+			if cfg.RetryMinAge != tc.wantRetryMinAge {
+				t.Errorf("RetryMinAge = %s, want %s", cfg.RetryMinAge, tc.wantRetryMinAge)
 			}
 			if cfg.ChainID != 42161 {
 				t.Errorf("ChainID = %d, want 42161", cfg.ChainID)
