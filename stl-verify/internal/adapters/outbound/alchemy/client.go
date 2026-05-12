@@ -15,6 +15,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -27,6 +28,36 @@ import (
 
 // Compile-time check that Client implements outbound.BlockchainClient
 var _ outbound.BlockchainClient = (*Client)(nil)
+
+// extractResult decodes a single JSON-RPC response into its raw bytes or an
+// error appropriate for further wrapping by the caller. It captures the
+// uniform handling pattern used by every multi-call fetcher in this file:
+//
+//   - transport error (non-nil callErr)  → propagated as-is
+//   - missing response (resp == nil)     → "missing response for <method> <subject>"
+//   - RPC error returned by the server   → "<method> <subject>: <rpcError>"
+//   - literal JSON null result           → wrapped [rpcutil.ErrUpstreamNullResult]
+//   - otherwise                          → the raw result bytes
+//
+// `subject` is whatever uniquely identifies the call to the operator reading
+// logs — a block hash for ByHash variants, a decimal block number for
+// ByNumber variants. The wrapped error preserves the underlying cause so
+// callers can use errors.Is / errors.Unwrap.
+func extractResult(resp *jsonRPCResponse, callErr error, method, subject string) (json.RawMessage, error) {
+	if callErr != nil {
+		return nil, callErr
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("missing response for %s %s", method, subject)
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("%s %s: %w", method, subject, resp.Error)
+	}
+	if rpcutil.IsNullOrEmpty(resp.Result) {
+		return nil, fmt.Errorf("%s %s: %w", method, subject, rpcutil.ErrUpstreamNullResult)
+	}
+	return resp.Result, nil
+}
 
 // ClientConfig holds configuration for the HTTP RPC client.
 type ClientConfig struct {
@@ -140,177 +171,78 @@ func NewClient(config ClientConfig) (*Client, error) {
 	}, nil
 }
 
-// GetBlockByNumber fetches a block by its number.
-func (c *Client) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
-	hexNum := fmt.Sprintf("0x%x", blockNum)
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlockByNumber",
-		Params:  []any{hexNum, fullTx},
-	}
-
+// callSingle dispatches a single JSON-RPC request and decodes the result
+// through extractResult, so every single-call fetcher gets the same VEC-242
+// null-result handling as the multi-call ones. The returned error wraps
+// [rpcutil.ErrUpstreamNullResult] when the upstream replied with literal JSON null.
+func (c *Client) callSingle(ctx context.Context, method, subject string, params []any) (json.RawMessage, error) {
+	req := jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params}
 	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return extractResult(resp, err, method, subject)
 }
 
-// GetBlockByHash fetches a block by its hash.
-func (c *Client) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlockByHash",
-		Params:  []any{hash, fullTx},
-	}
+// GetBlockByNumber fetches a block by its number. A literal JSON null response
+// surfaces as a wrapped [rpcutil.ErrUpstreamNullResult] (e.g. transient propagation
+// races near the chain tip).
+func (c *Client) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
+	hexNum := fmt.Sprintf("0x%x", blockNum)
+	return c.callSingle(ctx, "eth_getBlockByNumber", strconv.FormatInt(blockNum, 10), []any{hexNum, fullTx})
+}
 
-	resp, err := c.call(ctx, req)
+// GetBlockByHash fetches a block header by its hash. A literal JSON null
+// response surfaces as a wrapped [rpcutil.ErrUpstreamNullResult].
+func (c *Client) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
+	raw, err := c.callSingle(ctx, "eth_getBlockByHash", hash, []any{hash, fullTx})
 	if err != nil {
 		return nil, err
 	}
-
-	if resp.Result == nil || string(resp.Result) == "null" {
-		return nil, fmt.Errorf("block not found: %s", hash)
-	}
-
 	var header outbound.BlockHeader
-	if err := json.Unmarshal(resp.Result, &header); err != nil {
+	if err := json.Unmarshal(raw, &header); err != nil {
 		return nil, fmt.Errorf("failed to parse block: %w", err)
 	}
-
 	return &header, nil
 }
 
-// GetFullBlockByHash fetches full block JSON by hash.
+// GetFullBlockByHash fetches full block JSON by hash. A literal JSON null
+// response surfaces as a wrapped [rpcutil.ErrUpstreamNullResult].
 func (c *Client) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlockByHash",
-		Params:  []any{hash, fullTx},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.Result == nil || string(resp.Result) == "null" {
-		return nil, fmt.Errorf("block not found: %s", hash)
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "eth_getBlockByHash", hash, []any{hash, fullTx})
 }
 
 // GetBlockReceipts fetches all transaction receipts for a block by number.
 func (c *Client) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlockReceipts",
-		Params:  []any{hexNum},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "eth_getBlockReceipts", strconv.FormatInt(blockNum, 10), []any{hexNum})
 }
 
 // GetBlockReceiptsByHash fetches all transaction receipts for a block by hash.
 // Use this to prevent TOCTOU race conditions during reorgs.
 func (c *Client) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlockReceipts",
-		Params:  []any{hash},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "eth_getBlockReceipts", hash, []any{hash})
 }
 
 // GetBlockTraces fetches execution traces for a block by number.
 func (c *Client) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "trace_block",
-		Params:  []any{hexNum},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "trace_block", strconv.FormatInt(blockNum, 10), []any{hexNum})
 }
 
 // GetBlockTracesByHash fetches execution traces for a block by hash.
 // Use this to prevent TOCTOU race conditions during reorgs.
 func (c *Client) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "trace_block",
-		Params:  []any{hash},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "trace_block", hash, []any{hash})
 }
 
 // GetBlobSidecars fetches blob sidecars for a block by number.
 func (c *Client) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
 	hexNum := fmt.Sprintf("0x%x", blockNum)
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlobSidecars",
-		Params:  []any{hexNum},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "eth_getBlobSidecars", strconv.FormatInt(blockNum, 10), []any{hexNum})
 }
 
 // GetBlobSidecarsByHash fetches blob sidecars for a block by hash.
 // Use this to prevent TOCTOU race conditions during reorgs.
 func (c *Client) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
-	req := jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "eth_getBlobSidecars",
-		Params:  []any{hash},
-	}
-
-	resp, err := c.call(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.Result, nil
+	return c.callSingle(ctx, "eth_getBlobSidecars", hash, []any{hash})
 }
 
 // GetBlockDataByHash fetches all data for a single block by hash.
@@ -344,34 +276,20 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 	wg.Go(func() {
 		req := jsonRPCRequest{JSONRPC: "2.0", ID: 0, Method: "eth_getBlockByHash", Params: []any{hash, fullTx}}
 		resp, err := c.call(ctx, req)
+		raw, err := extractResult(resp, err, req.Method, hash)
 		mu.Lock()
-		defer mu.Unlock()
-		if err != nil {
-			result.BlockErr = err
-		} else if resp.Error != nil {
-			result.BlockErr = fmt.Errorf("block %s: %w", hash, resp.Error)
-		} else if rpcutil.IsNullOrEmpty(resp.Result) {
-			result.BlockErr = fmt.Errorf("eth_getBlockByHash %s: %w", hash, ErrUpstreamNullResult)
-		} else {
-			result.Block = resp.Result
-		}
+		result.Block, result.BlockErr = raw, err
+		mu.Unlock()
 	})
 
 	// Fetch receipts
 	wg.Go(func() {
 		req := jsonRPCRequest{JSONRPC: "2.0", ID: 1, Method: "eth_getBlockReceipts", Params: []any{hash}}
 		resp, err := c.call(ctx, req)
+		raw, err := extractResult(resp, err, req.Method, hash)
 		mu.Lock()
-		defer mu.Unlock()
-		if err != nil {
-			result.ReceiptsErr = err
-		} else if resp.Error != nil {
-			result.ReceiptsErr = fmt.Errorf("block %s receipts: %w", hash, resp.Error)
-		} else if rpcutil.IsNullOrEmpty(resp.Result) {
-			result.ReceiptsErr = fmt.Errorf("eth_getBlockReceipts %s: %w", hash, ErrUpstreamNullResult)
-		} else {
-			result.Receipts = resp.Result
-		}
+		result.Receipts, result.ReceiptsErr = raw, err
+		mu.Unlock()
 	})
 
 	// Fetch traces (only if enabled)
@@ -379,17 +297,10 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		wg.Go(func() {
 			req := jsonRPCRequest{JSONRPC: "2.0", ID: 2, Method: "trace_block", Params: []any{hash}}
 			resp, err := c.call(ctx, req)
+			raw, err := extractResult(resp, err, req.Method, hash)
 			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				result.TracesErr = err
-			} else if resp.Error != nil {
-				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
-			} else if rpcutil.IsNullOrEmpty(resp.Result) {
-				result.TracesErr = fmt.Errorf("trace_block %s: %w", hash, ErrUpstreamNullResult)
-			} else {
-				result.Traces = resp.Result
-			}
+			result.Traces, result.TracesErr = raw, err
+			mu.Unlock()
 		})
 	}
 
@@ -398,17 +309,10 @@ func (c *Client) getBlockDataByHashParallel(ctx context.Context, blockNum int64,
 		wg.Go(func() {
 			req := jsonRPCRequest{JSONRPC: "2.0", ID: 3, Method: "eth_getBlobSidecars", Params: []any{hash}}
 			resp, err := c.call(ctx, req)
+			raw, err := extractResult(resp, err, req.Method, hash)
 			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				result.BlobsErr = err
-			} else if resp.Error != nil {
-				result.BlobsErr = fmt.Errorf("block %s blobs: %w", hash, resp.Error)
-			} else if rpcutil.IsNullOrEmpty(resp.Result) {
-				result.BlobsErr = fmt.Errorf("eth_getBlobSidecars %s: %w", hash, ErrUpstreamNullResult)
-			} else {
-				result.Blobs = resp.Result
-			}
+			result.Blobs, result.BlobsErr = raw, err
+			mu.Unlock()
 		})
 	}
 
@@ -455,63 +359,16 @@ func (c *Client) getBlockDataByHashBatched(ctx context.Context, blockNum int64, 
 		respMap[responses[i].ID] = &responses[i]
 	}
 
-	// Assemble result
+	// Assemble result. extractResult covers all four error shapes (missing
+	// response, RPC error, JSON null, transport error) uniformly.
 	result := outbound.BlockData{BlockNumber: blockNum}
-
-	// Block data
-	if resp := respMap[0]; resp != nil {
-		if resp.Error != nil {
-			result.BlockErr = fmt.Errorf("block %s: %w", hash, resp.Error)
-		} else if rpcutil.IsNullOrEmpty(resp.Result) {
-			result.BlockErr = fmt.Errorf("eth_getBlockByHash %s: %w", hash, ErrUpstreamNullResult)
-		} else {
-			result.Block = resp.Result
-		}
-	} else {
-		result.BlockErr = fmt.Errorf("missing response for block %d", blockNum)
-	}
-
-	// Receipts
-	if resp := respMap[1]; resp != nil {
-		if resp.Error != nil {
-			result.ReceiptsErr = fmt.Errorf("block %s receipts: %w", hash, resp.Error)
-		} else if rpcutil.IsNullOrEmpty(resp.Result) {
-			result.ReceiptsErr = fmt.Errorf("eth_getBlockReceipts %s: %w", hash, ErrUpstreamNullResult)
-		} else {
-			result.Receipts = resp.Result
-		}
-	} else {
-		result.ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
-	}
-
-	// Traces (only if enabled)
+	result.Block, result.BlockErr = extractResult(respMap[0], nil, "eth_getBlockByHash", hash)
+	result.Receipts, result.ReceiptsErr = extractResult(respMap[1], nil, "eth_getBlockReceipts", hash)
 	if c.config.EnableTraces {
-		if resp := respMap[2]; resp != nil {
-			if resp.Error != nil {
-				result.TracesErr = fmt.Errorf("block %s traces: %w", hash, resp.Error)
-			} else if rpcutil.IsNullOrEmpty(resp.Result) {
-				result.TracesErr = fmt.Errorf("trace_block %s: %w", hash, ErrUpstreamNullResult)
-			} else {
-				result.Traces = resp.Result
-			}
-		} else {
-			result.TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
-		}
+		result.Traces, result.TracesErr = extractResult(respMap[2], nil, "trace_block", hash)
 	}
-
-	// Blobs (only if enabled)
 	if c.config.EnableBlobs {
-		if resp := respMap[3]; resp != nil {
-			if resp.Error != nil {
-				result.BlobsErr = fmt.Errorf("block %s blobs: %w", hash, resp.Error)
-			} else if rpcutil.IsNullOrEmpty(resp.Result) {
-				result.BlobsErr = fmt.Errorf("eth_getBlobSidecars %s: %w", hash, ErrUpstreamNullResult)
-			} else {
-				result.Blobs = resp.Result
-			}
-		} else {
-			result.BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
-		}
+		result.Blobs, result.BlobsErr = extractResult(respMap[3], nil, "eth_getBlobSidecars", hash)
 	}
 
 	return result, nil
@@ -585,58 +442,21 @@ func (c *Client) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx b
 		respMap[responses[i].ID] = &responses[i]
 	}
 
-	// Assemble results
+	// Assemble results. extractResult applies the null/RPC-error/missing-response
+	// decoding uniformly so the gap-fill path enjoys the same VEC-242 protection
+	// as the by-hash path.
 	results := make([]outbound.BlockData, len(blockNums))
 	for i, blockNum := range blockNums {
 		baseID := i * 4
+		subject := strconv.FormatInt(blockNum, 10)
 		results[i] = outbound.BlockData{BlockNumber: blockNum}
-
-		// Block data
-		if resp := respMap[baseID]; resp != nil {
-			if resp.Error != nil {
-				results[i].BlockErr = fmt.Errorf("block %d: %w", blockNum, resp.Error)
-			} else {
-				results[i].Block = resp.Result
-			}
-		} else {
-			results[i].BlockErr = fmt.Errorf("missing response for block %d", blockNum)
-		}
-
-		// Receipts
-		if resp := respMap[baseID+1]; resp != nil {
-			if resp.Error != nil {
-				results[i].ReceiptsErr = fmt.Errorf("block %d receipts: %w", blockNum, resp.Error)
-			} else {
-				results[i].Receipts = resp.Result
-			}
-		} else {
-			results[i].ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
-		}
-
-		// Traces (only if enabled)
+		results[i].Block, results[i].BlockErr = extractResult(respMap[baseID], nil, "eth_getBlockByNumber", subject)
+		results[i].Receipts, results[i].ReceiptsErr = extractResult(respMap[baseID+1], nil, "eth_getBlockReceipts", subject)
 		if c.config.EnableTraces {
-			if resp := respMap[baseID+2]; resp != nil {
-				if resp.Error != nil {
-					results[i].TracesErr = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
-				} else {
-					results[i].Traces = resp.Result
-				}
-			} else {
-				results[i].TracesErr = fmt.Errorf("missing response for traces of block %d", blockNum)
-			}
+			results[i].Traces, results[i].TracesErr = extractResult(respMap[baseID+2], nil, "trace_block", subject)
 		}
-
-		// Blobs (only if enabled)
 		if c.config.EnableBlobs {
-			if resp := respMap[baseID+3]; resp != nil {
-				if resp.Error != nil {
-					results[i].BlobsErr = fmt.Errorf("block %d blobs: %w", blockNum, resp.Error)
-				} else {
-					results[i].Blobs = resp.Result
-				}
-			} else {
-				results[i].BlobsErr = fmt.Errorf("missing response for blobs of block %d", blockNum)
-			}
+			results[i].Blobs, results[i].BlobsErr = extractResult(respMap[baseID+3], nil, "eth_getBlobSidecars", subject)
 		}
 	}
 
@@ -674,33 +494,14 @@ func (c *Client) GetBlocksAndReceiptsBatch(ctx context.Context, blockNums []int6
 		respMap[responses[i].ID] = &responses[i]
 	}
 
-	// Assemble results
+	// Assemble results.
 	results := make([]outbound.BlockData, len(blockNums))
 	for i, blockNum := range blockNums {
 		baseID := i * 2
+		subject := strconv.FormatInt(blockNum, 10)
 		results[i] = outbound.BlockData{BlockNumber: blockNum}
-
-		// Block data
-		if resp := respMap[baseID]; resp != nil {
-			if resp.Error != nil {
-				results[i].BlockErr = fmt.Errorf("block %d: %w", blockNum, resp.Error)
-			} else {
-				results[i].Block = resp.Result
-			}
-		} else {
-			results[i].BlockErr = fmt.Errorf("missing response for block %d", blockNum)
-		}
-
-		// Receipts
-		if resp := respMap[baseID+1]; resp != nil {
-			if resp.Error != nil {
-				results[i].ReceiptsErr = fmt.Errorf("block %d receipts: %w", blockNum, resp.Error)
-			} else {
-				results[i].Receipts = resp.Result
-			}
-		} else {
-			results[i].ReceiptsErr = fmt.Errorf("missing response for receipts of block %d", blockNum)
-		}
+		results[i].Block, results[i].BlockErr = extractResult(respMap[baseID], nil, "eth_getBlockByNumber", subject)
+		results[i].Receipts, results[i].ReceiptsErr = extractResult(respMap[baseID+1], nil, "eth_getBlockReceipts", subject)
 	}
 
 	return results, nil
@@ -740,15 +541,12 @@ func (c *Client) GetTracesBatch(ctx context.Context, blockNums []int64) (map[int
 	errs := make(map[int64]error)
 
 	for i, blockNum := range blockNums {
-		if resp := respMap[i]; resp != nil {
-			if resp.Error != nil {
-				errs[blockNum] = fmt.Errorf("block %d traces: %w", blockNum, resp.Error)
-			} else {
-				traces[blockNum] = resp.Result
-			}
-		} else {
-			errs[blockNum] = fmt.Errorf("missing response for traces of block %d", blockNum)
+		raw, err := extractResult(respMap[i], nil, "trace_block", strconv.FormatInt(blockNum, 10))
+		if err != nil {
+			errs[blockNum] = err
+			continue
 		}
+		traces[blockNum] = raw
 	}
 
 	return traces, errs

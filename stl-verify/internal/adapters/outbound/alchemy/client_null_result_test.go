@@ -83,8 +83,8 @@ func TestGetBlockDataByHash_Batched_NullBlock(t *testing.T) {
 	if bd.BlockErr == nil {
 		t.Fatalf("expected BlockErr to be set when result is null, got nil; Block=%q", string(bd.Block))
 	}
-	if !errors.Is(bd.BlockErr, ErrUpstreamNullResult) {
-		t.Errorf("expected BlockErr to wrap ErrUpstreamNullResult, got %v", bd.BlockErr)
+	if !errors.Is(bd.BlockErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected BlockErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.BlockErr)
 	}
 	if !rpcutil.IsNullOrEmpty(bd.Block) {
 		t.Errorf("expected Block to be empty/null after null response, got %q", string(bd.Block))
@@ -112,8 +112,8 @@ func TestGetBlockDataByHash_Batched_NullReceipts(t *testing.T) {
 	if bd.ReceiptsErr == nil {
 		t.Fatalf("expected ReceiptsErr to be set when result is null, got nil; Receipts=%q", string(bd.Receipts))
 	}
-	if !errors.Is(bd.ReceiptsErr, ErrUpstreamNullResult) {
-		t.Errorf("expected ReceiptsErr to wrap ErrUpstreamNullResult, got %v", bd.ReceiptsErr)
+	if !errors.Is(bd.ReceiptsErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected ReceiptsErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.ReceiptsErr)
 	}
 	if !rpcutil.IsNullOrEmpty(bd.Receipts) {
 		t.Errorf("expected Receipts to be empty/null, got %q", string(bd.Receipts))
@@ -144,8 +144,8 @@ func TestGetBlockDataByHash_Batched_NullTraces(t *testing.T) {
 	if bd.TracesErr == nil {
 		t.Fatalf("expected TracesErr to be set when result is null, got nil; Traces=%q", string(bd.Traces))
 	}
-	if !errors.Is(bd.TracesErr, ErrUpstreamNullResult) {
-		t.Errorf("expected TracesErr to wrap ErrUpstreamNullResult, got %v", bd.TracesErr)
+	if !errors.Is(bd.TracesErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected TracesErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.TracesErr)
 	}
 	if !rpcutil.IsNullOrEmpty(bd.Traces) {
 		t.Errorf("expected Traces to be empty/null, got %q", string(bd.Traces))
@@ -173,8 +173,8 @@ func TestGetBlockDataByHash_Batched_NullBlobs(t *testing.T) {
 	if bd.BlobsErr == nil {
 		t.Fatalf("expected BlobsErr to be set when result is null, got nil; Blobs=%q", string(bd.Blobs))
 	}
-	if !errors.Is(bd.BlobsErr, ErrUpstreamNullResult) {
-		t.Errorf("expected BlobsErr to wrap ErrUpstreamNullResult, got %v", bd.BlobsErr)
+	if !errors.Is(bd.BlobsErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected BlobsErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.BlobsErr)
 	}
 	if !rpcutil.IsNullOrEmpty(bd.Blobs) {
 		t.Errorf("expected Blobs to be empty/null, got %q", string(bd.Blobs))
@@ -206,8 +206,8 @@ func TestGetBlockDataByHash_Parallel_NullBlock(t *testing.T) {
 	if bd.BlockErr == nil {
 		t.Fatalf("expected BlockErr to be set when result is null, got nil; Block=%q", string(bd.Block))
 	}
-	if !errors.Is(bd.BlockErr, ErrUpstreamNullResult) {
-		t.Errorf("expected BlockErr to wrap ErrUpstreamNullResult, got %v", bd.BlockErr)
+	if !errors.Is(bd.BlockErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected BlockErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.BlockErr)
 	}
 	if !rpcutil.IsNullOrEmpty(bd.Block) {
 		t.Errorf("expected Block to be empty/null after null response, got %q", string(bd.Block))
@@ -235,8 +235,8 @@ func TestGetBlockDataByHash_Parallel_NullReceipts(t *testing.T) {
 	if bd.ReceiptsErr == nil {
 		t.Fatalf("expected ReceiptsErr to be set when result is null, got nil; Receipts=%q", string(bd.Receipts))
 	}
-	if !errors.Is(bd.ReceiptsErr, ErrUpstreamNullResult) {
-		t.Errorf("expected ReceiptsErr to wrap ErrUpstreamNullResult, got %v", bd.ReceiptsErr)
+	if !errors.Is(bd.ReceiptsErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected ReceiptsErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.ReceiptsErr)
 	}
 	if bd.BlockErr != nil {
 		t.Errorf("expected BlockErr to be nil (only receipts were null), got %v", bd.BlockErr)
@@ -261,8 +261,8 @@ func TestGetBlockDataByHash_Parallel_NullTraces(t *testing.T) {
 	if bd.TracesErr == nil {
 		t.Fatalf("expected TracesErr to be set when result is null, got nil; Traces=%q", string(bd.Traces))
 	}
-	if !errors.Is(bd.TracesErr, ErrUpstreamNullResult) {
-		t.Errorf("expected TracesErr to wrap ErrUpstreamNullResult, got %v", bd.TracesErr)
+	if !errors.Is(bd.TracesErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected TracesErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.TracesErr)
 	}
 }
 
@@ -284,8 +284,8 @@ func TestGetBlockDataByHash_Parallel_NullBlobs(t *testing.T) {
 	if bd.BlobsErr == nil {
 		t.Fatalf("expected BlobsErr to be set when result is null, got nil; Blobs=%q", string(bd.Blobs))
 	}
-	if !errors.Is(bd.BlobsErr, ErrUpstreamNullResult) {
-		t.Errorf("expected BlobsErr to wrap ErrUpstreamNullResult, got %v", bd.BlobsErr)
+	if !errors.Is(bd.BlobsErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected BlobsErr to wrap rpcutil.ErrUpstreamNullResult, got %v", bd.BlobsErr)
 	}
 }
 
@@ -332,5 +332,201 @@ func TestGetBlockDataByHash_Parallel_ValidResponseUnaffected(t *testing.T) {
 	}
 	if rpcutil.IsNullOrEmpty(bd.Block) || rpcutil.IsNullOrEmpty(bd.Receipts) {
 		t.Errorf("expected populated Block/Receipts, got block=%q receipts=%q", string(bd.Block), string(bd.Receipts))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetBlocksBatch / GetBlocksAndReceiptsBatch / GetTracesBatch
+// (the by-number bulk paths reached by BackfillService.processBatch)
+// ---------------------------------------------------------------------------
+
+func TestGetBlocksBatch_NullBlock(t *testing.T) {
+	// ID layout for GetBlocksBatch is i*4 + offset, where offset is
+	// 0=block, 1=receipts, 2=traces, 3=blobs. Only block 0's eth_getBlockByNumber
+	// (ID 0) is set to null here.
+	server := batchTestServer(t, map[int]json.RawMessage{
+		0: json.RawMessage("null"),
+	})
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	results, err := client.GetBlocksBatch(context.Background(), []int64{100}, false)
+	if err != nil {
+		t.Fatalf("GetBlocksBatch returned transport error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].BlockErr == nil {
+		t.Fatalf("expected BlockErr to be set, got nil; Block=%q", string(results[0].Block))
+	}
+	if !errors.Is(results[0].BlockErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected BlockErr to wrap rpcutil.ErrUpstreamNullResult, got %v", results[0].BlockErr)
+	}
+	if !rpcutil.IsNullOrEmpty(results[0].Block) {
+		t.Errorf("expected Block to be empty/null, got %q", string(results[0].Block))
+	}
+	if !strings.Contains(results[0].BlockErr.Error(), "eth_getBlockByNumber") {
+		t.Errorf("expected error to identify the RPC method, got %v", results[0].BlockErr)
+	}
+}
+
+func TestGetBlocksBatch_NullReceipts(t *testing.T) {
+	server := batchTestServer(t, map[int]json.RawMessage{
+		1: json.RawMessage("null"), // receipts of block 0
+	})
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	results, err := client.GetBlocksBatch(context.Background(), []int64{100}, false)
+	if err != nil {
+		t.Fatalf("GetBlocksBatch returned transport error: %v", err)
+	}
+	if !errors.Is(results[0].ReceiptsErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected ReceiptsErr to wrap rpcutil.ErrUpstreamNullResult, got %v", results[0].ReceiptsErr)
+	}
+	if results[0].BlockErr != nil {
+		t.Errorf("expected BlockErr to be nil (only receipts were null), got %v", results[0].BlockErr)
+	}
+}
+
+func TestGetBlocksAndReceiptsBatch_NullBlock(t *testing.T) {
+	// IDs are i*2 for block, i*2+1 for receipts.
+	server := batchTestServer(t, map[int]json.RawMessage{
+		0: json.RawMessage("null"),
+	})
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	results, err := client.GetBlocksAndReceiptsBatch(context.Background(), []int64{100}, false)
+	if err != nil {
+		t.Fatalf("transport error: %v", err)
+	}
+	if !errors.Is(results[0].BlockErr, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected BlockErr to wrap rpcutil.ErrUpstreamNullResult, got %v", results[0].BlockErr)
+	}
+}
+
+func TestGetTracesBatch_NullTrace(t *testing.T) {
+	server := batchTestServer(t, map[int]json.RawMessage{
+		0: json.RawMessage("null"),
+	})
+	defer server.Close()
+
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	traces, errs := client.GetTracesBatch(context.Background(), []int64{100})
+	if traces[100] != nil {
+		t.Errorf("expected traces[100] to be nil, got %q", string(traces[100]))
+	}
+	if !errors.Is(errs[100], rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected errs[100] to wrap rpcutil.ErrUpstreamNullResult, got %v", errs[100])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Single-call methods now consistently surface rpcutil.ErrUpstreamNullResult
+// ---------------------------------------------------------------------------
+
+func nullResultServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return singleCallTestServer(t, map[string]json.RawMessage{
+		"eth_getBlockByNumber": json.RawMessage("null"),
+		"eth_getBlockByHash":   json.RawMessage("null"),
+		"eth_getBlockReceipts": json.RawMessage("null"),
+		"trace_block":          json.RawMessage("null"),
+		"eth_getBlobSidecars":  json.RawMessage("null"),
+	})
+}
+
+func TestGetBlockByNumber_NullResult(t *testing.T) {
+	server := nullResultServer(t)
+	defer server.Close()
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	raw, err := client.GetBlockByNumber(context.Background(), 100, false)
+	if raw != nil {
+		t.Errorf("expected nil result, got %q", string(raw))
+	}
+	if !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult, got %v", err)
+	}
+}
+
+func TestGetFullBlockByHash_NullResult(t *testing.T) {
+	server := nullResultServer(t)
+	defer server.Close()
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	raw, err := client.GetFullBlockByHash(context.Background(), "0xabc", false)
+	if raw != nil {
+		t.Errorf("expected nil result, got %q", string(raw))
+	}
+	if !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult, got %v", err)
+	}
+}
+
+func TestGetBlockReceipts_NullResult(t *testing.T) {
+	server := nullResultServer(t)
+	defer server.Close()
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := client.GetBlockReceipts(context.Background(), 100); !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult, got %v", err)
+	}
+	if _, err := client.GetBlockReceiptsByHash(context.Background(), "0xabc"); !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult from ByHash variant, got %v", err)
+	}
+}
+
+func TestGetBlockTraces_NullResult(t *testing.T) {
+	server := nullResultServer(t)
+	defer server.Close()
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := client.GetBlockTraces(context.Background(), 100); !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult, got %v", err)
+	}
+	if _, err := client.GetBlockTracesByHash(context.Background(), "0xabc"); !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult from ByHash variant, got %v", err)
+	}
+}
+
+func TestGetBlobSidecars_NullResult(t *testing.T) {
+	server := nullResultServer(t)
+	defer server.Close()
+	client, err := NewClient(ClientConfig{HTTPURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if _, err := client.GetBlobSidecars(context.Background(), 100); !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult, got %v", err)
+	}
+	if _, err := client.GetBlobSidecarsByHash(context.Background(), "0xabc"); !errors.Is(err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("expected rpcutil.ErrUpstreamNullResult from ByHash variant, got %v", err)
 	}
 }
