@@ -7,7 +7,7 @@ import { css } from '#styled-system/css';
 import { getExplorerUrl } from '../../lib/dashboard';
 
 type TokenAddressProps = {
-  address: string;
+  address: string | null | undefined;
   chainId?: number;
   /** Type of address: 'address' for contract/EOA, 'tx' for transaction hash */
   type?: 'address' | 'tx';
@@ -39,6 +39,21 @@ export function TokenAddress({
   className,
 }: TokenAddressProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  if (!address) {
+    return (
+      <span
+        style={style}
+        className={css({
+          fontFamily: 'mono',
+          fontSize: type === 'tx' ? 'xs' : '2xs',
+          color: 'text.muted',
+        })}
+      >
+        —
+      </span>
+    );
+  }
 
   const explorerUrl = getExplorerUrl(chainId, address, type);
 

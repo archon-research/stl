@@ -63,7 +63,8 @@ function titleCase(value: string): string {
     .join(' ');
 }
 
-function normalizeLabel(value: string): string {
+function normalizeLabel(value: string | null | undefined): string {
+  if (!value) return '';
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
@@ -155,10 +156,11 @@ export function getChainLabel(
 }
 
 export function getProtocolLabel(
-  protocol: string,
+  protocol: string | null | undefined,
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
 ): string {
+  if (!protocol) return 'Direct';
   const normalized = normalizeLabel(protocol);
   return (
     findProtocolMetadata(protocol, localProtocols, chainId)?.name ??

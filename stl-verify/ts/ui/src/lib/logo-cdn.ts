@@ -30,7 +30,11 @@ const PROTOCOL_SLUG_OVERRIDES: Record<string, string | null> = {
   grove: null,
 };
 
-export function buildTokenLogoUrl(_chainId: number, address: string): string {
+export function buildTokenLogoUrl(
+  _chainId: number,
+  address: string | null | undefined,
+): string | null {
+  if (!address) return null;
   return `${ONE_INCH_TOKEN_CDN_BASE}/${address.toLowerCase()}.png`;
 }
 
