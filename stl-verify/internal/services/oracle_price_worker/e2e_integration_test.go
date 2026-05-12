@@ -703,18 +703,30 @@ func TestE2E_VEC242_GapFillRetriesNull(t *testing.T) {
 	t.Cleanup(func() { _ = bfSvc.Stop() })
 
 	t.Run("phase1_null_does_not_persist_empty_hash_row", func(t *testing.T) {
-		// Give the gap-fill loop 2 ticks to attempt block 2 against a null upstream.
-		time.Sleep(300 * time.Millisecond)
-		bs, err := blockStateRepo.GetBlockByNumber(ctx, block2Num)
-		if err != nil {
-			t.Fatalf("GetBlockByNumber: %v", err)
-		}
-		if bs != nil && bs.Hash == "" {
-			t.Fatal("backfill persisted a row with empty hash from a null upstream — VEC-242 regression")
-		}
-		// Either no row yet, or the gap-fill correctly bailed out.
-		if bs != nil && bs.Hash != block2Hash {
-			t.Errorf("unexpected hash %q at block %d while upstream null", bs.Hash, block2Num)
+		// Bounded poll instead of a fixed sleep: the gap-fill loop ticks every
+		// PollInterval (100ms), so a 1s window covers ~10 attempts on any
+		// reasonable runner. We fail the test the instant a corrupted row
+		// appears at any point in the window; otherwise we proceed once the
+		// window elapses cleanly. This is deterministic on fast machines
+		// (asserts fire as soon as state is wrong) and robust on slow CI
+		// runners (the window is long enough for several ticks).
+		const window = 1 * time.Second
+		const pollEvery = 50 * time.Millisecond
+		deadline := time.Now().Add(window)
+		for time.Now().Before(deadline) {
+			bs, err := blockStateRepo.GetBlockByNumber(ctx, block2Num)
+			if err != nil {
+				t.Fatalf("GetBlockByNumber: %v", err)
+			}
+			if bs != nil {
+				if bs.Hash == "" {
+					t.Fatal("backfill persisted a row with empty hash from a null upstream — VEC-242 regression")
+				}
+				if bs.Hash != block2Hash {
+					t.Fatalf("unexpected hash %q at block %d while upstream null", bs.Hash, block2Num)
+				}
+			}
+			time.Sleep(pollEvery)
 		}
 	})
 

@@ -45,7 +45,7 @@ var _ outbound.BlockchainClient = (*Client)(nil)
 // callers can use errors.Is / errors.Unwrap.
 func extractResult(resp *jsonRPCResponse, callErr error, method, subject string) (json.RawMessage, error) {
 	if callErr != nil {
-		return nil, callErr
+		return nil, fmt.Errorf("%s %s: %w", method, subject, callErr)
 	}
 	if resp == nil {
 		return nil, fmt.Errorf("missing response for %s %s", method, subject)
