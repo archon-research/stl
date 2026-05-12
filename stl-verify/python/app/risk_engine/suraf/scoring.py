@@ -63,9 +63,8 @@ class SURAFResults:
 
     def load_assessor_scores(self, assessor_paths: list[Path | str]) -> None:
         """Load assessor score CSVs and compute per-assessor results."""
-        assert self.sub_weights is not None and self.pillar_weights is not None, (
-            "load_weights() must be called before load_assessor_scores()"
-        )
+        if self.sub_weights is None or self.pillar_weights is None:
+            raise RuntimeError("load_weights() must be called before load_assessor_scores()")
         rows = []
 
         for path in assessor_paths:
