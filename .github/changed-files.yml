@@ -2,6 +2,10 @@ go:
   - stl-verify/**
   - '!stl-verify/python/**'
   - '!stl-verify/ts/**'
+  - lefthook.yml
+  - stl-verify/lefthook.yml
+  - stl-verify/python/lefthook.yml
+  - stl-verify/ts/lefthook.yml
   - .github/changed-files.yml
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
@@ -10,6 +14,9 @@ go:
 python:
   - stl-verify/python/**
   - stl-verify/db/migrations/**
+  - lefthook.yml
+  - stl-verify/lefthook.yml
+  - stl-verify/python/lefthook.yml
   - .github/changed-files.yml
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
@@ -20,6 +27,9 @@ ts:
   - stl-verify/python/app/**
   - stl-verify/python/scripts/export_openapi_schema.py
   - stl-verify/python/Makefile
+  - lefthook.yml
+  - stl-verify/lefthook.yml
+  - stl-verify/ts/lefthook.yml
   - .github/changed-files.yml
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
