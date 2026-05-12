@@ -26,7 +26,7 @@ class FakeRiskModel:
         if self.risk_model == "suraf":
             return RrcResult(
                 asset_id=asset_id,
-                prime_id=str(prime_id),
+                prime_id=prime_id,
                 rrc_usd=Decimal("100"),
                 comparable_crr_pct=Decimal("10"),
                 risk_model="suraf",
@@ -42,7 +42,7 @@ class FakeRiskModel:
             )
         return RrcResult(
             asset_id=asset_id,
-            prime_id=str(prime_id),
+            prime_id=prime_id,
             rrc_usd=Decimal("200"),
             comparable_crr_pct=Decimal("20"),
             risk_model="gap_sweep",

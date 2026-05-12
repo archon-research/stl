@@ -92,7 +92,7 @@ class RrcResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     asset_id: int
-    prime_id: str
+    prime_id: str | EthAddress
     rrc_usd: Decimal
     comparable_crr_pct: Decimal
     risk_model: ModelName

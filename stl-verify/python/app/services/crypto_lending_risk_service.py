@@ -79,7 +79,7 @@ class CryptoLendingRiskService:
         )
         return RrcResult(
             asset_id=asset_id,
-            prime_id=str(prime_id),
+            prime_id=prime_id,
             rrc_usd=rrc_usd,
             comparable_crr_pct=self._compute_comparable_crr_pct(rrc_usd, position_usd),
             risk_model=self.risk_model,

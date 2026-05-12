@@ -45,7 +45,7 @@ _PRIME_B = EthAddress("0x" + "bb" * 20)
 
 _SURAF_RESULT = RrcResult(
     asset_id=1,
-    prime_id=str(_PRIME_A),
+    prime_id=_PRIME_A,
     rrc_usd=Decimal("337.00"),
     comparable_crr_pct=Decimal("33.7"),
     risk_model="suraf",
@@ -62,7 +62,7 @@ _SURAF_RESULT = RrcResult(
 
 _GAP_SWEEP_RESULT = RrcResult(
     asset_id=2,
-    prime_id=str(_PRIME_A),
+    prime_id=_PRIME_A,
     rrc_usd=Decimal("1200.50"),
     comparable_crr_pct=Decimal("12.00"),
     risk_model="gap_sweep",
@@ -162,7 +162,7 @@ class TestRrcResult:
         with pytest.raises(ValidationError):
             RrcResult(
                 asset_id=1,
-                prime_id=str(_PRIME_A),
+                prime_id=_PRIME_A,
                 rrc_usd=Decimal("100"),
                 comparable_crr_pct=Decimal("10"),
                 risk_model=risk_model,
@@ -173,7 +173,7 @@ class TestRrcResult:
         with pytest.raises(ValidationError):
             RrcResult(
                 asset_id=1,
-                prime_id=str(_PRIME_A),
+                prime_id=_PRIME_A,
                 rrc_usd=Decimal("100"),
                 comparable_crr_pct=Decimal("10"),
                 risk_model=cast(ModelName, "typo_model"),

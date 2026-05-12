@@ -71,7 +71,7 @@ class SurafRrcService:
         rrc_usd = (usd_exposure * rating.crr_pct / _HUNDRED).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
         return RrcResult(
             asset_id=asset_id,
-            prime_id=str(prime_id),
+            prime_id=prime_id,
             rrc_usd=rrc_usd,
             comparable_crr_pct=rating.crr_pct,
             risk_model=self.risk_model,
