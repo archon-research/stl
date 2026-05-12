@@ -13,6 +13,11 @@ type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
+// Sentinel filter value for allocations with no registered protocol wrapper
+// (direct asset holdings). Distinguishes "show only direct holdings" from
+// "show all protocols" (which uses selectedProtocol === null).
+export const DIRECT_PROTOCOL_FILTER_VALUE = '__direct__';
+
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
   spark: 'SparkLend',
@@ -160,7 +165,7 @@ export function getProtocolLabel(
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
 ): string {
-  if (!protocol) return 'Direct';
+  if (!protocol || protocol === DIRECT_PROTOCOL_FILTER_VALUE) return 'Direct';
   const normalized = normalizeLabel(protocol);
   return (
     findProtocolMetadata(protocol, localProtocols, chainId)?.name ??
@@ -199,10 +204,8 @@ export function buildProtocolOptions(
   const counts = new Map<string, number>();
 
   for (const allocation of allocations) {
-    counts.set(
-      allocation.protocol_name,
-      (counts.get(allocation.protocol_name) ?? 0) + 1,
-    );
+    const key = allocation.protocol_name ?? DIRECT_PROTOCOL_FILTER_VALUE;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
   return [...counts.entries()]

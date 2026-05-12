@@ -40,23 +40,6 @@ export function TokenAddress({
 }: TokenAddressProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
-  if (!address) {
-    return (
-      <span
-        style={style}
-        className={css({
-          fontFamily: 'mono',
-          fontSize: type === 'tx' ? 'xs' : '2xs',
-          color: 'text.muted',
-        })}
-      >
-        —
-      </span>
-    );
-  }
-
-  const explorerUrl = getExplorerUrl(chainId, address, type);
-
   useEffect(() => {
     if (!isMenuOpen) {
       return;
@@ -71,6 +54,26 @@ export function TokenAddress({
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isMenuOpen]);
+
+  if (!address) {
+    return (
+      <span
+        style={style}
+        className={
+          className ??
+          css({
+            fontFamily: 'mono',
+            fontSize: type === 'tx' ? 'xs' : '2xs',
+            color: 'text.muted',
+          })
+        }
+      >
+        —
+      </span>
+    );
+  }
+
+  const explorerUrl = getExplorerUrl(chainId, address, type);
 
   const handleCopy = async () => {
     try {
