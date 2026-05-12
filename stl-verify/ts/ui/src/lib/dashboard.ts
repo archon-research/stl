@@ -13,6 +13,11 @@ type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
+// Sentinel filter value for allocations with no registered protocol wrapper
+// (direct asset holdings). Distinguishes "show only direct holdings" from
+// "show all protocols" (which uses selectedProtocol === null).
+export const DIRECT_PROTOCOL_FILTER_VALUE = '__direct__';
+
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
   spark: 'SparkLend',
@@ -63,7 +68,8 @@ function titleCase(value: string): string {
     .join(' ');
 }
 
-function normalizeLabel(value: string): string {
+function normalizeLabel(value: string | null | undefined): string {
+  if (!value) return '';
   return value.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
@@ -155,10 +161,11 @@ export function getChainLabel(
 }
 
 export function getProtocolLabel(
-  protocol: string,
+  protocol: string | null | undefined,
   localProtocols?: LocalProtocolRow[],
   chainId?: number,
 ): string {
+  if (!protocol || protocol === DIRECT_PROTOCOL_FILTER_VALUE) return 'Direct';
   const normalized = normalizeLabel(protocol);
   return (
     findProtocolMetadata(protocol, localProtocols, chainId)?.name ??
@@ -168,7 +175,11 @@ export function getProtocolLabel(
 }
 
 export function getAllocationKey(allocation: Allocation): string {
-  return String(allocation.receipt_token_id);
+  if (allocation.receipt_token_id != null) {
+    return String(allocation.receipt_token_id);
+  }
+  // Direct holdings have no receipt token; identify by chain + underlying.
+  return `direct:${allocation.chain_id}:${allocation.underlying_token_id}`;
 }
 
 export function buildNetworkOptions(
@@ -197,10 +208,8 @@ export function buildProtocolOptions(
   const counts = new Map<string, number>();
 
   for (const allocation of allocations) {
-    counts.set(
-      allocation.protocol_name,
-      (counts.get(allocation.protocol_name) ?? 0) + 1,
-    );
+    const key = allocation.protocol_name ?? DIRECT_PROTOCOL_FILTER_VALUE;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
   }
 
   return [...counts.entries()]

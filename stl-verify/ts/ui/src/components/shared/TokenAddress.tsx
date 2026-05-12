@@ -7,7 +7,7 @@ import { css } from '#styled-system/css';
 import { getExplorerUrl } from '../../lib/dashboard';
 
 type TokenAddressProps = {
-  address: string;
+  address: string | null | undefined;
   chainId?: number;
   /** Type of address: 'address' for contract/EOA, 'tx' for transaction hash */
   type?: 'address' | 'tx';
@@ -40,8 +40,6 @@ export function TokenAddress({
 }: TokenAddressProps) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
-  const explorerUrl = getExplorerUrl(chainId, address, type);
-
   useEffect(() => {
     if (!isMenuOpen) {
       return;
@@ -56,6 +54,26 @@ export function TokenAddress({
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isMenuOpen]);
+
+  if (!address) {
+    return (
+      <span
+        style={style}
+        className={
+          className ??
+          css({
+            fontFamily: 'mono',
+            fontSize: type === 'tx' ? 'xs' : '2xs',
+            color: 'text.muted',
+          })
+        }
+      >
+        —
+      </span>
+    );
+  }
+
+  const explorerUrl = getExplorerUrl(chainId, address, type);
 
   const handleCopy = async () => {
     try {

@@ -25,6 +25,7 @@ import {
   buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
+  DIRECT_PROTOCOL_FILTER_VALUE,
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
@@ -403,7 +404,9 @@ function App() {
           String(allocation.chain_id) === selectedNetwork;
         const matchesProtocol =
           selectedProtocol === null ||
-          allocation.protocol_name === selectedProtocol;
+          (selectedProtocol === DIRECT_PROTOCOL_FILTER_VALUE
+            ? allocation.protocol_name === null
+            : allocation.protocol_name === selectedProtocol);
 
         return matchesNetwork && matchesProtocol;
       }),

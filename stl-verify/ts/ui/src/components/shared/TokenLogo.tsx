@@ -5,7 +5,7 @@ import { css } from '#styled-system/css';
 import { buildTokenLogoUrl } from '../../lib/logo-cdn';
 
 type TokenLogoProps = {
-  address: string;
+  address: string | null | undefined;
   chainId: number;
   isSelected?: boolean;
   size?: '6' | '7' | '8' | '9' | '10';

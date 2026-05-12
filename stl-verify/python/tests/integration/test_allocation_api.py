@@ -22,6 +22,9 @@ _SPARK_PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
 _GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
 _OBEX_PROXY_HEX = "fedcba9876543210fedcba9876543210fedcba98"
 _UNKNOWN_PROXY_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+# Real Spark SubProxy address — used to exercise the ALM-only filter in
+# /v1/primes. Must match app.domain.proxy_kind._SUB_PROXY_HEX.
+_SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
 
 # Underlying tokens seeded by the sparklend migration (all chain_id=1).
 _USDC_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -166,13 +169,28 @@ async def _seed(async_url: str) -> None:
                 {"tid": gno_id, "pid": grove_id, "proxy": _GROVE_PROXY_HEX, "tx": _TX4_HEX},
             )
 
-            # obex holds raw USDC. This exercises branch 1 of the receipt-token
-            # SQL (``rt.underlying_token_id = t.id``): a position recorded in
-            # the underlying token is mapped onto every receipt token whose
-            # underlying is that token. Today that surfaces aUSDC — a single
-            # holding, which also covers the single-holding acceptance case.
-            # If a second USDC-underlying receipt_token is ever seeded, this
-            # will fan out (see T2 review issue #2).
+            # Spark also has an entry under its SubProxy wallet (risk capital).
+            # /v1/primes must NOT surface this as a separate prime — it shares
+            # spark_id with the ALM proxy above.
+            await conn.execute(
+                text(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, tx_hash, log_index, tx_amount, direction) "
+                    "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), 42, 2000, decode(:tx, 'hex'), 1, 42, 'in')"
+                ),
+                {
+                    "tid": ausdc_token_id,
+                    "pid": spark_id,
+                    "proxy": _SPARK_SUB_PROXY_HEX,
+                    "tx": _TX2_HEX,
+                },
+            )
+
+            # obex holds raw USDC directly (not wrapped in any receipt token).
+            # The endpoint should not surface this under aUSDC or any other
+            # receipt token whose underlying is USDC: a direct underlying
+            # holding is its own asset, not a position in a wrapper.
             await conn.execute(
                 text(
                     "INSERT INTO allocation_position "
@@ -210,6 +228,11 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
     assert response.status_code == 200
     data = response.json()
+    # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
+    # filtered out — only the ALM proxy per prime should appear.
+    assert len(data) == 3
+    addresses = {item["address"] for item in data}
+    assert f"0x{_SPARK_SUB_PROXY_HEX}" not in addresses
     by_name = {item["name"]: item for item in data}
     assert set(by_name.keys()) == {"spark", "grove", "obex"}
     assert by_name["spark"]["id"] == f"0x{_SPARK_PROXY_HEX}"
@@ -250,43 +273,53 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["protocol_name"] == "Aave V3"
 
 
-def test_list_allocations_returns_single_holding_via_underlying_branch(
+def test_direct_underlying_holdings_surface_as_their_own_rows(
     client: TestClient,
 ) -> None:
-    """obex holds raw USDC — exercises the ``rt.underlying_token_id = t.id``
-    branch of the receipt-token SQL, which maps a position in the underlying
-    onto every receipt token whose underlying is that token. Today this
-    surfaces aUSDC (one row). Doubles as the single-holding case required
-    by T2's acceptance criteria.
+    """A prime holds raw USDC directly. It must not be attributed to any
+    USDC-wrapping receipt token (that would double-count and fan out), but
+    it should appear as a direct-asset row with null receipt_token fields
+    and ASSET category.
     """
     response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
+    row = data[0]
+    assert row["symbol"] == "USDC"
+    assert row["underlying_symbol"] == "USDC"
+    assert row["receipt_token_id"] is None
+    assert row["receipt_token_address"] is None
+    assert row["protocol_name"] is None
+    assert row["underlying_token_address"] == f"0x{_USDC_HEX}"
+    assert row["balance"] == "250"
+    assert row["category"] == "asset"
 
-    ausdc = data[0]
-    assert ausdc["chain_id"] == 1
-    assert ausdc["symbol"] == "aUSDC"
-    assert ausdc["balance"] == "250"
-    assert ausdc["receipt_token_address"] == f"0x{_AUSDC_HEX}"
-    assert ausdc["underlying_token_address"] == f"0x{_USDC_HEX}"
-    assert ausdc["underlying_symbol"] == "USDC"
-    assert ausdc["protocol_name"] == "Aave V3"
 
-
-def test_list_allocations_returns_empty_when_prime_has_no_receipt_token_holdings(
+def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     client: TestClient,
 ) -> None:
-    """grove holds only GNO, which has no receipt_token mapping."""
+    """A prime holds only GNO. There is no receipt_token wrapping GNO, so the
+    response contains exactly one direct-asset row and no receipt-token rows.
+    """
     response = client.get(f"/v1/primes/0x{_GROVE_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
-    assert response.json() == []
+    data = response.json()
+    assert len(data) == 1
+    row = data[0]
+    assert row["symbol"] == "GNO"
+    assert row["receipt_token_id"] is None
+    assert row["protocol_name"] is None
+    assert row["category"] == "asset"
 
 
 def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:
-    """A well-formed but unknown prime_id is a missing path resource → 404."""
+    """A well-formed address with no allocation_position history is not a
+    registered prime: the endpoint signals this with 404 rather than an
+    ambiguous empty list.
+    """
     response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/allocations")
 
     assert response.status_code == 404

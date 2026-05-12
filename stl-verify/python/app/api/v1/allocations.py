@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -52,24 +53,53 @@ class ProtocolResponse(BaseModel):
 
 
 class AllocationResponse(BaseModel):
-    """Enriched allocation response with category and metadata."""
+    """Enriched allocation response with category and metadata.
+
+    Two row shapes share this model:
+    - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
+    - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
+      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
+      ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
+      the held asset; ``underlying_token_id`` / ``underlying_token_address``
+      point at it.
+    """
 
     chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
-    receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
-    receipt_token_address: str = Field(
-        description="0x-prefixed receipt-token contract address.",
+    receipt_token_id: int | None = Field(
+        default=None,
+        description="Surrogate id of the receipt token. `null` for direct asset holdings.",
+        examples=[42],
+    )
+    receipt_token_address: str | None = Field(
+        default=None,
+        description="0x-prefixed receipt-token contract address. `null` for direct asset holdings.",
         examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
     )
-    underlying_token_id: int = Field(description="Surrogate id of the underlying token.", examples=[1])
+    underlying_token_id: int = Field(
+        description="Surrogate id of the underlying token. For direct holdings, this is the held asset itself.",
+        examples=[1],
+    )
     underlying_token_address: str = Field(
-        description="0x-prefixed underlying-token contract address.",
+        description=(
+            "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself."
+        ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
-    symbol: str = Field(description="Receipt-token symbol.", examples=["aUSDC"])
-    underlying_symbol: str = Field(description="Underlying-token symbol.", examples=["USDC"])
-    protocol_name: str = Field(description="Protocol the position is held in.", examples=["aave-v3"])
+    symbol: str = Field(
+        description="Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.",
+        examples=["aUSDC"],
+    )
+    underlying_symbol: str = Field(
+        description="Underlying-token symbol. For direct holdings, same as ``symbol``.",
+        examples=["USDC"],
+    )
+    protocol_name: str | None = Field(
+        default=None,
+        description="Protocol the position is held in. `null` for direct holdings (no registered wrapper).",
+        examples=["aave-v3"],
+    )
     balance: Decimal = Field(
-        description="Receipt-token balance held by the prime, in token units. Decimal serialized as a JSON string.",
+        description="Balance held by the prime, in token units. Decimal serialized as a JSON string.",
         examples=["1234567.89"],
     )
     amount_usd: Decimal | None = Field(
@@ -322,7 +352,7 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
 @router.get(
     "/capital-metrics",
     response_model=list[CapitalMetricsResponse],
-    tags=["capital"],
+    tags=["capital", "internal"],
     summary="List per-prime capital metrics",
     description=(
         "Join each tracked prime with the latest row from the upstream Star risk-capital monitor "
@@ -437,16 +467,25 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
     tags=["allocations"],
     summary="List a prime's current allocations",
     description=(
-        "Return every receipt-token position currently held by the given prime, enriched with "
-        "USD value (when a price is available), latest on-chain activity timestamp, and "
-        "a derived allocation `category` (`allocation` / `pol` / `psm3` / `asset`)."
+        "Return every current allocation held by the given prime — both receipt-token "
+        "positions (enriched with USD value when a price is available) and direct asset "
+        "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
+        "surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and "
+        "`amount_usd` set to `null`). Each row includes the latest on-chain activity "
+        "timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`)."
     ),
 )
 async def list_allocations(
     prime_id: EthAddressParam,
     service: AllocationService = Depends(_get_service),
 ):
-    """Return current receipt-token holdings for ``prime_id``.
+    """Return current allocations for ``prime_id``.
+
+    Combines two sources:
+    - Receipt-token positions (e.g. spUSDT wrapping USDT).
+    - Direct asset holdings — tokens held in the proxy that are not
+      registered as receipt-token wrappers (e.g. PYUSD, syrupUSDT). These
+      rows have null ``receipt_token_*`` / ``protocol_name`` / ``amount_usd``.
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -456,10 +495,13 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    positions = await service.list_receipt_token_positions(prime_address)
+    positions, direct_holdings = await asyncio.gather(
+        service.list_receipt_token_positions(prime_address),
+        service.list_direct_asset_holdings(prime_address),
+    )
     category_service = AllocationCategoryService()
 
-    return [
+    receipt_rows = [
         AllocationResponse(
             chain_id=p.chain_id,
             receipt_token_id=p.receipt_token_id,
@@ -476,6 +518,24 @@ async def list_allocations(
         )
         for p in positions
     ]
+    direct_rows = [
+        AllocationResponse(
+            chain_id=h.chain_id,
+            receipt_token_id=None,
+            receipt_token_address=None,
+            underlying_token_id=h.token_id,
+            underlying_token_address=h.token_address,
+            symbol=h.symbol,
+            underlying_symbol=h.symbol,
+            protocol_name=None,
+            balance=h.balance,
+            amount_usd=None,
+            latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
+            category=category_service.classify(None, h.symbol),
+        )
+        for h in direct_holdings
+    ]
+    return receipt_rows + direct_rows
 
 
 @router.get(

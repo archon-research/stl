@@ -121,6 +121,7 @@ def _share_error_503(exc: AllocationShareError) -> HTTPException:
     "/risk/{receipt_token_id}/bad-debt",
     response_model=BadDebtResponse,
     summary="Estimate bad debt at a collateral gap",
+    tags=["internal"],
     description=(
         "Estimate USD bad debt for a receipt-token position when collateral prices "
         "fall by `gap_pct` (a fraction in `[0, 1]`).\n\n"
@@ -196,12 +197,12 @@ async def get_risk_breakdown(
 
 
 # ---------------------------------------------------------------------------
-# Unified /v1/risk/rrc — registry-dispatched, multi-model
+# Unified /v1/risk/rrc{,/scenario} — registry-dispatched, multi-model
 # ---------------------------------------------------------------------------
 
 
 class RrcRequest(BaseModel):
-    """POST /v1/risk/rrc body — overrides keyed by model name."""
+    """POST /v1/risk/rrc/scenario body — overrides keyed by model name."""
 
     asset_id: int = Field(ge=1, description="Surrogate receipt-token id.", examples=[42])
     prime_id: EthAddressParam = Field(
@@ -296,7 +297,7 @@ async def get_rrc(
 
 
 @router.post(
-    "/risk/rrc",
+    "/risk/rrc/scenario",
     response_model=RrcEnvelope,
     summary="Risk capital (RRC) with scenario overrides",
     description=(
@@ -311,7 +312,7 @@ async def get_rrc(
         "- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails."
     ),
 )
-async def post_rrc(
+async def post_rrc_scenario(
     body: RrcRequest,
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
@@ -323,6 +324,20 @@ async def post_rrc(
         registry=registry,
         lookup=receipt_token_lookup,
     )
+
+
+@router.post(
+    "/risk/rrc",
+    response_model=RrcEnvelope,
+    include_in_schema=False,
+    deprecated=True,
+)
+async def post_rrc(
+    body: RrcRequest,
+    registry: ModelRegistry = Depends(get_model_registry),
+    receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+) -> RrcEnvelope:
+    return await post_rrc_scenario(body, registry, receipt_token_lookup)
 
 
 async def _compute_envelope(

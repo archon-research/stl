@@ -2099,3 +2099,143 @@ func TestBackfillService_RetryDoesNotOrphanWhenCanonicalVerificationFails(t *tes
 		t.Fatal("block X should NOT be orphaned — canonical verification failed (inconclusive)")
 	}
 }
+
+// TestCacheAndPublishBlockData_RejectsLiteralNullBytes is a defense-in-depth
+// guard against the regression described in VEC-242. The retry loop's call into
+// cacheAndPublishBlockData must refuse `[]byte("null")` so a retried fetch that
+// still comes back null does not flip block_published to true.
+func TestCacheAndPublishBlockData_RejectsLiteralNullBytes(t *testing.T) {
+	literalNull := json.RawMessage("null")
+	validReceipts := json.RawMessage(`[]`)
+	validTraces := json.RawMessage(`[]`)
+	validBlobs := json.RawMessage(`[]`)
+	validBlock := json.RawMessage(`{"hash":"0xabc","number":"0x64","timestamp":"0x67c00000"}`)
+
+	cases := []struct {
+		name         string
+		enableTraces bool
+		enableBlobs  bool
+		bd           outbound.BlockData
+		wantContain  string
+	}{
+		{
+			name: "null_block",
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       literalNull,
+				Receipts:    validReceipts,
+			},
+			wantContain: "missing block data",
+		},
+		{
+			name: "null_receipts",
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    literalNull,
+			},
+			wantContain: "missing receipts data",
+		},
+		{
+			name:         "null_traces_when_enabled",
+			enableTraces: true,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    validReceipts,
+				Traces:      literalNull,
+			},
+			wantContain: "missing traces data",
+		},
+		{
+			name:        "null_blobs_when_enabled",
+			enableBlobs: true,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    validReceipts,
+				Blobs:       literalNull,
+			},
+			wantContain: "missing blobs data",
+		},
+		{
+			name:         "all_valid_baseline",
+			enableTraces: true,
+			enableBlobs:  true,
+			bd: outbound.BlockData{
+				BlockNumber: 100,
+				Block:       validBlock,
+				Receipts:    validReceipts,
+				Traces:      validTraces,
+				Blobs:       validBlobs,
+			},
+			wantContain: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			client := newMockClient()
+			stateRepo := memory.NewBlockStateRepository()
+			cache := memory.NewBlockCache()
+			eventSink := memory.NewEventSink()
+
+			// Seed block state so MarkPublishComplete inside the success path
+			// has a row to update — needed for the baseline case.
+			hash := "0xabc"
+			parentHash := "0x0"
+			if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+				Number:         100,
+				Hash:           hash,
+				ParentHash:     parentHash,
+				ReceivedAt:     time.Now().Unix(),
+				BlockTimestamp: time.Now().Unix(),
+			}); err != nil {
+				t.Fatalf("seed block: %v", err)
+			}
+
+			cfg := BackfillConfig{
+				ChainID:      1,
+				BatchSize:    10,
+				PollInterval: 30 * time.Second,
+				EnableTraces: tc.enableTraces,
+				EnableBlobs:  tc.enableBlobs,
+				Logger:       slog.Default(),
+			}
+			svc, err := NewBackfillService(cfg, client, stateRepo, cache, eventSink)
+			if err != nil {
+				t.Fatalf("NewBackfillService: %v", err)
+			}
+
+			header := outbound.BlockHeader{
+				Number:     "0x64",
+				Hash:       hash,
+				ParentHash: parentHash,
+				Timestamp:  "0x67c00000",
+			}
+
+			err = svc.cacheAndPublishBlockData(ctx, tc.bd, header, 0, time.Now())
+
+			if tc.wantContain == "" {
+				if err != nil {
+					t.Fatalf("expected success, got %v", err)
+				}
+				if len(eventSink.GetBlockEvents()) != 1 {
+					t.Errorf("expected exactly 1 BlockEvent on success, got %d", len(eventSink.GetBlockEvents()))
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantContain)
+			}
+			if !strings.Contains(err.Error(), tc.wantContain) {
+				t.Errorf("expected error containing %q, got %q", tc.wantContain, err.Error())
+			}
+			if len(eventSink.GetBlockEvents()) != 0 {
+				t.Errorf("expected no BlockEvents when rejecting null payload, got %d", len(eventSink.GetBlockEvents()))
+			}
+		})
+	}
+}
