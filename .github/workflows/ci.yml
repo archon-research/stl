@@ -59,7 +59,7 @@ jobs:
     uses: ./.github/workflows/ts-ci.yml
     secrets: inherit
 
-  success:
+  ci-passed:
     name: Success
     needs:
       - detect-changes
@@ -79,11 +79,11 @@ jobs:
     name: Deploy
     needs:
       - detect-changes
-      - success
+      - ci-passed
     if: |
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
-      needs.success.result == 'success' &&
+      needs.ci-passed.result == 'success' &&
       (
         needs.detect-changes.outputs.go == 'true' ||
         needs.detect-changes.outputs.python == 'true' ||
