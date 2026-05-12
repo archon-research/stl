@@ -37,9 +37,6 @@ asyncio_mode = "auto"
 include = ["app", "tests", "scripts"]
 exclude = [".venv", "**/__pycache__", "app/static"]
 
-[tool.ty.environment]
-python-version = "3.12"
-
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 

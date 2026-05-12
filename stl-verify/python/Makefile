@@ -10,7 +10,7 @@ OPENAPI_SCHEMA := $(TS_DIR)/ui/src/generated/openapi-schema.json
 typecheck:
 	$(UV) run --extra dev ty check
 
-lint: typecheck
+lint:
 	$(UV) run --extra dev ruff check .
 	$(UV) run --extra dev ruff format --check .
 
