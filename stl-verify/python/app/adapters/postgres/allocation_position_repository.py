@@ -15,6 +15,7 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.proxy_kind import ProxyKind, classify_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,15 @@ class PostgresAllocationRepository:
                         """
                     )
                 )
-                return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+                primes: list[Prime] = []
+                for row in result:
+                    address = "0x" + row.address
+                    # SubProxy wallets share a prime_id with the ALM proxy; surfacing
+                    # them here would duplicate each prime in /v1/primes.
+                    if classify_proxy(address) is not ProxyKind.ALM:
+                        continue
+                    primes.append(Prime(id=address, name=row.name, address=address))
+                return primes
         except asyncio.CancelledError:
             raise
         except Exception as exc:
