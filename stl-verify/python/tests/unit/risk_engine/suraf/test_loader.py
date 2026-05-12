@@ -76,11 +76,11 @@ class TestLoadAllRatings:
             load_all_ratings(inputs_dir, source_commit_sha="x")
 
     def test_raises_on_malformed_csv(self, inputs_dir: Path) -> None:
-        """Shape checks pass but the scorer raises — loader wraps it as a
-        SurafValidationError with package context."""
+        """Shape checks pass but the CSV parser raises a SurafValidationError
+        identifying the bad file."""
         (inputs_dir / "ratings" / "sample_rating" / "v1" / "crr_mapping.csv").write_text("not,a,real,schema\n1,2,3,4\n")
 
-        with pytest.raises(SurafValidationError, match="scoring failed"):
+        with pytest.raises(SurafValidationError, match="crr_mapping.csv.*missing required column"):
             load_all_ratings(inputs_dir, source_commit_sha="x")
 
     def test_empty_ratings_dir_returns_empty_dict(self, tmp_path: Path) -> None:

@@ -8,5 +8,7 @@
     "enabled": true,
     "args": ["serve"]
   },
-  "pgsql.connections": []
+  "pgsql.connections": [],
+  "python.defaultInterpreterPath": "${workspaceFolder}/stl-verify/python/.venv/bin/python",
+  "ty.interpreter": ["${workspaceFolder}/stl-verify/python/.venv/bin/python"]
 }

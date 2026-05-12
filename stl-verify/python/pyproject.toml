@@ -11,13 +11,11 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "httpx>=0.28.1",
-    "axis-synome==0.1.dev188",
+    "axis-synome[runtime] @ git+ssh://git@github.com/archon-research/next-gen-atlas.git@6259ebc48d10938bba0a077ad6904aecb0fe7176#subdirectory=python/axis_synome",
     "opentelemetry-sdk>=1.41.0,<2",
     "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
     "opentelemetry-exporter-otlp>=1.41.0,<2",
-    "pandas>=2.2.0",
-    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +32,11 @@ asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+# Required to allow the git+ssh:// reference for axis-synome while we wait
+# for an upstream release containing PR #23 to be published.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]

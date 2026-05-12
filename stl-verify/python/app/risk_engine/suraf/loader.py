@@ -5,7 +5,7 @@ rating configuration fails the app explicitly rather than silently
 omitting a model.
 
 Layout: ``ratings/{rating_id}/{version}/`` where ``{version}`` matches
-``v{N}`` (``v1``, ``v2``, …).
+``v{N}`` (``v1``, ``v2``, ...).
 """
 
 from __future__ import annotations
@@ -14,23 +14,31 @@ import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
+
+from axis_synome.spec.suraf.formulas.scoring import (
+    calculate_penalty,
+    map_crr,
+    total_n_score_1,
+    weighted_average,
+)
 
 from app.logging import get_logger
 
+from .parsing import load_version
 from .result import SurafResult
-from .scoring import SURAFResults
-from .validate import (
-    CRR_MAPPING_FILE,
-    PENALTY_FILE,
-    WEIGHTS_FILE,
-    SurafValidationError,
-    scorecard_paths,
-    validate_version,
-)
+from .validate import SurafValidationError, validate_version
 
 logger = get_logger(__name__)
 
 _VERSION_RE = re.compile(r"^v(\d+)$")
+
+
+class ScoredRating(NamedTuple):
+    avg_score: float
+    unadjusted_crr: float
+    penalty: float
+    adjusted_crr: float
 
 
 def _version_number(path: Path) -> int:
@@ -47,16 +55,17 @@ def _latest_version_dir(rating_dir: Path) -> Path:
     return max(versions, key=_version_number)
 
 
-def _score_version(version_dir: Path) -> SURAFResults:
+def _score_version(version_dir: Path) -> ScoredRating:
     try:
-        results = SURAFResults()
-        results.run(
-            weights_path=version_dir / WEIGHTS_FILE,
-            assessor_paths=list(scorecard_paths(version_dir)),
-            crr_path=version_dir / CRR_MAPPING_FILE,
-            penalty_path=version_dir / PENALTY_FILE,
-        )
-        return results
+        parsed = load_version(version_dir)
+        avg = weighted_average(parsed.assessors)
+        unadj = map_crr(avg, parsed.crr_mapping)
+        n1 = total_n_score_1(parsed.assessors)
+        penalty = calculate_penalty(n1, parsed.penalty_mapping)
+        adjusted = min(unadj + penalty, 100.0)
+        return ScoredRating(avg_score=avg, unadjusted_crr=unadj, penalty=penalty, adjusted_crr=adjusted)
+    except SurafValidationError:
+        raise
     except Exception as exc:
         raise SurafValidationError(f"scoring failed for {version_dir}: {exc}") from exc
 
@@ -64,7 +73,7 @@ def _score_version(version_dir: Path) -> SURAFResults:
 def _build_result(
     rating_id: str,
     version: str,
-    scored: SURAFResults,
+    scored: ScoredRating,
     source_commit_sha: str,
 ) -> SurafResult:
     return SurafResult(
