@@ -78,15 +78,39 @@ jobs:
     steps:
       - run: echo "multi-line call-deploy FIRED"
 
-  call-deploy-singleline:
-    name: Deploy (single-line if)
+  call-deploy-with-always:
+    name: Deploy (multi-line if + always())
     needs:
       - detect-changes
       - ci-passed
-    if: ${{ github.event_name == 'pull_request' && needs.ci-passed.result == 'success' && (needs.detect-changes.outputs.go == 'true' || needs.detect-changes.outputs.python == 'true' || needs.detect-changes.outputs.ts == 'true') }}
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      needs.ci-passed.result == 'success' &&
+      (
+        needs.detect-changes.outputs.go == 'true' ||
+        needs.detect-changes.outputs.python == 'true' ||
+        needs.detect-changes.outputs.ts == 'true'
+      )
     runs-on: ubuntu-latest
     steps:
-      - run: echo "single-line call-deploy FIRED"
+      - run: echo "always()+if call-deploy FIRED"
+
+  call-deploy-success-fn:
+    name: Deploy (success() function)
+    needs:
+      - detect-changes
+      - ci-passed
+    if: |
+      success() &&
+      (
+        needs.detect-changes.outputs.go == 'true' ||
+        needs.detect-changes.outputs.python == 'true' ||
+        needs.detect-changes.outputs.ts == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "success() call-deploy FIRED"
 
   debug-values:
     name: Echo resolved values
