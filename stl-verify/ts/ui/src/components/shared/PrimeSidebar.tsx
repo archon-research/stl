@@ -1,9 +1,14 @@
-import { SkeletonStack, ThemeToggle } from '@archon-research/design-system';
+import {
+  EmptyState,
+  ErrorState,
+  SkeletonStack,
+  ThemeToggle,
+} from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { EmptyState, ErrorState, ProtocolLogo } from '.';
+import { ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {

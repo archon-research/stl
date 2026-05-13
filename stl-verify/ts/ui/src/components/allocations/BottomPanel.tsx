@@ -1,4 +1,6 @@
 import {
+  EmptyState,
+  ErrorState,
   SearchInput,
   StyledSelect,
   Toggle,
@@ -23,7 +25,6 @@ import type {
   Prime,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { EmptyState, ErrorState } from '../shared';
 import { ActivityFeed } from './tabs/ActivityFeed';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 import { RrcTab } from './tabs/RrcTab';

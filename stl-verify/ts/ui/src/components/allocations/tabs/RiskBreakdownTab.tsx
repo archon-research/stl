@@ -1,13 +1,14 @@
 import {
+  DataTable,
   LoadingIndicator,
   SkeletonStack,
+  useDataTable,
 } from '@archon-research/design-system';
 import { type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { DataTable, useDataTable } from '../../../data-table';
 import {
   buildRowSearchString,
   matchesSearchQuery,

@@ -1,11 +1,16 @@
-import { SearchInput } from '@archon-research/design-system';
+import {
+  DataTable,
+  EmptyState,
+  ErrorState,
+  SearchInput,
+  useDataTable,
+} from '@archon-research/design-system';
 import { type ColumnDef, type SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { DataTable, useDataTable } from '../../data-table';
 import {
   type ChainLabelLookup,
   formatDateTime,
@@ -32,8 +37,6 @@ import type { LocalProtocolRow } from '../../types/local-data';
 import {
   AppTooltip,
   ChainLogo,
-  EmptyState,
-  ErrorState,
   ProtocolLogo,
   SummaryMetric,
   TokenAddress,

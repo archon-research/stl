@@ -1,4 +1,8 @@
-import { SkeletonStack } from '@archon-research/design-system';
+import {
+  EmptyState,
+  ErrorState,
+  SkeletonStack,
+} from '@archon-research/design-system';
 import { ArrowDownRight, ArrowRightLeft, ArrowUpLeft } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -25,7 +29,6 @@ import type {
 } from '../../../types/allocation';
 import { ChainLogo, ProtocolLogo } from '../../shared';
 import { TokenAddress } from '../../shared';
-import { EmptyState, ErrorState } from '../../shared';
 
 type ActivityFeedProps = {
   isEnabled: boolean;
