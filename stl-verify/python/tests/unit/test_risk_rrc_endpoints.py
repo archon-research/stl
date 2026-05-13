@@ -75,7 +75,7 @@ class _FakeRiskModel:
 def _suraf_result(rrc_usd: Decimal = Decimal("337.0")) -> RrcResult:
     return RrcResult(
         asset_id=_ASSET_ID,
-        prime_id=_PRIME_ID,
+        prime_id=_PRIME,
         rrc_usd=rrc_usd,
         comparable_crr_pct=Decimal("33.7"),
         risk_model="suraf",
@@ -94,7 +94,7 @@ def _suraf_result(rrc_usd: Decimal = Decimal("337.0")) -> RrcResult:
 def _gap_sweep_result(rrc_usd: Decimal = Decimal("1200.5")) -> RrcResult:
     return RrcResult(
         asset_id=_ASSET_ID,
-        prime_id=_PRIME_ID,
+        prime_id=_PRIME,
         rrc_usd=rrc_usd,
         comparable_crr_pct=Decimal("12.00"),
         risk_model="gap_sweep",
