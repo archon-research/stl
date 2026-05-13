@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,15 +32,16 @@ import (
 )
 
 // TestRun_EndToEnd exercises the full null-payload-refill flow against
-// LocalStack (S3, SNS, SQS), a TimescaleDB testcontainer, and a small
-// in-process JSON-RPC mock server. The subtests cover both key sources:
+// LocalStack (S3, SNS, SQS) and a small in-process JSON-RPC mock server. The
+// tool no longer talks to Postgres — all canonical-block metadata is derived
+// from RPC via eth_getBlockByNumber. The subtests cover both key sources:
 //
 //   - FileKeysFile: --keys-file is set; the tool ignores the bucket scan and
 //     reads keys from a pre-built file.
 //   - BucketScan:   --keys-file is empty; the tool lists S3 objects with
 //     Size <= --max-size and refills each one.
 //
-// Both variants share the same LocalStack/DB seeding via runRefillScenario.
+// Both variants share the same LocalStack seeding via runRefillScenario.
 func TestRun_EndToEnd(t *testing.T) {
 	t.Run("FileKeysFile", func(t *testing.T) {
 		runRefillScenario(t, true)
@@ -49,44 +51,25 @@ func TestRun_EndToEnd(t *testing.T) {
 	})
 }
 
-// runRefillScenario seeds LocalStack, Postgres, and the mock RPC, then runs
-// Run() once. When useKeysFile is true the keys-file path is supplied; when
-// false the tool scans the bucket via ListObjectsV2.
+// runRefillScenario seeds LocalStack and the mock RPC, then runs Run() once.
+// When useKeysFile is true the keys-file path is supplied; when false the
+// tool scans the bucket via ListObjectsV2.
 func runRefillScenario(t *testing.T, useKeysFile bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// 1. Bring up LocalStack (S3+SNS+SQS) and Postgres testcontainer.
+	// 1. Bring up LocalStack (S3+SNS+SQS).
 	_, lsCfg := testutil.StartLocalStack(t, ctx, "s3,sns,sqs")
-	pool, dsn, dbCleanup := testutil.SetupTimescaleDB(t)
-	t.Cleanup(dbCleanup)
 
-	// 2. Seed chain row so block_states FK is satisfied.
 	const chainID int64 = 43114
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO chain (chain_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-		chainID, "Avalanche C-Chain Test",
-	); err != nil {
-		t.Fatalf("seed chain: %v", err)
-	}
-
-	// 3. Insert a block_states row for the target block.
 	const blockNum int64 = 85149017
 	const blockHash = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	const parentHash = "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	const blockTimestamp int64 = 1730000000
 
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO block_states (chain_id, number, hash, parent_hash, received_at, is_orphaned, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		chainID, blockNum, blockHash, parentHash, blockTimestamp, false, time.Unix(blockTimestamp, 0).UTC(),
-	); err != nil {
-		t.Fatalf("seed block_states: %v", err)
-	}
-
-	// 4. Set up AWS clients.
+	// 2. Set up AWS clients.
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(lsCfg.Region),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
@@ -105,7 +88,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 		o.BaseEndpoint = aws.String(lsCfg.Endpoint)
 	})
 
-	// 5. Create S3 bucket and seed it with a null gzipped block object plus
+	// 3. Create S3 bucket and seed it with a null gzipped block object plus
 	//    a sentinel large object (BucketScan path must skip the large one).
 	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
 	bucket := "refill-" + suffix
@@ -118,29 +101,33 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	const sentinelKey = "85149000-85149999/85149018_0_block.json.gz"
 	putGzippedObject(t, ctx, s3c, bucket, sentinelKey, bytes.Repeat([]byte("x"), 4096))
 
-	// 6. Create a FIFO SNS topic and a subscribed FIFO SQS queue.
+	// 4. Create a FIFO SNS topic and a subscribed FIFO SQS queue.
 	topicArn := createFifoTopic(t, ctx, snsc, "refill-topic-"+suffix+".fifo")
 	queueURL := createFifoQueue(t, ctx, sqsc, "refill-queue-"+suffix+".fifo")
 	subscribeQueueToTopic(t, ctx, snsc, sqsc, topicArn, queueURL)
 
-	// 7. Start the in-process JSON-RPC server that mimics Alchemy.
+	// 5. Start the in-process JSON-RPC server that mimics Alchemy. The
+	//    canonical header response is what loadCanonicalBlock decodes for
+	//    hash/parentHash/timestamp; the data response is what fetchData reads
+	//    via GetBlockDataByHash.
+	canonicalHeader := json.RawMessage(fmt.Sprintf(
+		`{"hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
+		blockHash, parentHash, blockTimestamp,
+	))
 	validBlock := json.RawMessage(`{"number":"0x512f1c9","hash":"` + blockHash + `","parentHash":"` + parentHash + `"}`)
 	validReceipts := json.RawMessage(`[]`)
 	rpcSrv := startMockRPCServer(t, mockResponses{
-		Block:    validBlock,
-		Receipts: validReceipts,
-		Traces:   json.RawMessage(`[]`),
-		Blobs:    json.RawMessage(`[]`),
+		BlockByNumber: canonicalHeader,
+		Block:         validBlock,
+		Receipts:      validReceipts,
+		Traces:        json.RawMessage(`[]`),
+		Blobs:         json.RawMessage(`[]`),
 	})
 	t.Cleanup(rpcSrv.Close)
 
-	// 8. Build Options for the chosen key source.
+	// 6. Build Options for the chosen key source.
 	tmpDir := t.TempDir()
 	stateFile := filepath.Join(tmpDir, "state.jsonl")
-
-	// pool is held to keep the testcontainer alive via dbCleanup; Run will
-	// open its own pgxpool to dsn.
-	_ = pool
 
 	opts := Options{
 		Bucket:      bucket,
@@ -148,7 +135,6 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 		StateFile:   stateFile,
 		SNSTopicARN: topicArn,
 		RPCURL:      rpcSrv.URL,
-		PostgresURL: dsn,
 		SNSEndpoint: lsCfg.Endpoint,
 		S3Endpoint:  lsCfg.Endpoint,
 		AWSRegion:   lsCfg.Region,
@@ -177,7 +163,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 		t.Fatalf("Run exit code = %d, want 0", exitCode)
 	}
 
-	// 9. Verify S3 was overwritten with non-null content.
+	// 7. Verify S3 was overwritten with non-null content.
 	got := fetchObject(t, ctx, s3c, bucket, key)
 	if jsonutil.IsNullOrEmpty(got) {
 		t.Fatalf("S3 object still null after refill: %q", got)
@@ -186,7 +172,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 		t.Errorf("S3 object %q does not contain expected block hash %q", got, blockHash)
 	}
 
-	// 10. Verify SNS published an event into the SQS queue.
+	// 8. Verify SNS published an event into the SQS queue.
 	msg := receiveOneSQSMessage(t, ctx, sqsc, queueURL, 10*time.Second)
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(msg), &raw); err != nil {
@@ -206,8 +192,14 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	if event.ChainID != chainID || event.BlockNumber != blockNum || event.BlockHash != blockHash {
 		t.Errorf("event mismatch: %+v", event)
 	}
+	if event.ParentHash != parentHash {
+		t.Errorf("event parent hash = %q, want %q", event.ParentHash, parentHash)
+	}
+	if event.BlockTimestamp != blockTimestamp {
+		t.Errorf("event block timestamp = %d, want %d", event.BlockTimestamp, blockTimestamp)
+	}
 
-	// 11. State file has stage:sns for the key.
+	// 9. State file has stage:sns for the key.
 	st, err := Load(stateFile)
 	if err != nil {
 		t.Fatalf("load final state: %v", err)
@@ -226,10 +218,11 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 // ----- helpers ---------------------------------------------------------------
 
 type mockResponses struct {
-	Block    json.RawMessage
-	Receipts json.RawMessage
-	Traces   json.RawMessage
-	Blobs    json.RawMessage
+	BlockByNumber json.RawMessage
+	Block         json.RawMessage
+	Receipts      json.RawMessage
+	Traces        json.RawMessage
+	Blobs         json.RawMessage
 }
 
 func startMockRPCServer(t *testing.T, resp mockResponses) *httptest.Server {
@@ -275,6 +268,8 @@ type rpcResp struct {
 func handleSingle(req rpcReq, resp mockResponses) rpcResp {
 	r := rpcResp{JSONRPC: "2.0", ID: req.ID}
 	switch req.Method {
+	case "eth_getBlockByNumber":
+		r.Result = resp.BlockByNumber
 	case "eth_getBlockByHash":
 		r.Result = resp.Block
 	case "eth_getBlockReceipts":

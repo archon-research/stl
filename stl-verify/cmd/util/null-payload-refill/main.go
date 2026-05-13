@@ -14,10 +14,35 @@
 // For each candidate key the tool:
 //
 //  1. Verifies the existing S3 object is still null (gunzip + IsNullOrEmpty).
-//  2. Looks up the canonical block hash from block_states.
+//  2. Looks up the canonical block hash from the RPC via eth_getBlockByNumber.
 //  3. Fetches the corresponding data from RPC via GetBlockDataByHash.
 //  4. Overwrites the S3 object.
 //  5. Republishes a BlockEvent to the watcher's SNS topic.
+//
+// The tool does not connect to Postgres: all metadata it needs is derived from
+// RPC, so it can run anywhere with AWS + RPC credentials.
+//
+// Limitation — keys with version > 0 cannot be refilled
+//
+// S3 keys include a version slot — v0 is the first canonical attempt, v1+ are
+// re-attempts triggered by chain reorgs (each version slot holds the data for
+// a different block hash that was canonical at the time). The DB row in
+// block_states is the only place that records which hash maps to which slot.
+//
+// Without the DB, we can only ask RPC "what is the canonical block at this
+// number now?" — that answer corresponds to v0 only. Using the current
+// canonical hash to refill a v1 slot would write data for the wrong block
+// hash (today's canonical, not yesterday's orphan), silently corrupting the
+// slot far worse than the original null. So we skip those keys with
+// reason=cannot-determine-orphan-hash and let them remain null. The operator
+// can grep the state file post-run for that reason.
+//
+// In practice every null record observed in the wild is v0 (per the VEC-241
+// inventory), so this skip path has never fired against real data. If it
+// ever does, the fix is either (a) extend the keys-file format to carry a
+// hash hint per key (operator pulls the hash from a fresh snapshot or by
+// hand), or (b) restore the DB lookup path as an optional --postgres-url
+// fallback.
 //
 // Progress is persisted to a JSONL state file so the tool is resumable.
 package main
@@ -40,7 +65,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
@@ -86,7 +110,6 @@ type Options struct {
 	StateFile   string
 	SNSTopicARN string
 	RPCURL      string
-	PostgresURL string
 	SNSEndpoint string
 	S3Endpoint  string
 	AWSRegion   string
@@ -113,7 +136,6 @@ func parseFlags(args []string) (Options, error) {
 	fs.StringVar(&opts.StateFile, "state-file", "", "JSONL state file path; defaults to <keys-file>.state or null-payload-refill.state when scanning")
 	fs.StringVar(&opts.SNSTopicARN, "sns-topic-arn", "", "SNS FIFO topic ARN to publish BlockEvents to (required)")
 	fs.StringVar(&opts.RPCURL, "rpc-url", "", "JSON-RPC endpoint URL (required)")
-	fs.StringVar(&opts.PostgresURL, "postgres-url", "", "PostgreSQL connection string (required)")
 	fs.StringVar(&opts.SNSEndpoint, "sns-endpoint", "", "Optional SNS endpoint override (for LocalStack)")
 	fs.StringVar(&opts.S3Endpoint, "s3-endpoint", "", "Optional S3 endpoint override (for LocalStack)")
 	fs.StringVar(&opts.AWSRegion, "aws-region", "", "Optional AWS region override")
@@ -136,9 +158,6 @@ func parseFlags(args []string) (Options, error) {
 	}
 	if opts.RPCURL == "" {
 		return opts, errors.New("--rpc-url is required")
-	}
-	if opts.PostgresURL == "" {
-		return opts, errors.New("--postgres-url is required")
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
@@ -201,13 +220,6 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 		}
 	}()
 
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(opts.PostgresURL))
-	if err != nil {
-		return 1, fmt.Errorf("open postgres: %w", err)
-	}
-	defer pool.Close()
-	blockstateRepo := postgres.NewBlockStateRepository(pool, opts.ChainID, logger)
-
 	rpc, err := alchemy.NewClient(alchemy.ClientConfig{
 		HTTPURL:      opts.RPCURL,
 		Logger:       logger,
@@ -225,7 +237,6 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 		S3Reader:     s3Reader,
 		S3Overwriter: s3Overwriter,
 		RPCClient:    rpc,
-		BlockState:   blockstateRepo,
 		Publisher:    publisher,
 		State:        state,
 		Logger:       logger,

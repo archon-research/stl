@@ -131,10 +131,13 @@ func (f *fakeS3Overwriter) get(bucket, key string) []byte {
 }
 
 type fakeRPCClient struct {
-	mu       sync.Mutex
-	response outbound.BlockData
-	err      error
-	calls    []rpcCall
+	mu            sync.Mutex
+	response      outbound.BlockData
+	err           error
+	byNumber      map[int64]json.RawMessage
+	byNumberErr   error
+	byNumberCalls []int64
+	dataCalls     []rpcCall
 }
 
 type rpcCall struct {
@@ -142,18 +145,31 @@ type rpcCall struct {
 	Hash     string
 }
 
+func newFakeRPCClient() *fakeRPCClient {
+	return &fakeRPCClient{byNumber: make(map[int64]json.RawMessage)}
+}
+
 func (f *fakeRPCClient) GetBlockDataByHash(_ context.Context, blockNum int64, hash string, _ bool) (outbound.BlockData, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, rpcCall{BlockNum: blockNum, Hash: hash})
+	f.dataCalls = append(f.dataCalls, rpcCall{BlockNum: blockNum, Hash: hash})
 	if f.err != nil {
 		return outbound.BlockData{}, f.err
 	}
 	return f.response, nil
 }
 
-func (f *fakeRPCClient) GetBlockByNumber(_ context.Context, _ int64, _ bool) (json.RawMessage, error) {
-	panic("fakeRPCClient.GetBlockByNumber: not used by tests")
+func (f *fakeRPCClient) GetBlockByNumber(_ context.Context, blockNum int64, _ bool) (json.RawMessage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byNumberCalls = append(f.byNumberCalls, blockNum)
+	if f.byNumberErr != nil {
+		return nil, f.byNumberErr
+	}
+	if v, ok := f.byNumber[blockNum]; ok {
+		return v, nil
+	}
+	return json.RawMessage("null"), nil
 }
 
 func (f *fakeRPCClient) GetBlockByHash(_ context.Context, _ string, _ bool) (*outbound.BlockHeader, error) {
@@ -196,99 +212,16 @@ func (f *fakeRPCClient) GetBlocksBatch(_ context.Context, _ []int64, _ bool) ([]
 	panic("fakeRPCClient.GetBlocksBatch: not used by tests")
 }
 
-func (f *fakeRPCClient) callCount() int {
+func (f *fakeRPCClient) dataCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.calls)
+	return len(f.dataCalls)
 }
 
-type fakeBlockState struct {
-	mu    sync.Mutex
-	rows  map[int64]*outbound.BlockState
-	err   error
-	calls int
-}
-
-func newFakeBlockState() *fakeBlockState {
-	return &fakeBlockState{rows: make(map[int64]*outbound.BlockState)}
-}
-
-func (f *fakeBlockState) GetBlockByNumber(_ context.Context, number int64) (*outbound.BlockState, error) {
+func (f *fakeRPCClient) byNumberCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls++
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.rows[number], nil
-}
-
-func (f *fakeBlockState) SaveBlock(_ context.Context, _ outbound.BlockState) (int, error) {
-	panic("fakeBlockState.SaveBlock: not used by tests")
-}
-
-func (f *fakeBlockState) GetLastBlock(_ context.Context) (*outbound.BlockState, error) {
-	panic("fakeBlockState.GetLastBlock: not used by tests")
-}
-
-func (f *fakeBlockState) GetBlockByHash(_ context.Context, _ string) (*outbound.BlockState, error) {
-	panic("fakeBlockState.GetBlockByHash: not used by tests")
-}
-
-func (f *fakeBlockState) GetBlockVersionCount(_ context.Context, _ int64) (int, error) {
-	panic("fakeBlockState.GetBlockVersionCount: not used by tests")
-}
-
-func (f *fakeBlockState) GetRecentBlocks(_ context.Context, _ int) ([]outbound.BlockState, error) {
-	panic("fakeBlockState.GetRecentBlocks: not used by tests")
-}
-
-func (f *fakeBlockState) MarkBlockOrphaned(_ context.Context, _ string) error {
-	panic("fakeBlockState.MarkBlockOrphaned: not used by tests")
-}
-
-func (f *fakeBlockState) HandleReorgAtomic(_ context.Context, _ int64, _ outbound.ReorgEvent, _ outbound.BlockState) (int, error) {
-	panic("fakeBlockState.HandleReorgAtomic: not used by tests")
-}
-
-func (f *fakeBlockState) GetMinBlockNumber(_ context.Context) (int64, error) {
-	panic("fakeBlockState.GetMinBlockNumber: not used by tests")
-}
-
-func (f *fakeBlockState) GetMaxBlockNumber(_ context.Context) (int64, error) {
-	panic("fakeBlockState.GetMaxBlockNumber: not used by tests")
-}
-
-func (f *fakeBlockState) GetBackfillWatermark(_ context.Context) (int64, error) {
-	panic("fakeBlockState.GetBackfillWatermark: not used by tests")
-}
-
-func (f *fakeBlockState) SetBackfillWatermark(_ context.Context, _ int64) error {
-	panic("fakeBlockState.SetBackfillWatermark: not used by tests")
-}
-
-func (f *fakeBlockState) FindGaps(_ context.Context, _, _ int64) ([]outbound.BlockRange, error) {
-	panic("fakeBlockState.FindGaps: not used by tests")
-}
-
-func (f *fakeBlockState) VerifyChainIntegrity(_ context.Context, _, _ int64) error {
-	panic("fakeBlockState.VerifyChainIntegrity: not used by tests")
-}
-
-func (f *fakeBlockState) MarkPublishComplete(_ context.Context, _ string) error {
-	panic("fakeBlockState.MarkPublishComplete: not used by tests")
-}
-
-func (f *fakeBlockState) GetMinUnpublishedBlock(_ context.Context) (int64, bool, error) {
-	panic("fakeBlockState.GetMinUnpublishedBlock: not used by tests")
-}
-
-func (f *fakeBlockState) GetBlocksWithIncompletePublish(_ context.Context, _ int) ([]outbound.BlockState, error) {
-	panic("fakeBlockState.GetBlocksWithIncompletePublish: not used by tests")
-}
-
-func (f *fakeBlockState) GetReorgEventsByBlockRange(_ context.Context, _, _ int64) ([]outbound.ReorgEvent, error) {
-	panic("fakeBlockState.GetReorgEventsByBlockRange: not used by tests")
+	return len(f.byNumberCalls)
 }
 
 type fakePublisher struct {
@@ -333,7 +266,6 @@ type harness struct {
 	s3Reader     *fakeS3Reader
 	s3Overwriter *fakeS3Overwriter
 	rpc          *fakeRPCClient
-	blockstate   *fakeBlockState
 	publisher    *fakePublisher
 }
 
@@ -353,8 +285,7 @@ func newHarness(t *testing.T, opts ...func(*RefillerOptions)) *harness {
 		statePath:    path,
 		s3Reader:     newFakeS3Reader(),
 		s3Overwriter: newFakeS3Overwriter(),
-		rpc:          &fakeRPCClient{},
-		blockstate:   newFakeBlockState(),
+		rpc:          newFakeRPCClient(),
 		publisher:    &fakePublisher{},
 	}
 
@@ -364,7 +295,6 @@ func newHarness(t *testing.T, opts ...func(*RefillerOptions)) *harness {
 		S3Reader:     h.s3Reader,
 		S3Overwriter: h.s3Overwriter,
 		RPCClient:    h.rpc,
-		BlockState:   h.blockstate,
 		Publisher:    h.publisher,
 		State:        h.state,
 	}
@@ -384,6 +314,12 @@ func withDryRun(opts *RefillerOptions) { opts.DryRun = true }
 
 const testBlockKey = "85149000-85149999/85149017_0_block.json.gz"
 const testReceiptsKey = "85149000-85149999/85149017_0_receipts.json.gz"
+const testVersion1BlockKey = "85149000-85149999/85149017_1_block.json.gz"
+
+// canonicalHeader is the eth_getBlockByNumber JSON response used across
+// happy-path tests. The hash/parentHash/timestamp are the values the refiller
+// extracts into the synthetic *outbound.BlockState that drives the BlockEvent.
+const canonicalHeader = `{"hash":"0xabc","parentHash":"0xdef","timestamp":"0x3e7"}`
 
 func TestProcess_NotNullInS3_RecordsSkip(t *testing.T) {
 	h := newHarness(t)
@@ -396,8 +332,11 @@ func TestProcess_NotNullInS3_RecordsSkip(t *testing.T) {
 	if out.Reason != "already-healed" {
 		t.Errorf("reason = %q, want already-healed", out.Reason)
 	}
-	if h.rpc.callCount() != 0 {
-		t.Errorf("rpc calls = %d, want 0", h.rpc.callCount())
+	if h.rpc.dataCallCount() != 0 {
+		t.Errorf("rpc data calls = %d, want 0", h.rpc.dataCallCount())
+	}
+	if h.rpc.byNumberCallCount() != 0 {
+		t.Errorf("rpc byNumber calls = %d, want 0", h.rpc.byNumberCallCount())
 	}
 	if h.publisher.count() != 0 {
 		t.Errorf("publish calls = %d, want 0", h.publisher.count())
@@ -410,14 +349,7 @@ func TestProcess_NotNullInS3_RecordsSkip(t *testing.T) {
 func TestProcess_RpcStillReturnsNull_RecordsFail(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number:         85149017,
-		Hash:           "0xabc",
-		ParentHash:     "0xdef",
-		ReceivedAt:     1000,
-		BlockTimestamp: 999,
-		Version:        0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage("null")}
 
 	out := h.r.Process(context.Background(), testBlockKey)
@@ -444,14 +376,7 @@ func TestProcess_RpcStillReturnsNull_RecordsFail(t *testing.T) {
 func TestProcess_HappyPath_BlockKey(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number:         85149017,
-		Hash:           "0xabc",
-		ParentHash:     "0xdef",
-		ReceivedAt:     1000,
-		BlockTimestamp: 999,
-		Version:        0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	validBlock := json.RawMessage(`{"number":"0x512f1c9","hash":"0xabc"}`)
 	h.rpc.response = outbound.BlockData{Block: validBlock, Receipts: json.RawMessage(`[]`)}
 
@@ -473,6 +398,12 @@ func TestProcess_HappyPath_BlockKey(t *testing.T) {
 	if ev.ChainID != h.chainID || ev.BlockNumber != 85149017 || ev.Version != 0 || ev.BlockHash != "0xabc" {
 		t.Errorf("unexpected event: %+v", ev)
 	}
+	if ev.ParentHash != "0xdef" {
+		t.Errorf("event parent hash = %q, want 0xdef", ev.ParentHash)
+	}
+	if ev.BlockTimestamp != 0x3e7 {
+		t.Errorf("event block timestamp = %d, want %d", ev.BlockTimestamp, 0x3e7)
+	}
 
 	stage, _ := h.state.Lookup(testBlockKey)
 	if stage != StageSNS {
@@ -483,14 +414,7 @@ func TestProcess_HappyPath_BlockKey(t *testing.T) {
 func TestProcess_HappyPath_ReceiptsKey(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testReceiptsKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number:         85149017,
-		Hash:           "0xabc",
-		ParentHash:     "0xdef",
-		ReceivedAt:     1000,
-		BlockTimestamp: 999,
-		Version:        0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	validReceipts := json.RawMessage(`[{"transactionHash":"0xttt"}]`)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{}`), Receipts: validReceipts}
 
@@ -508,14 +432,7 @@ func TestProcess_ResumeFromS3Stage_OnlyPublishesSNS(t *testing.T) {
 	if err := h.state.Record(testBlockKey, StageS3, ""); err != nil {
 		t.Fatalf("preload state: %v", err)
 	}
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number:         85149017,
-		Hash:           "0xabc",
-		ParentHash:     "0xdef",
-		ReceivedAt:     1000,
-		BlockTimestamp: 999,
-		Version:        0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
 
 	out := h.r.Process(context.Background(), testBlockKey)
@@ -546,8 +463,11 @@ func TestProcess_ResumeFromSNSStage_SkipsEntirely(t *testing.T) {
 	if h.s3Reader.callCount() != 0 {
 		t.Errorf("s3 read calls = %d, want 0", h.s3Reader.callCount())
 	}
-	if h.rpc.callCount() != 0 {
-		t.Errorf("rpc calls = %d, want 0", h.rpc.callCount())
+	if h.rpc.dataCallCount() != 0 {
+		t.Errorf("rpc data calls = %d, want 0", h.rpc.dataCallCount())
+	}
+	if h.rpc.byNumberCallCount() != 0 {
+		t.Errorf("rpc byNumber calls = %d, want 0", h.rpc.byNumberCallCount())
 	}
 	if h.s3Overwriter.callCount() != 0 {
 		t.Errorf("s3 write calls = %d, want 0", h.s3Overwriter.callCount())
@@ -560,14 +480,7 @@ func TestProcess_ResumeFromSNSStage_SkipsEntirely(t *testing.T) {
 func TestProcess_DryRun_NoWritesNoPublish(t *testing.T) {
 	h := newHarness(t, withDryRun)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number:         85149017,
-		Hash:           "0xabc",
-		ParentHash:     "0xdef",
-		ReceivedAt:     1000,
-		BlockTimestamp: 999,
-		Version:        0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{}`)}
 
 	out := h.r.Process(context.Background(), testBlockKey)
@@ -586,37 +499,37 @@ func TestProcess_DryRun_NoWritesNoPublish(t *testing.T) {
 	}
 }
 
-func TestProcess_VersionMismatch_RecordsSkip(t *testing.T) {
+// TestProcess_VersionGt0_SkipsCannotDetermineOrphan asserts that a key with
+// version > 0 is skipped without any RPC call: eth_getBlockByNumber can only
+// return the canonical block, so we cannot recover orphan-chain hashes from
+// RPC alone. The DB-free design accepts this limitation because no version > 0
+// nulls exist in the wild.
+func TestProcess_VersionGt0_SkipsCannotDetermineOrphan(t *testing.T) {
 	h := newHarness(t)
-	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number:  85149017,
-		Hash:    "0xabc",
-		Version: 1,
-	}
+	h.s3Reader.putGzipped(h.bucket, testVersion1BlockKey, []byte("null"))
 
-	out := h.r.Process(context.Background(), testBlockKey)
-	if out.Stage != StageSkip || out.Reason != "version-mismatch" {
-		t.Errorf("outcome = %+v, want stage=skip reason=version-mismatch", out)
+	out := h.r.Process(context.Background(), testVersion1BlockKey)
+	if out.Stage != StageSkip || out.Reason != "cannot-determine-orphan-hash" {
+		t.Errorf("outcome = %+v, want stage=skip reason=cannot-determine-orphan-hash", out)
 	}
-	if h.rpc.callCount() != 0 {
-		t.Errorf("rpc must not be called on version mismatch")
+	if out.Fatal {
+		t.Errorf("Fatal = true, want false (skipped, not fatal)")
 	}
-}
-
-func TestProcess_BlockStateMissing_RecordsFail(t *testing.T) {
-	h := newHarness(t)
-	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-
-	out := h.r.Process(context.Background(), testBlockKey)
-	if out.Stage != StageFail || out.Reason != "no-block-state" {
-		t.Errorf("outcome = %+v, want stage=fail reason=no-block-state", out)
+	if h.rpc.byNumberCallCount() != 0 {
+		t.Errorf("rpc byNumber calls = %d, want 0 (version>0 skip must not call RPC)", h.rpc.byNumberCallCount())
 	}
-	if !out.Fatal {
-		t.Errorf("Fatal = false, want true (no-block-state is run-level fatal)")
+	if h.rpc.dataCallCount() != 0 {
+		t.Errorf("rpc data calls = %d, want 0", h.rpc.dataCallCount())
 	}
-	if h.rpc.callCount() != 0 {
-		t.Errorf("rpc must not be called when block state missing")
+	if h.s3Overwriter.callCount() != 0 {
+		t.Errorf("s3 writes = %d, want 0", h.s3Overwriter.callCount())
+	}
+	stage, reason := h.state.Lookup(testVersion1BlockKey)
+	if stage != StageSkip {
+		t.Errorf("state stage = %q, want %q", stage, StageSkip)
+	}
+	if reason != "cannot-determine-orphan-hash" {
+		t.Errorf("state reason = %q, want cannot-determine-orphan-hash", reason)
 	}
 }
 
@@ -637,9 +550,7 @@ func TestProcess_InvalidKey_RecordsFail(t *testing.T) {
 func TestProcess_RpcError_RecordsFail(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.err = errors.New("rpc boom")
 
 	out := h.r.Process(context.Background(), testBlockKey)
@@ -657,9 +568,7 @@ func TestProcess_RpcError_RecordsFail(t *testing.T) {
 func TestProcess_RpcError_PreservesErrorInOutcome(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	expectedErr := errors.New("rpc boom")
 	h.rpc.err = expectedErr
 
@@ -684,9 +593,7 @@ func TestProcess_RpcError_PreservesErrorInOutcome(t *testing.T) {
 func TestProcess_S3WriteError_RecordsFail(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
 	h.s3Overwriter.err = errors.New("s3 boom")
 
@@ -705,9 +612,7 @@ func TestProcess_S3WriteError_RecordsFail(t *testing.T) {
 func TestProcess_SNSPublishError_RecordsFail(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
 	h.publisher.err = errors.New("sns boom")
 
@@ -741,8 +646,8 @@ func TestProcess_S3KeyNotFound_RecordsNoSuchKey(t *testing.T) {
 	if out.Reason != "no-such-key" {
 		t.Errorf("reason = %q, want no-such-key", out.Reason)
 	}
-	if h.rpc.callCount() != 0 {
-		t.Errorf("rpc calls = %d, want 0", h.rpc.callCount())
+	if h.rpc.dataCallCount() != 0 || h.rpc.byNumberCallCount() != 0 {
+		t.Errorf("rpc calls (data=%d byNumber=%d), want 0/0", h.rpc.dataCallCount(), h.rpc.byNumberCallCount())
 	}
 	if h.s3Overwriter.callCount() != 0 {
 		t.Errorf("s3 writes = %d, want 0", h.s3Overwriter.callCount())
@@ -793,9 +698,7 @@ func TestProcess_ContextCancelledDuringS3Read_DoesNotRecordFail(t *testing.T) {
 func TestProcess_RawNullBytesInS3_StillTreatedAsNull(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putRaw(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
 
 	out := h.r.Process(context.Background(), testBlockKey)
@@ -804,53 +707,105 @@ func TestProcess_RawNullBytesInS3_StillTreatedAsNull(t *testing.T) {
 	}
 }
 
-// TestProcess_BlockStateError_IsFatal asserts that an unexpected error from
-// the block-state repository (e.g. Postgres outage) is classified as a
-// run-level fatal: Outcome.Fatal must be true and Err must wrap the cause.
-func TestProcess_BlockStateError_IsFatal(t *testing.T) {
+// TestProcess_GetBlockByNumberError_IsFatal asserts that an RPC failure during
+// the canonical-block lookup is classified as run-level fatal: Outcome.Fatal
+// must be true and Err must wrap the cause.
+func TestProcess_GetBlockByNumberError_IsFatal(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	dbErr := errors.New("db down")
-	h.blockstate.err = dbErr
+	rpcErr := errors.New("rpc unreachable")
+	h.rpc.byNumberErr = rpcErr
 
 	out := h.r.Process(context.Background(), testBlockKey)
 	if out.Stage != StageFail {
 		t.Errorf("stage = %q, want %q", out.Stage, StageFail)
 	}
-	if out.Reason != "blockstate-error" {
-		t.Errorf("reason = %q, want blockstate-error", out.Reason)
+	if out.Reason != "rpc-error" {
+		t.Errorf("reason = %q, want rpc-error", out.Reason)
 	}
 	if !out.Fatal {
-		t.Errorf("Fatal = false, want true (blockstate-error is run-level fatal)")
+		t.Errorf("Fatal = false, want true (rpc-error during canonical lookup is run-level fatal)")
 	}
-	if !errors.Is(out.Err, dbErr) {
-		t.Errorf("Err does not wrap dbErr: %v", out.Err)
+	if !errors.Is(out.Err, rpcErr) {
+		t.Errorf("Err does not wrap rpcErr: %v", out.Err)
 	}
 }
 
-// TestProcess_NoBlockState_IsFatal: keys-file referencing a block we don't
-// know about is inventory drift — abort the run so the operator notices.
-func TestProcess_NoBlockState_IsFatal(t *testing.T) {
+// TestProcess_GetBlockByNumberReturnsNull_IsFatal asserts a still-null
+// canonical-block lookup (operator pointed at an out-of-sync node, wrong
+// endpoint, or block genuinely missing) aborts the run with rpc-still-null.
+func TestProcess_GetBlockByNumberReturnsNull_IsFatal(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	// blockstate.rows is empty: GetBlockByNumber returns (nil, nil).
+	h.rpc.byNumber[85149017] = json.RawMessage("null")
 
 	out := h.r.Process(context.Background(), testBlockKey)
-	if out.Stage != StageFail || out.Reason != "no-block-state" {
-		t.Errorf("outcome = %+v, want stage=fail reason=no-block-state", out)
+	if out.Stage != StageFail || out.Reason != "rpc-still-null" {
+		t.Errorf("outcome = %+v, want stage=fail reason=rpc-still-null", out)
 	}
 	if !out.Fatal {
-		t.Errorf("Fatal = false, want true (no-block-state is run-level fatal)")
+		t.Errorf("Fatal = false, want true (rpc-still-null at canonical lookup is fatal)")
+	}
+	if !errors.Is(out.Err, errRPCStillNull) {
+		t.Errorf("Err chain missing errRPCStillNull, got %v", out.Err)
 	}
 }
 
-// TestProcess_RpcError_IsFatal asserts that an RPC failure is fatal.
+// TestProcess_GetBlockByNumberMalformedJSON_IsFatal asserts that an
+// undecodable header response is fatal so the operator notices.
+func TestProcess_GetBlockByNumberMalformedJSON_IsFatal(t *testing.T) {
+	h := newHarness(t)
+	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
+	h.rpc.byNumber[85149017] = json.RawMessage(`{"hash":}`)
+
+	out := h.r.Process(context.Background(), testBlockKey)
+	if out.Stage != StageFail || out.Reason != "block-decode-error" {
+		t.Errorf("outcome = %+v, want stage=fail reason=block-decode-error", out)
+	}
+	if !out.Fatal {
+		t.Errorf("Fatal = false, want true (block-decode-error is run-level fatal)")
+	}
+}
+
+// TestProcess_GetBlockByNumberEmptyHash_IsFatal asserts a decode-success with
+// empty hash is treated as malformed and is fatal: we cannot proceed without a
+// canonical hash to drive GetBlockDataByHash.
+func TestProcess_GetBlockByNumberEmptyHash_IsFatal(t *testing.T) {
+	h := newHarness(t)
+	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
+	h.rpc.byNumber[85149017] = json.RawMessage(`{"hash":"","parentHash":"0xdef","timestamp":"0x3e7"}`)
+
+	out := h.r.Process(context.Background(), testBlockKey)
+	if out.Stage != StageFail || out.Reason != "block-decode-error" {
+		t.Errorf("outcome = %+v, want stage=fail reason=block-decode-error", out)
+	}
+	if !out.Fatal {
+		t.Errorf("Fatal = false, want true")
+	}
+}
+
+// TestProcess_GetBlockByNumberBadTimestamp_IsFatal asserts an unparseable
+// timestamp (non-hex) is fatal.
+func TestProcess_GetBlockByNumberBadTimestamp_IsFatal(t *testing.T) {
+	h := newHarness(t)
+	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
+	h.rpc.byNumber[85149017] = json.RawMessage(`{"hash":"0xabc","parentHash":"0xdef","timestamp":"not-hex"}`)
+
+	out := h.r.Process(context.Background(), testBlockKey)
+	if out.Stage != StageFail || out.Reason != "block-timestamp-decode-error" {
+		t.Errorf("outcome = %+v, want stage=fail reason=block-timestamp-decode-error", out)
+	}
+	if !out.Fatal {
+		t.Errorf("Fatal = false, want true")
+	}
+}
+
+// TestProcess_RpcError_IsFatal asserts that an RPC failure (during
+// GetBlockDataByHash) is fatal.
 func TestProcess_RpcError_IsFatal(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	rpcErr := errors.New("rpc boom")
 	h.rpc.err = rpcErr
 
@@ -870,9 +825,7 @@ func TestProcess_RpcError_IsFatal(t *testing.T) {
 func TestProcess_S3WriteError_IsFatal(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
 	s3Err := errors.New("s3 boom")
 	h.s3Overwriter.err = s3Err
@@ -896,9 +849,7 @@ func TestProcess_S3WriteError_IsFatal(t *testing.T) {
 func TestProcess_SNSError_IsFatal(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
 	snsErr := errors.New("sns boom")
 	h.publisher.err = snsErr
@@ -947,15 +898,12 @@ func TestProcess_S3VerifyError_IsFatal(t *testing.T) {
 	}
 }
 
-// TestProcess_RpcStillNull_IsFatal asserts a still-null RPC response aborts
-// the run: every input key has a canonical hash in block_states, so RPC
-// failing to resolve it is unexpected and the operator must investigate.
+// TestProcess_RpcStillNull_IsFatal asserts a still-null GetBlockDataByHash
+// response aborts the run.
 func TestProcess_RpcStillNull_IsFatal(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
-	h.blockstate.rows[85149017] = &outbound.BlockState{
-		Number: 85149017, Hash: "0xabc", Version: 0,
-	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 	h.rpc.response = outbound.BlockData{Block: json.RawMessage("null")}
 
 	out := h.r.Process(context.Background(), testBlockKey)
@@ -970,7 +918,7 @@ func TestProcess_RpcStillNull_IsFatal(t *testing.T) {
 	}
 }
 
-// TestProcess_ContextCancelled_IsNotFatal: a SIGINT mid-DB-call must NOT be
+// TestProcess_ContextCancelled_IsNotFatal: a SIGINT mid-S3-call must NOT be
 // classified as fatal. The empty Outcome signals "interrupted, will retry".
 func TestProcess_ContextCancelled_IsNotFatal(t *testing.T) {
 	h := newHarness(t)

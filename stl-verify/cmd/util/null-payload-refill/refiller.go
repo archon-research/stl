@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/jsonutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -20,11 +21,12 @@ import (
 
 const defaultFetchTimeout = 15 * time.Second
 
-// errRPCStillNull is returned via Outcome.Err when the RPC re-fetch still
-// produces a null payload. A sentinel (rather than nil) ensures the worker
-// log gate logs the per-key failure at ERROR and lets downstream callers do
+// errRPCStillNull is returned via Outcome.Err when the RPC re-fetch (either the
+// canonical-block lookup or the by-hash data fetch) still produces a null
+// payload. A sentinel (rather than nil) ensures the worker log gate logs the
+// per-key failure at ERROR and lets downstream callers do
 // errors.Is(err, errRPCStillNull) without parsing the human-readable reason.
-var errRPCStillNull = errors.New("rpc returned null for canonical block hash")
+var errRPCStillNull = errors.New("rpc returned null for canonical block lookup")
 
 // Outcome summarises what happened to a single key during processing.
 //
@@ -32,11 +34,11 @@ var errRPCStillNull = errors.New("rpc returned null for canonical block hash")
 // the chain (e.g. errors.Is(out.Err, context.DeadlineExceeded)) without
 // re-parsing the human-readable Reason string.
 //
-// Fatal=true means a run-level error (environment broken: DB down, RPC down,
-// malformed input, programming error) — the worker loop must abort the run
-// instead of moving on to the next key. The flag is signal-only: the state
-// file still records stage:fail so a resumed run sees the entry. Per-item
-// data outcomes (already-healed, version-mismatch) keep Fatal=false and use
+// Fatal=true means a run-level error (environment broken: RPC down, malformed
+// input, programming error) — the worker loop must abort the run instead of
+// moving on to the next key. The flag is signal-only: the state file still
+// records stage:fail so a resumed run sees the entry. Per-item data outcomes
+// (already-healed, cannot-determine-orphan-hash) keep Fatal=false and use
 // StageSkip so the run continues to the next key.
 type Outcome struct {
 	Stage   Stage
@@ -65,7 +67,6 @@ type Refiller struct {
 	s3Reader     outbound.S3Reader
 	s3Overwriter outbound.S3Overwriter
 	rpcClient    outbound.BlockchainClient
-	blockstate   outbound.BlockStateRepository
 	publisher    outbound.EventSink
 	state        *State
 	logger       *slog.Logger
@@ -80,7 +81,6 @@ type RefillerOptions struct {
 	S3Reader     outbound.S3Reader
 	S3Overwriter outbound.S3Overwriter
 	RPCClient    outbound.BlockchainClient
-	BlockState   outbound.BlockStateRepository
 	Publisher    outbound.EventSink
 	State        *State
 	Logger       *slog.Logger
@@ -105,9 +105,6 @@ func NewRefiller(opts RefillerOptions) (*Refiller, error) {
 	if opts.RPCClient == nil {
 		return nil, errors.New("RPCClient is required")
 	}
-	if opts.BlockState == nil {
-		return nil, errors.New("BlockState is required")
-	}
 	if opts.Publisher == nil {
 		return nil, errors.New("publisher is required")
 	}
@@ -128,7 +125,6 @@ func NewRefiller(opts RefillerOptions) (*Refiller, error) {
 		s3Reader:     opts.S3Reader,
 		s3Overwriter: opts.S3Overwriter,
 		rpcClient:    opts.RPCClient,
-		blockstate:   opts.BlockState,
 		publisher:    opts.Publisher,
 		state:        opts.State,
 		logger:       logger.With("component", "null-payload-refill"),
@@ -143,7 +139,7 @@ func (r *Refiller) Process(ctx context.Context, key string) Outcome {
 	if done {
 		return out
 	}
-	bs, out, done := r.loadBlockState(ctx, key, parsed)
+	bs, out, done := r.loadCanonicalBlock(ctx, key, parsed)
 	if done {
 		return out
 	}
@@ -191,34 +187,58 @@ func (r *Refiller) verify(ctx context.Context, key string) (s3key.Key, Stage, Ou
 	}
 }
 
-// loadBlockState fetches the canonical block_states row and validates that the
-// stored version matches the key's version, so we never refill stale orphaned
-// rows with current canonical data.
-func (r *Refiller) loadBlockState(ctx context.Context, key string, parsed s3key.Key) (*outbound.BlockState, Outcome, bool) {
-	bs, err := r.blockstate.GetBlockByNumber(ctx, parsed.BlockNumber)
+// loadCanonicalBlock fetches the canonical block header from RPC by number,
+// derives the block hash + parent hash + timestamp, and returns them as a
+// synthetic *outbound.BlockState for use in the SNS BlockEvent. For
+// version > 0 keys we skip — the orphan-chain hash for that slot cannot be
+// recovered from RPC alone, and no such records exist in the wild today.
+func (r *Refiller) loadCanonicalBlock(ctx context.Context, key string, parsed s3key.Key) (*outbound.BlockState, Outcome, bool) {
+	if parsed.Version != 0 {
+		return nil, r.skip(key, "cannot-determine-orphan-hash"), true
+	}
+	blockJSON, err := r.rpcClient.GetBlockByNumber(ctx, parsed.BlockNumber, false)
 	if err != nil {
 		if parentCancelled(ctx) {
 			return nil, r.cancelled(), true
 		}
-		return nil, r.fatal(key, "blockstate-error", err), true
+		return nil, r.fatal(key, "rpc-error", err), true
 	}
-	if bs == nil {
-		return nil, r.fatal(key, "no-block-state", fmt.Errorf("block_states row missing for block %d", parsed.BlockNumber)), true
+	if jsonutil.IsNullOrEmpty(blockJSON) {
+		return nil, r.fatal(key, "rpc-still-null", errRPCStillNull), true
 	}
-	if bs.Version != parsed.Version {
-		return nil, r.skip(key, "version-mismatch"), true
+	var hdr struct {
+		Hash       string `json:"hash"`
+		ParentHash string `json:"parentHash"`
+		Timestamp  string `json:"timestamp"`
 	}
-	return bs, Outcome{}, false
+	if err := json.Unmarshal(blockJSON, &hdr); err != nil {
+		return nil, r.fatal(key, "block-decode-error", fmt.Errorf("unmarshal block header: %w", err)), true
+	}
+	if hdr.Hash == "" {
+		return nil, r.fatal(key, "block-decode-error", fmt.Errorf("empty hash in eth_getBlockByNumber response for block %d", parsed.BlockNumber)), true
+	}
+	ts, err := hexutil.ParseInt64(hdr.Timestamp)
+	if err != nil {
+		return nil, r.fatal(key, "block-timestamp-decode-error", fmt.Errorf("parse block timestamp %q: %w", hdr.Timestamp, err)), true
+	}
+	return &outbound.BlockState{
+		Number:         parsed.BlockNumber,
+		Hash:           hdr.Hash,
+		ParentHash:     hdr.ParentHash,
+		Version:        parsed.Version,
+		BlockTimestamp: ts,
+		ReceivedAt:     ts,
+	}, Outcome{}, false
 }
 
 // fetchData calls the RPC for the canonical block hash and extracts the field
-// matching parsed.DataType. A still-null RPC response is fatal: every key in
-// our input has a canonical hash in block_states, so the RPC failing to
-// resolve it is unexpected — the operator should investigate (upstream node
-// out of sync, wrong endpoint, block genuinely missing) rather than have the
-// tool burn through every key recording the same symptom. The fatal state
-// record lets the operator either fix the upstream cause and resume, or hand-
-// edit the state file to skip that one block permanently.
+// matching parsed.DataType. A still-null RPC response is fatal: the
+// canonical-block lookup just succeeded for the same block, so failing to
+// resolve the by-hash data is unexpected — the operator should investigate
+// (upstream node out of sync, wrong endpoint, block genuinely missing) rather
+// than have the tool burn through every key recording the same symptom. The
+// fatal state record lets the operator either fix the upstream cause and
+// resume, or hand-edit the state file to skip that one block permanently.
 func (r *Refiller) fetchData(ctx context.Context, key string, parsed s3key.Key, bs *outbound.BlockState) (json.RawMessage, Outcome, bool) {
 	bd, err := r.rpcClient.GetBlockDataByHash(ctx, parsed.BlockNumber, bs.Hash, true)
 	if err != nil {
