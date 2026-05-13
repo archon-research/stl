@@ -1,4 +1,5 @@
 import {
+  AsyncStateRenderer,
   EmptyState,
   ErrorState,
   SearchInput,
@@ -194,6 +195,21 @@ export function BottomPanel({
       (allocation) => getAllocationKey(allocation) === receiptTokenParam,
     ) ?? null;
 
+  const categoryEmptyDescription = `No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`;
+
+  const emptyStateView =
+    sortedAllocations.length === 0 ? (
+      <EmptyState
+        title="No receipt tokens returned"
+        description="The selected prime did not return any receipt token holdings from the API."
+      />
+    ) : (
+      <EmptyState
+        title="No receipt tokens in category"
+        description={categoryEmptyDescription}
+      />
+    );
+
   useEffect(() => {
     if (activeTab === 'rrc') {
       setLocalRiskSearchValue('');
@@ -386,68 +402,47 @@ export function BottomPanel({
             title="Choose a prime to inspect risk"
             description="The detail drawer becomes available after a prime is selected."
           />
-        ) : null}
-
-        {selectedPrime && errorMessage ? (
-          <ErrorState
-            title="Unable to load receipt tokens"
-            description="An error occurred while fetching receipt token data."
-            errorMessage={errorMessage}
-          />
-        ) : null}
-
-        {selectedPrime && !errorMessage && isLoading ? (
-          <EmptyState
-            title="Loading receipt tokens"
-            description="Waiting for the selected prime's receipt token holdings."
-          />
-        ) : null}
-
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        sortedAllocations.length === 0 ? (
-          <EmptyState
-            title="No receipt tokens returned"
-            description="The selected prime did not return any receipt token holdings from the API."
-          />
-        ) : null}
-
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        sortedAllocations.length > 0 &&
-        filteredAllocations.length === 0 ? (
-          <EmptyState
-            title="No receipt tokens in category"
-            description={`No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`}
-          />
-        ) : null}
-
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        filteredAllocations.length > 0 ? (
-          activeTab === 'risk' ? (
-            <RiskBreakdownTab
-              isEnabled={isDrawerOpen && activeTab === 'risk'}
-              searchQuery={riskSearchValue}
-              selectedReceiptToken={focusedAllocation}
-            />
-          ) : activeTab === 'rrc' ? (
-            <RrcTab
-              isEnabled={isDrawerOpen && activeTab === 'rrc'}
-              selectedReceiptToken={focusedAllocation}
-              selectedPrime={selectedPrime}
-            />
-          ) : (
-            <ActivityFeed
-              isEnabled={isDrawerOpen && activeTab === 'activity'}
-              searchQuery={riskSearchValue}
-              selectedPrime={selectedPrime}
-            />
-          )
-        ) : null}
+        ) : (
+          <AsyncStateRenderer
+            isLoading={isLoading}
+            error={errorMessage}
+            isEmpty={filteredAllocations.length === 0}
+            loadingView={
+              <EmptyState
+                title="Loading receipt tokens"
+                description="Waiting for the selected prime's receipt token holdings."
+              />
+            }
+            errorView={
+              <ErrorState
+                title="Unable to load receipt tokens"
+                description="An error occurred while fetching receipt token data."
+                errorMessage={errorMessage ?? undefined}
+              />
+            }
+            emptyView={emptyStateView}
+          >
+            {activeTab === 'risk' ? (
+              <RiskBreakdownTab
+                isEnabled={isDrawerOpen && activeTab === 'risk'}
+                searchQuery={riskSearchValue}
+                selectedReceiptToken={focusedAllocation}
+              />
+            ) : activeTab === 'rrc' ? (
+              <RrcTab
+                isEnabled={isDrawerOpen && activeTab === 'rrc'}
+                selectedReceiptToken={focusedAllocation}
+                selectedPrime={selectedPrime}
+              />
+            ) : (
+              <ActivityFeed
+                isEnabled={isDrawerOpen && activeTab === 'activity'}
+                searchQuery={riskSearchValue}
+                selectedPrime={selectedPrime}
+              />
+            )}
+          </AsyncStateRenderer>
+        )}
       </div>
     </div>
   );

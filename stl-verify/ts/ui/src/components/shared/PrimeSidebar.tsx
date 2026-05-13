@@ -1,4 +1,5 @@
 import {
+  AsyncStateRenderer,
   EmptyState,
   ErrorState,
   SkeletonStack,
@@ -104,24 +105,25 @@ export function PrimeSidebar({
           py: '4',
         })}
       >
-        {isLoading ? <SkeletonStack count={6} itemHeight={64} /> : null}
-
-        {!isLoading && errorMessage ? (
-          <ErrorState
-            title="Unable to load primes"
-            description="An error occurred while fetching primes data."
-            errorMessage={errorMessage}
-          />
-        ) : null}
-
-        {!isLoading && !errorMessage && primes.length === 0 ? (
-          <EmptyState
-            title="No primes returned"
-            description="No primes were returned by the API."
-          />
-        ) : null}
-
-        {!isLoading && !errorMessage && primes.length > 0 ? (
+        <AsyncStateRenderer
+          isLoading={isLoading}
+          error={errorMessage}
+          isEmpty={primes.length === 0}
+          loadingView={<SkeletonStack count={6} itemHeight={64} />}
+          errorView={
+            <ErrorState
+              title="Unable to load primes"
+              description="An error occurred while fetching primes data."
+              errorMessage={errorMessage ?? undefined}
+            />
+          }
+          emptyView={
+            <EmptyState
+              title="No primes returned"
+              description="No primes were returned by the API."
+            />
+          }
+        >
           <div className={css({ display: 'grid', gap: '2.5' })}>
             {primes.map((prime) => {
               const isSelected = prime.id === selectedPrimeId;
@@ -197,7 +199,7 @@ export function PrimeSidebar({
               );
             })}
           </div>
-        ) : null}
+        </AsyncStateRenderer>
       </div>
 
       <div

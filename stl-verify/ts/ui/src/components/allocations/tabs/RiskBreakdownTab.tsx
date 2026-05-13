@@ -1,6 +1,8 @@
 import {
+  buildRowSearchString,
   DataTable,
   LoadingIndicator,
+  matchesSearchQuery,
   SkeletonStack,
   useDataTable,
 } from '@archon-research/design-system';
@@ -8,11 +10,6 @@ import { type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
-
-import {
-  buildRowSearchString,
-  matchesSearchQuery,
-} from '../../../data-table/utils';
 import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
   formatDateTime,
@@ -32,6 +29,7 @@ import type {
   Token,
   TokenPrice,
 } from '../../../types/allocation';
+import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 import { ChainLogo, SummaryMetric } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
 
@@ -344,20 +342,7 @@ export function RiskBreakdownTab({
 
   if (!selectedReceiptToken) {
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Pick a receipt token to inspect its collateral backing.
-        </p>
-      </div>
+      <TabSelectionPrompt message="Pick a receipt token to inspect its collateral backing." />
     );
   }
 
@@ -385,37 +370,10 @@ export function RiskBreakdownTab({
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.default',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'sm',
-              fontWeight: 'semibold',
-              color: 'text.strong',
-            })}
-          >
-            Unable to load the risk breakdown.
-          </p>
-          <p
-            className={css({
-              m: 0,
-              mt: '1.5',
-              fontSize: 'sm',
-              color: 'text.muted',
-            })}
-          >
-            {errorMessage}
-          </p>
-        </div>
+        <TabErrorPanel
+          title="Unable to load the risk breakdown."
+          message={errorMessage}
+        />
       ) : null}
 
       {!errorMessage && summary ? (

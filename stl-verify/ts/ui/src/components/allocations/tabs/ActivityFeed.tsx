@@ -1,4 +1,5 @@
 import {
+  AsyncStateRenderer,
   EmptyState,
   ErrorState,
   SkeletonStack,
@@ -596,49 +597,45 @@ export function ActivityFeed({
     );
   }
 
-  if (isLoading && events.length === 0) {
-    return <SkeletonStack count={3} />;
-  }
-
-  if (error) {
-    return (
-      <ErrorState
-        title="Error Loading Activity"
-        description="An error occurred while loading the activity feed."
-        errorMessage={error}
-      />
-    );
-  }
-
-  if (filteredEvents.length === 0) {
-    return (
-      <EmptyState
-        title="No Activity Found"
-        description="No allocation activity events match your filters."
-        stretch
-      />
-    );
-  }
-
   return (
-    <div
-      className={css({
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        borderRadius: 'lg',
-        overflow: 'hidden',
-      })}
+    <AsyncStateRenderer
+      isLoading={isLoading && events.length === 0}
+      error={error}
+      isEmpty={filteredEvents.length === 0}
+      loadingView={<SkeletonStack count={3} />}
+      errorView={
+        <ErrorState
+          title="Error Loading Activity"
+          description="An error occurred while loading the activity feed."
+          errorMessage={error ?? undefined}
+        />
+      }
+      emptyView={
+        <EmptyState
+          title="No Activity Found"
+          description="No allocation activity events match your filters."
+          stretch
+        />
+      }
     >
       <div
         className={css({
-          flex: 1,
-          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
           borderRadius: 'lg',
-          border: '1px solid token(colors.surface.subtle)',
-          bg: 'surface.default',
+          overflow: 'hidden',
         })}
       >
+        <div
+          className={css({
+            flex: 1,
+            overflowY: 'auto',
+            borderRadius: 'lg',
+            border: '1px solid token(colors.surface.subtle)',
+            bg: 'surface.default',
+          })}
+        >
         {filteredEvents.map((event, idx) => {
           const eventKey = buildActivityEventKey(event);
           const txHash = event.tx_hash;
@@ -747,7 +744,8 @@ export function ActivityFeed({
             Limited to most recent {filters.limit || 50}
           </span>
         ) : null}
+        </div>
       </div>
-    </div>
+    </AsyncStateRenderer>
   );
 }

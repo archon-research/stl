@@ -1,13 +1,7 @@
-import { type SortingState } from '@tanstack/react-table';
-import { useCallback, useMemo } from 'react';
+import { useUrlSyncedTableStateAdapter } from '@archon-research/design-system';
+import type { UseUrlSyncedTableReturn } from '@archon-research/design-system';
 
 import { useUrlParam } from '../lib/url-params';
-import type { UseUrlSyncedTableReturn } from './types';
-import {
-  deserializeSorting,
-  serializeSorting,
-  validateSortingState,
-} from './utils';
 
 /**
  * Hook to sync TanStack table state (sorting, global search) with URL query params.
@@ -24,33 +18,10 @@ export function useUrlSyncedTableState(
   const [sortParam, setSortParam] = useUrlParam(sortParamKey);
   const [searchParam, setSearchParam] = useUrlParam(searchParamKey);
 
-  const sorting = useMemo(() => {
-    return validateSortingState(deserializeSorting(sortParam));
-  }, [sortParam]);
-
-  const globalFilter = searchParam ?? '';
-
-  const handleSetSorting = useCallback(
-    (newSorting: SortingState | ((old: SortingState) => SortingState)) => {
-      const resolvedSorting =
-        typeof newSorting === 'function' ? newSorting(sorting) : newSorting;
-      const serializedSorting = serializeSorting(resolvedSorting);
-      setSortParam(serializedSorting || null);
-    },
-    [sorting, setSortParam],
-  );
-
-  const handleSetGlobalFilter = useCallback(
-    (filter: string) => {
-      setSearchParam(filter || null);
-    },
-    [setSearchParam],
-  );
-
-  return {
-    sorting,
-    globalFilter,
-    setSorting: handleSetSorting,
-    setGlobalFilter: handleSetGlobalFilter,
-  };
+  return useUrlSyncedTableStateAdapter({
+    sortParam,
+    setSortParam,
+    searchParam,
+    setSearchParam,
+  });
 }

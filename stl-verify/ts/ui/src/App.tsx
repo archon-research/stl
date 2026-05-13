@@ -1,4 +1,8 @@
-import { SidebarLayout } from '@archon-research/design-system';
+import {
+  buildRowSearchString,
+  matchesSearchQuery,
+  SidebarLayout,
+} from '@archon-research/design-system';
 import type { SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -11,7 +15,6 @@ import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
-import { buildRowSearchString, matchesSearchQuery } from './data-table/utils';
 import {
   getAllocations,
   getCapitalMetrics,
