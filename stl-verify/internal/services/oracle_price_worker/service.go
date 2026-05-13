@@ -21,6 +21,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/jsonutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -277,6 +278,10 @@ func (s *Service) resolveBlockTimestamp(ctx context.Context, event outbound.Bloc
 	}
 	if data == nil {
 		return time.Time{}, fmt.Errorf("block %d (version %d) not found in cache or s3", event.BlockNumber, event.Version)
+	}
+	if jsonutil.IsNullOrEmpty(data) {
+		return time.Time{}, fmt.Errorf("block %d (version %d, chain %d) has null/empty payload in cache or s3 — upstream pipeline corruption",
+			event.BlockNumber, event.Version, event.ChainID)
 	}
 
 	var block struct {

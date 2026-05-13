@@ -26,8 +26,13 @@ type s3WriterAPI interface {
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 }
 
-// Compile-time check that Writer implements outbound.S3Writer
-var _ outbound.S3Writer = (*Writer)(nil)
+// Compile-time checks: Writer implements both ports so production services
+// (raw_data_backup, etc.) get only the safe API while cleanup tooling can
+// depend on the overwrite-capable port without a separate adapter.
+var (
+	_ outbound.S3Writer     = (*Writer)(nil)
+	_ outbound.S3Overwriter = (*Writer)(nil)
+)
 
 // Writer implements the S3Writer interface using the AWS SDK.
 type Writer struct {
@@ -116,6 +121,30 @@ func (w *Writer) WriteFileIfNotExists(ctx context.Context, bucket, key string, c
 
 	w.logger.Debug("wrote file to S3 (new)", "bucket", bucket, "key", key, "compressed", compressGzip)
 	return true, nil
+}
+
+// WriteFile writes content to the specified key in the bucket, overwriting any
+// existing object.
+func (w *Writer) WriteFile(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) error {
+	body, contentEncoding, err := w.prepareBody(content, compressGzip)
+	if err != nil {
+		return err
+	}
+
+	input := &s3.PutObjectInput{
+		Bucket:          aws.String(bucket),
+		Key:             aws.String(key),
+		Body:            body,
+		ContentType:     aws.String("application/json"),
+		ContentEncoding: contentEncoding,
+	}
+
+	if _, err := w.client.PutObject(ctx, input); err != nil {
+		return fmt.Errorf("failed to write to S3: %w", err)
+	}
+
+	w.logger.Debug("wrote file to S3 (overwrite)", "bucket", bucket, "key", key, "compressed", compressGzip)
+	return nil
 }
 
 // FileExists checks if a file already exists at the given key.
