@@ -6,14 +6,12 @@ startup with the loaded ratings and asset mapping and is stateless
 across requests.
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.risk import RrcResult, SurafDetails
+from app.domain.entities.risk import ModelName, RrcResult, SurafDetails
 from app.domain.exceptions import InvalidOverrideError
 from app.ports.allocation_repository import AllocationRepository
 from app.risk_engine.suraf.result import SurafResult
@@ -41,7 +39,7 @@ class SurafRrcService:
     be used by the unified risk-model registry.
     """
 
-    risk_model: str = "suraf"
+    risk_model: ModelName = "suraf"
 
     def __init__(
         self,

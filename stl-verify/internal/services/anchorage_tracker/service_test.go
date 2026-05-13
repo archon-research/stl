@@ -327,6 +327,35 @@ func TestService_Run(t *testing.T) {
 	}
 }
 
+func TestService_RunSkipsInactivePackages(t *testing.T) {
+	// Inactive package shaped like the real Anchorage response: empty
+	// ltvTimestamp / currentLtv. Without filtering, this would fail the
+	// whole batch on time.Parse and drop the active package too.
+	inactive := Package{
+		PackageID:    "pkg-inactive",
+		Active:       false,
+		State:        "",
+		LTVTimestamp: "",
+		CurrentLTV:   "",
+	}
+	client := &mockClient{
+		packages:   []Package{inactive, newTestPackage()},
+		operations: []Operation{newTestOperation()},
+	}
+	snapRepo := &mockSnapshotRepo{}
+	opRepo := &mockOperationRepo{}
+
+	svc := NewService(client, snapRepo, opRepo, 1, nil)
+
+	if err := svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if snapRepo.count() != 1 {
+		t.Errorf("expected 1 snapshot (active only), got %d", snapRepo.count())
+	}
+}
+
 func TestService_RunFailsOnAPIError(t *testing.T) {
 	client := &mockClient{fetchErr: fmt.Errorf("api down")}
 	svc := NewService(client, &mockSnapshotRepo{}, &mockOperationRepo{}, 1, nil)

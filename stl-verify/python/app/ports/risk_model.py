@@ -5,19 +5,17 @@ Domain code depends only on this protocol; concrete implementations
 live in adapters or services.
 """
 
-from __future__ import annotations
-
 from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.risk import RrcResult
+from app.domain.entities.risk import ModelName, RrcResult
 
 
 class RiskModel(Protocol):
     """Inbound port that any risk model (SURAF, gap-sweep, ...) must implement."""
 
-    risk_model: str
+    risk_model: ModelName
     """Discriminator string used in responses and override dispatch."""
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:

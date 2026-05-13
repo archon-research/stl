@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/jsonutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -394,7 +394,7 @@ func (s *Service) generateKey(partition string, event outbound.BlockEvent, dataT
 // writeToS3 writes data to S3 with the appropriate key structure.
 // Key format: {partition}/{blockNumber}_{version}_{dataType}.json.gz
 func (s *Service) writeToS3(ctx context.Context, partition string, event outbound.BlockEvent, dataType string, data json.RawMessage) error {
-	if jsonutil.IsNullOrEmpty(data) {
+	if rpcutil.IsNullOrEmpty(data) {
 		return fmt.Errorf("refusing to write null/empty %s payload to S3 for block %d (chain=%d, version=%d)",
 			dataType, event.BlockNumber, event.ChainID, event.Version)
 	}

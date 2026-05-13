@@ -20,6 +20,10 @@ def test_scorer_produces_expected_values(sample_version: Path) -> None:
         penalty_path=sample_version / "penalty.csv",
     )
 
+    assert results.avg_score is not None
+    assert results.unadjusted_crr is not None
+    assert results.penalty is not None
+    assert results.adjusted_crr is not None
     assert isclose(results.avg_score, 3.541628505214305, abs_tol=1e-12)
     assert isclose(results.unadjusted_crr, 13.666971958285561, abs_tol=1e-12)
     assert isclose(results.penalty, 20.0, abs_tol=1e-12)

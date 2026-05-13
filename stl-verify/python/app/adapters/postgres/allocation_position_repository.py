@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.allocation import (
     ChainMetadata,
+    DirectAssetHolding,
     EthAddress,
     Prime,
     ProtocolMetadata,
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.proxy_kind import ProxyKind, classify_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +131,15 @@ class PostgresAllocationRepository:
                         """
                     )
                 )
-                return [Prime(id="0x" + row.address, name=row.name, address="0x" + row.address) for row in result]
+                primes: list[Prime] = []
+                for row in result:
+                    address = "0x" + row.address
+                    # SubProxy wallets share a prime_id with the ALM proxy; surfacing
+                    # them here would duplicate each prime in /v1/primes.
+                    if classify_proxy(address) is not ProxyKind.ALM:
+                        continue
+                    primes.append(Prime(id=address, name=row.name, address=address))
+                return primes
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -214,6 +224,40 @@ class PostgresAllocationRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching receipt token positions: {exc}") from exc
+
+    async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    _DIRECT_ASSET_HOLDINGS_SQL,
+                    {"proxy_hex": prime_id.hex},
+                )
+                return [
+                    DirectAssetHolding(
+                        chain_id=row.chain_id,
+                        token_id=row.token_id,
+                        token_address="0x" + row.token_address,
+                        symbol=row.symbol,
+                        balance=_safe_decimal(row.balance, "balance", row.token_id),
+                        latest_activity_at=row.latest_activity_at,
+                    )
+                    for row in result
+                ]
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch direct asset holdings from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching direct asset holdings: {exc}") from exc
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
@@ -351,146 +395,116 @@ class PostgresAllocationRepository:
         ]
 
 
-# The allocation_position rows are event-oriented, so we first take the
-# latest row per (token_id, proxy_address) in ``latest_positions``. Each
-# remaining allocation token is then matched against receipt_token two
-# ways: by underlying_token_id (position recorded in the underlying) and
-# by receipt_token_address (position recorded in the receipt token
-# itself).
+# Match positions to receipt tokens only by receipt_token_address: a prime's
+# direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)
+# is not a position in any receipt token that wraps it, and attributing it to
+# every such receipt token double-counts and inflates per-token balances.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
-    WITH latest_positions AS (
-        SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
-            ap.chain_id,
-            ap.token_id,
-            ap.balance
+    WITH latest_receipt_positions AS (
+        SELECT DISTINCT ON (rt.id)
+            rt.id                                    AS receipt_token_id,
+            rt.symbol                                AS symbol,
+            encode(rt.receipt_token_address, 'hex')  AS receipt_token_address,
+            ut.id                                    AS underlying_token_id,
+            ut.symbol                                AS underlying_symbol,
+            encode(ut.address, 'hex')                AS underlying_token_address,
+            pr.id                                    AS protocol_id,
+            pr.name                                  AS protocol_name,
+            ap.chain_id                              AS chain_id,
+            ap.balance                               AS balance,
+            ap.created_at                            AS latest_activity_at
         FROM allocation_position ap
+        JOIN token t          ON t.id = ap.token_id
+        JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
+        JOIN token ut         ON ut.id = rt.underlying_token_id
+        JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-        ORDER BY ap.token_id, ap.proxy_address,
-                 ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
-    ),
-    latest_prices AS (
-        SELECT DISTINCT ON (rt.id, rt.underlying_token_id)
-            rt.id AS receipt_token_id,
-            rt.underlying_token_id AS token_id,
-            otp.price_usd
-        FROM receipt_token rt
-        JOIN protocol_oracle po ON po.protocol_id = rt.protocol_id
-        JOIN onchain_token_price otp ON otp.oracle_id = po.oracle_id
-            AND otp.token_id = rt.underlying_token_id
-        ORDER BY rt.id, rt.underlying_token_id,
-                 otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
-    ),
-    latest_activity AS (
-        SELECT DISTINCT ON (receipt_token_id)
-            receipt_token_id,
-            created_at AS latest_activity_at
-        FROM (
-            SELECT
-                rt.id AS receipt_token_id,
-                ap.created_at
-            FROM allocation_position ap
-            JOIN token t ON t.id = ap.token_id
-            JOIN receipt_token rt ON rt.underlying_token_id = t.id
-            JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
-            WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-
-            UNION ALL
-
-            SELECT
-                rt.id AS receipt_token_id,
-                ap.created_at
-            FROM allocation_position ap
-            JOIN token t ON t.id = ap.token_id
-            JOIN receipt_token rt ON rt.receipt_token_address = t.address
-            JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
-            WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-        ) activity_events
-        ORDER BY receipt_token_id, created_at DESC
+          AND ap.balance > 0
+        ORDER BY rt.id,
+                 ap.block_number DESC, ap.block_version DESC,
+                 ap.processing_version DESC, ap.log_index DESC
     )
-    SELECT DISTINCT ON (receipt_token_id)
-        combined.chain_id,
-        combined.receipt_token_id,
-        combined.receipt_token_address,
-        combined.underlying_token_id,
-        combined.underlying_token_address,
-        combined.symbol,
-        combined.underlying_symbol,
-        combined.protocol_name,
-        combined.balance,
-        (combined.balance * lp.price_usd) AS amount_usd,
-        la.latest_activity_at
-    FROM (
-        SELECT
-            lp.chain_id                                  AS chain_id,
-            rt.id                                        AS receipt_token_id,
-            encode(rt.receipt_token_address, 'hex')      AS receipt_token_address,
-            ut.id                                        AS underlying_token_id,
-            encode(ut.address, 'hex')                    AS underlying_token_address,
-            rt.symbol                                    AS symbol,
-            ut.symbol                                    AS underlying_symbol,
-            pr.name                                      AS protocol_name,
-            lp.balance
-        FROM latest_positions lp
-        JOIN token t ON t.id = lp.token_id
-        JOIN receipt_token rt ON rt.underlying_token_id = t.id
-        JOIN token ut ON ut.id = rt.underlying_token_id
-        JOIN protocol pr ON pr.id = rt.protocol_id
-        WHERE lp.balance > 0
-
-        UNION ALL
-
-        SELECT
-            lp.chain_id                                  AS chain_id,
-            rt.id                                        AS receipt_token_id,
-            encode(rt.receipt_token_address, 'hex')      AS receipt_token_address,
-            ut.id                                        AS underlying_token_id,
-            encode(ut.address, 'hex')                    AS underlying_token_address,
-            rt.symbol                                    AS symbol,
-            ut.symbol                                    AS underlying_symbol,
-            pr.name                                      AS protocol_name,
-            lp.balance
-        FROM latest_positions lp
-        JOIN token t ON t.id = lp.token_id
-        JOIN receipt_token rt ON rt.receipt_token_address = t.address
-        JOIN token ut ON ut.id = rt.underlying_token_id
-        JOIN protocol pr ON pr.id = rt.protocol_id
-        WHERE lp.balance > 0
-    ) combined
-    LEFT JOIN latest_prices lp ON lp.receipt_token_id = combined.receipt_token_id
-        AND lp.token_id = combined.underlying_token_id
-    LEFT JOIN latest_activity la ON la.receipt_token_id = combined.receipt_token_id
-    ORDER BY receipt_token_id, balance DESC
+    SELECT
+        p.chain_id,
+        p.receipt_token_id,
+        p.receipt_token_address,
+        p.underlying_token_id,
+        p.underlying_token_address,
+        p.symbol,
+        p.underlying_symbol,
+        p.protocol_name,
+        p.balance,
+        (p.balance * lp.price_usd) AS amount_usd,
+        p.latest_activity_at
+    FROM latest_receipt_positions p
+    LEFT JOIN LATERAL (
+        SELECT otp.price_usd
+        FROM onchain_token_price otp
+        JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+            AND po.protocol_id = p.protocol_id
+        WHERE otp.token_id = p.underlying_token_id
+        ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        LIMIT 1
+    ) lp ON TRUE
+    ORDER BY p.balance DESC
 """)
 
 
-_USD_EXPOSURE_SQL = text("""
-WITH latest_balance AS (
-    SELECT balance
-    FROM (
+# A "direct asset holding" is a position whose token has no row in the
+# receipt_token table — i.e. the prime holds the token itself rather than
+# a registered protocol wrapper for it. Receipt-token positions are returned
+# by ``_RECEIPT_TOKEN_POSITIONS_SQL``; this query is the complementary set.
+_DIRECT_ASSET_HOLDINGS_SQL = text("""
+    WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
-            ap.balance
+            ap.chain_id,
+            ap.token_id,
+            ap.balance,
+            ap.created_at AS latest_activity_at
         FROM allocation_position ap
-        JOIN receipt_token rt ON rt.id = :receipt_token_id
-        JOIN token t ON t.id = ap.token_id
-            AND (t.id = rt.underlying_token_id OR t.address = rt.receipt_token_address)
-        JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
           AND ap.balance > 0
         ORDER BY ap.token_id,
                  ap.block_number DESC, ap.block_version DESC,
                  ap.processing_version DESC, ap.log_index DESC
-    ) sub
-    ORDER BY balance DESC
+    )
+    SELECT
+        lp.chain_id,
+        lp.token_id,
+        encode(t.address, 'hex') AS token_address,
+        t.symbol                 AS symbol,
+        lp.balance,
+        lp.latest_activity_at
+    FROM latest_positions lp
+    JOIN token t ON t.id = lp.token_id
+    LEFT JOIN receipt_token rt
+        ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
+    WHERE rt.id IS NULL
+    ORDER BY lp.balance DESC
+""")
+
+
+_USD_EXPOSURE_SQL = text("""
+WITH latest_balance AS (
+    SELECT ap.balance
+    FROM allocation_position ap
+    JOIN receipt_token rt ON rt.id = :receipt_token_id
+    JOIN token t ON t.id = ap.token_id AND t.address = rt.receipt_token_address
+    JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = ap.chain_id
+    WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
+      AND ap.balance > 0
+    ORDER BY ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
     LIMIT 1
 ),
 latest_price AS (
-    SELECT DISTINCT ON (otp.token_id)
-        otp.price_usd
+    SELECT otp.price_usd
     FROM onchain_token_price otp
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
     JOIN receipt_token rt ON rt.protocol_id = po.protocol_id AND rt.id = :receipt_token_id
     WHERE otp.token_id = rt.underlying_token_id
-    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    LIMIT 1
 )
 SELECT lb.balance, lp.price_usd
 FROM latest_balance lb
@@ -499,62 +513,33 @@ CROSS JOIN latest_price lp
 
 
 _TOTAL_USD_EXPOSURE_SQL = text("""
-WITH latest_positions AS (
-    SELECT DISTINCT ON (ap.token_id, ap.proxy_address)
-        ap.chain_id,
-        ap.token_id,
+WITH latest_receipt_positions AS (
+    SELECT DISTINCT ON (rt.id)
+        rt.id                  AS receipt_token_id,
+        rt.underlying_token_id AS underlying_token_id,
+        rt.protocol_id         AS protocol_id,
         ap.balance
     FROM allocation_position ap
+    JOIN token t          ON t.id = ap.token_id
+    JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
+    JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-    ORDER BY ap.token_id, ap.proxy_address,
-             ap.block_number DESC, ap.block_version DESC, ap.processing_version DESC, ap.log_index DESC
-),
-receipt_positions AS (
-    SELECT DISTINCT ON (receipt_token_id)
-        receipt_token_id,
-        underlying_token_id,
-        balance
-    FROM (
-        SELECT
-            rt.id AS receipt_token_id,
-            rt.underlying_token_id,
-            lp.balance
-        FROM latest_positions lp
-        JOIN token t ON t.id = lp.token_id
-        JOIN receipt_token rt ON rt.underlying_token_id = t.id
-        JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = lp.chain_id
-        WHERE lp.balance > 0
-
-        UNION ALL
-
-        SELECT
-            rt.id AS receipt_token_id,
-            rt.underlying_token_id,
-            lp.balance
-        FROM latest_positions lp
-        JOIN token t ON t.id = lp.token_id
-        JOIN receipt_token rt ON rt.receipt_token_address = t.address
-        JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = lp.chain_id
-        WHERE lp.balance > 0
-    ) combined
-    ORDER BY receipt_token_id, balance DESC
-),
-latest_prices AS (
-    SELECT DISTINCT ON (rt.id, rt.underlying_token_id)
-        rt.id AS receipt_token_id,
-        rt.underlying_token_id AS token_id,
-        otp.price_usd
-    FROM receipt_token rt
-    JOIN protocol_oracle po ON po.protocol_id = rt.protocol_id
-    JOIN onchain_token_price otp ON otp.oracle_id = po.oracle_id
-        AND otp.token_id = rt.underlying_token_id
-    ORDER BY rt.id, rt.underlying_token_id,
-             otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+      AND ap.balance > 0
+    ORDER BY rt.id,
+             ap.block_number DESC, ap.block_version DESC,
+             ap.processing_version DESC, ap.log_index DESC
 )
-SELECT COALESCE(SUM(rp.balance * lp.price_usd), 0) AS total_usd_exposure
-FROM receipt_positions rp
-LEFT JOIN latest_prices lp ON lp.receipt_token_id = rp.receipt_token_id
-    AND lp.token_id = rp.underlying_token_id
+SELECT COALESCE(SUM(p.balance * lp.price_usd), 0) AS total_usd_exposure
+FROM latest_receipt_positions p
+LEFT JOIN LATERAL (
+    SELECT otp.price_usd
+    FROM onchain_token_price otp
+    JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+        AND po.protocol_id = p.protocol_id
+    WHERE otp.token_id = p.underlying_token_id
+    ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    LIMIT 1
+) lp ON TRUE
 """)
 
 

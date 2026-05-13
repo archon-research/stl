@@ -7,7 +7,7 @@ from app.config import Settings
 
 
 def test_settings_loads_with_defaults():
-    settings = Settings()
+    settings = Settings.model_validate({})
 
     assert settings.database_url is not None
     assert settings.log_level == "INFO"
@@ -25,7 +25,7 @@ def test_risk_default_gap_pct(monkeypatch: pytest.MonkeyPatch, env_value: str | 
     if env_value is not None:
         monkeypatch.setenv("RISK_DEFAULT_GAP_PCT", env_value)
 
-    settings = Settings()
+    settings = Settings.model_validate({})
 
     assert settings.risk_default_gap_pct == expected
 
@@ -35,28 +35,28 @@ def test_risk_default_gap_pct_rejects_out_of_bounds_env_values(monkeypatch: pyte
     monkeypatch.setenv("RISK_DEFAULT_GAP_PCT", env_value)
 
     with pytest.raises(ValidationError, match="risk_default_gap_pct"):
-        Settings()
+        Settings.model_validate({})
 
 
 class TestAsyncDatabaseUrl:
     def test_rewrites_postgresql_scheme(self):
-        settings = Settings(database_url="postgresql://host:5432/db")
+        settings = Settings.model_validate({"database_url": "postgresql://host:5432/db"})
         assert settings.async_database_url == "postgresql+asyncpg://host:5432/db"
 
     def test_rewrites_postgres_scheme(self):
-        settings = Settings(database_url="postgres://host:5432/db")
+        settings = Settings.model_validate({"database_url": "postgres://host:5432/db"})
         assert settings.async_database_url == "postgresql+asyncpg://host:5432/db"
 
     def test_preserves_asyncpg_scheme(self):
-        settings = Settings(database_url="postgresql+asyncpg://host:5432/db")
+        settings = Settings.model_validate({"database_url": "postgresql+asyncpg://host:5432/db"})
         assert settings.async_database_url == "postgresql+asyncpg://host:5432/db"
 
 
 class TestAllocationShareStaleness:
     def test_default_is_30_minutes(self):
-        settings = Settings()
+        settings = Settings.model_validate({})
         assert settings.allocation_share_max_stale_seconds == 1800
 
     def test_overridable(self):
-        settings = Settings(allocation_share_max_stale_seconds=600)
+        settings = Settings.model_validate({"allocation_share_max_stale_seconds": 600})
         assert settings.allocation_share_max_stale_seconds == 600

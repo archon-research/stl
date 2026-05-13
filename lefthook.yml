@@ -1,0 +1,43 @@
+# Lefthook configuration for stl-verify monorepo
+# Root config that extends language-specific configs from stl-verify/
+# Install: make install-hooks or lefthook install
+# Run manually: lefthook run pre-commit
+
+# Use doublestar glob matcher for standard recursive behavior
+glob_matcher: doublestar
+
+extends:
+  - stl-verify/lefthook.yml
+
+# Root-level generic checks
+pre-commit:
+  parallel: true
+  exclude: "bin/**|dist/**"
+
+  commands:
+    # Root-level generic file checks
+    trailing-whitespace:
+      glob: "**/*.{yml,yaml,json,md,sh}"
+      exclude: '(stl-verify|lefthook).*'
+      stage_fixed: true
+      run: perl -i -pe 's/[^\S\n]+$//' {staged_files}
+
+    end-of-file-fixer:
+      glob: "**/*.{yml,yaml,json,md,sh}"
+      exclude: '(stl-verify|lefthook).*'
+      stage_fixed: true
+      run: |
+        for file in {staged_files}; do
+          [ -f "$file" ] || continue
+          [ -n "$(tail -c1 "$file")" ] && echo >> "$file"
+          perl -i -0pe 's/\n+$/\n/' "$file"
+        done
+
+    check-merge-conflict:
+      glob: "**/*"
+      exclude: "stl-verify/.*"
+      run: |
+        if grep -r -E '^(<<<<<<<|=======|>>>>>>>)' {staged_files} 2>/dev/null; then
+          echo "Error: Merge conflict markers found"
+          exit 1
+        fi

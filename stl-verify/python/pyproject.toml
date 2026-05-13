@@ -26,11 +26,16 @@ dev = [
     "pytest-asyncio",
     "httpx",
     "ruff",
+    "ty==0.0.35",
     "testcontainers[postgres]",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ty.src]
+include = ["app", "tests", "scripts"]
+exclude = [".venv", "**/__pycache__", "app/static"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

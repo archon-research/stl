@@ -57,7 +57,7 @@ function generateMinimalMetadata(
 ): TokenMetadata {
   return {
     symbol: '???', // Fallback symbol - should be overridden by user
-    logoURI: buildTokenLogoUrl(chainId, tokenAddress),
+    logoURI: buildTokenLogoUrl(chainId, tokenAddress) ?? undefined,
   };
 }
 

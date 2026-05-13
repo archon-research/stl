@@ -15,12 +15,17 @@ class AllocationCategoryService:
         """Initialize with provided rules or default config rules."""
         self._rules = rules if rules is not None else default_allocation_category_rules()
 
-    def classify(self, protocol_name: str, token_symbol: str) -> AllocationCategory:
+    def classify(self, protocol_name: str | None, token_symbol: str) -> AllocationCategory:
         """Classify allocation as one of: ALLOCATION, POL, PSM3, ASSET.
 
-        Evaluates rules in priority order and returns the first match.
-        Falls back to ALLOCATION if no specific rules match.
+        Returns ASSET when ``protocol_name`` is None — direct asset holdings
+        with no registered protocol wrapper are treasury/non-strategy positions
+        by definition. Otherwise evaluates rules in priority order and falls
+        back to ALLOCATION if no rule matches.
         """
+        if protocol_name is None:
+            return AllocationCategory.ASSET
+
         # Sort by priority (descending) then by rule specificity
         # (prefer rules with specific tokens over protocol-only rules)
         sorted_rules = sorted(

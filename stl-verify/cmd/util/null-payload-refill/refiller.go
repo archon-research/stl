@@ -14,19 +14,12 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/gziputil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/jsonutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 const defaultFetchTimeout = 15 * time.Second
-
-// errRPCStillNull is returned via Outcome.Err when the RPC re-fetch (either the
-// canonical-block lookup or the by-hash data fetch) still produces a null
-// payload. A sentinel (rather than nil) ensures the worker log gate logs the
-// per-key failure at ERROR and lets downstream callers do
-// errors.Is(err, errRPCStillNull) without parsing the human-readable reason.
-var errRPCStillNull = errors.New("rpc returned null for canonical block lookup")
 
 // Outcome summarises what happened to a single key during processing.
 //
@@ -203,8 +196,8 @@ func (r *Refiller) loadCanonicalBlock(ctx context.Context, key string, parsed s3
 		}
 		return nil, r.fatal(key, "rpc-error", err), true
 	}
-	if jsonutil.IsNullOrEmpty(blockJSON) {
-		return nil, r.fatal(key, "rpc-still-null", errRPCStillNull), true
+	if rpcutil.IsNullOrEmpty(blockJSON) {
+		return nil, r.fatal(key, "rpc-still-null", rpcutil.ErrUpstreamNullResult), true
 	}
 	var hdr struct {
 		Hash       string `json:"hash"`
@@ -254,8 +247,8 @@ func (r *Refiller) fetchData(ctx context.Context, key string, parsed s3key.Key, 
 		}
 		return nil, r.fatal(key, "rpc-error", rpcErr), true
 	}
-	if jsonutil.IsNullOrEmpty(data) {
-		return nil, r.fatal(key, "rpc-still-null", errRPCStillNull), true
+	if rpcutil.IsNullOrEmpty(data) {
+		return nil, r.fatal(key, "rpc-still-null", rpcutil.ErrUpstreamNullResult), true
 	}
 	return data, Outcome{}, false
 }
@@ -342,7 +335,7 @@ func (r *Refiller) verifyStillNull(ctx context.Context, key string) (verifyResul
 	if err != nil {
 		return verifyNonNull, fmt.Errorf("decompress s3 object: %w", err)
 	}
-	if jsonutil.IsNullOrEmpty(json.RawMessage(raw)) {
+	if rpcutil.IsNullOrEmpty(json.RawMessage(raw)) {
 		return verifyNull, nil
 	}
 	return verifyNonNull, nil

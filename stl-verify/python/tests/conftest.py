@@ -1,10 +1,11 @@
 from decimal import Decimal
+from typing import Any
 
-from app.domain.entities.allocation import ReceiptTokenPosition
+from app.domain.entities.allocation import DirectAssetHolding, ReceiptTokenPosition
 
 
-def make_receipt_token_position(**overrides) -> ReceiptTokenPosition:
-    defaults = dict(
+def make_receipt_token_position(**overrides: Any) -> ReceiptTokenPosition:
+    defaults: dict[str, Any] = dict(
         chain_id=1,
         receipt_token_id=1,
         receipt_token_address="0x" + "a" * 40,
@@ -17,3 +18,15 @@ def make_receipt_token_position(**overrides) -> ReceiptTokenPosition:
     )
     defaults.update(overrides)
     return ReceiptTokenPosition(**defaults)
+
+
+def make_direct_asset_holding(**overrides: Any) -> DirectAssetHolding:
+    defaults: dict[str, Any] = dict(
+        chain_id=1,
+        token_id=99,
+        token_address="0x" + "c" * 40,
+        symbol="PYUSD",
+        balance=Decimal("250.0"),
+    )
+    defaults.update(overrides)
+    return DirectAssetHolding(**defaults)

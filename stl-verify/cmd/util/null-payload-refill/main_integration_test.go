@@ -26,7 +26,7 @@ import (
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
-	"github.com/archon-research/stl/stl-verify/internal/pkg/jsonutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -165,7 +165,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 	// 7. Verify S3 was overwritten with non-null content.
 	got := fetchObject(t, ctx, s3c, bucket, key)
-	if jsonutil.IsNullOrEmpty(got) {
+	if rpcutil.IsNullOrEmpty(got) {
 		t.Fatalf("S3 object still null after refill: %q", got)
 	}
 	if !bytes.Contains(got, []byte(blockHash)) {

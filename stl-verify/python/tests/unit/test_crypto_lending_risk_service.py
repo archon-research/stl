@@ -147,6 +147,7 @@ class TestCompute:
         override_result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={"gap_pct": Decimal("0.30")})
         default_result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
+        assert isinstance(override_result.details, GapSweepDetails)
         assert override_result.details.gap_pct == Decimal("0.30")
         assert override_result.rrc_usd >= default_result.rrc_usd
         assert reader.get_share.await_count == 2

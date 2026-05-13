@@ -1,11 +1,14 @@
 
-.PHONY: lint lint-fix test-unit test-integration build-ui-static export-openapi-schema run run-static
+.PHONY: lint lint-fix typecheck test-unit test-integration build-ui-static export-openapi-schema run run-static
 
 # Ensure `uv run` targets the project environment even if an unrelated venv is active.
 UV := env -u VIRTUAL_ENV uv
 TS_DIR := ../ts
 STATIC_DIR := app/static
 OPENAPI_SCHEMA := $(TS_DIR)/ui/src/generated/openapi-schema.json
+
+typecheck:
+	$(UV) run --extra dev ty check
 
 lint:
 	$(UV) run --extra dev ruff check .

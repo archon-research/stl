@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -362,8 +363,8 @@ func TestProcess_RpcStillReturnsNull_RecordsFail(t *testing.T) {
 	if !out.Fatal {
 		t.Errorf("Fatal = false, want true (rpc-still-null is unexpected, run must abort)")
 	}
-	if !errors.Is(out.Err, errRPCStillNull) {
-		t.Errorf("Err chain missing errRPCStillNull, got %v", out.Err)
+	if !errors.Is(out.Err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("Err chain missing rpcutil.ErrUpstreamNullResult, got %v", out.Err)
 	}
 	if h.s3Overwriter.callCount() != 0 {
 		t.Errorf("unexpected s3 write")
@@ -746,8 +747,8 @@ func TestProcess_GetBlockByNumberReturnsNull_IsFatal(t *testing.T) {
 	if !out.Fatal {
 		t.Errorf("Fatal = false, want true (rpc-still-null at canonical lookup is fatal)")
 	}
-	if !errors.Is(out.Err, errRPCStillNull) {
-		t.Errorf("Err chain missing errRPCStillNull, got %v", out.Err)
+	if !errors.Is(out.Err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("Err chain missing rpcutil.ErrUpstreamNullResult, got %v", out.Err)
 	}
 }
 
@@ -913,8 +914,8 @@ func TestProcess_RpcStillNull_IsFatal(t *testing.T) {
 	if !out.Fatal {
 		t.Errorf("Fatal = false, want true (rpc-still-null is unexpected, run must abort)")
 	}
-	if !errors.Is(out.Err, errRPCStillNull) {
-		t.Errorf("Err chain missing errRPCStillNull, got %v", out.Err)
+	if !errors.Is(out.Err, rpcutil.ErrUpstreamNullResult) {
+		t.Errorf("Err chain missing rpcutil.ErrUpstreamNullResult, got %v", out.Err)
 	}
 }
 

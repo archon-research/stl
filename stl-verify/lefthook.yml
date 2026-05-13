@@ -1,0 +1,87 @@
+# Lefthook configuration for stl-verify
+# Install: make install-hooks or lefthook install
+# Run manually: lefthook run pre-commit
+#
+# Extends language-specific configs from python/ and ts/ subdirectories
+# Includes stl-verify-specific validation and Go-specific linting
+
+# Use doublestar glob matcher for standard recursive behavior
+glob_matcher: doublestar
+
+extends:
+  - python/lefthook.yml
+  - ts/lefthook.yml
+
+# Excluded patterns for all commands unless overridden
+_exclude_dirs: &exclude_dirs 'db/**|k8s/**|docs/**|*.pb.go|vendor/**'
+
+pre-commit:
+  parallel: true
+  exclude: "bin/**|dist/**"
+
+  commands:
+    check-yaml:
+      glob: "**/*.{yml,yaml}"
+      exclude: *exclude_dirs
+      run: |
+        if command -v yamllint > /dev/null 2>&1; then
+          yamllint {staged_files}
+        else
+          echo "Warning: yamllint not found, skipping YAML validation. Install yamllint to enable this check."
+        fi
+
+    check-json:
+      glob: "**/*.json"
+      exclude: *exclude_dirs
+      run: |
+        if ! command -v jq > /dev/null 2>&1; then
+          echo "Warning: jq not found, skipping JSON validation. Install jq: brew install jq"
+          exit 0
+        fi
+        for file in {staged_files}; do
+          if [ -f "$file" ]; then
+            if ! jq . "$file" > /dev/null 2>&1; then
+              echo "Invalid JSON: $file"
+              exit 1
+            fi
+          fi
+        done
+
+    check-large-files:
+      glob: "**/*"
+      exclude: *exclude_dirs
+      run: |
+        for file in {staged_files}; do
+          # Skip directories
+          [ -d "$file" ] && continue
+
+          # If file is tracked by Git LFS, skip size check
+          if git lfs ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+            continue
+          fi
+
+          # Cross-platform file size (macOS/BSD stat first, then GNU stat)
+          size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null || echo 0)
+          if [ "$size" -gt 1024000 ]; then
+            echo "Error: $file is larger than 1000KB ($((size/1024))KB) and not tracked by Git LFS"
+            exit 1
+          fi
+        done
+
+    # =================================================================
+    # Go-specific linting
+    # =================================================================
+
+    go-fmt:
+      glob: "**/*.go"
+      exclude: *exclude_dirs
+      stage_fixed: true
+      run: gofmt -s -w {staged_files}
+
+    go-imports:
+      glob: "**/*.go"
+      exclude: *exclude_dirs
+      stage_fixed: true
+      run: |
+        GOBIN=$(go env GOPATH)/bin
+        $GOBIN/goimports -l -w {staged_files}

@@ -38,9 +38,15 @@ make cover              # Generate coverage report
 # CI (runs all checks)
 make ci                 # test-race, vet, fmt-check, tidy-check, staticcheck, vulncheck, golangci-lint
 
-# Formatting & Linting
-make fmt                # Format code
-make tools              # Install dev tools (staticcheck, golangci-lint, govulncheck, etc.)
+# Formatting & Linting (Go/Python/TypeScript)
+make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
+make format             # Auto-format all code locally (Go, Python, TS)
+make lint               # Run linters locally (delegates to language pipelines)
+
+# Note: CI workflows run per-language in .github/workflows/:
+# - go-ci.yml:      `make ci-checks && make test-race`
+# - python-ci.yml:  `make lint` + `make test-unit` + `make test-integration` (in python/)
+# - ts-ci.yml:      `npm run lint` + `npm run format:check` + `npm run build` (in ts/)
 
 # Docker (ARM64 for Fargate Graviton)
 make docker-release ENV=sentinelstaging    # Build and push watcher image
@@ -100,12 +106,12 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Interfaces**: Use `-er` suffix (Reader, Publisher)
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
-- **Errors**: 
+- **Errors**:
 Wrap with context: `fmt.Errorf("doing X: %w", err)`.
 Never ignore errors.
 Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
 **Fail hard and early on unexpected errors.**
-- **Testing**: 
+- **Testing**:
     Table-driven tests, mock outbound ports for unit tests.
     Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission critical that code is correct and robust.
     In services, ONLY test the public api. Dont test internals if you can avoid it.
@@ -115,10 +121,10 @@ Lean towards returning errors instead of continuing, unless there is an extremel
     Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
 - **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
-- **Function composition**: 
+- **Function composition**:
     Compose large functions from smaller functions.
     Large functions should read like prose, with each step delegated to a well-named helper function.
-- **Libraries**: 
+- **Libraries**:
     Use the standard library as much as possible.
     Instead of duplicating code, create a function containing the shared functionality, and re-use it.
 - **Database**:
@@ -166,3 +172,68 @@ Apply blocking and should-fix items before declaring the work done. Nice-to-have
 - Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
 - AWS for production (EKS on Graviton arm64 — migrating from ECS Fargate. RDS Aurora (TimescaleDB via TigerData), ElastiCache Redis, SNS/SQS, S3)
 - Alchemy API key required for Ethereum mainnet access
+
+## Linting & Code Quality
+
+### Architecture
+
+Quality is enforced at three levels:
+
+1. **Git Hooks (Lefthook)** — Runs on `git commit` and `git push`
+   - Automatically fixes formatting issues (`stage_fixed: true`)
+   - Prevents broken code from being pushed
+   - Pre-commit: runs on staged files only (fast)
+   - Pre-push: runs full-module checks (go vet, etc.)
+   - Configured per-language: `stl-verify/lefthook.yml`, `stl-verify/python/lefthook.yml`, `stl-verify/ts/lefthook.yml`
+
+2. **Local Development** — Convenience Makefile targets
+   - `make install-hooks` — Install git hooks
+   - `make format` — Auto-format code across all languages
+   - `make lint` — Run linters locally
+   - Delegates to language-specific tooling (Go, Python, TS)
+
+3. **CI Workflows** — Post-push checks (`.github/workflows/`)
+   - `go-ci.yml` — Go linting, vet, staticcheck, tests, vulncheck
+   - `python-ci.yml` — Ruff lint/format, unit & integration tests
+   - `ts-ci.yml` — oxlint, oxfmt, typecheck, build
+   - Triggered on changed files (via `changed-files.yml`)
+   - **These are the source of truth** — CI definitions are authoritative
+
+### Linting by Language
+
+**Go:**
+- Pre-commit hooks: gofmt, goimports (staged files only)
+- Pre-push hooks: go vet (full module)
+- CI: `make ci-checks` (vet, staticcheck, golangci-lint, vulncheck, tidy)
+- Tools: Install with `make tools`
+
+**Python:**
+- Hooks: ruff lint, ruff format
+- CI: `make lint` (from `stl-verify/python/Makefile`)
+- Tools: `uv sync --all-extras` (includes ruff, pytest, etc.)
+
+**TypeScript:**
+- Hooks: oxlint, oxfmt
+- CI: `npm run lint`, `npm run format:check`, `npm run build`
+- Tools: `npm ci` (includes oxlint, oxfmt, etc.)
+
+### Running Manually
+
+```bash
+# Run git hooks manually without committing
+lefthook run pre-commit   # Run all pre-commit hooks
+
+# Format and lint locally before committing
+make format
+make lint
+
+# Or let git hooks do it automatically on commit
+git commit  # Hooks auto-fix, may stage changes
+```
+
+### Key Points
+
+- **Don't bypass hooks**: They catch issues early and cheaply
+- **Hooks are fast**: Only check staged files, not entire codebase
+- **CI is strict**: Fails if any checks don't pass (source of truth)
+- **Language pipelines are independent**: Changes to one language don't trigger linting for others

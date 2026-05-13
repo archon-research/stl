@@ -8,8 +8,6 @@ Layout: ``ratings/{rating_id}/{version}/`` where ``{version}`` matches
 ``v{N}`` (``v1``, ``v2``, …).
 """
 
-from __future__ import annotations
-
 import re
 from datetime import datetime, timezone
 from decimal import Decimal

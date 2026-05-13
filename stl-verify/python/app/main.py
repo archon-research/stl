@@ -1,10 +1,12 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -34,6 +36,26 @@ APP_DIR = Path(__file__).resolve().parent
 DEFAULT_STATIC_DIR = APP_DIR / "static"
 RESERVED_FRONTEND_PREFIXES = ("v1", "docs", "redoc", "openapi.json")
 DOCS_FAVICON_URL = "/assets/archon-32.png"
+
+# Operations tagged with this are kept in the source OpenAPI schema (so the
+# UI's typed client still gets generated against them) but stripped from the
+# public-facing /openapi.json that Swagger UI consumes.
+INTERNAL_OPERATION_TAG = "internal"
+
+
+def strip_internal_operations(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return ``schema`` with operations tagged ``internal`` removed."""
+    filtered_paths: dict[str, dict[str, Any]] = {}
+    for path, methods in schema.get("paths", {}).items():
+        kept_methods = {
+            method: op
+            for method, op in methods.items()
+            if not (isinstance(op, dict) and INTERNAL_OPERATION_TAG in op.get("tags", []))
+        }
+        if kept_methods:
+            filtered_paths[path] = kept_methods
+    return {**schema, "paths": filtered_paths}
+
 
 OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "status", "description": "Liveness and readiness probes."},
@@ -244,6 +266,23 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.include_router(prime_debts.router, prefix="/v1")
     application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
+
+    def public_openapi() -> dict[str, Any]:
+        if application.openapi_schema is not None:
+            return application.openapi_schema
+        full = get_openapi(
+            title=application.title,
+            version=application.version,
+            description=application.description,
+            routes=application.routes,
+            tags=application.openapi_tags,
+        )
+        application.openapi_schema = strip_internal_operations(full)
+        return application.openapi_schema
+
+    # FastAPI's documented openapi override pattern
+    application.openapi = public_openapi  # ty: ignore[invalid-assignment]
+
     configure_docs(application)
     configure_static_hosting(application, static_dir or DEFAULT_STATIC_DIR)
     return application

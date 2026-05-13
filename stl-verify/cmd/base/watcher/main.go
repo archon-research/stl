@@ -383,6 +383,11 @@ func requireEnv(key string) string {
 // historic 10 blocks / 30s behaviour for any chain that doesn't override them.
 // Non-positive values are rejected: time.NewTicker panics on d <= 0, and a
 // negative BatchSize would feed back into SQL LIMIT and gap-fill arithmetic.
+//
+// Env vars:
+//   - BACKFILL_BATCH_SIZE      (int,      default 10)
+//   - BACKFILL_POLL_INTERVAL   (duration, default 30s)
+//   - BACKFILL_RETRY_MIN_AGE   (duration, default 30s)
 func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger) (backfill_gaps.BackfillConfig, error) {
 	batchSize, err := env.GetInt("BACKFILL_BATCH_SIZE", 10)
 	if err != nil {
@@ -398,10 +403,18 @@ func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *s
 	if pollInterval <= 0 {
 		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_POLL_INTERVAL must be > 0, got %s", pollInterval)
 	}
+	retryMinAge, err := env.GetDuration("BACKFILL_RETRY_MIN_AGE", 30*time.Second)
+	if err != nil {
+		return backfill_gaps.BackfillConfig{}, err
+	}
+	if retryMinAge <= 0 {
+		return backfill_gaps.BackfillConfig{}, fmt.Errorf("BACKFILL_RETRY_MIN_AGE must be > 0, got %s", retryMinAge)
+	}
 	return backfill_gaps.BackfillConfig{
 		ChainID:      chainID,
 		BatchSize:    batchSize,
 		PollInterval: pollInterval,
+		RetryMinAge:  retryMinAge,
 		EnableTraces: enableTraces,
 		EnableBlobs:  enableBlobs,
 		Logger:       logger,
