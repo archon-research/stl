@@ -116,10 +116,10 @@ func (s *Service) poll(ctx context.Context) (int, error) {
 
 	s.logger.Info("fetched packages", "count", len(packages))
 
-	packages = s.filterActivePackages(packages)
+	activePackages := s.filterActivePackages(packages)
 
 	now := time.Now().UTC()
-	snapshots, err := toSnapshots(packages, s.primeID, now)
+	snapshots, err := toSnapshots(activePackages, s.primeID, now)
 	if err != nil {
 		return 0, fmt.Errorf("convert packages: %w", err)
 	}
