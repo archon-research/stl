@@ -116,8 +116,10 @@ func (s *Service) poll(ctx context.Context) (int, error) {
 
 	s.logger.Info("fetched packages", "count", len(packages))
 
+	activePackages := s.filterActivePackages(packages)
+
 	now := time.Now().UTC()
-	snapshots, err := toSnapshots(packages, s.primeID, now)
+	snapshots, err := toSnapshots(activePackages, s.primeID, now)
 	if err != nil {
 		return 0, fmt.Errorf("convert packages: %w", err)
 	}
@@ -133,6 +135,25 @@ func (s *Service) poll(ctx context.Context) (int, error) {
 
 	s.logger.Info("stored snapshots", "count", len(snapshots))
 	return len(snapshots), nil
+}
+
+// filterActivePackages drops inactive packages. Anchorage returns a null
+// ltvTimestamp and currentLtv for them (no exposure → no LTV), which the
+// schema (NOT NULL, NUMERIC) cannot represent.
+func (s *Service) filterActivePackages(packages []Package) []Package {
+	active := make([]Package, 0, len(packages))
+	for _, pkg := range packages {
+		if !pkg.Active {
+			s.logger.Warn("skipping inactive anchorage package",
+				"package_id", pkg.PackageID,
+				"state", pkg.State,
+				"exposure_value", pkg.ExposureValue,
+			)
+			continue
+		}
+		active = append(active, pkg)
+	}
+	return active
 }
 
 // toSnapshots flattens packages into one snapshot row per collateral asset.
