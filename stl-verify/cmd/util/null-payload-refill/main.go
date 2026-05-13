@@ -35,7 +35,6 @@ import (
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awsS3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	awssns "github.com/aws/aws-sdk-go-v2/service/sns"
 	"golang.org/x/sync/errgroup"
@@ -44,6 +43,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
@@ -174,7 +174,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 		}
 	}()
 
-	awsCfg, err := loadAWSConfig(ctx, opts)
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{Region: opts.AWSRegion})
 	if err != nil {
 		return 1, fmt.Errorf("load aws config: %w", err)
 	}
@@ -431,15 +431,4 @@ func logSummary(logger *slog.Logger, s *summary) {
 	}
 }
 
-func loadAWSConfig(ctx context.Context, opts Options) (aws.Config, error) {
-	var loadOpts []func(*awsconfig.LoadOptions) error
-	if opts.AWSRegion != "" {
-		loadOpts = append(loadOpts, awsconfig.WithRegion(opts.AWSRegion))
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
-	if err != nil {
-		return aws.Config{}, err
-	}
-	return cfg, nil
-}
 

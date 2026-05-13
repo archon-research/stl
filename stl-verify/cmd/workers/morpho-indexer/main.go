@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -21,6 +20,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -160,24 +160,10 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	// AWS config
-	awsRegion := env.Get("AWS_REGION", "us-east-1")
-	awsOpts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(awsRegion),
-	}
-
-	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
-		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-		awsOpts = append(awsOpts, awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     accessKeyID,
-				SecretAccessKey: secretKey,
-				Source:          "StaticCredentials",
-			}, nil
-		})))
-	}
-
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		DefaultRegion:            "us-east-1",
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
