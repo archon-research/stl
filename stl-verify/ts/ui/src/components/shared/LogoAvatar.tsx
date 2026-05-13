@@ -1,16 +1,21 @@
 import { useEffect, useState } from 'react';
 
 import { css } from '#styled-system/css';
+import { logging } from '#src/lib/logging';
 
-type LogoAvatarProps = {
+type PandaSizeToken = '4' | '5' | '6' | '7' | '8' | '9' | '10' | '11';
+
+type LogoAvatarBaseProps = {
   alt: string;
   fallbackText: string;
   imageUrl: string | null;
   isSelected?: boolean;
-  size?: string;
-  sizePx?: number;
   fallbackColor?: 'text.default' | 'text.strong';
 };
+
+type LogoAvatarProps =
+  | (LogoAvatarBaseProps & { size?: PandaSizeToken; sizePx?: never })
+  | (LogoAvatarBaseProps & { size?: never; sizePx: number });
 
 export function LogoAvatar({
   alt,
@@ -71,7 +76,14 @@ export function LogoAvatar({
             objectFit: 'cover',
             display: 'block',
           })}
-          onError={() => setHasImageError(true)}
+          onError={() => {
+            setHasImageError(true);
+            logging.warn('Logo image failed to load', {
+              imageUrl,
+              alt,
+              fallbackText,
+            });
+          }}
           src={imageUrl}
         />
       )}

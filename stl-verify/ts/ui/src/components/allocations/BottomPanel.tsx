@@ -42,6 +42,18 @@ type BottomPanelProps = {
 
 type ActiveTab = 'risk' | 'rrc' | 'activity';
 
+function parseCategoryParam(value: string | null): AllocationCategory | '' {
+  if (
+    value === 'allocation' ||
+    value === 'pol' ||
+    value === 'psm3' ||
+    value === 'asset'
+  ) {
+    return value;
+  }
+  return '';
+}
+
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
 const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '7', px: '2', fontSize: 'xs' })}`;
@@ -63,12 +75,7 @@ export function BottomPanel({
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
-    categoryParam === 'allocation' ||
-      categoryParam === 'pol' ||
-      categoryParam === 'psm3' ||
-      categoryParam === 'asset'
-      ? categoryParam
-      : '',
+    parseCategoryParam(categoryParam),
   );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
@@ -92,13 +99,7 @@ export function BottomPanel({
   }, [selectedPrime?.id, setCategoryParam, setReceiptTokenParam]);
 
   useEffect(() => {
-    const normalized =
-      categoryParam === 'allocation' ||
-      categoryParam === 'pol' ||
-      categoryParam === 'psm3' ||
-      categoryParam === 'asset'
-        ? categoryParam
-        : '';
+    const normalized = parseCategoryParam(categoryParam);
 
     if (normalized !== categoryFilter) {
       setCategoryFilter(normalized);

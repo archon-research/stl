@@ -11,22 +11,13 @@ type TokenLogoProps = {
   symbol: string;
 };
 
-const TOKEN_LOGO_SIZE_MAP: Record<
-  NonNullable<TokenLogoProps['size']>,
-  number
-> = {
+const TOKEN_LOGO_SIZE_PX: Record<NonNullable<TokenLogoProps['size']>, number> = {
   6: 16,
   7: 18,
   8: 20,
   9: 24,
   10: 28,
 };
-
-function resolveTokenLogoSize(
-  size: NonNullable<TokenLogoProps['size']>,
-): number {
-  return TOKEN_LOGO_SIZE_MAP[size];
-}
 
 export function TokenLogo({
   address,
@@ -35,7 +26,7 @@ export function TokenLogo({
   size = '10',
   symbol,
 }: TokenLogoProps) {
-  const resolvedSize = resolveTokenLogoSize(size);
+  const resolvedSize = TOKEN_LOGO_SIZE_PX[size];
   const logoUrl = useMemo(
     () => buildTokenLogoUrl(chainId, address),
     [address, chainId],

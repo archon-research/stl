@@ -127,7 +127,7 @@ export function RrcTab({
 
   if (!selectedReceiptToken) {
     return (
-      <TabSelectionPrompt message="Pick a receipt token to model bad debt under a liquidation gap." />
+      <TabSelectionPrompt message="Pick a receipt token to inspect required risk capital." />
     );
   }
 
