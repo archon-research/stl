@@ -74,7 +74,7 @@ func TestStreamKeysFromFile_ContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		if _, err := f.WriteString("k" + string(rune('a'+i%26)) + "/" + string(rune('a'+(i/26)%26)) + "\n"); err != nil {
 			t.Fatalf("write: %v", err)
 		}
@@ -92,7 +92,7 @@ func TestStreamKeysFromFile_ContextCancel(t *testing.T) {
 	}()
 
 	// Drain 10 keys, then cancel.
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		select {
 		case <-out:
 		case <-time.After(2 * time.Second):
@@ -201,9 +201,9 @@ func TestStreamKeysFromBucket_FiltersBySize(t *testing.T) {
 func TestStreamKeysFromBucket_StreamsAcrossPages(t *testing.T) {
 	// Three pages of 5 objects each, all under threshold.
 	pages := make([]*s3.ListObjectsV2Output, 3)
-	for p := 0; p < 3; p++ {
+	for p := range 3 {
 		objs := make([]types.Object, 5)
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			objs[i] = makeObj("p"+string(rune('0'+p))+"/"+string(rune('a'+i)), 20)
 		}
 		var token *string
@@ -217,10 +217,6 @@ func TestStreamKeysFromBucket_StreamsAcrossPages(t *testing.T) {
 		}
 	}
 
-	// observedCalls captures ListObjectsV2 invocation count at the moment the
-	// consumer reads its very first key. If the producer batches everything
-	// before emitting, this will be 3. If it streams, it will be 1.
-	observedAtFirstKey := -1
 	lister := &mockLister{pages: pages}
 
 	out := make(chan string) // unbuffered → producer blocks until consumer reads
@@ -232,13 +228,14 @@ func TestStreamKeysFromBucket_StreamsAcrossPages(t *testing.T) {
 	// Read first key; capture call count. The unbuffered channel guarantees the
 	// producer issued at least one ListObjectsV2 call before any key arrives,
 	// and page 2 cannot have been requested yet because page 1's first item
-	// must be consumed before the producer can move past it.
+	// must be consumed before the producer can move past it. If the producer
+	// were batching everything, observedAtFirstKey would be 3; streaming = 1.
 	select {
 	case <-out:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timeout waiting for first key")
 	}
-	observedAtFirstKey = lister.callCount()
+	observedAtFirstKey := lister.callCount()
 
 	// Drain the remaining keys until the producer exits.
 	count := 1

@@ -246,10 +246,7 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 	// consumer does not stall the other side unnecessarily, while still
 	// providing backpressure: the producer cannot run more than 2*Concurrency
 	// keys ahead of the slowest worker.
-	bufSize := opts.Concurrency * 2
-	if bufSize < 1 {
-		bufSize = 1
-	}
+	bufSize := max(opts.Concurrency*2, 1)
 	keysCh := make(chan string, bufSize)
 
 	// Producer participates in the errgroup so a List failure (e.g.
@@ -430,5 +427,3 @@ func logSummary(logger *slog.Logger, s *summary) {
 		logger.Info("reason breakdown", "reason", reason, "count", count)
 	}
 }
-
-

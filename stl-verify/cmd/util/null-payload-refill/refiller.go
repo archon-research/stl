@@ -91,7 +91,7 @@ type RefillerOptions struct {
 // NewRefiller validates inputs and returns a configured Refiller.
 func NewRefiller(opts RefillerOptions) (*Refiller, error) {
 	if opts.Bucket == "" {
-		return nil, errors.New("Bucket is required")
+		return nil, errors.New("bucket is required")
 	}
 	if opts.ChainID <= 0 {
 		return nil, errors.New("ChainID must be > 0")
@@ -109,7 +109,7 @@ func NewRefiller(opts RefillerOptions) (*Refiller, error) {
 		return nil, errors.New("BlockState is required")
 	}
 	if opts.Publisher == nil {
-		return nil, errors.New("Publisher is required")
+		return nil, errors.New("publisher is required")
 	}
 	if opts.State == nil {
 		return nil, errors.New("State is required")

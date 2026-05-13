@@ -133,8 +133,7 @@ func TestState_ConcurrentRecord(t *testing.T) {
 	const n = 100
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
-		i := i
+	for i := range n {
 		go func() {
 			defer wg.Done()
 			if err := s.Record(fmt.Sprintf("k%d", i), StageSNS, ""); err != nil {
@@ -153,7 +152,7 @@ func TestState_ConcurrentRecord(t *testing.T) {
 	}
 	defer reloaded.Close()
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key := fmt.Sprintf("k%d", i)
 		if stage, _ := reloaded.Lookup(key); stage != StageSNS {
 			t.Errorf("missing record for %s", key)
