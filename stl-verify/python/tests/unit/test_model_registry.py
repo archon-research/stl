@@ -1,9 +1,11 @@
+from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any, cast
 
 import pytest
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.risk import GapSweepDetails, RrcResult, SurafDetails
+from app.domain.entities.risk import GapSweepDetails, ModelName, RrcResult, SurafDetails
 from app.services.model_registry import ModelRegistry
 
 _PRIME_A = EthAddress("0x" + "aa" * 20)
@@ -11,14 +13,16 @@ _PRIME_B = EthAddress("0x" + "bb" * 20)
 
 
 class FakeRiskModel:
+    risk_model: ModelName
+
     def __init__(self, risk_model: str, supported: set[tuple[int, EthAddress]]) -> None:
-        self.risk_model = risk_model
+        self.risk_model = cast(ModelName, risk_model)
         self._supported = supported
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:
         return (asset_id, prime_id) in self._supported
 
-    async def compute(self, asset_id: int, prime_id: EthAddress, overrides: dict) -> RrcResult:  # noqa: ARG002
+    async def compute(self, asset_id: int, prime_id: EthAddress, overrides: Mapping[str, Any]) -> RrcResult:  # noqa: ARG002
         if self.risk_model == "suraf":
             return RrcResult(
                 asset_id=asset_id,

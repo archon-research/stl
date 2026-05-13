@@ -12,8 +12,6 @@ Cross-validation (rating_ids against loaded ratings, addresses against
 the DB) belongs in startup wiring.
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 

@@ -92,7 +92,7 @@ class RrcResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     asset_id: int
-    prime_id: str
+    prime_id: EthAddress
     rrc_usd: Decimal
     comparable_crr_pct: Decimal
     risk_model: ModelName
@@ -100,13 +100,12 @@ class RrcResult(BaseModel):
 
     @field_validator("prime_id", mode="before")
     @classmethod
-    def _coerce_prime_id(cls, v: object) -> str:
+    def _coerce_prime_id(cls, v: object) -> EthAddress:
         """Accept an EthAddress or a 0x-prefixed hex string."""
         if isinstance(v, EthAddress):
-            return str(v)
-        if isinstance(v, str):
-            EthAddress(v)  # validate format; discard instance
             return v
+        if isinstance(v, str):
+            return EthAddress(v)
         raise ValueError(f"expected EthAddress or hex string, got {type(v).__name__}")
 
     @model_validator(mode="after")

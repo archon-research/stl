@@ -2,7 +2,7 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
@@ -51,7 +51,7 @@ class PostgresTokenCatalogRepository:
         self._engine = engine
 
     @staticmethod
-    def _row_to_metadata(row: object) -> TokenMetadata:
+    def _row_to_metadata(row: Row[Any]) -> TokenMetadata:
         return TokenMetadata(
             id=row.id,
             chain_id=row.chain_id,

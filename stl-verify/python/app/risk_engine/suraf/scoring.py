@@ -21,27 +21,27 @@ class SURAFResults:
     computes weighted averages, and maps to a Capital Risk Requirement."""
 
     # Weight lookups
-    sub_weights: pd.Series = field(init=False, repr=False, default=None)
-    pillar_weights: pd.Series = field(init=False, repr=False, default=None)
+    sub_weights: pd.Series | None = field(init=False, repr=False, default=None)
+    pillar_weights: pd.Series | None = field(init=False, repr=False, default=None)
 
     # Per-assessor results
-    assessor_results: pd.DataFrame = field(init=False, repr=False, default=None)
+    assessor_results: pd.DataFrame | None = field(init=False, repr=False, default=None)
 
     # Aggregates
-    avg_score: float = field(init=False, default=None)
-    total_score_1: int = field(init=False, default=None)
-    total_scored: int = field(init=False, default=None)
+    avg_score: float | None = field(init=False, default=None)
+    total_score_1: int | None = field(init=False, default=None)
+    total_scored: int | None = field(init=False, default=None)
 
     # CRR config (interpolation arrays)
-    _crr_scores: np.ndarray = field(init=False, repr=False, default=None)
-    _crr_values: np.ndarray = field(init=False, repr=False, default=None)
-    _penalty_ns: np.ndarray = field(init=False, repr=False, default=None)
-    _penalty_pps: np.ndarray = field(init=False, repr=False, default=None)
+    _crr_scores: np.ndarray | None = field(init=False, repr=False, default=None)
+    _crr_values: np.ndarray | None = field(init=False, repr=False, default=None)
+    _penalty_ns: np.ndarray | None = field(init=False, repr=False, default=None)
+    _penalty_pps: np.ndarray | None = field(init=False, repr=False, default=None)
 
     # CRR outputs
-    unadjusted_crr: float = field(init=False, default=None)
-    penalty: float = field(init=False, default=None)
-    adjusted_crr: float = field(init=False, default=None)
+    unadjusted_crr: float | None = field(init=False, default=None)
+    penalty: float | None = field(init=False, default=None)
+    adjusted_crr: float | None = field(init=False, default=None)
 
     def load_weights(self, weights_path: Path | str) -> None:
         """Load subsection and pillar weights from a weights CSV."""
@@ -63,6 +63,8 @@ class SURAFResults:
 
     def load_assessor_scores(self, assessor_paths: list[Path | str]) -> None:
         """Load assessor score CSVs and compute per-assessor results."""
+        if self.sub_weights is None or self.pillar_weights is None:
+            raise RuntimeError("load_weights() must be called before load_assessor_scores()")
         rows = []
 
         for path in assessor_paths:
@@ -94,6 +96,8 @@ class SURAFResults:
 
     def aggregate(self) -> None:
         """Compute cross-assessor aggregates."""
+        if self.assessor_results is None:
+            raise RuntimeError("load_assessor_scores() must be called before aggregate()")
         self.avg_score = self.assessor_results["overall_score"].mean()
         self.total_score_1 = int(self.assessor_results["n_score_1"].sum())
         self.total_scored = int(self.assessor_results["n_scored"].sum())
@@ -112,10 +116,19 @@ class SURAFResults:
 
     def map_crr(self) -> None:
         """Map the average score to an unadjusted CRR via interpolation."""
+        if self.avg_score is None or self._crr_scores is None or self._crr_values is None:
+            raise RuntimeError("aggregate() and load_crr_config() must be called before map_crr()")
         self.unadjusted_crr = float(np.interp(self.avg_score, self._crr_scores, self._crr_values))
 
     def apply_penalty(self) -> None:
         """Apply the score-of-1 penalty and compute the adjusted CRR."""
+        if (
+            self.total_score_1 is None
+            or self._penalty_ns is None
+            or self._penalty_pps is None
+            or self.unadjusted_crr is None
+        ):
+            raise RuntimeError("map_crr() and load_penalty_config() must be called before apply_penalty()")
         self.penalty = float(np.interp(self.total_score_1, self._penalty_ns, self._penalty_pps))
         self.adjusted_crr = min(self.unadjusted_crr + self.penalty, 100.0)
 
@@ -137,6 +150,8 @@ class SURAFResults:
 
     def summary(self) -> str:
         """Return a formatted summary string."""
+        if self.adjusted_crr is None:
+            raise RuntimeError("run() / apply_penalty() must be called before summary()")
         lines = [
             f"Average score:         {self.avg_score:.3f}",
             f"Unadjusted CRR:        {self.unadjusted_crr:.1f}%",

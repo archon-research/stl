@@ -21,7 +21,7 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
-def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: bool = True) -> AllocationService:
+def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: bool = True) -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
@@ -30,7 +30,7 @@ def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: 
     return service
 
 
-def _override_service(service: AllocationService):
+def _override_service(service: AsyncMock):
     async def _dep():
         yield service
 

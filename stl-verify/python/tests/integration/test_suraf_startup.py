@@ -11,8 +11,6 @@ checks (unknown receipt token address) are caught in the lifespan when
 the mapping is resolved against the database.
 """
 
-from __future__ import annotations
-
 import asyncio
 import shutil
 from pathlib import Path
@@ -37,10 +35,12 @@ _TEST_CHAIN_ID = 1
 
 
 def _settings(async_db_url: str, suraf_inputs_dir: Path, suraf_mappings_file: Path) -> Settings:
-    return Settings(
-        database_url=SecretStr(async_db_url),
-        suraf_inputs_dir=suraf_inputs_dir,
-        suraf_mappings_file=suraf_mappings_file,
+    return Settings.model_validate(
+        {
+            "database_url": SecretStr(async_db_url),
+            "suraf_inputs_dir": suraf_inputs_dir,
+            "suraf_mappings_file": suraf_mappings_file,
+        }
     )
 
 

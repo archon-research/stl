@@ -8,6 +8,7 @@ from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import (
     GapSweepDetails,
     LiquidationParams,
+    ModelName,
     RiskBreakdown,
     RiskEnrichedCollateral,
     RrcResult,
@@ -33,7 +34,7 @@ _HUNDRED = Decimal("100")
 class CryptoLendingRiskService:
     """RiskModel for crypto-lending assets using the gap-sweep stress."""
 
-    risk_model: str = "gap_sweep"
+    risk_model: ModelName = "gap_sweep"
 
     def __init__(
         self,
