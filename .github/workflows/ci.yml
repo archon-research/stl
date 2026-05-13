@@ -80,7 +80,12 @@ jobs:
     needs:
       - detect-changes
       - ci-passed
+    # `always() &&` is required to override GitHub Actions' implicit skip
+    # propagation: when an upstream job (e.g. go-ci) is skipped, GH skips this
+    # job too, even though `needs.ci-passed.result == 'success'` is true. See
+    # https://github.com/actions/runner/issues/491.
     if: |
+      always() &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
       needs.ci-passed.result == 'success' &&
