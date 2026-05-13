@@ -1,0 +1,78 @@
+name: Debug If
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/debug-if.yml'
+  workflow_dispatch:
+
+jobs:
+  setup:
+    name: Mock detect-changes (python=true, go=false, ts=false)
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.set.outputs.go }}
+      python: ${{ steps.set.outputs.python }}
+      ts: ${{ steps.set.outputs.ts }}
+    steps:
+      - id: set
+        run: |
+          echo "go=false" >> "$GITHUB_OUTPUT"
+          echo "python=true" >> "$GITHUB_OUTPUT"
+          echo "ts=false" >> "$GITHUB_OUTPUT"
+
+  ci-passed:
+    name: Mock ci-passed
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ci-passed succeeded"
+
+  debug-multiline:
+    name: Debug multi-line if (broken pattern from ci.yml)
+    needs: [setup, ci-passed]
+    if: |
+      needs.ci-passed.result == 'success' &&
+      (
+        needs.setup.outputs.go == 'true' ||
+        needs.setup.outputs.python == 'true' ||
+        needs.setup.outputs.ts == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "multi-line if FIRED"
+
+  debug-singleline:
+    name: Debug single-line if (proposed fix)
+    needs: [setup, ci-passed]
+    if: ${{ needs.ci-passed.result == 'success' && (needs.setup.outputs.go == 'true' || needs.setup.outputs.python == 'true' || needs.setup.outputs.ts == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "single-line if FIRED"
+
+  debug-folded:
+    name: Debug folded scalar if
+    needs: [setup, ci-passed]
+    if: >-
+      needs.ci-passed.result == 'success' &&
+      (
+        needs.setup.outputs.go == 'true' ||
+        needs.setup.outputs.python == 'true' ||
+        needs.setup.outputs.ts == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "folded scalar if FIRED"
+
+  debug-values:
+    name: Echo resolved values
+    needs: [setup, ci-passed]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "outputs.go=${{ needs.setup.outputs.go }}"
+          echo "outputs.python=${{ needs.setup.outputs.python }}"
+          echo "outputs.ts=${{ needs.setup.outputs.ts }}"
+          echo "ci-passed.result=${{ needs.ci-passed.result }}"
+          echo "or_eval=${{ needs.setup.outputs.go == 'true' || needs.setup.outputs.python == 'true' || needs.setup.outputs.ts == 'true' }}"
