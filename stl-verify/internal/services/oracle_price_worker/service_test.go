@@ -2217,7 +2217,7 @@ func TestResolveBlockTimestamp_RejectsNullPayload(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = svc.Stop() })
 
-	if !strings.Contains(err.Error(), "null/empty payload in cache or s3 — upstream pipeline corruption") {
+	if !strings.Contains(err.Error(), "not found in cache or s3 (or cached value is null)") {
 		t.Errorf("error = %q, want clear null/empty diagnostic", err)
 	}
 	if strings.Contains(err.Error(), "strconv.ParseInt") {
@@ -2247,7 +2247,7 @@ func TestResolveBlockTimestamp_RejectsEmptyPayload(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = svc.Stop() })
 
-	if !strings.Contains(err.Error(), "null/empty payload in cache or s3 — upstream pipeline corruption") {
+	if !strings.Contains(err.Error(), "not found in cache or s3 (or cached value is null)") {
 		t.Errorf("error = %q, want clear null/empty diagnostic", err)
 	}
 	if strings.Contains(err.Error(), "strconv.ParseInt") {
