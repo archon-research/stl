@@ -2,8 +2,8 @@ import {
   buildRowSearchString,
   matchesSearchQuery,
   SidebarLayout,
+  type SortingState,
 } from '@archon-research/design-system';
-import type { SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';

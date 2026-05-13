@@ -1,11 +1,12 @@
 import {
+  type ColumnDef,
   DataTable,
   EmptyState,
   ErrorState,
   SearchInput,
+  type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
-import { type ColumnDef, type SortingState } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';

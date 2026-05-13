@@ -1,12 +1,13 @@
 import {
   buildRowSearchString,
+  type CellContext,
+  type ColumnDef,
   DataTable,
   LoadingIndicator,
   matchesSearchQuery,
   SkeletonStack,
   useDataTable,
 } from '@archon-research/design-system';
-import { type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
