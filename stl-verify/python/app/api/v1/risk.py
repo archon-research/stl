@@ -121,7 +121,7 @@ def _share_error_503(exc: AllocationShareError) -> HTTPException:
     "/risk/{receipt_token_id}/bad-debt",
     response_model=BadDebtResponse,
     summary="Estimate bad debt at a collateral gap",
-    include_in_schema=False,
+    tags=["internal"],
     description=(
         "Estimate USD bad debt for a receipt-token position when collateral prices "
         "fall by `gap_pct` (a fraction in `[0, 1]`).\n\n"

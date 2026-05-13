@@ -10,7 +10,7 @@ from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, Pro
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 from app.main import app
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_receipt_token_position
+from tests.conftest import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = "0x" + "ab" * 20
 
@@ -21,10 +21,11 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
-def _make_service(primes=None, positions=None, *, exists: bool = True) -> AllocationService:
+def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: bool = True) -> AllocationService:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
+    service.list_direct_asset_holdings.return_value = direct_holdings or []
     service.prime_exists.return_value = exists
     return service
 
@@ -101,7 +102,65 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
 
 
+def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
+    """Direct holdings (e.g. raw PYUSD in a proxy) surface as their own rows.
+    receipt_token_id / receipt_token_address / protocol_name / amount_usd
+    are null; symbol and underlying_symbol both name the held asset; category
+    defaults to ASSET.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding()
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "chain_id": 1,
+            "receipt_token_id": None,
+            "receipt_token_address": None,
+            "underlying_token_id": 99,
+            "underlying_token_address": "0x" + "c" * 40,
+            "symbol": "PYUSD",
+            "underlying_symbol": "PYUSD",
+            "protocol_name": None,
+            "balance": "250.0",
+            "amount_usd": None,
+            "latest_activity_at": None,
+            "category": "asset",
+        }
+    ]
+    service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_combines_receipt_and_direct_rows():
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        positions=[make_receipt_token_position()],
+        direct_holdings=[make_direct_asset_holding()],
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 2
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["aUSDC"]["receipt_token_id"] == 1
+    assert by_symbol["PYUSD"]["receipt_token_id"] is None
+
+
 def test_list_allocations_returns_empty_when_prime_exists_with_no_holdings():
+    """A registered prime that has fully exited all positions returns 200+[],
+    not 404 — only unknown primes (no history at all) trigger 404.
+    """
     from app.api.v1 import allocations
 
     service = _make_service(positions=[], exists=True)
@@ -126,7 +185,9 @@ def test_list_allocations_returns_404_when_prime_missing():
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Prime not found"
+    service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
     service.list_receipt_token_positions.assert_not_awaited()
+    service.list_direct_asset_holdings.assert_not_awaited()
 
 
 def test_list_allocations_returns_422_for_invalid_prime_id():
