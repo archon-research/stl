@@ -34,8 +34,8 @@ class EthAddress(str):
         return f"EthAddress('{self!s}')"
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, str):
-            return str.lower(self) == other.lower()
+        if isinstance(other, EthAddress):
+            return str.lower(self) == str.lower(other)
         return NotImplemented
 
     def __hash__(self) -> int:
