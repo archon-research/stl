@@ -435,6 +435,7 @@ export function BottomPanel({
             />
           ) : activeTab === 'rrc' ? (
             <RrcTab
+              isEnabled={isDrawerOpen && activeTab === 'rrc'}
               selectedReceiptToken={focusedAllocation}
               selectedPrime={selectedPrime}
             />

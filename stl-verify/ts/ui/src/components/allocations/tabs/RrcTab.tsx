@@ -23,6 +23,7 @@ import {
 } from '../../shared';
 
 type RrcTabProps = {
+  isEnabled: boolean;
   selectedReceiptToken: Allocation | null;
   selectedPrime: Prime | null;
 };
@@ -53,15 +54,20 @@ function getToneStyles(tone: ReturnType<typeof getUsdTone>) {
   }
 }
 
-export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
+export function RrcTab({
+  isEnabled,
+  selectedReceiptToken,
+  selectedPrime,
+}: RrcTabProps) {
   const [rrc, setRrc] = useState<Rrc | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+  const primeAddress = selectedPrime?.address ?? null;
 
   useEffect(() => {
-    if (!selectedReceiptToken || !selectedPrime || receiptTokenId === null) {
+    if (!isEnabled || receiptTokenId === null || primeAddress === null) {
       setRrc(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -74,7 +80,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
     setErrorMessage(null);
     setRrc(null);
 
-    void getRrc(receiptTokenId, selectedPrime.id, controller.signal)
+    void getRrc(receiptTokenId, primeAddress, controller.signal)
       .then((response) => {
         setRrc(response);
       })
@@ -86,7 +92,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
         logging.error('Failed to load required risk capital (RRC)', {
           error,
           receiptTokenId,
-          primeId: selectedPrime.id,
+          primeAddress,
         });
         setErrorMessage(toErrorMessage(error));
         setRrc(null);
@@ -98,7 +104,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
       });
 
     return () => controller.abort();
-  }, [receiptTokenId, selectedPrime, selectedReceiptToken]);
+  }, [isEnabled, primeAddress, receiptTokenId]);
 
   const tone = getUsdTone(rrc?.max_rrc_usd);
   const toneStyles = getToneStyles(tone);
