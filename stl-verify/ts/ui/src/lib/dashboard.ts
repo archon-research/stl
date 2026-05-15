@@ -9,7 +9,7 @@ export type FilterOption = {
   count: number;
 };
 
-type BadDebtTone = 'green' | 'yellow' | 'red' | 'neutral';
+type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
@@ -449,9 +449,9 @@ export function getCategoryLabel(
   return category ? (labels[category] ?? fallback) : fallback;
 }
 
-export function getBadDebtTone(
+export function getUsdTone(
   value: number | string | null | undefined,
-): BadDebtTone {
+): UsdTone {
   const numeric = parseNumericValue(value);
 
   if (numeric === null) {

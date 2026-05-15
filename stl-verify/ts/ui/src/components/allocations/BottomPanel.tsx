@@ -25,8 +25,8 @@ import type {
 import type { LocalProtocolRow } from '../../types/local-data';
 import { EmptyState, ErrorState } from '../shared';
 import { ActivityFeed } from './tabs/ActivityFeed';
-import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
+import { RrcTab } from './tabs/RrcTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
@@ -38,7 +38,7 @@ type BottomPanelProps = {
   selectedPrime: Prime | null;
 };
 
-type ActiveTab = 'risk' | 'bad-debt' | 'activity';
+type ActiveTab = 'risk' | 'rrc' | 'activity';
 
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
@@ -75,8 +75,8 @@ export function BottomPanel({
   );
 
   const activeTab: ActiveTab =
-    tabParam === 'bad-debt'
-      ? 'bad-debt'
+    tabParam === 'rrc'
+      ? 'rrc'
       : tabParam === 'activity'
         ? 'activity'
         : 'risk';
@@ -198,7 +198,7 @@ export function BottomPanel({
     ) ?? null;
 
   useEffect(() => {
-    if (activeTab === 'bad-debt') {
+    if (activeTab === 'rrc') {
       setLocalRiskSearchValue('');
       setRiskSearchValue('');
       return;
@@ -241,7 +241,7 @@ export function BottomPanel({
 
             if (
               nextValue === 'risk' ||
-              nextValue === 'bad-debt' ||
+              nextValue === 'rrc' ||
               nextValue === 'activity'
             ) {
               setTabParam(nextValue);
@@ -253,8 +253,8 @@ export function BottomPanel({
           <Toggle value="risk" className={toggleClassName}>
             Risk breakdown
           </Toggle>
-          <Toggle value="bad-debt" className={toggleClassName}>
-            Bad debt
+          <Toggle value="rrc" className={toggleClassName}>
+            Risk capital
           </Toggle>
           <Toggle value="activity" className={toggleClassName}>
             Activity
@@ -437,8 +437,11 @@ export function BottomPanel({
               searchQuery={riskSearchValue}
               selectedReceiptToken={focusedAllocation}
             />
-          ) : activeTab === 'bad-debt' ? (
-            <BadDebtTab selectedReceiptToken={focusedAllocation} />
+          ) : activeTab === 'rrc' ? (
+            <RrcTab
+              selectedReceiptToken={focusedAllocation}
+              selectedPrime={selectedPrime}
+            />
           ) : (
             <ActivityFeed
               isEnabled={isDrawerOpen && activeTab === 'activity'}

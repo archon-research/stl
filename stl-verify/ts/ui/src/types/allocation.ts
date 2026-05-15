@@ -15,7 +15,10 @@ export type PrimeDebtSnapshot =
   components['schemas']['PrimeDebtSnapshotResponse'];
 
 export type RiskBreakdown = components['schemas']['RiskBreakdownResponse'];
-export type BadDebt = components['schemas']['BadDebtResponse'];
+export type Rrc = components['schemas']['RrcEnvelope'];
+export type RrcResult = components['schemas']['RrcResult'];
+export type SurafDetails = components['schemas']['SurafDetails'];
+export type GapSweepDetails = components['schemas']['GapSweepDetails'];
 
 export type PrimesResponse = NonNullable<
   paths['/v1/primes']['get']['responses']['200']['content']['application/json']
