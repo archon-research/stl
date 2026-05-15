@@ -75,11 +75,7 @@ export function BottomPanel({
   );
 
   const activeTab: ActiveTab =
-    tabParam === 'rrc'
-      ? 'rrc'
-      : tabParam === 'activity'
-        ? 'activity'
-        : 'risk';
+    tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
 
   useEffect(() => {
     const primeId = selectedPrime?.id ?? null;
