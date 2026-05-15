@@ -11,7 +11,10 @@ type TokenLogoProps = {
   symbol: string;
 };
 
-const TOKEN_LOGO_SIZE_PX: Record<NonNullable<TokenLogoProps['size']>, number> = {
+const TOKEN_LOGO_SIZE_PX: Record<
+  NonNullable<TokenLogoProps['size']>,
+  number
+> = {
   6: 16,
   7: 18,
   8: 20,

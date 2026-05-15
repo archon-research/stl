@@ -11,6 +11,7 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
+
 import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
   formatDateTime,
@@ -30,9 +31,9 @@ import type {
   Token,
   TokenPrice,
 } from '../../../types/allocation';
-import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 import { ChainLogo, SummaryMetric } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
+import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;

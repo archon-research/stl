@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
-import { css } from '#styled-system/css';
 import { logging } from '#src/lib/logging';
+import { css } from '#styled-system/css';
 
 type PandaSizeToken = '4' | '5' | '6' | '7' | '8' | '9' | '10' | '11';
 
