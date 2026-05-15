@@ -449,9 +449,7 @@ export function getCategoryLabel(
   return category ? (labels[category] ?? fallback) : fallback;
 }
 
-export function getUsdTone(
-  value: number | string | null | undefined,
-): UsdTone {
+export function getUsdTone(value: number | string | null | undefined): UsdTone {
   const numeric = parseNumericValue(value);
 
   if (numeric === null) {
