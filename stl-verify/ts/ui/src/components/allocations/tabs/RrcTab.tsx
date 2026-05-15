@@ -58,8 +58,10 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
+  const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+
   useEffect(() => {
-    if (!selectedReceiptToken || !selectedPrime) {
+    if (!selectedReceiptToken || !selectedPrime || receiptTokenId === null) {
       setRrc(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -72,11 +74,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
     setErrorMessage(null);
     setRrc(null);
 
-    void getRrc(
-      selectedReceiptToken.receipt_token_id,
-      selectedPrime.id,
-      controller.signal,
-    )
+    void getRrc(receiptTokenId, selectedPrime.id, controller.signal)
       .then((response) => {
         setRrc(response);
       })
@@ -87,7 +85,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
 
         logging.error('Failed to load required risk capital (RRC)', {
           error,
-          receiptTokenId: selectedReceiptToken.receipt_token_id,
+          receiptTokenId,
           primeId: selectedPrime.id,
         });
         setErrorMessage(toErrorMessage(error));
@@ -100,7 +98,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
       });
 
     return () => controller.abort();
-  }, [selectedPrime, selectedReceiptToken]);
+  }, [receiptTokenId, selectedPrime, selectedReceiptToken]);
 
   const tone = getUsdTone(rrc?.max_rrc_usd);
   const toneStyles = getToneStyles(tone);
@@ -134,6 +132,30 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
       >
         <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
           Pick a receipt token to inspect required risk capital.
+        </p>
+      </div>
+    );
+  }
+
+  if (receiptTokenId === null) {
+    // FIX ME: add API to return applicable risk models per asset_id. SURAF
+    // should eventually run on some direct-held assets (no receipt-token
+    // wrapper), so this branch should query that registry instead of
+    // hard-coding "no risk model" for every direct holding.
+    return (
+      <div
+        className={css({
+          borderRadius: 'md',
+          borderStyle: 'solid',
+          borderWidth: '1px',
+          borderColor: 'border.subtle',
+          bg: 'surface.subtle',
+          p: '4',
+        })}
+      >
+        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+          Required risk capital is only computed for receipt-token positions.
+          Direct asset holdings have no risk model.
         </p>
       </div>
     );

@@ -188,8 +188,10 @@ export function RiskBreakdownTab({
   const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
   const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
+  const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+
   useEffect(() => {
-    if (!isEnabled || !selectedReceiptToken) {
+    if (!isEnabled || !selectedReceiptToken || receiptTokenId === null) {
       setBreakdown(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -202,10 +204,7 @@ export function RiskBreakdownTab({
     setErrorMessage(null);
     setBreakdown(null);
 
-    void getRiskBreakdown(
-      selectedReceiptToken.receipt_token_id,
-      controller.signal,
-    )
+    void getRiskBreakdown(receiptTokenId, controller.signal)
       .then((response) => {
         if (controller.signal.aborted) {
           return;
@@ -219,7 +218,7 @@ export function RiskBreakdownTab({
 
         logging.error('Failed to load risk breakdown', {
           error,
-          receiptTokenId: selectedReceiptToken.receipt_token_id,
+          receiptTokenId,
         });
         setBreakdown(null);
         setErrorMessage(toErrorMessage(error));
@@ -231,7 +230,7 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, selectedReceiptToken]);
+  }, [isEnabled, receiptTokenId, selectedReceiptToken]);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -356,6 +355,25 @@ export function RiskBreakdownTab({
       >
         <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
           Pick a receipt token to inspect its collateral backing.
+        </p>
+      </div>
+    );
+  }
+
+  if (receiptTokenId === null) {
+    return (
+      <div
+        className={css({
+          borderRadius: 'md',
+          borderStyle: 'solid',
+          borderWidth: '1px',
+          borderColor: 'border.subtle',
+          bg: 'surface.subtle',
+          p: '4',
+        })}
+      >
+        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+          Direct asset holdings have no collateral backing to break down.
         </p>
       </div>
     );
