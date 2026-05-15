@@ -85,7 +85,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
           return;
         }
 
-        logging.error('Failed to load risk capital (RRC)', {
+        logging.error('Failed to load required risk capital (RRC)', {
           error,
           receiptTokenId: selectedReceiptToken.receipt_token_id,
           primeId: selectedPrime.id,
@@ -133,7 +133,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
         })}
       >
         <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Pick a receipt token to inspect risk capital.
+          Pick a receipt token to inspect required risk capital.
         </p>
       </div>
     );
@@ -169,10 +169,10 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
                 color: 'text.muted',
               })}
             >
-              Risk capital (RRC)
+              Required risk capital (RRC)
             </p>
             {isLoading ? (
-              <LoadingIndicator message="Fetching risk capital" />
+              <LoadingIndicator message="Fetching required risk capital" />
             ) : null}
           </div>
 
@@ -199,7 +199,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
               color: 'text.strong',
             })}
           >
-            Unable to compute risk capital.
+            Unable to compute required risk capital.
           </p>
           <p
             className={css({
@@ -288,7 +288,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
               color: 'text.muted',
             })}
           >
-            Max risk capital across models
+            Max required risk capital across models
           </p>
           <p
             className={css({
@@ -303,7 +303,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
           </p>
           {isLoading && !rrc ? (
             <div className={css({ mt: '3' })}>
-              <LoadingIndicator message="Computing risk capital" />
+              <LoadingIndicator message="Computing required risk capital" />
             </div>
           ) : (
             <p
@@ -318,7 +318,7 @@ export function RrcTab({ selectedReceiptToken, selectedPrime }: RrcTabProps) {
                 ? hasRiskCapital
                   ? `Max comparable capital ratio: ${formatPercentValue(rrc.max_crr_pct, 2)}.`
                   : 'Models report no required risk capital at default stress.'
-                : 'Pick a prime and receipt token to compute risk capital.'}
+                : 'Pick a prime and receipt token to compute required risk capital.'}
             </p>
           )}
         </div>

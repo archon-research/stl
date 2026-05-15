@@ -254,7 +254,7 @@ export function BottomPanel({
             Risk breakdown
           </Toggle>
           <Toggle value="rrc" className={toggleClassName}>
-            Risk capital
+            Required risk capital
           </Toggle>
           <Toggle value="activity" className={toggleClassName}>
             Activity
