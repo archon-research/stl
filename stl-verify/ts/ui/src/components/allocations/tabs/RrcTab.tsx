@@ -21,6 +21,7 @@ import {
   SummaryMetric,
   TokenLogo,
 } from '../../shared';
+import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 
 type RrcTabProps = {
   isEnabled: boolean;
@@ -126,20 +127,7 @@ export function RrcTab({
 
   if (!selectedReceiptToken) {
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Pick a receipt token to inspect required risk capital.
-        </p>
-      </div>
+      <TabSelectionPrompt message="Pick a receipt token to inspect required risk capital." />
     );
   }
 
@@ -149,21 +137,7 @@ export function RrcTab({
     // wrapper), so this branch should query that registry instead of
     // hard-coding "no risk model" for every direct holding.
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Required risk capital is only computed for receipt-token positions.
-          Direct asset holdings have no risk model.
-        </p>
-      </div>
+      <TabSelectionPrompt message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
     );
   }
 
@@ -209,37 +183,10 @@ export function RrcTab({
       </div>
 
       {errorMessage ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.default',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'sm',
-              fontWeight: 'semibold',
-              color: 'text.strong',
-            })}
-          >
-            Unable to compute required risk capital.
-          </p>
-          <p
-            className={css({
-              m: 0,
-              mt: '1.5',
-              fontSize: 'sm',
-              color: 'text.muted',
-            })}
-          >
-            {errorMessage}
-          </p>
-        </div>
+        <TabErrorPanel
+          title="Unable to compute required risk capital."
+          message={errorMessage}
+        />
       ) : null}
 
       {!errorMessage ? (

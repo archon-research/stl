@@ -1,4 +1,9 @@
-import { SkeletonStack } from '@archon-research/design-system';
+import {
+  AsyncStateRenderer,
+  EmptyState,
+  ErrorState,
+  SkeletonStack,
+} from '@archon-research/design-system';
 import { ArrowDownRight, ArrowRightLeft, ArrowUpLeft } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -25,7 +30,6 @@ import type {
 } from '../../../types/allocation';
 import { ChainLogo, ProtocolLogo } from '../../shared';
 import { TokenAddress } from '../../shared';
-import { EmptyState, ErrorState } from '../../shared';
 
 type ActivityFeedProps = {
   isEnabled: boolean;
@@ -593,158 +597,163 @@ export function ActivityFeed({
     );
   }
 
-  if (isLoading && events.length === 0) {
-    return <SkeletonStack count={3} />;
-  }
-
-  if (error) {
-    return (
-      <ErrorState
-        title="Error Loading Activity"
-        description="An error occurred while loading the activity feed."
-        errorMessage={error}
-      />
-    );
-  }
-
-  if (filteredEvents.length === 0) {
-    return (
-      <EmptyState
-        title="No Activity Found"
-        description="No allocation activity events match your filters."
-        stretch
-      />
-    );
-  }
-
   return (
-    <div
-      className={css({
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        borderRadius: 'lg',
-        overflow: 'hidden',
-      })}
+    <AsyncStateRenderer
+      isLoading={isLoading && events.length === 0}
+      error={error}
+      isEmpty={filteredEvents.length === 0}
+      loadingView={<SkeletonStack count={3} />}
+      errorView={
+        <ErrorState
+          title="Error Loading Activity"
+          description="An error occurred while loading the activity feed."
+          errorMessage={error ?? undefined}
+        />
+      }
+      emptyView={
+        <EmptyState
+          title="No Activity Found"
+          description="No allocation activity events match your filters."
+          stretch
+        />
+      }
     >
       <div
         className={css({
-          flex: 1,
-          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          height: '100%',
           borderRadius: 'lg',
-          border: '1px solid token(colors.surface.subtle)',
-          bg: 'surface.default',
+          overflow: 'hidden',
         })}
       >
-        {filteredEvents.map((event, idx) => {
-          const eventKey = buildActivityEventKey(event);
-          const txHash = event.tx_hash;
-          const txCacheKey = txHash
-            ? buildTxCacheKey(txHash, event.chain_id)
-            : null;
-          const isExpanded = selectedEventKey === eventKey;
-          const txEvents = txCacheKey ? txEventsByHash[txCacheKey] : undefined;
-          const txError = txCacheKey
-            ? txEventErrorsByHash[txCacheKey]
-            : undefined;
-          const isTxLoading =
-            txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
+        <div
+          className={css({
+            flex: 1,
+            overflowY: 'auto',
+            borderRadius: 'lg',
+            border: '1px solid token(colors.surface.subtle)',
+            bg: 'surface.default',
+          })}
+        >
+          {filteredEvents.map((event, idx) => {
+            const eventKey = buildActivityEventKey(event);
+            const txHash = event.tx_hash;
+            const txCacheKey = txHash
+              ? buildTxCacheKey(txHash, event.chain_id)
+              : null;
+            const isExpanded = selectedEventKey === eventKey;
+            const txEvents = txCacheKey
+              ? txEventsByHash[txCacheKey]
+              : undefined;
+            const txError = txCacheKey
+              ? txEventErrorsByHash[txCacheKey]
+              : undefined;
+            const isTxLoading =
+              txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
 
-          return (
-            <div key={`${eventKey}:${idx}`}>
-              <ActivityEventRow
-                event={event}
-                isExpanded={isExpanded}
-                onSelectTx={handleSelectTx}
-              />
+            return (
+              <div key={`${eventKey}:${idx}`}>
+                <ActivityEventRow
+                  event={event}
+                  isExpanded={isExpanded}
+                  onSelectTx={handleSelectTx}
+                />
 
-              {isExpanded && txHash ? (
-                <div
-                  className={css({
-                    marginX: '3',
-                    marginBottom: '3',
-                    borderWidth: '1px',
-                    borderStyle: 'solid',
-                    borderColor: 'border.subtle',
-                    borderRadius: 'md',
-                    bg: 'surface.subtle',
-                    padding: '3',
-                    display: 'grid',
-                    gap: '2',
-                  })}
-                >
+                {isExpanded && txHash ? (
                   <div
                     className={css({
-                      fontSize: 'xs',
-                      color: 'text.strong',
-                      fontWeight: 'semibold',
+                      marginX: '3',
+                      marginBottom: '3',
+                      borderWidth: '1px',
+                      borderStyle: 'solid',
+                      borderColor: 'border.subtle',
+                      borderRadius: 'md',
+                      bg: 'surface.subtle',
+                      padding: '3',
+                      display: 'grid',
+                      gap: '2',
                     })}
                   >
-                    Protocol Events For TX
+                    <div
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.strong',
+                        fontWeight: 'semibold',
+                      })}
+                    >
+                      Protocol Events For TX
+                    </div>
+
+                    {isTxLoading ? (
+                      <span
+                        className={css({
+                          fontSize: 'xs',
+                          color: 'text.default',
+                        })}
+                      >
+                        Loading protocol events...
+                      </span>
+                    ) : null}
+
+                    {!isTxLoading && txError ? (
+                      <span
+                        className={css({
+                          fontSize: 'xs',
+                          color: 'text.warning',
+                        })}
+                      >
+                        Failed to load protocol events: {txError}
+                      </span>
+                    ) : null}
+
+                    {!isTxLoading &&
+                    !txError &&
+                    txEvents &&
+                    txEvents.length === 0 ? (
+                      <EmptyState
+                        title="No Protocol Events"
+                        description="No protocol events were indexed for this transaction."
+                        size="compact"
+                        stretch
+                      />
+                    ) : null}
+
+                    {!isTxLoading && !txError && txEvents && txEvents.length > 0
+                      ? txEvents.map((protocolEvent) => (
+                          <ProtocolEventCard
+                            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
+                            event={protocolEvent}
+                          />
+                        ))
+                      : null}
                   </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
 
-                  {isTxLoading ? (
-                    <span
-                      className={css({ fontSize: 'xs', color: 'text.default' })}
-                    >
-                      Loading protocol events...
-                    </span>
-                  ) : null}
-
-                  {!isTxLoading && txError ? (
-                    <span
-                      className={css({ fontSize: 'xs', color: 'text.warning' })}
-                    >
-                      Failed to load protocol events: {txError}
-                    </span>
-                  ) : null}
-
-                  {!isTxLoading &&
-                  !txError &&
-                  txEvents &&
-                  txEvents.length === 0 ? (
-                    <EmptyState
-                      title="No Protocol Events"
-                      description="No protocol events were indexed for this transaction."
-                      size="compact"
-                      stretch
-                    />
-                  ) : null}
-
-                  {!isTxLoading && !txError && txEvents && txEvents.length > 0
-                    ? txEvents.map((protocolEvent) => (
-                        <ProtocolEventCard
-                          key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
-                          event={protocolEvent}
-                        />
-                      ))
-                    : null}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
+        <div
+          className={css({
+            padding: '3',
+            borderTop: '1px solid token(colors.surface.subtle)',
+            bg: 'surface.subtle',
+            fontSize: 'xs',
+            color: 'text.default',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          })}
+        >
+          <span>Showing {filteredEvents.length} events</span>
+          {filteredEvents.length >= (filters.limit || 50) ? (
+            <span className={css({ color: 'text.subtle' })}>
+              Limited to most recent {filters.limit || 50}
+            </span>
+          ) : null}
+        </div>
       </div>
-
-      <div
-        className={css({
-          padding: '3',
-          borderTop: '1px solid token(colors.surface.subtle)',
-          bg: 'surface.subtle',
-          fontSize: 'xs',
-          color: 'text.default',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-        })}
-      >
-        <span>Showing {filteredEvents.length} events</span>
-        {filteredEvents.length >= (filters.limit || 50) ? (
-          <span className={css({ color: 'text.subtle' })}>
-            Limited to most recent {filters.limit || 50}
-          </span>
-        ) : null}
-      </div>
-    </div>
+    </AsyncStateRenderer>
   );
 }
