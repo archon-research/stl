@@ -35,7 +35,6 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@archon-research/design-system": "0.2.2-dev25318411334",
     "@archon-research/oxfmt-config": "0.2.2-dev25318411334",
     "@archon-research/oxlint-config": "0.2.2-dev25318411334",
     "@archon-research/tsconfig": "0.2.2-dev25318411334",
