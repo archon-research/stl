@@ -12,9 +12,9 @@ type OrderbookLevel struct {
 // OrderbookSnapshot represents a point-in-time orderbook from a single exchange.
 type OrderbookSnapshot struct {
 	Exchange   string           `json:"exchange"`
-	Symbol     string           `json:"symbol"`     // Normalized symbol (e.g., "BTC", "ETH")
-	Bids       []OrderbookLevel `json:"bids"`       // Sorted best (highest) first
-	Asks       []OrderbookLevel `json:"asks"`       // Sorted best (lowest) first
+	Symbol     string           `json:"symbol"` // Normalized symbol (e.g., "BTC", "ETH")
+	Bids       []OrderbookLevel `json:"bids"`   // Sorted best (highest) first
+	Asks       []OrderbookLevel `json:"asks"`   // Sorted best (lowest) first
 	CapturedAt time.Time        `json:"captured_at"`
 	LatencyMs  int              `json:"latency_ms"` // Exchange → our service
 }

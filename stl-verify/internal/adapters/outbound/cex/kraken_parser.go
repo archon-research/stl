@@ -44,8 +44,8 @@ func (p *KrakenParser) ParseMessage(msg []byte) ([]entity.OrderbookSnapshot, err
 		Channel string `json:"channel"`
 		Type    string `json:"type"`
 		Data    []struct {
-			Symbol    string `json:"symbol"`
-			Bids      []struct {
+			Symbol string `json:"symbol"`
+			Bids   []struct {
 				Price float64 `json:"price"`
 				Qty   float64 `json:"qty"`
 			} `json:"bids"`

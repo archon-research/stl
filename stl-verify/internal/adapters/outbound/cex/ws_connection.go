@@ -8,13 +8,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/gorilla/websocket"
 )
 
 type WSConnectionConfig struct {
 	URL              string
-	Parser           Parser
+	Protocol         WSProtocol
 	Pairs            []string
 	Depth            int
 	PingInterval     time.Duration
@@ -24,17 +24,20 @@ type WSConnectionConfig struct {
 	ChannelBuffer    int
 }
 
+// WSConnection maintains a single resilient WebSocket connection to one
+// exchange. It forwards every incoming frame as a RawCEXMessage without
+// parsing — the indexer worker is responsible for interpreting payloads.
 type WSConnection struct {
-	config  WSConnectionConfig
-	logger  *slog.Logger
-	conn    *websocket.Conn
-	mu      sync.RWMutex
-	done    chan struct{}
-	closed  atomic.Bool
-	out     chan entity.OrderbookSnapshot
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	config WSConnectionConfig
+	logger *slog.Logger
+	conn   *websocket.Conn
+	mu     sync.RWMutex
+	done   chan struct{}
+	closed atomic.Bool
+	out    chan entity.RawCEXMessage
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 func NewWSConnection(config WSConnectionConfig, logger *slog.Logger) *WSConnection {
@@ -46,13 +49,15 @@ func NewWSConnection(config WSConnectionConfig, logger *slog.Logger) *WSConnecti
 	}
 	return &WSConnection{
 		config: config,
-		logger: logger.With("component", "ws-connection", "exchange", config.Parser.Exchange()),
+		logger: logger.With("component", "ws-connection", "exchange", config.Protocol.Exchange()),
 		done:   make(chan struct{}),
-		out:    make(chan entity.OrderbookSnapshot, config.ChannelBuffer),
+		out:    make(chan entity.RawCEXMessage, config.ChannelBuffer),
 	}
 }
 
-func (w *WSConnection) Connect(ctx context.Context) (<-chan entity.OrderbookSnapshot, error) {
+// Subscribe starts the connection loop and returns a channel of raw frames.
+// The channel is closed when Close is called.
+func (w *WSConnection) Subscribe(ctx context.Context) (<-chan entity.RawCEXMessage, error) {
 	w.ctx, w.cancel = context.WithCancel(ctx)
 	w.wg.Add(1)
 	go w.connectionLoop()
@@ -81,13 +86,13 @@ func (w *WSConnection) Close() error {
 
 func (w *WSConnection) HealthCheck() error {
 	if w.closed.Load() {
-		return fmt.Errorf("%s: connection closed", w.config.Parser.Exchange())
+		return fmt.Errorf("%s: connection closed", w.config.Protocol.Exchange())
 	}
 	w.mu.RLock()
 	conn := w.conn
 	w.mu.RUnlock()
 	if conn == nil {
-		return fmt.Errorf("%s: not connected", w.config.Parser.Exchange())
+		return fmt.Errorf("%s: not connected", w.config.Protocol.Exchange())
 	}
 	return nil
 }
@@ -138,7 +143,7 @@ func (w *WSConnection) connectAndSubscribe() error {
 		return conn.SetReadDeadline(time.Now().Add(w.config.PongTimeout + w.config.PingInterval))
 	})
 
-	subMsg, err := w.config.Parser.SubscribeMessage(w.config.Pairs, w.config.Depth)
+	subMsg, err := w.config.Protocol.SubscribeMessage(w.config.Pairs, w.config.Depth)
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("build subscribe: %w", err)
@@ -191,6 +196,7 @@ func (w *WSConnection) readLoop() error {
 		}
 	}()
 
+	source := w.config.Protocol.Exchange()
 	for {
 		select {
 		case <-w.done:
@@ -203,17 +209,15 @@ func (w *WSConnection) readLoop() error {
 			w.closeConn()
 			return fmt.Errorf("read: %w", err)
 		case msg := <-msgChan:
-			snapshots, err := w.config.Parser.ParseMessage(msg)
-			if err != nil {
-				w.logger.Warn("parse error", "error", err)
-				continue
+			envelope := entity.RawCEXMessage{
+				Source:     source,
+				CapturedAt: time.Now().UTC(),
+				Payload:    msg,
 			}
-			for _, snap := range snapshots {
-				select {
-				case w.out <- snap:
-				default:
-					w.logger.Warn("channel full, dropping snapshot", "symbol", snap.Symbol)
-				}
+			select {
+			case w.out <- envelope:
+			default:
+				w.logger.Warn("channel full, dropping message", "source", source)
 			}
 		case <-pingTicker.C:
 			if err := w.sendPing(); err != nil {
@@ -231,7 +235,7 @@ func (w *WSConnection) sendPing() error {
 	if conn == nil {
 		return fmt.Errorf("no connection")
 	}
-	if pingMsg := w.config.Parser.PingMessage(); pingMsg != nil {
+	if pingMsg := w.config.Protocol.PingMessage(); pingMsg != nil {
 		return conn.WriteMessage(websocket.TextMessage, pingMsg)
 	}
 	return conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(w.config.PongTimeout))
@@ -244,4 +248,33 @@ func (w *WSConnection) closeConn() {
 		w.conn.Close()
 		w.conn = nil
 	}
+}
+
+// BuildWSConnectionConfig assembles a WSConnectionConfig for the given
+// exchange from the global Exchanges registry. Returns an error if the
+// exchange is unknown.
+func BuildWSConnectionConfig(exchangeName string) (WSConnectionConfig, error) {
+	exchange, ok := Exchanges[exchangeName]
+	if !ok {
+		return WSConnectionConfig{}, fmt.Errorf("unknown exchange %q", exchangeName)
+	}
+	protocol := ProtocolForExchange(exchangeName)
+	if protocol == nil {
+		return WSConnectionConfig{}, fmt.Errorf("no protocol implementation for exchange %q", exchangeName)
+	}
+	pairs := make([]string, 0, len(exchange.Symbols))
+	for _, pair := range exchange.Symbols {
+		pairs = append(pairs, pair)
+	}
+	return WSConnectionConfig{
+		URL:              exchange.WebSocketURL,
+		Protocol:         protocol,
+		Pairs:            pairs,
+		Depth:            exchange.MaxDepth,
+		PingInterval:     exchange.PingInterval,
+		PongTimeout:      exchange.PongTimeout,
+		ReconnectBackoff: exchange.ReconnectBackoff,
+		MaxBackoff:       exchange.MaxReconnectBackoff,
+		ChannelBuffer:    200,
+	}, nil
 }

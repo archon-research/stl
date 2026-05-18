@@ -10,28 +10,15 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
-type mockParser struct{}
+type mockProtocol struct{}
 
-func (m *mockParser) Exchange() string { return "mock" }
-func (m *mockParser) SubscribeMessage(_ []string, _ int) ([]byte, error) {
+func (m *mockProtocol) Exchange() string { return "mock" }
+func (m *mockProtocol) SubscribeMessage(_ []string, _ int) ([]byte, error) {
 	return []byte(`{"op":"subscribe"}`), nil
 }
-func (m *mockParser) ParseMessage(msg []byte) ([]entity.OrderbookSnapshot, error) {
-	if strings.Contains(string(msg), "orderbook") {
-		return []entity.OrderbookSnapshot{{
-			Exchange:   "mock",
-			Symbol:     "BTC",
-			Bids:       []entity.OrderbookLevel{{Price: 100, Size: 1, Liquidity: 100}},
-			Asks:       []entity.OrderbookLevel{{Price: 101, Size: 1, Liquidity: 101}},
-			CapturedAt: time.Now(),
-		}}, nil
-	}
-	return nil, nil
-}
-func (m *mockParser) PingMessage() []byte { return nil }
+func (m *mockProtocol) PingMessage() []byte { return nil }
 
 func newTestWSServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest.Server {
 	t.Helper()
@@ -47,17 +34,19 @@ func newTestWSServer(t *testing.T, handler func(conn *websocket.Conn)) *httptest
 	}))
 }
 
-func TestWSConnection_ReceivesSnapshots(t *testing.T) {
+func TestWSConnection_ForwardsRawFrames(t *testing.T) {
+	const framePayload = `{"type":"orderbook","data":"hello"}`
+
 	server := newTestWSServer(t, func(conn *websocket.Conn) {
-		_, _, _ = conn.ReadMessage() // read subscription
-		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"orderbook"}`))
+		_, _, _ = conn.ReadMessage() // consume subscribe
+		conn.WriteMessage(websocket.TextMessage, []byte(framePayload))
 		time.Sleep(200 * time.Millisecond)
 	})
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 	cfg := WSConnectionConfig{
-		URL: wsURL, Parser: &mockParser{}, Pairs: []string{"BTCUSDT"}, Depth: 20,
+		URL: wsURL, Protocol: &mockProtocol{}, Pairs: []string{"BTCUSDT"}, Depth: 20,
 		PingInterval: 5 * time.Second, PongTimeout: 3 * time.Second,
 		ReconnectBackoff: 100 * time.Millisecond, MaxBackoff: 1 * time.Second, ChannelBuffer: 10,
 	}
@@ -65,22 +54,25 @@ func TestWSConnection_ReceivesSnapshots(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	ch, err := conn.Connect(ctx)
+	ch, err := conn.Subscribe(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
 
 	select {
-	case snap := <-ch:
-		if snap.Exchange != "mock" {
-			t.Errorf("expected mock, got %q", snap.Exchange)
+	case msg := <-ch:
+		if msg.Source != "mock" {
+			t.Errorf("expected source mock, got %q", msg.Source)
 		}
-		if snap.Symbol != "BTC" {
-			t.Errorf("expected BTC, got %q", snap.Symbol)
+		if string(msg.Payload) != framePayload {
+			t.Errorf("payload mismatch: got %q want %q", msg.Payload, framePayload)
+		}
+		if msg.CapturedAt.IsZero() {
+			t.Errorf("expected CapturedAt to be set")
 		}
 	case <-ctx.Done():
-		t.Fatal("timed out waiting for snapshot")
+		t.Fatal("timed out waiting for frame")
 	}
 }
 
@@ -108,7 +100,7 @@ func TestWSConnection_ReconnectsOnDisconnect(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 	cfg := WSConnectionConfig{
-		URL: wsURL, Parser: &mockParser{}, Pairs: []string{"BTCUSDT"}, Depth: 20,
+		URL: wsURL, Protocol: &mockProtocol{}, Pairs: []string{"BTCUSDT"}, Depth: 20,
 		PingInterval: 5 * time.Second, PongTimeout: 3 * time.Second,
 		ReconnectBackoff: 50 * time.Millisecond, MaxBackoff: 200 * time.Millisecond, ChannelBuffer: 10,
 	}
@@ -116,7 +108,7 @@ func TestWSConnection_ReconnectsOnDisconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	ch, err := wsConn.Connect(ctx)
+	ch, err := wsConn.Subscribe(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +120,7 @@ func TestWSConnection_ReconnectsOnDisconnect(t *testing.T) {
 		case <-ch:
 			received++
 		case <-ctx.Done():
-			t.Fatalf("timed out, received %d snapshots (expected 2)", received)
+			t.Fatalf("timed out, received %d frames (expected 2)", received)
 		}
 	}
 
@@ -137,4 +129,27 @@ func TestWSConnection_ReconnectsOnDisconnect(t *testing.T) {
 		t.Errorf("expected at least 2 connections, got %d", connectCount)
 	}
 	mu.Unlock()
+}
+
+func TestBuildWSConnectionConfig_KnownExchange(t *testing.T) {
+	cfg, err := BuildWSConnectionConfig("binance")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Protocol == nil {
+		t.Fatal("expected Protocol to be set")
+	}
+	if cfg.Protocol.Exchange() != "binance" {
+		t.Errorf("expected exchange binance, got %q", cfg.Protocol.Exchange())
+	}
+	if len(cfg.Pairs) == 0 {
+		t.Error("expected at least one pair")
+	}
+}
+
+func TestBuildWSConnectionConfig_UnknownExchange(t *testing.T) {
+	_, err := BuildWSConnectionConfig("nonexistent")
+	if err == nil {
+		t.Error("expected error for unknown exchange")
+	}
 }
