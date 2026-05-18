@@ -14,7 +14,7 @@
     "uikit:unlink": "uikit-cli unlink --consumer-root ."
   },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.1.0"
+    "@archon-research/uikit-cli": "0.3.2"
   },
   "volta": {
     "node": "24.14.1"
