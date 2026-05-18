@@ -126,6 +126,11 @@ func TestWriteFile_Gzip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gzip.NewReader: %v", err)
 	}
+	defer func() {
+		if cerr := gzReader.Close(); cerr != nil {
+			t.Errorf("close gzip reader: %v", cerr)
+		}
+	}()
 	roundtrip, err := io.ReadAll(gzReader)
 	if err != nil {
 		t.Fatalf("read gzipped body: %v", err)

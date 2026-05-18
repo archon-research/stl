@@ -286,7 +286,9 @@ func handleSingle(req rpcReq, resp mockResponses) rpcResp {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, fmt.Sprintf("encode json response: %v", err), http.StatusInternalServerError)
+	}
 }
 
 func putGzippedObject(t *testing.T, ctx context.Context, s3c *awsS3.Client, bucket, key string, content []byte) {
@@ -332,11 +334,15 @@ func fetchObject(t *testing.T, ctx context.Context, s3c *awsS3.Client, bucket, k
 		if err != nil {
 			t.Fatalf("gzip reader: %v", err)
 		}
+		defer func() {
+			if err := gz.Close(); err != nil {
+				t.Fatalf("gzip close: %v", err)
+			}
+		}()
 		body, err = io.ReadAll(gz)
 		if err != nil {
 			t.Fatalf("gzip read: %v", err)
 		}
-		_ = gz.Close()
 	}
 	return body
 }
@@ -406,6 +412,9 @@ func receiveOneSQSMessage(t *testing.T, ctx context.Context, sqsc *awssqs.Client
 			t.Fatalf("receive message: %v", err)
 		}
 		if len(out.Messages) > 0 {
+			if out.Messages[0].Body == nil {
+				t.Fatalf("received SQS message with nil body")
+			}
 			return *out.Messages[0].Body
 		}
 	}

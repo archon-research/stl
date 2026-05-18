@@ -77,10 +77,10 @@ const (
 )
 
 func main() {
-	opts, err := parseFlags(os.Args[1:])
+	opts, fs, err := parseFlags(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		flag.Usage()
+		fs.Usage()
 		os.Exit(2)
 	}
 
@@ -127,11 +127,11 @@ type Options struct {
 	Prefix string
 }
 
-func parseFlags(args []string) (Options, error) {
+func parseFlags(args []string) (Options, *flag.FlagSet, error) {
 	fs := flag.NewFlagSet("null-payload-refill", flag.ContinueOnError)
 	var opts Options
 	fs.StringVar(&opts.Bucket, "bucket", "", "S3 bucket containing the null objects (required)")
-	fs.Int64Var(&opts.ChainID, "chain-id", 0, "Chain ID for block_states lookup (required)")
+	fs.Int64Var(&opts.ChainID, "chain-id", 0, "Chain ID used in published BlockEvents and operator diagnostics (required)")
 	fs.StringVar(&opts.KeysFile, "keys-file", "", "Optional path to a file of S3 keys, one per line. If empty, the tool scans --bucket via ListObjectsV2 and treats objects with Size <= --max-size as candidates.")
 	fs.StringVar(&opts.StateFile, "state-file", "", "JSONL state file path; defaults to <keys-file>.state or null-payload-refill.state when scanning")
 	fs.StringVar(&opts.SNSTopicARN, "sns-topic-arn", "", "SNS FIFO topic ARN to publish BlockEvents to (required)")
@@ -144,26 +144,26 @@ func parseFlags(args []string) (Options, error) {
 	fs.Int64Var(&opts.MaxSize, "max-size", defaultMaxSize, "Scan path only: candidate threshold in bytes. Gzipped null is ~28B; valid gzipped blocks are kilobytes+. Ignored when --keys-file is set.")
 	fs.StringVar(&opts.Prefix, "prefix", "", "Scan path only: optional ListObjectsV2 prefix (e.g. \"85149000-85149999/\") to narrow the scan. Ignored when --keys-file is set.")
 	if err := fs.Parse(args); err != nil {
-		return Options{}, err
+		return Options{}, fs, err
 	}
 
 	if opts.Bucket == "" {
-		return opts, errors.New("--bucket is required")
+		return opts, fs, errors.New("--bucket is required")
 	}
 	if opts.ChainID <= 0 {
-		return opts, errors.New("--chain-id is required and must be > 0")
+		return opts, fs, errors.New("--chain-id is required and must be > 0")
 	}
 	if opts.SNSTopicARN == "" {
-		return opts, errors.New("--sns-topic-arn is required")
+		return opts, fs, errors.New("--sns-topic-arn is required")
 	}
 	if opts.RPCURL == "" {
-		return opts, errors.New("--rpc-url is required")
+		return opts, fs, errors.New("--rpc-url is required")
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
 	}
 	if opts.KeysFile == "" && opts.MaxSize <= 0 {
-		return opts, errors.New("--max-size must be > 0 when scanning the bucket")
+		return opts, fs, errors.New("--max-size must be > 0 when scanning the bucket")
 	}
 	if opts.StateFile == "" {
 		if opts.KeysFile != "" {
@@ -172,7 +172,7 @@ func parseFlags(args []string) (Options, error) {
 			opts.StateFile = "null-payload-refill.state"
 		}
 	}
-	return opts, nil
+	return opts, fs, nil
 }
 
 // Run wires up dependencies and processes candidate S3 keys. Keys are sourced

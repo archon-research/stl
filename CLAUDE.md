@@ -102,7 +102,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 
 ## Code Conventions
 
-- **Keep an eye out for deduplicate possibilites**: Try to consolidate lots of duplicated code. Create shareable libraries instead of duplicating code everywhere.
+- **Keep an eye out for deduplicate possibilities**: Try to consolidate lots of duplicated code. Create shareable libraries instead of duplicating code everywhere.
 - **Interfaces**: Use `-er` suffix (Reader, Publisher)
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case

@@ -13,6 +13,7 @@ func TestIsNullOrEmpty(t *testing.T) {
 	}{
 		{"nil", nil, true},
 		{"empty", json.RawMessage{}, true},
+		{"whitespace_only", json.RawMessage("\n  \t"), true},
 		{"literal_null", json.RawMessage("null"), true},
 		{"literal_null_with_whitespace", json.RawMessage("  null\n"), true},
 		{"empty_object", json.RawMessage("{}"), false},

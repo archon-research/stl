@@ -2096,6 +2096,47 @@ func TestProcessMessage_RejectsNullReceiptsPayload(t *testing.T) {
 	if !strings.Contains(err.Error(), "receipts") {
 		t.Errorf("error should mention dataType 'receipts': %v", err)
 	}
+	if !strings.Contains(err.Error(), "100") {
+		t.Errorf("error should include block number 100: %v", err)
+	}
+	if !strings.Contains(err.Error(), "chain=1") {
+		t.Errorf("error should include chain=1: %v", err)
+	}
+	if !strings.Contains(err.Error(), "version=0") {
+		t.Errorf("error should include version=0: %v", err)
+	}
+
+	if _, exists := writer.GetFile("test-bucket", "0-999/100_0_receipts.json.gz"); exists {
+		t.Error("receipts key should NOT have been written")
+	}
+}
+
+func TestProcessMessage_RejectsEmptyReceiptsPayload(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	svc, _ := NewService(Config{
+		ChainID: 1,
+		Bucket:  "test-bucket",
+		Logger:  testutil.DiscardLogger(),
+	}, consumer, cache, writer)
+
+	event := createBlockEvent(1, 100, 0)
+	ctx := context.Background()
+
+	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{"number": "0x64"}`))
+	_ = cache.SetReceipts(ctx, 1, 100, 0, json.RawMessage(""))
+	_ = cache.SetTraces(ctx, 1, 100, 0, json.RawMessage(`[{"action": {"callType": "call"}}]`))
+
+	msg := createSQSMessage("msg1", event)
+	err := svc.processMessage(ctx, msg)
+	if err == nil {
+		t.Fatal("expected error for empty receipts payload, got nil")
+	}
+	if !strings.Contains(err.Error(), "refusing to write null/empty") {
+		t.Errorf("error missing expected text 'refusing to write null/empty': %v", err)
+	}
 
 	if _, exists := writer.GetFile("test-bucket", "0-999/100_0_receipts.json.gz"); exists {
 		t.Error("receipts key should NOT have been written")

@@ -98,7 +98,7 @@ func (w *Writer) prepareBody(content io.Reader, compressGzip bool) (io.Reader, *
 func (w *Writer) WriteFileIfNotExists(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) (bool, error) {
 	body, contentEncoding, err := w.prepareBody(content, compressGzip)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("preparing upload body: %w", err)
 	}
 
 	input := &s3.PutObjectInput{
@@ -128,7 +128,7 @@ func (w *Writer) WriteFileIfNotExists(ctx context.Context, bucket, key string, c
 func (w *Writer) WriteFile(ctx context.Context, bucket, key string, content io.Reader, compressGzip bool) error {
 	body, contentEncoding, err := w.prepareBody(content, compressGzip)
 	if err != nil {
-		return err
+		return fmt.Errorf("preparing upload body: %w", err)
 	}
 
 	input := &s3.PutObjectInput{
