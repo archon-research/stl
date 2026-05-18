@@ -224,7 +224,6 @@ func main() {
 	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
 
 	awsCfg, err := awsconfig.Load(context.Background(), awsconfig.Options{
-		DefaultRegion:            "us-east-1",
 		StaticCredentialsFromEnv: true,
 	})
 	if err != nil {

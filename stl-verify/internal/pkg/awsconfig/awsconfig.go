@@ -13,14 +13,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
+// DefaultRegion is the region used when neither Options.Region nor the
+// AWS_REGION env var is set. eu-west-1 because every stl- deployment
+// (staging + prod EKS clusters, RDS, S3, SQS, SNS) lives there.
+const DefaultRegion = "eu-west-1"
+
 // Options controls how Load builds an aws.Config.
 type Options struct {
-	// Region overrides AWS_REGION. If empty, AWS_REGION env is read, then DefaultRegion.
+	// Region overrides AWS_REGION. If empty, AWS_REGION env is read, then
+	// the package-level DefaultRegion constant.
 	Region string
-
-	// DefaultRegion is used when both Region and AWS_REGION are empty.
-	// If both this and AWS_REGION are empty Load returns an error.
-	DefaultRegion string
 
 	// Endpoint, when non-empty, overrides the base endpoint for all clients
 	// built from the returned config (LocalStack-style).
@@ -34,18 +36,15 @@ type Options struct {
 	StaticCredentialsFromEnv bool
 }
 
-// Load returns an aws.Config matching opts. Returns an error if no region is
-// resolvable from opts or env.
+// Load returns an aws.Config matching opts. Resolution precedence:
+// opts.Region → AWS_REGION env → DefaultRegion package constant.
 func Load(ctx context.Context, opts Options) (aws.Config, error) {
 	region := opts.Region
 	if region == "" {
 		region = os.Getenv("AWS_REGION")
 	}
 	if region == "" {
-		region = opts.DefaultRegion
-	}
-	if region == "" {
-		return aws.Config{}, fmt.Errorf("awsconfig: no region resolved (set opts.Region, opts.DefaultRegion, or AWS_REGION)")
+		region = DefaultRegion
 	}
 
 	loadOpts := []func(*awsconfig.LoadOptions) error{

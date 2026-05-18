@@ -54,7 +54,7 @@ func parseFlags(args []string) (cliConfig, error) {
 	bucket := fs.String("bucket", "", "S3 bucket containing transaction receipts")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	chainID := fs.Int64("chain-id", 1, "Ethereum chain ID")
-	awsRegion := fs.String("aws-region", "us-east-1", "AWS region")
+	awsRegion := fs.String("aws-region", "eu-west-1", "AWS region")
 
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err

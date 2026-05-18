@@ -11,7 +11,7 @@ func TestLoad_RegionFromOpts(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 
-	cfg, err := Load(context.Background(), Options{Region: "ap-southeast-1", DefaultRegion: "eu-west-1"})
+	cfg, err := Load(context.Background(), Options{Region: "ap-southeast-1"})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestLoad_RegionFromEnv(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 
-	cfg, err := Load(context.Background(), Options{DefaultRegion: "eu-west-1"})
+	cfg, err := Load(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -34,31 +34,20 @@ func TestLoad_RegionFromEnv(t *testing.T) {
 	}
 }
 
-func TestLoad_RegionDefault(t *testing.T) {
+func TestLoad_RegionFallsBackToPackageDefault(t *testing.T) {
 	t.Setenv("AWS_REGION", "")
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 
-	cfg, err := Load(context.Background(), Options{DefaultRegion: "eu-west-1"})
+	cfg, err := Load(context.Background(), Options{})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Region != "eu-west-1" {
-		t.Fatalf("Region = %q, want %q", cfg.Region, "eu-west-1")
+	if cfg.Region != DefaultRegion {
+		t.Fatalf("Region = %q, want %q", cfg.Region, DefaultRegion)
 	}
-}
-
-func TestLoad_RegionMissing(t *testing.T) {
-	t.Setenv("AWS_REGION", "")
-	t.Setenv("AWS_ACCESS_KEY_ID", "")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
-
-	_, err := Load(context.Background(), Options{})
-	if err == nil {
-		t.Fatal("Load: expected error when no region resolved, got nil")
-	}
-	if !strings.Contains(err.Error(), "no region resolved") {
-		t.Fatalf("Load: error = %q, want substring %q", err.Error(), "no region resolved")
+	if DefaultRegion != "eu-west-1" {
+		t.Fatalf("DefaultRegion = %q, want eu-west-1 (every stl- deployment lives there)", DefaultRegion)
 	}
 }
 
@@ -68,7 +57,7 @@ func TestLoad_Endpoint(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 
 	const ep = "http://localhost:4566"
-	cfg, err := Load(context.Background(), Options{DefaultRegion: "eu-west-1", Endpoint: ep})
+	cfg, err := Load(context.Background(), Options{Endpoint: ep})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -152,7 +141,7 @@ func TestLoad_StaticCredsFromEnv_MissingSecret(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKID")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 
-	_, err := Load(context.Background(), Options{StaticCredentialsFromEnv: true, DefaultRegion: "us-east-1"})
+	_, err := Load(context.Background(), Options{StaticCredentialsFromEnv: true})
 	if err == nil {
 		t.Fatal("Load: expected error when AWS_ACCESS_KEY_ID is set but AWS_SECRET_ACCESS_KEY is empty, got nil")
 	}

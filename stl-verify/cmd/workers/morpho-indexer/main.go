@@ -161,7 +161,6 @@ func run(ctx context.Context, args []string) error {
 	slog.SetDefault(logger)
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
-		DefaultRegion:            "us-east-1",
 		StaticCredentialsFromEnv: true,
 	})
 	if err != nil {
