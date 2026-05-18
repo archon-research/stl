@@ -208,6 +208,7 @@ export function BottomPanel({
       <EmptyState
         title="No receipt tokens in category"
         description={categoryEmptyDescription}
+        stretch
       />
     );
 
@@ -412,6 +413,7 @@ export function BottomPanel({
               <EmptyState
                 title="Loading receipt tokens"
                 description="Waiting for the selected prime's receipt token holdings."
+                stretch
               />
             }
             errorView={
