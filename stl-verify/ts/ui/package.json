@@ -25,7 +25,8 @@
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-react": "0.2.2-dev25318411334",
+    "@archon-research/design-system": "0.3.1",
+    "@archon-research/http-client-react": "0.3.1",
     "lucide-react": "^1.14.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
