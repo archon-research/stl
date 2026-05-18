@@ -49,5 +49,9 @@
     "openapi-typescript": "^7.6.1",
     "postcss": "^8.5.6",
     "vite": "^5.2.0"
+  },
+  "optionalDependencies": {
+    "lightningcss-darwin-arm64": "1.31.1",
+    "lightningcss-linux-x64-gnu": "1.31.1"
   }
 }
