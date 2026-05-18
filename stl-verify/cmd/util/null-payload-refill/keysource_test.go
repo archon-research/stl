@@ -33,7 +33,7 @@ func TestStreamKeysFromFile_HappyPath(t *testing.T) {
 	}
 
 	out := make(chan string, 16)
-	err := streamKeysFromFile(context.Background(), path, out)
+	err := streamKeysFromFile(context.Background(), path, 0, newSummary(), out)
 	close(out)
 	if err != nil {
 		t.Fatalf("streamKeysFromFile: %v", err)
@@ -56,7 +56,7 @@ func TestStreamKeysFromFile_HappyPath(t *testing.T) {
 
 func TestStreamKeysFromFile_OpenError(t *testing.T) {
 	out := make(chan string, 1)
-	err := streamKeysFromFile(context.Background(), "/nonexistent/path/that/does/not/exist", out)
+	err := streamKeysFromFile(context.Background(), "/nonexistent/path/that/does/not/exist", 0, newSummary(), out)
 	close(out)
 	if err == nil {
 		t.Fatal("expected error for non-existent file")
@@ -88,7 +88,7 @@ func TestStreamKeysFromFile_ContextCancel(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- streamKeysFromFile(ctx, path, out)
+		done <- streamKeysFromFile(ctx, path, 0, newSummary(), out)
 	}()
 
 	// Drain 10 keys, then cancel.
@@ -177,7 +177,7 @@ func TestStreamKeysFromBucket_FiltersBySize(t *testing.T) {
 	}
 
 	out := make(chan string, 8)
-	err := streamKeysFromBucket(context.Background(), lister, "bucket", "", 40, out)
+	err := streamKeysFromBucket(context.Background(), lister, "bucket", "", 40, 0, newSummary(), out)
 	close(out)
 	if err != nil {
 		t.Fatalf("streamKeysFromBucket: %v", err)
@@ -222,7 +222,7 @@ func TestStreamKeysFromBucket_StreamsAcrossPages(t *testing.T) {
 	out := make(chan string) // unbuffered → producer blocks until consumer reads
 	done := make(chan error, 1)
 	go func() {
-		done <- streamKeysFromBucket(context.Background(), lister, "bucket", "", 100, out)
+		done <- streamKeysFromBucket(context.Background(), lister, "bucket", "", 100, 0, newSummary(), out)
 	}()
 
 	// Read first key; capture call count. The unbuffered channel guarantees the
@@ -273,7 +273,7 @@ func TestStreamKeysFromBucket_HonorsPrefix(t *testing.T) {
 		}},
 	}
 	out := make(chan string, 4)
-	if err := streamKeysFromBucket(context.Background(), lister, "bucket", "partition/", 40, out); err != nil {
+	if err := streamKeysFromBucket(context.Background(), lister, "bucket", "partition/", 40, 0, newSummary(), out); err != nil {
 		t.Fatalf("streamKeysFromBucket: %v", err)
 	}
 	close(out)
@@ -304,7 +304,7 @@ func TestStreamKeysFromBucket_PropagatesError(t *testing.T) {
 	}
 
 	out := make(chan string, 8)
-	err := streamKeysFromBucket(context.Background(), lister, "bucket", "", 100, out)
+	err := streamKeysFromBucket(context.Background(), lister, "bucket", "", 100, 0, newSummary(), out)
 	close(out)
 	if err == nil {
 		t.Fatalf("expected error from second page")
@@ -341,7 +341,7 @@ func TestStreamKeysFromBucket_ContextCancel(t *testing.T) {
 	out := make(chan string) // unbuffered
 	done := make(chan error, 1)
 	go func() {
-		done <- streamKeysFromBucket(ctx, lister, "bucket", "", 100, out)
+		done <- streamKeysFromBucket(ctx, lister, "bucket", "", 100, 0, newSummary(), out)
 	}()
 
 	// Consume the first key, then cancel.
@@ -379,5 +379,193 @@ func TestStreamKeysFromBucket_ContextCancel(t *testing.T) {
 	// At most 2 calls (initial + maybe one more in flight); never more.
 	if c := lister.callCount(); c > 2 {
 		t.Errorf("ListObjectsV2 call count = %d, want <= 2 after cancel", c)
+	}
+}
+
+// ---- limit + total -----------------------------------------------------------
+
+func TestStreamKeysFromFile_RespectsLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.txt")
+	body := "k0\nk1\nk2\nk3\nk4\nk5\nk6\nk7\nk8\nk9\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	sum := newSummary()
+	out := make(chan string, 16)
+	if err := streamKeysFromFile(context.Background(), path, 3, sum, out); err != nil {
+		t.Fatalf("streamKeysFromFile: %v", err)
+	}
+	close(out)
+
+	var got []string
+	for k := range out {
+		got = append(got, k)
+	}
+	if len(got) != 3 {
+		t.Fatalf("emitted %d keys (%v), want 3", len(got), got)
+	}
+	if total := sum.total.Load(); total != 3 {
+		t.Errorf("sum.total = %d, want 3 (capped at limit)", total)
+	}
+}
+
+func TestStreamKeysFromFile_NoLimitWhenZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.txt")
+	body := "k0\nk1\nk2\nk3\nk4\nk5\nk6\nk7\nk8\nk9\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	sum := newSummary()
+	out := make(chan string, 16)
+	if err := streamKeysFromFile(context.Background(), path, 0, sum, out); err != nil {
+		t.Fatalf("streamKeysFromFile: %v", err)
+	}
+	close(out)
+
+	count := 0
+	for range out {
+		count++
+	}
+	if count != 10 {
+		t.Errorf("emitted %d keys, want 10", count)
+	}
+	if total := sum.total.Load(); total != 10 {
+		t.Errorf("sum.total = %d, want 10", total)
+	}
+}
+
+func TestStreamKeysFromFile_PreCountIgnoresBlankAndComment(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.txt")
+	body := "" +
+		"k0\n" +
+		"\n" +
+		"k1\n" +
+		"# comment\n" +
+		"k2\n" +
+		"k3\n" +
+		"\n" +
+		"k4\n" +
+		"k5\n" +
+		"k6\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	sum := newSummary()
+	out := make(chan string, 16)
+	if err := streamKeysFromFile(context.Background(), path, 0, sum, out); err != nil {
+		t.Fatalf("streamKeysFromFile: %v", err)
+	}
+	close(out)
+
+	count := 0
+	for range out {
+		count++
+	}
+	if count != 7 {
+		t.Errorf("emitted %d keys, want 7", count)
+	}
+	if total := sum.total.Load(); total != 7 {
+		t.Errorf("sum.total = %d, want 7 (blanks + comments excluded)", total)
+	}
+}
+
+func TestStreamKeysFromBucket_RespectsLimit(t *testing.T) {
+	// 5 pages of 10 candidates each. With limit=12 only the first two pages
+	// should ever be requested (page 1 emits 10, page 2 emits 2 then stops).
+	pages := make([]*s3.ListObjectsV2Output, 5)
+	for p := range 5 {
+		objs := make([]types.Object, 10)
+		for i := range 10 {
+			objs[i] = makeObj("p"+string(rune('0'+p))+"/"+string(rune('a'+i)), 10)
+		}
+		var token *string
+		if p < 4 {
+			token = aws.String("token-" + string(rune('0'+p)))
+		}
+		pages[p] = &s3.ListObjectsV2Output{
+			Contents:              objs,
+			IsTruncated:           aws.Bool(p < 4),
+			NextContinuationToken: token,
+		}
+	}
+	lister := &mockLister{pages: pages}
+
+	sum := newSummary()
+	out := make(chan string, 64)
+	if err := streamKeysFromBucket(context.Background(), lister, "bucket", "", 100, 12, sum, out); err != nil {
+		t.Fatalf("streamKeysFromBucket: %v", err)
+	}
+	close(out)
+
+	count := 0
+	for range out {
+		count++
+	}
+	if count != 12 {
+		t.Errorf("emitted %d keys, want 12 (limit)", count)
+	}
+	// Pagination must have stopped: at most 2 List calls (page1 + page2).
+	if c := lister.callCount(); c > 2 {
+		t.Errorf("ListObjectsV2 call count = %d, want <= 2 after limit hit", c)
+	}
+	if total := sum.total.Load(); total != 12 {
+		t.Errorf("sum.total = %d, want 12", total)
+	}
+}
+
+func TestStreamKeysFromBucket_TotalGrowsWithCandidates(t *testing.T) {
+	// 2 pages of 3 candidates each. We consume one key at a time via an
+	// unbuffered channel and observe sum.total tracking the producer's
+	// running count.
+	pages := make([]*s3.ListObjectsV2Output, 2)
+	for p := range 2 {
+		objs := make([]types.Object, 3)
+		for i := range 3 {
+			objs[i] = makeObj("p"+string(rune('0'+p))+"/"+string(rune('a'+i)), 10)
+		}
+		var token *string
+		if p < 1 {
+			token = aws.String("tok")
+		}
+		pages[p] = &s3.ListObjectsV2Output{
+			Contents:              objs,
+			IsTruncated:           aws.Bool(p < 1),
+			NextContinuationToken: token,
+		}
+	}
+	lister := &mockLister{pages: pages}
+
+	sum := newSummary()
+	out := make(chan string) // unbuffered → one-at-a-time
+	done := make(chan error, 1)
+	go func() {
+		done <- streamKeysFromBucket(context.Background(), lister, "bucket", "", 100, 0, sum, out)
+	}()
+
+	for i := 1; i <= 6; i++ {
+		select {
+		case <-out:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for key %d", i)
+		}
+		// total is incremented before the send, so on the receive side total
+		// is at least i. The producer may have advanced to the next candidate
+		// and incremented further before our read here, so allow >= i.
+		if got := sum.total.Load(); got < int64(i) {
+			t.Errorf("after receiving %d keys, sum.total = %d, want >= %d", i, got, i)
+		}
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("streamKeysFromBucket: %v", err)
+	}
+	if got := sum.total.Load(); got != 6 {
+		t.Errorf("final sum.total = %d, want 6", got)
 	}
 }

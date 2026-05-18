@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -183,5 +185,91 @@ func TestProcessKeys_SkipDoesNotAbort(t *testing.T) {
 	}
 	if proc.callCount() != 3 {
 		t.Errorf("processor called %d times, want 3 (no early abort)", proc.callCount())
+	}
+}
+
+// syncBuffer is a goroutine-safe writer used to capture log output from
+// reportProgress in tests. slog handlers may write concurrently with the test
+// goroutine reading the buffer; bytes.Buffer is not safe for that.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestReportProgress_EmitsProgressWithTotal asserts the periodic progress log
+// line includes both processed and total so the operator can size completion.
+func TestReportProgress_EmitsProgressWithTotal(t *testing.T) {
+	t.Parallel()
+	sum := newSummary()
+	sum.total.Store(100)
+	for range 5 {
+		sum.record(Outcome{Stage: StageSkip, Reason: "already-healed"})
+	}
+
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		reportProgress(ctx, sum, logger, 20*time.Millisecond)
+		close(done)
+	}()
+	// Let the ticker fire at least once.
+	time.Sleep(80 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("reportProgress did not exit after ctx cancel")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "progress") {
+		t.Fatalf("expected at least one progress line, got %q", out)
+	}
+	if !strings.Contains(out, "processed=5") {
+		t.Errorf("expected processed=5 in log output, got %q", out)
+	}
+	if !strings.Contains(out, "total=100") {
+		t.Errorf("expected total=100 in log output, got %q", out)
+	}
+}
+
+// TestReportProgress_DisabledWhenIntervalZero asserts interval<=0 causes an
+// immediate return with no log emissions.
+func TestReportProgress_DisabledWhenIntervalZero(t *testing.T) {
+	t.Parallel()
+	buf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		reportProgress(context.Background(), newSummary(), logger, 0)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatalf("reportProgress(interval=0) did not return immediately")
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Errorf("reportProgress(interval=0) blocked for %s, want immediate return", elapsed)
+	}
+	if got := buf.String(); got != "" {
+		t.Errorf("expected no log emissions when interval<=0, got %q", got)
 	}
 }

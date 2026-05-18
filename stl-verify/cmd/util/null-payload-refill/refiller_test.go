@@ -322,28 +322,60 @@ const testVersion1BlockKey = "85149000-85149999/85149017_1_block.json.gz"
 // extracts into the synthetic *outbound.BlockState that drives the BlockEvent.
 const canonicalHeader = `{"hash":"0xabc","parentHash":"0xdef","timestamp":"0x3e7"}`
 
-func TestProcess_NotNullInS3_RecordsSkip(t *testing.T) {
+// TestProcess_NotNullInS3_StillPublishes guarantees 100% SNS coverage for the
+// operator's input list. When the S3 object is already non-null (either
+// because we healed it but failed to record state mid-flight, or because
+// live ingest / a parallel cleanup healed it), we still publish the SNS
+// event. The S3 write is skipped and so is the by-hash data fetch.
+func TestProcess_NotNullInS3_StillPublishes(t *testing.T) {
 	h := newHarness(t)
 	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte(`{"number":"0x5"}`))
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
 
 	out := h.r.Process(context.Background(), testBlockKey)
-	if out.Stage != StageSkip {
-		t.Errorf("stage = %q, want %q", out.Stage, StageSkip)
-	}
-	if out.Reason != "already-healed" {
-		t.Errorf("reason = %q, want already-healed", out.Reason)
-	}
-	if h.rpc.dataCallCount() != 0 {
-		t.Errorf("rpc data calls = %d, want 0", h.rpc.dataCallCount())
-	}
-	if h.rpc.byNumberCallCount() != 0 {
-		t.Errorf("rpc byNumber calls = %d, want 0", h.rpc.byNumberCallCount())
-	}
-	if h.publisher.count() != 0 {
-		t.Errorf("publish calls = %d, want 0", h.publisher.count())
+	if out.Stage != StageSNS {
+		t.Errorf("stage = %q, want %q (already-healed must still publish)", out.Stage, StageSNS)
 	}
 	if h.s3Overwriter.callCount() != 0 {
-		t.Errorf("write calls = %d, want 0", h.s3Overwriter.callCount())
+		t.Errorf("write calls = %d, want 0 (S3 already healed; must not overwrite)", h.s3Overwriter.callCount())
+	}
+	if h.rpc.dataCallCount() != 0 {
+		t.Errorf("rpc data calls = %d, want 0 (S3 already healed; no need to refetch)", h.rpc.dataCallCount())
+	}
+	if h.rpc.byNumberCallCount() != 1 {
+		t.Errorf("rpc byNumber calls = %d, want 1 (event metadata fetched once)", h.rpc.byNumberCallCount())
+	}
+	if h.publisher.count() != 1 {
+		t.Errorf("publish calls = %d, want 1 (operator's input key must get SNS coverage)", h.publisher.count())
+	}
+	if stage, _ := h.state.Lookup(testBlockKey); stage != StageSNS {
+		t.Errorf("state stage = %q, want %q", stage, StageSNS)
+	}
+}
+
+// TestProcess_S3WrittenButStateRecordFailed_PublishesOnResume is the
+// regression test for the documented corner case: a prior run successfully
+// wrote S3 but the recordState(StageS3) call failed (e.g. disk full), the
+// run aborted fatal, the state file ended up with no record for this key.
+// On resume the tool must publish the SNS event so derived data downstream
+// isn't silently missing.
+func TestProcess_S3WrittenButStateRecordFailed_PublishesOnResume(t *testing.T) {
+	h := newHarness(t)
+	// Simulate the post-corner-case state: S3 is healthy (a prior run wrote
+	// it), but the state file has no record at all (recordState failed
+	// before persisting).
+	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte(`{"number":"0x5"}`))
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
+
+	out := h.r.Process(context.Background(), testBlockKey)
+	if out.Stage != StageSNS {
+		t.Fatalf("stage = %q, want %q — resume MUST publish to guarantee SNS coverage", out.Stage, StageSNS)
+	}
+	if h.publisher.count() != 1 {
+		t.Errorf("publish calls = %d, want 1 (missing publish would silently drop downstream data)", h.publisher.count())
+	}
+	if h.s3Overwriter.callCount() != 0 {
+		t.Errorf("write calls = %d, want 0 (S3 already healthy; do not overwrite)", h.s3Overwriter.callCount())
 	}
 }
 
@@ -916,6 +948,93 @@ func TestProcess_RpcStillNull_IsFatal(t *testing.T) {
 	}
 	if !errors.Is(out.Err, rpcutil.ErrUpstreamNullResult) {
 		t.Errorf("Err chain missing rpcutil.ErrUpstreamNullResult, got %v", out.Err)
+	}
+}
+
+// TestProcess_ResumeFromStageS3_SkipsByHashFetch asserts the CodeRabbit fix:
+// when prior state is StageS3 the by-hash data fetch is skipped entirely (S3
+// was already healed by a previous run, the only remaining work is the SNS
+// publish). GetBlockByNumber is still called because the SNS BlockEvent needs
+// hash + parentHash + timestamp; that lookup is the cheap-and-canonical part.
+// The fix specifically prevents the more expensive GetBlockDataByHash call.
+func TestProcess_ResumeFromStageS3_SkipsByHashFetch(t *testing.T) {
+	h := newHarness(t)
+	if err := h.state.Record(testBlockKey, StageS3, ""); err != nil {
+		t.Fatalf("preload state: %v", err)
+	}
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
+	// Deliberately leave h.rpc.response zero: if fetchData were still being
+	// called, GetBlockDataByHash would return an empty BlockData and the
+	// outcome would be a fatal rpc-still-null instead of StageSNS.
+
+	out := h.r.Process(context.Background(), testBlockKey)
+	if out.Stage != StageSNS {
+		t.Errorf("stage = %q, want %q", out.Stage, StageSNS)
+	}
+	if h.rpc.dataCallCount() != 0 {
+		t.Errorf("rpc data calls = %d, want 0 (StageS3 resume must skip GetBlockDataByHash)", h.rpc.dataCallCount())
+	}
+	if h.s3Reader.callCount() != 0 {
+		t.Errorf("s3 read calls = %d, want 0 (StageS3 resume must skip verifyStillNull)", h.s3Reader.callCount())
+	}
+	if h.s3Overwriter.callCount() != 0 {
+		t.Errorf("s3 write calls = %d, want 0 (StageS3 resume must skip rewrite)", h.s3Overwriter.callCount())
+	}
+	if h.publisher.count() != 1 {
+		t.Errorf("publisher calls = %d, want 1 (SNS is the only remaining work)", h.publisher.count())
+	}
+}
+
+// TestProcess_DryRunStateNotTerminalOnRealRun asserts the CodeRabbit fix that
+// makes StageDryRun terminal only when r.dryRun is true. A first pass with
+// dry-run=true records StageDryRun for a key; a subsequent real run reusing
+// the same state file must re-process those keys, not skip them forever.
+func TestProcess_DryRunStateNotTerminalOnRealRun(t *testing.T) {
+	h := newHarness(t, withDryRun)
+	h.s3Reader.putGzipped(h.bucket, testBlockKey, []byte("null"))
+	h.rpc.byNumber[85149017] = json.RawMessage(canonicalHeader)
+	h.rpc.response = outbound.BlockData{Block: json.RawMessage(`{"hash":"0xabc"}`)}
+
+	out := h.r.Process(context.Background(), testBlockKey)
+	if out.Stage != StageDryRun {
+		t.Fatalf("first-run stage = %q, want %q", out.Stage, StageDryRun)
+	}
+	if stage, _ := h.state.Lookup(testBlockKey); stage != StageDryRun {
+		t.Fatalf("preconditions: state stage = %q, want %q", stage, StageDryRun)
+	}
+
+	// Build a fresh Refiller against the same state, but with dryRun=false.
+	// Re-using the same state path proves resume semantics: the recorded
+	// dry-run entry must not short-circuit the new real run.
+	realRefiller, err := NewRefiller(RefillerOptions{
+		Bucket:       h.bucket,
+		ChainID:      h.chainID,
+		S3Reader:     h.s3Reader,
+		S3Overwriter: h.s3Overwriter,
+		RPCClient:    h.rpc,
+		Publisher:    h.publisher,
+		State:        h.state,
+		DryRun:       false,
+	})
+	if err != nil {
+		t.Fatalf("NewRefiller(real): %v", err)
+	}
+
+	out = realRefiller.Process(context.Background(), testBlockKey)
+	if out.Stage != StageSNS {
+		t.Errorf("real-run stage = %q, want %q (StageDryRun must not be terminal on real run)", out.Stage, StageSNS)
+	}
+	if out.Skipped {
+		t.Errorf("Skipped = true, want false (real run must process, not skip)")
+	}
+	if h.s3Overwriter.callCount() != 1 {
+		t.Errorf("s3 write calls = %d, want 1 (real run must overwrite)", h.s3Overwriter.callCount())
+	}
+	if h.publisher.count() != 1 {
+		t.Errorf("publisher calls = %d, want 1 (real run must publish)", h.publisher.count())
+	}
+	if stage, _ := h.state.Lookup(testBlockKey); stage != StageSNS {
+		t.Errorf("final state stage = %q, want %q", stage, StageSNS)
 	}
 }
 

@@ -58,6 +58,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsS3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -72,8 +73,9 @@ import (
 )
 
 const (
-	defaultMaxSize     = 40
-	defaultConcurrency = 4
+	defaultMaxSize          = 40
+	defaultConcurrency      = 4
+	defaultProgressInterval = 10 * time.Second
 )
 
 func main() {
@@ -116,6 +118,10 @@ type Options struct {
 	DryRun      bool
 	Concurrency int
 
+	// ProgressInterval is how often a "progress" log line is emitted while the
+	// run is in flight. Set to 0 or negative to disable periodic progress.
+	ProgressInterval time.Duration
+
 	// MaxSize is the candidate threshold in bytes for the bucket-scan path.
 	// Objects with Size <= MaxSize are treated as null candidates. Ignored when
 	// KeysFile is set.
@@ -125,6 +131,11 @@ type Options struct {
 	// partition). Empty means scan the whole bucket. Ignored when KeysFile is
 	// set.
 	Prefix string
+
+	// Limit caps the number of candidate keys emitted by the producer. 0 means
+	// no limit (process every key from the file / every matching object from
+	// the scan). Useful as a safety cap for large runs or to size a smoke test.
+	Limit int
 }
 
 func parseFlags(args []string) (Options, *flag.FlagSet, error) {
@@ -141,8 +152,10 @@ func parseFlags(args []string) (Options, *flag.FlagSet, error) {
 	fs.StringVar(&opts.AWSRegion, "aws-region", "", "Optional AWS region override")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "If set, perform all reads/RPC but skip S3 writes and SNS publishes")
 	fs.IntVar(&opts.Concurrency, "concurrency", defaultConcurrency, "Number of parallel workers")
+	fs.DurationVar(&opts.ProgressInterval, "progress-interval", defaultProgressInterval, "How often to log aggregate progress (0 to disable)")
 	fs.Int64Var(&opts.MaxSize, "max-size", defaultMaxSize, "Scan path only: candidate threshold in bytes. Gzipped null is ~28B; valid gzipped blocks are kilobytes+. Ignored when --keys-file is set.")
 	fs.StringVar(&opts.Prefix, "prefix", "", "Scan path only: optional ListObjectsV2 prefix (e.g. \"85149000-85149999/\") to narrow the scan. Ignored when --keys-file is set.")
+	fs.IntVar(&opts.Limit, "limit", 0, "Cap the number of candidate keys to emit (0 = no limit). Useful as a safety cap or to size a smoke test.")
 	if err := fs.Parse(args); err != nil {
 		return Options{}, fs, err
 	}
@@ -260,20 +273,28 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 	bufSize := max(opts.Concurrency*2, 1)
 	keysCh := make(chan string, bufSize)
 
+	sum := newSummary()
 	// Producer participates in the errgroup so a List failure (e.g.
 	// AccessDenied from ListObjectsV2) is surfaced via Wait. We treat
 	// context.Canceled as benign (signal-driven exit). The deferred close on
 	// keysCh terminates worker for-range loops once listing is done.
 	g.Go(func() error {
 		defer close(keysCh)
-		err := streamKeys(gctx, opts, s3Client, keysCh)
+		err := streamKeys(gctx, opts, s3Client, sum, keysCh)
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err
 	})
 
-	sum := newSummary()
+	// Periodic progress so the operator sees motion on long runs without
+	// scanning every per-key INFO line. Spawn inside the errgroup so g.Wait()
+	// gates on its exit; otherwise a final "progress" line could race the
+	// subsequent "run complete" summary line in the operator's tail.
+	g.Go(func() error {
+		reportProgress(gctx, sum, logger, opts.ProgressInterval)
+		return nil
+	})
 	runProcessKeys(g, gctx, refiller, keysCh, opts.Concurrency, sum, logger)
 
 	waitErr := g.Wait()
@@ -292,11 +313,11 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 }
 
 // streamKeys dispatches to the file or bucket producer based on opts.
-func streamKeys(ctx context.Context, opts Options, lister s3Lister, out chan<- string) error {
+func streamKeys(ctx context.Context, opts Options, lister s3Lister, sum *summary, out chan<- string) error {
 	if opts.KeysFile != "" {
-		return streamKeysFromFile(ctx, opts.KeysFile, out)
+		return streamKeysFromFile(ctx, opts.KeysFile, opts.Limit, sum, out)
 	}
-	return streamKeysFromBucket(ctx, lister, opts.Bucket, opts.Prefix, opts.MaxSize, out)
+	return streamKeysFromBucket(ctx, lister, opts.Bucket, opts.Prefix, opts.MaxSize, opts.Limit, sum, out)
 }
 
 // logKeySourceConfig prints a single INFO line describing where keys come from
@@ -329,8 +350,14 @@ func s3OptsFor(opts Options) func(*awsS3.Options) {
 }
 
 // summary tracks counts across the run.
+//
+// total is the producer's best estimate of how many keys it will emit. For the
+// file source it is set once after a single pre-count pass. For the bucket
+// source it grows as the scan finds candidates, so during a scan total is a
+// running lower bound rather than the final figure. Zero means unknown.
 type summary struct {
 	processed atomic.Int64
+	total     atomic.Int64
 	refilled  atomic.Int64
 	skipped   atomic.Int64
 	failed    atomic.Int64
@@ -424,9 +451,36 @@ func runWorker(gctx context.Context, workerID int, r keyProcessor, jobs <-chan s
 	return nil
 }
 
+// reportProgress emits an aggregate "progress" log line every interval until
+// ctx is cancelled. interval <= 0 disables periodic progress entirely (used
+// by tests that want quiet output, or operators who prefer per-key INFO).
+func reportProgress(ctx context.Context, s *summary, logger *slog.Logger, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			logger.Info("progress",
+				"processed", s.processed.Load(),
+				"total", s.total.Load(),
+				"refilled", s.refilled.Load(),
+				"skipped", s.skipped.Load(),
+				"failed", s.failed.Load(),
+				"dry_run", s.dryRun.Load(),
+			)
+		}
+	}
+}
+
 func logSummary(logger *slog.Logger, s *summary) {
 	logger.Info("run complete",
 		"processed", s.processed.Load(),
+		"total", s.total.Load(),
 		"refilled", s.refilled.Load(),
 		"skipped", s.skipped.Load(),
 		"failed", s.failed.Load(),

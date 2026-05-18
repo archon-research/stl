@@ -31,8 +31,10 @@ const defaultFetchTimeout = 15 * time.Second
 // input, programming error) — the worker loop must abort the run instead of
 // moving on to the next key. The flag is signal-only: the state file still
 // records stage:fail so a resumed run sees the entry. Per-item data outcomes
-// (already-healed, cannot-determine-orphan-hash) keep Fatal=false and use
-// StageSkip so the run continues to the next key.
+// (no-such-key, cannot-determine-orphan-hash) keep Fatal=false and use
+// StageSkip so the run continues to the next key. Already-healthy S3 keys
+// still route through the publish-only path (StageSNS, not StageSkip) so
+// the operator's input list gets 100% SNS coverage.
 type Outcome struct {
 	Stage   Stage
 	Reason  string
@@ -43,8 +45,8 @@ type Outcome struct {
 
 // verifyResult is the tri-state returned by verifyStillNull. The caller relies
 // on the NotFound case to surface a distinct skip reason ("no-such-key") so
-// pointing the tool at the wrong bucket does not silently mark every key as
-// already-healed.
+// pointing the tool at the wrong bucket does not silently funnel every key
+// through the publish-only path.
 type verifyResult int
 
 const (
@@ -136,9 +138,17 @@ func (r *Refiller) Process(ctx context.Context, key string) Outcome {
 	if done {
 		return out
 	}
-	data, out, done := r.fetchData(ctx, key, parsed, bs)
-	if done {
-		return out
+	// Resume-from-StageS3 skips the by-hash data fetch entirely. S3 was
+	// already healed by a prior run; the only remaining work is the SNS
+	// publish, which reads from bs (loaded above) and ignores data. Re-
+	// fetching here would make resume depend on the RPC being healthy again,
+	// stranding keys whose S3 object is already good if the RPC is now down.
+	var data json.RawMessage
+	if priorStage != StageS3 {
+		data, out, done = r.fetchData(ctx, key, parsed, bs)
+		if done {
+			return out
+		}
 	}
 	return r.writeAndPublish(ctx, key, bs, data, priorStage)
 }
@@ -148,7 +158,11 @@ func (r *Refiller) Process(ctx context.Context, key string) Outcome {
 // caller must return the outcome immediately without continuing to later phases.
 func (r *Refiller) verify(ctx context.Context, key string) (s3key.Key, Stage, Outcome, bool) {
 	priorStage, priorReason := r.state.Lookup(key)
-	if priorStage == StageSNS || priorStage == StageSkip || priorStage == StageDryRun {
+	// StageDryRun is only terminal when we're still dry-running. A subsequent
+	// real run against the same state file must re-process every dry-run-
+	// recorded key — otherwise the operator who dry-ran first would silently
+	// skip all keys forever.
+	if priorStage == StageSNS || priorStage == StageSkip || (priorStage == StageDryRun && r.dryRun) {
 		return s3key.Key{}, priorStage, Outcome{Stage: priorStage, Reason: priorReason, Skipped: true}, true
 	}
 
@@ -172,7 +186,10 @@ func (r *Refiller) verify(ctx context.Context, key string) (s3key.Key, Stage, Ou
 	case verifyNull:
 		return parsed, priorStage, Outcome{}, false
 	case verifyNonNull:
-		return parsed, priorStage, r.skip(key, "already-healed"), true
+		// S3 is healthy; route through the publish-only path so the
+		// operator's input key still gets a SNS event (see
+		// writeAndPublish for the corner-case rationale).
+		return parsed, StageS3, Outcome{}, false
 	case verifyNotFound:
 		return parsed, priorStage, r.skip(key, "no-such-key"), true
 	default:
@@ -256,6 +273,15 @@ func (r *Refiller) fetchData(ctx context.Context, key string, parsed s3key.Key, 
 // writeAndPublish handles dry-run short-circuit, S3 overwrite, and SNS publish,
 // recording progress at each stage so a resumed run can skip already-completed
 // work.
+//
+// Corner case CC-1 (100% SNS coverage on partial-completion):
+// If WriteFile succeeds but the immediately-following recordState(StageS3) fails
+// (e.g. disk full), the run aborts fatal and the state file ends with no record
+// for this key. The verify phase's verifyNonNull branch covers the resume — it
+// returns synthetic StageS3, this function then skips the WriteFile and
+// proceeds straight to Publish + recordState(StageSNS). That guarantees every
+// key in the operator's input list gets a SNS event even when our S3 write
+// landed but our state record didn't.
 func (r *Refiller) writeAndPublish(ctx context.Context, key string, bs *outbound.BlockState, data json.RawMessage, priorStage Stage) Outcome {
 	if r.dryRun {
 		return r.success(key, StageDryRun)
@@ -268,13 +294,8 @@ func (r *Refiller) writeAndPublish(ctx context.Context, key string, bs *outbound
 			}
 			return r.fatal(key, "s3-write-error", err)
 		}
-		// CORNER CASE: if WriteFile succeeds but the subsequent recordState(StageS3)
-		// fails (e.g. disk full), the abort leaves the key in an indeterminate state.
-		// On resume, verifyStillNull will see the now-valid object and skip
-		// "already-healed" — the BlockEvent for this block will never be published.
-		// Operationally rare; the fatal log includes the key so the operator can
-		// manually publish the missing event if needed. We accept this trade-off to
-		// keep the state-record-after-write ordering simple.
+		// Corner case CC-1: a recordState failure here leaves S3 healed
+		// without a state record; the verify phase covers it on resume.
 		if out := r.success(key, StageS3); out.Fatal {
 			return out
 		}
