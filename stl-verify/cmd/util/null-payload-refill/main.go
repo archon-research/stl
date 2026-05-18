@@ -288,16 +288,24 @@ func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 	})
 
 	// Periodic progress so the operator sees motion on long runs without
-	// scanning every per-key INFO line. Spawn inside the errgroup so g.Wait()
-	// gates on its exit; otherwise a final "progress" line could race the
-	// subsequent "run complete" summary line in the operator's tail.
-	g.Go(func() error {
+	// scanning every per-key INFO line. The progress goroutine cannot live
+	// inside the errgroup: it only exits on ctx.Done(), and errgroup.Wait()
+	// blocks on every Go-func — that would deadlock (Wait waits for
+	// progress, progress waits for Wait to cancel gctx). Instead, spawn it
+	// outside, then close `progressDone` after Wait returns so logSummary
+	// reliably fires AFTER the last progress line.
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
 		reportProgress(gctx, sum, logger, opts.ProgressInterval)
-		return nil
-	})
+	}()
 	runProcessKeys(g, gctx, refiller, keysCh, opts.Concurrency, sum, logger)
 
 	waitErr := g.Wait()
+	// gctx is cancelled by errgroup the moment Wait returns; the progress
+	// goroutine sees that and exits on its next select iteration. Wait for
+	// it so the final summary line doesn't race with a trailing progress.
+	<-progressDone
 	logSummary(logger, sum)
 
 	// context.Canceled is the benign signal-driven exit path; any other error
