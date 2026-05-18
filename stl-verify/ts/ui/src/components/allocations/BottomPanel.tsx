@@ -1,4 +1,7 @@
 import {
+  AsyncStateRenderer,
+  EmptyState,
+  ErrorState,
   SearchInput,
   StyledSelect,
   Toggle,
@@ -23,10 +26,9 @@ import type {
   Prime,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
-import { EmptyState, ErrorState } from '../shared';
 import { ActivityFeed } from './tabs/ActivityFeed';
-import { BadDebtTab } from './tabs/BadDebtTab';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
+import { RrcTab } from './tabs/RrcTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
@@ -38,7 +40,19 @@ type BottomPanelProps = {
   selectedPrime: Prime | null;
 };
 
-type ActiveTab = 'risk' | 'bad-debt' | 'activity';
+type ActiveTab = 'risk' | 'rrc' | 'activity';
+
+function parseCategoryParam(value: string | null): AllocationCategory | '' {
+  if (
+    value === 'allocation' ||
+    value === 'pol' ||
+    value === 'psm3' ||
+    value === 'asset'
+  ) {
+    return value;
+  }
+  return '';
+}
 
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
@@ -61,12 +75,7 @@ export function BottomPanel({
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
-    categoryParam === 'allocation' ||
-      categoryParam === 'pol' ||
-      categoryParam === 'psm3' ||
-      categoryParam === 'asset'
-      ? categoryParam
-      : '',
+    parseCategoryParam(categoryParam),
   );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
@@ -75,11 +84,7 @@ export function BottomPanel({
   );
 
   const activeTab: ActiveTab =
-    tabParam === 'bad-debt'
-      ? 'bad-debt'
-      : tabParam === 'activity'
-        ? 'activity'
-        : 'risk';
+    tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
 
   useEffect(() => {
     const primeId = selectedPrime?.id ?? null;
@@ -94,13 +99,7 @@ export function BottomPanel({
   }, [selectedPrime?.id, setCategoryParam, setReceiptTokenParam]);
 
   useEffect(() => {
-    const normalized =
-      categoryParam === 'allocation' ||
-      categoryParam === 'pol' ||
-      categoryParam === 'psm3' ||
-      categoryParam === 'asset'
-        ? categoryParam
-        : '';
+    const normalized = parseCategoryParam(categoryParam);
 
     if (normalized !== categoryFilter) {
       setCategoryFilter(normalized);
@@ -197,8 +196,24 @@ export function BottomPanel({
       (allocation) => getAllocationKey(allocation) === receiptTokenParam,
     ) ?? null;
 
+  const categoryEmptyDescription = `No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`;
+
+  const emptyStateView =
+    sortedAllocations.length === 0 ? (
+      <EmptyState
+        title="No receipt tokens returned"
+        description="The selected prime did not return any receipt token holdings from the API."
+      />
+    ) : (
+      <EmptyState
+        title="No receipt tokens in category"
+        description={categoryEmptyDescription}
+        stretch
+      />
+    );
+
   useEffect(() => {
-    if (activeTab === 'bad-debt') {
+    if (activeTab === 'rrc') {
       setLocalRiskSearchValue('');
       setRiskSearchValue('');
       return;
@@ -241,7 +256,7 @@ export function BottomPanel({
 
             if (
               nextValue === 'risk' ||
-              nextValue === 'bad-debt' ||
+              nextValue === 'rrc' ||
               nextValue === 'activity'
             ) {
               setTabParam(nextValue);
@@ -253,8 +268,8 @@ export function BottomPanel({
           <Toggle value="risk" className={toggleClassName}>
             Risk breakdown
           </Toggle>
-          <Toggle value="bad-debt" className={toggleClassName}>
-            Bad debt
+          <Toggle value="rrc" className={toggleClassName}>
+            Required risk capital
           </Toggle>
           <Toggle value="activity" className={toggleClassName}>
             Activity
@@ -389,64 +404,48 @@ export function BottomPanel({
             title="Choose a prime to inspect risk"
             description="The detail drawer becomes available after a prime is selected."
           />
-        ) : null}
-
-        {selectedPrime && errorMessage ? (
-          <ErrorState
-            title="Unable to load receipt tokens"
-            description="An error occurred while fetching receipt token data."
-            errorMessage={errorMessage}
-          />
-        ) : null}
-
-        {selectedPrime && !errorMessage && isLoading ? (
-          <EmptyState
-            title="Loading receipt tokens"
-            description="Waiting for the selected prime's receipt token holdings."
-          />
-        ) : null}
-
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        sortedAllocations.length === 0 ? (
-          <EmptyState
-            title="No receipt tokens returned"
-            description="The selected prime did not return any receipt token holdings from the API."
-          />
-        ) : null}
-
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        sortedAllocations.length > 0 &&
-        filteredAllocations.length === 0 ? (
-          <EmptyState
-            title="No receipt tokens in category"
-            description={`No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`}
-          />
-        ) : null}
-
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        filteredAllocations.length > 0 ? (
-          activeTab === 'risk' ? (
-            <RiskBreakdownTab
-              isEnabled={isDrawerOpen && activeTab === 'risk'}
-              searchQuery={riskSearchValue}
-              selectedReceiptToken={focusedAllocation}
-            />
-          ) : activeTab === 'bad-debt' ? (
-            <BadDebtTab selectedReceiptToken={focusedAllocation} />
-          ) : (
-            <ActivityFeed
-              isEnabled={isDrawerOpen && activeTab === 'activity'}
-              searchQuery={riskSearchValue}
-              selectedPrime={selectedPrime}
-            />
-          )
-        ) : null}
+        ) : (
+          <AsyncStateRenderer
+            isLoading={isLoading}
+            error={errorMessage}
+            isEmpty={filteredAllocations.length === 0}
+            loadingView={
+              <EmptyState
+                title="Loading receipt tokens"
+                description="Waiting for the selected prime's receipt token holdings."
+                stretch
+              />
+            }
+            errorView={
+              <ErrorState
+                title="Unable to load receipt tokens"
+                description="An error occurred while fetching receipt token data."
+                errorMessage={errorMessage ?? undefined}
+              />
+            }
+            emptyView={emptyStateView}
+          >
+            {activeTab === 'risk' ? (
+              <RiskBreakdownTab
+                isEnabled={isDrawerOpen && activeTab === 'risk'}
+                searchQuery={riskSearchValue}
+                selectedReceiptToken={focusedAllocation}
+              />
+            ) : activeTab === 'rrc' ? (
+              <RrcTab
+                isEnabled={isDrawerOpen && activeTab === 'rrc'}
+                selectedReceiptToken={focusedAllocation}
+                selectedPrime={selectedPrime}
+              />
+            ) : (
+              <ActivityFeed
+                isEnabled={isDrawerOpen && activeTab === 'activity'}
+                searchQuery={riskSearchValue}
+                selectedPrime={selectedPrime}
+              />
+            )}
+          </AsyncStateRenderer>
+        )}
       </div>
     </div>
   );

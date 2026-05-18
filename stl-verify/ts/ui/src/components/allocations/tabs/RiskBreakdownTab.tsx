@@ -1,17 +1,17 @@
 import {
+  buildRowSearchString,
+  type CellContext,
+  type ColumnDef,
+  DataTable,
   LoadingIndicator,
+  matchesSearchQuery,
   SkeletonStack,
+  useDataTable,
 } from '@archon-research/design-system';
-import { type CellContext, type ColumnDef } from '@tanstack/react-table';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { DataTable, useDataTable } from '../../../data-table';
-import {
-  buildRowSearchString,
-  matchesSearchQuery,
-} from '../../../data-table/utils';
 import { getRiskBreakdown, getToken, getTokenPrice } from '../../../lib/api';
 import {
   formatDateTime,
@@ -33,6 +33,7 @@ import type {
 } from '../../../types/allocation';
 import { ChainLogo, SummaryMetric } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
+import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;
@@ -188,11 +189,16 @@ export function RiskBreakdownTab({
   const [tokenPrice, setTokenPrice] = useState<TokenPrice | null>(null);
   const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
+  const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+
   useEffect(() => {
-    // Risk breakdown only applies to receipt-token positions. Direct asset
-    // holdings have a null receipt_token_address, so skip them.
     const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
-    if (!isEnabled || !selectedReceiptToken || !receiptTokenAddress) {
+    if (
+      !isEnabled ||
+      !selectedReceiptToken ||
+      receiptTokenId === null ||
+      !receiptTokenAddress
+    ) {
       setBreakdown(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -236,7 +242,7 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, selectedReceiptToken]);
+  }, [isEnabled, receiptTokenId, selectedReceiptToken]);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -352,6 +358,12 @@ export function RiskBreakdownTab({
 
   if (!selectedReceiptToken) {
     return (
+      <TabSelectionPrompt message="Pick a receipt token to inspect its collateral backing." />
+    );
+  }
+
+  if (receiptTokenId === null) {
+    return (
       <div
         className={css({
           borderRadius: 'md',
@@ -363,7 +375,7 @@ export function RiskBreakdownTab({
         })}
       >
         <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Pick a receipt token to inspect its collateral backing.
+          Direct asset holdings have no collateral backing to break down.
         </p>
       </div>
     );
@@ -374,37 +386,10 @@ export function RiskBreakdownTab({
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.default',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'sm',
-              fontWeight: 'semibold',
-              color: 'text.strong',
-            })}
-          >
-            Unable to load the risk breakdown.
-          </p>
-          <p
-            className={css({
-              m: 0,
-              mt: '1.5',
-              fontSize: 'sm',
-              color: 'text.muted',
-            })}
-          >
-            {errorMessage}
-          </p>
-        </div>
+        <TabErrorPanel
+          title="Unable to load the risk breakdown."
+          message={errorMessage}
+        />
       ) : null}
 
       {!errorMessage && summary ? (

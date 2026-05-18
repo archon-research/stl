@@ -4,13 +4,13 @@ import type { paths } from '../generated/openapi-types';
 import type {
   AllocationActivityResponse,
   AllocationsResponse,
-  BadDebt,
   CapitalMetricsListResponse,
   DataSourcesResponse,
   PrimeDebtSnapshot,
   PrimesResponse,
   ProtocolEventsResponse,
   RiskBreakdown,
+  Rrc,
   Token,
   TokenPrice,
   TokensResponse,
@@ -22,9 +22,6 @@ import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
-
-type BadDebtQuery =
-  paths['/v1/risk/{chain_id}/{token_address}/bad-debt']['get']['parameters']['query'];
 
 type ApiResult<TData, TError> = Promise<{
   data?: TData;
@@ -127,21 +124,19 @@ export function getRiskBreakdown(
   );
 }
 
-export function getBadDebt(
-  chainId: number,
-  tokenAddress: string,
-  gapPct: BadDebtQuery['gap_pct'],
+export function getRrc(
+  assetId: number,
+  primeAddress: string,
   signal?: AbortSignal,
-): Promise<BadDebt> {
+): Promise<Rrc> {
   return requestData(
-    apiClient.GET('/v1/risk/{chain_id}/{token_address}/bad-debt', {
+    apiClient.GET('/v1/risk/rrc', {
       params: {
-        path: { chain_id: chainId, token_address: tokenAddress },
-        query: { gap_pct: gapPct },
+        query: { asset_id: assetId, prime_id: primeAddress },
       },
       signal,
     }),
-    'GET /v1/risk/{chain_id}/{token_address}/bad-debt',
+    'GET /v1/risk/rrc',
   );
 }
 

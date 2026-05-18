@@ -1,4 +1,4 @@
-import { SkeletonStack } from '@archon-research/design-system';
+import { ErrorState, SkeletonStack } from '@archon-research/design-system';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -19,7 +19,6 @@ import {
 import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
 import type { DataSource, Token, TokenPrice } from '../../types/allocation';
-import { ErrorState } from './index';
 
 type MethodologyPanelProps = {
   isOpen: boolean;

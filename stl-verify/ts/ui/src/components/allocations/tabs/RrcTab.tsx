@@ -4,30 +4,37 @@ import { useEffect, useMemo, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getBadDebt } from '../../../lib/api';
+import { getRrc } from '../../../lib/api';
 import {
-  formatRatioPercent,
+  formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
-  getBadDebtTone,
+  getUsdTone,
   parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
-import type { Allocation, BadDebt } from '../../../types/allocation';
+import type { Allocation, Prime, Rrc } from '../../../types/allocation';
 import {
-  PercentageSlider,
   ProtocolLogo,
   StatusBadge,
   SummaryMetric,
   TokenLogo,
 } from '../../shared';
+import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 
-type BadDebtTabProps = {
+type RrcTabProps = {
+  isEnabled: boolean;
   selectedReceiptToken: Allocation | null;
+  selectedPrime: Prime | null;
 };
 
-function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
+const MODEL_LABELS: Record<string, string> = {
+  suraf: 'SURAF',
+  gap_sweep: 'Gap sweep',
+};
+
+function getToneStyles(tone: ReturnType<typeof getUsdTone>) {
   switch (tone) {
     case 'green':
       return {
@@ -48,27 +55,21 @@ function getToneStyles(tone: ReturnType<typeof getBadDebtTone>) {
   }
 }
 
-export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
-  const [badDebt, setBadDebt] = useState<BadDebt | null>(null);
-  const [debouncedGapPct, setDebouncedGapPct] = useState(0.25);
+export function RrcTab({
+  isEnabled,
+  selectedReceiptToken,
+  selectedPrime,
+}: RrcTabProps) {
+  const [rrc, setRrc] = useState<Rrc | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [sliderValue, setSliderValue] = useState(0.25);
+
+  const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+  const primeAddress = selectedPrime?.address ?? null;
 
   useEffect(() => {
-    const timeoutId = window.setTimeout(() => {
-      setDebouncedGapPct(sliderValue);
-    }, 300);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [sliderValue]);
-
-  useEffect(() => {
-    // Bad-debt only applies to receipt-token positions. Direct asset
-    // holdings have a null receipt_token_address, so skip them.
-    const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
-    if (!selectedReceiptToken || !receiptTokenAddress) {
-      setBadDebt(null);
+    if (!isEnabled || receiptTokenId === null || primeAddress === null) {
+      setRrc(null);
       setErrorMessage(null);
       setIsLoading(false);
       return;
@@ -78,30 +79,24 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
 
     setIsLoading(true);
     setErrorMessage(null);
-    setBadDebt(null);
+    setRrc(null);
 
-    void getBadDebt(
-      selectedReceiptToken.chain_id,
-      receiptTokenAddress,
-      debouncedGapPct.toFixed(2),
-      controller.signal,
-    )
+    void getRrc(receiptTokenId, primeAddress, controller.signal)
       .then((response) => {
-        setBadDebt(response);
+        setRrc(response);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        logging.error('Failed to load bad debt calculation', {
+        logging.error('Failed to load required risk capital (RRC)', {
           error,
-          chainId: selectedReceiptToken.chain_id,
-          receiptTokenAddress,
-          gapPct: debouncedGapPct,
+          receiptTokenId,
+          primeAddress,
         });
         setErrorMessage(toErrorMessage(error));
-        setBadDebt(null);
+        setRrc(null);
       })
       .finally(() => {
         if (!controller.signal.aborted) {
@@ -110,16 +105,12 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
       });
 
     return () => controller.abort();
-  }, [debouncedGapPct, selectedReceiptToken]);
+  }, [isEnabled, primeAddress, receiptTokenId]);
 
-  const tone = getBadDebtTone(badDebt?.bad_debt_usd);
+  const tone = getUsdTone(rrc?.max_rrc_usd);
   const toneStyles = getToneStyles(tone);
-  const requestLabel = formatRatioPercent(
-    badDebt?.gap_pct ?? debouncedGapPct,
-    0,
-  );
-  const badDebtValue = parseNumericValue(badDebt?.bad_debt_usd) ?? 0;
-  const hasProjectedShortfall = badDebtValue > 0;
+  const maxRrcValue = parseNumericValue(rrc?.max_rrc_usd) ?? 0;
+  const hasRiskCapital = maxRrcValue > 0;
 
   const statusLabel = useMemo(() => {
     switch (tone) {
@@ -136,20 +127,17 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
 
   if (!selectedReceiptToken) {
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Pick a receipt token to model bad debt under a liquidation gap.
-        </p>
-      </div>
+      <TabSelectionPrompt message="Pick a receipt token to inspect required risk capital." />
+    );
+  }
+
+  if (receiptTokenId === null) {
+    // FIX ME: add API to return applicable risk models per asset_id. SURAF
+    // should eventually run on some direct-held assets (no receipt-token
+    // wrapper), so this branch should query that registry instead of
+    // hard-coding "no risk model" for every direct holding.
+    return (
+      <TabSelectionPrompt message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
     );
   }
 
@@ -183,58 +171,22 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
                 color: 'text.muted',
               })}
             >
-              Bad debt model
+              Required risk capital (RRC)
             </p>
             {isLoading ? (
-              <LoadingIndicator message="Recalculating scenario" />
+              <LoadingIndicator message="Fetching required risk capital" />
             ) : null}
           </div>
 
           <StatusBadge tone={tone} label={statusLabel} />
         </div>
-
-        <div className={css({ mt: '5' })}>
-          <PercentageSlider
-            id="bad-debt-gap"
-            label="Gap percentage"
-            value={sliderValue}
-            onChange={setSliderValue}
-          />
-        </div>
       </div>
 
       {errorMessage ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.default',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'sm',
-              fontWeight: 'semibold',
-              color: 'text.strong',
-            })}
-          >
-            Unable to calculate bad debt.
-          </p>
-          <p
-            className={css({
-              m: 0,
-              mt: '1.5',
-              fontSize: 'sm',
-              color: 'text.muted',
-            })}
-          >
-            {errorMessage}
-          </p>
-        </div>
+        <TabErrorPanel
+          title="Unable to compute required risk capital."
+          message={errorMessage}
+        />
       ) : null}
 
       {!errorMessage ? (
@@ -311,7 +263,7 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
               color: 'text.muted',
             })}
           >
-            Estimated bad debt
+            Max required risk capital across models
           </p>
           <p
             className={css({
@@ -322,15 +274,11 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
               color: toneStyles.valueColor,
             })}
           >
-            {badDebt
-              ? formatUsdValue(badDebt.bad_debt_usd)
-              : isLoading
-                ? '—'
-                : '—'}
+            {rrc ? formatUsdValue(rrc.max_rrc_usd) : '—'}
           </p>
-          {isLoading && !badDebt ? (
+          {isLoading && !rrc ? (
             <div className={css({ mt: '3' })}>
-              <LoadingIndicator message="Fetching bad debt model" />
+              <LoadingIndicator message="Computing required risk capital" />
             </div>
           ) : (
             <p
@@ -341,11 +289,81 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
                 color: 'text.muted',
               })}
             >
-              {hasProjectedShortfall
-                ? `At ${requestLabel}, the model projects a shortfall after liquidation.`
-                : `At ${requestLabel}, the model currently shows no bad debt.`}
+              {rrc
+                ? hasRiskCapital
+                  ? `Max comparable capital ratio: ${formatPercentValue(rrc.max_crr_pct, 2)}.`
+                  : 'Models report no required risk capital at default stress.'
+                : 'Pick a prime and receipt token to compute required risk capital.'}
             </p>
           )}
+        </div>
+      ) : null}
+
+      {!errorMessage && rrc && rrc.results.length > 0 ? (
+        <div
+          className={css({
+            borderRadius: 'md',
+            borderStyle: 'solid',
+            borderWidth: '1px',
+            borderColor: 'border.subtle',
+            bg: 'surface.subtle',
+            p: '4',
+            display: 'grid',
+            gap: '3',
+          })}
+        >
+          <p
+            className={css({
+              m: 0,
+              fontSize: 'xs',
+              textTransform: 'uppercase',
+              letterSpacing: '0.16em',
+              color: 'text.muted',
+            })}
+          >
+            Per-model results
+          </p>
+          <ul
+            className={css({
+              listStyle: 'none',
+              m: 0,
+              p: 0,
+              display: 'grid',
+              gap: '2',
+            })}
+          >
+            {rrc.results.map((result) => (
+              <li
+                key={result.risk_model}
+                className={flex({
+                  align: 'center',
+                  justify: 'space-between',
+                  gap: '4',
+                  p: '3',
+                  borderRadius: 'sm',
+                  bg: 'surface.default',
+                })}
+              >
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    fontWeight: 'semibold',
+                    color: 'text.strong',
+                  })}
+                >
+                  {MODEL_LABELS[result.risk_model] ?? result.risk_model}
+                </span>
+                <span
+                  className={css({
+                    fontSize: 'sm',
+                    color: 'text.muted',
+                  })}
+                >
+                  {`${formatUsdValue(result.rrc_usd)} · CRR ${formatPercentValue(result.comparable_crr_pct, 2)}`}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
     </div>
