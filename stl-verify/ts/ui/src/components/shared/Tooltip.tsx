@@ -1,4 +1,4 @@
-import { Tooltip } from '@base-ui/react/tooltip';
+import { Tooltip } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
