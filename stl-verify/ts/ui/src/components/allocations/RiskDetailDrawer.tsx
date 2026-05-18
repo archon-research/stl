@@ -126,7 +126,7 @@ export function RiskDetailDrawer({
     width: `min(${drawerWidth}px, 100vw)`,
   };
 
-  const handleResizeStart = (event: MouseEvent<HTMLDivElement>) => {
+  const handleResizeStart = (event: MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     setDragState({
       startPosition: event.clientX,
@@ -179,9 +179,8 @@ export function RiskDetailDrawer({
           flexDirection: 'column',
         })}
       >
-        <div
-          role="separator"
-          aria-orientation="vertical"
+        <button
+          type="button"
           aria-label="Resize risk detail drawer"
           onMouseDown={handleResizeStart}
           className={css({
@@ -190,6 +189,9 @@ export function RiskDetailDrawer({
             left: 0,
             bottom: 0,
             width: '2',
+            border: 'none',
+            bg: 'transparent',
+            p: 0,
             cursor: 'col-resize',
             zIndex: 2,
           })}
@@ -206,7 +208,7 @@ export function RiskDetailDrawer({
               opacity: 0.7,
             })}
           />
-        </div>
+        </button>
 
         <div
           className={css({

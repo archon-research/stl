@@ -18,6 +18,7 @@ export function AppTooltip({ trigger, content, ariaLabel }: AppTooltipProps) {
           render={
             <button
               type="button"
+              aria-label={ariaLabel}
               className={css({
                 display: 'inline-flex',
                 alignItems: 'center',
