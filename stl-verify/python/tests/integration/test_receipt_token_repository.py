@@ -166,3 +166,9 @@ async def test_list_receipt_tokens_for_underlying_returns_wrappers(repository) -
     refs = await repository.list_receipt_tokens_for_underlying(1, weth)
     assert len(refs) >= 1
     assert all(ref.chain_id == 1 for ref in refs)
+    seeded = next(
+        (ref for ref in refs if ref.receipt_token_address_hex == "0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db"),
+        None,
+    )
+    assert seeded is not None
+    assert seeded.symbol == "spWETH"
