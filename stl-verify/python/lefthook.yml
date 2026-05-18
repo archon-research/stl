@@ -17,3 +17,8 @@ pre-commit:
       glob: '**/*.{py,pyi}'
       run: env -u VIRTUAL_ENV uv run ruff format {staged_files}
       stage_fixed: true
+
+    python-ty:
+      root: *python_root
+      glob: '**/*.{py,pyi}'
+      run: env -u VIRTUAL_ENV uv run --extra dev ty check {staged_files}

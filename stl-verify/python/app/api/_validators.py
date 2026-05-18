@@ -30,6 +30,7 @@ malformed-ID rejection is uniform across the API.
 import re
 from typing import Annotated
 
+from fastapi import Path
 from pydantic import AfterValidator
 
 from app.domain.entities.allocation import EthAddress
@@ -84,3 +85,21 @@ OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optiona
 
 TxHashParam = Annotated[str, AfterValidator(_validate_tx_hash)]
 """Use as the type for any path/query/body field that holds a transaction hash."""
+
+
+ChainIdPath = Annotated[
+    int,
+    Path(ge=1, description="EVM chain id.", examples=[1]),
+]
+"""Path parameter for EVM chain id (must be >= 1)."""
+
+
+TokenAddressPath = Annotated[
+    str,
+    Path(
+        description="0x-prefixed token contract address (40 hex chars).",
+        examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+    ),
+    AfterValidator(_validate_eth_address),
+]
+"""Path parameter for an EVM token address. Validation matches ``EthAddressParam``."""

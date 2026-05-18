@@ -64,7 +64,10 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
   }, [sliderValue]);
 
   useEffect(() => {
-    if (!selectedReceiptToken) {
+    // Bad-debt only applies to receipt-token positions. Direct asset
+    // holdings have a null receipt_token_address, so skip them.
+    const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
+    if (!selectedReceiptToken || !receiptTokenAddress) {
       setBadDebt(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -78,7 +81,8 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
     setBadDebt(null);
 
     void getBadDebt(
-      selectedReceiptToken.receipt_token_id,
+      selectedReceiptToken.chain_id,
+      receiptTokenAddress,
       debouncedGapPct.toFixed(2),
       controller.signal,
     )
@@ -92,7 +96,8 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
 
         logging.error('Failed to load bad debt calculation', {
           error,
-          receiptTokenId: selectedReceiptToken.receipt_token_id,
+          chainId: selectedReceiptToken.chain_id,
+          receiptTokenAddress,
           gapPct: debouncedGapPct,
         });
         setErrorMessage(toErrorMessage(error));
@@ -276,7 +281,7 @@ export function BadDebtTab({ selectedReceiptToken }: BadDebtTabProps) {
             value={
               <>
                 <ProtocolLogo
-                  protocolName={selectedReceiptToken.protocol_name}
+                  protocolName={selectedReceiptToken.protocol_name ?? ''}
                   size="5"
                 />
                 {selectedReceiptToken.protocol_name}

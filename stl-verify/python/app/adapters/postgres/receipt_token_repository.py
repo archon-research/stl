@@ -2,8 +2,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo, ReceiptTokenProtocolPair
 from app.logging import get_logger
+from app.ports.receipt_token_lookup import ReceiptTokenAddressRef
 from app.risk_engine.mapping import MappingError
 
 logger = get_logger(__name__)
@@ -16,15 +18,20 @@ logger = get_logger(__name__)
 # receipt-token metadata anyway lets the API distinguish "not indexed yet"
 # (warm-up → 503) from "unknown receipt token" (→ 404), and lets non-Aave
 # branches (e.g. Morpho) resolve without ever needing receipt_token_token_id.
-_RECEIPT_TOKEN_SQL = """
+_RECEIPT_TOKEN_BASE_SELECT = """
 SELECT rt.id, rt.protocol_id, rt.underlying_token_id, rt.receipt_token_address,
        p.chain_id, p.name AS protocol_name,
        t.id AS receipt_token_token_id
 FROM receipt_token rt
 JOIN protocol p ON p.id = rt.protocol_id
 LEFT JOIN token t ON t.chain_id = p.chain_id AND t.address = rt.receipt_token_address
-WHERE rt.id = :receipt_token_id
 """
+
+_RECEIPT_TOKEN_SQL = _RECEIPT_TOKEN_BASE_SELECT + "WHERE rt.id = :receipt_token_id\n"
+
+_RECEIPT_TOKEN_BY_ADDRESS_SQL = (
+    _RECEIPT_TOKEN_BASE_SELECT + "WHERE rt.chain_id = :chain_id AND rt.receipt_token_address = :address\n"
+)
 
 _RECEIPT_TOKEN_ROUTING_SQL = """
 SELECT rt.id AS receipt_token_id, p.name AS protocol_name
@@ -32,6 +39,31 @@ FROM receipt_token rt
 JOIN protocol p ON p.id = rt.protocol_id
 ORDER BY rt.id
 """
+
+# Look up receipt tokens whose ``underlying_token_id`` matches the token row
+# at ``(chain_id, underlying_address)``. Used by the 404 hint when a caller
+# passes an underlying-token address where a receipt-token address is
+# expected.
+_RECEIPT_TOKENS_FOR_UNDERLYING_SQL = """
+SELECT rt.chain_id, rt.receipt_token_address, rt.symbol
+FROM receipt_token rt
+JOIN token ut ON ut.id = rt.underlying_token_id
+WHERE ut.chain_id = :chain_id AND ut.address = :address
+ORDER BY rt.id
+LIMIT 5
+"""
+
+
+def _row_to_receipt_token_info(row) -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=row.id,
+        protocol_id=row.protocol_id,
+        underlying_token_id=row.underlying_token_id,
+        receipt_token_address=bytes(row.receipt_token_address),
+        chain_id=row.chain_id,
+        protocol_name=row.protocol_name,
+        receipt_token_token_id=row.receipt_token_token_id,
+    )
 
 
 class ReceiptTokenRepository:
@@ -52,15 +84,54 @@ class ReceiptTokenRepository:
         if row is None:
             return None
 
-        return ReceiptTokenInfo(
-            receipt_token_id=row.id,
-            protocol_id=row.protocol_id,
-            underlying_token_id=row.underlying_token_id,
-            receipt_token_address=bytes(row.receipt_token_address),
-            chain_id=row.chain_id,
-            protocol_name=row.protocol_name,
-            receipt_token_token_id=row.receipt_token_token_id,
-        )
+        return _row_to_receipt_token_info(row)
+
+    async def get_by_chain_and_address(self, chain_id: int, address: EthAddress) -> ReceiptTokenInfo | None:
+        params = {"chain_id": chain_id, "address": address.to_bytes()}
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(_RECEIPT_TOKEN_BY_ADDRESS_SQL), params)
+                row = result.fetchone()
+        except SQLAlchemyError:
+            logger.exception(
+                "receipt_token_repository: DB error fetching chain_id=%d address=%s",
+                chain_id,
+                address,
+            )
+            raise
+
+        if row is None:
+            return None
+
+        return _row_to_receipt_token_info(row)
+
+    async def list_receipt_tokens_for_underlying(
+        self, chain_id: int, underlying_address: EthAddress
+    ) -> list[ReceiptTokenAddressRef]:
+        params = {
+            "chain_id": chain_id,
+            "address": underlying_address.to_bytes(),
+        }
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text(_RECEIPT_TOKENS_FOR_UNDERLYING_SQL), params)
+                rows = result.fetchall()
+        except SQLAlchemyError:
+            logger.exception(
+                "receipt_token_repository: DB error listing receipt tokens for underlying chain_id=%d address=%s",
+                chain_id,
+                underlying_address,
+            )
+            raise
+
+        return [
+            ReceiptTokenAddressRef(
+                chain_id=row.chain_id,
+                receipt_token_address=bytes(row.receipt_token_address),
+                symbol=row.symbol,
+            )
+            for row in rows
+        ]
 
     async def list_protocol_pairs(self) -> list[ReceiptTokenProtocolPair]:
         """Return receipt-token IDs paired with their protocol names."""

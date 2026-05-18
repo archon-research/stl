@@ -165,7 +165,7 @@
         "type": "string"
       },
       "AllocationResponse": {
-        "description": "Enriched allocation response with category and metadata.",
+        "description": "Enriched allocation response with category and metadata.\n\nTwo row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /\n  ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name\n  the held asset; ``underlying_token_id`` / ``underlying_token_address``\n  point at it.",
         "example": {
           "amount_usd": "1234567.89",
           "balance": "1234567.89",
@@ -198,7 +198,7 @@
             "title": "Amount Usd"
           },
           "balance": {
-            "description": "Receipt-token balance held by the prime, in token units. Decimal serialized as a JSON string.",
+            "description": "Balance held by the prime, in token units. Decimal serialized as a JSON string.",
             "examples": [
               "1234567.89"
             ],
@@ -234,31 +234,52 @@
             "title": "Latest Activity At"
           },
           "protocol_name": {
-            "description": "Protocol the position is held in.",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Protocol the position is held in. `null` for direct holdings (no registered wrapper).",
             "examples": [
               "aave-v3"
             ],
-            "title": "Protocol Name",
-            "type": "string"
+            "title": "Protocol Name"
           },
           "receipt_token_address": {
-            "description": "0x-prefixed receipt-token contract address.",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "0x-prefixed receipt-token contract address. `null` for direct asset holdings.",
             "examples": [
               "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
             ],
-            "title": "Receipt Token Address",
-            "type": "string"
+            "title": "Receipt Token Address"
           },
           "receipt_token_id": {
-            "description": "Surrogate id of the receipt token.",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Surrogate id of the receipt token. `null` for direct asset holdings.",
             "examples": [
               42
             ],
-            "title": "Receipt Token Id",
-            "type": "integer"
+            "title": "Receipt Token Id"
           },
           "symbol": {
-            "description": "Receipt-token symbol.",
+            "description": "Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.",
             "examples": [
               "aUSDC"
             ],
@@ -266,7 +287,7 @@
             "type": "string"
           },
           "underlying_symbol": {
-            "description": "Underlying-token symbol.",
+            "description": "Underlying-token symbol. For direct holdings, same as ``symbol``.",
             "examples": [
               "USDC"
             ],
@@ -274,7 +295,7 @@
             "type": "string"
           },
           "underlying_token_address": {
-            "description": "0x-prefixed underlying-token contract address.",
+            "description": "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself.",
             "examples": [
               "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
             ],
@@ -282,7 +303,7 @@
             "type": "string"
           },
           "underlying_token_id": {
-            "description": "Surrogate id of the underlying token.",
+            "description": "Surrogate id of the underlying token. For direct holdings, this is the held asset itself.",
             "examples": [
               1
             ],
@@ -292,13 +313,10 @@
         },
         "required": [
           "chain_id",
-          "receipt_token_id",
-          "receipt_token_address",
           "underlying_token_id",
           "underlying_token_address",
           "symbol",
           "underlying_symbol",
-          "protocol_name",
           "balance",
           "category"
         ],
@@ -1113,25 +1131,50 @@
         "type": "object"
       },
       "RrcRequest": {
-        "description": "POST /v1/risk/rrc body \u2014 overrides keyed by model name.",
+        "description": "POST /v1/risk/rrc/scenario body \u2014 overrides keyed by model name.\n\nAsset identity must be supplied as **exactly one** of:\n\n* ``asset_id`` (deprecated surrogate id), or\n* ``(chain_id, token_address)`` \u2014 receipt-token address on the given chain.\n\nBoth forms or neither raises 422.",
         "example": {
-          "asset_id": 42,
+          "chain_id": 1,
           "overrides": {
             "gap_sweep": {
               "gap_pct": "0.15"
             }
           },
-          "prime_id": "0x1234567890abcdef1234567890abcdef12345678"
+          "prime_id": "0x1234567890abcdef1234567890abcdef12345678",
+          "token_address": "0xbcca60bb61934080951369a648fb03df4f96263c"
         },
         "properties": {
           "asset_id": {
-            "description": "Surrogate receipt-token id.",
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "deprecated": true,
+            "description": "Surrogate receipt-token id. **Deprecated** \u2014 pass `chain_id` + `token_address` instead.",
             "examples": [
               42
             ],
-            "minimum": 1.0,
-            "title": "Asset Id",
-            "type": "integer"
+            "title": "Asset Id"
+          },
+          "chain_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "EVM chain id of the receipt token.",
+            "examples": [
+              1
+            ],
+            "title": "Chain Id"
           },
           "overrides": {
             "additionalProperties": {
@@ -1149,10 +1192,24 @@
             ],
             "title": "Prime Id",
             "type": "string"
+          },
+          "token_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "0x-prefixed receipt-token contract address.",
+            "examples": [
+              "0xbcca60bb61934080951369a648fb03df4f96263c"
+            ],
+            "title": "Token Address"
           }
         },
         "required": [
-          "asset_id",
           "prime_id"
         ],
         "title": "RrcRequest",
@@ -1815,7 +1872,8 @@
         },
         "summary": "List per-prime capital metrics",
         "tags": [
-          "capital"
+          "capital",
+          "internal"
         ]
       }
     },
@@ -1895,7 +1953,7 @@
     },
     "/v1/primes/{prime_id}/allocations": {
       "get": {
-        "description": "Return every receipt-token position currently held by the given prime, enriched with USD value (when a price is available), latest on-chain activity timestamp, and a derived allocation `category` (`allocation` / `pol` / `psm3` / `asset`).",
+        "description": "Return every current allocation held by the given prime \u2014 both receipt-token positions (enriched with USD value when a price is available) and direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and `amount_usd` set to `null`). Each row includes the latest on-chain activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`).",
         "operationId": "list_allocations_v1_primes__prime_id__allocations_get",
         "parameters": [
           {
@@ -2138,24 +2196,9 @@
     },
     "/v1/risk/rrc": {
       "get": {
-        "description": "Compute RRC at default stress for every model that applies to `(asset_id, prime_id)`. See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.\n\nErrors:\n- `404` if `asset_id` is not a known receipt token, or no models apply.\n- `422` if `prime_id` is malformed or `asset_id < 1`.\n- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.",
+        "description": "Compute RRC at default stress for every model that applies to the asset. Identify the asset by **exactly one** of:\n\n- `asset_id` (deprecated surrogate id), or\n- `chain_id` + `token_address` (receipt-token address on the given chain).\n\nPassing both forms or neither yields a `422`.\n\nSee `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.\n\nErrors:\n- `404` if the asset is not a known receipt token, or no models apply.\n- `422` if `prime_id` is malformed, identifiers are invalid, or the asset-identity mix is wrong (both forms / neither / partial pair).\n- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.",
         "operationId": "get_rrc_v1_risk_rrc_get",
         "parameters": [
-          {
-            "description": "Surrogate receipt-token id.",
-            "in": "query",
-            "name": "asset_id",
-            "required": true,
-            "schema": {
-              "description": "Surrogate receipt-token id.",
-              "examples": [
-                42
-              ],
-              "minimum": 1,
-              "title": "Asset Id",
-              "type": "integer"
-            }
-          },
           {
             "in": "query",
             "name": "prime_id",
@@ -2163,6 +2206,73 @@
             "schema": {
               "title": "Prime Id",
               "type": "string"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "Surrogate receipt-token id. **Deprecated** \u2014 prefer `chain_id` + `token_address`.",
+            "in": "query",
+            "name": "asset_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "deprecated": true,
+              "description": "Surrogate receipt-token id. **Deprecated** \u2014 prefer `chain_id` + `token_address`.",
+              "examples": [
+                42
+              ],
+              "title": "Asset Id"
+            }
+          },
+          {
+            "description": "EVM chain id of the receipt token.",
+            "in": "query",
+            "name": "chain_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "EVM chain id of the receipt token.",
+              "examples": [
+                1
+              ],
+              "title": "Chain Id"
+            }
+          },
+          {
+            "description": "0x-prefixed receipt-token contract address.",
+            "in": "query",
+            "name": "token_address",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "0x-prefixed receipt-token contract address.",
+              "examples": [
+                "0xbcca60bb61934080951369a648fb03df4f96263c"
+              ],
+              "title": "Token Address"
             }
           }
         ],
@@ -2192,10 +2302,12 @@
         "tags": [
           "risk"
         ]
-      },
+      }
+    },
+    "/v1/risk/rrc/scenario": {
       "post": {
-        "description": "Compute RRC with per-model scenario overrides for every applicable model. Outer override keys must be valid model names; unknown keys reject the request with `422`. See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.\n\nErrors:\n- `404` if `asset_id` is not a known receipt token, or no models apply.\n- `422` if `prime_id`/`asset_id` are invalid, an unknown override model key is present, or any model rejects its overrides.\n- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.",
-        "operationId": "post_rrc_v1_risk_rrc_post",
+        "description": "Compute RRC with per-model scenario overrides for every applicable model. Identify the asset by **exactly one** of `asset_id` (deprecated) or `chain_id` + `token_address`. Outer override keys must be valid model names; unknown keys reject the request with `422`. See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.\n\nErrors:\n- `404` if the asset is not a known receipt token, or no models apply.\n- `422` if identifiers are invalid, asset-identity mix is wrong, an unknown override model key is present, or any model rejects its overrides.\n- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.",
+        "operationId": "post_rrc_scenario_v1_risk_rrc_scenario_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2234,9 +2346,158 @@
         ]
       }
     },
+    "/v1/risk/{chain_id}/{token_address}/bad-debt": {
+      "get": {
+        "description": "Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).\n\n`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "operationId": "get_bad_debt_by_address_v1_risk__chain_id___token_address__bad_debt_get",
+        "parameters": [
+          {
+            "description": "EVM chain id.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "EVM chain id.",
+              "examples": [
+                1
+              ],
+              "minimum": 1,
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "0x-prefixed token contract address (40 hex chars).",
+            "in": "path",
+            "name": "token_address",
+            "required": true,
+            "schema": {
+              "description": "0x-prefixed token contract address (40 hex chars).",
+              "examples": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+              ],
+              "title": "Token Address",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Collateral gap fraction in [0, 1].",
+            "in": "query",
+            "name": "gap_pct",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                  "type": "string"
+                }
+              ],
+              "description": "Collateral gap fraction in [0, 1].",
+              "examples": [
+                "0.10"
+              ],
+              "title": "Gap Pct"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadDebtResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Estimate bad debt at a collateral gap (by chain id and receipt-token address)",
+        "tags": [
+          "risk"
+        ]
+      }
+    },
+    "/v1/risk/{chain_id}/{token_address}/breakdown": {
+      "get": {
+        "description": "Return the full risk-enriched collateral breakdown for the receipt-token position at `(chain_id, token_address)`.\n\n`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `chain_id` < 1 or `token_address` is malformed.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "operationId": "get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get",
+        "parameters": [
+          {
+            "description": "EVM chain id.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "EVM chain id.",
+              "examples": [
+                1
+              ],
+              "minimum": 1,
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "0x-prefixed token contract address (40 hex chars).",
+            "in": "path",
+            "name": "token_address",
+            "required": true,
+            "schema": {
+              "description": "0x-prefixed token contract address (40 hex chars).",
+              "examples": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+              ],
+              "title": "Token Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RiskBreakdownResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+        "tags": [
+          "risk"
+        ]
+      }
+    },
     "/v1/risk/{receipt_token_id}/bad-debt": {
       "get": {
-        "description": "Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "deprecated": true,
+        "description": "Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.\n\nErrors:\n- `404` if the receipt token is not found.\n- `422` if `gap_pct` is outside `[0, 1]`.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
         "operationId": "get_bad_debt_v1_risk__receipt_token_id__bad_debt_get",
         "parameters": [
           {
@@ -2293,15 +2554,17 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Estimate bad debt at a collateral gap",
+        "summary": "Estimate bad debt at a collateral gap (deprecated)",
         "tags": [
-          "risk"
+          "risk",
+          "internal"
         ]
       }
     },
     "/v1/risk/{receipt_token_id}/breakdown": {
       "get": {
-        "description": "Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\nErrors:\n- `404` if the receipt token is not found.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
+        "deprecated": true,
+        "description": "Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.\n\nErrors:\n- `404` if the receipt token is not found.\n- `503` (`share_data_*`) if the allocation-share lookup fails.",
         "operationId": "get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get",
         "parameters": [
           {
@@ -2336,7 +2599,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Risk-enriched collateral breakdown",
+        "summary": "Risk-enriched collateral breakdown (deprecated)",
         "tags": [
           "risk"
         ]
@@ -2456,10 +2719,137 @@
         ]
       }
     },
+    "/v1/tokens/{chain_id}/{token_address}": {
+      "get": {
+        "description": "Return the token catalog entry for the ERC-20 at `(chain_id, token_address)`, or `404` if unknown. `token_address` is matched case-insensitively.",
+        "operationId": "get_token_v1_tokens__chain_id___token_address__get",
+        "parameters": [
+          {
+            "description": "EVM chain id.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "EVM chain id.",
+              "examples": [
+                1
+              ],
+              "minimum": 1,
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "0x-prefixed token contract address (40 hex chars).",
+            "in": "path",
+            "name": "token_address",
+            "required": true,
+            "schema": {
+              "description": "0x-prefixed token contract address (40 hex chars).",
+              "examples": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+              ],
+              "title": "Token Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a token by chain id and address",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
+    "/v1/tokens/{chain_id}/{token_address}/price": {
+      "get": {
+        "description": "Return the latest USD price snapshot for the token at `(chain_id, token_address)`.\n\n- Returns `404` only when the token does not exist.\n- Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.\n- `price_usd` is a decimal serialized as a JSON string to preserve precision.",
+        "operationId": "get_token_price_v1_tokens__chain_id___token_address__price_get",
+        "parameters": [
+          {
+            "description": "EVM chain id.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "EVM chain id.",
+              "examples": [
+                1
+              ],
+              "minimum": 1,
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "0x-prefixed token contract address (40 hex chars).",
+            "in": "path",
+            "name": "token_address",
+            "required": true,
+            "schema": {
+              "description": "0x-prefixed token contract address (40 hex chars).",
+              "examples": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+              ],
+              "title": "Token Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenPriceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get latest token price by chain id and address",
+        "tags": [
+          "tokens"
+        ]
+      }
+    },
     "/v1/tokens/{token_id}": {
       "get": {
-        "description": "Return the token catalog entry for the given surrogate `token_id`, or `404` if unknown.",
-        "operationId": "get_token_v1_tokens__token_id__get",
+        "deprecated": true,
+        "description": "Return the token catalog entry for the given surrogate `token_id`, or `404` if unknown.\n\n**Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}` which addresses tokens by on-chain identity and avoids a discovery round-trip.",
+        "operationId": "get_token_by_id_v1_tokens__token_id__get",
         "parameters": [
           {
             "in": "path",
@@ -2493,7 +2883,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get a token by id",
+        "summary": "Get a token by id (deprecated)",
         "tags": [
           "tokens"
         ]
@@ -2501,8 +2891,9 @@
     },
     "/v1/tokens/{token_id}/price": {
       "get": {
-        "description": "Return the latest USD price snapshot for a token.\n\n- Returns `404` only when the token does not exist.\n- Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.\n- `price_usd` is a decimal serialized as a JSON string to preserve precision.",
-        "operationId": "get_token_price_v1_tokens__token_id__price_get",
+        "deprecated": true,
+        "description": "Return the latest USD price snapshot for a token.\n\n- Returns `404` only when the token does not exist.\n- Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.\n- `price_usd` is a decimal serialized as a JSON string to preserve precision.\n\n**Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}/price`.",
+        "operationId": "get_token_price_by_id_v1_tokens__token_id__price_get",
         "parameters": [
           {
             "in": "path",
@@ -2536,7 +2927,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get latest token price",
+        "summary": "Get latest token price (deprecated)",
         "tags": [
           "tokens"
         ]

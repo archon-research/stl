@@ -96,3 +96,24 @@ def test_risk_bad_debt_returns_503_when_receipt_token_token_row_is_missing(
     assert response.status_code == 503
     body = response.json()
     assert body["detail"]["code"] == "share_data_missing"
+
+
+def test_risk_breakdown_by_address_resolves_chain_and_address(
+    client: TestClient,
+    seeded_receipt_token_id: int,
+) -> None:
+    """The address-based breakdown route reaches the same service path as the legacy form."""
+    response = client.get(f"/v1/risk/1/0x{_RECEIPT_TOKEN_ADDRESS_HEX}/breakdown")
+
+    # Same warm-up state as the legacy test — receipt_token row exists but
+    # its token row does not, so share lookup signals "data not indexed".
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "share_data_missing"
+
+
+def test_risk_breakdown_by_address_returns_404_for_unknown_address(
+    client: TestClient,
+) -> None:
+    response = client.get("/v1/risk/1/0x" + "ff" * 20 + "/breakdown")
+
+    assert response.status_code == 404

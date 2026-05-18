@@ -2,15 +2,22 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.api._validators import EthAddressParam
+from app.api._validators import (
+    ChainIdPath,
+    EthAddressParam,
+    OptionalEthAddressParam,
+    TokenAddressPath,
+)
 from app.api.deps import (
     get_crypto_lending_risk_service,
     get_model_registry,
     get_receipt_token_lookup,
 )
+from app.api.v1._resolvers import check_exactly_one_asset_identity, resolve_receipt_token
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import (
     AllocationShareError,
@@ -117,24 +124,10 @@ def _share_error_503(exc: AllocationShareError) -> HTTPException:
     return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
 
 
-@router.get(
-    "/risk/{receipt_token_id}/bad-debt",
-    response_model=BadDebtResponse,
-    summary="Estimate bad debt at a collateral gap",
-    tags=["internal"],
-    description=(
-        "Estimate USD bad debt for a receipt-token position when collateral prices "
-        "fall by `gap_pct` (a fraction in `[0, 1]`).\n\n"
-        "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
-        "- `422` if `gap_pct` is outside `[0, 1]`.\n"
-        "- `503` (`share_data_*`) if the allocation-share lookup fails."
-    ),
-)
-async def get_bad_debt(
+async def _compute_bad_debt(
     receipt_token_id: int,
-    gap_pct: Decimal = Query(description="Collateral gap fraction in [0, 1].", examples=["0.10"]),
-    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+    gap_pct: Decimal,
+    service: CryptoLendingRiskService,
 ) -> BadDebtResponse:
     if not (_ZERO <= gap_pct <= _ONE):
         raise HTTPException(status_code=422, detail="gap_pct must be between 0 and 1")
@@ -154,21 +147,9 @@ async def get_bad_debt(
     )
 
 
-@router.get(
-    "/risk/{receipt_token_id}/breakdown",
-    response_model=RiskBreakdownResponse,
-    summary="Risk-enriched collateral breakdown",
-    description=(
-        "Return the full risk-enriched collateral breakdown for a receipt-token position: "
-        "one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n"
-        "Errors:\n"
-        "- `404` if the receipt token is not found.\n"
-        "- `503` (`share_data_*`) if the allocation-share lookup fails."
-    ),
-)
-async def get_risk_breakdown(
+async def _compute_risk_breakdown(
     receipt_token_id: int,
-    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+    service: CryptoLendingRiskService,
 ) -> RiskBreakdownResponse:
     try:
         breakdown = await service.get_risk_breakdown_legacy(receipt_token_id)
@@ -196,15 +177,140 @@ async def get_risk_breakdown(
     )
 
 
+@router.get(
+    "/risk/{receipt_token_id}/bad-debt",
+    response_model=BadDebtResponse,
+    summary="Estimate bad debt at a collateral gap (deprecated)",
+    tags=["internal"],
+    deprecated=True,
+    description=(
+        "Estimate USD bad debt for a receipt-token position when collateral prices "
+        "fall by `gap_pct` (a fraction in `[0, 1]`).\n\n"
+        "**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is not found.\n"
+        "- `422` if `gap_pct` is outside `[0, 1]`.\n"
+        "- `503` (`share_data_*`) if the allocation-share lookup fails."
+    ),
+)
+async def get_bad_debt(
+    receipt_token_id: int,
+    gap_pct: Decimal = Query(description="Collateral gap fraction in [0, 1].", examples=["0.10"]),
+    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+) -> BadDebtResponse:
+    return await _compute_bad_debt(receipt_token_id, gap_pct, service)
+
+
+@router.get(
+    "/risk/{receipt_token_id}/breakdown",
+    response_model=RiskBreakdownResponse,
+    summary="Risk-enriched collateral breakdown (deprecated)",
+    deprecated=True,
+    description=(
+        "Return the full risk-enriched collateral breakdown for a receipt-token position: "
+        "one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n"
+        "**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is not found.\n"
+        "- `503` (`share_data_*`) if the allocation-share lookup fails."
+    ),
+)
+async def get_risk_breakdown(
+    receipt_token_id: int,
+    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+) -> RiskBreakdownResponse:
+    return await _compute_risk_breakdown(receipt_token_id, service)
+
+
+@router.get(
+    "/risk/{chain_id}/{token_address}/bad-debt",
+    response_model=BadDebtResponse,
+    summary="Estimate bad debt at a collateral gap (by chain id and receipt-token address)",
+    description=(
+        "Estimate USD bad debt for the receipt-token position at "
+        "`(chain_id, token_address)` when collateral prices fall by `gap_pct` "
+        "(a fraction in `[0, 1]`).\n\n"
+        "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
+        "not the underlying ERC-20 address. Passing an underlying address yields a "
+        "`404` whose body suggests matching receipt tokens.\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is not found.\n"
+        "- `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is "
+        "outside `[0, 1]`.\n"
+        "- `503` (`share_data_*`) if the allocation-share lookup fails."
+    ),
+)
+async def get_bad_debt_by_address(
+    chain_id: ChainIdPath,
+    token_address: TokenAddressPath,
+    gap_pct: Decimal = Query(description="Collateral gap fraction in [0, 1].", examples=["0.10"]),
+    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+    lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+) -> BadDebtResponse:
+    info = await resolve_receipt_token(chain_id, token_address, lookup)
+    return await _compute_bad_debt(info.receipt_token_id, gap_pct, service)
+
+
+@router.get(
+    "/risk/{chain_id}/{token_address}/breakdown",
+    response_model=RiskBreakdownResponse,
+    summary="Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+    description=(
+        "Return the full risk-enriched collateral breakdown for the receipt-token "
+        "position at `(chain_id, token_address)`.\n\n"
+        "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
+        "not the underlying ERC-20 address. Passing an underlying address yields a "
+        "`404` whose body suggests matching receipt tokens.\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is not found.\n"
+        "- `422` if `chain_id` < 1 or `token_address` is malformed.\n"
+        "- `503` (`share_data_*`) if the allocation-share lookup fails."
+    ),
+)
+async def get_risk_breakdown_by_address(
+    chain_id: ChainIdPath,
+    token_address: TokenAddressPath,
+    service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
+    lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+) -> RiskBreakdownResponse:
+    info = await resolve_receipt_token(chain_id, token_address, lookup)
+    return await _compute_risk_breakdown(info.receipt_token_id, service)
+
+
 # ---------------------------------------------------------------------------
 # Unified /v1/risk/rrc{,/scenario} — registry-dispatched, multi-model
 # ---------------------------------------------------------------------------
 
 
 class RrcRequest(BaseModel):
-    """POST /v1/risk/rrc/scenario body — overrides keyed by model name."""
+    """POST /v1/risk/rrc/scenario body — overrides keyed by model name.
 
-    asset_id: int = Field(ge=1, description="Surrogate receipt-token id.", examples=[42])
+    Asset identity must be supplied as **exactly one** of:
+
+    * ``asset_id`` (deprecated surrogate id), or
+    * ``(chain_id, token_address)`` — receipt-token address on the given chain.
+
+    Both forms or neither raises 422.
+    """
+
+    asset_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="Surrogate receipt-token id. **Deprecated** — pass `chain_id` + `token_address` instead.",
+        examples=[42],
+        deprecated=True,
+    )
+    chain_id: int | None = Field(
+        default=None,
+        ge=1,
+        description="EVM chain id of the receipt token.",
+        examples=[1],
+    )
+    token_address: OptionalEthAddressParam = Field(
+        default=None,
+        description="0x-prefixed receipt-token contract address.",
+        examples=["0xbcca60bb61934080951369a648fb03df4f96263c"],
+    )
     prime_id: EthAddressParam = Field(
         description="Prime's 0x-prefixed Ethereum address.",
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
@@ -219,10 +325,16 @@ class RrcRequest(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _exactly_one_identity(self) -> "RrcRequest":
+        check_exactly_one_asset_identity(self.asset_id, self.chain_id, self.token_address)
+        return self
+
     model_config = {
         "json_schema_extra": {
             "example": {
-                "asset_id": 42,
+                "chain_id": 1,
+                "token_address": "0xbcca60bb61934080951369a648fb03df4f96263c",
                 "prime_id": "0x1234567890abcdef1234567890abcdef12345678",
                 "overrides": {"gap_sweep": {"gap_pct": "0.15"}},
             }
@@ -276,23 +388,60 @@ class RrcEnvelope(BaseModel):
     response_model=RrcEnvelope,
     summary="Risk capital (RRC) at default stress",
     description=(
-        "Compute RRC at default stress for every model that applies to "
-        "`(asset_id, prime_id)`. See `RrcEnvelope` for how to interpret per-model "
-        "`results` versus the `max_*` summary fields.\n\n"
+        "Compute RRC at default stress for every model that applies to the asset. "
+        "Identify the asset by **exactly one** of:\n\n"
+        "- `asset_id` (deprecated surrogate id), or\n"
+        "- `chain_id` + `token_address` (receipt-token address on the given chain).\n\n"
+        "Passing both forms or neither yields a `422`.\n\n"
+        "See `RrcEnvelope` for how to interpret per-model `results` versus the "
+        "`max_*` summary fields.\n\n"
         "Errors:\n"
-        "- `404` if `asset_id` is not a known receipt token, or no models apply.\n"
-        "- `422` if `prime_id` is malformed or `asset_id < 1`.\n"
+        "- `404` if the asset is not a known receipt token, or no models apply.\n"
+        "- `422` if `prime_id` is malformed, identifiers are invalid, or the "
+        "asset-identity mix is wrong (both forms / neither / partial pair).\n"
         "- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails."
     ),
 )
 async def get_rrc(
-    asset_id: Annotated[int, Query(ge=1, description="Surrogate receipt-token id.", examples=[42])],
     prime_id: EthAddressParam,
+    asset_id: Annotated[
+        int | None,
+        Query(
+            ge=1,
+            description="Surrogate receipt-token id. **Deprecated** — prefer `chain_id` + `token_address`.",
+            examples=[42],
+            deprecated=True,
+        ),
+    ] = None,
+    chain_id: Annotated[
+        int | None,
+        Query(ge=1, description="EVM chain id of the receipt token.", examples=[1]),
+    ] = None,
+    token_address: Annotated[
+        OptionalEthAddressParam,
+        Query(
+            description="0x-prefixed receipt-token contract address.",
+            examples=["0xbcca60bb61934080951369a648fb03df4f96263c"],
+        ),
+    ] = None,
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RrcEnvelope:
+    try:
+        check_exactly_one_asset_identity(asset_id, chain_id, token_address)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    info = await _resolve_asset(
+        asset_id=asset_id,
+        chain_id=chain_id,
+        token_address=token_address,
+        lookup=receipt_token_lookup,
+    )
     return await _compute_envelope(
-        asset_id, EthAddress(prime_id), overrides={}, registry=registry, lookup=receipt_token_lookup
+        info=info,
+        prime_id=EthAddress(prime_id),
+        overrides={},
+        registry=registry,
     )
 
 
@@ -302,13 +451,14 @@ async def get_rrc(
     summary="Risk capital (RRC) with scenario overrides",
     description=(
         "Compute RRC with per-model scenario overrides for every applicable model. "
-        "Outer override keys must be valid model names; unknown keys reject the request "
-        "with `422`. See `RrcEnvelope` for how to interpret per-model `results` versus the "
-        "`max_*` summary fields.\n\n"
+        "Identify the asset by **exactly one** of `asset_id` (deprecated) or "
+        "`chain_id` + `token_address`. Outer override keys must be valid model names; "
+        "unknown keys reject the request with `422`. See `RrcEnvelope` for how to "
+        "interpret per-model `results` versus the `max_*` summary fields.\n\n"
         "Errors:\n"
-        "- `404` if `asset_id` is not a known receipt token, or no models apply.\n"
-        "- `422` if `prime_id`/`asset_id` are invalid, an unknown override model key is "
-        "present, or any model rejects its overrides.\n"
+        "- `404` if the asset is not a known receipt token, or no models apply.\n"
+        "- `422` if identifiers are invalid, asset-identity mix is wrong, an unknown "
+        "override model key is present, or any model rejects its overrides.\n"
         "- `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails."
     ),
 )
@@ -317,12 +467,17 @@ async def post_rrc_scenario(
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RrcEnvelope:
+    info = await _resolve_asset(
+        asset_id=body.asset_id,
+        chain_id=body.chain_id,
+        token_address=body.token_address,
+        lookup=receipt_token_lookup,
+    )
     return await _compute_envelope(
-        body.asset_id,
-        EthAddress(body.prime_id),
+        info=info,
+        prime_id=EthAddress(body.prime_id),
         overrides=body.overrides,
         registry=registry,
-        lookup=receipt_token_lookup,
     )
 
 
@@ -340,12 +495,31 @@ async def post_rrc(
     return await post_rrc_scenario(body, registry, receipt_token_lookup)
 
 
+async def _resolve_asset(
+    *,
+    asset_id: int | None,
+    chain_id: int | None,
+    token_address: str | None,
+    lookup: ReceiptTokenLookup,
+) -> ReceiptTokenInfo:
+    """Resolve either form of asset identity to a ``ReceiptTokenInfo`` or raise 404."""
+    if asset_id is not None:
+        info = await lookup.get(asset_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail=f"unknown asset_id={asset_id}")
+        return info
+
+    # check_exactly_one_asset_identity guarantees both are set when we reach here.
+    assert chain_id is not None and token_address is not None
+    return await resolve_receipt_token(chain_id, token_address, lookup)
+
+
 async def _compute_envelope(
-    asset_id: int,
+    *,
+    info: ReceiptTokenInfo,
     prime_id: EthAddress,
     overrides: dict[str, dict[str, Any]],
     registry: ModelRegistry,
-    lookup: ReceiptTokenLookup,
 ) -> RrcEnvelope:
     unknown_models = set(overrides) - registry.risk_model_names
     if unknown_models:
@@ -354,10 +528,7 @@ async def _compute_envelope(
             detail=f"unknown override model keys: {sorted(unknown_models)}",
         )
 
-    info = await lookup.get(asset_id)
-    if info is None:
-        raise HTTPException(status_code=404, detail=f"unknown asset_id={asset_id}")
-
+    asset_id = info.receipt_token_id
     applicable = registry.applicable(asset_id, prime_id)
     if not applicable:
         raise HTTPException(

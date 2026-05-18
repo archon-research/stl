@@ -6,6 +6,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.domain.entities.allocation import EthAddress
 from tests.integration.conftest import store_test_ids
 
 
@@ -129,3 +130,39 @@ async def test_returns_receipt_token_info_when_receipt_token_address_token_row_i
 async def test_returns_none_for_unknown_id(repository) -> None:
     result = await repository.get(99999)
     assert result is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_get_by_chain_and_address_returns_info(repository, test_ids) -> None:
+
+    # Address seeded in `_seed_data` as the indexed receipt token.
+    result = await repository.get_by_chain_and_address(1, EthAddress("0x59cD1C87501baa753d0B5B5Ab5D8416A45cD71DB"))
+    assert result is not None
+    assert result.receipt_token_id == test_ids["receipt_token_id"]
+    assert result.protocol_name == "SparkLend"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_get_by_chain_and_address_case_insensitive(repository, test_ids) -> None:
+    """Address bytes are compared by value, not hex case."""
+
+    result = await repository.get_by_chain_and_address(1, EthAddress("0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db"))
+    assert result is not None
+    assert result.receipt_token_id == test_ids["receipt_token_id"]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_get_by_chain_and_address_returns_none_for_unknown_address(repository) -> None:
+
+    result = await repository.get_by_chain_and_address(1, EthAddress("0x" + "ff" * 20))
+    assert result is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_list_receipt_tokens_for_underlying_returns_wrappers(repository) -> None:
+    """WETH at chain 1 has at least one seeded receipt token wrapping it."""
+
+    weth = EthAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+    refs = await repository.list_receipt_tokens_for_underlying(1, weth)
+    assert len(refs) >= 1
+    assert all(ref.chain_id == 1 for ref in refs)

@@ -1,3 +1,4 @@
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 from app.ports.token_catalog_repository import TokenCatalogRepository
 
@@ -20,3 +21,9 @@ class TokenCatalogService:
 
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         return await self._repository.get_latest_price(token_id)
+
+    async def get_token_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenMetadata | None:
+        return await self._repository.get_token_by_chain_and_address(chain_id, address)
+
+    async def get_latest_price_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenPriceQuote | None:
+        return await self._repository.get_latest_price_by_chain_and_address(chain_id, address)

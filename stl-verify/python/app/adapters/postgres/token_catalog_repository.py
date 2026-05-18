@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,65 @@ class PostgresTokenCatalogRepository:
             )
             raise ValueError(f"Database query failed while fetching token {token_id}: {exc}") from exc
 
+    async def get_token_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenMetadata | None:
+        params = {"chain_id": chain_id, "address": address.to_bytes()}
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(_GET_TOKEN_BY_CHAIN_ADDRESS_SQL, params)).fetchone()
+
+            if row is None:
+                return None
+
+            return self._row_to_metadata(row)
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch token by chain+address from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "chain_id": chain_id,
+                    "address": str(address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching token for chain_id={chain_id}, address={address}: {exc}"
+            ) from exc
+
+    async def get_latest_price_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenPriceQuote | None:
+        params = {"chain_id": chain_id, "address": address.to_bytes()}
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(_LATEST_PRICE_BY_CHAIN_ADDRESS_SQL, params)).fetchone()
+
+            if row is None:
+                return None
+
+            return TokenPriceQuote(
+                token_id=row.token_id,
+                source_type=row.source_type,
+                source_id=row.source_id,
+                source_name=row.source_name,
+                source_display_name=row.source_display_name,
+                price_usd=_safe_decimal(row.price_usd, "price_usd", row.token_id),
+                timestamp=row.timestamp,
+                staleness_seconds=max(int(row.staleness_seconds or 0), 0),
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch token price by chain+address from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "chain_id": chain_id,
+                    "address": str(address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching price for chain_id={chain_id}, address={address}: {exc}"
+            ) from exc
+
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         try:
             async with self._engine.connect() as conn:
@@ -184,6 +244,22 @@ _GET_TOKEN_SQL = text(
 )
 
 
+_GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
+    """
+    SELECT
+        t.id,
+        t.chain_id,
+        encode(t.address, 'hex') AS address,
+        t.symbol,
+        t.decimals,
+        t.updated_at,
+        t.metadata
+    FROM token t
+    WHERE t.chain_id = :chain_id AND t.address = :address
+    """
+)
+
+
 _LATEST_PRICE_SQL = text(
     """
     WITH latest_onchain AS (
@@ -215,6 +291,67 @@ _LATEST_PRICE_SQL = text(
         FROM offchain_token_price otp
         JOIN offchain_price_source ops ON ops.id = otp.source_id
         WHERE otp.token_id = :token_id
+        ORDER BY otp.timestamp DESC, otp.processing_version DESC
+        LIMIT 1
+    )
+    SELECT
+        token_id,
+        source_type,
+        source_id,
+        source_name,
+        source_display_name,
+        price_usd,
+        timestamp,
+        staleness_seconds
+    FROM (
+        SELECT * FROM latest_onchain
+        UNION ALL
+        SELECT * FROM latest_offchain
+    ) priced
+    ORDER BY timestamp DESC
+    LIMIT 1
+    """
+)
+
+
+# Same latest-price selection as ``_LATEST_PRICE_SQL`` but keyed on
+# ``(chain_id, address)`` against the ``token`` table. Resolves the
+# surrogate ``token_id`` inline so callers never see it.
+_LATEST_PRICE_BY_CHAIN_ADDRESS_SQL = text(
+    """
+    WITH token_row AS (
+        SELECT id FROM token
+        WHERE chain_id = :chain_id AND address = :address
+    ),
+    latest_onchain AS (
+        SELECT
+            otp.token_id,
+            'onchain'::TEXT AS source_type,
+            otp.oracle_id::BIGINT AS source_id,
+            o.name AS source_name,
+            o.display_name AS source_display_name,
+            otp.price_usd,
+            otp.timestamp,
+            EXTRACT(EPOCH FROM (NOW() - otp.timestamp))::BIGINT AS staleness_seconds
+        FROM onchain_token_price otp
+        JOIN oracle o ON o.id = otp.oracle_id
+        WHERE otp.token_id = (SELECT id FROM token_row)
+        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        LIMIT 1
+    ),
+    latest_offchain AS (
+        SELECT
+            otp.token_id,
+            'offchain'::TEXT AS source_type,
+            otp.source_id::BIGINT AS source_id,
+            ops.name AS source_name,
+            ops.display_name AS source_display_name,
+            otp.price_usd,
+            otp.timestamp,
+            EXTRACT(EPOCH FROM (NOW() - otp.timestamp))::BIGINT AS staleness_seconds
+        FROM offchain_token_price otp
+        JOIN offchain_price_source ops ON ops.id = otp.source_id
+        WHERE otp.token_id = (SELECT id FROM token_row)
         ORDER BY otp.timestamp DESC, otp.processing_version DESC
         LIMIT 1
     )
