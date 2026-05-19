@@ -25,8 +25,10 @@
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
   "dependencies": {
-    "@archon-research/design-system": "0.3.1",
-    "@archon-research/http-client-react": "0.3.1",
+    "@archon-research/http-client-core": "0.3.2",
+    "@archon-research/http-client-react": "0.3.2",
+    "@tanstack/react-query": "^5.99.2",
+    "@tanstack/react-table": "^8.20.0",
     "lucide-react": "^1.14.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -35,10 +37,10 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@archon-research/design-system": "0.2.2-dev25318411334",
-    "@archon-research/oxfmt-config": "0.2.2-dev25318411334",
-    "@archon-research/oxlint-config": "0.2.2-dev25318411334",
-    "@archon-research/tsconfig": "0.2.2-dev25318411334",
+    "@archon-research/design-system": "0.3.2",
+    "@archon-research/oxfmt-config": "0.3.2",
+    "@archon-research/oxlint-config": "0.3.2",
+    "@archon-research/tsconfig": "0.3.2",
     "@pandacss/dev": "^1.9.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -47,5 +49,11 @@
     "openapi-typescript": "^7.6.1",
     "postcss": "^8.5.6",
     "vite": "^5.2.0"
+  },
+  "optionalDependencies": {
+    "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260504.1",
+    "@typescript/native-preview-linux-x64": "7.0.0-dev.20260504.1",
+    "lightningcss-darwin-arm64": "1.31.1",
+    "lightningcss-linux-x64-gnu": "1.31.1"
   }
 }

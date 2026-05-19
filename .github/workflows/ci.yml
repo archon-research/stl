@@ -66,14 +66,20 @@ jobs:
       - go-ci
       - python-ci
       - ts-ci
-    if: |
-      always() &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Report success
-        run: echo 'All required CI checks passed or were skipped.'
+      - name: Check all jobs succeeded
+        run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "One or more CI jobs failed"
+            exit 1
+          fi
+          if [[ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "One or more CI jobs were cancelled"
+            exit 1
+          fi
+          echo 'All required CI checks passed or were skipped.'
 
   call-deploy:
     name: Deploy
