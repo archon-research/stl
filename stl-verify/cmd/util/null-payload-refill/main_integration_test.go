@@ -90,8 +90,12 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 	// 3. Create S3 bucket and seed it with a null gzipped block object plus
 	//    a sentinel large object (BucketScan path must skip the large one).
+	//    Bucket + topic names must match the chain via chainutil's
+	//    Validate{S3Bucket,SNSTopic}ForChain — chainID 43114 is avalanche,
+	//    so the bucket name needs the "stl-sentineltest-avalanche-raw"
+	//    prefix and the topic must be "stl-sentineltest-avalanche-blocks.fifo".
 	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
-	bucket := "refill-" + suffix
+	bucket := "stl-sentineltest-avalanche-raw-" + suffix
 	if _, err := s3c.CreateBucket(ctx, &awsS3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
@@ -102,7 +106,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	putGzippedObject(t, ctx, s3c, bucket, sentinelKey, bytes.Repeat([]byte("x"), 4096))
 
 	// 4. Create a FIFO SNS topic and a subscribed FIFO SQS queue.
-	topicArn := createFifoTopic(t, ctx, snsc, "refill-topic-"+suffix+".fifo")
+	topicArn := createFifoTopic(t, ctx, snsc, "stl-sentineltest-avalanche-blocks.fifo")
 	queueURL := createFifoQueue(t, ctx, sqsc, "refill-queue-"+suffix+".fifo")
 	subscribeQueueToTopic(t, ctx, snsc, sqsc, topicArn, queueURL)
 

@@ -118,3 +118,139 @@ func TestValidateS3BucketForChain(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSNSTopicForChain(t *testing.T) {
+	tests := []struct {
+		name        string
+		chainID     int64
+		topicARN    string
+		environment string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "ethereum staging valid",
+			chainID:     1,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelstaging-ethereum-blocks.fifo",
+			environment: "staging",
+		},
+		{
+			name:        "avalanche staging valid",
+			chainID:     43114,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelstaging-avalanche-blocks.fifo",
+			environment: "staging",
+		},
+		{
+			name:        "prod environment valid",
+			chainID:     1,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelprod-ethereum-blocks.fifo",
+			environment: "prod",
+		},
+		{
+			name:        "ethereum chain ID with avalanche topic — must error",
+			chainID:     1,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelstaging-avalanche-blocks.fifo",
+			environment: "staging",
+			wantErr:     true,
+			errContains: "does not have expected suffix",
+		},
+		{
+			name:        "staging chain with prod topic — must error",
+			chainID:     1,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelprod-ethereum-blocks.fifo",
+			environment: "staging",
+			wantErr:     true,
+			errContains: "does not have expected suffix",
+		},
+		{
+			name:        "unknown chain ID",
+			chainID:     999999,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelstaging-ethereum-blocks.fifo",
+			environment: "staging",
+			wantErr:     true,
+			errContains: "unknown chain ID",
+		},
+		{
+			name:        "empty environment",
+			chainID:     1,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelstaging-ethereum-blocks.fifo",
+			environment: "",
+			wantErr:     true,
+			errContains: "environment must not be empty",
+		},
+		{
+			name:        "case-insensitive ARN match",
+			chainID:     1,
+			topicARN:    "ARN:AWS:SNS:EU-WEST-1:123456789012:STL-SENTINELSTAGING-ETHEREUM-BLOCKS.FIFO",
+			environment: "staging",
+		},
+		{
+			name:        "non-FIFO topic — must error",
+			chainID:     1,
+			topicARN:    "arn:aws:sns:eu-west-1:123456789012:stl-sentinelstaging-ethereum-blocks",
+			environment: "staging",
+			wantErr:     true,
+			errContains: "does not have expected suffix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateSNSTopicForChain(tt.chainID, tt.topicARN, tt.environment)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateSNSTopicForChain() expected error, got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("ValidateSNSTopicForChain() error = %v, want error containing %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidateSNSTopicForChain() unexpected error = %v", err)
+			}
+		})
+	}
+}
+
+func TestEnvironmentFromBucket(t *testing.T) {
+	tests := []struct {
+		name        string
+		bucket      string
+		wantEnv     string
+		wantErr     bool
+		errContains string
+	}{
+		{name: "staging bare", bucket: "stl-sentinelstaging-ethereum-raw", wantEnv: "staging"},
+		{name: "staging with suffix", bucket: "stl-sentinelstaging-ethereum-raw-89d540d0", wantEnv: "staging"},
+		{name: "prod", bucket: "stl-sentinelprod-avalanche-raw", wantEnv: "prod"},
+		{name: "case insensitive", bucket: "STL-SENTINELSTAGING-ethereum-raw", wantEnv: "staging"},
+		{name: "wrong prefix", bucket: "my-test-bucket", wantErr: true, errContains: "does not start with"},
+		{name: "no chain segment", bucket: "stl-sentinelstaging", wantErr: true, errContains: "malformed"},
+		{name: "empty", bucket: "", wantErr: true, errContains: "does not start with"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env, err := EnvironmentFromBucket(tt.bucket)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("EnvironmentFromBucket() expected error, got nil")
+					return
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("EnvironmentFromBucket() error = %v, want error containing %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("EnvironmentFromBucket() unexpected error = %v", err)
+				return
+			}
+			if env != tt.wantEnv {
+				t.Errorf("EnvironmentFromBucket() = %q, want %q", env, tt.wantEnv)
+			}
+		})
+	}
+}

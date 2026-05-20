@@ -69,6 +69,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
@@ -195,6 +196,26 @@ func parseFlags(args []string) (Options, *flag.FlagSet, error) {
 // when any key failed or the key source produced an error.
 func Run(ctx context.Context, opts Options, logger *slog.Logger) (int, error) {
 	logKeySourceConfig(logger, opts)
+
+	// Cross-check (chain, bucket, topic) before we touch any data. The three
+	// flags are independent and an operator typo could otherwise route
+	// chain-1 events to the avalanche topic, or write avalanche data to the
+	// ethereum bucket. Deriving the env from the bucket name ensures the
+	// bucket and topic are validated against the same deployment.
+	environment, err := chainutil.EnvironmentFromBucket(opts.Bucket)
+	if err != nil {
+		return 1, fmt.Errorf("derive environment from --bucket: %w", err)
+	}
+	if err := chainutil.ValidateS3BucketForChain(opts.ChainID, opts.Bucket, environment); err != nil {
+		return 1, fmt.Errorf("--bucket / --chain-id mismatch: %w", err)
+	}
+	if err := chainutil.ValidateSNSTopicForChain(opts.ChainID, opts.SNSTopicARN, environment); err != nil {
+		return 1, fmt.Errorf("--sns-topic-arn / --chain-id mismatch: %w", err)
+	}
+	logger.Info("validated chain/bucket/topic triple",
+		"chain_id", opts.ChainID,
+		"environment", environment,
+	)
 
 	state, err := Load(opts.StateFile)
 	if err != nil {
