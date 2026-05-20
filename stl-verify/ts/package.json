@@ -21,9 +21,6 @@
     "@archon-research/uikit-cli": "0.3.2",
     "typescript": "^5.4.5"
   },
-  "volta": {
-    "node": "24.14.1"
-  },
   "workspaces": [
     "ui"
   ]
