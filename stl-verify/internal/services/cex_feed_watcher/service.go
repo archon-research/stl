@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -23,6 +25,15 @@ type Config struct {
 	// logging and metrics tagging.
 	Source string
 	Logger *slog.Logger
+
+	// Metrics is optional; nil disables instrumentation (handy in tests).
+	Metrics *telemetry.CEXMetrics
+
+	// WireFormat and Kind, if non-empty, are emitted once on Start as a
+	// static cex_exchange_info gauge so dashboards can correlate this
+	// watcher's metrics with the exchange's wire-format characteristics.
+	WireFormat string
+	Kind       string
 }
 
 // Service consumes from a CEXFeedSubscriber and forwards messages to a
@@ -32,6 +43,7 @@ type Service struct {
 	subscriber outbound.CEXFeedSubscriber
 	publisher  outbound.CEXFeedPublisher
 	logger     *slog.Logger
+	metrics    *telemetry.CEXMetrics
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 }
@@ -56,6 +68,7 @@ func NewService(config Config, subscriber outbound.CEXFeedSubscriber, publisher 
 		subscriber: subscriber,
 		publisher:  publisher,
 		logger:     logger.With("component", "cex-feed-watcher", "source", config.Source),
+		metrics:    config.Metrics,
 	}, nil
 }
 
@@ -67,6 +80,9 @@ func (s *Service) Start(ctx context.Context) error {
 	ch, err := s.subscriber.Subscribe(ctx)
 	if err != nil {
 		return fmt.Errorf("subscribe: %w", err)
+	}
+	if s.config.WireFormat != "" || s.config.Kind != "" {
+		s.metrics.RecordExchangeInfo(ctx, s.config.Source, s.config.WireFormat, s.config.Kind)
 	}
 	s.wg.Add(1)
 	go s.forwardLoop(ctx, ch)
@@ -96,12 +112,18 @@ func (s *Service) forwardLoop(ctx context.Context, ch <-chan entity.RawCEXMessag
 			if !ok {
 				return
 			}
-			if err := s.publisher.Publish(ctx, msg); err != nil {
+			start := time.Now()
+			err := s.publisher.Publish(ctx, msg)
+			status := "success"
+			if err != nil {
+				status = "error"
 				// Drop and move on. Live data is point-in-time; the next
 				// frame will carry a fresh snapshot. Surfacing the error
 				// lets ops/alerts catch sustained publish failures.
 				s.logger.Warn("publish failed", "error", err, "payloadBytes", len(msg.Payload))
 			}
+			s.metrics.RecordMessageForwarded(ctx, s.config.Source, status, time.Since(start))
+			s.metrics.RecordMessageBytes(ctx, s.config.Source, len(msg.Payload))
 		}
 	}
 }

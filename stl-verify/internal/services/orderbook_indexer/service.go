@@ -19,6 +19,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cex"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -39,6 +40,9 @@ type Config struct {
 	ReceiveBatch int
 
 	Logger *slog.Logger
+
+	// Metrics is optional; nil disables instrumentation (handy in tests).
+	Metrics *telemetry.CEXMetrics
 }
 
 // Service consumes raw CEX frames and persists parsed snapshots.
@@ -49,6 +53,7 @@ type Service struct {
 	repo     outbound.OrderbookRepository
 	cache    CacheWriter
 	logger   *slog.Logger
+	metrics  *telemetry.CEXMetrics
 
 	bufferMu sync.Mutex
 	buffer   map[string]*entity.OrderbookSnapshot
@@ -91,6 +96,7 @@ func NewService(
 		repo:     repo,
 		cache:    cache,
 		logger:   logger.With("component", "orderbook-indexer"),
+		metrics:  config.Metrics,
 		buffer:   make(map[string]*entity.OrderbookSnapshot),
 	}, nil
 }
@@ -150,10 +156,12 @@ func (s *Service) consumeLoop(ctx context.Context) {
 }
 
 func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) {
+	start := time.Now()
 	envelope, err := decodeEnvelope(msg.Body)
 	if err != nil {
 		s.logger.Warn("decode envelope failed; deleting unparseable message",
 			"messageID", msg.MessageID, "error", err)
+		s.metrics.RecordMessageProcessed(ctx, "unknown", "decode_error", time.Since(start))
 		s.deleteMessage(ctx, msg)
 		return
 	}
@@ -162,6 +170,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) {
 	if !ok {
 		s.logger.Warn("unknown source; deleting message",
 			"source", envelope.Source, "messageID", msg.MessageID)
+		s.metrics.RecordMessageProcessed(ctx, envelope.Source, "unknown_source", time.Since(start))
 		s.deleteMessage(ctx, msg)
 		return
 	}
@@ -169,6 +178,7 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) {
 	snapshots, err := parser.ParseMessage(envelope.Payload)
 	if err != nil {
 		s.logger.Warn("parse failed", "source", envelope.Source, "error", err)
+		s.metrics.RecordMessageProcessed(ctx, envelope.Source, "parse_error", time.Since(start))
 		// Don't delete: leave to SQS visibility timeout → DLQ retry path.
 		return
 	}
@@ -176,6 +186,8 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) {
 	for _, snap := range snapshots {
 		s.bufferSnapshot(ctx, snap)
 	}
+	s.metrics.RecordSnapshotsProduced(ctx, envelope.Source, len(snapshots))
+	s.metrics.RecordMessageProcessed(ctx, envelope.Source, "success", time.Since(start))
 
 	s.deleteMessage(ctx, msg)
 }
@@ -227,10 +239,13 @@ func (s *Service) flush(ctx context.Context) {
 	for _, snap := range toFlush {
 		snapshots = append(snapshots, snap)
 	}
+	start := time.Now()
 	if err := s.repo.SaveSnapshots(ctx, snapshots); err != nil {
 		s.logger.Error("flush failed", "count", len(snapshots), "error", err)
+		s.metrics.RecordFlush(ctx, len(snapshots), time.Since(start), "error")
 		return
 	}
+	s.metrics.RecordFlush(ctx, len(snapshots), time.Since(start), "success")
 	s.logger.Info("flushed snapshots to DB", "count", len(snapshots))
 }
 

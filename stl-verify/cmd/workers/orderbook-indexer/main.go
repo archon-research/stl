@@ -78,6 +78,12 @@ func main() {
 	}
 	defer shutdownOTEL(context.Background())
 
+	metrics, err := telemetry.NewCEXMetrics("stl-orderbook-indexer")
+	if err != nil {
+		logger.Error("failed to initialize CEX metrics", "error", err)
+		os.Exit(1)
+	}
+
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(
 		env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"),
 	))
@@ -120,6 +126,7 @@ func main() {
 		orderbook_indexer.Config{
 			FlushInterval: flushInterval,
 			Logger:        logger,
+			Metrics:       metrics,
 		},
 		consumer,
 		cex.AllParsers(),

@@ -81,6 +81,12 @@ func main() {
 	}
 	defer shutdownOTEL(context.Background())
 
+	metrics, err := telemetry.NewCEXMetrics("stl-cex-feed-watcher")
+	if err != nil {
+		logger.Error("failed to initialize CEX metrics", "error", err)
+		os.Exit(1)
+	}
+
 	wsConn, err := buildWSConnection(cexName, logger)
 	if err != nil {
 		logger.Error("failed to build WS connection", "error", err)
@@ -98,8 +104,15 @@ func main() {
 		}
 	}()
 
+	exchangeCfg := cex.Exchanges[cexName]
 	service, err := cex_feed_watcher.NewService(
-		cex_feed_watcher.Config{Source: cexName, Logger: logger},
+		cex_feed_watcher.Config{
+			Source:     cexName,
+			Logger:     logger,
+			Metrics:    metrics,
+			WireFormat: exchangeCfg.WireFormat,
+			Kind:       exchangeCfg.Kind,
+		},
 		wsConn,
 		publisher,
 	)

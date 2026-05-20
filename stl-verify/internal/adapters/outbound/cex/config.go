@@ -15,6 +15,16 @@ type ExchangeConfig struct {
 	PongTimeout         time.Duration
 	ReconnectBackoff    time.Duration
 	MaxReconnectBackoff time.Duration
+
+	// WireFormat is a short identifier of the WS envelope shape, e.g.
+	// "combined_stream" (Binance) or "v5_public_orderbook" (Bybit). Used as
+	// a label on the cex_exchange_info gauge so dashboards can group by
+	// protocol family without hard-coding it.
+	WireFormat string
+	// Kind describes whether frames are full snapshots, deltas, or a
+	// runtime mix tagged by the exchange. Values: "snapshot", "delta",
+	// "mixed".
+	Kind string
 }
 
 // DefaultTimings returns common WebSocket timing defaults.
@@ -24,9 +34,13 @@ func DefaultTimings() (pingInterval, pongTimeout, reconnectBackoff, maxReconnect
 
 var Exchanges = map[string]*ExchangeConfig{
 	"binance": {
-		Name:         "binance",
-		DisplayName:  "Binance",
-		WebSocketURL: "wss://stream.binance.com:9443/ws",
+		Name:        "binance",
+		DisplayName: "Binance",
+		// /stream wraps every frame as {"stream":"<name>","data":{...}}, which
+		// is what BinanceParser.ParseMessage expects. The /ws raw endpoint
+		// delivers bare payloads with no symbol attribution, so the parser
+		// would silently drop every frame.
+		WebSocketURL: "wss://stream.binance.com:9443/stream",
 		RESTBaseURL:  "https://api.binance.com",
 		Symbols: map[string]string{
 			"BTC":    "btcusdt",
@@ -40,6 +54,8 @@ var Exchanges = map[string]*ExchangeConfig{
 		PongTimeout:         10 * time.Second,
 		ReconnectBackoff:    1 * time.Second,
 		MaxReconnectBackoff: 60 * time.Second,
+		WireFormat:          "combined_stream",
+		Kind:                "snapshot",
 	},
 	"bybit": {
 		Name:         "bybit",
@@ -47,21 +63,21 @@ var Exchanges = map[string]*ExchangeConfig{
 		WebSocketURL: "wss://stream.bybit.com/v5/public/spot",
 		RESTBaseURL:  "https://api.bybit.com",
 		Symbols: map[string]string{
-			"BTC":    "BTCUSDT",
-			"ETH":    "ETHUSDT",
-			"XRP":    "XRPUSDT",
-			"WBTC":   "WBTCUSDT",
-			"HYPE":   "HYPEUSDT",
-			"WSTETH": "WSTETHUSDT",
-			"CBBTC":  "CBBTCUSDT",
-			"LBTC":   "LBTCUSDT",
-			"WEETH":  "WEETHUSDT",
+			"BTC":   "BTCUSDT",
+			"ETH":   "ETHUSDT",
+			"XRP":   "XRPUSDT",
+			"WBTC":  "WBTCUSDT",
+			"HYPE":  "HYPEUSDT",
+			"LBTC":  "LBTCUSDT",
+			"WEETH": "WEETHUSDT",
 		},
 		MaxDepth:            200,
 		PingInterval:        20 * time.Second,
 		PongTimeout:         10 * time.Second,
 		ReconnectBackoff:    1 * time.Second,
 		MaxReconnectBackoff: 60 * time.Second,
+		WireFormat:          "v5_public_orderbook",
+		Kind:                "mixed",
 	},
 	"okx": {
 		Name:         "okx",
@@ -81,6 +97,8 @@ var Exchanges = map[string]*ExchangeConfig{
 		PongTimeout:         10 * time.Second,
 		ReconnectBackoff:    1 * time.Second,
 		MaxReconnectBackoff: 60 * time.Second,
+		WireFormat:          "v5_books_channel",
+		Kind:                "snapshot",
 	},
 	"kraken": {
 		Name:         "kraken",
@@ -98,6 +116,8 @@ var Exchanges = map[string]*ExchangeConfig{
 		PongTimeout:         10 * time.Second,
 		ReconnectBackoff:    1 * time.Second,
 		MaxReconnectBackoff: 60 * time.Second,
+		WireFormat:          "v2_book_channel",
+		Kind:                "mixed",
 	},
 	"coinbase": {
 		Name:         "coinbase",
@@ -117,6 +137,8 @@ var Exchanges = map[string]*ExchangeConfig{
 		PongTimeout:         10 * time.Second,
 		ReconnectBackoff:    1 * time.Second,
 		MaxReconnectBackoff: 60 * time.Second,
+		WireFormat:          "advanced_trade_level2",
+		Kind:                "delta",
 	},
 }
 
