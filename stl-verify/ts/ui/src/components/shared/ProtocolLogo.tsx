@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-
-import { css } from '#styled-system/css';
+import { useMemo } from 'react';
 
 import { buildProtocolLogoUrl } from '../../lib/logo-cdn';
+import { LogoAvatar } from './LogoAvatar';
 
 type ProtocolLogoProps = {
   protocolName: string;
@@ -24,58 +23,18 @@ export function ProtocolLogo({
   isSelected = false,
   size = '5',
 }: ProtocolLogoProps) {
-  const [hasImageError, setHasImageError] = useState(false);
   const imageUrl = useMemo(
     () => buildProtocolLogoUrl(protocolName),
     [protocolName],
   );
 
-  useEffect(() => {
-    setHasImageError(false);
-  }, [imageUrl]);
-
   return (
-    <div
-      className={css({
-        width: size,
-        height: size,
-        borderRadius: 'full',
-        overflow: 'hidden',
-        bg: isSelected ? 'interactive.accent' : 'surface.subtle',
-        borderWidth: '1px',
-        borderStyle: 'solid',
-        borderColor: isSelected ? 'interactive.accent' : 'border.subtle',
-        flexShrink: 0,
-      })}
-    >
-      {!imageUrl || hasImageError ? (
-        <div
-          className={css({
-            width: 'full',
-            height: 'full',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: isSelected ? 'white' : 'text.default',
-            fontSize: '2xs',
-            fontWeight: 'semibold',
-          })}
-        >
-          {fallbackText(protocolName)}
-        </div>
-      ) : (
-        <img
-          alt={`${protocolName} logo`}
-          className={css({
-            width: 'full',
-            height: 'full',
-            objectFit: 'cover',
-            display: 'block',
-          })}
-          onError={() => setHasImageError(true)}
-          src={imageUrl}
-        />
-      )}
-    </div>
+    <LogoAvatar
+      alt={`${protocolName} logo`}
+      fallbackText={fallbackText(protocolName)}
+      imageUrl={imageUrl}
+      isSelected={isSelected}
+      size={size}
+    />
   );
 }

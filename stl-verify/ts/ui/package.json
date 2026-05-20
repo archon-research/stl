@@ -17,20 +17,19 @@
     "build": "vite build",
     "pretype:check": "npm run codegen:styles",
     "type:check": "tsgo -b",
-    "format": "oxfmt -c ./.oxfmtrc.ts --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
-    "format:check": "oxfmt -c ./.oxfmtrc.ts --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
+    "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
+    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "preview": "vite preview",
     "generate:openapi-types": "openapi-typescript ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts",
     "prelint": "npm run codegen:styles",
-    "lint": "oxlint -c ./.oxlintrc.ts src panda.config.ts vite.config.ts"
+    "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-core": "0.2.2-dev25318411334",
-    "@archon-research/http-client-react": "0.2.2-dev25318411334",
+    "@archon-research/http-client-core": "0.3.2",
+    "@archon-research/http-client-react": "0.3.2",
     "@tanstack/react-query": "^5.99.2",
     "@tanstack/react-table": "^8.20.0",
     "lucide-react": "^1.14.0",
-    "openapi-fetch": "^0.17.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
@@ -38,20 +37,23 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@archon-research/design-system": "0.2.2-dev25318411334",
-    "@archon-research/oxfmt-config": "0.2.2-dev25318411334",
-    "@archon-research/oxlint-config": "0.2.2-dev25318411334",
-    "@archon-research/tsconfig": "0.2.2-dev25318411334",
+    "@archon-research/design-system": "0.3.2",
+    "@archon-research/oxfmt-config": "0.3.2",
+    "@archon-research/oxlint-config": "0.3.2",
+    "@archon-research/tsconfig": "0.3.2",
     "@pandacss/dev": "^1.9.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@typescript/native-preview": "7.0.0-dev.20260429.1",
+    "@typescript/native-preview": "7.0.0-dev.20260504.1",
     "@vitejs/plugin-react": "^4.3.0",
     "openapi-typescript": "^7.6.1",
-    "oxfmt": "^0.45.0",
-    "oxlint": "^1.60.0",
     "postcss": "^8.5.6",
-    "typescript": "^5.4.5",
     "vite": "^5.2.0"
+  },
+  "optionalDependencies": {
+    "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260504.1",
+    "@typescript/native-preview-linux-x64": "7.0.0-dev.20260504.1",
+    "lightningcss-darwin-arm64": "1.31.1",
+    "lightningcss-linux-x64-gnu": "1.31.1"
   }
 }

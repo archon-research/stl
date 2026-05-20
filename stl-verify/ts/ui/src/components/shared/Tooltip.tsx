@@ -1,4 +1,4 @@
-import { Tooltip } from '@base-ui/react/tooltip';
+import { Tooltip } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
@@ -18,6 +18,7 @@ export function AppTooltip({ trigger, content, ariaLabel }: AppTooltipProps) {
           render={
             <button
               type="button"
+              aria-label={ariaLabel}
               className={css({
                 display: 'inline-flex',
                 alignItems: 'center',
