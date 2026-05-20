@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -28,6 +26,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
@@ -220,38 +219,21 @@ func main() {
 
 	// Create SNS event sink
 	snsEndpoint := env.Get("AWS_SNS_ENDPOINT", "http://localhost:4566")
-	awsRegion := env.Get("AWS_REGION", "us-east-1")
 
 	// Single SNS FIFO topic for all event types
 	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
 
-	// Configure AWS SDK for LocalStack or production
-	// In production (ECS/Fargate), use the default credential chain which picks up IAM role credentials.
-	// For local development with LocalStack, use static credentials from environment variables.
-	awsConfigOptions := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(awsRegion),
-	}
-
-	// Only use static credentials if explicitly set (for LocalStack)
-	// In ECS/Fargate, these won't be set and the SDK will use the IAM role
-	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
-		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-		awsConfigOptions = append(awsConfigOptions,
-			awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-				accessKeyID,
-				secretKey,
-				"",
-			)),
-		)
-		logger.Debug("using static AWS credentials from environment")
-	} else {
-		logger.Debug("using default AWS credential chain (IAM role)")
-	}
-
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsConfigOptions...)
+	awsCfg, err := awsconfig.Load(context.Background(), awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		logger.Error("failed to load AWS config", "error", err)
 		os.Exit(1)
+	}
+	if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+		logger.Info("using static AWS credentials from environment")
+	} else {
+		logger.Info("using default AWS credential chain (IAM role / instance profile)")
 	}
 
 	// Create SNS client with custom endpoint for LocalStack

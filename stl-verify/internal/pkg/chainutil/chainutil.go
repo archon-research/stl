@@ -41,6 +41,58 @@ func ValidateS3BucketForChain(chainID int64, bucket string, environment string) 
 	return nil
 }
 
+// ValidateSNSTopicForChain checks that the SNS topic ARN's topic name has the
+// expected suffix for the given chain ID and deployment environment. This
+// prevents accidentally publishing chain-X BlockEvents to chain-Y's topic.
+//
+// The expected suffix is: stl-sentinel{environment}-{chainName}-blocks.fifo
+// matching the watcher's per-chain topic naming. For chain ID 1 (Ethereum) in
+// "staging" the ARN must end with "stl-sentinelstaging-ethereum-blocks.fifo".
+//
+// Returns an error if:
+//   - environment is empty
+//   - The chain ID is not recognized
+//   - The topic ARN does not have the expected suffix
+func ValidateSNSTopicForChain(chainID int64, topicARN string, environment string) error {
+	if environment == "" {
+		return fmt.Errorf("environment must not be empty")
+	}
+
+	chainName, ok := entity.ChainIDToS3Bucket[chainID]
+	if !ok {
+		return fmt.Errorf("unknown chain ID %d: cannot validate sns topic", chainID)
+	}
+
+	expectedSuffix := fmt.Sprintf(":stl-sentinel%s-%s-blocks.fifo", environment, chainName)
+	if !strings.HasSuffix(strings.ToLower(topicARN), strings.ToLower(expectedSuffix)) {
+		return fmt.Errorf("sns topic %q does not have expected suffix %q for chain ID %d", topicARN, expectedSuffix, chainID)
+	}
+
+	return nil
+}
+
+// EnvironmentFromBucket extracts the deployment environment (e.g. "staging",
+// "prod") from a stl-sentinel-prefixed bucket name. Use this to derive a
+// single env value that downstream validators (ValidateS3BucketForChain,
+// ValidateSNSTopicForChain) can share, so an operator who passes a
+// staging bucket and a prod topic gets a clear error at startup.
+//
+// Returns an error if bucket does not start with "stl-sentinel" or has no
+// segment following it.
+func EnvironmentFromBucket(bucket string) (string, error) {
+	const prefix = "stl-sentinel"
+	lower := strings.ToLower(bucket)
+	if !strings.HasPrefix(lower, prefix) {
+		return "", fmt.Errorf("bucket %q does not start with %q", bucket, prefix)
+	}
+	rest := lower[len(prefix):]
+	dash := strings.Index(rest, "-")
+	if dash < 1 {
+		return "", fmt.Errorf("bucket %q malformed; expected stl-sentinel{env}-{chain}-raw[-suffix]", bucket)
+	}
+	return rest[:dash], nil
+}
+
 // RequireChainID reads CHAIN_ID from the environment and parses it as an int.
 // Returns an error if the variable is unset or not a valid integer.
 func RequireChainID() (int, error) {
