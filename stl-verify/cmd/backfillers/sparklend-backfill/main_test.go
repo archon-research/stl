@@ -35,7 +35,7 @@ func TestParseFlags(t *testing.T) {
 				dbURL:       "postgres://x",
 				chainID:     1,
 				concurrency: 10,
-				awsRegion:   "us-east-1",
+				awsRegion:   "eu-west-1",
 			},
 		},
 		{
@@ -71,7 +71,7 @@ func TestParseFlags(t *testing.T) {
 				dbURL:       "postgres://from-env",
 				chainID:     1,
 				concurrency: 10,
-				awsRegion:   "us-east-1",
+				awsRegion:   "eu-west-1",
 			},
 		},
 		{
