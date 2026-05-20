@@ -2,6 +2,7 @@ go:
   - stl-verify/**
   - '!stl-verify/python/**'
   - '!stl-verify/ts/**'
+  - .go-version
   - lefthook.yml
   - stl-verify/lefthook.yml
   - stl-verify/python/lefthook.yml
@@ -14,6 +15,7 @@ go:
 python:
   - stl-verify/python/**
   - stl-verify/db/migrations/**
+  - .python-version
   - lefthook.yml
   - stl-verify/lefthook.yml
   - stl-verify/python/lefthook.yml
@@ -27,6 +29,7 @@ ts:
   - stl-verify/python/app/**
   - stl-verify/python/scripts/export_openapi_schema.py
   - stl-verify/python/Makefile
+  - .node-version
   - lefthook.yml
   - stl-verify/lefthook.yml
   - stl-verify/ts/lefthook.yml

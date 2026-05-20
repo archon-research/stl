@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.10
+ARG PYTHON_VERSION=3.12
 
 # Build UI on the native builder architecture — the output is static JS/HTML/CSS,
 # so there's no reason to run npm under QEMU arm64 emulation (which crashes node).
@@ -19,7 +20,7 @@ COPY ts/ui ui/
 RUN npm run build --workspace=@stl-verify/ui
 
 # Build Python dependencies
-FROM python:3.12-slim AS builder
+FROM python:${PYTHON_VERSION}-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.5 /uv /uvx /bin/
 
@@ -35,7 +36,7 @@ COPY python/app/ app/
 COPY python/suraf/ suraf/
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12-slim
+FROM python:${PYTHON_VERSION}-slim
 
 ARG GIT_COMMIT=unknown
 ENV GIT_COMMIT=${GIT_COMMIT}

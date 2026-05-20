@@ -6,7 +6,8 @@
 # -----------------------------------------------------------------------------
 # Build Stage
 # -----------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS builder
+ARG GO_VERSION=1.26.3
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
 # Build arguments for cross-compilation and versioning
 ARG TARGETARCH
