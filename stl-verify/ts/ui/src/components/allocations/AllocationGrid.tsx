@@ -99,6 +99,271 @@ function getCategoryTextColor(
   }
 }
 
+function AllocationAssetCell({
+  allocation,
+  localProtocols,
+  chainLabels,
+}: {
+  allocation: Allocation;
+  localProtocols: LocalProtocolRow[];
+  chainLabels: ChainLabelLookup;
+}) {
+  return (
+    <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
+      <p
+        className={css({
+          m: 0,
+          fontSize: 'sm',
+          fontWeight: 'semibold',
+          color: 'text.strong',
+        })}
+      >
+        {allocation.symbol}
+      </p>
+      <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.muted',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '1.5',
+            whiteSpace: 'nowrap',
+          })}
+        >
+          <ProtocolLogo
+            protocolName={getProtocolLabel(
+              allocation.protocol_name,
+              localProtocols,
+              allocation.chain_id,
+            )}
+            size="5"
+          />
+          {getProtocolLabel(
+            allocation.protocol_name,
+            localProtocols,
+            allocation.chain_id,
+          )}
+        </span>
+        <span
+          className={css({
+            fontSize: 'xs',
+            color: 'text.muted',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '1.5',
+            whiteSpace: 'nowrap',
+          })}
+        >
+          <ChainLogo
+            chainId={allocation.chain_id}
+            label={getChainLabel(allocation.chain_id, chainLabels)}
+            size="5"
+          />
+          {getChainLabel(allocation.chain_id, chainLabels)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function AllocationUnderlyingCell({
+  allocation,
+}: {
+  allocation: Allocation;
+}) {
+  return (
+    <div
+      className={css({
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '1',
+      })}
+    >
+      <div className={flex({ align: 'center', gap: '2' })}>
+        <TokenLogo
+          address={allocation.underlying_token_address}
+          chainId={allocation.chain_id}
+          size="6"
+          symbol={allocation.underlying_symbol}
+        />
+        <span
+          className={css({
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            color: 'text.strong',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            m: 0,
+          })}
+        >
+          {allocation.underlying_symbol}
+        </span>
+      </div>
+      <TokenAddress
+        address={allocation.underlying_token_address}
+        chainId={allocation.chain_id}
+        style={{ fontSize: '0.8rem' }}
+      />
+    </div>
+  );
+}
+
+function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
+  const amountUsd = allocation.amount_usd;
+
+  return (
+    <div
+      className={css({
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '1',
+      })}
+    >
+      <div className={flex({ align: 'center', gap: '2' })}>
+        <TokenLogo
+          address={allocation.receipt_token_address}
+          chainId={allocation.chain_id}
+          size="6"
+          symbol={allocation.symbol}
+        />
+        <span
+          className={css({
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            color: 'text.strong',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            m: 0,
+          })}
+        >
+          {amountUsd !== undefined && amountUsd !== null
+            ? formatUsdValue(amountUsd)
+            : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+        </span>
+      </div>
+      <TokenAddress
+        address={allocation.receipt_token_address}
+        chainId={allocation.chain_id}
+        style={{ fontSize: '0.8rem' }}
+      />
+    </div>
+  );
+}
+
+function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
+  if (!allocation.latest_activity_at) {
+    return (
+      <p
+        className={css({
+          m: 0,
+          fontSize: 'sm',
+          color: 'text.muted',
+        })}
+      >
+        —
+      </p>
+    );
+  }
+
+  return (
+    <div>
+      <p
+        className={css({
+          m: 0,
+          fontSize: 'sm',
+          fontWeight: 'semibold',
+          color: 'text.strong',
+        })}
+      >
+        {formatFreshnessLabel(allocation.latest_activity_at)}
+      </p>
+      <p
+        className={css({
+          m: 0,
+          fontSize: 'xs',
+          color: 'text.muted',
+        })}
+      >
+        {formatDateTime(allocation.latest_activity_at)}
+      </p>
+    </div>
+  );
+}
+
+function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
+  const category = allocation.category;
+  const categoryBg = getCategoryColor(category);
+  const categoryText = getCategoryTextColor(category);
+
+  return (
+    <div
+      className={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        px: '2',
+        py: '1',
+        borderRadius: 'md',
+        fontSize: 'xs',
+        fontWeight: 'semibold',
+        bg: categoryBg,
+        color: categoryText,
+      })}
+    >
+      {getCategoryLabel(category)}
+    </div>
+  );
+}
+
+function createAllocationColumns(
+  chainLabels: ChainLabelLookup,
+  localProtocols: LocalProtocolRow[],
+): ColumnDef<Allocation>[] {
+  return [
+    {
+      id: 'symbol',
+      header: 'Asset',
+      accessorFn: (allocation) => allocation.symbol,
+      cell: ({ row }) => (
+        <AllocationAssetCell
+          allocation={row.original}
+          chainLabels={chainLabels}
+          localProtocols={localProtocols}
+        />
+      ),
+    },
+    {
+      id: 'underlying_symbol',
+      header: 'Underlying',
+      accessorFn: (allocation) => allocation.underlying_symbol,
+      cell: ({ row }) => <AllocationUnderlyingCell allocation={row.original} />,
+    },
+    {
+      id: 'balance',
+      header: 'Balance',
+      accessorFn: (allocation) => Number(allocation.balance),
+      cell: ({ row }) => <AllocationBalanceCell allocation={row.original} />,
+    },
+    {
+      id: 'latest_activity_at',
+      header: 'Latest activity',
+      accessorFn: (allocation) => {
+        const latestActivityAt = allocation.latest_activity_at;
+        return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
+      },
+      cell: ({ row }) => <AllocationActivityCell allocation={row.original} />,
+    },
+    {
+      id: 'category',
+      header: 'Category',
+      accessorFn: (allocation) => allocation.category,
+      cell: ({ row }) => <AllocationCategoryCell allocation={row.original} />,
+    },
+  ];
+}
+
 export function AllocationGrid({
   allocations,
   capitalMetrics,
@@ -192,245 +457,7 @@ export function AllocationGrid({
   const hasSearchQuery = searchValue.trim().length > 0;
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
-    () => [
-      {
-        id: 'symbol',
-        header: 'Asset',
-        accessorFn: (allocation) => allocation.symbol,
-        cell: ({ row }) => {
-          const allocation = row.original;
-
-          return (
-            <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
-              <p
-                className={css({
-                  m: 0,
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                })}
-              >
-                {allocation.symbol}
-              </p>
-              <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
-                <span
-                  className={css({
-                    fontSize: 'xs',
-                    color: 'text.muted',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '1.5',
-                    whiteSpace: 'nowrap',
-                  })}
-                >
-                  <ProtocolLogo
-                    protocolName={getProtocolLabel(
-                      allocation.protocol_name,
-                      localProtocols,
-                      allocation.chain_id,
-                    )}
-                    size="5"
-                  />
-                  {getProtocolLabel(
-                    allocation.protocol_name,
-                    localProtocols,
-                    allocation.chain_id,
-                  )}
-                </span>
-                <span
-                  className={css({
-                    fontSize: 'xs',
-                    color: 'text.muted',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '1.5',
-                    whiteSpace: 'nowrap',
-                  })}
-                >
-                  <ChainLogo
-                    chainId={allocation.chain_id}
-                    label={getChainLabel(allocation.chain_id, chainLabels)}
-                    size="5"
-                  />
-                  {getChainLabel(allocation.chain_id, chainLabels)}
-                </span>
-              </div>
-            </div>
-          );
-        },
-      },
-      {
-        id: 'underlying_symbol',
-        header: 'Underlying',
-        accessorFn: (allocation) => allocation.underlying_symbol,
-        cell: ({ row }) => {
-          const allocation = row.original;
-
-          return (
-            <div
-              className={css({
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '1',
-              })}
-            >
-              <div className={flex({ align: 'center', gap: '2' })}>
-                <TokenLogo
-                  address={allocation.underlying_token_address}
-                  chainId={allocation.chain_id}
-                  size="6"
-                  symbol={allocation.underlying_symbol}
-                />
-                <span
-                  className={css({
-                    fontSize: 'sm',
-                    fontWeight: 'semibold',
-                    color: 'text.strong',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    m: 0,
-                  })}
-                >
-                  {allocation.underlying_symbol}
-                </span>
-              </div>
-              <TokenAddress
-                address={allocation.underlying_token_address}
-                chainId={allocation.chain_id}
-                style={{ fontSize: '0.8rem' }}
-              />
-            </div>
-          );
-        },
-      },
-      {
-        id: 'balance',
-        header: 'Balance',
-        accessorFn: (allocation) => Number(allocation.balance),
-        cell: ({ row }) => {
-          const allocation = row.original;
-          const amountUsd = allocation.amount_usd;
-
-          return (
-            <div
-              className={css({
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '1',
-              })}
-            >
-              <div className={flex({ align: 'center', gap: '2' })}>
-                <TokenLogo
-                  address={allocation.receipt_token_address}
-                  chainId={allocation.chain_id}
-                  size="6"
-                  symbol={allocation.symbol}
-                />
-                <span
-                  className={css({
-                    fontSize: 'sm',
-                    fontWeight: 'semibold',
-                    color: 'text.strong',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    m: 0,
-                  })}
-                >
-                  {amountUsd !== undefined && amountUsd !== null
-                    ? formatUsdValue(amountUsd)
-                    : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
-                </span>
-              </div>
-              <TokenAddress
-                address={allocation.receipt_token_address}
-                chainId={allocation.chain_id}
-                style={{ fontSize: '0.8rem' }}
-              />
-            </div>
-          );
-        },
-      },
-      {
-        id: 'latest_activity_at',
-        header: 'Latest activity',
-        accessorFn: (allocation) => {
-          const latestActivityAt = allocation.latest_activity_at;
-          return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
-        },
-        cell: ({ row }) => {
-          const allocation = row.original;
-
-          if (!allocation.latest_activity_at) {
-            return (
-              <p
-                className={css({
-                  m: 0,
-                  fontSize: 'sm',
-                  color: 'text.muted',
-                })}
-              >
-                —
-              </p>
-            );
-          }
-
-          return (
-            <div>
-              <p
-                className={css({
-                  m: 0,
-                  fontSize: 'sm',
-                  fontWeight: 'semibold',
-                  color: 'text.strong',
-                })}
-              >
-                {formatFreshnessLabel(allocation.latest_activity_at)}
-              </p>
-              <p
-                className={css({
-                  m: 0,
-                  fontSize: 'xs',
-                  color: 'text.muted',
-                })}
-              >
-                {formatDateTime(allocation.latest_activity_at)}
-              </p>
-            </div>
-          );
-        },
-      },
-      {
-        id: 'category',
-        header: 'Category',
-        accessorFn: (allocation) => allocation.category,
-        cell: ({ row }) => {
-          const allocation = row.original;
-          const category = allocation.category;
-          const categoryBg = getCategoryColor(category);
-          const categoryText = getCategoryTextColor(category);
-
-          return (
-            <div
-              className={css({
-                display: 'inline-flex',
-                alignItems: 'center',
-                px: '2',
-                py: '1',
-                borderRadius: 'md',
-                fontSize: 'xs',
-                fontWeight: 'semibold',
-                bg: categoryBg,
-                color: categoryText,
-              })}
-            >
-              {getCategoryLabel(category)}
-            </div>
-          );
-        },
-      },
-    ],
+    () => createAllocationColumns(chainLabels, localProtocols),
     [chainLabels, localProtocols],
   );
 

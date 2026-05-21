@@ -43,6 +43,86 @@ type RiskBreakdownTabProps = {
 
 type RiskItem = RiskBreakdown['items'][number];
 
+function RiskSymbolCell({
+  chainId,
+  symbol,
+}: {
+  chainId: number;
+  symbol: string;
+}) {
+  return (
+    <div
+      className={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '2',
+      })}
+    >
+      <ChainLogo chainId={chainId} size="6" />
+      <span>{symbol}</span>
+    </div>
+  );
+}
+
+function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
+  return [
+    {
+      id: 'symbol',
+      header: 'Symbol',
+      accessorKey: 'symbol',
+      cell: (info: CellContext<RiskItem, unknown>) => (
+        <RiskSymbolCell chainId={chainId} symbol={info.getValue() as string} />
+      ),
+    },
+    {
+      id: 'amount',
+      header: 'Amount',
+      accessorKey: 'amount',
+      cell: (info: CellContext<RiskItem, unknown>) => {
+        const value = info.getValue();
+        return typeof value === 'string'
+          ? parseFloat(value).toFixed(2)
+          : (value as number).toFixed(2);
+      },
+    },
+    {
+      id: 'price_usd',
+      header: 'Price USD',
+      accessorKey: 'price_usd',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatUsdValue(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'amount_usd',
+      header: 'Amount USD',
+      accessorKey: 'amount_usd',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatUsdValue(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'backing_pct',
+      header: 'Backing %',
+      accessorKey: 'backing_pct',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatPercentValue(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'lt',
+      header: 'Liquidation Threshold',
+      accessorKey: 'liquidation_threshold',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatRatioPercent(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'bonus',
+      header: 'Liquidation Bonus',
+      accessorKey: 'liquidation_bonus',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatMultiplier(info.getValue() as string | number | null | undefined),
+    },
+  ];
+}
+
 function RiskTable({
   chainId,
   items,
@@ -74,80 +154,7 @@ function RiskTable({
   );
 
   const columns = useMemo<ColumnDef<RiskItem>[]>(
-    () => [
-      {
-        id: 'symbol',
-        header: 'Symbol',
-        accessorKey: 'symbol',
-        cell: (info: CellContext<RiskItem, unknown>) => {
-          const symbol = info.getValue() as string;
-          return (
-            <div
-              className={css({
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '2',
-              })}
-            >
-              <ChainLogo chainId={chainId} size="6" />
-              <span>{symbol}</span>
-            </div>
-          );
-        },
-      },
-      {
-        id: 'amount',
-        header: 'Amount',
-        accessorKey: 'amount',
-        cell: (info: CellContext<RiskItem, unknown>) => {
-          const value = info.getValue();
-          return typeof value === 'string'
-            ? parseFloat(value).toFixed(2)
-            : (value as number).toFixed(2);
-        },
-      },
-      {
-        id: 'price_usd',
-        header: 'Price USD',
-        accessorKey: 'price_usd',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatUsdValue(info.getValue() as string | number | null | undefined),
-      },
-      {
-        id: 'amount_usd',
-        header: 'Amount USD',
-        accessorKey: 'amount_usd',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatUsdValue(info.getValue() as string | number | null | undefined),
-      },
-      {
-        id: 'backing_pct',
-        header: 'Backing %',
-        accessorKey: 'backing_pct',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatPercentValue(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-      {
-        id: 'lt',
-        header: 'Liquidation Threshold',
-        accessorKey: 'liquidation_threshold',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatRatioPercent(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-      {
-        id: 'bonus',
-        header: 'Liquidation Bonus',
-        accessorKey: 'liquidation_bonus',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatMultiplier(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-    ],
+    () => createRiskColumns(chainId),
     [chainId],
   );
 
