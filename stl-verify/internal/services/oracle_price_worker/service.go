@@ -284,7 +284,7 @@ func (s *Service) resolveBlockTimestamp(ctx context.Context, event outbound.Bloc
 	// We surface a clear error and let SQS retry — the watcher's fix will have
 	// overwritten the row with valid data by the time the retry fires.
 	if rpcutil.IsNullOrEmpty(data) {
-		return time.Time{}, fmt.Errorf("block %d (version %d) not found in cache or s3 (or cached value is null)", event.BlockNumber, event.Version)
+		return time.Time{}, fmt.Errorf("block %d (version %d, chain %d) not found in cache or s3 (or cached value is null)", event.BlockNumber, event.Version, event.ChainID)
 	}
 
 	var block struct {

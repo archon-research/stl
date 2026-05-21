@@ -34,10 +34,8 @@ var ErrUpstreamNullResult = errors.New("upstream returned null result")
 // strips whitespace before producing the RawMessage value, so this is belt
 // and braces.
 func IsNullOrEmpty(r json.RawMessage) bool {
-	if len(r) == 0 {
-		return true
-	}
-	return bytes.Equal(bytes.TrimSpace(r), []byte("null"))
+	trimmed := bytes.TrimSpace(r)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 // Request represents a JSON-RPC 2.0 request.
