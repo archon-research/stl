@@ -6,28 +6,10 @@ The risk API uses this to enrich responses with the on-chain identifiers
 unknown" with a ``None`` return so handlers can return 404 explicitly.
 """
 
-from dataclasses import dataclass
 from typing import Protocol
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
-
-
-@dataclass(frozen=True)
-class ReceiptTokenAddressRef:
-    """Address-only reference to a receipt token wrapping a given underlying.
-
-    Used by the 404 "did you mean" hint when the caller passes an
-    underlying-token address where a receipt-token address is expected.
-    """
-
-    chain_id: int
-    receipt_token_address: bytes
-    symbol: str | None
-
-    @property
-    def receipt_token_address_hex(self) -> str:
-        return "0x" + self.receipt_token_address.hex()
 
 
 class ReceiptTokenLookup(Protocol):
@@ -42,16 +24,5 @@ class ReceiptTokenLookup(Protocol):
 
         ``address`` is matched against ``receipt_token.receipt_token_address``
         (the ALM-proxy / aToken address, not the underlying ERC-20 address).
-        """
-        ...
-
-    async def list_receipt_tokens_for_underlying(
-        self, chain_id: int, underlying_address: EthAddress
-    ) -> list[ReceiptTokenAddressRef]:
-        """Return receipt tokens wrapping the underlying ERC-20 at ``(chain_id, address)``.
-
-        Used to produce a helpful 404 when callers pass an underlying-token
-        address where a receipt-token address is expected. Returns an empty
-        list when nothing matches; never raises for "no rows".
         """
         ...

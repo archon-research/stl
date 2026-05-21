@@ -151,22 +151,6 @@ def test_risk_by_address_accepts_mixed_case_address(
     assert response.json()["detail"]["code"] == "share_data_missing"
 
 
-def test_risk_by_address_returns_404_with_hint_when_address_is_underlying(
-    client: TestClient,
-    seeded_receipt_token_id: int,
-) -> None:
-    """Passing the underlying ERC-20 address yields 404 with a hint listing the wrapping receipt tokens."""
-    weth_address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
-    response = client.get(f"/v1/risk/1/{weth_address}/breakdown")
-
-    assert response.status_code == 404
-    detail = response.json()["detail"]
-    assert isinstance(detail, dict)
-    assert "underlying" in detail["message"]
-    assert len(detail["suggestions"]) >= 1
-    assert any(s["receipt_token_address"].lower() == f"0x{_RECEIPT_TOKEN_ADDRESS_HEX}" for s in detail["suggestions"])
-
-
 def test_risk_bad_debt_by_address_returns_422_for_malformed_address(
     client: TestClient,
 ) -> None:

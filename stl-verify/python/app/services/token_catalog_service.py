@@ -24,6 +24,3 @@ class TokenCatalogService:
 
     async def get_token_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenMetadata | None:
         return await self._repository.get_token_by_chain_and_address(chain_id, address)
-
-    async def get_latest_price_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenPriceQuote | None:
-        return await self._repository.get_latest_price_by_chain_and_address(chain_id, address)

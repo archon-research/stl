@@ -26,7 +26,3 @@ class TokenCatalogRepository(Protocol):
     async def get_token_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenMetadata | None:
         """Return token metadata for ``(chain_id, address)``, or None when not found."""
         ...
-
-    async def get_latest_price_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenPriceQuote | None:
-        """Return the latest price quote for the token at ``(chain_id, address)``."""
-        ...

@@ -156,19 +156,3 @@ async def test_get_by_chain_and_address_returns_none_for_unknown_address(reposit
 
     result = await repository.get_by_chain_and_address(1, EthAddress("0x" + "ff" * 20))
     assert result is None
-
-
-@pytest.mark.asyncio(loop_scope="module")
-async def test_list_receipt_tokens_for_underlying_returns_wrappers(repository) -> None:
-    """WETH at chain 1 has at least one seeded receipt token wrapping it."""
-
-    weth = EthAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
-    refs = await repository.list_receipt_tokens_for_underlying(1, weth)
-    assert len(refs) >= 1
-    assert all(ref.chain_id == 1 for ref in refs)
-    seeded = next(
-        (ref for ref in refs if ref.receipt_token_address_hex == "0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db"),
-        None,
-    )
-    assert seeded is not None
-    assert seeded.symbol == "spWETH"
