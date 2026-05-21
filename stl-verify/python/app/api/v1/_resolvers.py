@@ -4,7 +4,15 @@ These helpers translate the on-chain identity ``(chain_id, token_address)``
 into the internal surrogate-ID entities that the service layer still
 consumes. Centralised here so the 404 contract stays uniform across
 endpoints.
+
+The ``AssetIdentity`` discriminated union and ``parse_asset_identity``
+factory also live here so route handlers can lift the loose "one of
+``asset_id`` or ``(chain_id, token_address)``" trio into a single typed
+value at the API boundary, eliminating the need for trust-based asserts
+downstream.
 """
+
+from dataclasses import dataclass
 
 from fastapi import HTTPException
 
@@ -44,26 +52,41 @@ async def resolve_receipt_token(
     return info
 
 
-def check_exactly_one_asset_identity(
+@dataclass(frozen=True, slots=True)
+class AssetById:
+    asset_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class AssetByAddress:
+    chain_id: int
+    token_address: str
+
+
+AssetIdentity = AssetById | AssetByAddress
+
+
+def parse_asset_identity(
     asset_id: int | None,
     chain_id: int | None,
     token_address: str | None,
-) -> None:
-    """Raise ``ValueError`` unless exactly one of ``asset_id`` or ``(chain_id, token_address)`` supplied.
+) -> AssetIdentity:
+    """Lift loose identity inputs into a typed ``AssetIdentity`` or raise 422.
 
-    ``chain_id`` and ``token_address`` count as a single identity pair:
-    both must be provided together, or both omitted. Pydantic
-    ``model_validator`` surfaces the ``ValueError`` as a normal 422.
-    Handlers that call this directly should catch ``ValueError`` and
-    re-raise as ``HTTPException(status_code=422, detail=...)``.
+    Exactly one of ``asset_id`` or ``(chain_id, token_address)`` must be
+    supplied. ``chain_id`` and ``token_address`` count as a single pair —
+    both together, or both omitted. Once this returns, downstream code
+    pattern-matches on the variant and never needs to inspect ``None``.
     """
-    has_surrogate = asset_id is not None
-    pair_provided = chain_id is not None or token_address is not None
-    pair_complete = chain_id is not None and token_address is not None
+    if asset_id is not None and chain_id is None and token_address is None:
+        return AssetById(asset_id)
+    if asset_id is None and chain_id is not None and token_address is not None:
+        return AssetByAddress(chain_id, token_address)
 
-    if pair_provided and not pair_complete:
-        raise ValueError("chain_id and token_address must be supplied together")
-    if has_surrogate and pair_complete:
-        raise ValueError("provide exactly one of asset_id or (chain_id, token_address); got both")
-    if not has_surrogate and not pair_complete:
-        raise ValueError("provide exactly one of asset_id or (chain_id, token_address); got neither")
+    if (chain_id is None) != (token_address is None):
+        detail = "chain_id and token_address must be supplied together"
+    elif asset_id is not None:
+        detail = "provide exactly one of asset_id or (chain_id, token_address); got both"
+    else:
+        detail = "provide exactly one of asset_id or (chain_id, token_address); got neither"
+    raise HTTPException(status_code=422, detail=detail)

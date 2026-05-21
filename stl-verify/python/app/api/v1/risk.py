@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from app.api._validators import (
     ChainIdPath,
@@ -15,7 +15,12 @@ from app.api.deps import (
     get_model_registry,
     get_receipt_token_lookup,
 )
-from app.api.v1._resolvers import check_exactly_one_asset_identity, resolve_receipt_token
+from app.api.v1._resolvers import (
+    AssetById,
+    AssetIdentity,
+    parse_asset_identity,
+    resolve_receipt_token,
+)
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import RrcResult
@@ -325,11 +330,6 @@ class RrcRequest(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def _exactly_one_identity(self) -> "RrcRequest":
-        check_exactly_one_asset_identity(self.asset_id, self.chain_id, self.token_address)
-        return self
-
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -427,16 +427,8 @@ async def get_rrc(
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RrcEnvelope:
-    try:
-        check_exactly_one_asset_identity(asset_id, chain_id, token_address)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    info = await _resolve_asset(
-        asset_id=asset_id,
-        chain_id=chain_id,
-        token_address=token_address,
-        lookup=receipt_token_lookup,
-    )
+    identity = parse_asset_identity(asset_id, chain_id, token_address)
+    info = await _resolve_asset(identity, receipt_token_lookup)
     return await _compute_envelope(
         info=info,
         prime_id=EthAddress(prime_id),
@@ -467,12 +459,8 @@ async def post_rrc_scenario(
     registry: ModelRegistry = Depends(get_model_registry),
     receipt_token_lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RrcEnvelope:
-    info = await _resolve_asset(
-        asset_id=body.asset_id,
-        chain_id=body.chain_id,
-        token_address=body.token_address,
-        lookup=receipt_token_lookup,
-    )
+    identity = parse_asset_identity(body.asset_id, body.chain_id, body.token_address)
+    info = await _resolve_asset(identity, receipt_token_lookup)
     return await _compute_envelope(
         info=info,
         prime_id=EthAddress(body.prime_id),
@@ -496,22 +484,16 @@ async def post_rrc(
 
 
 async def _resolve_asset(
-    *,
-    asset_id: int | None,
-    chain_id: int | None,
-    token_address: str | None,
+    identity: AssetIdentity,
     lookup: ReceiptTokenLookup,
 ) -> ReceiptTokenInfo:
-    """Resolve either form of asset identity to a ``ReceiptTokenInfo`` or raise 404."""
-    if asset_id is not None:
-        info = await lookup.get(asset_id)
+    """Resolve a typed asset identity to a ``ReceiptTokenInfo`` or raise 404."""
+    if isinstance(identity, AssetById):
+        info = await lookup.get(identity.asset_id)
         if info is None:
-            raise HTTPException(status_code=404, detail=f"unknown asset_id={asset_id}")
+            raise HTTPException(status_code=404, detail=f"unknown asset_id={identity.asset_id}")
         return info
-
-    # check_exactly_one_asset_identity guarantees both are set when we reach here.
-    assert chain_id is not None and token_address is not None
-    return await resolve_receipt_token(chain_id, token_address, lookup)
+    return await resolve_receipt_token(identity.chain_id, identity.token_address, lookup)
 
 
 async def _compute_envelope(

@@ -103,10 +103,7 @@ class PostgresTokenCatalogRepository:
             async with self._engine.connect() as conn:
                 row = (await conn.execute(_GET_TOKEN_SQL, {"token_id": token_id})).fetchone()
 
-            if row is None:
-                return None
-
-            return self._row_to_metadata(row)
+            return self._row_to_metadata(row) if row else None
         except Exception as exc:
             logger.error(
                 "Failed to fetch token from database",
@@ -125,10 +122,7 @@ class PostgresTokenCatalogRepository:
             async with self._engine.connect() as conn:
                 row = (await conn.execute(_GET_TOKEN_BY_CHAIN_ADDRESS_SQL, params)).fetchone()
 
-            if row is None:
-                return None
-
-            return self._row_to_metadata(row)
+            return self._row_to_metadata(row) if row else None
         except Exception as exc:
             logger.error(
                 "Failed to fetch token by chain+address from database",
