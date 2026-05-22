@@ -1,0 +1,36 @@
+# =============================================================================
+# Vector alerts — lint, diff, sync to Grafana Cloud Mimir
+# =============================================================================
+# Delegates to the reusable workflow at
+# archon-research/github-actions/.github/workflows/mimir-rules-sync.yml.
+# That workflow handles AWS OIDC, fetches the per-team Grafana Cloud Mimir
+# rules:write token from Secrets Manager, runs lint + diff (on PR) + sync
+# (on merge to main) against both the staging and prod stacks.
+#
+# Rule files live in `alerts/`. Critical alerts must include a `runbook_url`
+# annotation (lint-enforced); per-alert runbooks live in `docs/runbooks/`.
+#
+# See: docs/runbooks/, ADR-008 in the infrastructure repo, ORB-200.
+# =============================================================================
+name: Alerts
+
+on:
+  pull_request:
+    paths:
+      - "alerts/**"
+      - ".github/workflows/alerts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "alerts/**"
+      - ".github/workflows/alerts.yml"
+
+jobs:
+  alerts:
+    uses: archon-research/github-actions/.github/workflows/mimir-rules-sync.yml@main
+    with:
+      team: vector
+    permissions:
+      contents: read
+      id-token: write       # AWS OIDC into the shared mimir-rules-deployer role
+      pull-requests: write  # diff comment upsert
