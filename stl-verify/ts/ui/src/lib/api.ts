@@ -109,15 +109,18 @@ export function getAllocations(
 }
 
 export function getRiskBreakdown(
-  receiptTokenId: number,
+  chainId: number,
+  tokenAddress: string,
   signal?: AbortSignal,
 ): Promise<RiskBreakdown> {
   return requestData(
-    apiClient.GET('/v1/risk/{receipt_token_id}/breakdown', {
-      params: { path: { receipt_token_id: receiptTokenId } },
+    apiClient.GET('/v1/risk/{chain_id}/{token_address}/breakdown', {
+      params: {
+        path: { chain_id: chainId, token_address: tokenAddress },
+      },
       signal,
     }),
-    'GET /v1/risk/{receipt_token_id}/breakdown',
+    'GET /v1/risk/{chain_id}/{token_address}/breakdown',
   );
 }
 
@@ -248,36 +251,40 @@ export function getTokens(
 }
 
 export function getToken(
-  tokenId: number,
+  chainId: number,
+  tokenAddress: string,
   signal?: AbortSignal,
 ): Promise<Token> {
   return requestData(
-    apiClient.GET('/v1/tokens/{token_id}', {
+    apiClient.GET('/v1/tokens/{chain_id}/{token_address}', {
       params: {
         path: {
-          token_id: tokenId,
+          chain_id: chainId,
+          token_address: tokenAddress,
         },
       },
       signal,
     }),
-    'GET /v1/tokens/{token_id}',
+    'GET /v1/tokens/{chain_id}/{token_address}',
   );
 }
 
 export function getTokenPrice(
-  tokenId: number,
+  chainId: number,
+  tokenAddress: string,
   signal?: AbortSignal,
 ): Promise<TokenPrice> {
   return requestData(
-    apiClient.GET('/v1/tokens/{token_id}/price', {
+    apiClient.GET('/v1/tokens/{chain_id}/{token_address}/price', {
       params: {
         path: {
-          token_id: tokenId,
+          chain_id: chainId,
+          token_address: tokenAddress,
         },
       },
       signal,
     }),
-    'GET /v1/tokens/{token_id}/price',
+    'GET /v1/tokens/{chain_id}/{token_address}/price',
   );
 }
 

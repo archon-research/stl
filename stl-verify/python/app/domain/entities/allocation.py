@@ -30,6 +30,10 @@ class EthAddress(str):
         """The raw 40-character hex string without 0x prefix."""
         return self.removeprefix("0x")
 
+    def to_bytes(self) -> bytes:
+        """Return the address as raw 20 bytes (matches DB ``BYTEA`` columns)."""
+        return bytes.fromhex(self.hex)
+
     def __repr__(self) -> str:
         return f"EthAddress('{self!s}')"
 

@@ -19,6 +19,7 @@ from app.config import Settings
 from app.main import create_app
 
 _RECEIPT_TOKEN_ADDRESS_HEX = "59cd1c87501baa753d0b5b5ab5d8416a45cd71dc"
+_PRIME_ID = "0x" + "ab" * 20
 
 
 async def _seed(async_url: str) -> int:
@@ -96,3 +97,144 @@ def test_risk_bad_debt_returns_503_when_receipt_token_token_row_is_missing(
     assert response.status_code == 503
     body = response.json()
     assert body["detail"]["code"] == "share_data_missing"
+
+
+def test_risk_breakdown_by_address_resolves_chain_and_address(
+    client: TestClient,
+    seeded_receipt_token_id: int,
+) -> None:
+    """The address-based breakdown route reaches the same service path as the legacy form."""
+    response = client.get(f"/v1/risk/1/0x{_RECEIPT_TOKEN_ADDRESS_HEX}/breakdown")
+
+    # Same warm-up state as the legacy test — receipt_token row exists but
+    # its token row does not, so share lookup signals "data not indexed".
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "share_data_missing"
+
+
+def test_risk_breakdown_by_address_returns_404_for_unknown_address(
+    client: TestClient,
+) -> None:
+    response = client.get("/v1/risk/1/0x" + "ff" * 20 + "/breakdown")
+
+    assert response.status_code == 404
+
+
+def test_risk_bad_debt_by_address_resolves_chain_and_address(
+    client: TestClient,
+    seeded_receipt_token_id: int,
+) -> None:
+    """Bad-debt address route reaches the same service path as the legacy form."""
+    response = client.get(f"/v1/risk/1/0x{_RECEIPT_TOKEN_ADDRESS_HEX}/bad-debt?gap_pct=0.1")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "share_data_missing"
+
+
+def test_risk_bad_debt_by_address_returns_404_for_unknown_address(
+    client: TestClient,
+) -> None:
+    response = client.get("/v1/risk/1/0x" + "ff" * 20 + "/bad-debt?gap_pct=0.1")
+
+    assert response.status_code == 404
+
+
+def test_risk_by_address_accepts_mixed_case_address(
+    client: TestClient,
+    seeded_receipt_token_id: int,
+) -> None:
+    """Address path is matched case-insensitively (compared as bytes after hex decode)."""
+    mixed = "0x59cD1C87501baa753d0B5B5Ab5D8416A45cD71DC"
+    response = client.get(f"/v1/risk/1/{mixed}/breakdown")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "share_data_missing"
+
+
+def test_risk_bad_debt_by_address_returns_422_for_malformed_address(
+    client: TestClient,
+) -> None:
+    response = client.get("/v1/risk/1/0xbadaddr/bad-debt?gap_pct=0.1")
+
+    assert response.status_code == 422
+
+
+def test_risk_bad_debt_by_address_returns_422_for_out_of_range_gap_pct(
+    client: TestClient,
+    seeded_receipt_token_id: int,
+) -> None:
+    response = client.get(f"/v1/risk/1/0x{_RECEIPT_TOKEN_ADDRESS_HEX}/bad-debt?gap_pct=1.5")
+
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# /v1/risk/rrc{,/scenario} — asset-identity validation + 404 unknown address
+# ---------------------------------------------------------------------------
+
+
+def test_get_rrc_returns_422_when_both_identities_supplied(client: TestClient) -> None:
+    response = client.get(
+        "/v1/risk/rrc",
+        params={
+            "asset_id": 1,
+            "chain_id": 1,
+            "token_address": f"0x{_RECEIPT_TOKEN_ADDRESS_HEX}",
+            "prime_id": _PRIME_ID,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "got both" in response.json()["detail"]
+
+
+def test_get_rrc_returns_422_when_neither_identity_supplied(client: TestClient) -> None:
+    response = client.get("/v1/risk/rrc", params={"prime_id": _PRIME_ID})
+
+    assert response.status_code == 422
+    assert "neither" in response.json()["detail"]
+
+
+def test_get_rrc_returns_422_when_only_chain_id_supplied(client: TestClient) -> None:
+    response = client.get(
+        "/v1/risk/rrc",
+        params={"chain_id": 1, "prime_id": _PRIME_ID},
+    )
+
+    assert response.status_code == 422
+
+
+def test_get_rrc_returns_404_when_address_unknown(client: TestClient) -> None:
+    response = client.get(
+        "/v1/risk/rrc",
+        params={
+            "chain_id": 1,
+            "token_address": "0x" + "ff" * 20,
+            "prime_id": _PRIME_ID,
+        },
+    )
+
+    assert response.status_code == 404
+
+
+def test_post_scenario_returns_422_when_both_identities_supplied(client: TestClient) -> None:
+    response = client.post(
+        "/v1/risk/rrc/scenario",
+        json={
+            "asset_id": 1,
+            "chain_id": 1,
+            "token_address": f"0x{_RECEIPT_TOKEN_ADDRESS_HEX}",
+            "prime_id": _PRIME_ID,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_post_scenario_returns_422_when_neither_identity_supplied(client: TestClient) -> None:
+    response = client.post(
+        "/v1/risk/rrc/scenario",
+        json={"prime_id": _PRIME_ID},
+    )
+
+    assert response.status_code == 422

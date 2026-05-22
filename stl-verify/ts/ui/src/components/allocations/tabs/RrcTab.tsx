@@ -233,7 +233,7 @@ export function RrcTab({
             value={
               <>
                 <ProtocolLogo
-                  protocolName={selectedReceiptToken.protocol_name}
+                  protocolName={selectedReceiptToken.protocol_name ?? ''}
                   size="5"
                 />
                 {selectedReceiptToken.protocol_name}

@@ -1,5 +1,6 @@
 from typing import Protocol
 
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
 
@@ -20,4 +21,8 @@ class TokenCatalogRepository(Protocol):
 
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         """Return the latest price quote with source metadata for a token."""
+        ...
+
+    async def get_token_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenMetadata | None:
+        """Return token metadata for ``(chain_id, address)``, or None when not found."""
         ...

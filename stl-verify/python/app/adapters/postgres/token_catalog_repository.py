@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
 logger = logging.getLogger(__name__)
@@ -102,10 +103,7 @@ class PostgresTokenCatalogRepository:
             async with self._engine.connect() as conn:
                 row = (await conn.execute(_GET_TOKEN_SQL, {"token_id": token_id})).fetchone()
 
-            if row is None:
-                return None
-
-            return self._row_to_metadata(row)
+            return self._row_to_metadata(row) if row else None
         except Exception as exc:
             logger.error(
                 "Failed to fetch token from database",
@@ -117,6 +115,28 @@ class PostgresTokenCatalogRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching token {token_id}: {exc}") from exc
+
+    async def get_token_by_chain_and_address(self, chain_id: int, address: EthAddress) -> TokenMetadata | None:
+        params = {"chain_id": chain_id, "address": address.to_bytes()}
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(_GET_TOKEN_BY_CHAIN_ADDRESS_SQL, params)).fetchone()
+
+            return self._row_to_metadata(row) if row else None
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch token by chain+address from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "chain_id": chain_id,
+                    "address": str(address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching token for chain_id={chain_id}, address={address}: {exc}"
+            ) from exc
 
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         try:
@@ -180,6 +200,22 @@ _GET_TOKEN_SQL = text(
         t.metadata
     FROM token t
     WHERE t.id = :token_id
+    """
+)
+
+
+_GET_TOKEN_BY_CHAIN_ADDRESS_SQL = text(
+    """
+    SELECT
+        t.id,
+        t.chain_id,
+        encode(t.address, 'hex') AS address,
+        t.symbol,
+        t.decimals,
+        t.updated_at,
+        t.metadata
+    FROM token t
+    WHERE t.chain_id = :chain_id AND t.address = :address
     """
 )
 

@@ -23,7 +23,7 @@ import type { DataSource, Token, TokenPrice } from '../../types/allocation';
 type MethodologyPanelProps = {
   isOpen: boolean;
   onToggle: () => void;
-  selectedTokenId?: number | null;
+  selectedTokenAddress?: string | null;
   selectedTokenSymbol?: string | null;
   selectedChainId?: number;
 };
@@ -42,7 +42,7 @@ const METHODOLOGY_MARKDOWN = `## Internal Data (STL)
 export function MethodologyPanel({
   isOpen,
   onToggle,
-  selectedTokenId,
+  selectedTokenAddress,
   selectedTokenSymbol,
   selectedChainId,
 }: MethodologyPanelProps) {
@@ -96,7 +96,11 @@ export function MethodologyPanel({
       return;
     }
 
-    if (selectedTokenId === null || selectedTokenId === undefined) {
+    if (
+      !selectedTokenAddress ||
+      selectedChainId === null ||
+      selectedChainId === undefined
+    ) {
       setSelectedToken(null);
       setTokenPrice(null);
       setCatalogPreviewCount(0);
@@ -105,15 +109,8 @@ export function MethodologyPanel({
       return;
     }
 
-    const tokenId = Number(selectedTokenId);
-    if (!Number.isFinite(tokenId)) {
-      setSelectedToken(null);
-      setTokenPrice(null);
-      setCatalogPreviewCount(0);
-      setTokenError('Invalid token identifier');
-      setIsTokenLoading(false);
-      return;
-    }
+    const chainId = selectedChainId;
+    const tokenAddress = selectedTokenAddress;
 
     const abortController = new AbortController();
 
@@ -126,11 +123,11 @@ export function MethodologyPanel({
 
       const [tokenResult, tokenPriceResult, tokensResult] =
         await Promise.allSettled([
-          getToken(tokenId, abortController.signal),
-          getTokenPrice(tokenId, abortController.signal),
+          getToken(chainId, tokenAddress, abortController.signal),
+          getTokenPrice(chainId, tokenAddress, abortController.signal),
           getTokens(
             {
-              chain_id: selectedChainId,
+              chain_id: chainId,
               symbol: selectedTokenSymbol ?? undefined,
               limit: 200,
             },
@@ -151,8 +148,8 @@ export function MethodologyPanel({
         logging.error('Failed to fetch selected token from catalog', {
           error: tokenResult.reason,
           errorMessage: errorMsg,
-          selectedTokenId: tokenId,
-          selectedChainId,
+          chainId,
+          tokenAddress,
         });
       }
 
@@ -165,7 +162,8 @@ export function MethodologyPanel({
         logging.error('Failed to fetch selected token price', {
           error: tokenPriceResult.reason,
           errorMessage: errorMsg,
-          selectedTokenId: tokenId,
+          chainId,
+          tokenAddress,
         });
       }
 
@@ -186,7 +184,7 @@ export function MethodologyPanel({
     void fetchTokenTransparency();
 
     return () => abortController.abort();
-  }, [isOpen, selectedChainId, selectedTokenId, selectedTokenSymbol]);
+  }, [isOpen, selectedChainId, selectedTokenAddress, selectedTokenSymbol]);
 
   return (
     <div
@@ -298,7 +296,7 @@ export function MethodologyPanel({
                 Token Catalog & Price
               </h3>
 
-              {!selectedTokenId ? (
+              {!selectedTokenAddress ? (
                 <p
                   className={css({
                     m: 0,
@@ -311,11 +309,11 @@ export function MethodologyPanel({
                 </p>
               ) : null}
 
-              {selectedTokenId && isTokenLoading ? (
+              {selectedTokenAddress && isTokenLoading ? (
                 <SkeletonStack count={2} />
               ) : null}
 
-              {selectedTokenId && tokenError ? (
+              {selectedTokenAddress && tokenError ? (
                 <p
                   className={css({
                     m: 0,
@@ -327,7 +325,7 @@ export function MethodologyPanel({
                 </p>
               ) : null}
 
-              {selectedTokenId && !isTokenLoading && selectedToken ? (
+              {selectedTokenAddress && !isTokenLoading && selectedToken ? (
                 <div
                   className={css({
                     borderWidth: '1px',
@@ -372,7 +370,7 @@ export function MethodologyPanel({
                 </div>
               ) : null}
 
-              {selectedTokenId && !isTokenLoading && tokenPrice ? (
+              {selectedTokenAddress && !isTokenLoading && tokenPrice ? (
                 <div
                   className={css({
                     borderWidth: '1px',
