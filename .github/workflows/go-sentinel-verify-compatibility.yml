@@ -171,15 +171,54 @@ jobs:
           CONTRACT_SCHEMA_NAME: ${{ inputs.contract_schema_name }}
         run: |
           set -euo pipefail
+          source_dir="$(realpath "$SOURCE_DIR")"
           target_dir="$GITHUB_WORKSPACE/stl/stl-verify/contracts/axis-synome"
           mkdir -p "$target_dir"
+          target_dir="$(realpath "$target_dir")"
 
-          cp "$SOURCE_DIR/$CONTRACT_JSON_NAME" "$target_dir/$CONTRACT_JSON_NAME"
-          cp "$SOURCE_DIR/$CONTRACT_SCHEMA_NAME" "$target_dir/$CONTRACT_SCHEMA_NAME"
+          for f in "$CONTRACT_JSON_NAME" "$CONTRACT_SCHEMA_NAME"; do
+            if [[ "$f" != "$(basename "$f")" || "$f" == *".."* || "$f" == *"\\"* ]]; then
+              echo "::error::Invalid contract file name: $f"
+              exit 1
+            fi
+          done
+
+          copy_contract_file() {
+            local file_name="$1"
+            local source_file="$source_dir/$file_name"
+            local target_file="$target_dir/$file_name"
+            local source_real
+            local target_real
+
+            source_real="$(realpath "$source_file")"
+            target_real="$(realpath -m "$target_file")"
+
+            if [[ "$source_real" != "$source_dir"/* ]]; then
+              echo "::error::Source path escapes source directory: $file_name"
+              exit 1
+            fi
+            if [[ "$target_real" != "$target_dir"/* ]]; then
+              echo "::error::Target path escapes target directory: $file_name"
+              exit 1
+            fi
+
+            cp "$source_real" "$target_real"
+          }
+
+          copy_contract_file "$CONTRACT_JSON_NAME"
+          copy_contract_file "$CONTRACT_SCHEMA_NAME"
 
       - name: Run Go compatibility gate
         working-directory: stl/stl-verify
-        run: go test ${{ inputs.go_test_target }}
+        env:
+          GO_TEST_TARGET: ${{ inputs.go_test_target }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$GO_TEST_TARGET" =~ ^\./[A-Za-z0-9_./-]+$ || "$GO_TEST_TARGET" == *".."* ]]; then
+            echo "::error::Invalid go_test_target: $GO_TEST_TARGET"
+            exit 1
+          fi
+          go test "$GO_TEST_TARGET"
 
       - name: Summarize run
         if: ${{ always() }}

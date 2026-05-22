@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -25,9 +26,9 @@ func TestLoad_OK(t *testing.T) {
 							"ASSETS_BY_PRIME": map[string]any{
 								"spark": []map[string]any{
 									{
-										"contract_address": "0x1",
-										"wallet_address":   "0x2",
-										"asset_address":    "0x3",
+										"contract_address": "0x1111111111111111111111111111111111111111",
+										"wallet_address":   "0x2222222222222222222222222222222222222222",
+										"asset_address":    nil,
 										"star":             "spark",
 										"chain":            "mainnet",
 										"protocol":         "aave-v3",
@@ -44,7 +45,7 @@ func TestLoad_OK(t *testing.T) {
 									"mainnet": map[string]any{
 										"star":    "spark",
 										"chain":   "mainnet",
-										"address": "0xabc",
+										"address": "0x3333333333333333333333333333333333333333",
 									},
 								},
 							},
@@ -73,8 +74,8 @@ func TestLoad_OK(t *testing.T) {
 	}
 
 	got := bundle.Contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"].Address
-	if got != "0xabc" {
-		t.Fatalf("address = %q, want %q", got, "0xabc")
+	if got != "0x3333333333333333333333333333333333333333" {
+		t.Fatalf("address = %q, want %q", got, "0x3333333333333333333333333333333333333333")
 	}
 }
 
@@ -104,6 +105,95 @@ func TestLoadContract_UnknownFieldFails(t *testing.T) {
 	_, err := LoadContract(contractPath)
 	if err == nil {
 		t.Fatal("expected strict decode error, got nil")
+	}
+}
+
+func TestLoadContract_InvalidAddressFails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	contractPath := filepath.Join(dir, "contract.json")
+
+	payload := map[string]any{
+		"version":                "v1",
+		"axis_synome_git_commit": "deadbeef",
+		"axis_synome": map[string]any{
+			"spec": map[string]any{
+				"asc": map[string]any{
+					"entities": map[string]any{
+						"assets_by_prime": map[string]any{
+							"ASSETS_BY_PRIME": map[string]any{
+								"spark": []map[string]any{
+									{
+										"contract_address": "0x1",
+										"wallet_address":   "0x2222222222222222222222222222222222222222",
+										"asset_address":    nil,
+										"star":             "spark",
+										"chain":            "mainnet",
+										"protocol":         "aave-v3",
+										"allocation_type":  "allocation",
+										"token_type":       "atoken",
+										"created_at_block": nil,
+									},
+								},
+							},
+						},
+						"alm_proxies": map[string]any{
+							"AlmProxy": map[string]any{
+								"spark": map[string]any{
+									"mainnet": map[string]any{
+										"star":    "spark",
+										"chain":   "mainnet",
+										"address": "0x3333333333333333333333333333333333333333",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	mustWriteJSON(t, contractPath, payload)
+
+	_, err := LoadContract(contractPath)
+	if err == nil {
+		t.Fatal("expected address validation error, got nil")
+	}
+}
+
+func TestLoadContract_TrailingJSONFails(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	contractPath := filepath.Join(dir, "contract.json")
+
+	payload := `{
+  "version": "v1",
+  "axis_synome_git_commit": "deadbeef",
+  "axis_synome": {
+    "spec": {
+      "asc": {
+        "entities": {
+          "assets_by_prime": { "ASSETS_BY_PRIME": {} },
+          "alm_proxies": { "AlmProxy": {} }
+        }
+      }
+    }
+  }
+}{"extra":true}`
+
+	if err := os.WriteFile(contractPath, []byte(payload), 0o644); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+
+	_, err := LoadContract(contractPath)
+	if err == nil {
+		t.Fatal("expected trailing JSON error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unexpected trailing JSON content") {
+		t.Fatalf("expected trailing JSON error, got: %v", err)
 	}
 }
 

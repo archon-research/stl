@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 const (
@@ -55,15 +58,15 @@ type ProxyConfig struct {
 }
 
 type TokenEntry struct {
-	ContractAddress string `json:"contract_address"`
-	WalletAddress   string `json:"wallet_address"`
-	AssetAddress    string `json:"asset_address"`
-	Star            string `json:"star"`
-	Chain           string `json:"chain"`
-	Protocol        string `json:"protocol"`
-	AllocationType  string `json:"allocation_type"`
-	TokenType       string `json:"token_type"`
-	CreatedAtBlock  *int64 `json:"created_at_block"`
+	ContractAddress string  `json:"contract_address"`
+	WalletAddress   string  `json:"wallet_address"`
+	AssetAddress    *string `json:"asset_address"`
+	Star            string  `json:"star"`
+	Chain           string  `json:"chain"`
+	Protocol        string  `json:"protocol"`
+	AllocationType  string  `json:"allocation_type"`
+	TokenType       string  `json:"token_type"`
+	CreatedAtBlock  *int64  `json:"created_at_block"`
 }
 
 func LoadDefault() (*Bundle, error) {
@@ -101,8 +104,48 @@ func LoadContract(path string) (*Contract, error) {
 	if contract.AxisSynomeGitCommit == "" {
 		return nil, fmt.Errorf("decoding axis-synome contract file %q: missing axis_synome_git_commit", path)
 	}
+	if err := validateAddresses(&contract); err != nil {
+		return nil, fmt.Errorf("decoding axis-synome contract file %q: %w", path, err)
+	}
 
 	return &contract, nil
+}
+
+func validateAddresses(contract *Contract) error {
+	for star, byChain := range contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy {
+		for chain, proxy := range byChain {
+			context := fmt.Sprintf("alm_proxy star=%s chain=%s", star, chain)
+			if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
+				return err
+			}
+		}
+	}
+
+	for star, entries := range contract.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime {
+		for i, entry := range entries {
+			context := fmt.Sprintf("token_entry star=%s index=%d", star, i)
+			if err := validateEthereumAddress(entry.ContractAddress, "contract_address", context); err != nil {
+				return err
+			}
+			if err := validateEthereumAddress(entry.WalletAddress, "wallet_address", context); err != nil {
+				return err
+			}
+			if entry.AssetAddress != nil {
+				if err := validateEthereumAddress(*entry.AssetAddress, "asset_address", context); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateEthereumAddress(value string, field string, context string) error {
+	if !common.IsHexAddress(value) {
+		return fmt.Errorf("invalid ethereum address for %s in %s: %q", field, context, value)
+	}
+	return nil
 }
 
 func LoadSchema(path string) (map[string]any, error) {
@@ -127,8 +170,9 @@ func unmarshalStrict(data []byte, target any) error {
 		return err
 	}
 
-	if decoder.More() {
-		return fmt.Errorf("unexpected trailing JSON content")
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("unexpected trailing JSON content: %w", err)
 	}
 
 	return nil
