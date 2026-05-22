@@ -79,6 +79,7 @@ on:
         default: '3.12'
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -95,6 +96,7 @@ jobs:
           ref: ${{ inputs.stl_ref }}
           path: stl
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Checkout caller repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -103,6 +105,7 @@ jobs:
           ref: ${{ inputs.caller_ref != '' && inputs.caller_ref || github.sha }}
           path: caller
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -117,7 +120,7 @@ jobs:
 
       - name: Download wheel artifact
         if: ${{ inputs.replacement_mode == 'wheel' && inputs.wheel_artifact_name != '' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ inputs.wheel_artifact_name }}
           path: caller-wheel

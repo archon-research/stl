@@ -1,6 +1,6 @@
 # ADR-0004: Sentinel Verify Compatibility CI via Reusable Workflow
 
-**Status**: Proposed
+**Status**: Accepted
 **Proposed**: @r0hitsharma
 **Date**: 2026-05-21
 **Deciders**: @vector, @tensor
