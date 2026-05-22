@@ -1,4 +1,4 @@
-# ADR-0004: Sentinel Verify Compatibility CI via Reusable Workflow
+# ADR-0004: Sentinel Verify Compatibility CI via Reusable Workflows
 
 **Status**: Accepted
 **Proposed**: @r0hitsharma
@@ -7,92 +7,93 @@
 
 ## Context
 
-`stl-verify/python` depends on external Python modules and runs strict quality checks (`ty`, `ruff`, unit tests). A module can be valid in its own repository but still break compatibility with Sentinel Verify.
+`axis-synome` changes can break Sentinel Verify in two places:
 
-Today, this compatibility check is mostly validated after publishing or by manual local testing. That creates avoidable regressions and slower feedback loops.
+- Python runtime integration in `stl-verify/python`.
+- Go contract consumption in `stl-verify/internal/pkg/axis_synome_contract`.
 
-We want a reusable CI entrypoint owned by this repository so external repositories can validate compatibility against Sentinel Verify before merge. `axis-synome` is the first adopter of this compatibility gate.
+Current state: Go application code does not yet rely on runtime imports or direct execution from `axis-synome`.
+The Go side currently validates compatibility at the contract boundary (exported entities JSON + schema and
+the stl loader package).
+
+Planned direction: stl Go services will consume axis-synome entities in a follow-up implementation. This ADR
+defines the integration checks and ownership boundaries ahead of that adoption.
+
+A module can pass its own CI and still fail in downstream integration. We need a reusable compatibility gate owned by `archon-research/stl` so callers validate against Sentinel Verify before merge.
 
 ## Decision
 
-This repository will expose a reusable GitHub Actions workflow that other repositories can call.
+Expose two reusable workflows with the same call model (checkout stl, checkout caller, replace caller artifact, run gate), while keeping language-specific setup and commands isolated:
 
-The workflow will:
+- `.github/workflows/python-sentinel-verify-compatibility.yml`
+- `.github/workflows/go-sentinel-verify-compatibility.yml`
 
-- Checkout this repository (`archon-research/stl`) at `main` by default.
-- Allow callers to override the stl ref (`stl_ref`) when needed.
-- Checkout the caller repository so it can provide replacement artifacts.
-- Replace a target module dependency in `stl-verify/python` using one of two v1 modes:
-  - `folder`: install from a caller-provided folder path.
-  - `wheel`: install from a caller-provided wheel path.
-- Run the compatibility gate in `stl-verify/python`:
+Why two workflows instead of one multi-language workflow:
+
+- Python and Go setup/tooling are different enough that a single workflow would carry conditional complexity and weaker readability.
+- Separate workflows keep contracts simple and stable per language.
+- Callers can run either or both jobs explicitly.
+- This ADR intentionally scopes to compatibility verification and boundary definition; service-level Go entity
+  consumption is explicitly deferred to follow-up work.
+
+## Shared Contract Pattern
+
+Each reusable workflow supports:
+
+- `stl_ref` (default `main`) for target stl revision.
+- `caller_repository` and `caller_ref` overrides for local/manual compatibility tests.
+- Replacement from caller-provided paths/artifacts.
+- Strict failure on gate command/test failures.
+
+## Language-Specific Gates
+
+Python workflow (`python-sentinel-verify-compatibility.yml`):
+
+- Replacement modes: `folder` and `wheel`.
+- Replaces caller dependency in `stl-verify/python`.
+- Runs:
   - `make typecheck`
   - `make lint`
   - `make test-unit`
 
-Any failing gate command fails the workflow.
+Go workflow (`go-sentinel-verify-compatibility.yml`):
 
-## Reusable Workflow Contract
-
-Inputs:
-
-- `stl_ref` (default: `main`): ref of `archon-research/stl` to test against.
-- `replacement_mode` (required): `folder` or `wheel`.
-- `replacement_path` (required): path pattern for folder/wheel replacement target.
-- `dependency_name` (default: `axis-synome`): package/module name to replace (callers should set this for their module).
-- `caller_repository` (default: caller repository): optional override for manual and local test runs.
-- `caller_ref` (default: caller SHA): optional override for manual and local test runs.
-- `wheel_artifact_name` (optional): artifact name to download wheel files from when using `wheel` mode.
-- `python_version` (default: `3.12`): Python version used for the compatibility job.
-
-Behavior:
-
-1. Clone `archon-research/stl` at `stl_ref`.
-2. Clone caller repository at caller SHA (or caller override ref).
-3. Install stl Python dependencies with `uv sync --all-extras`.
-4. Optionally download wheel artifact when `wheel_artifact_name` is provided.
-5. Replace `dependency_name` using `replacement_mode` and `replacement_path`.
-6. Execute compatibility gate commands.
+- Replacement modes: `folder` and `artifact`.
+- Replaces contract artifacts under `stl-verify/contracts/axis-synome/`.
+- Runs:
+  - `go test ./internal/pkg/axis_synome_contract`
 
 ## Security and Supply Chain
 
-- The workflow uses read-only repository permissions.
-- Third-party actions should remain pinned by commit SHA.
-- Default behavior tests against `main`; callers can opt into explicit ref overrides.
-- This is compatible with open-source repository checkout (no private source fetch assumptions in v1).
+- Workflows use read-only repository permissions.
+- Third-party actions are pinned by commit SHA.
+- Default stl target is `main`; callers may explicitly pin a compatibility branch/ref.
+- No private-source assumptions in v1.
 
 ## Consequences
 
 Positive:
 
-- Fast compatibility feedback in caller PRs.
-- Lower risk of publishing `axis-synome` changes that break `stl-verify/python`.
-- Single source of truth for compatibility gates.
+- Compatibility breakages are detected in caller PRs before merge.
+- Single, stl-owned source of truth for downstream compatibility gates.
+- Python and Go compatibility can evolve independently without workflow sprawl.
 
 Trade-offs:
 
-- Additional CI time in caller repositories.
-- Caller repositories must provide valid replacement artifacts/paths.
-- v1 intentionally excludes remote wheel URLs and arbitrary pip specs.
+- Extra CI time in caller repositories.
+- Caller repos must provide valid replacement artifacts/paths.
+- v1 focuses on module/contract replacement and does not run broad integration test suites.
 
-## Non-Goals (v1)
+## Non-Goals
 
-- Running integration tests as part of compatibility gating.
-- Handling remote wheel download URLs directly.
-- Supporting arbitrary `pip install` spec strings.
-- Publishing artifacts from this repository.
+- Running full integration/E2E tests in compatibility workflows.
+- Supporting arbitrary remote package/spec installs.
+- Publishing artifacts from `stl`.
+- Implementing service-level Go consumption of axis-synome entities in this change; that implementation is follow-up work.
 
 ## Caller Example (axis-synome)
 
 ```yaml
-name: Sentinel Verify Compatibility (axis-synome)
-
-on:
-  pull_request:
-    paths:
-      - python/axis_synome/**
-      - .github/workflows/**
-
 jobs:
   stl-compat-folder:
     uses: archon-research/stl/.github/workflows/python-sentinel-verify-compatibility.yml@main
@@ -120,26 +121,53 @@ jobs:
       replacement_path: '*.whl'
       wheel_artifact_name: axis-synome-wheel
       dependency_name: axis-synome
+
+  build-axis-entities:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: |
+          cd python/axis_synome
+          uv run python scripts/export_entities.py \
+            --out generated/stl/axis_synome_entities.json \
+            --schema-out generated/stl/axis_synome_entities.schema.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: axis-synome-entities
+          path: python/axis_synome/generated/stl/*
+
+  stl-go-compat-artifact:
+    needs: build-axis-entities
+    uses: archon-research/stl/.github/workflows/go-sentinel-verify-compatibility.yml@main
+    with:
+      replacement_mode: artifact
+      replacement_path: python/axis_synome/generated/stl
+      artifact_name: axis-synome-entities
+      contract_json_name: axis_synome_entities.json
+      contract_schema_name: axis_synome_entities.schema.json
 ```
 
 ## Flow
 
 ```mermaid
 flowchart TD
-  A[Caller module PR] --> B{Replacement mode}
-  B -->|folder| C[Call STL reusable workflow with replacement_path]
-  B -->|wheel| D[Build wheel and upload artifact]
-  D --> E[Call STL reusable workflow with wheel_artifact_name]
-  C --> F[Checkout stl ref: main by default]
-  E --> F
-  F --> G[Checkout caller repository/ref]
-  G --> H[Setup Python and uv]
-  H --> I[Install stl-verify/python dependencies]
-  I --> J[Replace dependency_name with caller target]
-  J --> K[Run make typecheck]
-  K --> L[Run make lint]
-  L --> M[Run make test-unit]
-  M --> N{All checks pass?}
-  N -->|yes| O[Compatibility confirmed]
-  N -->|no| P[Fail compatibility gate]
+  A[Caller PR] --> B[Select compatibility gates]
+  B --> C[Python gate]
+  B --> D[Go gate]
+
+  C --> C1[Checkout stl and caller]
+  C1 --> C2[Resolve replacement: folder or wheel]
+  C2 --> C3[Run typecheck, lint, unit tests]
+
+  D --> D1[Export entities JSON and schema]
+  D1 --> D2[Upload or provide contract folder]
+  D2 --> D3[Checkout stl and caller]
+  D3 --> D4[Replace contracts/axis-synome artifacts]
+  D4 --> D5[Run go test internal/pkg/axis_synome_contract]
+
+  C3 --> E{All selected gates pass?}
+  D5 --> E
+  E -->|yes| F[Compatibility confirmed]
+  E -->|no| G[Fail caller CI]
 ```
