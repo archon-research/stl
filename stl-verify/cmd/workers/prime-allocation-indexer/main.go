@@ -262,13 +262,26 @@ func run(ctx context.Context, args []string) error {
 		registry.Register(s)
 	}
 
+	defaultEntries, err := at.LoadDefaultTokenEntries()
+	if err != nil {
+		return fmt.Errorf("load default token entries: %w", err)
+	}
+
 	// Token entries filtered by chain
-	entries := at.EntriesForChainID(at.DefaultTokenEntries(), cfg.chainID)
+	entries := at.EntriesForChainID(defaultEntries, cfg.chainID)
 	if len(entries) == 0 {
 		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
 	}
 
-	proxies := at.ProxiesForChainID(at.DefaultProxies(), cfg.chainID)
+	defaultProxies, err := at.LoadDefaultProxies()
+	if err != nil {
+		return fmt.Errorf("load default proxies: %w", err)
+	}
+
+	proxies := at.ProxiesForChainID(defaultProxies, cfg.chainID)
+	if len(proxies) == 0 {
+		return fmt.Errorf("no proxies for chain ID %d", cfg.chainID)
+	}
 
 	// Database
 	dbPool, err := pgxpool.New(ctx, cfg.dbURL)

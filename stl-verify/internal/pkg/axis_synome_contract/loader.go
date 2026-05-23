@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -70,7 +73,35 @@ type TokenEntry struct {
 }
 
 func LoadDefault() (*Bundle, error) {
-	return Load(DefaultContractPath, DefaultSchemaPath)
+	contract, err := LoadDefaultContract()
+	if err != nil {
+		return nil, err
+	}
+
+	schema, err := LoadDefaultSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	return &Bundle{Contract: *contract, Schema: schema}, nil
+}
+
+func LoadDefaultContract() (*Contract, error) {
+	contractPath, err := resolveDefaultPath(DefaultContractPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return LoadContract(contractPath)
+}
+
+func LoadDefaultSchema() (map[string]any, error) {
+	schemaPath, err := resolveDefaultPath(DefaultSchemaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return LoadSchema(schemaPath)
 }
 
 func Load(contractPath string, schemaPath string) (*Bundle, error) {
@@ -176,4 +207,61 @@ func unmarshalStrict(data []byte, target any) error {
 	}
 
 	return nil
+}
+
+func resolveDefaultPath(relativePath string) (string, error) {
+	candidates, err := defaultPathCandidates(relativePath)
+	if err != nil {
+		return "", err
+	}
+
+	tried := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat axis-synome default path %q: %w", candidate, err)
+		}
+		tried = append(tried, candidate)
+	}
+
+	return "", fmt.Errorf("axis-synome default file %q not found; tried: %s", relativePath, strings.Join(tried, ", "))
+}
+
+func defaultPathCandidates(relativePath string) ([]string, error) {
+	candidates := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Clean(filepath.Join(cwd, relativePath)))
+	}
+
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		if len(candidates) > 0 {
+			return uniquePaths(candidates), nil
+		}
+		return nil, fmt.Errorf("resolve axis-synome default path: runtime caller unavailable")
+	}
+
+	candidates = append(candidates, filepath.Clean(filepath.Join(
+		filepath.Dir(currentFile),
+		"..",
+		"..",
+		"..",
+		relativePath,
+	)))
+
+	return uniquePaths(candidates), nil
+}
+
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique
 }
