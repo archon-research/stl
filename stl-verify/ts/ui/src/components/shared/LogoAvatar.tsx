@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Avatar } from '@archon-research/design-system';
 
 import { logging } from '#src/lib/logging';
 import { css } from '#styled-system/css';
@@ -17,6 +17,8 @@ type LogoAvatarProps =
   | (LogoAvatarBaseProps & { size?: PandaSizeToken; sizePx?: never })
   | (LogoAvatarBaseProps & { size?: never; sizePx: number });
 
+type AvatarStatusChangeDetails = { status: 'loading' | 'loaded' | 'error' };
+
 export function LogoAvatar({
   alt,
   fallbackText,
@@ -26,18 +28,21 @@ export function LogoAvatar({
   sizePx,
   fallbackColor = 'text.default',
 }: LogoAvatarProps) {
-  const [hasImageError, setHasImageError] = useState(false);
-
-  useEffect(() => {
-    setHasImageError(false);
-  }, [imageUrl]);
-
   const sizingStyle = sizePx
     ? { width: `${sizePx}px`, height: `${sizePx}px` }
     : undefined;
 
   return (
-    <div
+    <Avatar.Root
+      onStatusChange={(details: AvatarStatusChangeDetails) => {
+        if (details.status === 'error' && imageUrl) {
+          logging.warn('Logo image failed to load', {
+            imageUrl,
+            alt,
+            fallbackText,
+          });
+        }
+      }}
       style={sizingStyle}
       className={css({
         width: sizePx ? undefined : size,
@@ -51,42 +56,33 @@ export function LogoAvatar({
         flexShrink: 0,
       })}
     >
-      {!imageUrl || hasImageError ? (
-        <div
-          className={css({
-            width: 'full',
-            height: 'full',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: isSelected ? 'white' : fallbackColor,
-            fontSize: '2xs',
-            fontWeight: 'semibold',
-            userSelect: 'none',
-          })}
-        >
-          {fallbackText}
-        </div>
-      ) : (
-        <img
+      <Avatar.Fallback
+        className={css({
+          width: 'full',
+          height: 'full',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: isSelected ? 'white' : fallbackColor,
+          fontSize: '2xs',
+          fontWeight: 'semibold',
+          userSelect: 'none',
+        })}
+      >
+        {fallbackText}
+      </Avatar.Fallback>
+      {imageUrl ? (
+        <Avatar.Image
           alt={alt}
+          src={imageUrl}
           className={css({
             width: 'full',
             height: 'full',
             objectFit: 'cover',
             display: 'block',
           })}
-          onError={() => {
-            setHasImageError(true);
-            logging.warn('Logo image failed to load', {
-              imageUrl,
-              alt,
-              fallbackText,
-            });
-          }}
-          src={imageUrl}
         />
-      )}
-    </div>
+      ) : null}
+    </Avatar.Root>
   );
 }

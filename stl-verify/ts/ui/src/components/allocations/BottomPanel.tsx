@@ -4,7 +4,6 @@ import {
   ErrorState,
   SearchInput,
   StyledSelect,
-  Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
@@ -249,10 +248,10 @@ export function BottomPanel({
           wrap: 'wrap',
         })}
       >
-        <ToggleGroup
+        <ToggleGroup.Root
           value={[activeTab]}
-          onValueChange={(value: readonly string[]) => {
-            const nextValue = value[0];
+          onValueChange={(details: { value: string[] }) => {
+            const nextValue = details.value[0];
 
             if (
               nextValue === 'risk' ||
@@ -265,16 +264,16 @@ export function BottomPanel({
           aria-label="Risk views"
           className={toggleGroupClassName}
         >
-          <Toggle value="risk" className={toggleClassName}>
+          <ToggleGroup.Item value="risk" className={toggleClassName}>
             Risk breakdown
-          </Toggle>
-          <Toggle value="rrc" className={toggleClassName}>
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="rrc" className={toggleClassName}>
             Required risk capital
-          </Toggle>
-          <Toggle value="activity" className={toggleClassName}>
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="activity" className={toggleClassName}>
             Activity
-          </Toggle>
-        </ToggleGroup>
+          </ToggleGroup.Item>
+        </ToggleGroup.Root>
       </div>
 
       <div
