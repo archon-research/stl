@@ -42,7 +42,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: archon-research/github-actions
-          ref: 9a1ebb7e1602c0fed1f12d8a95c1b66342553ac3  # github-actions PR #17 HEAD (temporary; repin to merge SHA after merge)
+          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
