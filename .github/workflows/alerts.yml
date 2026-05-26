@@ -1,16 +1,24 @@
 # =============================================================================
 # Vector alerts — lint, diff, sync to Grafana Cloud Mimir
 # =============================================================================
-# Delegates to the reusable workflow at
-# archon-research/github-actions/.github/workflows/mimir-rules-sync.yml.
-# That workflow handles AWS OIDC, fetches the per-team Grafana Cloud Mimir
-# rules:write token from Secrets Manager, runs lint + diff (on PR) + sync
-# (on merge to main) against both the staging and prod stacks.
+# Consumes the `mimir-rules-sync` composite action from the PRIVATE
+# `archon-research/github-actions` repo via the deploy-key vendoring pattern
+# (mirrors `slack-notify.yaml`). The cross-repo `uses:` reference would fail
+# because stl is public and the actions repo is private — GitHub returns a
+# misleading "workflow not found" error.
 #
-# Rule files live in `alerts/`. Critical alerts must include a `runbook_url`
-# annotation (lint-enforced); per-alert runbooks live in `docs/runbooks/`.
+# Org rule: NEVER flip github-actions to public to "fix" this. See
+# infrastructure/CLAUDE.md → "GitHub Actions: consuming
+# archon-research/github-actions" + ADR-008.
 #
-# See: docs/runbooks/, ADR-008 in the infrastructure repo, ORB-200.
+# Required secrets on this repo:
+#   - GH_ACTIONS_DEPLOY_KEY  SSH private key (deploy key on github-actions).
+#
+# IAM roles assumed via OIDC are provisioned by
+# infrastructure/infra/16_github_oidc.tf (caller-repo allowlist).
+# The per-env Grafana Cloud token secret is provisioned by
+# infrastructure/infra/17_grafana_cloud.tf and carries
+# {token, mimir_address, mimir_tenant_id, cluster_label, env_label}.
 # =============================================================================
 name: Alerts
 
@@ -25,12 +33,64 @@ on:
       - "alerts/**"
       - ".github/workflows/alerts.yml"
 
+# Stop earlier in-flight runs for the same PR/branch.
+concurrency:
+  group: alerts-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  alerts:
-    uses: archon-research/github-actions/.github/workflows/mimir-rules-sync.yml@main
-    with:
-      team: vector
+  sync:
+    name: ${{ matrix.env }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write       # AWS OIDC into the shared mimir-rules-deployer role
+      id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: staging
+            role-arn: arn:aws:iam::579039992622:role/archonstaging-github-actions-mimir-rules
+            secret-id: archonstaging-mimir-rules-token-vector
+          - env: prod
+            role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-mimir-rules
+            secret-id: archonprod-mimir-rules-token-vector
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Vendor archon-research/github-actions (deploy key)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: 4d3f8a3c5a083925907c4eec332334c2b53f13a8  # main @ PR #14 merge
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - name: Configure AWS credentials (${{ matrix.env }})
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        with:
+          role-to-assume: ${{ matrix.role-arn }}
+          aws-region: eu-west-1
+
+      - name: Fetch Grafana Cloud Mimir token (${{ matrix.env }})
+        uses: aws-actions/aws-secretsmanager-get-secrets@5e19ff380d035695bdd56bbad320ca535c9063f2  # v2.0.10
+        with:
+          secret-ids: |
+            GC,${{ matrix.secret-id }}
+          parse-json-secrets: true
+
+      - name: Sync rules
+        uses: ./.github-actions/mimir-rules-sync
+        with:
+          team: vector
+          namespace: vector-${{ github.event.repository.name }}
+          rules-dir: alerts
+          mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
+          mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
+          mimir-token: ${{ env.GC_TOKEN }}
+          cluster-label: ${{ env.GC_CLUSTER_LABEL }}
+          env-label: ${{ env.GC_ENV_LABEL }}
