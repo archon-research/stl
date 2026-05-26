@@ -1,11 +1,14 @@
 
-.PHONY: lint lint-fix typecheck test-unit test-integration build-ui-static export-openapi-schema run run-static
+.PHONY: lint lint-fix typecheck test-unit test-integration build-ui-static export-openapi-schema export-axis-synome-contract run run-static
 
 # Ensure `uv run` targets the project environment even if an unrelated venv is active.
 UV := env -u VIRTUAL_ENV uv
 TS_DIR := ../ts
 STATIC_DIR := app/static
 OPENAPI_SCHEMA := $(TS_DIR)/ui/src/generated/openapi-schema.json
+AXIS_SYNOME_CONTRACT_DIR := ../contracts/axis-synome
+AXIS_SYNOME_CONTRACT_JSON := $(AXIS_SYNOME_CONTRACT_DIR)/axis_synome_entities.json
+AXIS_SYNOME_CONTRACT_SCHEMA := $(AXIS_SYNOME_CONTRACT_DIR)/axis_synome_entities.schema.json
 
 typecheck:
 	$(UV) run --extra dev ty check
@@ -32,6 +35,9 @@ build-ui-static:
 
 export-openapi-schema:
 	$(UV) run python scripts/export_openapi_schema.py --output $(OPENAPI_SCHEMA)
+
+export-axis-synome-contract:
+	$(UV) run export_entities --out $(AXIS_SYNOME_CONTRACT_JSON) --schema-out $(AXIS_SYNOME_CONTRACT_SCHEMA)
 
 # Run the FastAPI dev server (requires dev-up in stl-verify/ first)
 run:

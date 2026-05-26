@@ -52,35 +52,15 @@ jobs:
           name: axis-synome-wheel
           path: caller-wheel
 
-      - name: Resolve replacement target
-        id: resolve
-        run: |
-          set -euo pipefail
-          pattern="$GITHUB_WORKSPACE/caller-wheel/*.whl"
-          first_match=""
-          for candidate in $pattern; do
-            if [ -f "$candidate" ]; then
-              first_match="$candidate"
-              break
-            fi
-          done
-          if [ -z "$first_match" ]; then
-            echo "::error::No wheel matched path pattern: $pattern"
-            exit 1
-          fi
-          echo "install_target=$first_match" >> "$GITHUB_OUTPUT"
-
       - name: Install stl Python dependencies
         working-directory: stl/stl-verify/python
         run: uv sync --all-extras
 
       - name: Replace dependency with caller artifact
         working-directory: stl/stl-verify/python
-        env:
-          INSTALL_TARGET: ${{ steps.resolve.outputs.install_target }}
         run: |
           set -euo pipefail
-          uv pip install --no-deps --python .venv/bin/python --force-reinstall "$INSTALL_TARGET"
+          uv pip install --no-deps --python .venv/bin/python --force-reinstall "$GITHUB_WORKSPACE"/caller-wheel/*.whl
 
           uv pip show --python .venv/bin/python axis-synome
 
@@ -106,12 +86,11 @@ jobs:
         if: ${{ always() }}
         env:
           STL_REF: ${{ inputs.stl_ref }}
-          INSTALL_TARGET: ${{ steps.resolve.outputs.install_target }}
         run: |
           {
             echo "## Python Sentinel Verify Compatibility Summary"
             echo ""
             echo "- stl_ref: $STL_REF"
             echo "- wheel_artifact_name: axis-synome-wheel"
-            echo "- resolved_install_target: $INSTALL_TARGET"
+            echo "- install_target: $GITHUB_WORKSPACE/caller-wheel/*.whl"
           } >> "$GITHUB_STEP_SUMMARY"
