@@ -8,75 +8,12 @@ on:
         required: false
         type: string
         default: main
-      replacement_mode:
-        description: Replacement mode (folder or wheel)
-        required: true
-        type: string
-      replacement_path:
-        description: Caller-repo-relative path to folder or wheel (glob allowed for wheel). If wheel_artifact_name is set, this is resolved relative to downloaded artifact directory.
-        required: true
-        type: string
-      dependency_name:
-        description: Python package name to replace
-        required: false
-        type: string
-        default: axis-synome
-      caller_repository:
-        description: Repository to checkout for replacement artifact/path
-        required: false
-        type: string
-        default: ''
-      caller_ref:
-        description: Ref to checkout for caller repository
-        required: false
-        type: string
-        default: ''
-      wheel_artifact_name:
-        description: Optional artifact name containing wheel files produced by caller CI
-        required: false
-        type: string
-        default: ''
-      python_version:
-        description: Python version for compatibility checks
-        required: false
-        type: string
-        default: '3.12'
   workflow_dispatch:
     inputs:
       stl_ref:
         description: Ref of archon-research/stl to test against
         required: false
         default: main
-      replacement_mode:
-        description: Replacement mode (folder or wheel)
-        required: true
-        type: choice
-        options:
-          - folder
-          - wheel
-      replacement_path:
-        description: Caller-repo-relative path to folder or wheel (glob allowed for wheel). If wheel_artifact_name is set, this is resolved relative to downloaded artifact directory.
-        required: true
-      dependency_name:
-        description: Python package name to replace
-        required: false
-        default: axis-synome
-      caller_repository:
-        description: Repository to checkout for replacement artifact/path
-        required: false
-        default: ''
-      caller_ref:
-        description: Ref to checkout for caller repository
-        required: false
-        default: ''
-      wheel_artifact_name:
-        description: Optional artifact name containing wheel files produced by caller CI
-        required: false
-        default: ''
-      python_version:
-        description: Python version for compatibility checks
-        required: false
-        default: '3.12'
 
 permissions:
   actions: read
@@ -98,19 +35,10 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Checkout caller repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ${{ inputs.caller_repository != '' && inputs.caller_repository || github.repository }}
-          ref: ${{ inputs.caller_ref != '' && inputs.caller_ref || github.sha }}
-          path: caller
-          fetch-depth: 1
-          persist-credentials: false
-
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: ${{ inputs.python_version }}
+          python-version: '3.12'
 
       - name: Setup uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -119,55 +47,28 @@ jobs:
           working-directory: stl/stl-verify/python
 
       - name: Download wheel artifact
-        if: ${{ inputs.replacement_mode == 'wheel' && inputs.wheel_artifact_name != '' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ${{ inputs.wheel_artifact_name }}
+          name: axis-synome-wheel
           path: caller-wheel
 
       - name: Resolve replacement target
         id: resolve
-        env:
-          REPLACEMENT_MODE: ${{ inputs.replacement_mode }}
-          REPLACEMENT_PATH: ${{ inputs.replacement_path }}
-          WHEEL_ARTIFACT_NAME: ${{ inputs.wheel_artifact_name }}
         run: |
           set -euo pipefail
-          caller_root="$GITHUB_WORKSPACE/caller"
-
-          case "$REPLACEMENT_MODE" in
-            folder)
-              target="$caller_root/$REPLACEMENT_PATH"
-              if [ ! -d "$target" ]; then
-                echo "::error::Folder replacement path does not exist: $target"
-                exit 1
-              fi
-              echo "install_target=$target" >> "$GITHUB_OUTPUT"
-              ;;
-            wheel)
-              wheel_root="$caller_root"
-              if [ -n "$WHEEL_ARTIFACT_NAME" ]; then
-                wheel_root="$GITHUB_WORKSPACE/caller-wheel"
-              fi
-              pattern="$wheel_root/$REPLACEMENT_PATH"
-              first_match=""
-              for candidate in $pattern; do
-                if [ -f "$candidate" ]; then
-                  first_match="$candidate"
-                  break
-                fi
-              done
-              if [ -z "$first_match" ]; then
-                echo "::error::No wheel matched path pattern: $pattern"
-                exit 1
-              fi
-              echo "install_target=$first_match" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::Unsupported replacement_mode '$REPLACEMENT_MODE'. Use folder or wheel."
-              exit 1
-              ;;
-          esac
+          pattern="$GITHUB_WORKSPACE/caller-wheel/*.whl"
+          first_match=""
+          for candidate in $pattern; do
+            if [ -f "$candidate" ]; then
+              first_match="$candidate"
+              break
+            fi
+          done
+          if [ -z "$first_match" ]; then
+            echo "::error::No wheel matched path pattern: $pattern"
+            exit 1
+          fi
+          echo "install_target=$first_match" >> "$GITHUB_OUTPUT"
 
       - name: Install stl Python dependencies
         working-directory: stl/stl-verify/python
@@ -176,18 +77,12 @@ jobs:
       - name: Replace dependency with caller artifact
         working-directory: stl/stl-verify/python
         env:
-          DEPENDENCY_NAME: ${{ inputs.dependency_name }}
-          REPLACEMENT_MODE: ${{ inputs.replacement_mode }}
           INSTALL_TARGET: ${{ steps.resolve.outputs.install_target }}
         run: |
           set -euo pipefail
-          if [ "$REPLACEMENT_MODE" = "folder" ]; then
-            uv pip install --no-deps --python .venv/bin/python --force-reinstall -e "$INSTALL_TARGET"
-          else
-            uv pip install --no-deps --python .venv/bin/python --force-reinstall "$INSTALL_TARGET"
-          fi
+          uv pip install --no-deps --python .venv/bin/python --force-reinstall "$INSTALL_TARGET"
 
-          uv pip show --python .venv/bin/python "$DEPENDENCY_NAME"
+          uv pip show --python .venv/bin/python axis-synome
 
       - name: Type check
         working-directory: stl/stl-verify/python
@@ -211,21 +106,12 @@ jobs:
         if: ${{ always() }}
         env:
           STL_REF: ${{ inputs.stl_ref }}
-          CALLER_REPOSITORY: ${{ inputs.caller_repository != '' && inputs.caller_repository || github.repository }}
-          CALLER_REF: ${{ inputs.caller_ref != '' && inputs.caller_ref || github.sha }}
-          WHEEL_ARTIFACT_NAME: ${{ inputs.wheel_artifact_name }}
-          REPLACEMENT_MODE: ${{ inputs.replacement_mode }}
-          REPLACEMENT_PATH: ${{ inputs.replacement_path }}
           INSTALL_TARGET: ${{ steps.resolve.outputs.install_target }}
         run: |
           {
             echo "## Python Sentinel Verify Compatibility Summary"
             echo ""
             echo "- stl_ref: $STL_REF"
-            echo "- caller_repository: $CALLER_REPOSITORY"
-            echo "- caller_ref: $CALLER_REF"
-            echo "- wheel_artifact_name: $WHEEL_ARTIFACT_NAME"
-            echo "- replacement_mode: $REPLACEMENT_MODE"
-            echo "- replacement_path: $REPLACEMENT_PATH"
+            echo "- wheel_artifact_name: axis-synome-wheel"
             echo "- resolved_install_target: $INSTALL_TARGET"
           } >> "$GITHUB_STEP_SUMMARY"

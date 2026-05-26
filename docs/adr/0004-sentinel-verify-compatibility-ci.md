@@ -23,7 +23,7 @@ A module can pass its own CI and still fail in downstream integration. We need a
 
 ## Decision
 
-Expose two reusable workflows with the same call model (checkout stl, checkout caller, replace caller artifact, run gate), while keeping language-specific setup and commands isolated:
+Expose two reusable workflows with the same call model (checkout stl, download caller-produced artifact, run gate), while keeping language-specific setup and commands isolated:
 
 - `.github/workflows/python-sentinel-verify-compatibility.yml`
 - `.github/workflows/go-sentinel-verify-compatibility.yml`
@@ -41,16 +41,15 @@ Why two workflows instead of one multi-language workflow:
 Each reusable workflow supports:
 
 - `stl_ref` (default `main`) for target stl revision.
-- `caller_repository` and `caller_ref` overrides for local/manual compatibility tests.
-- Replacement from caller-provided paths/artifacts.
+- Caller-provided artifacts with fixed, language-specific names.
 - Strict failure on gate command/test failures.
 
 ## Language-Specific Gates
 
 Python workflow (`python-sentinel-verify-compatibility.yml`):
 
-- Replacement modes: `folder` and `wheel`.
-- Replaces caller dependency in `stl-verify/python`.
+- Consumes artifact `axis-synome-wheel`.
+- Replaces `axis-synome` in `stl-verify/python` by installing the built wheel.
 - Runs:
   - `make typecheck`
   - `make lint`
@@ -58,7 +57,7 @@ Python workflow (`python-sentinel-verify-compatibility.yml`):
 
 Go workflow (`go-sentinel-verify-compatibility.yml`):
 
-- Replacement modes: `folder` and `artifact`.
+- Consumes artifact `axis-synome-entities`.
 - Replaces contract artifacts under `stl-verify/contracts/axis-synome/`.
 - Runs:
   - `go test ./internal/pkg/axis_synome_contract`
@@ -81,7 +80,7 @@ Positive:
 Trade-offs:
 
 - Extra CI time in caller repositories.
-- Caller repos must provide valid replacement artifacts/paths.
+- Caller repos must publish required artifacts with the expected names.
 - v1 focuses on module/contract replacement and does not run broad integration test suites.
 
 ## Non-Goals
@@ -95,38 +94,12 @@ Trade-offs:
 
 ```yaml
 jobs:
-  stl-compat-folder:
-    uses: archon-research/stl/.github/workflows/python-sentinel-verify-compatibility.yml@main
-    with:
-      replacement_mode: folder
-      replacement_path: python/axis_synome
-      dependency_name: axis-synome
-
-  build-axis-wheel:
+  build-axis-artifacts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v8.1.0
       - run: make build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: axis-synome-wheel
-          path: python/axis_synome/dist/*.whl
-
-  stl-compat-wheel:
-    needs: build-axis-wheel
-    uses: archon-research/stl/.github/workflows/python-sentinel-verify-compatibility.yml@main
-    with:
-      replacement_mode: wheel
-      replacement_path: '*.whl'
-      wheel_artifact_name: axis-synome-wheel
-      dependency_name: axis-synome
-
-  build-axis-entities:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8.1.0
       - run: |
           cd python/axis_synome
           uv run python scripts/export_entities.py \
@@ -134,18 +107,26 @@ jobs:
             --schema-out generated/stl/axis_synome_entities.schema.json
       - uses: actions/upload-artifact@v4
         with:
+          name: axis-synome-wheel
+          path: python/axis_synome/dist/*.whl
+      - uses: actions/upload-artifact@v4
+        with:
           name: axis-synome-entities
-          path: python/axis_synome/generated/stl/*
+          path: |
+            python/axis_synome/generated/stl/axis_synome_entities.json
+            python/axis_synome/generated/stl/axis_synome_entities.schema.json
+
+  stl-compat-python:
+    needs: build-axis-artifacts
+    uses: archon-research/stl/.github/workflows/python-sentinel-verify-compatibility.yml@main
+    with:
+      stl_ref: main
 
   stl-go-compat-artifact:
-    needs: build-axis-entities
+    needs: build-axis-artifacts
     uses: archon-research/stl/.github/workflows/go-sentinel-verify-compatibility.yml@main
     with:
-      replacement_mode: artifact
-      replacement_path: python/axis_synome/generated/stl
-      artifact_name: axis-synome-entities
-      contract_json_name: axis_synome_entities.json
-      contract_schema_name: axis_synome_entities.schema.json
+      stl_ref: main
 ```
 
 ## Flow
@@ -156,18 +137,18 @@ flowchart TD
   B --> C[Python gate]
   B --> D[Go gate]
 
-  C --> C1[Checkout stl and caller]
-  C1 --> C2[Resolve replacement: folder or wheel]
-  C2 --> C3[Run typecheck, lint, unit tests]
+  C --> C1[Download axis-synome-wheel artifact]
+  C1 --> C2[Checkout stl]
+  C2 --> C3[Install wheel in stl-verify/python]
+  C3 --> C4[Run typecheck, lint, unit tests]
 
-  D --> D1[Export entities JSON and schema]
-  D1 --> D2[Upload or provide contract folder]
-  D2 --> D3[Checkout stl and caller]
-  D3 --> D4[Replace contracts/axis-synome artifacts]
-  D4 --> D5[Run go test internal/pkg/axis_synome_contract]
+  D --> D1[Download axis-synome-entities artifact]
+  D1 --> D2[Checkout stl]
+  D2 --> D3[Replace contracts/axis-synome artifacts]
+  D3 --> D4[Run go test internal/pkg/axis_synome_contract]
 
-  C3 --> E{All selected gates pass?}
-  D5 --> E
+  C4 --> E{All selected gates pass?}
+  D4 --> E
   E -->|yes| F[Compatibility confirmed]
   E -->|no| G[Fail caller CI]
 ```
