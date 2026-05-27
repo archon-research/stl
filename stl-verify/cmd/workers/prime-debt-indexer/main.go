@@ -15,14 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/ethereum/go-ethereum/common"
 
 	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -122,22 +121,9 @@ func run(ctx context.Context, args []string) error {
 	}))
 	slog.SetDefault(logger)
 
-	// AWS config
-	awsRegion := env.Get("AWS_REGION", "eu-west-1")
-	awsOpts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(awsRegion),
-	}
-	if accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID"); accessKeyID != "" {
-		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-		awsOpts = append(awsOpts, awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
-			return aws.Credentials{
-				AccessKeyID:     accessKeyID,
-				SecretAccessKey: secretKey,
-				Source:          "StaticCredentials",
-			}, nil
-		})))
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsOpts...)
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}

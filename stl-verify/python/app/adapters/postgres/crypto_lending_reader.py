@@ -144,7 +144,7 @@ class PostgresCryptoLendingReader:
         return await self._load_share(
             chain_id=info.chain_id,
             token_id=token_id,
-            wallet_address=bytes.fromhex(prime_id.hex),
+            wallet_address=prime_id.to_bytes(),
         )
 
     async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:

@@ -735,6 +735,8 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_COMMIT_FULL ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.3")
+PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12")
 
 # Image tag (default to git sha, can override)
 IMAGE_TAG ?= $(GIT_COMMIT)
@@ -752,6 +754,7 @@ docker-build:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -777,6 +780,7 @@ _docker-release-internal:
 	echo "    Repository: $(ECR_REPO)" && \
 	echo "    Tag: $$IMAGE_TAG" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$GIT_COMMIT_FULL \
 		--build-arg GIT_BRANCH=$$GIT_BRANCH \
 		--build-arg BUILD_TIME=$$BUILD_TIME \
@@ -805,7 +809,7 @@ ecs-deploy-watcher:
 # Named aliases for consistency with other service targets
 docker-build-watcher:
 ifdef LOCAL
-	docker build -t stl-watcher:local -f Dockerfile .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-watcher:local -f Dockerfile .
 else
 	@$(MAKE) docker-build
 endif
@@ -968,6 +972,7 @@ docker-build-backup:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -996,6 +1001,7 @@ _docker-release-backup-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -1031,7 +1037,7 @@ ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws
 # Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
 docker-build-oracle-price-worker:
 ifdef LOCAL
-	docker build -t stl-oracle-price-worker:local -f Dockerfile.oracle-price-worker .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-oracle-price-worker:local -f Dockerfile.oracle-price-worker .
 else
 	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
@@ -1039,6 +1045,7 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1068,6 +1075,7 @@ _docker-release-oracle-price-worker-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -1113,7 +1121,7 @@ ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).am
 # Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
 docker-build-sparklend-position-tracker:
 ifdef LOCAL
-	docker build -t stl-sparklend-position-tracker:local -f Dockerfile.sparklend-position-tracker .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-sparklend-position-tracker:local -f Dockerfile.sparklend-position-tracker .
 else
 	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
@@ -1121,6 +1129,7 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1150,6 +1159,7 @@ _docker-release-sparklend-position-tracker-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -1186,7 +1196,7 @@ ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/
 # Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
 docker-build-morpho-indexer:
 ifdef LOCAL
-	docker build -t stl-morpho-indexer:local -f Dockerfile.morpho-indexer .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-morpho-indexer:local -f Dockerfile.morpho-indexer .
 else
 	@echo "==> Building Morpho Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
@@ -1194,6 +1204,7 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1223,6 +1234,7 @@ _docker-release-morpho-indexer-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -1257,7 +1269,7 @@ ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.
 # Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
 docker-build-prime-debt-indexer:
 ifdef LOCAL
-	docker build -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
 else
 	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
@@ -1265,6 +1277,7 @@ else
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1294,6 +1307,7 @@ _docker-release-prime-debt-indexer-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -1510,6 +1524,7 @@ docker-build-allocation-tracker:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -1538,6 +1553,7 @@ _docker-release-allocation-tracker-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -1579,6 +1595,7 @@ _docker-release-migrate-internal:
 	echo "    Repository: $(ECR_REPO_MIGRATE)" && \
 	echo "    Tag: $$TAG" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		-f Dockerfile.migrate \
 		-t $(ECR_REPO_MIGRATE):$$TAG \
 		-t $(ECR_REPO_MIGRATE):latest \
@@ -1862,7 +1879,7 @@ kind-secrets:
 	  --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 
 docker-build-migrate:
-	docker build -t stl-migrate:local -f Dockerfile.migrate .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-migrate:local -f Dockerfile.migrate .
 
 kind-load-images:
 	@test -n "$(IMAGES)" || { echo "ERROR: IMAGES is required."; exit 1; }
@@ -1928,7 +1945,7 @@ CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
-	docker build --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
 
 # Pattern rule: release a cronjob image to ECR (build + push).
 # All cronjobs share a single ECR repo; the cronjob name is part of the tag.
@@ -1947,6 +1964,7 @@ _docker-release-cronjob-%-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg CRONJOB=$* \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
@@ -2023,6 +2041,7 @@ ECR_REPO_PYTHON_API = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-
 docker-build-python-api:
 ifdef LOCAL
 	docker buildx build --load \
+		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-t stl-python-api:local -f python/Dockerfile .
 else
@@ -2031,6 +2050,7 @@ else
 	@echo "    Tag: $(IMAGE_TAG)"
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$(IMAGE_TAG) \
@@ -2055,6 +2075,7 @@ _docker-release-python-api-internal:
 	echo "    Tag: $$TAG" && \
 	echo "    Commit: $$COMMIT" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		-f python/Dockerfile \
 		-t $(ECR_REPO_PYTHON_API):$$TAG \
@@ -2082,6 +2103,7 @@ docker-build-mock-blockchain-server:
 	@echo "    Commit: $(GIT_COMMIT_FULL)"
 	@echo "    Branch: $(GIT_BRANCH)"
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
@@ -2110,6 +2132,7 @@ _docker-release-mock-blockchain-server-internal:
 	echo "    Commit: $$COMMIT" && \
 	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg GIT_COMMIT=$$COMMIT \
 		--build-arg GIT_BRANCH=$$BRANCH \
 		--build-arg BUILD_TIME=$$TIME \
@@ -2131,7 +2154,7 @@ docker-release-mock-blockchain-server-staging:
 
 # Build local Docker image for kind
 kind-build-mock-blockchain-server:
-	docker build -f Dockerfile.mock-blockchain-server -t stl-mock-blockchain-server:local .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -f Dockerfile.mock-blockchain-server -t stl-mock-blockchain-server:local .
 
 # Build and load image into kind cluster
 kind-load-mock-blockchain-server: kind-build-mock-blockchain-server

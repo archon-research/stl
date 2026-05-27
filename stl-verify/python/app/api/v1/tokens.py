@@ -7,7 +7,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.token_catalog_repository import PostgresTokenCatalogRepository
+from app.api._validators import ChainIdPath, TokenAddressPath
 from app.api.deps import get_engine
+from app.api.v1._resolvers import resolve_token
+from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 from app.services.token_catalog_service import TokenCatalogService
 
 router = APIRouter(tags=["tokens"])
@@ -149,38 +152,7 @@ async def list_tokens(
     return [_to_token_response(row) for row in rows]
 
 
-@router.get(
-    "/tokens/{token_id}",
-    response_model=TokenResponse,
-    summary="Get a token by id",
-    description="Return the token catalog entry for the given surrogate `token_id`, or `404` if unknown.",
-)
-async def get_token(token_id: int, service: TokenCatalogService = Depends(_get_service)) -> TokenResponse:
-    row = await service.get_token(token_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Token not found")
-
-    return _to_token_response(row)
-
-
-@router.get(
-    "/tokens/{token_id}/price",
-    response_model=TokenPriceResponse,
-    summary="Get latest token price",
-    description=(
-        "Return the latest USD price snapshot for a token.\n\n"
-        "- Returns `404` only when the token does not exist.\n"
-        "- Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` "
-        "when the token exists but no quote is currently available.\n"
-        "- `price_usd` is a decimal serialized as a JSON string to preserve precision."
-    ),
-)
-async def get_token_price(token_id: int, service: TokenCatalogService = Depends(_get_service)) -> TokenPriceResponse:
-    token = await service.get_token(token_id)
-    if token is None:
-        raise HTTPException(status_code=404, detail="Token not found")
-
-    quote = await service.get_latest_price(token_id)
+def _quote_to_price_response(token_id: int, quote: TokenPriceQuote | None) -> TokenPriceResponse:
     if quote is None:
         return TokenPriceResponse(
             token_id=token_id,
@@ -194,7 +166,6 @@ async def get_token_price(token_id: int, service: TokenCatalogService = Depends(
             is_stale=True,
             staleness_reason="missing_quote",
         )
-
     return TokenPriceResponse(
         token_id=quote.token_id,
         source_type=quote.source_type,
@@ -207,3 +178,87 @@ async def get_token_price(token_id: int, service: TokenCatalogService = Depends(
         is_stale=False,
         staleness_reason=None,
     )
+
+
+@router.get(
+    "/tokens/{token_id}",
+    response_model=TokenResponse,
+    summary="Get a token by id (deprecated)",
+    description=(
+        "Return the token catalog entry for the given surrogate `token_id`, or `404` if unknown.\n\n"
+        "**Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}` which addresses "
+        "tokens by on-chain identity and avoids a discovery round-trip."
+    ),
+    deprecated=True,
+)
+async def get_token_by_id(token_id: int, service: TokenCatalogService = Depends(_get_service)) -> TokenResponse:
+    row = await service.get_token(token_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    return _to_token_response(row)
+
+
+@router.get(
+    "/tokens/{token_id}/price",
+    response_model=TokenPriceResponse,
+    summary="Get latest token price (deprecated)",
+    description=(
+        "Return the latest USD price snapshot for a token.\n\n"
+        "- Returns `404` only when the token does not exist.\n"
+        "- Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` "
+        "when the token exists but no quote is currently available.\n"
+        "- `price_usd` is a decimal serialized as a JSON string to preserve precision.\n\n"
+        "**Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}/price`."
+    ),
+    deprecated=True,
+)
+async def get_token_price_by_id(
+    token_id: int, service: TokenCatalogService = Depends(_get_service)
+) -> TokenPriceResponse:
+    token = await service.get_token(token_id)
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+
+    quote = await service.get_latest_price(token_id)
+    return _quote_to_price_response(token_id, quote)
+
+
+@router.get(
+    "/tokens/{chain_id}/{token_address}",
+    response_model=TokenResponse,
+    summary="Get a token by chain id and address",
+    description=(
+        "Return the token catalog entry for the ERC-20 at `(chain_id, token_address)`, "
+        "or `404` if unknown. `token_address` is matched case-insensitively."
+    ),
+)
+async def get_token(
+    chain_id: ChainIdPath,
+    token_address: TokenAddressPath,
+    service: TokenCatalogService = Depends(_get_service),
+) -> TokenResponse:
+    row: TokenMetadata = await resolve_token(chain_id, token_address, service)
+    return _to_token_response(row)
+
+
+@router.get(
+    "/tokens/{chain_id}/{token_address}/price",
+    response_model=TokenPriceResponse,
+    summary="Get latest token price by chain id and address",
+    description=(
+        "Return the latest USD price snapshot for the token at `(chain_id, token_address)`.\n\n"
+        "- Returns `404` only when the token does not exist.\n"
+        "- Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` "
+        "when the token exists but no quote is currently available.\n"
+        "- `price_usd` is a decimal serialized as a JSON string to preserve precision."
+    ),
+)
+async def get_token_price(
+    chain_id: ChainIdPath,
+    token_address: TokenAddressPath,
+    service: TokenCatalogService = Depends(_get_service),
+) -> TokenPriceResponse:
+    token = await resolve_token(chain_id, token_address, service)
+    quote = await service.get_latest_price(token.id)
+    return _quote_to_price_response(token.id, quote)

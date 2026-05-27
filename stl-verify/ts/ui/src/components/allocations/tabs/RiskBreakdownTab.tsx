@@ -192,7 +192,13 @@ export function RiskBreakdownTab({
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
 
   useEffect(() => {
-    if (!isEnabled || !selectedReceiptToken || receiptTokenId === null) {
+    const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
+    if (
+      !isEnabled ||
+      !selectedReceiptToken ||
+      receiptTokenId === null ||
+      !receiptTokenAddress
+    ) {
       setBreakdown(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -205,7 +211,11 @@ export function RiskBreakdownTab({
     setErrorMessage(null);
     setBreakdown(null);
 
-    void getRiskBreakdown(receiptTokenId, controller.signal)
+    void getRiskBreakdown(
+      selectedReceiptToken.chain_id,
+      receiptTokenAddress,
+      controller.signal,
+    )
       .then((response) => {
         if (controller.signal.aborted) {
           return;
@@ -219,7 +229,8 @@ export function RiskBreakdownTab({
 
         logging.error('Failed to load risk breakdown', {
           error,
-          receiptTokenId,
+          chainId: selectedReceiptToken.chain_id,
+          receiptTokenAddress,
         });
         setBreakdown(null);
         setErrorMessage(toErrorMessage(error));
@@ -241,8 +252,9 @@ export function RiskBreakdownTab({
       return;
     }
 
-    const tokenId = Number(selectedReceiptToken.underlying_token_id);
-    if (!Number.isFinite(tokenId)) {
+    const chainId = selectedReceiptToken.chain_id;
+    const underlyingAddress = selectedReceiptToken.underlying_token_address;
+    if (!underlyingAddress) {
       setTokenCatalog(null);
       setTokenPrice(null);
       setIsTokenMetaLoading(false);
@@ -253,8 +265,8 @@ export function RiskBreakdownTab({
     setIsTokenMetaLoading(true);
 
     void Promise.allSettled([
-      getToken(tokenId, controller.signal),
-      getTokenPrice(tokenId, controller.signal),
+      getToken(chainId, underlyingAddress, controller.signal),
+      getTokenPrice(chainId, underlyingAddress, controller.signal),
     ])
       .then(([tokenResult, priceResult]) => {
         if (controller.signal.aborted) {
@@ -267,7 +279,8 @@ export function RiskBreakdownTab({
           setTokenCatalog(null);
           logging.warn('Token catalog metadata unavailable for risk summary', {
             error: tokenResult.reason,
-            tokenId,
+            chainId,
+            underlyingAddress,
           });
         }
 
@@ -277,7 +290,8 @@ export function RiskBreakdownTab({
           setTokenPrice(null);
           logging.warn('Token price metadata unavailable for risk summary', {
             error: priceResult.reason,
-            tokenId,
+            chainId,
+            underlyingAddress,
           });
         }
       })
@@ -511,7 +525,7 @@ export function RiskBreakdownTab({
         isOpen={isMethodologyOpen}
         onToggle={() => setIsMethodologyOpen(!isMethodologyOpen)}
         selectedChainId={selectedReceiptToken.chain_id}
-        selectedTokenId={selectedReceiptToken.underlying_token_id}
+        selectedTokenAddress={selectedReceiptToken.underlying_token_address}
         selectedTokenSymbol={selectedReceiptToken.underlying_symbol}
       />
     </div>

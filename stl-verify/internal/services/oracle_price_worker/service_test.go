@@ -2203,3 +2203,54 @@ func TestResolveBlockTimestamp_MalformedBlockJSON(t *testing.T) {
 		t.Errorf("error = %q, want it to mention parsing failure", err)
 	}
 }
+
+func TestResolveBlockTimestamp_RejectsNullPayload(t *testing.T) {
+	cache := &mockBlockCacheReader{
+		getBlockFn: func(_ context.Context, _, _ int64, _ int) (json.RawMessage, error) {
+			return json.RawMessage("null"), nil
+		},
+	}
+
+	svc, _, err := runProcessBlockWithCache(t, cache)
+	if err == nil {
+		t.Fatal("expected error for null cache payload, got nil")
+	}
+	t.Cleanup(func() { _ = svc.Stop() })
+
+	if !strings.Contains(err.Error(), "not found in cache or s3 (or cached value is null)") {
+		t.Errorf("error = %q, want clear null/empty diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "strconv.ParseInt") {
+		t.Errorf("error should not leak strconv.ParseInt detail: %v", err)
+	}
+	if !strings.Contains(err.Error(), "18000000") {
+		t.Errorf("error should include block number 18000000: %v", err)
+	}
+	if !strings.Contains(err.Error(), "version 2") {
+		t.Errorf("error should include version 2: %v", err)
+	}
+	if !strings.Contains(err.Error(), "chain 1") {
+		t.Errorf("error should include chain 1: %v", err)
+	}
+}
+
+func TestResolveBlockTimestamp_RejectsEmptyPayload(t *testing.T) {
+	cache := &mockBlockCacheReader{
+		getBlockFn: func(_ context.Context, _, _ int64, _ int) (json.RawMessage, error) {
+			return json.RawMessage(""), nil
+		},
+	}
+
+	svc, _, err := runProcessBlockWithCache(t, cache)
+	if err == nil {
+		t.Fatal("expected error for empty cache payload, got nil")
+	}
+	t.Cleanup(func() { _ = svc.Stop() })
+
+	if !strings.Contains(err.Error(), "not found in cache or s3 (or cached value is null)") {
+		t.Errorf("error = %q, want clear null/empty diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "strconv.ParseInt") {
+		t.Errorf("error should not leak strconv.ParseInt detail: %v", err)
+	}
+}
