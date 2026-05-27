@@ -490,10 +490,10 @@ function App() {
     <div
       className={css({
         position: 'relative',
-        '& [data-sidebar-layout] [role="separator"]': {
+        '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"][data-axis="vertical"]': {
           right: '0 !important',
         },
-        '& [data-sidebar-layout] [role="separator"] > [aria-hidden="true"]': {
+        '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="indicator"]': {
           opacity: 0,
         },
         '@media screen and (max-width: 64rem)': {
@@ -518,7 +518,7 @@ function App() {
             minHeight: '0 !important',
             justifyContent: 'stretch !important',
           },
-          '& [data-sidebar-layout] [role="separator"]': {
+          '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"]': {
             display: 'none !important',
           },
         },
