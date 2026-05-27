@@ -15,10 +15,14 @@
 # Metric source: OTel SDK in each indexer. Series carry:
 #   - service_name="stl-morpho-indexer" | "stl-oracle-indexer"
 #   - k8s_namespace_name="vector"
+#   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain (for multi-chain indexers)
 #
-# `cluster` / `env` are injected as external labels by the mimir-rules-sync
-# CI action — do not add them here (lint rejects).
+# `cluster` is propagated from the source metric (preserved through `sum by`)
+# so the Alertmanager Slack template's `Cluster:` header is populated.
+# `namespace` is set as a static rule label since every rule here filters to
+# `k8s_namespace_name="vector"`. The mimir-rules-sync lint forbids `cluster`
+# and `env` as static rule labels (FORBIDDEN_LABELS) but allows `namespace`.
 # =============================================================================
 groups:
   - name: vector-indexers
@@ -30,7 +34,7 @@ groups:
 
       - alert: VectorMorphoIndexerStalled
         expr: |
-          sum by (chain) (
+          sum by (chain, cluster) (
             rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
@@ -38,6 +42,7 @@ groups:
           team: vector
           severity: critical
           component: morpho-indexer
+          namespace: vector
         annotations:
           summary: "Vector morpho-indexer stalled on {{ $labels.chain }}"
           description: |
@@ -48,7 +53,7 @@ groups:
 
       - alert: VectorOracleIndexerStalled
         expr: |
-          sum by (chain) (
+          sum by (chain, cluster) (
             rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
@@ -56,6 +61,7 @@ groups:
           team: vector
           severity: critical
           component: oracle-indexer
+          namespace: vector
         annotations:
           summary: "Vector oracle-indexer stalled on {{ $labels.chain }}"
           description: |
@@ -70,7 +76,7 @@ groups:
 
       - alert: VectorMorphoIndexerErrorsHigh
         expr: |
-          sum by (chain) (
+          sum by (chain, cluster) (
             rate(morpho_errors_total{k8s_namespace_name="vector"}[10m])
           ) > 0.1
         for: 15m
@@ -78,6 +84,7 @@ groups:
           team: vector
           severity: warning
           component: morpho-indexer
+          namespace: vector
         annotations:
           summary: "Vector morpho-indexer error rate >0.1/s on {{ $labels.chain }}"
           description: |
@@ -87,7 +94,7 @@ groups:
 
       - alert: VectorOracleIndexerErrorsHigh
         expr: |
-          sum by (chain) (
+          sum by (chain, cluster) (
             rate(oracle_errors_total{k8s_namespace_name="vector"}[10m])
           ) > 0.1
         for: 15m
@@ -95,6 +102,7 @@ groups:
           team: vector
           severity: warning
           component: oracle-indexer
+          namespace: vector
         annotations:
           summary: "Vector oracle-indexer error rate >0.1/s on {{ $labels.chain }}"
           description: |
@@ -112,7 +120,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (chain, le) (
+            sum by (chain, cluster, le) (
               rate(morpho_rpc_duration_seconds_bucket{
                 k8s_namespace_name="vector"
               }[10m])
@@ -123,6 +131,7 @@ groups:
           team: vector
           severity: warning
           component: morpho-indexer
+          namespace: vector
         annotations:
           summary: "Vector morpho-indexer p99 RPC latency >3s on {{ $labels.chain }}"
           description: |
@@ -136,7 +145,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (chain, le) (
+            sum by (chain, cluster, le) (
               rate(oracle_rpc_duration_seconds_bucket{
                 k8s_namespace_name="vector"
               }[10m])
@@ -147,6 +156,7 @@ groups:
           team: vector
           severity: warning
           component: oracle-indexer
+          namespace: vector
         annotations:
           summary: "Vector oracle-indexer p99 RPC latency >3s on {{ $labels.chain }}"
           description: |
