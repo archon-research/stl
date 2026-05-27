@@ -158,6 +158,63 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
+    # Curve DEX worker is Ethereum-only (VEC-79)
+    echo "Creating Ethereum curve-dex queues..."
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-curve-dex-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-curve-dex.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-curve-dex.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
+    # Balancer V2 DEX worker is Ethereum-only (VEC-79)
+    echo "Creating Ethereum balancer-dex queues..."
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-balancer-dex-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-balancer-dex.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-balancer-dex.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
+    # Uniswap V3 DEX worker is Ethereum-only (VEC-79)
+    echo "Creating Ethereum uniswap-v3-dex queues..."
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-uniswap-v3-dex-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-uniswap-v3-dex.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-uniswap-v3-dex.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
     echo "Creating S3 buckets..."
     $AWS s3 mb s3://${S3_BUCKET} --region $REGION
     $AWS s3 mb s3://stress-test-data --region $REGION

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: balancer-dex-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: balancer-dex-worker
+  template:
+    metadata:
+      labels:
+        app: balancer-dex-worker
+    spec:
+      serviceAccountName: balancer-dex-worker
+      containers:
+        - name: balancer-dex-worker
+          image: balancer-dex-worker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: balancer-dex-worker-config
+            - secretRef:
+                name: balancer-dex-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f balancer-dex-worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

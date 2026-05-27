@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uniswap-v3-dex-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: uniswap-v3-dex-worker
+  template:
+    metadata:
+      labels:
+        app: uniswap-v3-dex-worker
+    spec:
+      serviceAccountName: uniswap-v3-dex-worker
+      containers:
+        - name: uniswap-v3-dex-worker
+          image: uniswap-v3-dex-worker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: uniswap-v3-dex-worker-config
+            - secretRef:
+                name: uniswap-v3-dex-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f uniswap-v3-dex-worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

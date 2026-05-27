@@ -4,10 +4,16 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax run-curve-dex-worker run-uniswap-v3-dex-worker run-balancer-dex-worker help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-curve-dex-worker-internal _docker-release-uniswap-v3-dex-worker-internal _docker-release-balancer-dex-worker-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		docker-build-curve-dex-worker docker-push-curve-dex-worker docker-release-curve-dex-worker \
+		docker-build-curve-dex-worker-staging docker-push-curve-dex-worker-staging docker-release-curve-dex-worker-staging \
+		docker-build-uniswap-v3-dex-worker docker-push-uniswap-v3-dex-worker docker-release-uniswap-v3-dex-worker \
+		docker-build-uniswap-v3-dex-worker-staging docker-push-uniswap-v3-dex-worker-staging docker-release-uniswap-v3-dex-worker-staging \
+		docker-build-balancer-dex-worker docker-push-balancer-dex-worker docker-release-balancer-dex-worker \
+		docker-build-balancer-dex-worker-staging docker-push-balancer-dex-worker-staging docker-release-balancer-dex-worker-staging \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -86,6 +92,21 @@ run-oracle-price-worker-avax:
 run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
 	@set -a && . cmd/workers/morpho-indexer/.env && [ -f cmd/workers/morpho-indexer/.env.local ] && . cmd/workers/morpho-indexer/.env.local; set +a && go run ./cmd/workers/morpho-indexer
+
+# Run the Curve DEX worker (requires dev-up first)
+run-curve-dex-worker:
+	@echo "==> Running Curve DEX worker..."
+	@set -a && . cmd/workers/curve-dex-worker/.env && [ -f cmd/workers/curve-dex-worker/.env.local ] && . cmd/workers/curve-dex-worker/.env.local; set +a && go run ./cmd/workers/curve-dex-worker
+
+# Run the Uniswap V3 DEX worker (requires dev-up first)
+run-uniswap-v3-dex-worker:
+	@echo "==> Running Uniswap V3 DEX worker..."
+	@set -a && . cmd/workers/uniswap-v3-dex-worker/.env && [ -f cmd/workers/uniswap-v3-dex-worker/.env.local ] && . cmd/workers/uniswap-v3-dex-worker/.env.local; set +a && go run ./cmd/workers/uniswap-v3-dex-worker
+
+# Run the Balancer V2 DEX worker (requires dev-up first)
+run-balancer-dex-worker:
+	@echo "==> Running Balancer V2 DEX worker..."
+	@set -a && . cmd/workers/balancer-dex-worker/.env && [ -f cmd/workers/balancer-dex-worker/.env.local ] && . cmd/workers/balancer-dex-worker/.env.local; set +a && go run ./cmd/workers/balancer-dex-worker
 
 # Run the allocation tracker (requires dev-up first)
 run-allocation-tracker:
@@ -419,8 +440,11 @@ _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
+	$(call build-if-needed,stl-curve-dex-worker:local,docker-build-curve-dex-worker LOCAL=1)
+	$(call build-if-needed,stl-uniswap-v3-dex-worker:local,docker-build-uniswap-v3-dex-worker LOCAL=1)
+	$(call build-if-needed,stl-balancer-dex-worker:local,docker-build-balancer-dex-worker LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
+	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer curve-dex-worker uniswap-v3-dex-worker balancer-dex-worker; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
 	    { echo "ERROR: deployment $$dep not ready after 300s"; exit 1; }; \
 	done
@@ -1292,6 +1316,186 @@ docker-release-prime-debt-indexer-staging:
 	@$(MAKE) docker-release-prime-debt-indexer ENV=sentinelstaging
 
 # =============================================================================
+# Docker Build & Push - Curve DEX Worker
+# =============================================================================
+
+ECR_REPO_CURVE_DEX_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-curve-dex-worker
+
+docker-build-curve-dex-worker:
+ifdef LOCAL
+	docker build -t stl-curve-dex-worker:local -f Dockerfile.curve-dex-worker .
+else
+	@echo "==> Building Curve DEX Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_CURVE_DEX_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.curve-dex-worker \
+		-t $(ECR_REPO_CURVE_DEX_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_CURVE_DEX_WORKER):latest \
+		--load .
+endif
+
+docker-push-curve-dex-worker: ecr-login
+	@echo "==> Pushing Curve DEX Worker Docker image to ECR..."
+	docker push $(ECR_REPO_CURVE_DEX_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_CURVE_DEX_WORKER):latest
+
+docker-release-curve-dex-worker: ecr-login _docker-release-curve-dex-worker-internal
+
+_docker-release-curve-dex-worker-internal:
+	@TAG=$(IMAGE_TAG) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Curve DEX Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_CURVE_DEX_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.curve-dex-worker \
+		-t $(ECR_REPO_CURVE_DEX_WORKER):$$TAG \
+		-t $(ECR_REPO_CURVE_DEX_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Curve DEX Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_CURVE_DEX_WORKER):$$TAG && \
+	docker push $(ECR_REPO_CURVE_DEX_WORKER):latest && \
+	echo "==> Curve DEX Worker Docker image released: $(ECR_REPO_CURVE_DEX_WORKER):$$TAG"
+
+docker-build-curve-dex-worker-staging:
+	@$(MAKE) docker-build-curve-dex-worker ENV=sentinelstaging
+
+docker-push-curve-dex-worker-staging:
+	@$(MAKE) docker-push-curve-dex-worker ENV=sentinelstaging
+
+docker-release-curve-dex-worker-staging:
+	@$(MAKE) docker-release-curve-dex-worker ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Uniswap V3 DEX Worker
+# =============================================================================
+
+ECR_REPO_UNISWAP_V3_DEX_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-uniswap-v3-dex-worker
+
+docker-build-uniswap-v3-dex-worker:
+ifdef LOCAL
+	docker build -t stl-uniswap-v3-dex-worker:local -f Dockerfile.uniswap-v3-dex-worker .
+else
+	@echo "==> Building Uniswap V3 DEX Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_UNISWAP_V3_DEX_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.uniswap-v3-dex-worker \
+		-t $(ECR_REPO_UNISWAP_V3_DEX_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_UNISWAP_V3_DEX_WORKER):latest \
+		--load .
+endif
+
+docker-push-uniswap-v3-dex-worker: ecr-login
+	@echo "==> Pushing Uniswap V3 DEX Worker Docker image to ECR..."
+	docker push $(ECR_REPO_UNISWAP_V3_DEX_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_UNISWAP_V3_DEX_WORKER):latest
+
+docker-release-uniswap-v3-dex-worker: ecr-login _docker-release-uniswap-v3-dex-worker-internal
+
+_docker-release-uniswap-v3-dex-worker-internal:
+	@TAG=$(IMAGE_TAG) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Uniswap V3 DEX Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_UNISWAP_V3_DEX_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.uniswap-v3-dex-worker \
+		-t $(ECR_REPO_UNISWAP_V3_DEX_WORKER):$$TAG \
+		-t $(ECR_REPO_UNISWAP_V3_DEX_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Uniswap V3 DEX Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_UNISWAP_V3_DEX_WORKER):$$TAG && \
+	docker push $(ECR_REPO_UNISWAP_V3_DEX_WORKER):latest && \
+	echo "==> Uniswap V3 DEX Worker Docker image released: $(ECR_REPO_UNISWAP_V3_DEX_WORKER):$$TAG"
+
+docker-build-uniswap-v3-dex-worker-staging:
+	@$(MAKE) docker-build-uniswap-v3-dex-worker ENV=sentinelstaging
+
+docker-push-uniswap-v3-dex-worker-staging:
+	@$(MAKE) docker-push-uniswap-v3-dex-worker ENV=sentinelstaging
+
+docker-release-uniswap-v3-dex-worker-staging:
+	@$(MAKE) docker-release-uniswap-v3-dex-worker ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Balancer DEX Worker
+# =============================================================================
+
+ECR_REPO_BALANCER_DEX_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-balancer-dex-worker
+
+docker-build-balancer-dex-worker:
+ifdef LOCAL
+	docker build -t stl-balancer-dex-worker:local -f Dockerfile.balancer-dex-worker .
+else
+	@echo "==> Building Balancer DEX Worker Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_BALANCER_DEX_WORKER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.balancer-dex-worker \
+		-t $(ECR_REPO_BALANCER_DEX_WORKER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_BALANCER_DEX_WORKER):latest \
+		--load .
+endif
+
+docker-push-balancer-dex-worker: ecr-login
+	@echo "==> Pushing Balancer DEX Worker Docker image to ECR..."
+	docker push $(ECR_REPO_BALANCER_DEX_WORKER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_BALANCER_DEX_WORKER):latest
+
+docker-release-balancer-dex-worker: ecr-login _docker-release-balancer-dex-worker-internal
+
+_docker-release-balancer-dex-worker-internal:
+	@TAG=$(IMAGE_TAG) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Balancer DEX Worker Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_BALANCER_DEX_WORKER)" && \
+	echo "    Tag: $$TAG" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.balancer-dex-worker \
+		-t $(ECR_REPO_BALANCER_DEX_WORKER):$$TAG \
+		-t $(ECR_REPO_BALANCER_DEX_WORKER):latest \
+		--load . && \
+	echo "==> Pushing Balancer DEX Worker Docker image to ECR..." && \
+	docker push $(ECR_REPO_BALANCER_DEX_WORKER):$$TAG && \
+	docker push $(ECR_REPO_BALANCER_DEX_WORKER):latest && \
+	echo "==> Balancer DEX Worker Docker image released: $(ECR_REPO_BALANCER_DEX_WORKER):$$TAG"
+
+docker-build-balancer-dex-worker-staging:
+	@$(MAKE) docker-build-balancer-dex-worker ENV=sentinelstaging
+
+docker-push-balancer-dex-worker-staging:
+	@$(MAKE) docker-push-balancer-dex-worker ENV=sentinelstaging
+
+docker-release-balancer-dex-worker-staging:
+	@$(MAKE) docker-release-balancer-dex-worker ENV=sentinelstaging
+
+# =============================================================================
 # Docker Build & Push - Allocation Tracker
 # =============================================================================
 
@@ -1699,7 +1903,7 @@ kind-load-watcher:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:local"
 
 kind-load-workers:
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local stl-curve-dex-worker:local stl-uniswap-v3-dex-worker:local stl-balancer-dex-worker:local"
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1707,7 +1911,7 @@ kind-deploy-watcher:
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer deployment/curve-dex-worker deployment/uniswap-v3-dex-worker deployment/balancer-dex-worker -n $(KUBE_NS)
 
 kind-load-python-api:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-python-api:local"
