@@ -1,0 +1,821 @@
+# =============================================================================
+# Vector pipeline overview — starter dashboard
+# =============================================================================
+# Top-down health view of the Vector ingestion pipeline:
+#   watcher → backup-worker → (morpho-indexer, oracle-indexer)
+#
+# Panels are deliberately keyed to the alert rules in `alerts/vector-*.yaml`
+# so the dashboard answers "is this alert about to fire / why is it firing?"
+# Threshold lines on each panel mirror the alert expression.
+#
+# Two CRs in this file — one per Grafana stack. The
+# `grafana-dashboards-{prod,staging}` ApplicationSets in the infra repo sync
+# this same path into both clusters; the `environment` instanceSelector
+# routes each CR to the matching Grafana CR. Dashboard JSON is duplicated to
+# keep the file self-contained (Grafana Operator does not support YAML anchors
+# inside `spec.json`).
+#
+# Folder UID `vector` is owned by Terraform (`infra/18_grafana_rbac.tf`).
+# =============================================================================
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vector-pipeline-overview
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app: grafana-operator
+      environment: prod
+  folderUID: vector
+  resyncPeriod: 5m
+  json: |
+    {
+      "title": "Vector — Pipeline Overview",
+      "uid": "vector-pipeline-overview",
+      "tags": ["vector", "pipeline"],
+      "schemaVersion": 39,
+      "timezone": "",
+      "time": { "from": "now-3h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROM",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "", "value": "" },
+            "hide": 0
+          },
+          {
+            "name": "cluster",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": "label_values(alchemy_client_requests_total{k8s_namespace_name=\"vector\"}, cluster)",
+            "refresh": 2,
+            "includeAll": false,
+            "multi": false,
+            "current": { "text": "archon-prod", "value": "archon-prod" }
+          },
+          {
+            "name": "chain",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": "label_values(alchemy_client_requests_total{k8s_namespace_name=\"vector\", cluster=\"$cluster\"}, chain)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Pipeline health",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "type": "stat",
+          "title": "Watcher block polls / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "green", "value": 0.05 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Backup-worker blocks / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 5, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"raw-data-backup\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Morpho indexer blocks / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 10, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Oracle indexer blocks / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 15, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(oracle_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Alchemy error rate",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.1 },
+                { "color": "red", "value": 0.5 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "refId": "A"
+          }]
+        },
+
+        {
+          "type": "row",
+          "title": "Watcher (alerts/vector-watcher.yaml)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "eth_getBlockByNumber rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "Alchemy error ratio per chain — VectorWatcherAlchemyErrorsHigh fires > 0.5 for 10m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "max": 1,
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 0.5 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "Alchemy p99 latency per chain — VectorWatcherAlchemyLatencyHigh fires > 5s for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 5 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(alchemy_client_request_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "Alchemy retry ratio per chain — VectorWatcherAlchemyRetriesHigh fires > 0.2 for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "max": 1,
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 0.2 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(alchemy_client_retries_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])), 0.001)",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+
+        {
+          "type": "row",
+          "title": "Backup worker (alerts/vector-backup-worker.yaml)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "blocks_processed rate per chain — VectorBackupWorkerStalled fires at 0 for 15m (while watcher producing)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"raw-data-backup\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "SQS→S3 p99 processing latency per chain — VectorBackupWorkerLatencyHigh fires > 30s for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 30 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(processing_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"raw-data-backup\", chain=~\"$chain\"}[10m])))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+
+        {
+          "type": "row",
+          "title": "Indexers (alerts/vector-indexers.yaml)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "Indexer block rate per chain — Stalled alerts fire at 0 for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (chain) (rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "morpho · {{chain}}"
+            },
+            {
+              "expr": "sum by (chain) (rate(oracle_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+              "refId": "B",
+              "legendFormat": "oracle · {{chain}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Indexer errors/s per chain — ErrorsHigh alerts fire > 0.1 for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 0.1 }
+              ] }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (chain) (rate(morpho_errors_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m]))",
+              "refId": "A",
+              "legendFormat": "morpho · {{chain}}"
+            },
+            {
+              "expr": "sum by (chain) (rate(oracle_errors_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m]))",
+              "refId": "B",
+              "legendFormat": "oracle · {{chain}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Indexer p99 RPC latency per chain — RPCLatencyHigh alerts fire > 3s for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 3 }
+              ] }
+            }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(morpho_rpc_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m])))",
+              "refId": "A",
+              "legendFormat": "morpho · {{chain}}"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(oracle_rpc_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m])))",
+              "refId": "B",
+              "legendFormat": "oracle · {{chain}}"
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vector-pipeline-overview
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app: grafana-operator
+      environment: staging
+  folderUID: vector
+  resyncPeriod: 5m
+  json: |
+    {
+      "title": "Vector — Pipeline Overview",
+      "uid": "vector-pipeline-overview",
+      "tags": ["vector", "pipeline"],
+      "schemaVersion": 39,
+      "timezone": "",
+      "time": { "from": "now-3h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROM",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "", "value": "" },
+            "hide": 0
+          },
+          {
+            "name": "cluster",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": "label_values(alchemy_client_requests_total{k8s_namespace_name=\"vector\"}, cluster)",
+            "refresh": 2,
+            "includeAll": false,
+            "multi": false,
+            "current": { "text": "archon-staging", "value": "archon-staging" }
+          },
+          {
+            "name": "chain",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": "label_values(alchemy_client_requests_total{k8s_namespace_name=\"vector\", cluster=\"$cluster\"}, chain)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": { "text": "All", "value": "$__all" }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "Pipeline health",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "type": "stat",
+          "title": "Watcher block polls / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 0, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "yellow", "value": 0.01 },
+                { "color": "green", "value": 0.05 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Backup-worker blocks / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 5, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"raw-data-backup\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Morpho indexer blocks / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 10, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Oracle indexer blocks / min",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 5, "x": 15, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(oracle_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "all chains"
+          }]
+        },
+        {
+          "type": "stat",
+          "title": "Alchemy error rate",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "yellow", "value": 0.1 },
+                { "color": "red", "value": 0.5 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "refId": "A"
+          }]
+        },
+
+        {
+          "type": "row",
+          "title": "Watcher (alerts/vector-watcher.yaml)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "eth_getBlockByNumber rate per chain — VectorWatcherNoBlocks fires at 0 for 1m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "Alchemy error ratio per chain — VectorWatcherAlchemyErrorsHigh fires > 0.5 for 10m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "max": 1,
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 0.5 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "Alchemy p99 latency per chain — VectorWatcherAlchemyLatencyHigh fires > 5s for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 5 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(alchemy_client_request_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "Alchemy retry ratio per chain — VectorWatcherAlchemyRetriesHigh fires > 0.2 for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "max": 1,
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 0.2 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(alchemy_client_retries_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])), 0.001)",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+
+        {
+          "type": "row",
+          "title": "Backup worker (alerts/vector-backup-worker.yaml)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "blocks_processed rate per chain — VectorBackupWorkerStalled fires at 0 for 15m (while watcher producing)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "sum by (chain) (rate(blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"raw-data-backup\", chain=~\"$chain\"}[5m]))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+        {
+          "type": "timeseries",
+          "title": "SQS→S3 p99 processing latency per chain — VectorBackupWorkerLatencyHigh fires > 30s for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 30 }
+              ] }
+            }
+          },
+          "targets": [{
+            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(processing_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"raw-data-backup\", chain=~\"$chain\"}[10m])))",
+            "refId": "A",
+            "legendFormat": "{{chain}}"
+          }]
+        },
+
+        {
+          "type": "row",
+          "title": "Indexers (alerts/vector-indexers.yaml)",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+          "collapsed": false
+        },
+        {
+          "type": "timeseries",
+          "title": "Indexer block rate per chain — Stalled alerts fire at 0 for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "red", "value": null },
+                { "color": "green", "value": 0.001 }
+              ] }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (chain) (rate(morpho_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "morpho · {{chain}}"
+            },
+            {
+              "expr": "sum by (chain) (rate(oracle_blocks_processed_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[5m]))",
+              "refId": "B",
+              "legendFormat": "oracle · {{chain}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Indexer errors/s per chain — ErrorsHigh alerts fire > 0.1 for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 0.1 }
+              ] }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (chain) (rate(morpho_errors_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m]))",
+              "refId": "A",
+              "legendFormat": "morpho · {{chain}}"
+            },
+            {
+              "expr": "sum by (chain) (rate(oracle_errors_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m]))",
+              "refId": "B",
+              "legendFormat": "oracle · {{chain}}"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Indexer p99 RPC latency per chain — RPCLatencyHigh alerts fire > 3s for 15m",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "fillOpacity": 10, "lineWidth": 2 },
+              "thresholds": { "mode": "absolute", "steps": [
+                { "color": "green", "value": null },
+                { "color": "red", "value": 3 }
+              ] }
+            }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(morpho_rpc_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m])))",
+              "refId": "A",
+              "legendFormat": "morpho · {{chain}}"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(oracle_rpc_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", chain=~\"$chain\"}[10m])))",
+              "refId": "B",
+              "legendFormat": "oracle · {{chain}}"
+            }
+          ]
+        }
+      ]
+    }
