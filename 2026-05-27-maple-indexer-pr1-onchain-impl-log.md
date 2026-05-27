@@ -92,3 +92,29 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - No new env vars. No new global helpers.
 
 ---
+
+## Task 8 — Service Config + Telemetry skeleton
+
+**Files:**
+- `stl-verify/internal/services/maple_indexer/types.go`
+- `stl-verify/internal/services/maple_indexer/telemetry.go`
+- `stl-verify/internal/services/maple_indexer/types_test.go`
+
+### What was done
+- `types.go`: `mapleSyrupDeployBlocks` map (chain 1 → 20231245) with `MapleSyrupDeployBlock()` accessor that errors on unknown chains. `Config` wraps `shared.SQSConsumerConfig` with optional `*Telemetry` field.
+- `telemetry.go`: full OTel surface mirroring morpho's `telemetry.go`. Counters: `blocksProcessed`, `vaultStateWrites`, `positionWrites`, `rpcCallsTotal`, `errorsTotal`. Histograms: `blockDuration`, `receiptDuration`, `rpcDuration`. All recorders are nil-safe so unit tests can pass nil Telemetry.
+- 4 unit tests: deploy-block lookup (3 sub-cases), config defaults, nil-safe recorders, full constructor sanity.
+
+### Decisions / departures from plan
+- **Richer telemetry than plan's minimal `MessagesProcessed/VaultStateWrites/PositionWrites/BlockLag`.** Mirrored morpho's pattern (tracer + spans + dedicated recorder methods) for consistency — the service in Task 13 will need spans to wrap block/receipt processing, and adding them piecemeal later would just churn this file.
+- Renamed plan's `MessagesProcessed` to `blocksProcessed` since `sqsutil.RunLoop` is the message-level handler; what we record here is at the block-event granularity.
+- Plan suggested `ConfigDefaults() Config` returning `Config{SQSConsumerConfig: shared.SQSConsumerConfigDefaults()}` — kept verbatim.
+- Plan's `SyrupDeployBlock(chainID int64) (int64, bool)` boolean-OK signature changed to `MapleSyrupDeployBlock(chainID int64) (int64, error)` — matches morpho's `MorphoBlueDeployBlock` error-return pattern.
+
+### Gotchas
+- None — straightforward port of morpho's pattern.
+
+### State of codebase
+- Package `maple_indexer` compiles, 4 tests pass.
+- Next: Task 9 (event_extractor.go). Use the syrup events ABI already in `internal/pkg/blockchain/abis/syrup_vault_abi.go`. Topic hashes only — full Morpho-style event-decoding is overkill for Syrup because the service only needs to know which users were touched, not the parsed args.
+
