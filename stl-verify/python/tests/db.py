@@ -132,15 +132,23 @@ async def wrap_conn(session_engine: AsyncEngine) -> AsyncIterator[AsyncConnectio
             # Roll back each layer independently so a failure on one does not
             # mask the other and leave the connection in an unknown state.
             savepoint_err: BaseException | None = None
+            outer_err: BaseException | None = None
             if savepoint.is_active:
                 try:
                     await savepoint.rollback()
                 except Exception as exc:
                     savepoint_err = exc
             if outer.is_active:
-                await outer.rollback()
+                try:
+                    await outer.rollback()
+                except Exception as exc:
+                    outer_err = exc
+            if savepoint_err is not None and outer_err is not None:
+                raise ExceptionGroup("wrap_conn rollback failed", [savepoint_err, outer_err])
             if savepoint_err is not None:
                 raise savepoint_err
+            if outer_err is not None:
+                raise outer_err
 
 
 @pytest_asyncio.fixture(loop_scope="session")
