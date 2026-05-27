@@ -1,0 +1,98 @@
+# =============================================================================
+# Vector — backup worker alerts (ADR-008 / ORB-200)
+# =============================================================================
+# The backup worker consumes SQS messages produced by the watcher and writes
+# raw block data to S3 for long-term archive / replay. It can fall behind
+# without the watcher noticing — these alerts catch that.
+#
+# Metric source: OTel SDK in the backup-worker service. Series carry:
+#   - service_name="raw-data-backup"   (OTel service.name set in main.go)
+#   - k8s_namespace_name="vector"
+#   - chain
+#
+# `cluster` / `env` are injected as external labels by the mimir-rules-sync
+# CI action — do not add them here (lint rejects).
+# =============================================================================
+groups:
+  - name: vector-backup-worker
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL — page-worthy
+      # ---------------------------------------------------------------------
+
+      - alert: VectorBackupWorkerStalled
+        # Backup worker not processing blocks while the watcher IS producing.
+        # The `and on(chain)` guard prevents firing when the watcher itself
+        # is down (that's VectorWatcherNoBlocks's job).
+        #
+        # Assumes the backup worker emits its own `blocks_processed_total`
+        # counter tagged with service_name="stl-backup-worker".
+        expr: |
+          (
+            sum by (chain) (
+              rate(blocks_processed_total{
+                k8s_namespace_name="vector",
+                service_name="raw-data-backup"
+              }[5m])
+            ) == 0
+          )
+          and on (chain) (
+            sum by (chain) (
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher",
+                rpc_method="eth_getBlockByNumber"
+              }[5m])
+            ) > 0
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: backup-worker
+        annotations:
+          summary: "Vector backup-worker stalled on {{ $labels.chain }} (watcher still producing)"
+          description: |
+            `stl-backup-worker` on chain `{{ $labels.chain }}` has not
+            processed a block for >15m while the watcher is still polling
+            Alchemy. SQS depth is likely growing — raw block archive will
+            fall behind.
+
+            Check backup-worker pod logs and the upstream SQS queue for
+            DLQ messages.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-backup-worker.md#vectorbackupworkerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorBackupWorkerLatencyHigh
+        # p99 SQS→S3 processing >30s for 15m. Healthy p99 is a few seconds.
+        # 30s means we're at risk of SQS visibility-timeout redelivery and
+        # the queue is growing.
+        #
+        # Histogram `processing_duration_seconds` (OTel instrument name in the
+        # backup-worker service; exported as *_bucket / *_count / *_sum).
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, le) (
+              rate(processing_duration_seconds_bucket{
+                k8s_namespace_name="vector",
+                service_name="raw-data-backup"
+              }[10m])
+            )
+          ) > 30
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: backup-worker
+        annotations:
+          summary: "Vector backup-worker p99 processing latency >30s on {{ $labels.chain }}"
+          description: |
+            p99 SQS→S3 processing for `stl-backup-worker` on chain
+            `{{ $labels.chain }}` is `{{ $value | printf "%.1fs" }}` over
+            15m. Approaching the SQS visibility timeout — messages may
+            start getting redelivered and the queue depth will grow.

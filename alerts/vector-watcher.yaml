@@ -1,0 +1,164 @@
+# =============================================================================
+# Vector — chain watcher alerts (ADR-008 / ORB-200)
+# =============================================================================
+# The chain watcher is the head of the Vector data pipeline: it polls Alchemy
+# (and a fallback subscriber) for new blocks per chain and writes them to the
+# downstream queue. If it stalls, the whole pipeline stalls.
+#
+# Metric source: OTel SDK in the watcher service. Series carry:
+#   - service_name="stl-watcher"           (OTel service.name)
+#   - k8s_namespace_name="vector"          (k8sattributes processor)
+#   - chain                                (per-chain label, set by app code)
+#   - rpc_method                           (e.g. eth_getBlockByNumber)
+#
+# `cluster` / `env` are injected as external labels by the mimir-rules-sync
+# CI action — do not add them here (lint rejects).
+# Namespace assumption: documented per-alert; adjust in review if cardinality
+# differs from what the SDK actually emits.
+# =============================================================================
+groups:
+  - name: vector-watcher
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL — page-worthy
+      # ---------------------------------------------------------------------
+
+      - alert: VectorWatcherNoBlocks
+        # Watcher stops requesting new blocks from Alchemy. If true for >1m
+        # the pipeline is starved at the head — every downstream service
+        # will appear idle within minutes.
+        #
+        # `for: 1m` is intentionally aggressive (per Simon's Slack feedback):
+        # a healthy watcher polls every block (~12s on Ethereum, ~2s on L2s).
+        # If we're not seeing eth_getBlockByNumber for a full minute, the
+        # watcher is stuck — no benign reason to wait longer.
+        expr: |
+          sum by (chain) (
+            rate(alchemy_client_requests_total{
+              k8s_namespace_name="vector",
+              service_name="stl-watcher",
+              rpc_method="eth_getBlockByNumber"
+            }[1m])
+          ) == 0
+        for: 1m
+        labels:
+          team: vector
+          severity: critical
+          component: watcher
+        annotations:
+          summary: "Vector watcher not polling blocks on {{ $labels.chain }}"
+          description: |
+            `stl-watcher` on chain `{{ $labels.chain }}` has not issued a
+            single `eth_getBlockByNumber` call to Alchemy for >1m. The chain
+            ingestion pipeline is stalled at the head — every downstream
+            indexer will go idle shortly.
+
+            Check watcher pod logs and Alchemy availability before restarting.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchernoblocks
+
+      - alert: VectorWatcherAlchemyErrorsHigh
+        # Sustained Alchemy RPC error rate >50% for 10m. Captures upstream
+        # outage, auth failure, or quota exhaustion. Below 50% the watcher's
+        # retry logic should absorb it.
+        expr: |
+          (
+            sum by (chain) (
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher",
+                status="error"
+              }[5m])
+            )
+            /
+            sum by (chain) (
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[5m])
+            )
+          ) > 0.5
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: watcher
+        annotations:
+          summary: "Vector watcher Alchemy error rate >50% on {{ $labels.chain }}"
+          description: |
+            `stl-watcher` on chain `{{ $labels.chain }}` is seeing >50% of
+            Alchemy RPC calls fail for >10m. Likely an upstream outage, an
+            auth/quota issue, or a misconfigured endpoint.
+
+            Verify the Alchemy status page and the `ALCHEMY_API_KEY` secret
+            value before restarting.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheralchemyerrorshigh
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorWatcherAlchemyLatencyHigh
+        # p99 Alchemy RPC latency >5s for 15m. Healthy p99 is sub-second.
+        # 5s sustained means the poll loop is degraded but not broken —
+        # early warning before VectorWatcherNoBlocks fires.
+        #
+        # Assumes the SDK exposes histogram
+        # `alchemy_client_request_duration_seconds`. Adjust if the metric
+        # name differs.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, le) (
+              rate(alchemy_client_request_duration_seconds_bucket{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[10m])
+            )
+          ) > 5
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+        annotations:
+          summary: "Vector watcher Alchemy p99 latency >5s on {{ $labels.chain }}"
+          description: |
+            p99 Alchemy RPC latency for `stl-watcher` on chain
+            `{{ $labels.chain }}` is `{{ $value | printf "%.2fs" }}`
+            sustained over 15m. Pipeline is degraded; expect block lag.
+
+      - alert: VectorWatcherAlchemyRetriesHigh
+        # Retry ratio >20% for 15m — Alchemy is intermittently failing and
+        # the SDK is masking it via retries. Below 20% is normal noise.
+        #
+        # Assumes counter `alchemy_client_retries_total` next to the
+        # existing `alchemy_client_requests_total`.
+        expr: |
+          (
+            sum by (chain) (
+              rate(alchemy_client_retries_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[10m])
+            )
+            /
+            sum by (chain) (
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[10m])
+            )
+          ) > 0.2
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+        annotations:
+          summary: "Vector watcher Alchemy retry ratio >20% on {{ $labels.chain }}"
+          description: |
+            `stl-watcher` on chain `{{ $labels.chain }}` is retrying
+            `{{ $value | humanizePercentage }}` of Alchemy calls over 15m.
+            Upstream is flaky; if this escalates we'll see
+            VectorWatcherAlchemyErrorsHigh.
