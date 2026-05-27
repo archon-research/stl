@@ -118,3 +118,33 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - Package `maple_indexer` compiles, 4 tests pass.
 - Next: Task 9 (event_extractor.go). Use the syrup events ABI already in `internal/pkg/blockchain/abis/syrup_vault_abi.go`. Topic hashes only — full Morpho-style event-decoding is overkill for Syrup because the service only needs to know which users were touched, not the parsed args.
 
+
+## Task 9 — EventExtractor
+
+**Files:**
+- `stl-verify/internal/services/maple_indexer/event_extractor.go`
+- `stl-verify/internal/services/maple_indexer/event_extractor_test.go` (13 cases)
+
+### What was done
+- `EventExtractor` caches the keccak topic-hashes for Syrup `Deposit`, `Withdraw`, `Transfer`. No full ABI decoding — Syrup indexing only needs to know *which* users were touched.
+- `IsRelevant(vault, log)` — `vault address match` AND `recognised topic[0]`.
+- `ExtractTouchedAddresses(vault, logs) -> (map[Address]struct{}, bool)`:
+  - **Deposit:** `Topics[1]=sender, Topics[2]=owner` → refresh both.
+  - **Withdraw:** `Topics[2]=receiver, Topics[3]=owner` → refresh both. **Sender (Topics[1]) intentionally NOT refreshed** — that slot is `msg.sender`, which on router-style withdrawals is a contract, not a position holder.
+  - **Transfer:** `Topics[1]=from, Topics[2]=to` → refresh both, skipping the zero address (mint/burn counter-party).
+- Zero-address filter is global: any topic decoded to `0x0` is dropped.
+- Map-based return naturally dedupes across multiple logs touching the same user.
+
+### Decisions / departures from plan
+- Plan's test imports `core/types.Log`. Reality uses `shared.Log` (JSON-shaped, `Address`/`Topics`/`Data` as strings) — that's what `service.go` parses receipts into. Tests use `shared.Log` accordingly.
+- **Withdraw extractor narrows refresh set to (receiver, owner), excluding sender.** Plan said refresh "owner (and receiver if non-zero)". The ERC-4626 `Withdraw` event has `sender = msg.sender`, `receiver = assets recipient`, `owner = shares burner`. Router-style withdrawals (e.g. Maple's PoolManager calling the vault) have `sender` as a contract address that holds no Syrup shares; refreshing it is wasted multicall budget.
+- Used `common.HexToHash(topicHex).Bytes()` then `common.BytesToAddress` for safe topic→address conversion (left-padded 32-byte topic → 20-byte address).
+- Added explicit handling for malformed logs (matching topic but missing indexed slots) → contributes 0 users but `relevant=true` stays so the caller can still write a vault_state row if needed.
+
+### Gotchas
+- The Syrup ABI sometimes ships with named-parameter variations across deploys, but the canonical ERC-4626 signatures match what's in `syrup_vault_abi.go`. Stuck to those names; if a vault's deploy bytecode emits a different parameter ordering, the topic hash would differ and `IsRelevant` would correctly reject it.
+
+### State of codebase
+- 13 unit tests pass (covers happy path for all 3 event types + edge cases).
+- Next: Task 10 (vault_registry.go) — mirror morpho's but drop `notVaults` since Maple registry is static (DB-seeded, no on-chain discovery).
+
