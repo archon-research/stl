@@ -1,10 +1,12 @@
 package sqsutil
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -100,6 +102,31 @@ func TestProcessMessages_DoesNotDeleteOnHandlerError(t *testing.T) {
 	}
 	if len(consumer.deletedHandles) != 0 {
 		t.Errorf("expected no deletes on handler error, got %v", consumer.deletedHandles)
+	}
+}
+
+// On a handler error, the SQS ApproximateReceiveCount must be surfaced in the
+// log so a poison-pill stuck near the DLQ threshold is visible in metrics.
+func TestProcessMessages_LogsApproximateReceiveCountOnError(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	msg := makeMsg("1", "h1", event)
+	msg.ApproximateReceiveCount = 7
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{msg}},
+	}
+
+	var buf bytes.Buffer
+	cfg := testConfig(consumer)
+	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	handler := func(_ context.Context, _ outbound.BlockEvent) error {
+		return errors.New("simulated handler failure")
+	}
+	if err := ProcessMessages(context.Background(), cfg, handler); err == nil {
+		t.Fatal("expected handler error")
+	}
+	if !strings.Contains(buf.String(), `"approximateReceiveCount":7`) {
+		t.Errorf("error log missing approximateReceiveCount field; got %q", buf.String())
 	}
 }
 

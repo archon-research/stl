@@ -1042,14 +1042,19 @@ func TestProtocolIDIsCachedAcrossEvents(t *testing.T) {
 // if a downstream multicall sub-call reverts. The pre-fix worker ran every
 // readPoolState/readGaugeState multicall BEFORE opening any DB transaction,
 // so a single revert wiped the audit row from the world.
-func TestProcessReceipt_MulticallFails_AuditRowStillLands(t *testing.T) {
+// When the multicall reverts BEFORE the DB transaction opens (audit + typed
+// projection now share one tx — see handlePoolLog comment), processBlockEvent
+// returns an error so SQS does not ack. No rows of any kind are written.
+// The retry is safe: the multicall re-runs idempotently and the SQS-retried
+// INSERTs are protected by ADR-0002 ON CONFLICT clauses on every typed table.
+func TestProcessReceipt_MulticallFails_NoRowsWritten_NoAck(t *testing.T) {
 	h := newHarness(t)
 	pool := makePoolV1()
 	h.svc.registry.addPool(pool)
 
-	var auditEvent *entity.ProtocolEvent
-	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, e *entity.ProtocolEvent) error {
-		auditEvent = e
+	auditWritten := false
+	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error {
+		auditWritten = true
 		return nil
 	}
 	stateWritten := false
@@ -1079,8 +1084,8 @@ func TestProcessReceipt_MulticallFails_AuditRowStillLands(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when multicall reverts, got nil (SQS would ack and we'd lose the message)")
 	}
-	if auditEvent == nil {
-		t.Error("protocol_event audit row was NOT persisted before the multicall ran — source-of-truth promise violated")
+	if auditWritten {
+		t.Error("audit row should NOT be persisted when multicall reverts; SQS retry will re-run cleanly")
 	}
 	if stateWritten {
 		t.Error("typed pool_state row should NOT be persisted when multicall reverts")

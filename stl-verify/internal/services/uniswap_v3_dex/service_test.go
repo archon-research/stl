@@ -966,6 +966,35 @@ func TestProcessReceipt_Idempotency_SameBlockTwice(t *testing.T) {
 	}
 }
 
+// D2: GetOrCreateProtocol must be called exactly ONCE for the worker's
+// lifetime — the protocol row is process-immutable, so per-event upserts are
+// wasted work. Drive three swap events through processBlockEvent and assert
+// exactly one resolution. Curve and Balancer have the same caching pattern.
+func TestProtocolIDIsCachedAcrossEvents(t *testing.T) {
+	h := newHarness(t)
+	pool := makePool()
+	h.primePool(pool)
+
+	var resolveCalls atomic.Int32
+	h.protocolRepo.GetOrCreateProtocolFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ string, _ int64) (int64, error) {
+		resolveCalls.Add(1)
+		return 42, nil
+	}
+	h.multicaller.ExecuteFn = h.defaultMulticall()
+	h.uniswapRepo.SaveUniswapV3PoolSwapFn = func(_ context.Context, _ pgx.Tx, _ *entity.UniswapV3PoolSwap) error { return nil }
+	h.uniswapRepo.SaveUniswapV3PoolStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.UniswapV3PoolState) error { return nil }
+
+	for i := 0; i < 3; i++ {
+		if err := h.deliverReceipt(t, int64(100+i), 0, []shared.Log{h.buildSwapLog(t)}); err != nil {
+			t.Fatalf("event #%d: %v", i, err)
+		}
+	}
+
+	if got := resolveCalls.Load(); got != 1 {
+		t.Errorf("GetOrCreateProtocol called %d times across 3 events; want exactly 1 (cached after first resolve)", got)
+	}
+}
+
 func TestProcessReceipt_Idempotency_BumpedBlockVersion(t *testing.T) {
 	h := newHarness(t)
 	pool := makePool()

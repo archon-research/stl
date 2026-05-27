@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -67,6 +69,14 @@ type Service struct {
 
 	registry *poolRegistry
 	posCache *positionCache
+
+	// uniswapV3ProtocolID is the cached protocol_event.protocol_id for the
+	// Uniswap V3 protocol row, populated via a check-lock-check on first
+	// call. Reads on the hot path are unsynchronised; the mutex is only
+	// taken to serialise the first GetOrCreateProtocol I/O. Mirrors the
+	// Curve and Balancer adapters' resolveProtocolID pattern.
+	protocolIDMu        sync.Mutex
+	uniswapV3ProtocolID atomic.Int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -502,11 +512,33 @@ func (s *Service) readPoolStateForEvent(ctx context.Context, pool *entity.Uniswa
 	return s.blockchain.readPoolState(ctx, pool, t0, t1, blockNumber)
 }
 
+// resolveProtocolID returns the cached UniswapV3 protocol_id, populating it
+// via GetOrCreateProtocol on first call. Check-lock-check: a fast unlocked
+// load short-circuits the steady-state hot path; the mutex is only taken on
+// the first (or post-error) call to serialise the I/O. The atomic store
+// publishes to subsequent unsynchronised reads.
+func (s *Service) resolveProtocolID(ctx context.Context, tx pgx.Tx, chainID int64) (int64, error) {
+	if id := s.uniswapV3ProtocolID.Load(); id != 0 {
+		return id, nil
+	}
+	s.protocolIDMu.Lock()
+	defer s.protocolIDMu.Unlock()
+	if id := s.uniswapV3ProtocolID.Load(); id != 0 {
+		return id, nil
+	}
+	id, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, UniswapV3ProtocolAddress, "UniswapV3", "dex", uniswapV3ProtocolDeployBlock)
+	if err != nil {
+		return 0, fmt.Errorf("getting UniswapV3 protocol_id: %w", err)
+	}
+	s.uniswapV3ProtocolID.Store(id)
+	return id, nil
+}
+
 // saveProtocolEvent writes the raw audit row for any decoded event.
 func (s *Service) saveProtocolEvent(ctx context.Context, tx pgx.Tx, decoded *decodedEvent, contractAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, UniswapV3ProtocolAddress, "UniswapV3", "dex", uniswapV3ProtocolDeployBlock)
+	protocolID, err := s.resolveProtocolID(ctx, tx, chainID)
 	if err != nil {
-		return fmt.Errorf("getting UniswapV3 protocol_id: %w", err)
+		return err
 	}
 	payload, err := json.Marshal(decoded)
 	if err != nil {

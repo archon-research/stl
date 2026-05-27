@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -112,8 +114,14 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		MaxNumberOfMessages: int32(maxMessages),
 		WaitTimeSeconds:     c.config.WaitTimeSeconds,
 		VisibilityTimeout:   c.config.VisibilityTimeout,
-		// Request all message attributes
+		// Request all user-attached message attributes.
 		MessageAttributeNames: []string{"All"},
+		// Request the SQS-managed delivery counter so the handler can log
+		// it on errors; high values mean the message is approaching the
+		// DLQ threshold.
+		MessageSystemAttributeNames: []sqstypes.MessageSystemAttributeName{
+			sqstypes.MessageSystemAttributeNameApproximateReceiveCount,
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to receive messages: %w", err)
@@ -124,10 +132,21 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		if msg.MessageId == nil || msg.ReceiptHandle == nil || msg.Body == nil {
 			continue
 		}
+		// SQS returns ApproximateReceiveCount as a string in the
+		// Attributes map; parse leniently — a malformed value just
+		// leaves the counter at 0, which is the same signal we'd use
+		// for "couldn't read it".
+		var receives int
+		if s, ok := msg.Attributes[string(sqstypes.MessageSystemAttributeNameApproximateReceiveCount)]; ok {
+			if n, err := strconv.Atoi(s); err == nil {
+				receives = n
+			}
+		}
 		messages = append(messages, outbound.SQSMessage{
-			MessageID:     *msg.MessageId,
-			ReceiptHandle: *msg.ReceiptHandle,
-			Body:          *msg.Body,
+			MessageID:               *msg.MessageId,
+			ReceiptHandle:           *msg.ReceiptHandle,
+			Body:                    *msg.Body,
+			ApproximateReceiveCount: receives,
 		})
 	}
 

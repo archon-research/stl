@@ -224,10 +224,8 @@ func (r *CurvePoolRepository) SetCurveGaugeKilled(ctx context.Context, tx pgx.Tx
 // Hypertables
 // ---------------------------------------------------------------------------
 
-// SaveCurvePoolState writes one row to curve_pool_state. The BEFORE INSERT
-// trigger fills processing_version; no ON CONFLICT clause — replay safety is
-// the trigger's job and a duplicate (same build, same key) will collide on the
-// PK, which the caller treats as already-written.
+// SaveCurvePoolState writes one row to curve_pool_state. See the
+// per-INSERT comment below for the trigger / ON CONFLICT contract.
 func (r *CurvePoolRepository) SaveCurvePoolState(ctx context.Context, tx pgx.Tx, state *entity.CurvePoolState) error {
 	balances, err := bigIntsToNumericArray(state.Balances)
 	if err != nil {

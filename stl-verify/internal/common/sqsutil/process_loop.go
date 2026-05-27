@@ -105,8 +105,14 @@ func ProcessMessages(
 		}
 
 		if err := handler(ctx, event); err != nil {
+			// Surface the SQS delivery counter on the error log so a
+			// stuck poison-pill is visible in metrics before the
+			// message reaches the DLQ. ApproximateReceiveCount=1 is
+			// normal (first delivery); >1 means at least one prior
+			// attempt failed or timed out.
 			cfg.Logger.Error("failed to process message",
 				"messageID", msg.MessageID,
+				"approximateReceiveCount", msg.ApproximateReceiveCount,
 				"error", err)
 			errs = append(errs, err)
 			continue

@@ -332,18 +332,13 @@ func (s *Service) handlePoolLog(ctx context.Context, log shared.Log, pool *entit
 		return nil
 	}
 
-	// S4: write the protocol_event audit row in its own transaction BEFORE
-	// the multicall. The audit row is the "never lossy" source of truth (plan
-	// §5.0); if we ran the multicall first and any sub-call reverted, the
-	// whole handler aborted and the event was lost from the world. With the
-	// audit row pre-committed via ON CONFLICT DO NOTHING, an SQS retry is
-	// idempotent: tx1 no-ops, the multicall is re-attempted, and tx2 lands.
-	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.saveProtocolEvent(ctx, tx, decoded, pool.Address, chainID, blockNumber, blockVersion, blockTimestamp)
-	}); err != nil {
-		return fmt.Errorf("persisting %s audit row for pool %s: %w", name, pool.Label, err)
-	}
-
+	// Multicall runs BEFORE opening the DB tx: an RPC revert aborts here
+	// without leaving partial state. SQS retry semantics are clean because
+	// every typed-table INSERT in the tx below uses ON CONFLICT DO NOTHING
+	// (ADR-0002); a same-build redelivery silently no-ops, a cross-build
+	// reprocess lands at a fresh processing_version. The audit row + typed
+	// projection therefore share one transaction (matching the other six
+	// Curve handlers and both other DEX workers).
 	state, err := s.blockchain.readPoolState(ctx, pool, blockNumber)
 	if err != nil {
 		return fmt.Errorf("reading pool state for %s at block %d: %w", pool.Label, blockNumber, err)
@@ -369,6 +364,9 @@ func (s *Service) handlePoolLog(ctx context.Context, log shared.Log, pool *entit
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		if err := s.saveProtocolEvent(ctx, tx, decoded, pool.Address, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			return err
+		}
 		if err := s.savePoolEventProjection(ctx, tx, decoded, pool, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
 		}

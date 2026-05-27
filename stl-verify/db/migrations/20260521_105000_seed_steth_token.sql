@@ -11,6 +11,24 @@
 -- Insert stETH explicitly at id=227 and advance the BIGSERIAL so subsequent
 -- inserts don't collide. ON CONFLICT DO NOTHING covers the staging case
 -- where id=227 already happens to be stETH.
+--
+-- Edge-case matrix (see vec-79-review5):
+--   1. Fresh container (stETH absent)
+--      → INSERT lands at id=227, sequence advanced. ✓
+--   2. Staging (stETH already at id=227)
+--      → ON CONFLICT(chain_id, address) fires, no-op. ✓
+--   3. Some DB where stETH exists at a DIFFERENT id (e.g. 300)
+--      → ON CONFLICT(chain_id, address) fires, no-op. The downstream
+--        curve_pool seed in 20260521_110000 expects stETH at id=227, so its
+--        post-seed `DO $$ ... $$` assertion fires with a clear "missing or
+--        address-mismatched token mapping" error. Loud, not silent.
+--   4. Some DB where id=227 is held by a DIFFERENT token (manual seed)
+--      → The explicit `VALUES (227, …)` collides on the BIGSERIAL PK BEFORE
+--        the ON CONFLICT(chain_id, address) clause is consulted; migration
+--        fails with `token_pkey` unique_violation. Loud, not silent.
+-- Cases 3 and 4 are unreachable in our migration set as long as it is run
+-- start-to-finish on a clean DB or replayed against staging — both flagged
+-- here so a future forked schema gets a quick diagnosis from the failure.
 
 INSERT INTO token (id, chain_id, address, symbol, decimals)
 VALUES (227, 1, '\xae7ab96520DE3A18E5e111B5EaAb095312D7fE84'::bytea, 'stETH', 18)
