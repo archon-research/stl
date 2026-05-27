@@ -207,3 +207,60 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - 38 total tests in `services/maple_indexer` package.
 - Next: Task 13 (service.go) — wires registry + extractor + blockchain + repo + tx_manager.
 
+
+## Task 13 — Service (SQS consumer loop + per-message handler)
+
+**Files:**
+- `stl-verify/internal/services/maple_indexer/service.go`
+- `stl-verify/internal/services/maple_indexer/service_test.go` (15 cases)
+
+### What was done
+- `Service` wires Config + ports + auxiliary components. NewService validates every dep (consumer, cache, multicaller, txManager, userRepo, mapleRepo) and rejects unsupported chains.
+- `Start(ctx)`: cancellable child ctx → registry.LoadFromDB → `sqsutil.RunLoop` in a goroutine. Returns immediately.
+- `Stop()`: nil-safe cancel.
+- `processBlockEvent` → `fetchAndProcessReceipts` (with tracing + duration recording).
+- `fetchAndProcessReceipts`:
+  1. GetReceipts from cache (nil receipts = hard error → SQS redeliver).
+  2. Unmarshal `[]shared.TransactionReceipt`.
+  3. `touchedVaults(receipts)` flattens logs, walks registered vaults, calls `ExtractTouchedAddresses` per vault.
+  4. **Sorts vault addresses + user addresses by bytes** so concurrent indexer instances acquire user/vault locks in identical order (defence-in-depth against future deadlocks; see ADR-0002 §3 cited in morpho's code).
+  5. For each touched vault, runs `indexVault` and collects errors via `errors.Join` so one vault's failure doesn't shadow another.
+- `indexVault`:
+  1. FetchVaultState (one multicall).
+  2. FetchUserPositions (two multicalls).
+  3. Build entity.MapleVaultState.
+  4. **One DB tx per vault per block**: SaveVaultState → buildPositionEntities (per-user GetOrCreateUser + entity construction) → SaveVaultPositions.
+  5. Telemetry: VaultStateWrite + PositionWrites.
+- `buildPositionEntities`: sorted users → user upsert inside the open tx → entity construction.
+
+### Test coverage (15 service-level cases)
+- Constructor: nil-dep rejection (6 cases inlined), unsupported chain.
+- Receipts cache: nil receipts errors, propagated cache errors.
+- No relevant logs → no writes, no multicall invocation.
+- Deposit happy path: 1 vault_state, 2 position rows in sorted user order, correct big.Int decoding.
+- Error propagation: vault-state RPC error, vault-state save error, user repo error.
+- Dedup: user touched by Deposit + Transfer → one position row.
+- One-tx-per-vault invariant (counts WithTransaction calls).
+- `touchedVaults` direct: ignores logs from non-registered addresses.
+- Stop pre-Start: no panic.
+- Sanity: user A/B/C byte ordering matches the sort assumption in tests.
+
+### Decisions / departures from plan
+- **No `protocol_event` audit log writes.** Morpho writes every event as a protocol_event row; the maple plan and spec deliberately omit this for PR1 — the Syrup index goal is per-block state + positions, not a full event log. Add later via a new repo method if needed.
+- **No vault discovery branch.** Registry is static; if a log addresses a non-registered vault, `touchedVaults` simply ignores it. Morpho's discovery + probe machinery is unnecessary here.
+- **`sortedUsers + vault sort` even though only one Syrup vault is touched per block today.** Future-proofs against multi-vault transactions (e.g. a router that mints into SyrupUSDC and burns SyrupUSDT in one tx) and matches morpho's defensive sort convention.
+- **`fetchAndProcessReceipts` does NOT pre-walk for any discovery.** Morpho's pre-walk pattern is V1/V1.1 vault discovery via the Morpho Blue path — irrelevant here.
+- **Construction without DB**: registry is loaded in `Start()`, not `NewService()`, so unit tests can construct a Service and inject vaults via direct `registry.LoadFromDB` call.
+- **`userRepoStub` lives in service_test.go** (not testhelpers) because it's only used by service tests. Kept testhelpers focused on cross-test stubs.
+
+### Gotchas
+- **Initial test file had a vestigial `cases := []struct{...}` table** from a refactor — compile error in the cases.func anonymous-struct type vs concrete signature. Removed and replaced with inline nil checks (simpler and equivalent coverage).
+- **First instinct was to use `testutil.MockUserRepository`** but its default `GetOrCreateUser` returns `(1, nil)` regardless of address, which would make the per-user position assertions meaningless (all positions get user_id=1). Wrote `userRepoStub` with proper address-keyed ID assignment.
+- `Service.cancel` starts nil → `Stop()` must nil-check before calling, otherwise unit tests panic.
+- `errors.Join(nil)` returns nil so the `errs []error` slice + `errors.Join(errs...)` pattern is safe when no errors occur.
+
+### State of codebase
+- 47 tests in `services/maple_indexer` pass, race detector clean.
+- `go build ./...` clean for the entire module.
+- Next: Task 14 (`cmd/workers/maple-indexer/main.go`) — wire the service against real adapters (postgres, redis, alchemy multicall, SQS, telemetry).
+
