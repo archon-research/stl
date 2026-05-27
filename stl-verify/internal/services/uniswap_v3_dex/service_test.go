@@ -984,7 +984,7 @@ func TestProtocolIDIsCachedAcrossEvents(t *testing.T) {
 	h.uniswapRepo.SaveUniswapV3PoolSwapFn = func(_ context.Context, _ pgx.Tx, _ *entity.UniswapV3PoolSwap) error { return nil }
 	h.uniswapRepo.SaveUniswapV3PoolStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.UniswapV3PoolState) error { return nil }
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := h.deliverReceipt(t, int64(100+i), 0, []shared.Log{h.buildSwapLog(t)}); err != nil {
 			t.Fatalf("event #%d: %v", i, err)
 		}
@@ -1390,9 +1390,7 @@ func TestFindPoolForPosition_NoReentrantRLockDeadlock(t *testing.T) {
 	// write lock is contending against the readers throughout the test.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -1402,7 +1400,7 @@ func TestFindPoolForPosition_NoReentrantRLockDeadlock(t *testing.T) {
 				time.Sleep(time.Microsecond)
 			}
 		}
-	}()
+	})
 
 	// Reader: run findPoolForPosition many times. The pre-fix version
 	// re-acquires the RLock internally via tokensFor — a writer queued

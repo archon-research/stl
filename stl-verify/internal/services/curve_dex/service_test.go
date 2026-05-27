@@ -1021,7 +1021,7 @@ func TestProtocolIDIsCachedAcrossEvents(t *testing.T) {
 	h.curveRepo.SaveCurvePoolExchangeRateFn = func(_ context.Context, _ pgx.Tx, _ *entity.CurvePoolExchangeRate) error { return nil }
 	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error { return nil }
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		log := h.makeTokenExchangeLog(pool.Address, common.HexToAddress("0xdeadbeef"), 0, 1, big.NewInt(int64(10+i)), big.NewInt(int64(9+i)))
 		receipt := shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}
 		body, _ := json.Marshal([]shared.TransactionReceipt{receipt})
