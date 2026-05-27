@@ -40,3 +40,55 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - No env vars added.
 
 ---
+
+## Tasks 2-7 — Domain entities + ABI + Port + Postgres adapter
+
+### Task 2: `MapleVault` entity
+- File: `internal/domain/entity/maple_vault.go` (+ `_test.go`, 8 test cases).
+- Used `int64` chainID (matches morpho's MorphoVault), not plan's `int`. Dropped plan's `_unusedID` argument slot.
+
+### Task 3: `MapleVaultState` entity
+- File: `internal/domain/entity/maple_vault_state.go` (+ `_test.go`, 7 test cases).
+- **Dropped `BuildID` from entity** — morpho convention puts build_id on the repository, not the domain entity. Repo passes `int(r.buildID)` at insert time.
+- Used `BlockTimestamp` (morpho name) and `BlockVersion int` (not int32).
+- Added `WithPrices()` helper for the nullable USD slots.
+
+### Task 4: `MapleVaultPosition` entity
+- File: `internal/domain/entity/maple_vault_position.go` (+ `_test.go`, 7 test cases).
+- Same pattern as state: no BuildID field, BlockTimestamp name, `BlockVersion int`.
+
+### Task 5: Syrup ABI accessors
+- File: `internal/pkg/blockchain/abis/syrup_vault_abi.go` (+ `_test.go`).
+- **Departed from plan:** plan suggested `//go:embed` JSON files; repo convention uses inline strings via `ParseABI(...)` (see `metamorpho_abi.go`, `sparklend_abi.go`). Followed repo convention — no JSON files created.
+
+### Task 6: `MapleRepository` outbound port
+- File: `internal/ports/outbound/maple_repository.go`.
+- Uses `pgx.Tx` directly (matches morpho port), not the plan-suggested `outbound.Tx` (no such type exists in this repo).
+- API: `GetAllVaults`, `SaveVaultState` (single), `SaveVaultPositions` (batch).
+
+### Task 7: Postgres `MapleRepository` adapter
+- Files: `internal/adapters/outbound/postgres/maple_repository.go` + integration test (7 cases, all passing).
+- Constructor takes `buildregistry.BuildID` (an `int` alias) — repo writes `int(r.buildID)` into `build_id` column.
+- Uses `bigIntToNumeric` (existing helper) + nullable `*string` for `underlying_price_usd` / `syrup_price_usd`.
+- Batch insert via `pgx.Batch` for positions.
+- ON CONFLICT clause references all PK columns: `(maple_vault_id, block_number, block_version, processing_version, timestamp)` — matches morpho convention post-`20260410_130000_alter_constraints.sql`.
+
+### Decisions / departures from plan (cumulative)
+| Plan said | Actually did | Why |
+|---|---|---|
+| Entity carries `BuildID` | Repo carries `BuildID` | Mirrors morpho — keeps entity ignorant of persistence concerns |
+| Use `//go:embed` JSON | Inline strings via `ParseABI` | Repo convention — no embed files anywhere in `abis/` |
+| `outbound.Tx` | `pgx.Tx` | No such marker type in this repo |
+| `_unusedID int64` slot in `NewMapleVault` | Removed | Awkward; mirrored MorphoVault constructor instead |
+| Migration PK ends in `(timestamp, processing_version)` | `(processing_version, timestamp)` | Matches morpho PK ordering post-alter |
+
+### Verification snapshot
+- Unit tests: 23 entity tests PASS, 2 ABI smoke tests PASS.
+- Integration tests: 7 maple repo + 1 migrator schema PASS against fresh TimescaleDB container.
+
+### State of codebase
+- Migrations applied; entities + port + adapter ready.
+- Next: service layer (Tasks 8-13), worker cmd (14), Dockerfile/Makefile (15), k8s (16).
+- No new env vars. No new global helpers.
+
+---
