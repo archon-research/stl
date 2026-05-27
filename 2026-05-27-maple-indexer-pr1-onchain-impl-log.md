@@ -148,3 +148,29 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - 13 unit tests pass (covers happy path for all 3 event types + edge cases).
 - Next: Task 10 (vault_registry.go) — mirror morpho's but drop `notVaults` since Maple registry is static (DB-seeded, no on-chain discovery).
 
+
+## Task 10 — VaultRegistry + shared testhelpers_test.go
+
+**Files:**
+- `stl-verify/internal/services/maple_indexer/vault_registry.go`
+- `stl-verify/internal/services/maple_indexer/vault_registry_test.go` (6 cases)
+- `stl-verify/internal/services/maple_indexer/testhelpers_test.go` (shared stubs — created early; plan put this in Task 12 but it's needed now)
+
+### What was done
+- `VaultRegistry` mirrors morpho's surface (`LoadFromDB`, `IsKnownVault`, `GetVault`, `All`, `Count`) but **drops** `notVaults` cache, `MarkNotVault`, `RegisterVault`. Maple's registry is static (DB-seeded only) — no on-chain discovery means no negative caching and no runtime registration. Restart picks up new seed migrations.
+- `All()` returns a snapshot slice copy so callers iterate without holding the registry RWMutex.
+- `testhelpers_test.go` ships `mapleRepoStub` (satisfies `outbound.MapleRepository`), `multicallStub` (satisfies `outbound.Multicaller`), `encodeUint256`/`encodeUint8` ABI encoding helpers.
+
+### Decisions / departures from plan
+- **Plan put shared helpers in Task 12.** Pulled them forward to Task 10 because Task 11 (blockchain_service tests) and Task 13 (service tests) both need them; building duplicate stubs in 3 places and consolidating later would be wasted work. `testhelpers_test.go` is package-internal (suffix `_test.go`), no production code touched.
+- **`multicallStub.Calls` and `BlockNumbers` capture each invocation** so tests can assert call shape (used heavily in Task 11).
+- `RegisterVault` is **intentionally absent** — adding it would invite drift between in-memory state and the DB. Maple's vault set changes via a new seed migration, not at runtime.
+
+### Gotchas
+- Initial draft of `vault_registry_test.go` tried to inline a partial repo stub that didn't satisfy `outbound.MapleRepository` (missing pgx.Tx-typed methods). Switched to the shared `mapleRepoStub` which fully implements the interface (compile-time `var _ outbound.MapleRepository = (*mapleRepoStub)(nil)` check guards this).
+
+### State of codebase
+- 6 registry tests pass.
+- Shared stubs ready for Tasks 11 + 13.
+- Next: Task 11 (blockchain_service.go) — multicall wrapper for FetchVaultState + FetchUserPositions.
+
