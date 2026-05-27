@@ -40,7 +40,7 @@ replay. It runs per-chain.
 
 ### Verify recovery
 
-`rate(blocks_processed_total{service_name="stl-backup-worker"}) > 0` for
+`rate(blocks_processed_total{service_name="raw-data-backup"}) > 0` for
 the affected chain. SQS queue depth trends back down.
 
 ---

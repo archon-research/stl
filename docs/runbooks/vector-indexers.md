@@ -21,7 +21,9 @@ prices is going stale.
 
 ### First checks (≤5 min)
 
-1. **Pod status** — `kubectl -n vector get pods -l app=stl-<morpho|oracle>-indexer`.
+1. **Pod status** — run the one matching the firing alert:
+   - Morpho: `kubectl -n vector get pods -l app=stl-morpho-indexer`
+   - Oracle: `kubectl -n vector get pods -l app=stl-oracle-indexer`
 2. **Recent logs** — look for decode panics, DB connection errors, or
    `context deadline exceeded` against the watcher's archive RPC.
 3. **Upstream lag** — confirm the watcher is producing for this chain (if

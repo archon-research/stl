@@ -37,8 +37,9 @@ groups:
           sum by (chain) (
             rate(alchemy_client_requests_total{
               k8s_namespace_name="vector",
+              service_name="stl-watcher",
               rpc_method="eth_getBlockByNumber"
-            }[2m])
+            }[1m])
           ) == 0
         for: 1m
         labels:
@@ -65,12 +66,16 @@ groups:
             sum by (chain) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
+                service_name="stl-watcher",
                 status="error"
               }[5m])
             )
             /
             sum by (chain) (
-              rate(alchemy_client_requests_total{k8s_namespace_name="vector"}[5m])
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[5m])
             )
           ) > 0.5
         for: 10m
@@ -106,7 +111,8 @@ groups:
             0.99,
             sum by (chain, le) (
               rate(alchemy_client_request_duration_seconds_bucket{
-                k8s_namespace_name="vector"
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
               }[10m])
             )
           ) > 5
@@ -131,11 +137,17 @@ groups:
         expr: |
           (
             sum by (chain) (
-              rate(alchemy_client_retries_total{k8s_namespace_name="vector"}[10m])
+              rate(alchemy_client_retries_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[10m])
             )
             /
             sum by (chain) (
-              rate(alchemy_client_requests_total{k8s_namespace_name="vector"}[10m])
+              rate(alchemy_client_requests_total{
+                k8s_namespace_name="vector",
+                service_name="stl-watcher"
+              }[10m])
             )
           ) > 0.2
         for: 15m

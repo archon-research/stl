@@ -6,7 +6,7 @@
 # without the watcher noticing — these alerts catch that.
 #
 # Metric source: OTel SDK in the backup-worker service. Series carry:
-#   - service_name="stl-backup-worker"
+#   - service_name="raw-data-backup"   (OTel service.name set in main.go)
 #   - k8s_namespace_name="vector"
 #   - chain
 #
@@ -33,7 +33,7 @@ groups:
             sum by (chain) (
               rate(blocks_processed_total{
                 k8s_namespace_name="vector",
-                service_name="stl-backup-worker"
+                service_name="raw-data-backup"
               }[5m])
             ) == 0
           )
@@ -41,6 +41,7 @@ groups:
             sum by (chain) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
+                service_name="stl-watcher",
                 rpc_method="eth_getBlockByNumber"
               }[5m])
             ) > 0
@@ -71,13 +72,15 @@ groups:
         # 30s means we're at risk of SQS visibility-timeout redelivery and
         # the queue is growing.
         #
-        # Assumes histogram `backup_worker_processing_duration_seconds`.
+        # Histogram `processing_duration_seconds` (OTel instrument name in the
+        # backup-worker service; exported as *_bucket / *_count / *_sum).
         expr: |
           histogram_quantile(
             0.99,
             sum by (chain, le) (
-              rate(backup_worker_processing_duration_seconds_bucket{
-                k8s_namespace_name="vector"
+              rate(processing_duration_seconds_bucket{
+                k8s_namespace_name="vector",
+                service_name="raw-data-backup"
               }[10m])
             )
           ) > 30

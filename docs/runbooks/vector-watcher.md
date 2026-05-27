@@ -15,7 +15,8 @@ head of the pipeline — if it stalls, everything downstream goes idle.
 ### What it means
 
 `stl-watcher` on the labelled `chain` has not issued a single
-`eth_getBlockByNumber` call to Alchemy in the last 2 minutes. A healthy
+`eth_getBlockByNumber` call to Alchemy in the last 1 minute (rate over a
+1m lookback + `for: 1m`, so effective time-to-fire is ~2m). A healthy
 watcher polls every block (~12s on L1, ~2s on L2s) so a 1-minute gap is
 already abnormal.
 

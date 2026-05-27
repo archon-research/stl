@@ -107,12 +107,13 @@ groups:
         # archive RPC; sustained high latency means decoding / storage is
         # blocking, or the upstream RPC node is degraded.
         #
-        # Assumes histogram `morpho_rpc_request_duration_seconds`.
+        # Histogram `morpho.rpc.duration_seconds` (OTel instrument), exported as
+        # `morpho_rpc_duration_seconds_bucket`.
         expr: |
           histogram_quantile(
             0.99,
             sum by (chain, le) (
-              rate(morpho_rpc_request_duration_seconds_bucket{
+              rate(morpho_rpc_duration_seconds_bucket{
                 k8s_namespace_name="vector"
               }[10m])
             )
@@ -131,12 +132,12 @@ groups:
 
       - alert: VectorOracleIndexerRPCLatencyHigh
         # See VectorMorphoIndexerRPCLatencyHigh — same shape, different
-        # metric prefix.
+        # metric prefix. Histogram `oracle.rpc.duration_seconds`.
         expr: |
           histogram_quantile(
             0.99,
             sum by (chain, le) (
-              rate(oracle_rpc_request_duration_seconds_bucket{
+              rate(oracle_rpc_duration_seconds_bucket{
                 k8s_namespace_name="vector"
               }[10m])
             )
