@@ -10,10 +10,13 @@
 #
 # Two CRs in this file — one per Grafana stack. The
 # `grafana-dashboards-{prod,staging}` ApplicationSets in the infra repo sync
-# this same path into both clusters; the `environment` instanceSelector
-# routes each CR to the matching Grafana CR. Dashboard JSON is duplicated to
-# keep the file self-contained (Grafana Operator does not support YAML anchors
-# inside `spec.json`).
+# this same path into both clusters, so both CRs land in each cluster; the
+# `environment` instanceSelector routes them to the matching Grafana CR at
+# the operator layer. Note the `-prod`/`-staging` suffix on metadata.name —
+# Kubernetes resource identity is (group, kind, namespace, name), so they
+# must differ even though only one is "active" per cluster. Dashboard JSON
+# is duplicated to keep the file self-contained (Grafana Operator does not
+# support YAML anchors inside `spec.json`).
 #
 # Folder UID `vector` is owned by Terraform (`infra/18_grafana_rbac.tf`).
 # =============================================================================
@@ -21,7 +24,7 @@
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
 metadata:
-  name: vector-pipeline-overview
+  name: vector-pipeline-overview-prod
   namespace: observability
 spec:
   instanceSelector:
@@ -422,7 +425,7 @@ spec:
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
 metadata:
-  name: vector-pipeline-overview
+  name: vector-pipeline-overview-staging
   namespace: observability
 spec:
   instanceSelector:
