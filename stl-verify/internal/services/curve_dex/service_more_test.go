@@ -1395,6 +1395,90 @@ func TestProcessReceipt_GaugeDeposit_WithRewards_ReadsRewardData(t *testing.T) {
 	}
 }
 
+// B3: the in-process registeredTokens cache must NOT be updated until the
+// surrounding tx commits. Pre-fix, a tx rollback (e.g. SaveCurveGaugeState
+// fails after GetOrCreateToken succeeded) left the cache thinking the token
+// row existed when it didn't, permanently skipping the metadata read on
+// subsequent gauge events for that token.
+//
+// The test forces a SaveCurveGaugeState failure after a successful
+// GetOrCreateToken call and then asserts the cache stays empty so the SQS
+// retry will re-register the token.
+func TestSaveGaugeState_TxRollback_DoesNotPoisonTokenCache(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolV1()
+	h.svc.registry.addPool(pool)
+	gauge := makeGauge(pool.ID, testGaugeAddr)
+	h.svc.registry.addGauge(gauge)
+
+	reward := common.HexToAddress("0xD533a949740bb3306d119CC777fa900bA034cd52") // CRV
+
+	tAddr, _ := abi.NewType("address", "", nil)
+	tU256, _ := abi.NewType("uint256", "", nil)
+	rdArgs := abi.Arguments{{Type: tAddr}, {Type: tAddr}, {Type: tU256}, {Type: tU256}, {Type: tU256}, {Type: tU256}}
+	encodeRewardData := func() []byte {
+		out, _ := rdArgs.Pack(reward, common.Address{}, big.NewInt(1_700_000_000), big.NewInt(7), big.NewInt(0), big.NewInt(0))
+		return out
+	}
+
+	// 1: gauge state with reward_count=1
+	// 2: reward_tokens(0) → reward
+	// 3: reward_data(reward)
+	// 4: readERC20Metadata(reward): symbol + decimals
+	callIdx := 0
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		callIdx++
+		switch callIdx {
+		case 1:
+			return h.gaugeStateResults(1), nil
+		case 2:
+			return []outbound.Result{{Success: true, ReturnData: h.packAddress(reward)}}, nil
+		case 3:
+			return []outbound.Result{{Success: true, ReturnData: encodeRewardData()}}, nil
+		case 4:
+			strT, _ := abi.NewType("string", "", nil)
+			uint8T, _ := abi.NewType("uint8", "", nil)
+			symOut, _ := (abi.Arguments{{Type: strT}}).Pack("CRV")
+			decOut, _ := (abi.Arguments{{Type: uint8T}}).Pack(uint8(18))
+			return []outbound.Result{
+				{Success: true, ReturnData: symOut},
+				{Success: true, ReturnData: decOut},
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected multicall #%d", callIdx)
+	}
+
+	tokenCalls := 0
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ int64) (int64, error) {
+		tokenCalls++
+		return 1, nil
+	}
+	// Force SaveCurveGaugeState to fail — this rolls back the tx and undoes
+	// the GetOrCreateToken INSERT.
+	h.curveRepo.SaveCurveGaugeStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.CurveGaugeState) error {
+		return fmt.Errorf("simulated downstream commit failure")
+	}
+
+	log := h.makeGaugeDepositLog(gauge.Address, testUser, big.NewInt(1))
+	err := h.runProcess(t, 1200, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}})
+	if err == nil {
+		t.Fatal("expected error (SaveCurveGaugeState forced to fail) so SQS doesn't ack")
+	}
+
+	// Critical assertion: the in-process cache must be empty so the retry
+	// will fetch ERC20 metadata + call GetOrCreateToken again.
+	h.svc.registeredTokensMu.Lock()
+	_, seen := h.svc.registeredTokens[reward]
+	cacheSize := len(h.svc.registeredTokens)
+	h.svc.registeredTokensMu.Unlock()
+	if seen {
+		t.Errorf("registeredTokens cache contains %s after the tx rolled back — retry will skip re-registration", reward.Hex())
+	}
+	if cacheSize != 0 {
+		t.Errorf("registeredTokens cache has %d entries after rolled-back tx; want 0", cacheSize)
+	}
+}
+
 // TestProcessReceipt_PoolEvent_WithAttachedGauge_WithRewards exercises the
 // handlePoolLog branch where pool.gauge != nil AND reward_count > 0, so the
 // worker chains pool state → gauge state → reward_tokens → reward_data.

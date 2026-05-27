@@ -535,6 +535,71 @@ func TestStartSkipsBootstrapWhenMetaRegistryReturnsZero(t *testing.T) {
 	}
 }
 
+// B5: a single MetaRegistry.get_gauge probe failure (RPC revert, transient
+// network error, MetaRegistry rejecting an exotic factory pool) must NOT
+// fail-stop the entire worker. The runtime NewGauge listener will catch
+// future gauges; the bootstrap can be retried on next restart. Tanking the
+// whole worker because one pool's optional bootstrap probe errored is a
+// disproportionate response and the reason production ops have had to
+// manually intervene before.
+func TestStartContinuesWhenSingleMetaRegistryBootstrapFails(t *testing.T) {
+	h := newHarness(t)
+	poolA := makePoolV1()
+	poolB := makePoolNG()
+	goodGauge := common.HexToAddress("0xAbCdEf0123456789abcDef0123456789ABcDEF02")
+
+	h.curveRepo.ListEnabledCurvePoolsFn = func(_ context.Context, _ int64) ([]*entity.CurvePool, error) {
+		return []*entity.CurvePool{poolA, poolB}, nil
+	}
+	h.curveRepo.GetCurveGaugeFn = func(_ context.Context, _ int64) (*entity.CurveGauge, error) {
+		return nil, nil
+	}
+
+	var upserted *entity.CurveGauge
+	h.curveRepo.UpsertCurveGaugeFn = func(_ context.Context, _ pgx.Tx, g *entity.CurveGauge) (int64, error) {
+		upserted = g
+		return 7, nil
+	}
+
+	// Multicaller fans out two get_gauge calls (one per pool). Mock the first
+	// to revert (simulating MetaRegistry not knowing about a pool) and the
+	// second to succeed with goodGauge.
+	callIdx := 0
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		callIdx++
+		if callIdx == 1 {
+			out := make([]outbound.Result, len(calls))
+			for i := range calls {
+				out[i] = outbound.Result{Success: false, ReturnData: nil}
+			}
+			return out, nil
+		}
+		out := make([]outbound.Result, len(calls))
+		for i := range calls {
+			out[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(goodGauge.Bytes(), 32)}
+		}
+		return out, nil
+	}
+
+	if err := h.svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start should not fail when a single bootstrap probe errors: %v", err)
+	}
+	defer h.svc.Stop()
+
+	if upserted == nil {
+		t.Fatal("expected the second pool's MetaRegistry-bootstrapped gauge to be upserted despite the first pool's failure")
+	}
+	if upserted.Address != goodGauge {
+		t.Errorf("upserted gauge = %s, want %s", upserted.Address.Hex(), goodGauge.Hex())
+	}
+	if h.svc.registry.gaugeByPoolID(poolB.ID) == nil {
+		t.Error("poolB's gauge not registered after partial-failure bootstrap")
+	}
+	if h.svc.registry.gaugeByPoolID(poolA.ID) != nil {
+		t.Error("poolA's bootstrap failed, expected no gauge registered for it")
+	}
+}
+
 func TestProcessReceipt_TokenExchange_WritesSwapStateAndExchangeRates(t *testing.T) {
 	h := newHarness(t)
 	pool := makePoolV1()

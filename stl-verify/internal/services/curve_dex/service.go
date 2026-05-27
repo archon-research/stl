@@ -193,8 +193,19 @@ func (s *Service) loadRegistry(ctx context.Context) error {
 		// addresses are immutable after deploy. A zero result means the pool
 		// has no gauge today; the runtime NewGauge listener will catch any
 		// future addition.
+		//
+		// Failure here is non-fatal: a single MetaRegistry probe error (the
+		// pool isn't registered in MetaRegistry, a transient RPC blip, an
+		// exotic factory pool the meta-registry doesn't recognize) must NOT
+		// tank the entire worker. The NewGauge listener will catch any
+		// gauge that's added after startup, and the next restart will retry
+		// the bootstrap. Log + continue.
 		if err := s.bootstrapGaugeFromMetaRegistry(ctx, p); err != nil {
-			return fmt.Errorf("bootstrapping gauge for pool %d: %w", p.ID, err)
+			s.logger.Warn("metaregistry gauge bootstrap failed, continuing",
+				"pool_id", p.ID,
+				"pool_address", p.Address.Hex(),
+				"pool_label", p.Label,
+				"err", err)
 		}
 	}
 	return nil
@@ -363,7 +374,8 @@ func (s *Service) handlePoolLog(ctx context.Context, log shared.Log, pool *entit
 		gaugeState = gs
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var newlyRegistered []common.Address
+	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveProtocolEvent(ctx, tx, decoded, pool.Address, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
 		}
@@ -380,13 +392,20 @@ func (s *Service) handlePoolLog(ctx context.Context, log shared.Log, pool *entit
 			statesWritten[pool.ID] = true
 		}
 		if gauge != nil && gaugeState != nil && !gaugesWritten[gauge.ID] {
-			if err := s.saveGaugeState(ctx, tx, gauge, gaugeState, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			added, err := s.saveGaugeState(ctx, tx, gauge, gaugeState, chainID, blockNumber, blockVersion, blockTimestamp)
+			if err != nil {
 				return err
 			}
+			newlyRegistered = append(newlyRegistered, added...)
 			gaugesWritten[gauge.ID] = true
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.markTokensRegistered(newlyRegistered)
+	return nil
 }
 
 // handleLPTokenTransfer decodes an ERC-20 Transfer on the LP token, writes the
@@ -497,18 +516,26 @@ func (s *Service) handleGaugeLog(ctx context.Context, log shared.Log, gauge *ent
 		gs.RewardRates = rates
 		gs.RewardPeriodFinish = finishes
 	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var newlyRegistered []common.Address
+	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveProtocolEvent(ctx, tx, decoded, gauge.Address, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
 		}
 		if !gaugesWritten[gauge.ID] {
-			if err := s.saveGaugeState(ctx, tx, gauge, gs, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			added, err := s.saveGaugeState(ctx, tx, gauge, gs, chainID, blockNumber, blockVersion, blockTimestamp)
+			if err != nil {
 				return err
 			}
+			newlyRegistered = append(newlyRegistered, added...)
 			gaugesWritten[gauge.ID] = true
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	s.markTokensRegistered(newlyRegistered)
+	return nil
 }
 
 // handleGaugeControllerLog handles NewGauge / KillGauge / Killed. NewGauge

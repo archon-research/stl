@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -140,7 +141,13 @@ func (s *Service) saveExchangeRates(ctx context.Context, tx pgx.Tx, pool *entity
 // saveGaugeState writes one curve_gauge_state row plus, where new reward
 // tokens appear, registers them in the `token` table on-the-fly so downstream
 // queries can join.
-func (s *Service) saveGaugeState(ctx context.Context, tx pgx.Tx, gauge *entity.CurveGauge, gs *gaugeMulticallResult, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+//
+// Returns the list of newly-registered reward token addresses. The caller
+// must commit the surrounding tx successfully BEFORE calling
+// markTokensRegistered with this list — otherwise a tx rollback would
+// leave the in-process cache thinking the token row exists when it doesn't,
+// permanently skipping the metadata read on subsequent gauge events.
+func (s *Service) saveGaugeState(ctx context.Context, tx pgx.Tx, gauge *entity.CurveGauge, gs *gaugeMulticallResult, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) ([]common.Address, error) {
 	finishes := make([]time.Time, len(gs.RewardPeriodFinish))
 	for i, pf := range gs.RewardPeriodFinish {
 		if pf == nil {
@@ -150,6 +157,7 @@ func (s *Service) saveGaugeState(ctx context.Context, tx pgx.Tx, gauge *entity.C
 		finishes[i] = time.Unix(pf.Int64(), 0).UTC()
 	}
 
+	var newlyRegistered []common.Address
 	for _, tok := range gs.RewardTokens {
 		if isZeroAddress(tok) {
 			continue
@@ -167,14 +175,13 @@ func (s *Service) saveGaugeState(ctx context.Context, tx pgx.Tx, gauge *entity.C
 		// 18 placeholder, which would break every downstream USD conversion.
 		symbol, decimals, err := s.blockchain.readERC20Metadata(ctx, tok, blockNumber)
 		if err != nil {
-			return fmt.Errorf("reading ERC20 metadata for reward token %s: %w", tok.Hex(), err)
+			return nil, fmt.Errorf("reading ERC20 metadata for reward token %s: %w", tok.Hex(), err)
 		}
 		if _, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, tok, symbol, int(decimals), blockNumber); err != nil {
-			return fmt.Errorf("registering reward token %s: %w", tok.Hex(), err)
+			return nil, fmt.Errorf("registering reward token %s: %w", tok.Hex(), err)
 		}
-		s.registeredTokensMu.Lock()
-		s.registeredTokens[tok] = struct{}{}
-		s.registeredTokensMu.Unlock()
+		// Cache update is DEFERRED to post-commit (see method doc-comment).
+		newlyRegistered = append(newlyRegistered, tok)
 	}
 
 	state := &entity.CurveGaugeState{
@@ -193,9 +200,23 @@ func (s *Service) saveGaugeState(ctx context.Context, tx pgx.Tx, gauge *entity.C
 		RewardPeriodFinish: finishes,
 	}
 	if err := s.curveRepo.SaveCurveGaugeState(ctx, tx, state); err != nil {
-		return fmt.Errorf("saving gauge state for %s: %w", gauge.Address.Hex(), err)
+		return nil, fmt.Errorf("saving gauge state for %s: %w", gauge.Address.Hex(), err)
 	}
-	return nil
+	return newlyRegistered, nil
+}
+
+// markTokensRegistered inserts the addresses into the in-process cache after
+// the surrounding tx has committed successfully. Safe to call with an empty
+// or nil slice.
+func (s *Service) markTokensRegistered(tokens []common.Address) {
+	if len(tokens) == 0 {
+		return
+	}
+	s.registeredTokensMu.Lock()
+	defer s.registeredTokensMu.Unlock()
+	for _, t := range tokens {
+		s.registeredTokens[t] = struct{}{}
+	}
 }
 
 // -----------------------------------------------------------------------------

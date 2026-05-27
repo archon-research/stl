@@ -101,16 +101,9 @@ func (b *blockchainService) decodePoolState(results []outbound.Result) (*poolMul
 	if err != nil {
 		return nil, fmt.Errorf("decoding slot0: %w", err)
 	}
-	if len(unpacked) != 7 {
-		return nil, fmt.Errorf("slot0 returned %d values, want 7", len(unpacked))
+	if err := slot0FieldsFromUnpacked(unpacked, out); err != nil {
+		return nil, fmt.Errorf("decoding slot0: %w", err)
 	}
-	out.SqrtPriceX96 = unpacked[0].(*big.Int)
-	out.Tick = int32(unpacked[1].(*big.Int).Int64())
-	out.ObservationIndex = int32(unpacked[2].(uint16))
-	out.ObservationCardinality = int32(unpacked[3].(uint16))
-	out.ObservationCardinalityNext = int32(unpacked[4].(uint16))
-	out.FeeProtocol = int32(unpacked[5].(uint8))
-	out.Unlocked = unpacked[6].(bool)
 
 	liq, err := unpackUint(b.poolRead, "liquidity", results[1])
 	if err != nil {
@@ -136,16 +129,20 @@ func (b *blockchainService) decodePoolState(results []outbound.Result) (*poolMul
 		out.SecsPerLiquidityCumulativeX128 = secs[0]
 	}
 
-	if results[3].Success {
-		if v, err := unpackUint(b.poolRead, "balanceOf", results[3]); err == nil {
-			out.Balance0 = v
-		}
+	// B2: pool.balanceOf(token0/token1) reverting is UNEXPECTED — both tokens
+	// are valid ERC-20 contracts pinned to the event block. Propagate the
+	// error so SQS doesn't ack and the retry runs cleanly. Matches the
+	// fail-fast policy used by Curve and Balancer for `balanceOf`.
+	bal0, err := unpackUint(b.poolRead, "balanceOf", results[3])
+	if err != nil {
+		return nil, fmt.Errorf("decoding balanceOf(token0): %w", err)
 	}
-	if results[4].Success {
-		if v, err := unpackUint(b.poolRead, "balanceOf", results[4]); err == nil {
-			out.Balance1 = v
-		}
+	out.Balance0 = bal0
+	bal1, err := unpackUint(b.poolRead, "balanceOf", results[4])
+	if err != nil {
+		return nil, fmt.Errorf("decoding balanceOf(token1): %w", err)
 	}
+	out.Balance1 = bal1
 	return out, nil
 }
 
@@ -212,22 +209,115 @@ func (b *blockchainService) readNFPMPosition(ctx context.Context, nfpm common.Ad
 	if err != nil {
 		return nil, fmt.Errorf("decoding positions(%s): %w", tokenID, err)
 	}
+	pos, err := positionFieldsFromUnpacked(unpacked)
+	if err != nil {
+		return nil, fmt.Errorf("decoding positions(%s): %w", tokenID, err)
+	}
+	return pos, nil
+}
+
+// slot0FieldsFromUnpacked copies the per-field values from a successfully-
+// unpacked slot0 tuple into the pool-state struct. Length is checked by the
+// caller; this function asserts each field's Go type and returns a wrapped
+// error on mismatch so an ABI drift surfaces as a logged error rather than
+// a worker panic.
+func slot0FieldsFromUnpacked(unpacked []any, out *poolMulticallResult) error {
+	sqrt, ok := unpacked[0].(*big.Int)
+	if !ok {
+		return fmt.Errorf("slot0 field 0 (sqrtPriceX96): got %T, want *big.Int", unpacked[0])
+	}
+	tick, ok := unpacked[1].(*big.Int)
+	if !ok {
+		return fmt.Errorf("slot0 field 1 (tick): got %T, want *big.Int", unpacked[1])
+	}
+	obsIdx, ok := unpacked[2].(uint16)
+	if !ok {
+		return fmt.Errorf("slot0 field 2 (observationIndex): got %T, want uint16", unpacked[2])
+	}
+	obsCard, ok := unpacked[3].(uint16)
+	if !ok {
+		return fmt.Errorf("slot0 field 3 (observationCardinality): got %T, want uint16", unpacked[3])
+	}
+	obsCardNext, ok := unpacked[4].(uint16)
+	if !ok {
+		return fmt.Errorf("slot0 field 4 (observationCardinalityNext): got %T, want uint16", unpacked[4])
+	}
+	feeProtocol, ok := unpacked[5].(uint8)
+	if !ok {
+		return fmt.Errorf("slot0 field 5 (feeProtocol): got %T, want uint8", unpacked[5])
+	}
+	unlocked, ok := unpacked[6].(bool)
+	if !ok {
+		return fmt.Errorf("slot0 field 6 (unlocked): got %T, want bool", unpacked[6])
+	}
+	out.SqrtPriceX96 = sqrt
+	out.Tick = int32(tick.Int64())
+	out.ObservationIndex = int32(obsIdx)
+	out.ObservationCardinality = int32(obsCard)
+	out.ObservationCardinalityNext = int32(obsCardNext)
+	out.FeeProtocol = int32(feeProtocol)
+	out.Unlocked = unlocked
+	return nil
+}
+
+// positionFieldsFromUnpacked turns the NFPM positions(tokenId) unpacked tuple
+// into the typed result. Same panic-avoidance contract as
+// slot0FieldsFromUnpacked: every type assertion uses comma-ok.
+func positionFieldsFromUnpacked(unpacked []any) (*nfpmPositionResult, error) {
 	if len(unpacked) != 12 {
-		return nil, fmt.Errorf("positions(%s) returned %d values, want 12", tokenID, len(unpacked))
+		return nil, fmt.Errorf("positions returned %d values, want 12", len(unpacked))
+	}
+	token0, ok := unpacked[2].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("positions field 2 (token0): got %T, want common.Address", unpacked[2])
+	}
+	token1, ok := unpacked[3].(common.Address)
+	if !ok {
+		return nil, fmt.Errorf("positions field 3 (token1): got %T, want common.Address", unpacked[3])
+	}
+	fee, ok := unpacked[4].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 4 (fee): got %T, want *big.Int", unpacked[4])
+	}
+	tickLower, ok := unpacked[5].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 5 (tickLower): got %T, want *big.Int", unpacked[5])
+	}
+	tickUpper, ok := unpacked[6].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 6 (tickUpper): got %T, want *big.Int", unpacked[6])
+	}
+	liquidity, ok := unpacked[7].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 7 (liquidity): got %T, want *big.Int", unpacked[7])
+	}
+	feeGrowth0, ok := unpacked[8].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 8 (feeGrowthInside0LastX128): got %T, want *big.Int", unpacked[8])
+	}
+	feeGrowth1, ok := unpacked[9].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 9 (feeGrowthInside1LastX128): got %T, want *big.Int", unpacked[9])
+	}
+	tokensOwed0, ok := unpacked[10].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 10 (tokensOwed0): got %T, want *big.Int", unpacked[10])
+	}
+	tokensOwed1, ok := unpacked[11].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("positions field 11 (tokensOwed1): got %T, want *big.Int", unpacked[11])
 	}
 	return &nfpmPositionResult{
-		// unpacked[0]: nonce (uint96)        -- not used
-		// unpacked[1]: operator (address)    -- not used
-		Token0:                   unpacked[2].(common.Address),
-		Token1:                   unpacked[3].(common.Address),
-		Fee:                      int32(unpacked[4].(*big.Int).Int64()),
-		TickLower:                int32(unpacked[5].(*big.Int).Int64()),
-		TickUpper:                int32(unpacked[6].(*big.Int).Int64()),
-		Liquidity:                unpacked[7].(*big.Int),
-		FeeGrowthInside0LastX128: unpacked[8].(*big.Int),
-		FeeGrowthInside1LastX128: unpacked[9].(*big.Int),
-		TokensOwed0:              unpacked[10].(*big.Int),
-		TokensOwed1:              unpacked[11].(*big.Int),
+		Token0:                   token0,
+		Token1:                   token1,
+		Fee:                      int32(fee.Int64()),
+		TickLower:                int32(tickLower.Int64()),
+		TickUpper:                int32(tickUpper.Int64()),
+		Liquidity:                liquidity,
+		FeeGrowthInside0LastX128: feeGrowth0,
+		FeeGrowthInside1LastX128: feeGrowth1,
+		TokensOwed0:              tokensOwed0,
+		TokensOwed1:              tokensOwed1,
 	}, nil
 }
 
