@@ -174,3 +174,36 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - Shared stubs ready for Tasks 11 + 13.
 - Next: Task 11 (blockchain_service.go) — multicall wrapper for FetchVaultState + FetchUserPositions.
 
+
+## Task 11 — BlockchainService (multicall wrapper)
+
+**Files:**
+- `stl-verify/internal/services/maple_indexer/blockchain_service.go`
+- `stl-verify/internal/services/maple_indexer/blockchain_service_test.go` (9 cases)
+
+### What was done
+- `BlockchainService` wraps `outbound.Multicaller` + Syrup views ABI. No state across blocks; safe for shared use.
+- `NewBlockchainService` pre-packs the no-argument view call data once (`totalAssets`, `totalSupply`, `decimals`). `convertToAssets` is packed per call because the share-unit argument is constant but the per-user variant takes a dynamic balance.
+- `FetchVaultState` — one multicall with 4 calls: totalAssets / totalSupply / convertToAssets(`shareUnit=1e6`) / decimals. Returns `VaultStateRaw{TotalAssets, TotalSupply, SharePrice, Decimals}`.
+- `FetchUserPositions` — two sequential multicalls:
+  1. `balanceOf(user)` for each user → shares.
+  2. `convertToAssets(shares)` for each user → assets.
+  Sequential because the second batch's args depend on the first's results.
+- All decode helpers verify `Result.Success` and `len(ReturnData) > 0` before unpacking; reverted calls produce a typed error.
+- Empty user slice short-circuits to empty map without invoking multicaller.
+
+### Decisions / departures from plan
+- **Plan suggested a custom `multicall.Caller` interface.** Reality uses the repo's existing `outbound.Multicaller` (signature `Execute(ctx, calls, blockNumber)` returning `[]Result`). Followed repo convention.
+- **shareUnit hard-coded to 1e6** with an explicit comment. SyrupUSDC + SyrupUSDT both have 6 decimals; the decimals() read is captured in `VaultStateRaw.Decimals` for future expansion. If a non-6-decimal Syrup vault ships, switch to `10^decimals` per-call (one extra call per vault).
+- **Pre-packed call data** for the no-argument views — small optimisation that matters when the service runs ~80k blocks/day on mainnet and packs the same selector each time.
+- **Test stub `multicallStub` captures `Calls` and `BlockNumbers`** to let tests assert call shape and block-tag propagation. Useful in Task 13 too.
+
+### Gotchas
+- `viewABI.Unpack(method, raw)` requires the method name to match an ABI entry; the decoder uses the method name to look up the output schema, NOT to validate the input selector. So `decodeUint256("totalAssets", balanceOfResult)` would technically work because both return a single uint256 — but the explicit per-method calls keep error messages traceable.
+- `Result.Success=false` with empty `ReturnData` typically indicates a multicall sub-call revert (not an RPC error). We treat that as a hard error so the SQS message redelivers.
+
+### State of codebase
+- 9 unit tests pass (constructor, vault state happy path, error paths, two-batch flow, block-tag propagation).
+- 38 total tests in `services/maple_indexer` package.
+- Next: Task 13 (service.go) — wires registry + extractor + blockchain + repo + tx_manager.
+
