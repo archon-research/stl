@@ -25,7 +25,7 @@ from app.main import create_app
 from app.risk_engine.mapping import MappingError
 from app.risk_engine.suraf.result import SurafResult
 from app.risk_engine.suraf.validate import SurafValidationError
-from tests.integration.conftest import composite_mapping_key, insert_receipt_token
+from tests.integration.db_utils import composite_mapping_key, insert_receipt_token
 
 SAMPLE_PACKAGE = Path(__file__).resolve().parents[1] / "unit" / "risk_engine" / "suraf" / "testdata" / "sample_rating"
 

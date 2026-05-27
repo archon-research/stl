@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.aave_like_liquidation_params_repository import (
     AaveLikeLiquidationParamsRepository,
 )
-from tests.integration.conftest import store_test_ids
+from tests.integration.db_utils import store_test_ids
 
 
 async def _insert_reserve_with_liq_params(

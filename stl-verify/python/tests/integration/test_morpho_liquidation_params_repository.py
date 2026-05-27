@@ -11,7 +11,7 @@ from app.adapters.postgres.morpho_liquidation_params_repository import (
     MorphoLiquidationParamsRepository,
 )
 from app.risk_engine.crypto_lending.lif import compute_lif
-from tests.integration.conftest import insert_user, store_test_ids
+from tests.integration.db_utils import insert_user, store_test_ids
 
 
 async def _insert_morpho_vault(conn: asyncpg.Connection, protocol_id: int, chain_id: int, asset_token_id: int) -> int:
