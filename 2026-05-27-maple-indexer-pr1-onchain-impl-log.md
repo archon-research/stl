@@ -297,3 +297,43 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - No new env vars beyond morpho's set (ALCHEMY_API_KEY, REDIS_ADDR, DATABASE_URL, AWS_SQS_QUEUE_URL, S3_BUCKET, DEPLOY_ENV, optional CHAIN_ID / SQS_WAIT_TIME / SQS_VISIBILITY_TIMEOUT).
 - Next: Task 15 (Dockerfile.maple-indexer + Makefile targets).
 
+
+## Task 15 — Dockerfile + Makefile targets
+
+**Files:**
+- `stl-verify/Dockerfile.maple-indexer` (new)
+- `stl-verify/Makefile` (modified)
+
+### What was done
+- `Dockerfile.maple-indexer`: identical to `Dockerfile.morpho-indexer` with binary/path renames. ARM64 cross-compile, non-root runtime user, static binary, no exposed ports (background worker).
+- `Makefile`:
+  - `.PHONY`: registered `run-maple-indexer`, `_docker-release-maple-indexer-internal`, and the 6 `docker-{build,push,release}-maple-indexer{,-staging}` targets.
+  - `run-maple-indexer`: mirror of `run-morpho-indexer` (`set -a && . cmd/workers/maple-indexer/.env...`).
+  - `dev-up`: appended `maple-indexer` to the Alchemy-dependent DEPS list at line 363; updated the two help/warning strings + `dev-up-workers` MISSING string + Alchemy-workers deploy banner.
+  - `_dev-up-alchemy-workers`: `build-if-needed stl-maple-indexer:local` + rollout-status loop now waits for `maple-indexer` deployment.
+  - `dev-env`: new `cmd/workers/maple-indexer/.env` stanza pointing at `stl-ethereum-maple-indexing.fifo` SQS queue + chain_id=1.
+  - `docker-release-all`: added `_docker-release-maple-indexer-internal` between morpho and allocation-tracker.
+  - `kind-load-workers`: added `stl-maple-indexer:local` to the IMAGES list.
+  - `kind-deploy-workers`: added `deployment/maple-indexer` to the rollout-restart chain.
+  - Added the full ARM64 build/push/release block + sentinelstaging shortcuts (mirrors morpho block ~70 lines).
+
+### Decisions / departures from plan
+- Plan said to add `docker-release-maple-indexer-staging` etc. as standalone phony targets. I followed morpho's actual pattern: a real block (ECR_REPO_MAPLE_INDEXER + docker-build/push/release with LOCAL guard) followed by a "Sentinelstaging shortcuts" section. Matches morpho 1:1 so the dev-up flow finds the image identically.
+- Plan said the dev-up DEPS list lives around line 362; verified by `grep` — exact match. Same with the `for dep in …` rollout list at line 423.
+- Did NOT touch `_docker-release-internal _docker-release-backup-internal …` line 10 of `.PHONY` — already added `_docker-release-maple-indexer-internal` there.
+
+### Verification
+- `make -n docker-build-maple-indexer LOCAL=1` → resolves to `docker build … -t stl-maple-indexer:local -f Dockerfile.maple-indexer .`
+- `make -n run-maple-indexer` → resolves to `echo + set -a && . cmd/workers/maple-indexer/.env && go run ./cmd/workers/maple-indexer`
+- `make docker-build-maple-indexer LOCAL=1` actually executed → `stl-maple-indexer:local` image produced (ARM64 cross-compile, 7s go build inside Alpine).
+
+### Gotchas
+- `docker buildx build … --load .` produces a single-arch image (linux/arm64) on Apple Silicon; on AMD hosts the LOCAL fallback in this Makefile (`docker build` without buildx) auto-picks the host arch — fine because LOCAL=1 is only the kind dev workflow, where kind nodes match host arch.
+- `.PHONY` is split across multiple lines; the new entries had to be added to **two** different continuation lines (the run-* line at top, and the docker-release-internal helper line). Forgetting one of the two would silently keep `_docker-release-maple-indexer-internal` from being treated as phony and could break re-runs.
+
+### State of codebase
+- `dev-up` will now expect `maple-indexer` k8s deployment to exist. Next task (16) creates it. **Until then, `make dev-up` will hang on the rollout-status wait** — running Task 16 before exercising dev-up is recommended.
+- No env vars added beyond what the morpho worker already needs.
+- Next: Task 16 (k8s manifest + overlay patches).
+
+

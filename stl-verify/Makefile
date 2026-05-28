@@ -4,10 +4,10 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-maple-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-maple-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -22,6 +22,8 @@ include lint.mk
         \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
+        docker-build-maple-indexer docker-push-maple-indexer docker-release-maple-indexer \
+        docker-build-maple-indexer-staging docker-push-maple-indexer-staging docker-release-maple-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         \
@@ -86,6 +88,11 @@ run-oracle-price-worker-avax:
 run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
 	@set -a && . cmd/workers/morpho-indexer/.env && [ -f cmd/workers/morpho-indexer/.env.local ] && . cmd/workers/morpho-indexer/.env.local; set +a && go run ./cmd/workers/morpho-indexer
+
+# Run the Maple indexer (requires dev-up first)
+run-maple-indexer:
+	@echo "==> Running Maple indexer..."
+	@set -a && . cmd/workers/maple-indexer/.env && [ -f cmd/workers/maple-indexer/.env.local ] && . cmd/workers/maple-indexer/.env.local; set +a && go run ./cmd/workers/maple-indexer
 
 # Run the allocation tracker (requires dev-up first)
 run-allocation-tracker:
@@ -359,7 +366,7 @@ dev-up:
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS)"; \
+	  DEPS="mock-blockchain-server watcher morpho-indexer maple-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS)"; \
 	else \
 	  DEPS="mock-blockchain-server watcher python-api $(CRONJOBS)"; \
 	fi; \
@@ -377,7 +384,7 @@ dev-up:
 	  echo "  The watcher pipeline is running with the mock blockchain server."; \
 	  echo "  Workers require the following keys in .env.secrets:"; \
 	  echo ""; \
-	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer,"; \
+	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer, maple-indexer,"; \
 	  echo "                         sparklend-position-tracker, prime-debt-indexer"; \
 	  echo "    COINGECKO_API_KEY  — offchain-price-indexer"; \
 	  echo "    ETHERSCAN_API_KEY  — watcher-data-validator"; \
@@ -393,7 +400,7 @@ dev-up-workers:
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	MISSING=""; \
 	if [ -z "$$ALCHEMY_API_KEY" ]; then \
-	  MISSING="$$MISSING\n    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer"; \
+	  MISSING="$$MISSING\n    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer, maple-indexer, sparklend-position-tracker, prime-debt-indexer"; \
 	fi; \
 	if [ -z "$$COINGECKO_API_KEY" ]; then \
 	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — offchain-price-indexer"; \
@@ -408,7 +415,7 @@ dev-up-workers:
 	  echo ""; \
 	fi; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  echo "==> Deploying Alchemy workers (oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer)..."; \
+	  echo "==> Deploying Alchemy workers (oracle-price-worker, morpho-indexer, maple-indexer, sparklend-position-tracker, prime-debt-indexer)..."; \
 	  $(MAKE) _dev-up-alchemy-workers; \
 	else \
 	  echo "==> Skipping Alchemy workers (no ALCHEMY_API_KEY)"; \
@@ -417,10 +424,11 @@ dev-up-workers:
 _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-oracle-price-worker:local,docker-build-oracle-price-worker LOCAL=1)
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
+	$(call build-if-needed,stl-maple-indexer:local,docker-build-maple-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
+	@for dep in morpho-indexer maple-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
 	    { echo "ERROR: deployment $$dep not ready after 300s"; exit 1; }; \
 	done
@@ -601,6 +609,26 @@ dev-env:
 		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
+	@set -a; . ../.env.secrets; set +a; \
+	printf '%s\n' \
+		"ENVIRONMENT=development" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-maple-indexing.fifo" \
+		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_ACCESS_KEY_ID=test" \
+		"AWS_SECRET_ACCESS_KEY=test" \
+		"AWS_REGION=us-east-1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"REDIS_ADDR=127.0.0.1:6379" \
+		"REDIS_PASSWORD=" \
+		"CHAIN_ID=1" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"SQS_WAIT_TIME=1" \
+		"SQS_VISIBILITY_TIMEOUT=30" \
+		"LOG_LEVEL=debug" \
+		> cmd/workers/maple-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
 		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets
@@ -837,6 +865,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-maple-indexer-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
@@ -1235,6 +1265,80 @@ docker-push-morpho-indexer-staging:
 
 docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Maple Indexer
+# =============================================================================
+
+# ECR repository URL for maple indexer
+ECR_REPO_MAPLE_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-maple-indexer
+
+# Build Docker image for maple indexer (ARM64 for Fargate Graviton)
+docker-build-maple-indexer:
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-maple-indexer:local -f Dockerfile.maple-indexer .
+else
+	@echo "==> Building Maple Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_MAPLE_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		-f Dockerfile.maple-indexer \
+		-t $(ECR_REPO_MAPLE_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_MAPLE_INDEXER):latest \
+		--load .
+endif
+
+# Push maple indexer Docker image to ECR
+docker-push-maple-indexer: ecr-login
+	@echo "==> Pushing Maple Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_MAPLE_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_MAPLE_INDEXER):latest
+
+# Build and push maple indexer in one step (captures tag at start to ensure consistency)
+docker-release-maple-indexer: ecr-login _docker-release-maple-indexer-internal
+
+_docker-release-maple-indexer-internal:
+	@TAG=$(IMAGE_TAG) && \
+	COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	echo "==> Building Maple Indexer Docker image for ARM64..." && \
+	echo "    Repository: $(ECR_REPO_MAPLE_INDEXER)" && \
+	echo "    Tag: $$TAG" && \
+	echo "    Commit: $$COMMIT" && \
+	echo "    Branch: $$BRANCH" && \
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$$COMMIT \
+		--build-arg GIT_BRANCH=$$BRANCH \
+		--build-arg BUILD_TIME=$$TIME \
+		-f Dockerfile.maple-indexer \
+		-t $(ECR_REPO_MAPLE_INDEXER):$$TAG \
+		-t $(ECR_REPO_MAPLE_INDEXER):latest \
+		--load . && \
+	echo "==> Pushing Maple Indexer Docker image to ECR..." && \
+	docker push $(ECR_REPO_MAPLE_INDEXER):$$TAG && \
+	docker push $(ECR_REPO_MAPLE_INDEXER):latest && \
+	echo "==> Maple Indexer Docker image released: $(ECR_REPO_MAPLE_INDEXER):$$TAG"
+
+# =============================================================================
+# Sentinelstaging Maple Indexer Docker Shortcuts
+# =============================================================================
+
+docker-build-maple-indexer-staging:
+	@$(MAKE) docker-build-maple-indexer ENV=sentinelstaging
+
+docker-push-maple-indexer-staging:
+	@$(MAKE) docker-push-maple-indexer ENV=sentinelstaging
+
+docker-release-maple-indexer-staging:
+	@$(MAKE) docker-release-maple-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Prime Debt Indexer
@@ -1716,7 +1820,7 @@ kind-load-watcher:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:local"
 
 kind-load-workers:
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-maple-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1724,7 +1828,7 @@ kind-deploy-watcher:
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/maple-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
 kind-load-python-api:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-python-api:local"
