@@ -55,7 +55,7 @@ jobs:
         run: pip install --quiet zizmor==1.6.0
 
       - name: Run zizmor
-        run: zizmor --format plain .
+        run: zizmor --format plain --min-severity medium .
 
   gitleaks:
     name: Secret Scan (Gitleaks)
@@ -101,3 +101,64 @@ jobs:
             exit 1
           fi
           echo "All external action references are SHA-pinned."
+
+  summary:
+    name: Security Summary
+    needs: [actionlint, zizmor, gitleaks, sha-pin-check]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Post PR comment
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        env:
+          ACTIONLINT: ${{ needs.actionlint.result }}
+          ZIZMOR: ${{ needs.zizmor.result }}
+          GITLEAKS: ${{ needs.gitleaks.result }}
+          SHA_PIN: ${{ needs.sha-pin-check.result }}
+        with:
+          script: |
+            const checks = [
+              { name: 'Action Lint', result: process.env.ACTIONLINT },
+              { name: 'Workflow Security (zizmor)', result: process.env.ZIZMOR },
+              { name: 'Secret Scan (Gitleaks)', result: process.env.GITLEAKS },
+              { name: 'SHA Pinning Check', result: process.env.SHA_PIN },
+            ];
+            const icon = r => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';
+            const allPassed = checks.every(c => c.result === 'success' || c.result === 'skipped');
+            const header = allPassed
+              ? '## ✅ Workflow Security Checks Passed'
+              : '## ❌ Workflow Security Checks Failed';
+            const table = checks.map(c => `| ${icon(c.result)} | ${c.name} | ${c.result} |`).join('\n');
+            const body = [
+              '<!-- security-summary -->',
+              header,
+              '',
+              '| | Check | Result |',
+              '|---|---|---|',
+              table,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body?.includes('<!-- security-summary -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

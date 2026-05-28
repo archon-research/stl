@@ -1,0 +1,8 @@
+# Gitleaks config for stl.
+# Generated OpenAPI files contain Ethereum contract addresses (public on-chain
+# data, 0x-prefixed 40-char hex) that the generic-api-key rule false-positives
+# on. Skipping generated output avoids a growing .gitleaksignore file.
+[allowlist]
+paths = [
+  '''stl-verify/ts/ui/src/generated/''',
+]

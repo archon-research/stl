@@ -4,3 +4,18 @@ rules:
       policies:
         "archon-research/github-actions/*": ref-pin
         "*": hash-pin
+
+  # deploy.yaml only runs on push-to-main or workflow_dispatch (both require
+  # repo write access). The ${{ inputs.sha }}, ${{ github.actor }}, and
+  # ${{ steps.changelog.outputs.changelog }} interpolations in run: blocks are
+  # not attacker-controlled in these contexts.
+  template-injection:
+    ignore:
+      - deploy.yaml
+
+  # ci.yml grants id-token: write at workflow level because reusable-workflow
+  # callers cannot set permissions at job level. GitHub blocks OIDC minting
+  # for fork PRs, so this is not exploitable.
+  excessive-permissions:
+    ignore:
+      - ci.yml
