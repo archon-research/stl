@@ -13,9 +13,14 @@ rules:
     ignore:
       - deploy.yaml
 
-  # ci.yml grants id-token: write at workflow level because reusable-workflow
-  # callers cannot set permissions at job level. GitHub blocks OIDC minting
-  # for fork PRs, so this is not exploitable.
+  # ci.yml: id-token: write at workflow level is required because reusable-
+  # workflow callers cannot grant permissions at job level. GitHub blocks OIDC
+  # minting for fork PRs, so this is not exploitable.
+  # deploy.yaml: only reached via push-to-main or workflow_dispatch. Jobs that
+  # call reusable workflows (slack-notify) inherit the caller's permissions;
+  # constraining them further would require per-job permissions: {} which
+  # cannot be set on `uses:` jobs that need secrets.
   excessive-permissions:
     ignore:
       - ci.yml
+      - deploy.yaml
