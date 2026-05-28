@@ -41,6 +41,22 @@ func TestMapleVaultState_WithPrices(t *testing.T) {
 	}
 }
 
+func TestMapleVaultState_WithPrices_NilUnderlying(t *testing.T) {
+	ts := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	s, err := NewMapleVaultState(1, 1, 0, ts,
+		big.NewInt(1), big.NewInt(1), big.NewInt(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.WithPrices(nil, big.NewInt(110_000_000))
+	if s.UnderlyingPriceUSD != nil {
+		t.Fatal("expected nil underlyingPriceUSD")
+	}
+	if s.SyrupPriceUSD.Cmp(big.NewInt(110_000_000)) != 0 {
+		t.Fatal("syrup USD mis-set")
+	}
+}
+
 func TestNewMapleVaultState_RejectsNegativeBlock(t *testing.T) {
 	if _, err := NewMapleVaultState(1, -1, 0, time.Now(),
 		big.NewInt(1), big.NewInt(1), big.NewInt(1)); err == nil {

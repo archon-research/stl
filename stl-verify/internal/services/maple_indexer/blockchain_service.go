@@ -14,7 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// shareUnit is the share-side argument passed to convertToAssets() when
+// newShareUnit returns the share-side argument passed to convertToAssets() when
 // computing the displayed share price. Syrup vaults (USDC/USDT) use 6
 // decimals, matching their underlying asset, so 1e6 shares = "1 share unit"
 // for price-display purposes. The on-chain share price is recorded in the
@@ -26,7 +26,9 @@ import (
 // blockchain service will need to read decimals() first and use 10^decimals
 // here. For now SyrupUSDC + SyrupUSDT are the only known instances and
 // both are 6.
-var shareUnit = big.NewInt(1_000_000)
+//
+// Returns a fresh *big.Int each call to prevent callers from mutating a shared value.
+func newShareUnit() *big.Int { return big.NewInt(1_000_000) }
 
 // VaultStateRaw is the on-chain snapshot of a Syrup vault at a given block,
 // before mapping to the domain entity.
@@ -102,7 +104,7 @@ func (s *BlockchainService) FetchVaultState(ctx context.Context, vault common.Ad
 	defer span.End()
 	defer func() { s.telemetry.RecordRPCCall(ctx, "fetchVaultState", time.Since(start), retErr) }()
 
-	convData, err := s.viewABI.Pack("convertToAssets", shareUnit)
+	convData, err := s.viewABI.Pack("convertToAssets", newShareUnit())
 	if err != nil {
 		return nil, fmt.Errorf("packing convertToAssets: %w", err)
 	}

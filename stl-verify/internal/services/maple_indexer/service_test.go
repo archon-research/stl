@@ -244,6 +244,17 @@ func TestService_Start_FailsOnEmptyRegistry(t *testing.T) {
 // fetchAndProcessReceipts — golden path + edge cases
 // -----------------------------------------------------------------------------
 
+func TestService_ProcessBlock_MalformedReceiptsJSON_Errors(t *testing.T) {
+	h := newHarness(t)
+	event := makeBlockEvent(18_500_000)
+	h.cache.SetReceipts(1, event.BlockNumber, 0, json.RawMessage("not valid json"))
+
+	err := h.svc.processBlockEvent(context.Background(), event)
+	if err == nil || !strings.Contains(err.Error(), "unmarshalling receipts") {
+		t.Fatalf("expected unmarshalling error, got %v", err)
+	}
+}
+
 func TestService_ProcessBlock_NoCachedReceipts_Errors(t *testing.T) {
 	h := newHarness(t)
 	event := makeBlockEvent(18_500_000)
@@ -488,6 +499,48 @@ func TestService_Stop_NoStart_NoPanic(t *testing.T) {
 	// cancel is nil prior to Start — Stop must not panic.
 	if err := h.svc.Stop(); err != nil {
 		t.Fatalf("Stop() returned err: %v", err)
+	}
+}
+
+func TestService_Start_Stop_WaitsForLoop(t *testing.T) {
+	vaultAddr := common.HexToAddress(syrupUSDCAddr)
+	vault := newMapleVault(t, vaultAddr)
+	vault.ID = 1
+	mapleRepo := newRepoStub(map[common.Address]*entity.MapleVault{vaultAddr: vault}, nil)
+
+	cfg := ConfigDefaults()
+	cfg.ChainID = 1
+	cfg.Logger = quietLogger()
+
+	svc, err := NewService(cfg, &testutil.MockSQSConsumer{}, testutil.NewMockBlockCache(),
+		&multicallStub{}, &testutil.MockTxManager{}, newUserRepoStub(), mapleRepo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Stop must block until the RunLoop goroutine exits, not just cancel ctx.
+	if err := svc.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestService_Start_LoadFromDBError_ReturnsError(t *testing.T) {
+	wantErr := errors.New("db connection refused")
+	mapleRepo := newRepoStub(nil, wantErr)
+
+	cfg := ConfigDefaults()
+	cfg.ChainID = 1
+	cfg.Logger = quietLogger()
+
+	svc, err := NewService(cfg, &testutil.MockSQSConsumer{}, testutil.NewMockBlockCache(),
+		&multicallStub{}, &testutil.MockTxManager{}, newUserRepoStub(), mapleRepo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(context.Background()); err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected wrapped db error, got %v", err)
 	}
 }
 

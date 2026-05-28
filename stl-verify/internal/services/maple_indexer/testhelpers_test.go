@@ -2,6 +2,7 @@ package maple_indexer
 
 import (
 	"context"
+	"maps"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -33,7 +34,12 @@ func newRepoStub(vaults map[common.Address]*entity.MapleVault, getErr error) *ma
 }
 
 func (s *mapleRepoStub) GetAllVaults(_ context.Context, _ int64) (map[common.Address]*entity.MapleVault, error) {
-	return s.vaults, s.getErr
+	if s.getErr != nil {
+		return nil, s.getErr
+	}
+	out := make(map[common.Address]*entity.MapleVault, len(s.vaults))
+	maps.Copy(out, s.vaults)
+	return out, nil
 }
 
 func (s *mapleRepoStub) SaveVaultState(_ context.Context, _ pgx.Tx, state *entity.MapleVaultState) error {

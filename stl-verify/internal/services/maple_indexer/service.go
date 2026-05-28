@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/big"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,8 +30,7 @@ import (
 // refresh per block is derived from the Deposit / Withdraw / Transfer logs
 // emitted by each vault.
 type Service struct {
-	config      Config
-	deployBlock int64
+	config Config
 
 	consumer  outbound.SQSConsumer
 	cache     outbound.BlockCacheReader
@@ -45,6 +45,7 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup
 	logger *slog.Logger
 }
 
@@ -72,9 +73,11 @@ func NewService(
 	if err := config.SQSConsumerConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
+	if config.Logger == nil {
+		return nil, fmt.Errorf("config.Logger is required")
+	}
 
-	deployBlock, err := MapleSyrupDeployBlock(config.ChainID)
-	if err != nil {
+	if _, err := MapleSyrupDeployBlock(config.ChainID); err != nil {
 		return nil, fmt.Errorf("getting deploy block: %w", err)
 	}
 
@@ -90,7 +93,6 @@ func NewService(
 
 	return &Service{
 		config:        config,
-		deployBlock:   deployBlock,
 		consumer:      consumer,
 		cache:         cache,
 		txManager:     txManager,
@@ -118,13 +120,17 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("vault registry is empty for chain %d: migration may not have run or chain_id is wrong", s.config.ChainID)
 	}
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlockEvent)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.consumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlockEvent)
+	}()
 
 	s.logger.Info("maple indexer started",
 		"maxMessages", s.config.MaxMessages,
@@ -132,10 +138,11 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the internal context, stopping the SQS poll loop.
+// Stop cancels the internal context and waits for the SQS poll loop to exit.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
+		s.wg.Wait()
 	}
 	s.logger.Info("maple indexer stopped")
 	return nil
