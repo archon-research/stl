@@ -1,4 +1,10 @@
-"""Canonical demo: ``seeds.*`` + ``wrap_engine`` for repository integration tests.
+"""``ReceiptTokenRepository`` integration tests via ``seeds.*`` + ``wrap_engine``.
+
+Pairs with the legacy ``test_receipt_token_repository.py`` module: same SUT,
+same scenarios, but exercised through the new session-DB + savepoint
+infrastructure with hermetic synthetic seed data. The ``_via_wrap_engine``
+suffix is intentional and temporary — when the legacy module is migrated
+onto these fixtures, this file replaces it and the suffix is dropped.
 
 Pattern this file pins for future repo tests:
 
@@ -10,11 +16,6 @@ Per-test outer txn + nested savepoint guarantees the DB is rolled back at
 teardown, so no manual cleanup is needed. Repos that issue multiple
 ``engine.connect()`` calls per method share the same savepoint because
 ``wrap_engine`` re-yields the single ``wrap_conn``.
-
-``ReceiptTokenRepository`` is used here because its public API exercises both
-a primary-key fetch (``get``) and a unique-constraint fetch
-(``get_by_chain_and_address``), and its underlying SQL JOINs the ``protocol``
-and ``token`` tables — a representative shape for the repo layer.
 """
 
 import pytest
