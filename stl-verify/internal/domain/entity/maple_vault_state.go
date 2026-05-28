@@ -64,8 +64,23 @@ func (s *MapleVaultState) Validate() error {
 	if s.BlockTimestamp.IsZero() {
 		return fmt.Errorf("blockTimestamp must not be zero")
 	}
-	if s.TotalAssets == nil || s.TotalSupply == nil || s.SharePrice == nil {
-		return fmt.Errorf("totalAssets/totalSupply/sharePrice must not be nil")
+	if s.TotalAssets == nil {
+		return fmt.Errorf("totalAssets must not be nil")
+	}
+	if s.TotalSupply == nil {
+		return fmt.Errorf("totalSupply must not be nil")
+	}
+	if s.SharePrice == nil {
+		return fmt.Errorf("sharePrice must not be nil")
+	}
+	if s.TotalAssets.Sign() < 0 {
+		return fmt.Errorf("totalAssets must be non-negative, got %s", s.TotalAssets)
+	}
+	if s.TotalSupply.Sign() < 0 {
+		return fmt.Errorf("totalSupply must be non-negative, got %s", s.TotalSupply)
+	}
+	if s.SharePrice.Sign() < 0 {
+		return fmt.Errorf("sharePrice must be non-negative, got %s", s.SharePrice)
 	}
 	return nil
 }

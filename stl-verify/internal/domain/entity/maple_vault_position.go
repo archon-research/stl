@@ -58,8 +58,17 @@ func (p *MapleVaultPosition) Validate() error {
 	if p.BlockTimestamp.IsZero() {
 		return fmt.Errorf("blockTimestamp must not be zero")
 	}
-	if p.Shares == nil || p.Assets == nil {
-		return fmt.Errorf("shares/assets must not be nil")
+	if p.Shares == nil {
+		return fmt.Errorf("shares must not be nil")
+	}
+	if p.Assets == nil {
+		return fmt.Errorf("assets must not be nil")
+	}
+	if p.Shares.Sign() < 0 {
+		return fmt.Errorf("shares must be non-negative, got %s", p.Shares)
+	}
+	if p.Assets.Sign() < 0 {
+		return fmt.Errorf("assets must be non-negative, got %s", p.Assets)
 	}
 	return nil
 }
