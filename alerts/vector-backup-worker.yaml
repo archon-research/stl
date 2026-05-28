@@ -8,10 +8,14 @@
 # Metric source: OTel SDK in the backup-worker service. Series carry:
 #   - service_name="raw-data-backup"   (OTel service.name set in main.go)
 #   - k8s_namespace_name="vector"
+#   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain
 #
-# `cluster` / `env` are injected as external labels by the mimir-rules-sync
-# CI action — do not add them here (lint rejects).
+# `cluster` is propagated from the source metric (preserved through `sum by`)
+# so the Alertmanager Slack template's `Cluster:` header is populated.
+# `namespace` is set as a static rule label since every rule here filters to
+# `k8s_namespace_name="vector"`. The mimir-rules-sync lint forbids `cluster`
+# and `env` as static rule labels (FORBIDDEN_LABELS) but allows `namespace`.
 # =============================================================================
 groups:
   - name: vector-backup-worker
@@ -30,15 +34,15 @@ groups:
         # counter tagged with service_name="stl-backup-worker".
         expr: |
           (
-            sum by (chain) (
+            sum by (chain, cluster) (
               rate(blocks_processed_total{
                 k8s_namespace_name="vector",
                 service_name="raw-data-backup"
               }[5m])
             ) == 0
           )
-          and on (chain) (
-            sum by (chain) (
+          and on (chain, cluster) (
+            sum by (chain, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name="stl-watcher",
@@ -51,6 +55,7 @@ groups:
           team: vector
           severity: critical
           component: backup-worker
+          namespace: vector
         annotations:
           summary: "Vector backup-worker stalled on {{ $labels.chain }} (watcher still producing)"
           description: |
@@ -77,7 +82,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (chain, le) (
+            sum by (chain, cluster, le) (
               rate(processing_duration_seconds_bucket{
                 k8s_namespace_name="vector",
                 service_name="raw-data-backup"
@@ -89,6 +94,7 @@ groups:
           team: vector
           severity: warning
           component: backup-worker
+          namespace: vector
         annotations:
           summary: "Vector backup-worker p99 processing latency >30s on {{ $labels.chain }}"
           description: |

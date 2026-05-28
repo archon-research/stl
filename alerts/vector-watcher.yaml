@@ -8,13 +8,15 @@
 # Metric source: OTel SDK in the watcher service. Series carry:
 #   - service_name="stl-watcher"           (OTel service.name)
 #   - k8s_namespace_name="vector"          (k8sattributes processor)
+#   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain                                (per-chain label, set by app code)
 #   - rpc_method                           (e.g. eth_getBlockByNumber)
 #
-# `cluster` / `env` are injected as external labels by the mimir-rules-sync
-# CI action — do not add them here (lint rejects).
-# Namespace assumption: documented per-alert; adjust in review if cardinality
-# differs from what the SDK actually emits.
+# `cluster` is propagated from the source metric (preserved through `sum by`)
+# so the Alertmanager Slack template's `Cluster:` header is populated.
+# `namespace` is set as a static rule label since every rule here filters to
+# `k8s_namespace_name="vector"`. The mimir-rules-sync lint forbids `cluster`
+# and `env` as static rule labels (FORBIDDEN_LABELS) but allows `namespace`.
 # =============================================================================
 groups:
   - name: vector-watcher
@@ -34,7 +36,7 @@ groups:
         # If we're not seeing eth_getBlockByNumber for a full minute, the
         # watcher is stuck — no benign reason to wait longer.
         expr: |
-          sum by (chain) (
+          sum by (chain, cluster) (
             rate(alchemy_client_requests_total{
               k8s_namespace_name="vector",
               service_name="stl-watcher",
@@ -46,6 +48,7 @@ groups:
           team: vector
           severity: critical
           component: watcher
+          namespace: vector
         annotations:
           summary: "Vector watcher not polling blocks on {{ $labels.chain }}"
           description: |
@@ -63,7 +66,7 @@ groups:
         # retry logic should absorb it.
         expr: |
           (
-            sum by (chain) (
+            sum by (chain, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name="stl-watcher",
@@ -71,7 +74,7 @@ groups:
               }[5m])
             )
             /
-            sum by (chain) (
+            sum by (chain, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name="stl-watcher"
@@ -83,6 +86,7 @@ groups:
           team: vector
           severity: critical
           component: watcher
+          namespace: vector
         annotations:
           summary: "Vector watcher Alchemy error rate >50% on {{ $labels.chain }}"
           description: |
@@ -109,7 +113,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (chain, le) (
+            sum by (chain, cluster, le) (
               rate(alchemy_client_request_duration_seconds_bucket{
                 k8s_namespace_name="vector",
                 service_name="stl-watcher"
@@ -121,6 +125,7 @@ groups:
           team: vector
           severity: warning
           component: watcher
+          namespace: vector
         annotations:
           summary: "Vector watcher Alchemy p99 latency >5s on {{ $labels.chain }}"
           description: |
@@ -136,14 +141,14 @@ groups:
         # existing `alchemy_client_requests_total`.
         expr: |
           (
-            sum by (chain) (
+            sum by (chain, cluster) (
               rate(alchemy_client_retries_total{
                 k8s_namespace_name="vector",
                 service_name="stl-watcher"
               }[10m])
             )
             /
-            sum by (chain) (
+            sum by (chain, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name="stl-watcher"
@@ -155,6 +160,7 @@ groups:
           team: vector
           severity: warning
           component: watcher
+          namespace: vector
         annotations:
           summary: "Vector watcher Alchemy retry ratio >20% on {{ $labels.chain }}"
           description: |
