@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: archon-research/github-actions
-          ref: b3c43a7950c91a2d150780c05b2dd5e5a7046239  # main
+          ref: 165a6c55b855e880753370d6b6fad05be64ee768  # main (slack-notify #9)
           ssh-key: ${{ secrets.gh-actions-deploy-key }}
           path: .github-actions
       - uses: ./.github-actions/slack-notify
