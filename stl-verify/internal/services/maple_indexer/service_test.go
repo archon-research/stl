@@ -219,6 +219,27 @@ func TestNewService_RejectsUnsupportedChain(t *testing.T) {
 	}
 }
 
+func TestService_Start_FailsOnEmptyRegistry(t *testing.T) {
+	mc := &multicallStub{}
+	tx := &testutil.MockTxManager{}
+	ur := newUserRepoStub()
+	mr := newRepoStub(map[common.Address]*entity.MapleVault{}, nil) // empty vault map
+	cache := testutil.NewMockBlockCache()
+	consumer := &testutil.MockSQSConsumer{}
+
+	cfg := ConfigDefaults()
+	cfg.ChainID = 1 // mainnet — valid chain, but no vaults seeded
+	cfg.Logger = quietLogger()
+
+	svc, err := NewService(cfg, consumer, cache, mc, tx, ur, mr)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(context.Background()); err == nil {
+		t.Fatal("expected error when vault registry is empty")
+	}
+}
+
 // -----------------------------------------------------------------------------
 // fetchAndProcessReceipts — golden path + edge cases
 // -----------------------------------------------------------------------------

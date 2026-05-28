@@ -113,6 +113,10 @@ func (s *Service) Start(ctx context.Context) error {
 		s.cancel()
 		return fmt.Errorf("loading vault registry: %w", err)
 	}
+	if s.registry.Count() == 0 {
+		s.cancel()
+		return fmt.Errorf("vault registry is empty for chain %d: migration may not have run or chain_id is wrong", s.config.ChainID)
+	}
 
 	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
 		Consumer:     s.consumer,
