@@ -337,3 +337,28 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - Next: Task 16 (k8s manifest + overlay patches).
 
 
+## Task 16 — Kubernetes manifest
+
+**Files:**
+- `stl-verify/k8s/apps/workers/maple-indexer.yaml` (new)
+
+### What was done
+- Copied `morpho-indexer.yaml` verbatim. Renamed every `morpho-indexer` token to `maple-indexer`. Changed `AWS_SQS_QUEUE_URL` to `stl-ethereum-maple-indexing.fifo`. Single-container Deployment, replicas=1, `localhost/stl-maple-indexer:local` image with `imagePullPolicy: Never` (kind-loaded), pulls env from existing `stl-config` ConfigMap + `stl-secrets` Secret.
+- Validated: `kubectl --dry-run=client apply -f stl-verify/k8s/apps/workers/maple-indexer.yaml` → `deployment.apps/maple-indexer created (dry run)`.
+
+### Decisions / departures from plan
+- **No `k8s/overlays/*` edits.** The plan assumed a Kustomize layout with `k8s/overlays/{prod,staging}/kustomization.yaml`. This repo has no `overlays/` directory at all (verified via `find stl-verify/k8s -type d`). Workers are plain single-file Deployments in `k8s/apps/workers/`. Prod/staging image-tag rotation is handled outside this repo via the `deploy(staging|prod): update image tags …` automation against a separate config repo.
+- **No infra/terraform changes.** SQS FIFO queue `stl-ethereum-maple-indexing.fifo` + matching SNS subscription must exist before prod rollout; that lives in the separate infra repo. Will flag in the PR description (Task 18).
+- **No kustomize validation.** Used `kubectl --dry-run=client apply` instead — same intent, matches the repo's actual deployment style.
+
+### Verification
+- Manifest validates via `kubectl --dry-run=client apply`.
+- `make dev-up` should now find the deployment when the `_dev-up-alchemy-workers` rollout-status loop hits `deployment/maple-indexer`.
+
+### State of codebase
+- Worker stack code-complete. End-to-end smoke (Task 17) is optional verification — skipped in this session because there's no live kind cluster running and `make dev-up` requires Docker plus real ALCHEMY_API_KEY for full workers spin-up. The structural pieces (image build, manifest validation) are confirmed.
+- **Infra dependency to flag in PR:** the FIFO queue `stl-ethereum-maple-indexing.fifo` + matching SNS topic subscription must be provisioned in the infra repo before prod deploy.
+- Next: Task 17 (e2e smoke — defer/skip), Task 18 (reviewer pass + PR open).
+
+
+
