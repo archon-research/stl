@@ -132,7 +132,7 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop cancels the internal context, draining the SQS poll loop.
+// Stop cancels the internal context, stopping the SQS poll loop.
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
