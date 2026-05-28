@@ -1,0 +1,103 @@
+# Workflow security gates — aligned with archon-research/github-actions and
+# archon-research/infrastructure CI. Catches workflow syntax errors, template
+# injection, unpinned actions, and accidental secret commits.
+#
+# Actions are pinned to commit SHAs for supply-chain security.
+# To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
+name: Workflow Security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/**"
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  actionlint:
+    name: Action Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          ACTIONLINT_VERSION="1.7.7"
+          curl -sL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | tar xz -C /usr/local/bin actionlint
+
+      - name: Run actionlint
+        run: actionlint -color -shellcheck ""
+
+  zizmor:
+    name: Workflow Security (zizmor)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        run: pip install --quiet zizmor==1.6.0
+
+      - name: Run zizmor
+        run: zizmor --format plain .
+
+  gitleaks:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Gitleaks
+        run: |
+          GITLEAKS_VERSION="8.18.2"
+          curl -sL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Run Gitleaks
+        run: gitleaks detect --source . --verbose --no-git
+
+  sha-pin-check:
+    name: Action SHA Pinning Check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check all action references use SHA pins
+        run: |
+          USES='uses:'
+          VIOLATIONS=$(grep -rn "${USES}.*@" --include='*.yml' --include='*.yaml' .github \
+            | grep -v 'archon-research/github-actions/' \
+            | grep -v '@[0-9a-f]\{40\}' \
+            || true)
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::Found external action references not pinned to full SHA:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi
+          echo "All external action references are SHA-pinned."

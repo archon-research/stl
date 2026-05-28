@@ -1,0 +1,6 @@
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "archon-research/github-actions/*": ref-pin
+        "*": hash-pin
