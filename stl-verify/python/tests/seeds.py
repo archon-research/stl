@@ -16,22 +16,32 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import Table
+from sqlalchemy import MetaData, Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
-
-from tests.db import get_session_metadata
 
 _ZERO_TX_HASH = b"\x00" * 32
 _ZERO_ADDRESS = b"\x00" * 20
 
+_session_metadata: MetaData | None = None
+
+
+def set_session_metadata(metadata: MetaData) -> None:
+    """Cache the reflected metadata for ``_table()`` lookups.
+
+    Called by the ``session_engine`` fixture after reflection runs.
+    """
+    global _session_metadata
+    _session_metadata = metadata
+
 
 def _table(name: str) -> Table:
-    metadata = get_session_metadata()
+    if _session_metadata is None:
+        raise RuntimeError("session metadata not reflected yet — request the session_engine fixture first")
     try:
-        return metadata.tables[name]
+        return _session_metadata.tables[name]
     except KeyError:
-        known = sorted(metadata.tables)
+        known = sorted(_session_metadata.tables)
         raise KeyError(
             f"table {name!r} not in reflected MetaData — did the migration adding it run? known tables: {known}"
         ) from None
