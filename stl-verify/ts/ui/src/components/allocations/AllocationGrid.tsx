@@ -486,60 +486,6 @@ export function AllocationGrid({
     boxShadow: 'none',
   });
 
-  const tableClassName = css({
-    borderRadius: uiVariant === 'b' ? 'sm' : 'md',
-    borderWidth: '0',
-    borderStyle: 'none',
-    borderColor: 'transparent',
-    boxShadow: uiVariant === 'c' ? '0 8px 20px rgba(15, 23, 42, 0.05)' : 'none',
-    '& thead tr': {
-      bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
-    },
-    '& thead th': {
-      borderBottomWidth: '1px',
-      borderBottomStyle: 'solid',
-      borderBottomColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
-    },
-    '& thead th button': {
-      color: uiVariant === 'c' ? 'text.default' : 'text.muted',
-      fontWeight: uiVariant === 'c' ? 'semibold' : 'medium',
-      letterSpacing: uiVariant === 'c' ? '0.04em' : '0.08em',
-    },
-    '& thead th button span:last-child': {
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minWidth: uiVariant === 'b' ? '4' : '5',
-      height: uiVariant === 'b' ? '4' : '5',
-      borderRadius: 'full',
-      borderWidth: '1px',
-      borderStyle: 'solid',
-      borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
-      bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
-      fontSize: uiVariant === 'b' ? '2xs' : 'xs',
-      fontWeight: 'semibold',
-      color: uiVariant === 'c' ? 'text.interactive' : 'text.muted',
-    },
-    '& tbody td': {
-      py: uiVariant === 'b' ? '2.5' : '3.5',
-    },
-    '& tbody tr[aria-selected="true"]': {
-      boxShadow:
-        uiVariant === 'c'
-          ? 'inset 0 0 0 1px var(--colors-border-default)'
-          : 'none',
-    },
-  });
-
-  const tableVariantZoneClassName = css({
-    mt: uiVariant === 'b' ? '4' : '6',
-    borderRadius: uiVariant === 'c' ? 'lg' : 'md',
-    borderStyle: 'solid',
-    borderWidth: '1px',
-    borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
-    bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
-  });
-
   return (
     <div
       className={css({
@@ -567,9 +513,7 @@ export function AllocationGrid({
               ? { base: '4', md: '5' }
               : { base: '5', md: '6' },
           boxShadow:
-            uiVariant === 'c'
-              ? '0 28px 84px rgba(15, 23, 42, 0.12)'
-              : '0 24px 80px rgba(15, 23, 42, 0.08)',
+            uiVariant === 'c' ? '2xl' : 'xl',
         })}
       >
         <div

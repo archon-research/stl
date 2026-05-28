@@ -150,7 +150,7 @@ export function RiskDetailDrawer({
         className={css({
           position: 'fixed',
           inset: 0,
-          bg: 'rgba(15, 23, 42, 0.28)',
+          bg: 'overlay.backdrop',
           border: 'none',
           p: 0,
           opacity: isOpen ? 1 : 0,
@@ -170,7 +170,7 @@ export function RiskDetailDrawer({
           right: 0,
           bottom: 0,
           bg: 'surface.default',
-          boxShadow: '-24px 0 80px rgba(15, 23, 42, 0.16)',
+          boxShadow: '2xl',
           transform: isOpen ? 'translateX(0)' : 'translateX(100%)',
           transitionDuration: 'normal',
           transitionProperty: 'transform',
