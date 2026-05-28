@@ -6,21 +6,24 @@ rules:
         "*": hash-pin
 
   # deploy.yaml only runs on push-to-main or workflow_dispatch (both require
-  # repo write access). The ${{ inputs.sha }}, ${{ github.actor }}, and
-  # ${{ steps.changelog.outputs.changelog }} interpolations in run: blocks are
-  # not attacker-controlled in these contexts.
+  # repo write access), so interpolated values are not attacker-controlled.
   template-injection:
     ignore:
       - deploy.yaml
 
-  # ci.yml: id-token: write at workflow level is required because reusable-
-  # workflow callers cannot grant permissions at job level. GitHub blocks OIDC
-  # minting for fork PRs, so this is not exploitable.
-  # deploy.yaml: only reached via push-to-main or workflow_dispatch. Jobs that
-  # call reusable workflows (slack-notify) inherit the caller's permissions;
-  # constraining them further would require per-job permissions: {} which
-  # cannot be set on `uses:` jobs that need secrets.
+  # ci.yml: id-token: write must be workflow-level (reusable-workflow callers
+  # cannot set job-level permissions). Safe because GitHub blocks OIDC for forks.
+  # deploy.yaml: only reached via push-to-main or dispatch; notify jobs inherit
+  # caller permissions and cannot be narrowed further on `uses:` jobs.
   excessive-permissions:
     ignore:
       - ci.yml
       - deploy.yaml
+
+  # ci.yml uses `secrets: inherit` for internal reusable workflow calls.
+  # The CI sub-workflows don't consume secrets; the deploy workflow does
+  # but is gated to push-to-main. Explicit per-secret forwarding adds
+  # coupling without meaningful security benefit.
+  secrets-inherit:
+    ignore:
+      - ci.yml
