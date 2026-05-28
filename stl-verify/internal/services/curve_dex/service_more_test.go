@@ -13,8 +13,12 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -1393,6 +1397,88 @@ func TestProcessReceipt_GaugeDeposit_WithRewards_ReadsRewardData(t *testing.T) {
 	if tokenCalls != 2 {
 		t.Errorf("expected 2 GetOrCreateToken calls (one per reward), got %d", tokenCalls)
 	}
+}
+
+func newHarnessWithTelemetry(t *testing.T, tel *dextelemetry.Telemetry) *harness {
+	t.Helper()
+	h := newHarness(t)
+	h.svc.telemetry = tel
+	return h
+}
+
+// N7-4: every invocation of processBlockEvent must emit exactly one
+// curve.blocks.processed datapoint, labelled status=success on the happy
+// path and status=error on the error path. Without this metric the alert
+// rule curve_blocks_processed_total in alerts/vector-indexers.yaml cannot
+// fire and a stalled worker has no pager.
+func TestProcessBlockEvent_EmitsBlockProcessedMetric(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	tel, err := dextelemetry.NewTelemetry("curve")
+	if err != nil {
+		t.Fatalf("dextelemetry.NewTelemetry: %v", err)
+	}
+	h := newHarnessWithTelemetry(t, tel)
+
+	// Happy path: a receipt with no Curve-relevant logs is a valid no-op,
+	// so processBlockEvent returns nil and the metric records status=success.
+	if err := h.runProcess(t, 100, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: nil}); err != nil {
+		t.Fatalf("happy path processBlockEvent: %v", err)
+	}
+
+	// Error path: receipts missing from cache => processBlockEvent errors,
+	// status=error must be recorded.
+	errEvent := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    9999,
+		Version:        0,
+		BlockTimestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Unix(),
+	}
+	if err := h.svc.processBlockEvent(context.Background(), errEvent); err == nil {
+		t.Fatal("expected processBlockEvent to fail when receipts not in cache")
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	successCount, errorCount := readBlockCountersByStatus(t, &rm, "curve.blocks.processed")
+	if successCount != 1 {
+		t.Errorf("curve.blocks.processed{status=success} = %d, want 1", successCount)
+	}
+	if errorCount != 1 {
+		t.Errorf("curve.blocks.processed{status=error} = %d, want 1", errorCount)
+	}
+}
+
+func readBlockCountersByStatus(t *testing.T, rm *metricdata.ResourceMetrics, name string) (success, errCount int64) {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("%s: unexpected metric type %T", name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				status, _ := dp.Attributes.Value("status")
+				switch status.AsString() {
+				case "success":
+					success += dp.Value
+				case "error":
+					errCount += dp.Value
+				}
+			}
+			return success, errCount
+		}
+	}
+	t.Fatalf("metric %s not found", name)
+	return 0, 0
 }
 
 // B3: the in-process registeredTokens cache must NOT be updated until the

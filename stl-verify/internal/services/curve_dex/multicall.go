@@ -208,11 +208,15 @@ func (b *blockchainService) readPoolState(ctx context.Context, pool *entity.Curv
 	for k, key := range dyOrder {
 		r := results[idx+k]
 		if !r.Success {
-			// get_dy can revert on degenerate states; record dy=0 so the
-			// snapshot row still lands and downstream consumers can detect.
+			// get_dy can revert on degenerate states (paused pools, empty
+			// reserves, exotic Stableswap-NG variants). Write Dy=nil so the
+			// nullable DB column lands as NULL — consumers can then
+			// distinguish revert from a genuine zero with IS NOT NULL,
+			// instead of having to flag "dy=0" as ambiguous. The snapshot
+			// row still lands (Dx is still set; we control it).
 			dys = append(dys, dyEntry{I: key.i, J: key.j,
 				Dx: new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(pool.CoinDecimals[key.i])), nil),
-				Dy: big.NewInt(0)})
+				Dy: nil})
 			continue
 		}
 		v, err := unpackUint(readABI, "get_dy", r)

@@ -453,6 +453,13 @@ END $$;
 -- ===========================================================================
 -- Hypertable: periodic get_dy(i, j, 10^decimals[i]) snapshots.
 -- One row per (i, j) directional pair per event-triggered multicall.
+--
+-- dy is nullable: get_dy can revert on degenerate pool states (paused pools,
+-- empty reserves, exotic Stableswap-NG variants). On revert the worker
+-- writes NULL so consumers can distinguish revert from a genuine zero with
+-- IS NOT NULL — a NOT NULL column would force the worker to write 0, which
+-- is indistinguishable from a real "no liquidity that direction" quote.
+-- dx stays NOT NULL because it's an input parameter we control.
 -- ===========================================================================
 CREATE TABLE IF NOT EXISTS curve_pool_exchange_rate (
     curve_pool_id      BIGINT       NOT NULL REFERENCES curve_pool (id),
@@ -462,7 +469,7 @@ CREATE TABLE IF NOT EXISTS curve_pool_exchange_rate (
     i                  SMALLINT     NOT NULL CHECK (i BETWEEN 0 AND 7),
     j                  SMALLINT     NOT NULL CHECK (j BETWEEN 0 AND 7),
     dx                 NUMERIC      NOT NULL,
-    dy                 NUMERIC      NOT NULL,
+    dy                 NUMERIC,
     processing_version INT          NOT NULL DEFAULT 0,
     build_id           INT          NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

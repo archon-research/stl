@@ -8,6 +8,17 @@
 /blockwatcher
 dist/mock-blockchain-server
 
+# Worker binaries built by `go build .` from stl-verify/ (canonical output
+# is stl-verify/dist/ via `make build-go` per CLAUDE.md; these are stray
+# local builds that should not land in commits). The Dockerfile.* negation
+# preserves Dockerfile.curve-dex-worker / Dockerfile.morpho-indexer / …,
+# which would otherwise be caught by the *-worker / *-indexer patterns.
+/stl-verify/dist/
+/stl-verify/*-worker
+/stl-verify/*-indexer
+/stl-verify/watcher
+!/stl-verify/Dockerfile.*
+
 # Test artifacts
 *.test
 *.out

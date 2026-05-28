@@ -1,19 +1,30 @@
 # =============================================================================
 # Vector — indexer alerts (ADR-008 / ORB-200)
 # =============================================================================
-# The morpho and oracle indexers consume blocks from the watcher pipeline and
-# derive product state (positions, prices) into TimescaleDB. They're the last
-# hop before downstream readers see data, so stalls / errors here translate
-# directly into stale customer views.
+# The vector indexers consume blocks from the watcher pipeline and derive
+# product state (positions, prices, DEX state) into TimescaleDB. They're the
+# last hop before downstream readers see data, so stalls / errors here
+# translate directly into stale customer views.
 #
-# Two indexers in v1 (morpho, oracle). Each gets its own rules because the
-# Slack-thread spec uses distinct per-indexer metric prefixes
-# (`morpho_blocks_processed_total`, `oracle_blocks_processed_total`). Once
-# the services are unified onto a single metric name with an `indexer` label,
-# these can collapse into a single rule per signal.
+# Indexers covered (each gets its own rules because metric prefixes are
+# per-indexer; once unified onto a single metric name with an `indexer` label,
+# these can collapse):
+#   - morpho-indexer        — `morpho_blocks_processed_total`
+#   - oracle-indexer        — `oracle_blocks_processed_total`
+#   - curve-dex-worker      — `curve_blocks_processed_total`
+#   - uniswap-v3-dex-worker — `uniswap_v3_blocks_processed_total`
+#   - balancer-dex-worker   — `balancer_blocks_processed_total`
+#
+# The three DEX workers emit blocks_processed_total + errors_total + a
+# block.duration_seconds histogram via the shared `internal/pkg/dextelemetry`
+# helper. The DEX latency alerts below use the block-duration histogram
+# (closest to morpho/oracle's rpc_duration histogram, but measured around
+# the whole processBlockEvent path).
 #
 # Metric source: OTel SDK in each indexer. Series carry:
 #   - service_name="stl-morpho-indexer" | "stl-oracle-indexer"
+#                 | "curve-dex-worker" | "uniswap-v3-dex-worker"
+#                 | "balancer-dex-worker"
 #   - k8s_namespace_name="vector"
 #   - chain (for multi-chain indexers)
 #
@@ -153,3 +164,200 @@ groups:
             `stl-oracle-indexer` on chain `{{ $labels.chain }}` p99 RPC
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
+
+      # ---------------------------------------------------------------------
+      # Curve DEX worker (VEC-79)
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveDexWorkerStalled
+        expr: |
+          sum (
+            rate(curve_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: curve-dex-worker
+        annotations:
+          summary: "Vector curve-dex-worker stalled"
+          description: |
+            `curve-dex-worker` has not advanced for >15m. Curve pool / gauge
+            state in TimescaleDB will go stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcurvedexworkerstalled
+
+      - alert: VectorCurveDexWorkerErrorsHigh
+        expr: |
+          sum (
+            rate(curve_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-dex-worker
+        annotations:
+          summary: "Vector curve-dex-worker error rate >0.1/s"
+          description: |
+            `curve-dex-worker` is throwing `{{ $value | printf "%.2f" }}`
+            errors/s over 15m. Investigate pod logs before this turns into
+            a stall.
+
+      - alert: VectorCurveDexWorkerLatencyHigh
+        # Histogram `<prefix>.block.duration_seconds` (OTel) → exported as
+        # `curve_block_duration_seconds_bucket`. p99 > 5s for 15m suggests
+        # multicall or Postgres write path is degraded; expect lag in
+        # downstream Curve pool / gauge state.
+        #
+        # `status="success"` filter so error-path durations (which are
+        # generally short — failed multicall returns fast) don't artificially
+        # depress the p99 of the actual processing path. The intent of this
+        # alert is "successful processing got slow", not "any block".
+        # ErrorsHigh covers the error-rate dimension separately.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (
+              rate(curve_block_duration_seconds_bucket{
+                k8s_namespace_name="vector",
+                status="success"
+              }[10m])
+            )
+          ) > 5
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-dex-worker
+        annotations:
+          summary: "Vector curve-dex-worker p99 block duration >5s"
+          description: |
+            `curve-dex-worker` p99 block-processing latency is
+            `{{ $value | printf "%.2fs" }}` over 15m. Indexer is degraded;
+            expect lag in downstream Curve pool / gauge state.
+
+      # ---------------------------------------------------------------------
+      # Uniswap V3 DEX worker (VEC-79)
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV3DexWorkerStalled
+        expr: |
+          sum (
+            rate(uniswap_v3_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: uniswap-v3-dex-worker
+        annotations:
+          summary: "Vector uniswap-v3-dex-worker stalled"
+          description: |
+            `uniswap-v3-dex-worker` has not advanced for >15m. Uniswap V3
+            pool / NFPM position state in TimescaleDB will go stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3dexworkerstalled
+
+      - alert: VectorUniswapV3DexWorkerErrorsHigh
+        expr: |
+          sum (
+            rate(uniswap_v3_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-dex-worker
+        annotations:
+          summary: "Vector uniswap-v3-dex-worker error rate >0.1/s"
+          description: |
+            `uniswap-v3-dex-worker` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorUniswapV3DexWorkerLatencyHigh
+        # See VectorCurveDexWorkerLatencyHigh — same shape, different prefix.
+        # status="success" filter applied for the same reason.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (
+              rate(uniswap_v3_block_duration_seconds_bucket{
+                k8s_namespace_name="vector",
+                status="success"
+              }[10m])
+            )
+          ) > 5
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-dex-worker
+        annotations:
+          summary: "Vector uniswap-v3-dex-worker p99 block duration >5s"
+          description: |
+            `uniswap-v3-dex-worker` p99 block-processing latency is
+            `{{ $value | printf "%.2fs" }}` over 15m. Indexer is degraded;
+            expect lag in downstream Uniswap V3 pool / NFPM position state.
+
+      # ---------------------------------------------------------------------
+      # Balancer V2 DEX worker (VEC-79)
+      # ---------------------------------------------------------------------
+
+      - alert: VectorBalancerDexWorkerStalled
+        expr: |
+          sum (
+            rate(balancer_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: balancer-dex-worker
+        annotations:
+          summary: "Vector balancer-dex-worker stalled"
+          description: |
+            `balancer-dex-worker` has not advanced for >15m. Balancer V2
+            pool state in TimescaleDB will go stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorbalancerdexworkerstalled
+
+      - alert: VectorBalancerDexWorkerErrorsHigh
+        expr: |
+          sum (
+            rate(balancer_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: balancer-dex-worker
+        annotations:
+          summary: "Vector balancer-dex-worker error rate >0.1/s"
+          description: |
+            `balancer-dex-worker` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorBalancerDexWorkerLatencyHigh
+        # See VectorCurveDexWorkerLatencyHigh — same shape, different prefix.
+        # status="success" filter applied for the same reason.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (
+              rate(balancer_block_duration_seconds_bucket{
+                k8s_namespace_name="vector",
+                status="success"
+              }[10m])
+            )
+          ) > 5
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: balancer-dex-worker
+        annotations:
+          summary: "Vector balancer-dex-worker p99 block duration >5s"
+          description: |
+            `balancer-dex-worker` p99 block-processing latency is
+            `{{ $value | printf "%.2fs" }}` over 15m. Indexer is degraded;
+            expect lag in downstream Balancer V2 pool state.

@@ -337,32 +337,47 @@ func (b *blockchainService) readPoolState(ctx context.Context, pool *entity.Bala
 		}
 	}
 
-	// 3: getActualSupply (composable_stable only).
+	// 3: getActualSupply (composable_stable only). The Success guard tolerates
+	// a revert (paused / pre-init), but a Success=true with an undecodable
+	// payload indicates an ABI/contract drift — fail hard per CLAUDE.md so
+	// the snapshot is never silently written with this column as NULL.
 	if isComposable && results[3].Success {
-		if v, err := unpackUint(b.poolRead, "getActualSupply", results[3]); err == nil {
-			out.ActualSupply = v
+		v, err := unpackUint(b.poolRead, "getActualSupply", results[3])
+		if err != nil {
+			return nil, fmt.Errorf("decoding getActualSupply for pool %s: %w", pool.Address.Hex(), err)
 		}
+		out.ActualSupply = v
 	}
 
-	// 4: totalSupply.
+	// 4: totalSupply. Mandatory on every Balancer V2 pool type — decode
+	// failure on Success=true means our ABI no longer matches the on-chain
+	// contract. Fail-fast rather than write a stale-looking row.
 	if results[4].Success {
-		if v, err := unpackUint(b.poolRead, "totalSupply", results[4]); err == nil {
-			out.TotalSupply = v
+		v, err := unpackUint(b.poolRead, "totalSupply", results[4])
+		if err != nil {
+			return nil, fmt.Errorf("decoding totalSupply for pool %s: %w", pool.Address.Hex(), err)
 		}
+		out.TotalSupply = v
 	}
 
-	// 5: getScalingFactors.
+	// 5: getScalingFactors. Mandatory: every Balancer V2 pool exposes a
+	// scaling-factor vector that downstream price math depends on.
 	if results[5].Success {
-		if sf, err := unpackUintSlice(b.poolRead, "getScalingFactors", results[5]); err == nil {
-			out.ScalingFactors = sf
+		sf, err := unpackUintSlice(b.poolRead, "getScalingFactors", results[5])
+		if err != nil {
+			return nil, fmt.Errorf("decoding getScalingFactors for pool %s: %w", pool.Address.Hex(), err)
 		}
+		out.ScalingFactors = sf
 	}
 
-	// 6: getSwapFeePercentage.
+	// 6: getSwapFeePercentage. Mandatory: required for every fee/yield
+	// calculation downstream; a silent NULL would skew accounting.
 	if results[6].Success {
-		if v, err := unpackUint(b.poolRead, "getSwapFeePercentage", results[6]); err == nil {
-			out.SwapFee = v
+		v, err := unpackUint(b.poolRead, "getSwapFeePercentage", results[6])
+		if err != nil {
+			return nil, fmt.Errorf("decoding getSwapFeePercentage for pool %s: %w", pool.Address.Hex(), err)
 		}
+		out.SwapFee = v
 	}
 
 	// 7: getPausedState.

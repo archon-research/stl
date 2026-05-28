@@ -600,6 +600,69 @@ func TestStartContinuesWhenSingleMetaRegistryBootstrapFails(t *testing.T) {
 	}
 }
 
+// S2: get_dy can revert on degenerate pool states. Pre-fix the worker
+// wrote Dy=0 indistinguishable from a real "no liquidity that direction"
+// zero. Post-fix the worker must write Dy=nil so the new nullable column
+// receives NULL and consumers can filter with IS NOT NULL. The Dx input
+// is still set (we control it) so downstream queries can still tell which
+// direction was probed.
+func TestProcessReceipt_TokenExchange_GetDyRevert_WritesNilDy(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolV1()
+	h.svc.registry.addPool(pool)
+
+	var rates []*entity.CurvePoolExchangeRate
+	h.curveRepo.SaveCurvePoolExchangeRateFn = func(_ context.Context, _ pgx.Tx, r *entity.CurvePoolExchangeRate) error {
+		rates = append(rates, r)
+		return nil
+	}
+	h.curveRepo.SaveCurvePoolSwapFn = func(_ context.Context, _ pgx.Tx, _ *entity.CurvePoolSwap) error { return nil }
+	h.curveRepo.SaveCurvePoolStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.CurvePoolState) error { return nil }
+	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error { return nil }
+
+	// Pool state results, with get_dy(0,1) reverting (Success=false). The
+	// other directional pair succeeds normally.
+	results := h.poolStateResultsV1()
+	results[6] = outbound.Result{Success: false, ReturnData: nil} // get_dy(0,1) reverts
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return results, nil
+	}
+
+	log := h.makeTokenExchangeLog(pool.Address, testUser, 0, 1, big.NewInt(100), big.NewInt(99))
+	receipt := shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}
+	body, err := json.Marshal([]shared.TransactionReceipt{receipt})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	h.cache.SetReceipts(1, 100, 0, body)
+	if err := h.svc.processBlockEvent(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 100, Version: 0,
+		BlockTimestamp: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Unix(),
+	}); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+
+	if len(rates) != 2 {
+		t.Fatalf("rates rows = %d, want 2 (one revert + one success)", len(rates))
+	}
+	// Find the reverted-direction (i=0, j=1) and the success-direction (i=1, j=0).
+	var revertedDy, successDy *big.Int
+	for _, r := range rates {
+		if r.I == 0 && r.J == 1 {
+			revertedDy = r.Dy
+		}
+		if r.I == 1 && r.J == 0 {
+			successDy = r.Dy
+		}
+	}
+	if revertedDy != nil {
+		t.Errorf("get_dy(0,1) reverted but Dy=%s; want nil so DB column lands as NULL (consumers can distinguish revert from genuine zero)", revertedDy)
+	}
+	if successDy == nil {
+		t.Error("get_dy(1,0) succeeded but Dy=nil; want non-nil")
+	}
+}
+
 func TestProcessReceipt_TokenExchange_WritesSwapStateAndExchangeRates(t *testing.T) {
 	h := newHarness(t)
 	pool := makePoolV1()

@@ -912,6 +912,62 @@ func TestProcessReceipt_PoolPausedStateChanged_WritesPaused(t *testing.T) {
 	}
 }
 
+// S1: a successful multicall slot whose ReturnData fails to decode against
+// our pool-read ABI indicates the contract layout has shifted under us
+// (proxy upgrade, new factory variant). Per CLAUDE.md "fail hard and early
+// on unexpected errors": readPoolState must propagate the decode error
+// rather than silently writing a state row with NULLs in mandatory columns
+// — a stale snapshot is worse than no snapshot because downstream consumers
+// can't tell. Covers getActualSupply / totalSupply / getScalingFactors /
+// getSwapFeePercentage at lines 341-367 of multicall.go.
+func TestReadPoolState_DecodeErrorOnMandatoryField_PropagatesError(t *testing.T) {
+	cases := []struct {
+		name      string
+		slot      int
+		wantField string
+	}{
+		{"getActualSupply (composable_stable)", 3, "getActualSupply"},
+		{"totalSupply", 4, "totalSupply"},
+		{"getScalingFactors", 5, "getScalingFactors"},
+		{"getSwapFeePercentage", 6, "getSwapFeePercentage"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.registerPool()
+
+			h.balancerRepo.SaveBalancerPoolSwapFn = func(_ context.Context, _ pgx.Tx, _ *entity.BalancerPoolSwap) error {
+				return nil
+			}
+			h.balancerRepo.SaveBalancerPoolStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.BalancerPoolState) error {
+				return nil
+			}
+			h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error {
+				return nil
+			}
+
+			// Canned good results, then corrupt one mandatory slot.
+			// `Success: true` plus garbage ReturnData forces the unpack to fail.
+			results := h.poolStateResults()
+			results[tc.slot] = outbound.Result{Success: true, ReturnData: []byte{0x01}}
+
+			h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				return results, nil
+			}
+
+			log := h.makeVaultSwapLog(testPoolID, wstETHAddr, wethAddr, big.NewInt(100), big.NewInt(99), "0x1")
+			receipt := shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}
+			err := h.deliver([]shared.TransactionReceipt{receipt}, 100, 0)
+			if err == nil {
+				t.Fatalf("expected deliver to fail because %s decode failed with Success=true", tc.wantField)
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("error %q must reference field %q so on-call can tell which slot broke", err, tc.wantField)
+			}
+		})
+	}
+}
+
 func TestProcessReceipt_BPTTransfer_WritesTwoPositions(t *testing.T) {
 	h := newHarness(t)
 	h.registerPool()

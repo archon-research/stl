@@ -16,6 +16,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -37,6 +38,11 @@ const balancerProtocolDeployBlock = int64(12272146)
 // Config holds service configuration.
 type Config struct {
 	shared.SQSConsumerConfig
+
+	// Telemetry, when non-nil, is invoked once per processBlockEvent with the
+	// terminal duration and error. Wired by the worker main.go to emit
+	// balancer_blocks_processed_total / balancer_errors_total. Nil disables.
+	Telemetry *dextelemetry.Telemetry
 }
 
 // ConfigDefaults returns default configuration values.
@@ -60,6 +66,7 @@ type Service struct {
 
 	blockchain *blockchainService
 	extractor  *eventExtractor
+	telemetry  *dextelemetry.Telemetry
 
 	registry *poolRegistry
 
@@ -124,6 +131,7 @@ func NewService(
 		eventRepo:    eventRepo,
 		blockchain:   bc,
 		extractor:    extractor,
+		telemetry:    config.Telemetry,
 		registry:     newPoolRegistry(),
 		logger:       config.Logger.With("component", "balancer-dex-worker"),
 	}, nil
@@ -181,7 +189,14 @@ func (s *Service) loadRegistry(ctx context.Context) error {
 
 // processBlockEvent is the per-message handler. Each receipt's logs are
 // filtered to the Balancer scope and dispatched per category.
-func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
+func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordBlockProcessed(ctx, time.Since(start), retErr)
+		if retErr != nil {
+			s.telemetry.RecordError(ctx, "processBlockEvent", retErr)
+		}
+	}()
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
 		return fmt.Errorf("fetching receipts from cache: %w", err)

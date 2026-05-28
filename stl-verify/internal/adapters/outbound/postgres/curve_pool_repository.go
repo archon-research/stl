@@ -375,16 +375,16 @@ func (r *CurvePoolRepository) SaveCurvePoolParameterEvent(ctx context.Context, t
 	return nil
 }
 
-// SaveCurvePoolExchangeRate writes one row to curve_pool_exchange_rate.
+// SaveCurvePoolExchangeRate writes one row to curve_pool_exchange_rate. Dy
+// is nullable (column has DROP NOT NULL after migration
+// 20260523_120000): a nil Dy lands as SQL NULL, signalling the on-chain
+// get_dy call reverted. Consumers filter with IS NOT NULL.
 func (r *CurvePoolRepository) SaveCurvePoolExchangeRate(ctx context.Context, tx pgx.Tx, rate *entity.CurvePoolExchangeRate) error {
 	dx, err := bigIntToNumericRequired(rate.Dx, "dx")
 	if err != nil {
 		return err
 	}
-	dy, err := bigIntToNumericRequired(rate.Dy, "dy")
-	if err != nil {
-		return err
-	}
+	dy := bigIntToNullableNumeric(rate.Dy)
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO curve_pool_exchange_rate (
