@@ -18,7 +18,7 @@
     "@tanstack/react-table": "^8.20.0"
   },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.3.2",
+    "@archon-research/uikit-cli": "0.4.0",
     "typescript": "^5.4.5"
   },
   "workspaces": [
