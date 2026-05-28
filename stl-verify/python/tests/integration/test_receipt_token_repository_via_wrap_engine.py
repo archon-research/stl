@@ -64,14 +64,18 @@ async def _seed_receipt_token(
     return protocol_id, underlying_token_id, receipt_token_id
 
 
+@pytest.fixture
+def repo(wrap_engine: AsyncEngine) -> ReceiptTokenRepository:
+    return ReceiptTokenRepository(wrap_engine)
+
+
 @pytest.mark.asyncio(loop_scope="session")
 async def test_get_returns_receipt_token_info(
     wrap_conn: AsyncConnection,
-    wrap_engine: AsyncEngine,
+    repo: ReceiptTokenRepository,
 ) -> None:
     protocol_id, underlying_token_id, rt_id = await _seed_receipt_token(wrap_conn)
 
-    repo = ReceiptTokenRepository(wrap_engine)
     result = await repo.get(rt_id)
 
     assert result is not None
@@ -86,12 +90,11 @@ async def test_get_returns_receipt_token_info(
 @pytest.mark.asyncio(loop_scope="session")
 async def test_get_returns_none_when_receipt_token_address_token_row_missing(
     wrap_conn: AsyncConnection,
-    wrap_engine: AsyncEngine,
+    repo: ReceiptTokenRepository,
 ) -> None:
     """``receipt_token_token_id`` is None until the indexer materialises the token row."""
     _, _, rt_id = await _seed_receipt_token(wrap_conn, index_receipt_token_address=False)
 
-    repo = ReceiptTokenRepository(wrap_engine)
     result = await repo.get(rt_id)
 
     assert result is not None
@@ -102,11 +105,10 @@ async def test_get_returns_none_when_receipt_token_address_token_row_missing(
 @pytest.mark.asyncio(loop_scope="session")
 async def test_get_by_chain_and_address_is_case_insensitive(
     wrap_conn: AsyncConnection,
-    wrap_engine: AsyncEngine,
+    repo: ReceiptTokenRepository,
 ) -> None:
     _, _, rt_id = await _seed_receipt_token(wrap_conn)
 
-    repo = ReceiptTokenRepository(wrap_engine)
     upper = await repo.get_by_chain_and_address(1, EthAddress("0x" + "CC" * 20))
     lower = await repo.get_by_chain_and_address(1, EthAddress("0x" + "cc" * 20))
 
@@ -117,14 +119,12 @@ async def test_get_by_chain_and_address_is_case_insensitive(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_get_returns_none_for_unknown_id(wrap_engine: AsyncEngine) -> None:
-    repo = ReceiptTokenRepository(wrap_engine)
+async def test_get_returns_none_for_unknown_id(repo: ReceiptTokenRepository) -> None:
     assert await repo.get(99_999) is None
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_get_by_chain_and_address_returns_none_for_unknown_address(
-    wrap_engine: AsyncEngine,
+    repo: ReceiptTokenRepository,
 ) -> None:
-    repo = ReceiptTokenRepository(wrap_engine)
     assert await repo.get_by_chain_and_address(1, EthAddress("0x" + "ff" * 20)) is None
