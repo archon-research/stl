@@ -12,13 +12,13 @@ import (
 )
 
 func TestNewBlockchainService_RejectsNilMulticaller(t *testing.T) {
-	if _, err := NewBlockchainService(nil); err == nil {
+	if _, err := NewBlockchainService(nil, nil); err == nil {
 		t.Fatal("expected error for nil multicaller")
 	}
 }
 
 func TestNewBlockchainService_PrePacksNoArgViews(t *testing.T) {
-	bs, err := NewBlockchainService(&multicallStub{})
+	bs, err := NewBlockchainService(&multicallStub{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 			encodeUint8(6),                               // decimals
 		},
 	}
-	bs, err := NewBlockchainService(mc)
+	bs, err := NewBlockchainService(mc, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 func TestFetchVaultState_PropagatesMulticallError(t *testing.T) {
 	wantErr := errors.New("network down")
 	mc := &multicallStub{Err: wantErr}
-	bs, _ := NewBlockchainService(mc)
+	bs, _ := NewBlockchainService(mc, nil)
 	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), big.NewInt(1))
 	if err == nil || !errors.Is(err, wantErr) {
 		t.Fatalf("expected wrapped multicall error, got %v", err)
@@ -102,7 +102,7 @@ func TestFetchVaultState_PropagatesMulticallError(t *testing.T) {
 }
 
 func TestFetchVaultState_FailsOnRevertedCall(t *testing.T) {
-	bs, _ := NewBlockchainService(&multicallStub{})
+	bs, _ := NewBlockchainService(&multicallStub{}, nil)
 	mc := &reverteringMulticaller{}
 	bs.multicaller = mc
 	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), big.NewInt(1))
@@ -126,7 +126,7 @@ func (r *reverteringMulticaller) Address() common.Address { return common.Addres
 
 func TestFetchUserPositions_EmptyUsers_ShortCircuits(t *testing.T) {
 	mc := &multicallStub{}
-	bs, _ := NewBlockchainService(mc)
+	bs, _ := NewBlockchainService(mc, nil)
 	out, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), nil, big.NewInt(1))
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestFetchUserPositions_TwoBatches(t *testing.T) {
 			encodeUint256(big.NewInt(825)),
 		},
 	}
-	bs, _ := NewBlockchainService(mc)
+	bs, _ := NewBlockchainService(mc, nil)
 	vault := common.HexToAddress(syrupUSDCAddr)
 	u1 := common.HexToAddress(userA)
 	u2 := common.HexToAddress(userB)
@@ -186,7 +186,7 @@ func TestFetchUserPositions_TwoBatches(t *testing.T) {
 func TestFetchUserPositions_PropagatesBalanceOfError(t *testing.T) {
 	wantErr := errors.New("rpc 502")
 	mc := &multicallStub{Err: wantErr}
-	bs, _ := NewBlockchainService(mc)
+	bs, _ := NewBlockchainService(mc, nil)
 	_, err := bs.FetchUserPositions(context.Background(),
 		common.HexToAddress(syrupUSDCAddr),
 		[]common.Address{common.HexToAddress(userA)},
@@ -203,7 +203,7 @@ func TestFetchUserPositions_PassesBlockNumberThrough(t *testing.T) {
 			encodeUint256(big.NewInt(2)),
 		},
 	}
-	bs, _ := NewBlockchainService(mc)
+	bs, _ := NewBlockchainService(mc, nil)
 	block := big.NewInt(18_700_000)
 	if _, err := bs.FetchUserPositions(context.Background(),
 		common.HexToAddress(syrupUSDCAddr),

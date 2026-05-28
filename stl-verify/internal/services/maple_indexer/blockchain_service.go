@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -48,6 +50,7 @@ type UserPosition struct {
 type BlockchainService struct {
 	multicaller outbound.Multicaller
 	viewABI     *abi.ABI
+	telemetry   *Telemetry
 
 	// Pre-packed call data for the no-argument vault-level views, so we
 	// don't re-pack on every block. Vault-level views are call-data-free
@@ -59,7 +62,7 @@ type BlockchainService struct {
 
 // NewBlockchainService loads the Syrup views ABI and pre-packs the
 // no-argument view calls.
-func NewBlockchainService(mc outbound.Multicaller) (*BlockchainService, error) {
+func NewBlockchainService(mc outbound.Multicaller, telemetry *Telemetry) (*BlockchainService, error) {
 	if mc == nil {
 		return nil, fmt.Errorf("multicaller is nil")
 	}
@@ -89,6 +92,7 @@ func NewBlockchainService(mc outbound.Multicaller) (*BlockchainService, error) {
 	return &BlockchainService{
 		multicaller:     mc,
 		viewABI:         a,
+		telemetry:       telemetry,
 		totalAssetsData: ta,
 		totalSupplyData: ts,
 		decimalsData:    dec,
@@ -107,7 +111,14 @@ func NewBlockchainService(mc outbound.Multicaller) (*BlockchainService, error) {
 //     a share unit, including any vault-internal rounding.
 //   - decimals is fetched for observability/sanity-checks; the service does
 //     not yet adapt shareUnit to non-6-decimal vaults.
-func (s *BlockchainService) FetchVaultState(ctx context.Context, vault common.Address, blockNumber *big.Int) (*VaultStateRaw, error) {
+func (s *BlockchainService) FetchVaultState(ctx context.Context, vault common.Address, blockNumber *big.Int) (_ *VaultStateRaw, retErr error) {
+	start := time.Now()
+	ctx, span := s.telemetry.StartSpan(ctx, "maple.rpc.fetchVaultState",
+		attribute.String("vault", vault.Hex()),
+	)
+	defer span.End()
+	defer func() { s.telemetry.RecordRPCCall(ctx, "fetchVaultState", time.Since(start), retErr) }()
+
 	convData, err := s.viewABI.Pack("convertToAssets", shareUnit)
 	if err != nil {
 		return nil, fmt.Errorf("packing convertToAssets: %w", err)
@@ -175,6 +186,11 @@ func (s *BlockchainService) FetchUserPositions(
 		return map[common.Address]*UserPosition{}, nil
 	}
 
+	ctx, span := s.telemetry.StartSpan(ctx, "maple.rpc.fetchUserPositions",
+		attribute.String("vault", vault.Hex()),
+	)
+	defer span.End()
+
 	balanceCalls := make([]outbound.Call, len(users))
 	for i, u := range users {
 		data, err := s.viewABI.Pack("balanceOf", u)
@@ -183,7 +199,9 @@ func (s *BlockchainService) FetchUserPositions(
 		}
 		balanceCalls[i] = outbound.Call{Target: vault, CallData: data}
 	}
+	balanceStart := time.Now()
 	balanceResults, err := s.multicaller.Execute(ctx, balanceCalls, blockNumber)
+	s.telemetry.RecordRPCCall(ctx, "balanceOf", time.Since(balanceStart), err)
 	if err != nil {
 		return nil, fmt.Errorf("multicall balanceOf for vault %s: %w", vault.Hex(), err)
 	}
@@ -208,7 +226,9 @@ func (s *BlockchainService) FetchUserPositions(
 		}
 		assetCalls[i] = outbound.Call{Target: vault, CallData: data}
 	}
+	assetStart := time.Now()
 	assetResults, err := s.multicaller.Execute(ctx, assetCalls, blockNumber)
+	s.telemetry.RecordRPCCall(ctx, "convertToAssets", time.Since(assetStart), err)
 	if err != nil {
 		return nil, fmt.Errorf("multicall convertToAssets for vault %s: %w", vault.Hex(), err)
 	}

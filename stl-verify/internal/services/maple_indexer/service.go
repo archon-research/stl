@@ -83,7 +83,7 @@ func NewService(
 		return nil, fmt.Errorf("creating event extractor: %w", err)
 	}
 
-	bs, err := NewBlockchainService(multicaller)
+	bs, err := NewBlockchainService(multicaller, config.Telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockchain service: %w", err)
 	}
