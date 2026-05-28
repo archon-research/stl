@@ -105,55 +105,6 @@ func (b *blockchainService) readERC20MetadataBatch(ctx context.Context, tokens [
 	return syms, decs, nil
 }
 
-// readERC20Metadata reads `symbol()` + `decimals()` on an ERC-20 token in a
-// single multicall, pinned to `blockNumber`. Used by populatePoolTokens so a
-// non-18-decimal token (USDC, WBTC, …) isn't silently registered with the 18
-// placeholder, which would break every downstream USD-conversion query.
-// Reverts on these standard ERC-20 view methods are UNEXPECTED and propagate.
-func (b *blockchainService) readERC20Metadata(ctx context.Context, token common.Address, blockNumber int64) (string, uint8, error) {
-	symData, err := b.erc20Read.Pack("symbol")
-	if err != nil {
-		return "", 0, fmt.Errorf("packing symbol: %w", err)
-	}
-	decData, err := b.erc20Read.Pack("decimals")
-	if err != nil {
-		return "", 0, fmt.Errorf("packing decimals: %w", err)
-	}
-	results, err := b.multicaller.Execute(ctx, []outbound.Call{
-		{Target: token, CallData: symData},
-		{Target: token, CallData: decData},
-	}, big.NewInt(blockNumber))
-	if err != nil {
-		return "", 0, fmt.Errorf("multicall ERC20 metadata: %w", err)
-	}
-	if len(results) != 2 {
-		return "", 0, fmt.Errorf("ERC20 metadata multicall returned %d results, expected 2", len(results))
-	}
-	if !results[0].Success {
-		return "", 0, fmt.Errorf("symbol() reverted on %s at block %d", token.Hex(), blockNumber)
-	}
-	symUnp, err := b.erc20Read.Unpack("symbol", results[0].ReturnData)
-	if err != nil || len(symUnp) == 0 {
-		return "", 0, fmt.Errorf("decoding symbol on %s: %w", token.Hex(), err)
-	}
-	symbol, ok := symUnp[0].(string)
-	if !ok {
-		return "", 0, fmt.Errorf("symbol returned %T, want string", symUnp[0])
-	}
-	if !results[1].Success {
-		return "", 0, fmt.Errorf("decimals() reverted on %s at block %d", token.Hex(), blockNumber)
-	}
-	decUnp, err := b.erc20Read.Unpack("decimals", results[1].ReturnData)
-	if err != nil || len(decUnp) == 0 {
-		return "", 0, fmt.Errorf("decoding decimals on %s: %w", token.Hex(), err)
-	}
-	decimals, ok := decUnp[0].(uint8)
-	if !ok {
-		return "", 0, fmt.Errorf("decimals returned %T, want uint8", decUnp[0])
-	}
-	return symbol, decimals, nil
-}
-
 // readBPTBalances issues balanceOf(user) on the pool's BPT contract (the pool
 // address itself on ComposableStable) for every non-zero address in `users`,
 // pinned to `blockNumber`. balanceOf on a healthy ERC-20 must succeed for any

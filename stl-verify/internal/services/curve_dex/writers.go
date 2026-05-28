@@ -223,8 +223,6 @@ func (s *Service) markTokensRegistered(tokens []common.Address) {
 // small math helpers
 // -----------------------------------------------------------------------------
 
-func newZero() *big.Int { return big.NewInt(0) }
-
 func negate(b *big.Int) *big.Int {
 	if b == nil {
 		return big.NewInt(0)

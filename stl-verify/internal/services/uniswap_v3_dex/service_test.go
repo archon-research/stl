@@ -594,7 +594,7 @@ func TestStartLoadsPools(t *testing.T) {
 	if err := h.svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer h.svc.Stop()
+	defer func() { _ = h.svc.Stop() }()
 	if got := h.svc.registry.poolCount(); got != 1 {
 		t.Errorf("poolCount = %d, want 1", got)
 	}

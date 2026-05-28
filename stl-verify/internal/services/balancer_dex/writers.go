@@ -160,8 +160,6 @@ func (s *Service) savePoolState(ctx context.Context, tx pgx.Tx, pool *registered
 // small helpers
 // -----------------------------------------------------------------------------
 
-func newZero() *big.Int { return big.NewInt(0) }
-
 func negate(b *big.Int) *big.Int {
 	if b == nil {
 		return big.NewInt(0)

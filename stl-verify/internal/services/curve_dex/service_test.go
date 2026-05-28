@@ -429,7 +429,7 @@ func TestStartLoadsPoolsAndGauges(t *testing.T) {
 	if err := h.svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer h.svc.Stop()
+	defer func() { _ = h.svc.Stop() }()
 
 	if got := h.svc.registry.poolCount(); got != 1 {
 		t.Errorf("poolCount = %d, want 1", got)
@@ -480,7 +480,7 @@ func TestStartBootstrapsGaugesFromMetaRegistry(t *testing.T) {
 	if err := h.svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer h.svc.Stop()
+	defer func() { _ = h.svc.Stop() }()
 
 	if upserted == nil {
 		t.Fatal("MetaRegistry-bootstrapped gauge was not upserted into curve_gauge")
@@ -525,7 +525,7 @@ func TestStartSkipsBootstrapWhenMetaRegistryReturnsZero(t *testing.T) {
 	if err := h.svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer h.svc.Stop()
+	defer func() { _ = h.svc.Stop() }()
 
 	if upsertCalled {
 		t.Error("MetaRegistry returned zero address but UpsertCurveGauge was still called")
@@ -584,7 +584,7 @@ func TestStartContinuesWhenSingleMetaRegistryBootstrapFails(t *testing.T) {
 	if err := h.svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start should not fail when a single bootstrap probe errors: %v", err)
 	}
-	defer h.svc.Stop()
+	defer func() { _ = h.svc.Stop() }()
 
 	if upserted == nil {
 		t.Fatal("expected the second pool's MetaRegistry-bootstrapped gauge to be upserted despite the first pool's failure")
@@ -1116,7 +1116,7 @@ func TestBootstrapGaugeFromMetaRegistry_UsesLatestBlock(t *testing.T) {
 	if err := h.svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer h.svc.Stop()
+	defer func() { _ = h.svc.Stop() }()
 
 	if !bootstrapBlockArgSeen {
 		t.Fatal("multicaller was not invoked by bootstrap")
