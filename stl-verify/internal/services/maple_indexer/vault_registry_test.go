@@ -112,7 +112,7 @@ func TestVaultRegistry_LoadFromDB_IsIdempotent(t *testing.T) {
 	v := newMapleVault(t, addr)
 	repo := newRepoStub(map[common.Address]*entity.MapleVault{addr: v}, nil)
 	r := NewVaultRegistry(quietLogger())
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := r.LoadFromDB(context.Background(), repo, 1); err != nil {
 			t.Fatal(err)
 		}

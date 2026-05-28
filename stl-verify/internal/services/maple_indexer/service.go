@@ -120,9 +120,7 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("vault registry is empty for chain %d: migration may not have run or chain_id is wrong", s.config.ChainID)
 	}
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		sqsutil.RunLoop(s.ctx, sqsutil.Config{
 			Consumer:     s.consumer,
 			MaxMessages:  s.config.MaxMessages,
@@ -130,7 +128,7 @@ func (s *Service) Start(ctx context.Context) error {
 			Logger:       s.logger,
 			ChainID:      s.config.ChainID,
 		}, s.processBlockEvent)
-	}()
+	})
 
 	s.logger.Info("maple indexer started",
 		"maxMessages", s.config.MaxMessages,

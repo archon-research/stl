@@ -1,6 +1,7 @@
 package maple_indexer
 
 import (
+	"context"
 	"testing"
 )
 
@@ -46,11 +47,11 @@ func TestNewTelemetry_NilSafeOperations(t *testing.T) {
 	// All recorder methods must be no-ops on a nil receiver — the service
 	// passes the telemetry struct around as a value that may not be wired
 	// up in unit tests.
-	tel.RecordBlockProcessed(nil, 0, nil)
-	tel.RecordVaultStateWrite(nil)
-	tel.RecordPositionWrites(nil, 5)
-	tel.RecordRPCCall(nil, "x", 0, nil)
-	tel.RecordError(nil, "op", nil)
+	tel.RecordBlockProcessed(context.TODO(), 0, nil)
+	tel.RecordVaultStateWrite(context.TODO())
+	tel.RecordPositionWrites(context.TODO(), 5)
+	tel.RecordRPCCall(context.TODO(), "x", 0, nil)
+	tel.RecordError(context.TODO(), "op", nil)
 }
 
 func TestNewTelemetry_CreatesAllInstruments(t *testing.T) {
