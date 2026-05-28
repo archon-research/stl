@@ -26,7 +26,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
-from tests.seeds import set_session_metadata
+from tests.db import set_session_metadata
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[1] / "db" / "migrations"
 TIMESCALEDB_IMAGE = "timescale/timescaledb:2.25.1-pg17"

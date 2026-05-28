@@ -16,35 +16,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import MetaData, Table
+from sqlalchemy import Table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.db import get_table
+
 _ZERO_TX_HASH = b"\x00" * 32
 _ZERO_ADDRESS = b"\x00" * 20
-
-_session_metadata: MetaData | None = None
-
-
-def set_session_metadata(metadata: MetaData) -> None:
-    """Cache the reflected metadata for ``_table()`` lookups.
-
-    Called by the ``session_engine`` fixture after reflection runs.
-    """
-    global _session_metadata
-    _session_metadata = metadata
-
-
-def _table(name: str) -> Table:
-    if _session_metadata is None:
-        raise RuntimeError("session metadata not reflected yet — request the session_engine fixture first")
-    try:
-        return _session_metadata.tables[name]
-    except KeyError:
-        known = sorted(_session_metadata.tables)
-        raise KeyError(
-            f"table {name!r} not in reflected MetaData — did the migration adding it run? known tables: {known}"
-        ) from None
 
 
 async def _insert_returning_id(conn: AsyncConnection, table: Table, values: dict[str, Any]) -> int:
@@ -87,7 +66,7 @@ async def insert_token(
     """Upsert a ``token`` row on ``(chain_id, address)``."""
     return await _upsert_returning_id(
         conn,
-        _table("token"),
+        get_table("token"),
         {"chain_id": chain_id, "address": address, "symbol": symbol, "decimals": decimals},
         index_elements=["chain_id", "address"],
         update_columns=["symbol"],
@@ -108,7 +87,7 @@ async def insert_user(
     """
     return await _upsert_returning_id(
         conn,
-        _table("user"),
+        get_table("user"),
         {
             "chain_id": chain_id,
             "address": address,
@@ -131,7 +110,7 @@ async def insert_protocol(
     """Upsert a ``protocol`` row on ``(chain_id, address)``."""
     return await _upsert_returning_id(
         conn,
-        _table("protocol"),
+        get_table("protocol"),
         {
             "chain_id": chain_id,
             "address": address,
@@ -154,7 +133,7 @@ async def insert_prime(
     """Upsert a ``prime`` row on ``name``."""
     return await _upsert_returning_id(
         conn,
-        _table("prime"),
+        get_table("prime"),
         {"name": name, "vault_address": vault_address},
         index_elements=["name"],
         update_columns=["vault_address"],
@@ -189,7 +168,7 @@ async def insert_receipt_token(
         )
     return await _upsert_returning_id(
         conn,
-        _table("receipt_token"),
+        get_table("receipt_token"),
         {
             "chain_id": chain_id,
             "protocol_id": protocol_id,
@@ -234,7 +213,7 @@ async def insert_allocation_position(
     }
     if scaled_balance is not None:
         values["scaled_balance"] = scaled_balance
-    await conn.execute(_table("allocation_position").insert().values(**values))
+    await conn.execute(get_table("allocation_position").insert().values(**values))
 
 
 async def insert_morpho_market(
@@ -253,7 +232,7 @@ async def insert_morpho_market(
     """Upsert a ``morpho_market`` row on ``(chain_id, market_id)``."""
     return await _upsert_returning_id(
         conn,
-        _table("morpho_market"),
+        get_table("morpho_market"),
         {
             "chain_id": chain_id,
             "protocol_id": protocol_id,
@@ -281,7 +260,7 @@ async def insert_morpho_market_state(
     fee: int | Decimal = 0,
 ) -> None:
     await conn.execute(
-        _table("morpho_market_state")
+        get_table("morpho_market_state")
         .insert()
         .values(
             morpho_market_id=morpho_market_id,
@@ -310,7 +289,7 @@ async def insert_morpho_market_position(
     block_version: int = 0,
 ) -> None:
     await conn.execute(
-        _table("morpho_market_position")
+        get_table("morpho_market_position")
         .insert()
         .values(
             user_id=user_id,
@@ -342,7 +321,7 @@ async def insert_morpho_vault(
     """Upsert a ``morpho_vault`` row on ``(chain_id, address)``."""
     return await _upsert_returning_id(
         conn,
-        _table("morpho_vault"),
+        get_table("morpho_vault"),
         {
             "chain_id": chain_id,
             "protocol_id": protocol_id,
@@ -367,7 +346,7 @@ async def insert_morpho_vault_state(
     block_version: int = 0,
 ) -> None:
     await conn.execute(
-        _table("morpho_vault_state")
+        get_table("morpho_vault_state")
         .insert()
         .values(
             morpho_vault_id=morpho_vault_id,
@@ -393,7 +372,7 @@ async def insert_sparklend_reserve(
     if ltv is None:
         ltv = Decimal("8000") if usage_as_collateral_enabled else Decimal("0")
     await conn.execute(
-        _table("sparklend_reserve_data")
+        get_table("sparklend_reserve_data")
         .insert()
         .values(
             protocol_id=protocol_id,
@@ -419,7 +398,7 @@ async def insert_borrower(
     block_version: int = 0,
 ) -> None:
     await conn.execute(
-        _table("borrower")
+        get_table("borrower")
         .insert()
         .values(
             user_id=user_id,
@@ -449,7 +428,7 @@ async def insert_borrower_collateral(
     block_version: int = 0,
 ) -> None:
     await conn.execute(
-        _table("borrower_collateral")
+        get_table("borrower_collateral")
         .insert()
         .values(
             user_id=user_id,
@@ -478,7 +457,7 @@ async def insert_oracle_asset(
     The unique constraint covers ``(oracle_id, token_id) WHERE feed_address IS NULL``;
     on conflict we treat the row as already present and skip.
     """
-    stmt = pg_insert(_table("oracle_asset")).values(oracle_id=oracle_id, token_id=token_id, enabled=enabled)
+    stmt = pg_insert(get_table("oracle_asset")).values(oracle_id=oracle_id, token_id=token_id, enabled=enabled)
     await conn.execute(stmt.on_conflict_do_nothing())
 
 
@@ -493,7 +472,7 @@ async def insert_onchain_token_price(
     timestamp: datetime | None = None,
 ) -> None:
     await conn.execute(
-        _table("onchain_token_price")
+        get_table("onchain_token_price")
         .insert()
         .values(
             token_id=token_id,
