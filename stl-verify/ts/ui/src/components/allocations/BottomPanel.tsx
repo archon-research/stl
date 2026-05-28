@@ -55,7 +55,7 @@ function parseCategoryParam(value: string | null): AllocationCategory | '' {
 
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '7', px: '2', fontSize: 'xs' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'sm' })}`;
 
 export function BottomPanel({
   allocations,
@@ -298,7 +298,7 @@ export function BottomPanel({
             className={css({
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.14em',
+              letterSpacing: '0.1em',
               color: 'text.muted',
             })}
           >
@@ -338,7 +338,7 @@ export function BottomPanel({
             className={css({
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.14em',
+              letterSpacing: '0.1em',
               color: 'text.muted',
             })}
           >

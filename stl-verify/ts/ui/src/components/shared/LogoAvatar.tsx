@@ -1,4 +1,5 @@
 import { Avatar } from '@archon-research/design-system';
+import { useEffect, useMemo, useState } from 'react';
 
 import { logging } from '#src/lib/logging';
 import { css } from '#styled-system/css';
@@ -19,6 +20,9 @@ type LogoAvatarProps =
 
 type AvatarStatusChangeDetails = { status: 'loading' | 'loaded' | 'error' };
 
+// Cache known-bad logo URLs to avoid repeated failed requests and duplicate warnings.
+const failedLogoUrls = new Set<string>();
+
 export function LogoAvatar({
   alt,
   fallbackText,
@@ -28,16 +32,40 @@ export function LogoAvatar({
   sizePx,
   fallbackColor = 'text.default',
 }: LogoAvatarProps) {
+  const normalizedImageUrl = useMemo(() => imageUrl ?? null, [imageUrl]);
+  const [hasImageError, setHasImageError] = useState<boolean>(
+    normalizedImageUrl !== null && failedLogoUrls.has(normalizedImageUrl),
+  );
+
+  useEffect(() => {
+    if (!normalizedImageUrl) {
+      setHasImageError(true);
+      return;
+    }
+
+    setHasImageError(failedLogoUrls.has(normalizedImageUrl));
+  }, [normalizedImageUrl]);
+
   const sizingStyle = sizePx
     ? { width: `${sizePx}px`, height: `${sizePx}px` }
     : undefined;
 
+  const shouldRenderImage = normalizedImageUrl !== null && !hasImageError;
+
   return (
     <Avatar.Root
       onStatusChange={(details: AvatarStatusChangeDetails) => {
-        if (details.status === 'error' && imageUrl) {
+        if (details.status === 'error' && normalizedImageUrl) {
+          const isFirstFailure = !failedLogoUrls.has(normalizedImageUrl);
+          failedLogoUrls.add(normalizedImageUrl);
+          setHasImageError(true);
+
+          if (!isFirstFailure) {
+            return;
+          }
+
           logging.warn('Logo image failed to load', {
-            imageUrl,
+            imageUrl: normalizedImageUrl,
             alt,
             fallbackText,
           });
@@ -71,10 +99,10 @@ export function LogoAvatar({
       >
         {fallbackText}
       </Avatar.Fallback>
-      {imageUrl ? (
+      {shouldRenderImage ? (
         <Avatar.Image
           alt={alt}
-          src={imageUrl}
+          src={normalizedImageUrl}
           className={css({
             width: 'full',
             height: 'full',

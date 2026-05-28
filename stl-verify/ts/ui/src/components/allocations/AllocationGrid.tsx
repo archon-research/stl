@@ -575,7 +575,7 @@ export function AllocationGrid({
                   <div
                     className={css({
                       display: 'flex',
-                      alignItems: 'baseline',
+                      alignItems: 'center',
                       gap: '1.5',
                       flexWrap: 'wrap',
                       justifyContent: 'flex-end',
@@ -583,7 +583,7 @@ export function AllocationGrid({
                   >
                     <span
                       className={css({
-                        fontSize: 'xs',
+                        fontSize: 'sm',
                         fontWeight: 'semibold',
                         color: 'text.strong',
                       })}
@@ -596,6 +596,7 @@ export function AllocationGrid({
                     <span
                       className={css({
                         fontSize: 'xs',
+                        lineHeight: 'short',
                         color: 'text.muted',
                       })}
                     >
@@ -609,7 +610,7 @@ export function AllocationGrid({
                   <div
                     className={css({
                       display: 'flex',
-                      alignItems: 'baseline',
+                      alignItems: 'center',
                       gap: '1.5',
                       flexWrap: 'wrap',
                       justifyContent: 'flex-end',
@@ -617,7 +618,7 @@ export function AllocationGrid({
                   >
                     <span
                       className={css({
-                        fontSize: 'xs',
+                        fontSize: 'sm',
                         fontWeight: 'semibold',
                         color: 'text.strong',
                       })}
@@ -632,6 +633,7 @@ export function AllocationGrid({
                     <span
                       className={css({
                         fontSize: 'xs',
+                        lineHeight: 'short',
                         color: 'text.muted',
                       })}
                     >
@@ -823,7 +825,7 @@ export function AllocationGrid({
                 py: uiVariant === 'b' ? '0.5' : '1',
                 fontSize: 'xs',
                 fontWeight: 'semibold',
-                letterSpacing: '0.14em',
+                letterSpacing: '0.1em',
                 textTransform: 'uppercase',
                 color: 'text.muted',
               })}

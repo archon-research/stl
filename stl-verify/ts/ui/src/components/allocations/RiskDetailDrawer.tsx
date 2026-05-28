@@ -233,7 +233,7 @@ export function RiskDetailDrawer({
                   m: 0,
                   fontSize: 'xs',
                   textTransform: 'uppercase',
-                  letterSpacing: '0.14em',
+                  letterSpacing: '0.1em',
                   color: 'text.muted',
                 })}
               >
@@ -280,13 +280,14 @@ export function RiskDetailDrawer({
               type="button"
               onClick={onClose}
               className={css({
+                minHeight: '11',
                 borderRadius: 'sm',
                 borderWidth: '1px',
                 borderStyle: 'solid',
                 borderColor: 'border.subtle',
                 bg: 'surface.default',
                 px: '3',
-                py: '1.5',
+                py: '2',
                 fontSize: 'sm',
                 color: 'text.strong',
                 cursor: 'pointer',
