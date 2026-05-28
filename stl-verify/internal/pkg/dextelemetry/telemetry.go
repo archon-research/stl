@@ -11,6 +11,7 @@ package dextelemetry
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -19,23 +20,33 @@ import (
 )
 
 // Telemetry emits per-worker block/error counters plus a block-duration
-// histogram. The receiver is nil-safe: every method becomes a no-op when
+// histogram. Every datapoint is tagged with the worker's chain ID via the
+// `chain` attribute so alerts can `sum by (chain)` like the morpho/oracle
+// alerts do. The receiver is nil-safe: every method becomes a no-op when
 // called on a nil pointer, so production code can pass nil for "telemetry
 // disabled" without guard checks at each call site.
 type Telemetry struct {
 	prefix          string
+	chainAttr       attribute.KeyValue
 	blocksProcessed metric.Int64Counter
 	errorsTotal     metric.Int64Counter
 	blockDuration   metric.Float64Histogram
 }
 
 // NewTelemetry registers the two counters under `<prefix>.blocks.processed`
-// and `<prefix>.errors.total`. The OTel-to-Prometheus exporter normalises the
-// dots to underscores and adds the `_total` suffix, yielding the metric
-// series names the alert rules expect.
-func NewTelemetry(prefix string) (*Telemetry, error) {
+// and `<prefix>.errors.total`, plus the `<prefix>.block.duration_seconds`
+// histogram. The OTel-to-Prometheus exporter normalises the dots to
+// underscores and adds the `_total` suffix, yielding the metric series names
+// the alert rules expect. The chainID is baked into every datapoint as a
+// `chain` attribute (string form) so multi-chain Prometheus dashboards can
+// distinguish ethereum vs base vs avalanche traffic without resorting to
+// k8s pod labels.
+func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")
+	}
+	if chainID <= 0 {
+		return nil, fmt.Errorf("dextelemetry.NewTelemetry: chainID must be positive, got %d", chainID)
 	}
 	meter := otel.Meter(prefix + "-dex-worker")
 
@@ -66,6 +77,7 @@ func NewTelemetry(prefix string) (*Telemetry, error) {
 
 	return &Telemetry{
 		prefix:          prefix,
+		chainAttr:       attribute.String("chain", strconv.FormatInt(chainID, 10)),
 		blocksProcessed: blocks,
 		errorsTotal:     errs,
 		blockDuration:   dur,
@@ -86,16 +98,19 @@ func (t *Telemetry) RecordBlockProcessed(ctx context.Context, dur time.Duration,
 	if err != nil {
 		status = "error"
 	}
-	attrs := metric.WithAttributes(attribute.String("status", status))
+	attrs := metric.WithAttributes(attribute.String("status", status), t.chainAttr)
 	t.blocksProcessed.Add(ctx, 1, attrs)
 	t.blockDuration.Record(ctx, dur.Seconds(), attrs)
 }
 
-// RecordError increments errors_total with the operation label. Nil error or
-// nil receiver are no-ops.
+// RecordError increments errors_total with the operation label and chain
+// attribute. Nil error or nil receiver are no-ops.
 func (t *Telemetry) RecordError(ctx context.Context, operation string, err error) {
 	if t == nil || err == nil {
 		return
 	}
-	t.errorsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("operation", operation)))
+	t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("operation", operation),
+		t.chainAttr,
+	))
 }

@@ -23,7 +23,7 @@ func TestProcessBlockEvent_EmitsBlockProcessedMetric(t *testing.T) {
 	otel.SetMeterProvider(mp)
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	tel, err := dextelemetry.NewTelemetry("uniswap_v3")
+	tel, err := dextelemetry.NewTelemetry("uniswap_v3", 1)
 	if err != nil {
 		t.Fatalf("dextelemetry.NewTelemetry: %v", err)
 	}

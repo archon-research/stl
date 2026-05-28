@@ -24,6 +24,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -95,11 +96,11 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
 	}
 
-	chainIDStr := env.Get("CHAIN_ID", "1")
-	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	chainIDInt, err := chainutil.RequireChainID()
 	if err != nil {
-		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+		return fmt.Errorf("invalid CHAIN_ID: %w", err)
 	}
+	chainID := int64(chainIDInt)
 
 	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
 		v, err := strconv.Atoi(waitTimeStr)

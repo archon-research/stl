@@ -130,6 +130,57 @@ func TestProcessMessages_LogsApproximateReceiveCountOnError(t *testing.T) {
 	}
 }
 
+// Review-11 DLQ visibility: a message that's been redelivered several times
+// — eventually succeeding or not — should surface a WARN log up front so an
+// operator can see the redelivery pattern before the message hits the DLQ.
+// Pre-fix only the error path logged ApproximateReceiveCount; a flaky
+// "fails twice then succeeds" message left no trace.
+func TestProcessMessages_WarnsOnHighReceiveCount_EvenOnSuccess(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	msg := makeMsg("1", "h1", event)
+	msg.ApproximateReceiveCount = 5 // about to DLQ on the typical maxReceives=5 config
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{msg}},
+	}
+
+	var buf bytes.Buffer
+	cfg := testConfig(consumer)
+	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	handler := func(_ context.Context, _ outbound.BlockEvent) error { return nil } // success
+	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
+		t.Fatalf("ProcessMessages: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"approximateReceiveCount":5`) {
+		t.Errorf("expected warn log to surface high receive count; got %q", out)
+	}
+	if !strings.Contains(out, `"level":"WARN"`) {
+		t.Errorf("expected the redelivery surface to be WARN-level; got %q", out)
+	}
+}
+
+// First-delivery messages must NOT produce the redelivery warning — that
+// would drown out the legitimate signal and break dashboards.
+func TestProcessMessages_NoWarnOnFirstDelivery(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	msg := makeMsg("1", "h1", event)
+	msg.ApproximateReceiveCount = 1 // first delivery
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{msg}},
+	}
+	var buf bytes.Buffer
+	cfg := testConfig(consumer)
+	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	handler := func(_ context.Context, _ outbound.BlockEvent) error { return nil }
+	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
+		t.Fatalf("ProcessMessages: %v", err)
+	}
+	if strings.Contains(buf.String(), "approximateReceiveCount") {
+		t.Errorf("first-delivery message should not trigger redelivery warn; log = %q", buf.String())
+	}
+}
+
 func TestProcessMessages_EmptyBatch(t *testing.T) {
 	consumer := &mockConsumer{}
 

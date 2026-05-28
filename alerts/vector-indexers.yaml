@@ -171,7 +171,7 @@ groups:
 
       - alert: VectorCurveDexWorkerStalled
         expr: |
-          sum (
+          sum by (chain) (
             rate(curve_blocks_processed_total{k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
@@ -180,15 +180,16 @@ groups:
           severity: critical
           component: curve-dex-worker
         annotations:
-          summary: "Vector curve-dex-worker stalled"
+          summary: "Vector curve-dex-worker stalled on {{ $labels.chain }}"
           description: |
-            `curve-dex-worker` has not advanced for >15m. Curve pool / gauge
-            state in TimescaleDB will go stale.
+            `curve-dex-worker` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Curve pool / gauge state in TimescaleDB
+            will go stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcurvedexworkerstalled
 
       - alert: VectorCurveDexWorkerErrorsHigh
         expr: |
-          sum (
+          sum by (chain) (
             rate(curve_errors_total{k8s_namespace_name="vector"}[10m])
           ) > 0.1
         for: 15m
@@ -197,11 +198,11 @@ groups:
           severity: warning
           component: curve-dex-worker
         annotations:
-          summary: "Vector curve-dex-worker error rate >0.1/s"
+          summary: "Vector curve-dex-worker error rate >0.1/s on {{ $labels.chain }}"
           description: |
-            `curve-dex-worker` is throwing `{{ $value | printf "%.2f" }}`
-            errors/s over 15m. Investigate pod logs before this turns into
-            a stall.
+            `curve-dex-worker` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
 
       - alert: VectorCurveDexWorkerLatencyHigh
         # Histogram `<prefix>.block.duration_seconds` (OTel) → exported as
@@ -217,7 +218,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (le) (
+            sum by (chain, le) (
               rate(curve_block_duration_seconds_bucket{
                 k8s_namespace_name="vector",
                 status="success"
@@ -230,11 +231,12 @@ groups:
           severity: warning
           component: curve-dex-worker
         annotations:
-          summary: "Vector curve-dex-worker p99 block duration >5s"
+          summary: "Vector curve-dex-worker p99 block duration >5s on {{ $labels.chain }}"
           description: |
-            `curve-dex-worker` p99 block-processing latency is
-            `{{ $value | printf "%.2fs" }}` over 15m. Indexer is degraded;
-            expect lag in downstream Curve pool / gauge state.
+            `curve-dex-worker` on chain `{{ $labels.chain }}` p99
+            block-processing latency is `{{ $value | printf "%.2fs" }}` over
+            15m. Indexer is degraded; expect lag in downstream Curve pool
+            / gauge state.
 
       # ---------------------------------------------------------------------
       # Uniswap V3 DEX worker (VEC-79)
@@ -242,7 +244,7 @@ groups:
 
       - alert: VectorUniswapV3DexWorkerStalled
         expr: |
-          sum (
+          sum by (chain) (
             rate(uniswap_v3_blocks_processed_total{k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
@@ -251,15 +253,16 @@ groups:
           severity: critical
           component: uniswap-v3-dex-worker
         annotations:
-          summary: "Vector uniswap-v3-dex-worker stalled"
+          summary: "Vector uniswap-v3-dex-worker stalled on {{ $labels.chain }}"
           description: |
-            `uniswap-v3-dex-worker` has not advanced for >15m. Uniswap V3
-            pool / NFPM position state in TimescaleDB will go stale.
+            `uniswap-v3-dex-worker` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Uniswap V3 pool / NFPM position state in
+            TimescaleDB will go stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3dexworkerstalled
 
       - alert: VectorUniswapV3DexWorkerErrorsHigh
         expr: |
-          sum (
+          sum by (chain) (
             rate(uniswap_v3_errors_total{k8s_namespace_name="vector"}[10m])
           ) > 0.1
         for: 15m
@@ -268,11 +271,11 @@ groups:
           severity: warning
           component: uniswap-v3-dex-worker
         annotations:
-          summary: "Vector uniswap-v3-dex-worker error rate >0.1/s"
+          summary: "Vector uniswap-v3-dex-worker error rate >0.1/s on {{ $labels.chain }}"
           description: |
-            `uniswap-v3-dex-worker` is throwing
-            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
-            pod logs before this turns into a stall.
+            `uniswap-v3-dex-worker` on chain `{{ $labels.chain }}` is
+            throwing `{{ $value | printf "%.2f" }}` errors/s over 15m.
+            Investigate pod logs before this turns into a stall.
 
       - alert: VectorUniswapV3DexWorkerLatencyHigh
         # See VectorCurveDexWorkerLatencyHigh — same shape, different prefix.
@@ -280,7 +283,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (le) (
+            sum by (chain, le) (
               rate(uniswap_v3_block_duration_seconds_bucket{
                 k8s_namespace_name="vector",
                 status="success"
@@ -293,11 +296,12 @@ groups:
           severity: warning
           component: uniswap-v3-dex-worker
         annotations:
-          summary: "Vector uniswap-v3-dex-worker p99 block duration >5s"
+          summary: "Vector uniswap-v3-dex-worker p99 block duration >5s on {{ $labels.chain }}"
           description: |
-            `uniswap-v3-dex-worker` p99 block-processing latency is
-            `{{ $value | printf "%.2fs" }}` over 15m. Indexer is degraded;
-            expect lag in downstream Uniswap V3 pool / NFPM position state.
+            `uniswap-v3-dex-worker` on chain `{{ $labels.chain }}` p99
+            block-processing latency is `{{ $value | printf "%.2fs" }}` over
+            15m. Indexer is degraded; expect lag in downstream Uniswap V3
+            pool / NFPM position state.
 
       # ---------------------------------------------------------------------
       # Balancer V2 DEX worker (VEC-79)
@@ -305,7 +309,7 @@ groups:
 
       - alert: VectorBalancerDexWorkerStalled
         expr: |
-          sum (
+          sum by (chain) (
             rate(balancer_blocks_processed_total{k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
@@ -314,15 +318,16 @@ groups:
           severity: critical
           component: balancer-dex-worker
         annotations:
-          summary: "Vector balancer-dex-worker stalled"
+          summary: "Vector balancer-dex-worker stalled on {{ $labels.chain }}"
           description: |
-            `balancer-dex-worker` has not advanced for >15m. Balancer V2
-            pool state in TimescaleDB will go stale.
+            `balancer-dex-worker` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Balancer V2 pool state in TimescaleDB will
+            go stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorbalancerdexworkerstalled
 
       - alert: VectorBalancerDexWorkerErrorsHigh
         expr: |
-          sum (
+          sum by (chain) (
             rate(balancer_errors_total{k8s_namespace_name="vector"}[10m])
           ) > 0.1
         for: 15m
@@ -331,9 +336,9 @@ groups:
           severity: warning
           component: balancer-dex-worker
         annotations:
-          summary: "Vector balancer-dex-worker error rate >0.1/s"
+          summary: "Vector balancer-dex-worker error rate >0.1/s on {{ $labels.chain }}"
           description: |
-            `balancer-dex-worker` is throwing
+            `balancer-dex-worker` on chain `{{ $labels.chain }}` is throwing
             `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
             pod logs before this turns into a stall.
 
@@ -343,7 +348,7 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (le) (
+            sum by (chain, le) (
               rate(balancer_block_duration_seconds_bucket{
                 k8s_namespace_name="vector",
                 status="success"
@@ -356,8 +361,9 @@ groups:
           severity: warning
           component: balancer-dex-worker
         annotations:
-          summary: "Vector balancer-dex-worker p99 block duration >5s"
+          summary: "Vector balancer-dex-worker p99 block duration >5s on {{ $labels.chain }}"
           description: |
-            `balancer-dex-worker` p99 block-processing latency is
-            `{{ $value | printf "%.2fs" }}` over 15m. Indexer is degraded;
-            expect lag in downstream Balancer V2 pool state.
+            `balancer-dex-worker` on chain `{{ $labels.chain }}` p99
+            block-processing latency is `{{ $value | printf "%.2fs" }}` over
+            15m. Indexer is degraded; expect lag in downstream Balancer V2
+            pool state.

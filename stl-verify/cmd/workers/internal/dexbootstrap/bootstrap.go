@@ -195,7 +195,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	// signal-driven teardown doesn't truncate the final metric flush.
 	d.cleanups = append(d.cleanups, func() { shutdownOTEL(context.Background()) })
 
-	dexTel, err := dextelemetry.NewTelemetry(opts.MetricPrefix)
+	dexTel, err := dextelemetry.NewTelemetry(opts.MetricPrefix, cfg.ChainID)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("creating dex telemetry: %w", err)
