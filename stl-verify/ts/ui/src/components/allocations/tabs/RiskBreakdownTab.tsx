@@ -31,7 +31,7 @@ import type {
   Token,
   TokenPrice,
 } from '../../../types/allocation';
-import { ChainLogo, SummaryMetric } from '../../shared';
+import { ChainLogo, SummaryMetric, TokenAddress } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
 import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 
@@ -483,7 +483,22 @@ export function RiskBreakdownTab({
               isTokenMetaLoading
                 ? 'Fetching token metadata'
                 : tokenCatalog
-                  ? `${tokenCatalog.address} · ${tokenCatalog.decimals ?? 'Unknown'} decimals`
+                  ? (
+                      <span
+                        className={css({
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '1.5',
+                          flexWrap: 'wrap',
+                        })}
+                      >
+                        <TokenAddress
+                          address={tokenCatalog.address}
+                          chainId={selectedReceiptToken.chain_id}
+                        />
+                        <span>{tokenCatalog.decimals ?? 'Unknown'} decimals</span>
+                      </span>
+                    )
                   : 'Token metadata unavailable'
             }
           />

@@ -38,18 +38,48 @@ export function TokenAddress({
   style,
   className,
 }: TokenAddressProps) {
+  const monoStyle: React.CSSProperties = {
+    ...style,
+    fontFamily: 'var(--fonts-mono), monospace',
+  };
+
+  const emptyClassName = css({
+    fontFamily: 'mono',
+    fontSize: type === 'tx' ? 'xs' : '2xs',
+    color: 'text.muted',
+  });
+
+  const triggerClassName = css({
+    flex: '1 1 0',
+    minWidth: '0',
+    minHeight: '11',
+    fontFamily: 'mono',
+    fontSize: type === 'tx' ? 'xs' : '2xs',
+    color: { base: 'blue.500', _dark: 'blue.400' },
+    bg: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    paddingInline: '1',
+    paddingBlock: '1',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    textAlign: 'left',
+    _hover: {
+      color: 'interactive.accent',
+    },
+    _focus: {
+      outline: '2px solid',
+      outlineColor: 'interactive.accent',
+      outlineOffset: '1px',
+    },
+  });
+
   if (!address) {
     return (
       <span
-        style={style}
-        className={
-          className ??
-          css({
-            fontFamily: 'mono',
-            fontSize: type === 'tx' ? 'xs' : '2xs',
-            color: 'text.muted',
-          })
-        }
+        style={monoStyle}
+        className={className ? `${emptyClassName} ${className}` : emptyClassName}
       >
         —
       </span>
@@ -91,34 +121,9 @@ export function TokenAddress({
           <button
             type="button"
             title={address}
-            style={style}
+            style={monoStyle}
             className={
-              className ??
-              css({
-                flex: '1 1 0',
-                minWidth: '0',
-                minHeight: '11',
-                fontFamily: 'mono',
-                fontSize: type === 'tx' ? 'xs' : '2xs',
-                color: { base: 'blue.500', _dark: 'blue.400' },
-                bg: 'transparent',
-                border: 'none',
-                cursor: 'pointer',
-                paddingInline: '1',
-                paddingBlock: '1',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                textAlign: 'left',
-                _hover: {
-                  color: 'interactive.accent',
-                },
-                _focus: {
-                  outline: '2px solid',
-                  outlineColor: 'interactive.accent',
-                  outlineOffset: '1px',
-                },
-              })
+              className ? `${triggerClassName} ${className}` : triggerClassName
             }
           >
             {truncateMiddle(address, 20)}
