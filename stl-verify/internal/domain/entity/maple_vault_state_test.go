@@ -57,7 +57,7 @@ func TestNewMapleVaultState_RejectsZeroTimestamp(t *testing.T) {
 
 func TestNewMapleVaultState_RejectsNilNumerics(t *testing.T) {
 	cases := []struct {
-		name string
+		name    string
 		a, b, c *big.Int
 	}{
 		{"nil totalAssets", nil, big.NewInt(1), big.NewInt(1)},

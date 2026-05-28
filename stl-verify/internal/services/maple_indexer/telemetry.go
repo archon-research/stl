@@ -20,11 +20,11 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed   metric.Int64Counter
-	vaultStateWrites  metric.Int64Counter
-	positionWrites    metric.Int64Counter
-	rpcCallsTotal     metric.Int64Counter
-	errorsTotal       metric.Int64Counter
+	blocksProcessed  metric.Int64Counter
+	vaultStateWrites metric.Int64Counter
+	positionWrites   metric.Int64Counter
+	rpcCallsTotal    metric.Int64Counter
+	errorsTotal      metric.Int64Counter
 
 	// Histograms
 	blockDuration   metric.Float64Histogram
