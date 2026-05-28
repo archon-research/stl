@@ -92,4 +92,3 @@ func readBlockCountersByStatus(t *testing.T, rm *metricdata.ResourceMetrics, nam
 	t.Fatalf("metric %s not found", name)
 	return 0, 0
 }
-

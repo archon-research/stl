@@ -26,13 +26,13 @@ func buildPoolStateResults(t *testing.T) []outbound.Result {
 	slot0Args := exABI.Methods["slot0"].Outputs
 	sqrtPriceX96 := new(big.Int).Lsh(big.NewInt(1), 96)
 	slot0Data, err := slot0Args.Pack(
-		sqrtPriceX96,     // sqrtPriceX96 (uint160)
-		big.NewInt(100),  // tick (int24)
-		uint16(10),       // observationIndex
-		uint16(100),      // observationCardinality
-		uint16(100),      // observationCardinalityNext
-		uint8(0),         // feeProtocol
-		true,             // unlocked
+		sqrtPriceX96,    // sqrtPriceX96 (uint160)
+		big.NewInt(100), // tick (int24)
+		uint16(10),      // observationIndex
+		uint16(100),     // observationCardinality
+		uint16(100),     // observationCardinalityNext
+		uint8(0),        // feeProtocol
+		true,            // unlocked
 	)
 	if err != nil {
 		t.Fatalf("pack slot0: %v", err)
@@ -83,13 +83,13 @@ func poolABIForTests() (*abi.ABI, error) {
 func TestSlot0FieldsFromUnpacked_RejectsWrongTypes(t *testing.T) {
 	good := func() []any {
 		return []any{
-			big.NewInt(1),  // 0: sqrtPriceX96 (*big.Int)
-			big.NewInt(2),  // 1: tick (*big.Int)
-			uint16(3),      // 2: observationIndex
-			uint16(4),      // 3: observationCardinality
-			uint16(5),      // 4: observationCardinalityNext
-			uint8(6),       // 5: feeProtocol
-			true,           // 6: unlocked
+			big.NewInt(1), // 0: sqrtPriceX96 (*big.Int)
+			big.NewInt(2), // 1: tick (*big.Int)
+			uint16(3),     // 2: observationIndex
+			uint16(4),     // 3: observationCardinality
+			uint16(5),     // 4: observationCardinalityNext
+			uint8(6),      // 5: feeProtocol
+			true,          // 6: unlocked
 		}
 	}
 
@@ -131,18 +131,18 @@ func TestSlot0FieldsFromUnpacked_RejectsWrongTypes(t *testing.T) {
 func TestPositionFieldsFromUnpacked_RejectsWrongTypes(t *testing.T) {
 	good := func() []any {
 		return []any{
-			big.NewInt(0),        // 0: nonce (unused but still asserted typewise? no — unused)
-			common.Address{},     // 1: operator (unused)
+			big.NewInt(0),    // 0: nonce (unused but still asserted typewise? no — unused)
+			common.Address{}, // 1: operator (unused)
 			common.HexToAddress("0x1111111111111111111111111111111111111111"), // 2: token0
 			common.HexToAddress("0x2222222222222222222222222222222222222222"), // 3: token1
-			big.NewInt(500),      // 4: fee
-			big.NewInt(-887000),  // 5: tickLower
-			big.NewInt(887000),   // 6: tickUpper
-			big.NewInt(1e18),     // 7: liquidity
-			big.NewInt(10),       // 8: feeGrowthInside0LastX128
-			big.NewInt(11),       // 9: feeGrowthInside1LastX128
-			big.NewInt(12),       // 10: tokensOwed0
-			big.NewInt(13),       // 11: tokensOwed1
+			big.NewInt(500),     // 4: fee
+			big.NewInt(-887000), // 5: tickLower
+			big.NewInt(887000),  // 6: tickUpper
+			big.NewInt(1e18),    // 7: liquidity
+			big.NewInt(10),      // 8: feeGrowthInside0LastX128
+			big.NewInt(11),      // 9: feeGrowthInside1LastX128
+			big.NewInt(12),      // 10: tokensOwed0
+			big.NewInt(13),      // 11: tokensOwed1
 		}
 	}
 
@@ -248,4 +248,3 @@ func TestReadPoolState_BalanceOfRevert_BubblesUp(t *testing.T) {
 // rig is wrong. Keeps an explicit happy-path baseline alongside the failure
 // tests above.
 var _ = errors.New
-
