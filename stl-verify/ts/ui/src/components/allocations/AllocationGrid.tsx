@@ -69,6 +69,25 @@ type AllocationGridProps = {
 
 type UiVariant = 'a' | 'b' | 'c';
 
+const tableHeaderTypographyClassName = css({
+  '& thead th': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'capitalize',
+    color: 'text.default',
+  },
+  '& thead th button': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'capitalize',
+    color: 'text.default',
+  },
+});
+
 function getDefaultUiVariant(): UiVariant {
   return 'c';
 }
@@ -893,15 +912,17 @@ export function AllocationGrid({
           {selectedPrime &&
           !errorMessage &&
           (isLoading || filteredAllocations.length > 0) ? (
-            <DataTable
-              table={table}
-              isLoading={isLoading}
-              onRowClick={(allocation) =>
-                onSelectAllocation(getAllocationKey(allocation))
-              }
-              getRowKey={getAllocationKey}
-              selectedRowKey={selectedAllocationKey}
-            />
+            <div className={tableHeaderTypographyClassName}>
+              <DataTable
+                table={table}
+                isLoading={isLoading}
+                onRowClick={(allocation) =>
+                  onSelectAllocation(getAllocationKey(allocation))
+                }
+                getRowKey={getAllocationKey}
+                selectedRowKey={selectedAllocationKey}
+              />
+            </div>
           ) : null}
         </div>
       </section>

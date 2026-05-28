@@ -41,6 +41,25 @@ type RiskBreakdownTabProps = {
   selectedReceiptToken: Allocation | null;
 };
 
+const tableHeaderTypographyClassName = css({
+  '& thead th': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'capitalize',
+    color: 'text.default',
+  },
+  '& thead th button': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'capitalize',
+    color: 'text.default',
+  },
+});
+
 type RiskItem = RiskBreakdown['items'][number];
 
 function RiskSymbolCell({
@@ -167,23 +186,25 @@ function RiskTable({
   });
 
   return (
-    <DataTable
-      table={table}
-      isLoading={isLoading}
-      getRowKey={(item) => String(item.token_id)}
-      skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
-      minWidth="76rem"
-      renderCell={(children) => (
-        <div
-          className={css({
-            fontSize: 'sm',
-            color: 'text.strong',
-          })}
-        >
-          {children}
-        </div>
-      )}
-    />
+    <div className={tableHeaderTypographyClassName}>
+      <DataTable
+        table={table}
+        isLoading={isLoading}
+        getRowKey={(item) => String(item.token_id)}
+        skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
+        minWidth="76rem"
+        renderCell={(children) => (
+          <div
+            className={css({
+              fontSize: 'sm',
+              color: 'text.strong',
+            })}
+          >
+            {children}
+          </div>
+        )}
+      />
+    </div>
   );
 }
 
