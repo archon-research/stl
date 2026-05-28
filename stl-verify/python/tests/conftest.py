@@ -28,7 +28,7 @@ from testcontainers.postgres import PostgresContainer
 
 from tests.db import set_session_metadata
 
-MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[1] / "db" / "migrations"
+MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "db" / "migrations"
 TIMESCALEDB_IMAGE = "timescale/timescaledb:2.25.1-pg17"
 SESSION_DB_NAME = "stl_verify_test"
 
@@ -45,9 +45,15 @@ async def _create_database(admin_dsn: str, db_name: str) -> None:
 
 
 async def _run_migrations(dsn: str) -> None:
+    sql_files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if not sql_files:
+        # Guards against silent typos in ``MIGRATIONS_DIR``: an empty glob would
+        # leave the session DB schema-less, which then fails far away as
+        # "relation X does not exist" inside individual tests.
+        raise RuntimeError(f"no migration files found under {MIGRATIONS_DIR}")
     conn = await asyncpg.connect(dsn)
     try:
-        for sql_file in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        for sql_file in sql_files:
             # CONCURRENTLY cannot run inside a transaction block.
             # Tests have no concurrent traffic, so the plain variant is safe.
             sql = sql_file.read_text().replace(" CONCURRENTLY", "")
