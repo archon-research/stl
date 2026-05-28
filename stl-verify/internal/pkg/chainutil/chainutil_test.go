@@ -254,3 +254,72 @@ func TestEnvironmentFromBucket(t *testing.T) {
 		})
 	}
 }
+
+// RequireChainID is now consumed by dexbootstrap + all three DEX workers
+// + morpho/prime-debt/prime-allocation indexers. Per N12-7, give it the same
+// table-driven coverage as the other helpers in this package.
+func TestRequireChainID(t *testing.T) {
+	tests := []struct {
+		name        string
+		envValue    string // empty = unset
+		wantID      int
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:     "ethereum mainnet",
+			envValue: "1",
+			wantID:   1,
+		},
+		{
+			name:     "avalanche c-chain",
+			envValue: "43114",
+			wantID:   43114,
+		},
+		{
+			name:        "unset",
+			envValue:    "",
+			wantErr:     true,
+			errContains: "CHAIN_ID",
+		},
+		{
+			name:        "non-integer",
+			envValue:    "mainnet",
+			wantErr:     true,
+			errContains: "CHAIN_ID must be a valid integer",
+		},
+		{
+			name:        "float-shaped",
+			envValue:    "1.0",
+			wantErr:     true,
+			errContains: "CHAIN_ID must be a valid integer",
+		},
+		{
+			name:        "whitespace",
+			envValue:    "   ",
+			wantErr:     true,
+			errContains: "CHAIN_ID must be a valid integer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CHAIN_ID", tt.envValue)
+			id, err := RequireChainID()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("RequireChainID() error = nil, want one containing %q", tt.errContains)
+				}
+				if !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("RequireChainID() error = %q, want substring %q", err.Error(), tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RequireChainID() unexpected error = %v", err)
+			}
+			if id != tt.wantID {
+				t.Errorf("RequireChainID() = %d, want %d", id, tt.wantID)
+			}
+		})
+	}
+}
