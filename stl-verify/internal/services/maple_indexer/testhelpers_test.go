@@ -111,14 +111,3 @@ func encodeUint256(n *big.Int) []byte {
 	}
 	return out
 }
-
-// encodeUint8 produces an ABI-encoded uint8 return value.
-func encodeUint8(n uint8) []byte {
-	ty, _ := abi.NewType("uint8", "", nil)
-	args := abi.Arguments{{Type: ty}}
-	out, err := args.Pack(n)
-	if err != nil {
-		panic(err)
-	}
-	return out
-}

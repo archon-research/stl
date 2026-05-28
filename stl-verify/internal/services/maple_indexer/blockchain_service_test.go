@@ -22,15 +22,11 @@ func TestNewBlockchainService_PrePacksNoArgViews(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bs.totalAssetsData) == 0 || len(bs.totalSupplyData) == 0 || len(bs.decimalsData) == 0 {
+	if len(bs.totalAssetsData) == 0 || len(bs.totalSupplyData) == 0 {
 		t.Fatal("pre-packed call data is empty")
 	}
-	// Selectors must differ — three distinct view methods.
 	if bytesEqual(bs.totalAssetsData, bs.totalSupplyData) {
 		t.Fatal("totalAssets == totalSupply selector")
-	}
-	if bytesEqual(bs.totalAssetsData, bs.decimalsData) {
-		t.Fatal("totalAssets == decimals selector")
 	}
 }
 
@@ -52,7 +48,6 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 			encodeUint256(big.NewInt(1_000_000_000_000)), // totalAssets
 			encodeUint256(big.NewInt(900_000_000_000)),   // totalSupply
 			encodeUint256(big.NewInt(1_111_111)),         // convertToAssets(1e6)
-			encodeUint8(6),                               // decimals
 		},
 	}
 	bs, err := NewBlockchainService(mc, nil)
@@ -73,15 +68,12 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 	if state.SharePrice.Cmp(big.NewInt(1_111_111)) != 0 {
 		t.Fatalf("SharePrice=%s", state.SharePrice)
 	}
-	if state.Decimals != 6 {
-		t.Fatalf("Decimals=%d", state.Decimals)
-	}
-	// Confirm we sent exactly one multicall with 4 calls.
+	// Confirm we sent exactly one multicall with 3 calls.
 	if len(mc.Calls) != 1 {
 		t.Fatalf("expected 1 multicall batch, got %d", len(mc.Calls))
 	}
-	if len(mc.Calls[0]) != 4 {
-		t.Fatalf("expected 4 calls, got %d", len(mc.Calls[0]))
+	if len(mc.Calls[0]) != 3 {
+		t.Fatalf("expected 3 calls, got %d", len(mc.Calls[0]))
 	}
 	// All calls must target the vault.
 	for i, c := range mc.Calls[0] {

@@ -149,13 +149,12 @@ func receiptWithLogs(t *testing.T, logs []shared.Log) json.RawMessage {
 
 // queueVaultStateAndPositions seeds the multicall stub with responses for
 // one FetchVaultState + one FetchUserPositions(N users) call sequence.
-func (h *harness) queueVaultStateAndPositions(totalAssets, totalSupply, sharePrice int64, decimals uint8, balances, assets []int64) {
-	// FetchVaultState — 4 calls.
+func (h *harness) queueVaultStateAndPositions(totalAssets, totalSupply, sharePrice int64, balances, assets []int64) {
+	// FetchVaultState — 3 calls.
 	h.multicaller.Responses = append(h.multicaller.Responses,
 		encodeUint256(big.NewInt(totalAssets)),
 		encodeUint256(big.NewInt(totalSupply)),
 		encodeUint256(big.NewInt(sharePrice)),
-		encodeUint8(decimals),
 	)
 	// FetchUserPositions — 2 batches, N each.
 	for _, b := range balances {
@@ -306,7 +305,6 @@ func TestService_ProcessBlock_Deposit_WritesStateAndPosition(t *testing.T) {
 		1_000_000_000_000, // totalAssets
 		900_000_000_000,   // totalSupply
 		1_111_111,         // sharePrice
-		6,                 // decimals
 		[]int64{500, 750}, // balances A,B
 		[]int64{550, 825}, // assets   A,B
 	)
@@ -380,7 +378,7 @@ func TestService_ProcessBlock_VaultStateSaveError_Propagates(t *testing.T) {
 		Topics:  []string{depositTopic, topicForAddress(userA), topicForAddress(userB)},
 	}}
 	h.cache.SetReceipts(1, event.BlockNumber, 0, receiptWithLogs(t, logs))
-	h.queueVaultStateAndPositions(1, 1, 1, 6, []int64{1, 1}, []int64{1, 1})
+	h.queueVaultStateAndPositions(1, 1, 1, []int64{1, 1}, []int64{1, 1})
 	wantErr := errors.New("constraint violation")
 	h.mapleRepo.stateErr = wantErr
 
@@ -399,7 +397,7 @@ func TestService_ProcessBlock_UserRepoError_Propagates(t *testing.T) {
 		Topics:  []string{depositTopic, topicForAddress(userA), topicForAddress(userB)},
 	}}
 	h.cache.SetReceipts(1, event.BlockNumber, 0, receiptWithLogs(t, logs))
-	h.queueVaultStateAndPositions(1, 1, 1, 6, []int64{1, 1}, []int64{1, 1})
+	h.queueVaultStateAndPositions(1, 1, 1, []int64{1, 1}, []int64{1, 1})
 	wantErr := errors.New("user table corrupted")
 	h.userRepo.err = wantErr
 
@@ -421,7 +419,7 @@ func TestService_ProcessBlock_DedupesUsersAcrossLogs(t *testing.T) {
 	}
 	h.cache.SetReceipts(1, event.BlockNumber, 0, receiptWithLogs(t, logs))
 	// 3 unique users (A, B, C) — sorted A < B < C.
-	h.queueVaultStateAndPositions(1, 1, 1, 6,
+	h.queueVaultStateAndPositions(1, 1, 1,
 		[]int64{500, 600, 700},
 		[]int64{550, 660, 770})
 
@@ -442,7 +440,7 @@ func TestService_ProcessBlock_OneTxPerVault(t *testing.T) {
 		Topics:  []string{depositTopic, topicForAddress(userA), topicForAddress(userB)},
 	}}
 	h.cache.SetReceipts(1, event.BlockNumber, 0, receiptWithLogs(t, logs))
-	h.queueVaultStateAndPositions(1, 1, 1, 6, []int64{1, 1}, []int64{1, 1})
+	h.queueVaultStateAndPositions(1, 1, 1, []int64{1, 1}, []int64{1, 1})
 
 	var txCount int
 	h.txMgr.WithTransactionFn = func(ctx context.Context, fn func(tx pgx.Tx) error) error {

@@ -34,7 +34,6 @@ type VaultStateRaw struct {
 	TotalAssets *big.Int
 	TotalSupply *big.Int
 	SharePrice  *big.Int // convertToAssets(shareUnit)
-	Decimals    uint8
 }
 
 // UserPosition is the on-chain snapshot of a single user's stake in a Syrup
@@ -57,7 +56,6 @@ type BlockchainService struct {
 	// (no per-vault arg), so packing once is correct.
 	totalAssetsData []byte
 	totalSupplyData []byte
-	decimalsData    []byte
 }
 
 // NewBlockchainService loads the Syrup views ABI and pre-packs the
@@ -85,32 +83,17 @@ func NewBlockchainService(mc outbound.Multicaller, telemetry *Telemetry) (*Block
 	if err != nil {
 		return nil, err
 	}
-	dec, err := pack("decimals")
-	if err != nil {
-		return nil, err
-	}
 	return &BlockchainService{
 		multicaller:     mc,
 		viewABI:         a,
 		telemetry:       telemetry,
 		totalAssetsData: ta,
 		totalSupplyData: ts,
-		decimalsData:    dec,
 	}, nil
 }
 
 // FetchVaultState issues a single multicall returning (totalAssets,
-// totalSupply, convertToAssets(shareUnit), decimals) for the vault at the
-// given block height.
-//
-// The four-call batch is the smallest set that gives a usable share-price
-// snapshot:
-//   - totalAssets/totalSupply lets downstream APY math reconstruct
-//     historical inflows/outflows from row-to-row deltas.
-//   - convertToAssets(shareUnit) is the official ERC-4626 "spot price" for
-//     a share unit, including any vault-internal rounding.
-//   - decimals is fetched for observability/sanity-checks; the service does
-//     not yet adapt shareUnit to non-6-decimal vaults.
+// totalSupply, convertToAssets(shareUnit)) for the vault at the given block.
 func (s *BlockchainService) FetchVaultState(ctx context.Context, vault common.Address, blockNumber *big.Int) (_ *VaultStateRaw, retErr error) {
 	start := time.Now()
 	ctx, span := s.telemetry.StartSpan(ctx, "maple.rpc.fetchVaultState",
@@ -128,7 +111,6 @@ func (s *BlockchainService) FetchVaultState(ctx context.Context, vault common.Ad
 		{Target: vault, CallData: s.totalAssetsData},
 		{Target: vault, CallData: s.totalSupplyData},
 		{Target: vault, CallData: convData},
-		{Target: vault, CallData: s.decimalsData},
 	}
 
 	results, err := s.multicaller.Execute(ctx, calls, blockNumber)
@@ -151,16 +133,11 @@ func (s *BlockchainService) FetchVaultState(ctx context.Context, vault common.Ad
 	if err != nil {
 		return nil, fmt.Errorf("vault %s convertToAssets: %w", vault.Hex(), err)
 	}
-	decimals, err := s.decodeUint8("decimals", results[3])
-	if err != nil {
-		return nil, fmt.Errorf("vault %s decimals: %w", vault.Hex(), err)
-	}
 
 	return &VaultStateRaw{
 		TotalAssets: totalAssets,
 		TotalSupply: totalSupply,
 		SharePrice:  sharePrice,
-		Decimals:    decimals,
 	}, nil
 }
 
@@ -265,28 +242,6 @@ func (s *BlockchainService) decodeUint256(method string, r outbound.Result) (*bi
 	v, ok := vals[0].(*big.Int)
 	if !ok {
 		return nil, fmt.Errorf("%s: expected *big.Int, got %T", method, vals[0])
-	}
-	return v, nil
-}
-
-// decodeUint8 unpacks an ABI-encoded uint8 return value from a multicall result.
-func (s *BlockchainService) decodeUint8(method string, r outbound.Result) (uint8, error) {
-	if !r.Success {
-		return 0, fmt.Errorf("%s call reverted", method)
-	}
-	if len(r.ReturnData) == 0 {
-		return 0, fmt.Errorf("%s returned empty data", method)
-	}
-	vals, err := s.viewABI.Unpack(method, r.ReturnData)
-	if err != nil {
-		return 0, fmt.Errorf("unpacking %s: %w", method, err)
-	}
-	if len(vals) != 1 {
-		return 0, fmt.Errorf("%s expected 1 return value, got %d", method, len(vals))
-	}
-	v, ok := vals[0].(uint8)
-	if !ok {
-		return 0, fmt.Errorf("%s: expected uint8, got %T", method, vals[0])
 	}
 	return v, nil
 }
