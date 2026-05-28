@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import Table
+from sqlalchemy import Table, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -454,11 +454,19 @@ async def insert_oracle_asset(
 ) -> None:
     """Insert an ``oracle_asset`` row.
 
-    The unique constraint covers ``(oracle_id, token_id) WHERE feed_address IS NULL``;
-    on conflict we treat the row as already present and skip.
+    Scopes ``ON CONFLICT DO NOTHING`` to the ``oracle_asset_nonfeed_unique`` partial
+    index (``(oracle_id, token_id) WHERE feed_address IS NULL``). Unscoped
+    ``DO NOTHING`` would silently swallow violations on any other unique surface
+    added later — scoping makes the intent explicit and matches the rest of the
+    seed helpers, which all pin their conflict target.
     """
     stmt = pg_insert(get_table("oracle_asset")).values(oracle_id=oracle_id, token_id=token_id, enabled=enabled)
-    await conn.execute(stmt.on_conflict_do_nothing())
+    await conn.execute(
+        stmt.on_conflict_do_nothing(
+            index_elements=["oracle_id", "token_id"],
+            index_where=text("feed_address IS NULL"),
+        )
+    )
 
 
 async def insert_onchain_token_price(
