@@ -211,7 +211,7 @@ func TestNewService_RejectsUnsupportedChain(t *testing.T) {
 	consumer := &testutil.MockSQSConsumer{}
 
 	cfg := ConfigDefaults()
-	cfg.ChainID = 137 // not in mapleSyrupDeployBlocks
+	cfg.ChainID = 999_999 // not in mapleSyrupDeployBlocks
 	cfg.Logger = quietLogger()
 
 	if _, err := NewService(cfg, consumer, cache, mc, tx, ur, mr); err == nil {
