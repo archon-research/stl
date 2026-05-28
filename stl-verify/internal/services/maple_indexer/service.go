@@ -78,7 +78,7 @@ func NewService(
 		return nil, fmt.Errorf("getting deploy block: %w", err)
 	}
 
-	extractor, err := NewEventExtractor()
+	extractor, err := NewEventExtractor(config.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating event extractor: %w", err)
 	}

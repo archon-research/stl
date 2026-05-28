@@ -23,7 +23,7 @@ func topicForAddress(addr string) string {
 
 func newExtractor(t *testing.T) *EventExtractor {
 	t.Helper()
-	e, err := NewEventExtractor()
+	e, err := NewEventExtractor(quietLogger())
 	if err != nil {
 		t.Fatalf("NewEventExtractor: %v", err)
 	}

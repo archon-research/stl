@@ -2,6 +2,7 @@ package maple_indexer
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -21,6 +22,7 @@ import (
 // pay the cost of parsing them.
 type EventExtractor struct {
 	abi        *abi.ABI
+	logger     *slog.Logger
 	depositID  common.Hash
 	withdrawID common.Hash
 	transferID common.Hash
@@ -28,7 +30,7 @@ type EventExtractor struct {
 
 // NewEventExtractor loads the Syrup events ABI and caches the three
 // topic-hashes the extractor recognises.
-func NewEventExtractor() (*EventExtractor, error) {
+func NewEventExtractor(logger *slog.Logger) (*EventExtractor, error) {
 	a, err := abis.GetSyrupVaultEventsABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading Syrup events ABI: %w", err)
@@ -52,7 +54,7 @@ func NewEventExtractor() (*EventExtractor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &EventExtractor{abi: a, depositID: d, withdrawID: w, transferID: t}, nil
+	return &EventExtractor{abi: a, logger: logger, depositID: d, withdrawID: w, transferID: t}, nil
 }
 
 // DepositTopic returns the keccak topic hash for the Syrup Deposit event.
@@ -116,6 +118,8 @@ func (e *EventExtractor) ExtractTouchedAddresses(
 			if len(log.Topics) >= 3 {
 				addUser(users, log.Topics[1])
 				addUser(users, log.Topics[2])
+			} else {
+				e.logger.Warn("malformed Deposit log: expected 3 topics", "got", len(log.Topics), "tx", log.TransactionHash)
 			}
 		case e.withdrawID:
 			if len(log.Topics) >= 4 {
@@ -124,11 +128,15 @@ func (e *EventExtractor) ExtractTouchedAddresses(
 				// router-style withdrawals is a contract, not a user.
 				addUser(users, log.Topics[2])
 				addUser(users, log.Topics[3])
+			} else {
+				e.logger.Warn("malformed Withdraw log: expected 4 topics", "got", len(log.Topics), "tx", log.TransactionHash)
 			}
 		case e.transferID:
 			if len(log.Topics) >= 3 {
 				addUser(users, log.Topics[1])
 				addUser(users, log.Topics[2])
+			} else {
+				e.logger.Warn("malformed Transfer log: expected 3 topics", "got", len(log.Topics), "tx", log.TransactionHash)
 			}
 		}
 	}
