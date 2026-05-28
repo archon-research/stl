@@ -1,0 +1,155 @@
+# =============================================================================
+# Vector — indexer alerts (ADR-008 / ORB-200)
+# =============================================================================
+# The morpho and oracle indexers consume blocks from the watcher pipeline and
+# derive product state (positions, prices) into TimescaleDB. They're the last
+# hop before downstream readers see data, so stalls / errors here translate
+# directly into stale customer views.
+#
+# Two indexers in v1 (morpho, oracle). Each gets its own rules because the
+# Slack-thread spec uses distinct per-indexer metric prefixes
+# (`morpho_blocks_processed_total`, `oracle_blocks_processed_total`). Once
+# the services are unified onto a single metric name with an `indexer` label,
+# these can collapse into a single rule per signal.
+#
+# Metric source: OTel SDK in each indexer. Series carry:
+#   - service_name="stl-morpho-indexer" | "stl-oracle-indexer"
+#   - k8s_namespace_name="vector"
+#   - chain (for multi-chain indexers)
+#
+# `cluster` / `env` are injected as external labels by the mimir-rules-sync
+# CI action — do not add them here (lint rejects).
+# =============================================================================
+groups:
+  - name: vector-indexers
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL — page-worthy
+      # ---------------------------------------------------------------------
+
+      - alert: VectorMorphoIndexerStalled
+        expr: |
+          sum by (chain) (
+            rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: morpho-indexer
+        annotations:
+          summary: "Vector morpho-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `stl-morpho-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Morpho position state in TimescaleDB will
+            go stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphoindexerstalled
+
+      - alert: VectorOracleIndexerStalled
+        expr: |
+          sum by (chain) (
+            rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: oracle-indexer
+        annotations:
+          summary: "Vector oracle-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `stl-oracle-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Oracle price state in TimescaleDB will go
+            stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleindexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorMorphoIndexerErrorsHigh
+        expr: |
+          sum by (chain) (
+            rate(morpho_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+        annotations:
+          summary: "Vector morpho-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `stl-morpho-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorOracleIndexerErrorsHigh
+        expr: |
+          sum by (chain) (
+            rate(oracle_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+        annotations:
+          summary: "Vector oracle-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `stl-oracle-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorMorphoIndexerRPCLatencyHigh
+        # Indexer RPC latency >3s p99 for 15m. Indexers query the watcher's
+        # archive RPC; sustained high latency means decoding / storage is
+        # blocking, or the upstream RPC node is degraded.
+        #
+        # Histogram `morpho.rpc.duration_seconds` (OTel instrument), exported as
+        # `morpho_rpc_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, le) (
+              rate(morpho_rpc_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+        annotations:
+          summary: "Vector morpho-indexer p99 RPC latency >3s on {{ $labels.chain }}"
+          description: |
+            `stl-morpho-indexer` on chain `{{ $labels.chain }}` p99 RPC
+            latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
+            degraded; expect lag in downstream Morpho position state.
+
+      - alert: VectorOracleIndexerRPCLatencyHigh
+        # See VectorMorphoIndexerRPCLatencyHigh — same shape, different
+        # metric prefix. Histogram `oracle.rpc.duration_seconds`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, le) (
+              rate(oracle_rpc_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+        annotations:
+          summary: "Vector oracle-indexer p99 RPC latency >3s on {{ $labels.chain }}"
+          description: |
+            `stl-oracle-indexer` on chain `{{ $labels.chain }}` p99 RPC
+            latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
+            degraded; expect lag in downstream oracle price state.
