@@ -67,6 +67,12 @@ type AllocationGridProps = {
   sorting: SortingState;
 };
 
+type UiVariant = 'a' | 'b' | 'c';
+
+function getDefaultUiVariant(): UiVariant {
+  return 'c';
+}
+
 function getCategoryColor(category: AllocationCategory | undefined): string {
   switch (category) {
     case 'allocation':
@@ -210,7 +216,11 @@ function AllocationUnderlyingCell({
   );
 }
 
-function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
+function AllocationBalanceCell({
+  allocation,
+}: {
+  allocation: Allocation;
+}) {
   const amountUsd = allocation.amount_usd;
 
   return (
@@ -348,7 +358,7 @@ function createAllocationColumns(
     },
     {
       id: 'latest_activity_at',
-      header: 'Latest activity',
+      header: 'Latest Activity',
       accessorFn: (allocation) => {
         const latestActivityAt = allocation.latest_activity_at;
         return latestActivityAt ? new Date(latestActivityAt).getTime() : 0;
@@ -385,6 +395,7 @@ export function AllocationGrid({
   sorting,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
+  const uiVariant = getDefaultUiVariant();
 
   useEffect(() => {
     setLocalSearchValue(searchValue);
@@ -473,37 +484,119 @@ export function AllocationGrid({
   const hasTopMetrics =
     capitalMetrics !== null || summary !== null || selectedPrime !== null;
 
+  const metricsCardClassName = css({
+    borderRadius: 'sm',
+    borderStyle: 'solid',
+    borderWidth: '1px',
+    borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
+    bg: uiVariant === 'b' ? 'surface.default' : 'surface.subtle',
+    p: { base: '3', md: uiVariant === 'b' ? '3' : '3.5' },
+    boxShadow: 'none',
+  });
+
+  const tableClassName = css({
+    borderRadius: uiVariant === 'b' ? 'sm' : 'md',
+    borderWidth: '0',
+    borderStyle: 'none',
+    borderColor: 'transparent',
+    boxShadow:
+      uiVariant === 'c' ? '0 8px 20px rgba(15, 23, 42, 0.05)' : 'none',
+    '& thead tr': {
+      bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
+    },
+    '& thead th': {
+      borderBottomWidth: '1px',
+      borderBottomStyle: 'solid',
+      borderBottomColor:
+        uiVariant === 'c' ? 'border.default' : 'border.subtle',
+    },
+    '& thead th button': {
+      color: uiVariant === 'c' ? 'text.default' : 'text.muted',
+      fontWeight: uiVariant === 'c' ? 'semibold' : 'medium',
+      letterSpacing: uiVariant === 'c' ? '0.04em' : '0.08em',
+    },
+    '& thead th button span:last-child': {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minWidth: uiVariant === 'b' ? '4' : '5',
+      height: uiVariant === 'b' ? '4' : '5',
+      borderRadius: 'full',
+      borderWidth: '1px',
+      borderStyle: 'solid',
+      borderColor:
+        uiVariant === 'c' ? 'border.default' : 'border.subtle',
+      bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
+      fontSize: uiVariant === 'b' ? '2xs' : 'xs',
+      fontWeight: 'semibold',
+      color: uiVariant === 'c' ? 'text.interactive' : 'text.muted',
+    },
+    '& tbody td': {
+      py: uiVariant === 'b' ? '2.5' : '3.5',
+    },
+    '& tbody tr[aria-selected="true"]': {
+      boxShadow:
+        uiVariant === 'c' ? 'inset 0 0 0 1px var(--colors-border-default)' : 'none',
+    },
+  });
+
+  const tableVariantZoneClassName = css({
+    mt: uiVariant === 'b' ? '4' : '6',
+    borderRadius: uiVariant === 'c' ? 'lg' : 'md',
+    borderStyle: 'solid',
+    borderWidth: '1px',
+    borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
+    bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
+  });
+
   return (
     <div
       className={css({
         minHeight: '100%',
         bg: 'surface.subtle',
-        px: { base: '5', md: '7' },
-        py: { base: '6', md: '7' },
+        px:
+          uiVariant === 'b' || uiVariant === 'c'
+            ? { base: '4', md: '5' }
+            : { base: '5', md: '7' },
+        py:
+          uiVariant === 'b' || uiVariant === 'c'
+            ? { base: '4', md: '5' }
+            : { base: '6', md: '7' },
       })}
     >
       <section
         className={css({
-          borderRadius: 'md',
+          borderRadius: uiVariant === 'c' ? 'lg' : 'md',
           borderStyle: 'solid',
           borderWidth: '1px',
-          borderColor: 'border.subtle',
+          borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
           bg: 'surface.default',
-          p: { base: '5', md: '6' },
-          boxShadow: '0 24px 80px rgba(15, 23, 42, 0.08)',
+          p:
+            uiVariant === 'b' || uiVariant === 'c'
+              ? { base: '4', md: '5' }
+              : { base: '5', md: '6' },
+          boxShadow:
+            uiVariant === 'c'
+              ? '0 28px 84px rgba(15, 23, 42, 0.12)'
+              : '0 24px 80px rgba(15, 23, 42, 0.08)',
         })}
       >
-        <div className={css({ display: 'grid', gap: '4' })}>
+        <div className={css({ display: 'grid', gap: uiVariant === 'b' ? '3' : '4' })}>
           <div
             className={flex({
-              align: 'flex-end',
+              align: 'flex-start',
               justify: 'space-between',
-              gap: '3',
+              gap: { base: '3', md: '4' },
               wrap: 'wrap',
             })}
           >
             <div
-              className={css({ display: 'grid', gap: '1', minWidth: '18rem' })}
+              className={css({
+                display: 'grid',
+                gap: '1',
+                minWidth: { base: '0', md: '18rem' },
+                flex: '1 1 20rem',
+              })}
             >
               <div className={flex({ align: 'center', gap: '2.5' })}>
                 {selectedPrime ? (
@@ -512,7 +605,10 @@ export function AllocationGrid({
                 <h1
                   className={css({
                     m: 0,
-                    fontSize: { base: '2xl', md: '3xl' },
+                    fontSize:
+                      uiVariant === 'c'
+                        ? { base: '3xl', md: '4xl' }
+                        : { base: '2xl', md: '3xl' },
                     lineHeight: 'tight',
                     color: 'text.strong',
                   })}
@@ -529,9 +625,10 @@ export function AllocationGrid({
                 className={css({
                   display: 'flex',
                   flexWrap: 'wrap',
-                  gap: '4',
-                  justifyContent: 'flex-end',
-                  textAlign: 'right',
+                  gap: { base: '2.5', md: '4' },
+                  justifyContent: { base: 'flex-start', md: 'flex-end' },
+                  textAlign: { base: 'left', md: 'right' },
+                  flex: '1 1 22rem',
                 })}
               >
                 {summary ? (
@@ -614,8 +711,9 @@ export function AllocationGrid({
               className={css({
                 display: 'grid',
                 gridTemplateColumns: {
-                  base: 'repeat(2, minmax(0, 1fr))',
-                  md: 'repeat(4, minmax(0, 1fr))',
+                  base: '1fr',
+                  sm: 'repeat(2, minmax(0, 1fr))',
+                  lg: 'repeat(4, minmax(0, 1fr))',
                 },
                 gap: '3',
               })}
@@ -640,14 +738,16 @@ export function AllocationGrid({
               className={css({
                 display: 'grid',
                 gridTemplateColumns: {
-                  base: 'repeat(2, minmax(0, 1fr))',
-                  md: 'repeat(4, minmax(0, 1fr))',
+                  base: '1fr',
+                  sm: 'repeat(2, minmax(0, 1fr))',
+                  lg: 'repeat(4, minmax(0, 1fr))',
                 },
-                gap: '3',
+                gap: uiVariant === 'b' ? '2' : '3',
               })}
             >
               {summary ? (
                 <SummaryMetric
+                  className={metricsCardClassName}
                   label="Total allocation"
                   value={
                     hasSearchQuery && overallSummary
@@ -665,6 +765,7 @@ export function AllocationGrid({
               {capitalMetrics ? (
                 <>
                   <SummaryMetric
+                    className={metricsCardClassName}
                     label="Risk capital"
                     value={formatUsdValue(capitalMetrics.risk_capital)}
                     detail={
@@ -680,6 +781,7 @@ export function AllocationGrid({
 
               {capitalMetrics ? (
                 <SummaryMetric
+                  className={metricsCardClassName}
                   label="Total capital"
                   value={formatUsdValue(capitalMetrics.total_capital)}
                   detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
@@ -689,6 +791,7 @@ export function AllocationGrid({
               {selectedPrime ? (
                 <>
                   <SummaryMetric
+                    className={metricsCardClassName}
                     label="Prime debt exposure"
                     value={
                       isPrimeDebtLoading
@@ -756,11 +859,14 @@ export function AllocationGrid({
             </p>
           ) : null}
           <div
-            className={flex({
-              align: 'flex-end',
-              justify: 'space-between',
-              gap: '5',
-              wrap: 'wrap',
+            className={css({
+              display: 'grid',
+              gridTemplateColumns: {
+                base: '1fr',
+                lg: 'auto minmax(20rem, 24rem)',
+              },
+              gap: { base: '3', md: '4', lg: '5' },
+              alignItems: 'end',
             })}
           >
             <span
@@ -769,9 +875,12 @@ export function AllocationGrid({
                 width: 'fit-content',
                 alignItems: 'center',
                 borderRadius: 'full',
-                bg: { _dark: 'gray.800', base: 'gray.100' },
-                px: '3',
-                py: '1',
+                bg:
+                  uiVariant === 'c'
+                    ? { _dark: 'gray.700', base: 'gray.200' }
+                    : { _dark: 'gray.800', base: 'gray.100' },
+                px: uiVariant === 'b' ? '2.5' : '3',
+                py: uiVariant === 'b' ? '0.5' : '1',
                 fontSize: 'xs',
                 fontWeight: 'semibold',
                 letterSpacing: '0.14em',
@@ -783,10 +892,9 @@ export function AllocationGrid({
             </span>
             <div
               className={css({
-                flex: '0 1 24rem',
-                minWidth: { base: '100%', md: '22rem' },
-                marginLeft: 'auto',
-                alignSelf: 'flex-end',
+                minWidth: '0',
+                width: '100%',
+                justifySelf: { lg: 'end' },
               })}
             >
               <SearchInput
