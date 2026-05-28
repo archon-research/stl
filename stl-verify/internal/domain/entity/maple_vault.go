@@ -62,8 +62,8 @@ func (v *MapleVault) Validate() error {
 	if v.VaultVersion <= 0 {
 		return fmt.Errorf("vaultVersion must be positive, got %d", v.VaultVersion)
 	}
-	if v.CreatedAtBlock < 0 {
-		return fmt.Errorf("createdAtBlock must be non-negative, got %d", v.CreatedAtBlock)
+	if v.CreatedAtBlock <= 0 {
+		return fmt.Errorf("createdAtBlock must be positive, got %d", v.CreatedAtBlock)
 	}
 	return nil
 }
