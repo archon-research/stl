@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -487,6 +488,158 @@ func TestService_Stop_NoStart_NoPanic(t *testing.T) {
 	// cancel is nil prior to Start — Stop must not panic.
 	if err := h.svc.Stop(); err != nil {
 		t.Fatalf("Stop() returned err: %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Reorg path (block_version != 0)
+// -----------------------------------------------------------------------------
+
+func TestService_ProcessBlock_ReorgVersion_WritesCorrectBlockVersion(t *testing.T) {
+	h := newHarness(t)
+	event := makeBlockEvent(18_500_000)
+	event.Version = 2 // reorg — same block, different version
+
+	depositTopic := h.svc.extractor.DepositTopic().Hex()
+	logs := []shared.Log{{
+		Address: syrupUSDCAddr,
+		Topics:  []string{depositTopic, topicForAddress(userA), topicForAddress(userB)},
+	}}
+	h.cache.SetReceipts(1, event.BlockNumber, 2, receiptWithLogs(t, logs))
+	h.queueVaultStateAndPositions(1, 1, 1, []int64{1, 1}, []int64{1, 1})
+
+	if err := h.svc.processBlockEvent(context.Background(), event); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if len(h.mapleRepo.stateRows) != 1 {
+		t.Fatalf("state rows=%d, want 1", len(h.mapleRepo.stateRows))
+	}
+	if h.mapleRepo.stateRows[0].BlockVersion != 2 {
+		t.Fatalf("BlockVersion=%d, want 2", h.mapleRepo.stateRows[0].BlockVersion)
+	}
+	if len(h.mapleRepo.posRows) != 2 {
+		t.Fatalf("position rows=%d, want 2", len(h.mapleRepo.posRows))
+	}
+	if h.mapleRepo.posRows[0].BlockVersion != 2 {
+		t.Fatalf("position BlockVersion=%d, want 2", h.mapleRepo.posRows[0].BlockVersion)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// SaveVaultPositions error path
+// -----------------------------------------------------------------------------
+
+func TestService_ProcessBlock_VaultPositionsSaveError_Propagates(t *testing.T) {
+	h := newHarness(t)
+	event := makeBlockEvent(18_500_000)
+	depositTopic := h.svc.extractor.DepositTopic().Hex()
+	logs := []shared.Log{{
+		Address: syrupUSDCAddr,
+		Topics:  []string{depositTopic, topicForAddress(userA), topicForAddress(userB)},
+	}}
+	h.cache.SetReceipts(1, event.BlockNumber, 0, receiptWithLogs(t, logs))
+	h.queueVaultStateAndPositions(1, 1, 1, []int64{1, 1}, []int64{1, 1})
+	wantErr := errors.New("positions insert failed")
+	h.mapleRepo.posErr = wantErr
+
+	err := h.svc.processBlockEvent(context.Background(), event)
+	if err == nil || !errors.Is(err, wantErr) {
+		t.Fatalf("expected wrapped position save error, got %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Multi-vault deterministic sort
+// -----------------------------------------------------------------------------
+
+func TestService_ProcessBlock_MultiVault_WritesInByteOrder(t *testing.T) {
+	usdcAddr := common.HexToAddress(syrupUSDCAddr)
+	usdtAddr := common.HexToAddress(syrupUSDTAddr)
+	usdcVault := newMapleVault(t, usdcAddr)
+	usdcVault.ID = 1
+	usdtVault := newMapleVault(t, usdtAddr)
+	usdtVault.ID = 2
+
+	mapleRepo := newRepoStub(map[common.Address]*entity.MapleVault{
+		usdcAddr: usdcVault,
+		usdtAddr: usdtVault,
+	}, nil)
+	userRepo := newUserRepoStub()
+	mc := &multicallStub{}
+	tx := &testutil.MockTxManager{}
+	cache := testutil.NewMockBlockCache()
+	consumer := &testutil.MockSQSConsumer{}
+
+	cfg := ConfigDefaults()
+	cfg.ChainID = 1
+	cfg.Logger = quietLogger()
+
+	svc, err := NewService(cfg, consumer, cache, mc, tx, userRepo, mapleRepo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.registry.LoadFromDB(context.Background(), mapleRepo, 1); err != nil {
+		t.Fatalf("registry.LoadFromDB: %v", err)
+	}
+
+	event := makeBlockEvent(18_500_000)
+	depositTopic := svc.extractor.DepositTopic().Hex()
+	logs := []shared.Log{
+		{Address: syrupUSDCAddr, Topics: []string{depositTopic, topicForAddress(userA), topicForAddress(userB)}},
+		{Address: syrupUSDTAddr, Topics: []string{depositTopic, topicForAddress(userC), topicForAddress(userA)}},
+	}
+	cache.SetReceipts(1, event.BlockNumber, 0, receiptWithLogs(t, logs))
+
+	// Vaults sort by byte order: USDT (0x35...) before USDC (0x80...).
+	// Each vault: FetchVaultState (3 responses) + FetchUserPositions 2 users (2+2 responses).
+	for range 2 {
+		mc.Responses = append(mc.Responses,
+			encodeUint256(big.NewInt(1_000_000)), // totalAssets
+			encodeUint256(big.NewInt(900_000)),   // totalSupply
+			encodeUint256(big.NewInt(1_000_001)), // sharePrice
+			encodeUint256(big.NewInt(500)),       // balanceOf user1
+			encodeUint256(big.NewInt(600)),       // balanceOf user2
+			encodeUint256(big.NewInt(550)),       // convertToAssets user1
+			encodeUint256(big.NewInt(660)),       // convertToAssets user2
+		)
+	}
+
+	if err := svc.processBlockEvent(context.Background(), event); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if len(mapleRepo.stateRows) != 2 {
+		t.Fatalf("state rows=%d, want 2", len(mapleRepo.stateRows))
+	}
+	// USDT (ID=2) must come first — lower byte address.
+	if mapleRepo.stateRows[0].MapleVaultID != 2 {
+		t.Fatalf("stateRows[0].MapleVaultID=%d, want 2 (USDT sorts before USDC)", mapleRepo.stateRows[0].MapleVaultID)
+	}
+	if mapleRepo.stateRows[1].MapleVaultID != 1 {
+		t.Fatalf("stateRows[1].MapleVaultID=%d, want 1 (USDC)", mapleRepo.stateRows[1].MapleVaultID)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// buildPositionEntities — missing position defensive branch
+// -----------------------------------------------------------------------------
+
+func TestService_BuildPositionEntities_MissingPosition_Errors(t *testing.T) {
+	h := newHarness(t)
+	event := makeBlockEvent(18_500_000)
+	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
+
+	users := []common.Address{common.HexToAddress(userA), common.HexToAddress(userB)}
+	// positionsRaw intentionally omits userB.
+	positionsRaw := map[common.Address]*UserPosition{
+		common.HexToAddress(userA): {Shares: big.NewInt(100), Assets: big.NewInt(110)},
+	}
+
+	_, err := h.svc.buildPositionEntities(context.Background(), nil, 1, users, positionsRaw, event, blockTimestamp)
+	if err == nil {
+		t.Fatal("expected error for missing user position")
+	}
+	if !strings.Contains(err.Error(), "position missing for user") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
