@@ -1,6 +1,5 @@
-# Workflow security gates — aligned with archon-research/github-actions and
-# archon-research/infrastructure CI. Catches workflow syntax errors, template
-# injection, unpinned actions, and accidental secret commits.
+# Workflow security gates. Catches workflow syntax errors, template injection,
+# unpinned actions, and accidental secret commits.
 #
 # Actions are pinned to commit SHAs for supply-chain security.
 # To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
