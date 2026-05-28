@@ -490,13 +490,17 @@ function App() {
     <div
       className={css({
         position: 'relative',
+        '& [data-sidebar-layout] [data-part="panel"]:last-of-type > div': {
+          overflow: 'auto !important',
+          minHeight: '0 !important',
+        },
         '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"][data-axis="vertical"]': {
           right: '0 !important',
         },
         '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="indicator"]': {
           opacity: 0,
         },
-        '@media screen and (max-width: 64rem)': {
+        '@media screen and (max-width: 48rem)': {
           '& [data-sidebar-layout] > div': {
             display: 'block !important',
             height: 'auto !important',
