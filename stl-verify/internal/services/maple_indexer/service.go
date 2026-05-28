@@ -251,12 +251,18 @@ func (s *Service) indexVault(
 	event outbound.BlockEvent,
 	blockNumber *big.Int,
 	blockTimestamp time.Time,
-) error {
+) (retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "maple.indexVault",
 		attribute.String("vault.address", vaultAddr.Hex()),
 		attribute.Int64("block.number", event.BlockNumber),
 		attribute.Int("users.touched", len(users)))
 	defer span.End()
+	defer func() {
+		if retErr != nil {
+			SetSpanError(span, retErr, "indexVault failed")
+			s.telemetry.RecordError(ctx, "indexVault", retErr)
+		}
+	}()
 
 	vault := s.registry.GetVault(vaultAddr)
 	if vault == nil {
