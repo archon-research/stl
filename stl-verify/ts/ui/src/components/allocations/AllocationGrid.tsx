@@ -75,7 +75,7 @@ const tableHeaderTypographyClassName = css({
     fontWeight: 'semibold',
     lineHeight: 'shorter',
     letterSpacing: '0.02em',
-    textTransform: 'capitalize',
+    textTransform: 'uppercase',
     color: 'text.default',
   },
   '& thead th button': {
@@ -83,7 +83,7 @@ const tableHeaderTypographyClassName = css({
     fontWeight: 'semibold',
     lineHeight: 'shorter',
     letterSpacing: '0.02em',
-    textTransform: 'capitalize',
+    textTransform: 'uppercase',
     color: 'text.default',
   },
 });
