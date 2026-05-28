@@ -264,3 +264,36 @@ Worktree: `/Users/andrius/workspace/stl-worktrees/maple-indexer/`
 - `go build ./...` clean for the entire module.
 - Next: Task 14 (`cmd/workers/maple-indexer/main.go`) — wire the service against real adapters (postgres, redis, alchemy multicall, SQS, telemetry).
 
+
+## Task 14 — `cmd/workers/maple-indexer` (main.go + tests)
+
+**Files:**
+- `stl-verify/cmd/workers/maple-indexer/main.go`
+- `stl-verify/cmd/workers/maple-indexer/main_test.go` (19 parseConfig sub-cases)
+- `stl-verify/cmd/workers/maple-indexer/main_integration_test.go` (2 cases, build tag `integration`)
+
+### What was done
+- Copied morpho-indexer cmd structure verbatim; swapped `morpho-indexer` → `maple-indexer` and `morpho_indexer` → `maple_indexer` everywhere.
+- Service wiring follows Task 13's `NewService(config, consumer, cache, multicaller, txManager, userRepo, mapleRepo)` signature — **dropped** `protocolRepo`, `tokenRepo`, `eventRepo`, `receiptTokenRepo` from the call site (Syrup needs none of them).
+- Telemetry: `maple_indexer.NewTelemetry()` returned from `services/maple_indexer/telemetry.go`; OTEL service name set to `"maple-indexer"` for spans/metrics.
+- Repositories constructed: `txManager`, `userRepo`, `mapleRepo`. Build registry passes `buildReg.BuildID()` into `NewMapleRepository` exactly as morpho does.
+- Integration tests reuse `testutil.{StartTimescaleDBForMain, StartRedisForMain, StartLocalStackForMain, StartMockSQS, SetupTestSchema}` — no new helpers invented.
+
+### Decisions / departures from plan
+- Plan's "omit eventRepo if not in signature" branch hit. Task 13's `NewService` takes 7 args (no event/protocol/token/receiptToken). Verified by reading `service.go` constructor signature before writing the call site.
+- The dev binary `stl-verify/maple-indexer` was a stray Mach-O from a manual `go build .` run; removed before running tests so `go test ./cmd/workers/maple-indexer/` resolves the package (not the binary).
+
+### Test results
+- Unit (`TestParseConfig`): 19 sub-cases PASS.
+- Integration (`TestRunIntegration_BadConnectionConfig`, `TestRunIntegration_StartupAndShutdown`): both PASS, 33.8s total (TimescaleDB + LocalStack + Redis containers spin up via `TestMain`).
+- Full suite `go test ./...` clean — no regressions.
+
+### Gotchas
+- `go test ./cmd/workers/maple-indexer/` initially balked because cwd contained a stray `maple-indexer` binary (from a one-off `go build .` debug step). `go test` resolves `./cmd/workers/maple-indexer/` against the package import path, but the bash session's working-directory aliasing made the binary visible. Cleanup: `rm -f stl-verify/maple-indexer` before re-running tests.
+- `lifecycle.Run(ctx, logger, service)` is the same lifecycle helper morpho uses — `Service` already satisfies `Start(ctx) error` + `Stop() error`, no adapter glue needed.
+
+### State of codebase
+- Worker entry point ready. `make run-maple-indexer` not yet added (Task 15).
+- No new env vars beyond morpho's set (ALCHEMY_API_KEY, REDIS_ADDR, DATABASE_URL, AWS_SQS_QUEUE_URL, S3_BUCKET, DEPLOY_ENV, optional CHAIN_ID / SQS_WAIT_TIME / SQS_VISIBILITY_TIMEOUT).
+- Next: Task 15 (Dockerfile.maple-indexer + Makefile targets).
+
