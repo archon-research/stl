@@ -104,14 +104,18 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
       header: 'Backing %',
       accessorKey: 'backing_pct',
       cell: (info: CellContext<RiskItem, unknown>) =>
-        formatPercentValue(info.getValue() as string | number | null | undefined),
+        formatPercentValue(
+          info.getValue() as string | number | null | undefined,
+        ),
     },
     {
       id: 'lt',
       header: 'Liquidation Threshold',
       accessorKey: 'liquidation_threshold',
       cell: (info: CellContext<RiskItem, unknown>) =>
-        formatRatioPercent(info.getValue() as string | number | null | undefined),
+        formatRatioPercent(
+          info.getValue() as string | number | null | undefined,
+        ),
     },
     {
       id: 'bonus',

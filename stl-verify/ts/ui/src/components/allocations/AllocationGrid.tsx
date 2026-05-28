@@ -173,11 +173,7 @@ function AllocationAssetCell({
   );
 }
 
-function AllocationUnderlyingCell({
-  allocation,
-}: {
-  allocation: Allocation;
-}) {
+function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
   return (
     <div
       className={css({
@@ -216,11 +212,7 @@ function AllocationUnderlyingCell({
   );
 }
 
-function AllocationBalanceCell({
-  allocation,
-}: {
-  allocation: Allocation;
-}) {
+function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
   const amountUsd = allocation.amount_usd;
 
   return (
@@ -499,16 +491,14 @@ export function AllocationGrid({
     borderWidth: '0',
     borderStyle: 'none',
     borderColor: 'transparent',
-    boxShadow:
-      uiVariant === 'c' ? '0 8px 20px rgba(15, 23, 42, 0.05)' : 'none',
+    boxShadow: uiVariant === 'c' ? '0 8px 20px rgba(15, 23, 42, 0.05)' : 'none',
     '& thead tr': {
       bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
     },
     '& thead th': {
       borderBottomWidth: '1px',
       borderBottomStyle: 'solid',
-      borderBottomColor:
-        uiVariant === 'c' ? 'border.default' : 'border.subtle',
+      borderBottomColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
     },
     '& thead th button': {
       color: uiVariant === 'c' ? 'text.default' : 'text.muted',
@@ -524,8 +514,7 @@ export function AllocationGrid({
       borderRadius: 'full',
       borderWidth: '1px',
       borderStyle: 'solid',
-      borderColor:
-        uiVariant === 'c' ? 'border.default' : 'border.subtle',
+      borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
       bg: uiVariant === 'c' ? 'surface.subtle' : 'surface.default',
       fontSize: uiVariant === 'b' ? '2xs' : 'xs',
       fontWeight: 'semibold',
@@ -536,7 +525,9 @@ export function AllocationGrid({
     },
     '& tbody tr[aria-selected="true"]': {
       boxShadow:
-        uiVariant === 'c' ? 'inset 0 0 0 1px var(--colors-border-default)' : 'none',
+        uiVariant === 'c'
+          ? 'inset 0 0 0 1px var(--colors-border-default)'
+          : 'none',
     },
   });
 
@@ -581,7 +572,12 @@ export function AllocationGrid({
               : '0 24px 80px rgba(15, 23, 42, 0.08)',
         })}
       >
-        <div className={css({ display: 'grid', gap: uiVariant === 'b' ? '3' : '4' })}>
+        <div
+          className={css({
+            display: 'grid',
+            gap: uiVariant === 'b' ? '3' : '4',
+          })}
+        >
           <div
             className={flex({
               align: 'flex-start',
