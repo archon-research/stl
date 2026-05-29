@@ -45,7 +45,7 @@ Use plugin setup from this `ts` folder when you want plugin behavior scoped to t
 Claude (project-scoped):
 
 ```bash
-claude plugin marketplace add https://github.com/archon-research/uikit.git#rohit/add-plugin
+claude plugin marketplace add https://github.com/archon-research/uikit.git#98ea9e55edae3397c43421582126dc9742a8fe7b
 claude plugin install uikit-agent-marketplace@uikit-plugins --scope project
 ```
 
@@ -61,7 +61,7 @@ then updates/installs `uikit-agent-marketplace@uikit-plugins`.
 
 Defaults:
 
-- `UIKIT_PLUGIN_SHA=202fd44fd38fa916e2cdc72b49100a69af647d06`
+- `UIKIT_PLUGIN_SHA=98ea9e55edae3397c43421582126dc9742a8fe7b`
 
 If you want commit pinning:
 

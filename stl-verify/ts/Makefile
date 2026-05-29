@@ -1,5 +1,5 @@
 UIKIT_REPO ?= https://github.com/archon-research/uikit.git
-UIKIT_PLUGIN_SHA ?= 202fd44fd38fa916e2cdc72b49100a69af647d06
+UIKIT_PLUGIN_SHA ?= 98ea9e55edae3397c43421582126dc9742a8fe7b
 PLUGIN_SUBDIR := packages/agent-marketplace/copilot-plugin
 COPILOT_MARKETPLACE_DIR := .copilot-marketplace
 COPILOT_PLUGIN_DIR := $(COPILOT_MARKETPLACE_DIR)/uikit-agent-marketplace
