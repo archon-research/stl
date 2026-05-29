@@ -31,6 +31,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
@@ -38,7 +40,7 @@ jobs:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Configure AWS credentials (staging)
         uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
@@ -65,7 +67,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
@@ -73,6 +75,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
+          persist-credentials: false
 
       - name: Commit and push to main (via API for verified commits)
         env:
@@ -222,7 +225,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
@@ -232,6 +235,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Build changelog
         id: changelog
@@ -357,24 +361,33 @@ jobs:
             --field "sha=${NEW_COMMIT}" \
             --field "force=true"
 
-          # Create the new prod deploy PR FIRST, so that if `gh pr create`
-          # fails transiently we don't end up with no open prod-deploy PR
-          # (older PRs would have already been closed).
-          gh pr create \
-            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
-            --body "$(cat <<EOF
+          # Build the PR body in a file and use --body-file. Avoid passing the
+          # body via $(cat <<EOF ... EOF) — backticks in the changelog (code
+          # fences, inline code) get interpreted as command substitution by
+          # bash inside $(...) and the changelog gets silently dropped.
+          {
+            cat <<HEADER_EOF
           Automated prod image tag update.
 
           **Deploy SHA:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${SHA})
           **Images pushed to:** prod ECR (\`030797368798\`)
           **Triggered by:** @${{ github.actor }}
 
-          ${{ steps.changelog.outputs.changelog }}
+          HEADER_EOF
+            cat /tmp/changelog.md
+            cat <<'FOOTER_EOF'
 
           ---
           Merge this PR to update prod kustomization, then sync in ArgoCD.
-          EOF
-          )" \
+          FOOTER_EOF
+          } > /tmp/pr-body.md
+
+          # Create the new prod deploy PR FIRST, so that if `gh pr create`
+          # fails transiently we don't end up with no open prod-deploy PR
+          # (older PRs would have already been closed).
+          gh pr create \
+            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
+            --body-file /tmp/pr-body.md \
             --head "$BRANCH" \
             --base main
 
