@@ -501,6 +501,7 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/oracle-price-indexer/.env && \
 	printf '%s\n' \
@@ -516,6 +517,7 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/oracle-price-indexer/.env.avax && \
 	printf '%s\n' \
@@ -534,6 +536,7 @@ dev-env:
 		"CHAIN_ID=1" \
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/sparklend-indexer/.env && \
 	printf '%s\n' \
@@ -552,6 +555,7 @@ dev-env:
 		"CHAIN_ID=43114" \
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/sparklend-indexer/.env.avax && \
 	printf '%s\n' \
@@ -570,6 +574,7 @@ dev-env:
 		"CHAIN_ID=1" \
 		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
 		"DEPLOY_ENV=development" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/prime-allocation-indexer/.env && \
 	printf '%s\n' \
@@ -588,6 +593,7 @@ dev-env:
 		"CHAIN_ID=43114" \
 		"S3_BUCKET=stl-sentineldevelopment-avalanche-raw" \
 		"DEPLOY_ENV=development" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/prime-allocation-indexer/.env.avax && \
 	printf '%s\n' \
@@ -596,6 +602,7 @@ dev-env:
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-morpho-indexing.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
 		"AWS_SECRET_ACCESS_KEY=test" \
 		"AWS_REGION=us-east-1" \
@@ -603,10 +610,13 @@ dev-env:
 		"REDIS_ADDR=127.0.0.1:6379" \
 		"REDIS_PASSWORD=" \
 		"CHAIN_ID=1" \
+		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
+		"DEPLOY_ENV=development" \
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"SQS_WAIT_TIME=1" \
 		"SQS_VISIBILITY_TIMEOUT=30" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
 	@set -a; . ../.env.secrets; set +a; \
@@ -616,6 +626,7 @@ dev-env:
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"AWS_SQS_QUEUE_URL=http://127.0.0.1:4566/000000000000/stl-ethereum-maple-indexing.fifo" \
 		"AWS_SQS_ENDPOINT=http://127.0.0.1:4566" \
+		"AWS_S3_ENDPOINT=http://127.0.0.1:4566" \
 		"AWS_ACCESS_KEY_ID=test" \
 		"AWS_SECRET_ACCESS_KEY=test" \
 		"AWS_REGION=us-east-1" \
@@ -623,10 +634,13 @@ dev-env:
 		"REDIS_ADDR=127.0.0.1:6379" \
 		"REDIS_PASSWORD=" \
 		"CHAIN_ID=1" \
+		"S3_BUCKET=stl-sentineldevelopment-ethereum-raw" \
+		"DEPLOY_ENV=development" \
 		"JAEGER_ENDPOINT=127.0.0.1:4317" \
 		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"SQS_WAIT_TIME=1" \
 		"SQS_VISIBILITY_TIMEOUT=30" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/maple-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
