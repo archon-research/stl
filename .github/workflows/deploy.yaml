@@ -357,24 +357,33 @@ jobs:
             --field "sha=${NEW_COMMIT}" \
             --field "force=true"
 
-          # Create the new prod deploy PR FIRST, so that if `gh pr create`
-          # fails transiently we don't end up with no open prod-deploy PR
-          # (older PRs would have already been closed).
-          gh pr create \
-            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
-            --body "$(cat <<EOF
+          # Build the PR body in a file and use --body-file. Avoid passing the
+          # body via $(cat <<EOF ... EOF) — backticks in the changelog (code
+          # fences, inline code) get interpreted as command substitution by
+          # bash inside $(...) and the changelog gets silently dropped.
+          {
+            cat <<HEADER_EOF
           Automated prod image tag update.
 
           **Deploy SHA:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${SHA})
           **Images pushed to:** prod ECR (\`030797368798\`)
           **Triggered by:** @${{ github.actor }}
 
-          ${{ steps.changelog.outputs.changelog }}
+          HEADER_EOF
+            cat /tmp/changelog.md
+            cat <<'FOOTER_EOF'
 
           ---
           Merge this PR to update prod kustomization, then sync in ArgoCD.
-          EOF
-          )" \
+          FOOTER_EOF
+          } > /tmp/pr-body.md
+
+          # Create the new prod deploy PR FIRST, so that if `gh pr create`
+          # fails transiently we don't end up with no open prod-deploy PR
+          # (older PRs would have already been closed).
+          gh pr create \
+            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
+            --body-file /tmp/pr-body.md \
             --head "$BRANCH" \
             --base main
 
