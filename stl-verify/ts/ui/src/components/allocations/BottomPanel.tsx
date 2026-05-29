@@ -59,10 +59,6 @@ const toggleClassName = `${segmentedControlStyles.item} ${css({
   minHeight: '8',
   px: '2.5',
   fontSize: 'sm',
-  '&[data-state="on"]': {
-    bg: 'interactive.selected',
-    color: 'text.strong',
-  },
 })}`;
 
 export function BottomPanel({
