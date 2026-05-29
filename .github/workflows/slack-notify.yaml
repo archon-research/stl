@@ -40,6 +40,7 @@ jobs:
           ref: 165a6c55b855e880753370d6b6fad05be64ee768  # main (slack-notify #9)
           ssh-key: ${{ secrets.gh-actions-deploy-key }}
           path: .github-actions
+          persist-credentials: false
       - uses: ./.github-actions/slack-notify
         with:
           slack-webhook-url: ${{ secrets.slack-webhook-url }}
