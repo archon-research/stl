@@ -43,7 +43,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        uses: aws-actions/configure-aws-credentials@99214aa6889fcddfa57764031d71add364327e59  # v6.1.3
         with:
           role-to-assume: arn:aws:iam::579039992622:role/archonstaging-github-actions-mimir-rules
           aws-region: eu-west-1
@@ -95,7 +95,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        uses: aws-actions/configure-aws-credentials@99214aa6889fcddfa57764031d71add364327e59  # v6.1.3
         with:
           role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-mimir-rules
           aws-region: eu-west-1
