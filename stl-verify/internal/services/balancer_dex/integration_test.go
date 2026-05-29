@@ -41,6 +41,8 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 
+	t.Setenv("BUILD_GIT_HASH", "integration-test-swap-writes-all-rows")
+
 	buildReg, err := buildregistry.New(ctx, pool)
 	if err != nil {
 		t.Fatalf("buildregistry.New: %v", err)
@@ -79,7 +81,7 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 	if err := svc.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer svc.Stop()
+	defer func() { _ = svc.Stop() }()
 
 	if svc.registry.poolCount() != 1 {
 		t.Fatalf("expected 1 seeded pool, got %d", svc.registry.poolCount())
@@ -115,24 +117,42 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 		return out
 	}
 
+	// ERC20 metadata batch response: 3 tokens × (symbol+decimals) = 6 results.
+	strT, _ := abi.NewType("string", "", nil)
+	uint8T, _ := abi.NewType("uint8", "", nil)
+	symOut, _ := (abi.Arguments{{Type: strT}}).Pack("TKN")
+	decOut, _ := (abi.Arguments{{Type: uint8T}}).Pack(uint8(18))
+	metaBatchResp := []outbound.Result{
+		{Success: true, ReturnData: symOut}, {Success: true, ReturnData: decOut},
+		{Success: true, ReturnData: symOut}, {Success: true, ReturnData: decOut},
+		{Success: true, ReturnData: symOut}, {Success: true, ReturnData: decOut},
+	}
+
 	callIdx := 0
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		callIdx++
-		if callIdx == 1 {
+		switch callIdx {
+		case 1:
+			// vault.getPoolTokens
 			return []outbound.Result{{Success: true, ReturnData: gptData}}, nil
+		case 2:
+			// readERC20MetadataBatch — 3 tokens × 2 sub-calls
+			return metaBatchResp, nil
+		default:
+			// readPoolState — 10 sub-calls
+			return []outbound.Result{
+				{Success: true, ReturnData: gptData},
+				{Success: true, ReturnData: ampData},
+				{Success: true, ReturnData: mkUint(int64(1.05e18))},
+				{Success: true, ReturnData: mkUint(int64(1.0e18))},
+				{Success: true, ReturnData: mkUint(int64(2.5e18))},
+				{Success: true, ReturnData: sfData},
+				{Success: true, ReturnData: mkUint(int64(4e14))},
+				{Success: true, ReturnData: pausedData},
+				{Success: true, ReturnData: mkUint(int64(1.18e18))},
+				{Success: true, ReturnData: mkUint(int64(1.0e18))},
+			}, nil
 		}
-		return []outbound.Result{
-			{Success: true, ReturnData: gptData},
-			{Success: true, ReturnData: ampData},
-			{Success: true, ReturnData: mkUint(int64(1.05e18))},
-			{Success: true, ReturnData: mkUint(int64(1.0e18))},
-			{Success: true, ReturnData: mkUint(int64(2.5e18))},
-			{Success: true, ReturnData: sfData},
-			{Success: true, ReturnData: mkUint(int64(4e14))},
-			{Success: true, ReturnData: pausedData},
-			{Success: true, ReturnData: mkUint(int64(1.18e18))},
-			{Success: true, ReturnData: mkUint(int64(1.0e18))},
-		}, nil
 	}
 
 	// Build a Vault.Swap log.

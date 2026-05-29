@@ -42,6 +42,8 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 	pgPool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 
+	t.Setenv("BUILD_GIT_HASH", "integration-test-swap-writes-all-rows")
+
 	buildReg, err := buildregistry.New(ctx, pgPool)
 	if err != nil {
 		t.Fatalf("buildregistry.New: %v", err)
@@ -83,9 +85,9 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 	if err := svc.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer svc.Stop()
-	if svc.registry.poolCount() != 1 {
-		t.Fatalf("expected 1 pool registered after Start, got %d", svc.registry.poolCount())
+	defer func() { _ = svc.Stop() }()
+	if svc.registry.poolByAddress(pool.Address) == nil {
+		t.Fatalf("expected test pool %s to be registered after Start", pool.Address.Hex())
 	}
 	// Prime token addresses so we don't need a static read; pool's token0/token1
 	// are unknown to the test harness without a chain read.

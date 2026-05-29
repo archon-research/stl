@@ -200,17 +200,14 @@ func (r *BalancerPoolRepository) UpsertBalancerPoolToken(ctx context.Context, tx
 // safety is the trigger's job and a duplicate (same build, same key) will
 // collide on the PK, which the caller treats as already-written.
 func (r *BalancerPoolRepository) SaveBalancerPoolState(ctx context.Context, tx pgx.Tx, state *entity.BalancerPoolState) error {
-	balances, err := bigIntsToNumericArray(state.Balances)
-	if err != nil {
-		return fmt.Errorf("converting balances: %w", err)
-	}
+	balances := bigIntsToNullableElementNumericArray(state.Balances)
 	ampFactor := bigIntToNullableNumeric(state.AmpFactor)
 	bptRate := bigIntToNullableNumeric(state.BptRate)
 	actualSupply := bigIntToNullableNumeric(state.ActualSupply)
 	totalSupply := bigIntToNullableNumeric(state.TotalSupply)
-	tokenRates, err := bigIntsToNullableNumericArray(state.TokenRates)
-	if err != nil {
-		return fmt.Errorf("converting token_rates: %w", err)
+	var tokenRates any
+	if state.TokenRates != nil {
+		tokenRates = bigIntsToNullableElementNumericArray(state.TokenRates)
 	}
 	scalingFactors, err := bigIntsToNullableNumericArray(state.ScalingFactors)
 	if err != nil {

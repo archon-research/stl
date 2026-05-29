@@ -522,3 +522,20 @@ func bigIntsToNullableNumericArray(bs []*big.Int) (any, error) {
 	}
 	return bigIntsToNumericArray(bs)
 }
+
+// bigIntsToNullableElementNumericArray converts a slice of *big.Int to a
+// NUMERIC[] payload where individual nil entries become SQL NULL elements
+// (rather than erroring). Used by columns that are NOT NULL on the array
+// itself but allow NULL per-element semantics — e.g. balancer_pool_state
+// balances where phantom BPT slots have no real reserve.
+func bigIntsToNullableElementNumericArray(bs []*big.Int) []pgtype.Numeric {
+	out := make([]pgtype.Numeric, len(bs))
+	for i, b := range bs {
+		if b == nil {
+			out[i] = pgtype.Numeric{Valid: false}
+			continue
+		}
+		out[i] = pgtype.Numeric{Int: new(big.Int).Set(b), Exp: 0, Valid: true}
+	}
+	return out
+}

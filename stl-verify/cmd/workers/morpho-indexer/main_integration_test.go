@@ -50,6 +50,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	defer rpcServer.Close()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
@@ -97,6 +98,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}
 
 	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
 	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
