@@ -2164,6 +2164,30 @@ func TestDefaultChainExpectations_IncludesAvalanche(t *testing.T) {
 	}
 }
 
+// TestDefaultChainExpectations_L2sBackUpReceipts guards against the L2 backup gap:
+// base/optimism/unichain/arbitrum watchers run with --enable-traces=false but always
+// cache receipts, so their backups must expect receipts (not block-only) and must not
+// expect traces or blobs. A missing entry silently degrades to block-only.
+func TestDefaultChainExpectations_L2sBackUpReceipts(t *testing.T) {
+	expectations := DefaultChainExpectations()
+	for _, chainID := range []int64{8453, 10, 130, 42161} {
+		exp, ok := expectations[chainID]
+		if !ok {
+			t.Errorf("chain %d missing from default expectations (would back up block only, skipping receipts)", chainID)
+			continue
+		}
+		if !exp.ExpectReceipts {
+			t.Errorf("chain %d: expected receipts to be backed up", chainID)
+		}
+		if exp.ExpectTraces {
+			t.Errorf("chain %d: must NOT expect traces (watcher runs --enable-traces=false)", chainID)
+		}
+		if exp.ExpectBlobs {
+			t.Errorf("chain %d: must NOT expect blobs", chainID)
+		}
+	}
+}
+
 func TestProcessMessage_AvalancheSkipsTracesAndBlobs(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()

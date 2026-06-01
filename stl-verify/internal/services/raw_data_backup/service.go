@@ -60,19 +60,21 @@ type ChainExpectation struct {
 	ExpectBlobs bool
 }
 
-// DefaultChainExpectations returns the default expectations for known chains.
+// DefaultChainExpectations returns the default expectations for known chains. These
+// MUST mirror what each chain's watcher actually caches, since the backup reads from
+// that cache: receipts are always fetched, but traces only when the watcher runs
+// without --enable-traces=false. Today only the ethereum watcher fetches traces; every
+// other chain's watcher sets --enable-traces=false (avalanche and arbitrum have no
+// trace_block on Alchemy at all; base/optimism/unichain support it but the watcher
+// still does not fetch it). Blobs are not fetched anywhere (--enable-blobs is false).
 func DefaultChainExpectations() map[int64]ChainExpectation {
 	return map[int64]ChainExpectation{
-		1: { // Ethereum Mainnet
-			ExpectReceipts: true,
-			ExpectTraces:   true,
-			ExpectBlobs:    false, // Blobs are optional (post-Dencun)
-		},
-		43114: { // Avalanche C-Chain
-			ExpectReceipts: true,
-			ExpectTraces:   false,
-			ExpectBlobs:    false,
-		},
+		1:     {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: false},  // Ethereum Mainnet
+		43114: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Avalanche C-Chain
+		8453:  {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Base
+		10:    {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Optimism
+		130:   {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Unichain
+		42161: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false}, // Arbitrum
 	}
 }
 
