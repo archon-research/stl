@@ -145,9 +145,39 @@ jobs:
           echo "Failed to update main after ${MAX_RETRIES} attempts"
           exit 1
 
+  wait-staging-healthy:
+    name: Wait for Staging Healthy
+    needs: update-staging
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-wait-staging
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: c48359460cbfe5421e084d4efdad5f39f7873ea5  # feat(argocd-wait) #18
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - uses: ./.github-actions/argocd-wait
+        with:
+          app: stl-staging
+          server: http://argocd-prod-archon
+          timeout: "300"
+          min-wait: "30"
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
+          tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
+          argocd-token-secret-id: archon-prod-argocd-ci-token
+
   build-push-prod:
     name: Build & Push Images (Prod)
-    needs: build-push-staging
+    needs: [build-push-staging, wait-staging-healthy]
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -426,8 +456,8 @@ jobs:
 
   notify-staging-failure:
     name: Notify Staging Deploy Failure
-    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
-    needs: [build-push-staging, update-staging]
+    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure' || needs.wait-staging-healthy.result == 'failure') }}
+    needs: [build-push-staging, update-staging, wait-staging-healthy]
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
@@ -435,6 +465,7 @@ jobs:
       failed-jobs: |
         Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
         Update Staging Image Tags=${{ needs.update-staging.result }}
+        Wait for Staging Healthy=${{ needs.wait-staging-healthy.result }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

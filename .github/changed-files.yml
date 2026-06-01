@@ -11,6 +11,7 @@ go:
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
   - .github/workflows/go-ci.yml
+  - .github/workflows/go-sentinel-verify-compatibility.yml
 
 python:
   - stl-verify/python/**
@@ -23,6 +24,7 @@ python:
   - .github/workflows/ci.yml
   - .github/workflows/deploy.yaml
   - .github/workflows/python-ci.yml
+  - .github/workflows/python-sentinel-verify-compatibility.yml
 
 ts:
   - stl-verify/ts/**
