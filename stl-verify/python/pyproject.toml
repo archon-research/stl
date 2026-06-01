@@ -17,6 +17,7 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
     "opentelemetry-exporter-otlp>=1.41.0,<2",
     "pandas>=2.2.0",
+    "pyarrow>=18.0.0",
     "numpy",
     "arch>=8.0.0",
     "statsmodels>=0.14.6",
