@@ -20,6 +20,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/alchemy"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -86,6 +87,8 @@ type workerConfig struct {
 	chainID             int64
 	deployEnv           string
 	awsRegion           string
+	alchemyAPIKey       string
+	alchemyHTTPURL      string
 	workers             int
 	cacheMissMaxRetries int
 }
@@ -150,6 +153,20 @@ func parseConfig(workers int) (workerConfig, error) {
 	}
 
 	cfg.awsRegion = env.Get("AWS_REGION", "eu-west-1")
+
+	// Alchemy credentials back the RPC fallback used when block data has aged out
+	// of the cache. Both are required: without them a cache miss could not
+	// self-heal and would be lost. ALCHEMY_HTTP_URL is per-chain so there is no
+	// default; the same value already wires the per-chain watcher.
+	cfg.alchemyAPIKey = os.Getenv("ALCHEMY_API_KEY")
+	if cfg.alchemyAPIKey == "" {
+		return workerConfig{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	}
+
+	cfg.alchemyHTTPURL = os.Getenv("ALCHEMY_HTTP_URL")
+	if cfg.alchemyHTTPURL == "" {
+		return workerConfig{}, fmt.Errorf("ALCHEMY_HTTP_URL environment variable is required")
+	}
 
 	// Optional drain-speed lever: how many extra cache reads to attempt before
 	// treating a miss as permanent. Defaults to the service default when unset.
@@ -241,6 +258,21 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 	writer := s3.NewWriter(awsCfg, logger)
 	logger.Info("S3 writer created", "bucket", cfg.bucket)
 
+	// Create the Alchemy HTTP client for the cache-miss RPC fallback. EnableTraces
+	// and EnableBlobs follow this chain's expectations so the by-hash fetch only
+	// requests the data types we actually back up.
+	exp := rawdatabackup.DefaultChainExpectations()[cfg.chainID]
+	client, err := alchemy.NewClient(alchemy.ClientConfig{
+		HTTPURL:      fmt.Sprintf("%s/%s", cfg.alchemyHTTPURL, cfg.alchemyAPIKey),
+		EnableTraces: exp.ExpectTraces,
+		EnableBlobs:  exp.ExpectBlobs,
+		Logger:       logger,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create Alchemy client: %w", err)
+	}
+	logger.Info("Alchemy client created for RPC fallback", "chainID", cfg.chainID, "enableTraces", exp.ExpectTraces, "enableBlobs", exp.ExpectBlobs)
+
 	// Initialize OpenTelemetry tracing and metrics
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    "raw-data-backup",
@@ -268,7 +300,7 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 		CacheMissMaxRetries: cfg.cacheMissMaxRetries,
 		Logger:              logger,
 		Metrics:             metricsRec,
-	}, consumer, cache, writer, deadLetter)
+	}, consumer, cache, writer, deadLetter, client)
 	if err != nil {
 		return fmt.Errorf("failed to create backup service: %w", err)
 	}

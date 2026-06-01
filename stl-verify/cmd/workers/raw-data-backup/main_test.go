@@ -12,12 +12,14 @@ import (
 // remove or override individual keys to exercise the validation branches.
 func requiredEnv() map[string]string {
 	return map[string]string{
-		"SQS_QUEUE_URL": "https://sqs.eu-west-1.amazonaws.com/123/main.fifo",
-		"DLQ_QUEUE_URL": "https://sqs.eu-west-1.amazonaws.com/123/dlq.fifo",
-		"S3_BUCKET":     "stl-sentinelstaging-avalanche-raw",
-		"REDIS_ADDR":    "redis.example.com:6379",
-		"CHAIN_ID":      "43114",
-		"DEPLOY_ENV":    "staging",
+		"SQS_QUEUE_URL":    "https://sqs.eu-west-1.amazonaws.com/123/main.fifo",
+		"DLQ_QUEUE_URL":    "https://sqs.eu-west-1.amazonaws.com/123/dlq.fifo",
+		"S3_BUCKET":        "stl-sentinelstaging-avalanche-raw",
+		"REDIS_ADDR":       "redis.example.com:6379",
+		"CHAIN_ID":         "43114",
+		"DEPLOY_ENV":       "staging",
+		"ALCHEMY_API_KEY":  "test-api-key",
+		"ALCHEMY_HTTP_URL": "https://avax-mainnet.g.alchemy.com/v2",
 	}
 }
 
@@ -26,6 +28,7 @@ func TestParseConfig(t *testing.T) {
 	allKeys := []string{
 		"SQS_QUEUE_URL", "DLQ_QUEUE_URL", "S3_BUCKET", "REDIS_ADDR", "CHAIN_ID",
 		"DEPLOY_ENV", "AWS_REGION", "CACHE_MISS_MAX_RETRIES", "WORKERS",
+		"ALCHEMY_API_KEY", "ALCHEMY_HTTP_URL",
 	}
 
 	tests := []struct {
@@ -58,7 +61,25 @@ func TestParseConfig(t *testing.T) {
 				if cfg.workers != 2 {
 					t.Errorf("expected workers 2, got %d", cfg.workers)
 				}
+				if cfg.alchemyAPIKey != "test-api-key" {
+					t.Errorf("unexpected alchemyAPIKey: %q", cfg.alchemyAPIKey)
+				}
+				if cfg.alchemyHTTPURL != "https://avax-mainnet.g.alchemy.com/v2" {
+					t.Errorf("unexpected alchemyHTTPURL: %q", cfg.alchemyHTTPURL)
+				}
 			},
+		},
+		{
+			name:      "missing ALCHEMY_API_KEY",
+			env:       without(requiredEnv(), "ALCHEMY_API_KEY"),
+			workers:   2,
+			wantError: "ALCHEMY_API_KEY environment variable is required",
+		},
+		{
+			name:      "missing ALCHEMY_HTTP_URL",
+			env:       without(requiredEnv(), "ALCHEMY_HTTP_URL"),
+			workers:   2,
+			wantError: "ALCHEMY_HTTP_URL environment variable is required",
 		},
 		{
 			name:      "missing SQS_QUEUE_URL",

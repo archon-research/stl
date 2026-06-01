@@ -35,6 +35,8 @@ var errCacheMiss = errors.New("cache miss")
 // Processing status labels recorded via BackupMetricsRecorder.RecordBlockProcessed.
 const (
 	statusSuccess          = "success"
+	statusAlreadyBackedUp  = "already_backed_up"
+	statusRPCFallback      = "rpc_fallback"
 	statusDeadLettered     = "dead_lettered"
 	statusTransientError   = "transient_error"
 	statusDLQPublishFailed = "dlq_publish_failed"
@@ -138,6 +140,7 @@ type Service struct {
 	cache             outbound.BlockCache
 	writer            outbound.S3Writer
 	deadLetter        outbound.DeadLetterPublisher
+	client            outbound.BlockchainClient
 	metrics           outbound.BackupMetricsRecorder
 	logger            *slog.Logger
 	closeOnce         sync.Once
@@ -145,13 +148,16 @@ type Service struct {
 	wg                sync.WaitGroup
 }
 
-// NewService creates a new backup service.
+// NewService creates a new backup service. The blockchain client is required:
+// it backs the RPC fallback used when block data has aged out of the cache, so
+// a cache miss can be re-fetched by block hash instead of being dead-lettered.
 func NewService(
 	config Config,
 	consumer outbound.SQSConsumer,
 	cache outbound.BlockCache,
 	writer outbound.S3Writer,
 	deadLetter outbound.DeadLetterPublisher,
+	client outbound.BlockchainClient,
 ) (*Service, error) {
 	if consumer == nil {
 		return nil, fmt.Errorf("consumer is required")
@@ -164,6 +170,9 @@ func NewService(
 	}
 	if deadLetter == nil {
 		return nil, fmt.Errorf("dead-letter publisher is required")
+	}
+	if client == nil {
+		return nil, fmt.Errorf("blockchain client is required")
 	}
 	if config.Bucket == "" {
 		return nil, fmt.Errorf("bucket is required")
@@ -194,6 +203,7 @@ func NewService(
 		cache:             cache,
 		writer:            writer,
 		deadLetter:        deadLetter,
+		client:            client,
 		metrics:           config.Metrics,
 		logger:            config.Logger.With("component", "raw-data-backup"),
 		stopCh:            make(chan struct{}),
@@ -281,9 +291,9 @@ func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSM
 
 	for msg := range msgCh {
 		start := time.Now()
-		err := s.processMessage(ctx, msg)
+		status, err := s.processMessage(ctx, msg)
 		s.recordLatency(ctx, start, err)
-		s.handleResult(ctx, logger, msg, err)
+		s.handleResult(ctx, logger, msg, status, err)
 	}
 }
 
@@ -300,13 +310,17 @@ func (s *Service) recordLatency(ctx context.Context, start time.Time, err error)
 }
 
 // handleResult decides what to do with a message after processing:
-//   - success: delete it.
+//   - success: record the returned outcome status and delete it.
 //   - permanent failure: route to the DLQ, then delete (only if the DLQ
 //     publish succeeds, otherwise preserve for redelivery).
 //   - transient failure: leave it on the queue for SQS redelivery.
-func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, err error) {
+//
+// On success, status carries the specific outcome (statusSuccess,
+// statusAlreadyBackedUp, statusRPCFallback) so the metric distinguishes a cache
+// hit from a no-op re-delivery and from an RPC self-heal.
+func (s *Service) handleResult(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage, status string, err error) {
 	if err == nil {
-		s.recordProcessed(ctx, statusSuccess)
+		s.recordProcessed(ctx, status)
 		s.deleteMessage(ctx, logger, msg)
 		return
 	}
@@ -422,7 +436,10 @@ type cacheGetter func(ctx context.Context, chainID int64, blockNumber int64, ver
 //   - getter error (e.g. Redis down): returned unwrapped and NOT retried; this
 //     is transient, so the message stays on the queue for SQS redelivery.
 //   - miss persisting after CacheMissMaxRetries: translated into a descriptive
-//     error wrapped with ErrPermanent and routed to the DLQ.
+//     error that wraps the errCacheMiss sentinel (NOT ErrPermanent). The caller
+//     uses errors.Is(err, errCacheMiss) to fall back to the RPC fetch; a miss is
+//     no longer terminal because cached payloads expire (2h TTL) while a backlog
+//     can exceed that, so real blocks would otherwise be wrongly dead-lettered.
 func (s *Service) getCachedWithRetry(ctx context.Context, get cacheGetter, dataType string, event outbound.BlockEvent) (json.RawMessage, error) {
 	cfg := cacheMissBackoff()
 	cfg.MaxRetries = s.config.CacheMissMaxRetries
@@ -446,7 +463,7 @@ func (s *Service) getCachedWithRetry(ctx context.Context, get cacheGetter, dataT
 		if errors.Is(err, errCacheMiss) {
 			cacheKey := shared.CacheKey(event.ChainID, event.BlockNumber, event.Version, dataType)
 			return nil, fmt.Errorf("%s data not found in cache for chain %d block %d version %d (cacheKey=%s): %w",
-				dataType, event.ChainID, event.BlockNumber, event.Version, cacheKey, ErrPermanent)
+				dataType, event.ChainID, event.BlockNumber, event.Version, cacheKey, errCacheMiss)
 		}
 		// Transient getter error: return as-is (already unwrapped).
 		return nil, err
@@ -455,15 +472,21 @@ func (s *Service) getCachedWithRetry(ctx context.Context, get cacheGetter, dataT
 	return data, nil
 }
 
-// processMessage handles a single SQS message. Errors it returns are transient by
-// default: the worker leaves the message on the queue for SQS redelivery. A failure
-// that redelivery cannot fix must be wrapped with ErrPermanent so the worker routes
-// it to the DLQ and deletes it. See ErrPermanent and the classification in
-// parseEvent, fetchExpectedData, and writeToS3.
-func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (retErr error) {
+// processMessage handles a single SQS message and returns the outcome status
+// alongside an error. Errors it returns are transient by default: the worker
+// leaves the message on the queue for SQS redelivery. A failure that redelivery
+// cannot fix must be wrapped with ErrPermanent so the worker routes it to the DLQ
+// and deletes it. The status is only meaningful when err is nil and records which
+// success path was taken (statusSuccess for a cache hit, statusAlreadyBackedUp for
+// a no-op when S3 already holds every file, statusRPCFallback for an RPC re-fetch).
+//
+// Read fallback chain on a cache miss: cache -> S3 (already backed up? no-op) ->
+// RPC by block hash. See the classification in parseEvent, fetchExpectedData,
+// fetchFromRPC, and writeToS3.
+func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (string, error) {
 	event, err := s.parseEvent(msg)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	s.logger.Debug("processing block",
@@ -472,18 +495,44 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 		"chainID", event.ChainID,
 	)
 
-	// Determine chain expectations (used for conditional fetching and validation)
 	expectation := s.chainExpectations[event.ChainID]
+	partitionKey := partition.GetPartition(event.BlockNumber)
+	expectedTypes := s.expectedTypes(expectation)
 
-	blockData, receiptsData, tracesData, blobsData, err := s.fetchExpectedData(ctx, event, expectation)
+	// S3 idempotency check first: if every expected file already exists this is a
+	// no-op. Done before any read so a re-delivery (or an aged-out-but-backed-up
+	// block) never triggers a needless cache read or RPC fetch.
+	allExist, err := s.allExpectedFilesExist(ctx, partitionKey, event, expectedTypes)
 	if err != nil {
-		return err
+		return "", err
+	}
+	if allExist {
+		s.logger.Debug("all expected files exist, skipping backup", "block", event.BlockNumber)
+		return statusAlreadyBackedUp, nil
 	}
 
-	// Calculate the partition (block range)
-	partitionKey := partition.GetPartition(event.BlockNumber)
+	// Read the data: cache first, then RPC by hash on a confirmed cache miss.
+	blockData, receiptsData, tracesData, blobsData, status, err := s.fetchBlockData(ctx, event, expectation)
+	if err != nil {
+		return "", err
+	}
 
-	// Determine which files are expected for a complete backup
+	if err := s.backUpToS3(ctx, partitionKey, event, blockData, receiptsData, tracesData, blobsData); err != nil {
+		return "", err
+	}
+
+	s.logger.Info("backed up block to S3",
+		"blockNumber", event.BlockNumber,
+		"partition", partitionKey,
+		"source", status,
+	)
+
+	return status, nil
+}
+
+// expectedTypes returns the data types that must be present for a complete
+// backup of the given chain. Block is always required; the rest are conditional.
+func (s *Service) expectedTypes(expectation ChainExpectation) []string {
 	expectedTypes := []string{"block"}
 	if expectation.ExpectReceipts {
 		expectedTypes = append(expectedTypes, "receipts")
@@ -494,54 +543,146 @@ func (s *Service) processMessage(ctx context.Context, msg outbound.SQSMessage) (
 	if expectation.ExpectBlobs {
 		expectedTypes = append(expectedTypes, "blobs")
 	}
+	return expectedTypes
+}
 
-	// Check if all expected files already exist
-	allExist := true
+// allExpectedFilesExist reports whether S3 already holds every expected file for
+// this block. A FileExists error is transient (returned unwrapped) so the message
+// stays on the queue for redelivery.
+func (s *Service) allExpectedFilesExist(ctx context.Context, partitionKey string, event outbound.BlockEvent, expectedTypes []string) (bool, error) {
 	for _, dataType := range expectedTypes {
 		key := s.generateKey(partitionKey, event, dataType)
 		exists, err := s.writer.FileExists(ctx, s.config.Bucket, key)
 		if err != nil {
-			return fmt.Errorf("failed to check existence of %s: %w", key, err)
+			return false, fmt.Errorf("failed to check existence of %s: %w", key, err)
 		}
 		if !exists {
-			allExist = false
-			break
+			return false, nil
 		}
 	}
+	return true, nil
+}
 
-	if allExist {
-		s.logger.Debug("all expected files exist, skipping backup", "block", event.BlockNumber)
-		return nil
+// fetchBlockData reads the block (and any expected optional types) from the cache,
+// falling back to an RPC fetch by block hash on a confirmed cache miss. It returns
+// the raw payloads plus the success status: statusSuccess for a cache hit,
+// statusRPCFallback when the data was re-fetched via RPC.
+func (s *Service) fetchBlockData(ctx context.Context, event outbound.BlockEvent, expectation ChainExpectation) (block, receipts, traces, blobs json.RawMessage, status string, err error) {
+	block, receipts, traces, blobs, err = s.fetchExpectedData(ctx, event, expectation)
+	if err == nil {
+		return block, receipts, traces, blobs, statusSuccess, nil
+	}
+	if !errors.Is(err, errCacheMiss) {
+		// Transient getter error or any other non-miss failure: surface as-is.
+		return nil, nil, nil, nil, "", err
 	}
 
-	// Write all available data to S3 (overwriting if necessary to ensure consistency)
-	if err := s.writeToS3(ctx, partitionKey, event, "block", blockData); err != nil {
+	// Cache miss: the payload aged out of the 2h TTL while the backlog drained.
+	// Re-fetch by block hash so a real block self-heals instead of being lost.
+	s.logger.Info("cache miss, falling back to RPC fetch by hash",
+		"blockNumber", event.BlockNumber,
+		"version", event.Version,
+		"chainID", event.ChainID,
+	)
+	block, receipts, traces, blobs, err = s.fetchFromRPC(ctx, event, expectation)
+	if err != nil {
+		return nil, nil, nil, nil, "", err
+	}
+	return block, receipts, traces, blobs, statusRPCFallback, nil
+}
+
+// fetchFromRPC fetches a block by hash via the blockchain client and validates it
+// against the chain expectation, mirroring the backfill validation:
+//   - whole-call error -> transient (the message stays on the queue for retry).
+//   - a per-type network/429/5xx/timeout error -> transient.
+//   - a null result (ErrUpstreamNullResult or null/empty payload) for an expected
+//     type, or a missing block hash -> permanent (DLQ): an aged-out block the node no
+//     longer returns by hash cannot be recovered by redelivery. See validateRPCType.
+//
+// Fetching by hash is TOCTOU-safe: it returns data for the exact block the event
+// references, even across a reorg.
+func (s *Service) fetchFromRPC(ctx context.Context, event outbound.BlockEvent, expectation ChainExpectation) (block, receipts, traces, blobs json.RawMessage, err error) {
+	// The fallback re-fetches by hash; without one the block can never be recovered.
+	if event.BlockHash == "" {
+		return nil, nil, nil, nil, fmt.Errorf("cannot RPC-fetch block %d: event has no block hash: %w", event.BlockNumber, ErrPermanent)
+	}
+	bd, err := s.client.GetBlockDataByHash(ctx, event.BlockNumber, event.BlockHash, true)
+	if err != nil {
+		// Network error / batch failure: transient, let SQS redeliver.
+		return nil, nil, nil, nil, fmt.Errorf("RPC fetch by hash failed for block %d (hash=%s): %w", event.BlockNumber, event.BlockHash, err)
+	}
+
+	if err := validateRPCType(event, "block", bd.Block, bd.BlockErr); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if expectation.ExpectReceipts {
+		if err := validateRPCType(event, "receipts", bd.Receipts, bd.ReceiptsErr); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		receipts = bd.Receipts
+	}
+	if expectation.ExpectTraces {
+		if err := validateRPCType(event, "traces", bd.Traces, bd.TracesErr); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		traces = bd.Traces
+	}
+	if expectation.ExpectBlobs {
+		if err := validateRPCType(event, "blobs", bd.Blobs, bd.BlobsErr); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		blobs = bd.Blobs
+	}
+
+	return bd.Block, receipts, traces, blobs, nil
+}
+
+// validateRPCType classifies one RPC-fetched data type. The fallback only runs for a
+// cache miss, i.e. a block that has already aged out of cache (>2h old), so:
+//   - a null result (the adapter's ErrUpstreamNullResult, or a null/empty payload) is
+//     PERMANENT: an aged-out block the node no longer returns by hash has been reorged
+//     out or is absent and will not appear on redelivery, so it is routed to the DLQ
+//     instead of retried (which would only head-of-line stall the FIFO queue). This is
+//     deliberately stricter than the watcher/backfill, where a null is a recoverable
+//     propagation race for a freshly announced block.
+//   - any other per-type fetch error (network / 429 / 5xx / timeout) is TRANSIENT and
+//     left on the queue for SQS to redeliver.
+func validateRPCType(event outbound.BlockEvent, dataType string, payload json.RawMessage, typeErr error) error {
+	if typeErr != nil {
+		if errors.Is(typeErr, rpcutil.ErrUpstreamNullResult) {
+			return fmt.Errorf("RPC returned null %s for aged-out block %d (chain=%d, version=%d, hash=%s): %w",
+				dataType, event.BlockNumber, event.ChainID, event.Version, event.BlockHash, ErrPermanent)
+		}
+		return fmt.Errorf("RPC %s fetch failed for block %d (hash=%s): %w", dataType, event.BlockNumber, event.BlockHash, typeErr)
+	}
+	if rpcutil.IsNullOrEmpty(payload) {
+		return fmt.Errorf("RPC returned null/empty %s for block %d (chain=%d, version=%d, hash=%s): %w",
+			dataType, event.BlockNumber, event.ChainID, event.Version, event.BlockHash, ErrPermanent)
+	}
+	return nil
+}
+
+// backUpToS3 writes the block and each non-nil expected data type to S3. The
+// writeToS3 null/empty guard stays permanent for each type.
+func (s *Service) backUpToS3(ctx context.Context, partitionKey string, event outbound.BlockEvent, block, receipts, traces, blobs json.RawMessage) error {
+	if err := s.writeToS3(ctx, partitionKey, event, "block", block); err != nil {
 		return err
 	}
-
-	if receiptsData != nil {
-		if err := s.writeToS3(ctx, partitionKey, event, "receipts", receiptsData); err != nil {
+	if receipts != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, "receipts", receipts); err != nil {
 			return err
 		}
 	}
-
-	if tracesData != nil {
-		if err := s.writeToS3(ctx, partitionKey, event, "traces", tracesData); err != nil {
+	if traces != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, "traces", traces); err != nil {
 			return err
 		}
 	}
-
-	if blobsData != nil {
-		if err := s.writeToS3(ctx, partitionKey, event, "blobs", blobsData); err != nil {
+	if blobs != nil {
+		if err := s.writeToS3(ctx, partitionKey, event, "blobs", blobs); err != nil {
 			return err
 		}
 	}
-
-	s.logger.Info("backed up block to S3",
-		"blockNumber", event.BlockNumber,
-		"partition", partitionKey,
-	)
-
 	return nil
 }
 

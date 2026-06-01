@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,74 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
+
+// =============================================================================
+// Stub blockchain client
+// =============================================================================
+
+// stubBlockchainClient stubs outbound.BlockchainClient for integration tests.
+// Alchemy is an external data source we do not control, so the RPC fallback is
+// stubbed rather than hitting the network. Only GetBlockDataByHash is exercised
+// by the backup service; the rest panic if called.
+type stubBlockchainClient struct {
+	calls   atomic.Int32
+	data    outbound.BlockData
+	callErr error
+}
+
+func (s *stubBlockchainClient) GetBlockDataByHash(ctx context.Context, blockNum int64, hash string, fullTx bool) (outbound.BlockData, error) {
+	s.calls.Add(1)
+	if s.callErr != nil {
+		return outbound.BlockData{}, s.callErr
+	}
+	return s.data, nil
+}
+
+func (s *stubBlockchainClient) GetBlockByNumber(ctx context.Context, blockNum int64, fullTx bool) (json.RawMessage, error) {
+	panic("GetBlockByNumber must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlockByHash(ctx context.Context, hash string, fullTx bool) (*outbound.BlockHeader, error) {
+	panic("GetBlockByHash must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetFullBlockByHash(ctx context.Context, hash string, fullTx bool) (json.RawMessage, error) {
+	panic("GetFullBlockByHash must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlockReceipts(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	panic("GetBlockReceipts must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlockReceiptsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	panic("GetBlockReceiptsByHash must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlockTraces(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	panic("GetBlockTraces must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlockTracesByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	panic("GetBlockTracesByHash must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlobSidecars(ctx context.Context, blockNum int64) (json.RawMessage, error) {
+	panic("GetBlobSidecars must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlobSidecarsByHash(ctx context.Context, hash string) (json.RawMessage, error) {
+	panic("GetBlobSidecarsByHash must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetCurrentBlockNumber(ctx context.Context) (int64, error) {
+	panic("GetCurrentBlockNumber must not be called by the backup service")
+}
+
+func (s *stubBlockchainClient) GetBlocksBatch(ctx context.Context, blockNums []int64, fullTx bool) ([]outbound.BlockData, error) {
+	panic("GetBlocksBatch must not be called by the backup service")
+}
+
+var _ outbound.BlockchainClient = (*stubBlockchainClient)(nil)
 
 // =============================================================================
 // Test Infrastructure
@@ -395,7 +464,7 @@ func TestIntegration_SingleBlockBackup(t *testing.T) {
 		Workers:   2,
 		BatchSize: 10,
 		Logger:    infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -500,7 +569,7 @@ func TestIntegration_MultipleBlocksProcessedConcurrently(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -573,7 +642,7 @@ func TestIntegration_IdempotentWrites(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -676,7 +745,7 @@ func TestIntegration_DifferentVersionsStored(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -794,7 +863,7 @@ func TestIntegration_LargeBlockData(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -857,7 +926,7 @@ func TestIntegration_GracefulShutdown(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -936,7 +1005,7 @@ func TestIntegration_RaceConditionIdempotency(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1042,7 +1111,7 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1081,10 +1150,10 @@ func TestIntegration_PartialWriteFailure(t *testing.T) {
 	}
 }
 
-// TestIntegration_CacheMissBlockData tests that a confirmed cache miss (no data
-// after retries) is treated as permanent: the message is routed to the DLQ and
-// removed from the source queue, and no S3 files are written.
-func TestIntegration_CacheMissBlockData(t *testing.T) {
+// TestIntegration_CacheMiss_RPCFallbackBacksUp tests that a cache miss is no
+// longer terminal: the worker re-fetches the block by hash via the (stubbed) RPC
+// client and backs it up to S3, with nothing dead-lettered.
+func TestIntegration_CacheMiss_RPCFallbackBacksUp(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
 	}
@@ -1098,20 +1167,107 @@ func TestIntegration_CacheMissBlockData(t *testing.T) {
 	blockNumber := int64(9999)
 	chainID := int64(1)
 
-	// Intentionally NOT setting any cache data - simulating a confirmed miss.
+	// Intentionally NOT setting any cache data - simulating an aged-out miss. The
+	// stub returns the block so the RPC fallback can self-heal.
+	client := &stubBlockchainClient{
+		data: outbound.BlockData{
+			BlockNumber: blockNumber,
+			Block:       json.RawMessage(`{"number":"0x270f","hash":"0xfromrpc"}`),
+		},
+	}
 
 	svc, err := NewService(Config{
-		ChainID:   chainID,
-		Bucket:    infra.BucketName,
-		Workers:   1,
-		BatchSize: 10,
-		// Fail fast: no retries, so a miss is permanent immediately.
+		ChainID:             chainID,
+		Bucket:              infra.BucketName,
+		Workers:             1,
+		BatchSize:           10,
+		CacheMissMaxRetries: 0, // fail fast to the RPC fallback
+		ChainExpectations: map[int64]ChainExpectation{
+			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
+		},
+		Logger: infra.Logger,
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, client)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Run(svcCtx)
+	}()
+
+	event := outbound.BlockEvent{
+		ChainID:     chainID,
+		BlockNumber: blockNumber,
+		Version:     0,
+		BlockHash:   "0xaged",
+	}
+	publishBlockEvent(t, ctx, infra, event)
+
+	// The block should be backed up to S3 from the RPC fallback.
+	prefix := fmt.Sprintf("9000-9999/%d_", blockNumber)
+	objects := waitForS3Objects(t, ctx, infra, prefix, 1, 30*time.Second)
+
+	svc.Stop()
+	svcCancel()
+	<-done
+
+	if len(objects) != 1 {
+		t.Errorf("expected 1 file from RPC fallback, got %d: %v", len(objects), objects)
+	}
+	if calls := client.calls.Load(); calls < 1 {
+		t.Errorf("expected at least 1 RPC call, got %d", calls)
+	}
+
+	// Nothing should have been dead-lettered.
+	dlqAttrs, err := infra.SQSClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(infra.DLQQueueURL),
+		AttributeNames: []sqstypes.QueueAttributeName{
+			sqstypes.QueueAttributeNameApproximateNumberOfMessages,
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to get DLQ attributes: %v", err)
+	}
+	if got := dlqAttrs.Attributes[string(sqstypes.QueueAttributeNameApproximateNumberOfMessages)]; got != "0" {
+		t.Errorf("expected 0 messages on DLQ for RPC fallback success, got %s", got)
+	}
+}
+
+// TestIntegration_CacheMiss_RPCNullPermanent tests that a cache miss whose RPC
+// re-fetch returns a null block is permanent: routed to the DLQ, removed from the
+// source queue, with no S3 files written.
+func TestIntegration_CacheMiss_RPCNullPermanent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupIntegrationInfra(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	blockNumber := int64(9998)
+	chainID := int64(1)
+
+	// No cache data, and the RPC stub returns a null block -> permanent.
+	client := &stubBlockchainClient{
+		data: outbound.BlockData{BlockNumber: blockNumber, Block: json.RawMessage("null")},
+	}
+
+	svc, err := NewService(Config{
+		ChainID:             chainID,
+		Bucket:              infra.BucketName,
+		Workers:             1,
+		BatchSize:           10,
 		CacheMissMaxRetries: 0,
 		ChainExpectations: map[int64]ChainExpectation{
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, client)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1132,7 +1288,7 @@ func TestIntegration_CacheMissBlockData(t *testing.T) {
 
 	// The permanent failure should land on the DLQ.
 	dlqMsg := waitForDLQMessage(t, ctx, infra, 30*time.Second)
-	if !strings.Contains(dlqMsg, `"blockNumber":9999`) {
+	if !strings.Contains(dlqMsg, `"blockNumber":9998`) {
 		t.Errorf("DLQ message does not reference the expected block: %s", dlqMsg)
 	}
 
@@ -1140,11 +1296,11 @@ func TestIntegration_CacheMissBlockData(t *testing.T) {
 	svcCancel()
 	<-done
 
-	// No files were created (block data was missing).
+	// No files were created (RPC returned a null block).
 	prefix := fmt.Sprintf("9000-9999/%d_", blockNumber)
 	objects := listS3Objects(t, ctx, infra, prefix)
 	if len(objects) != 0 {
-		t.Errorf("expected 0 files (cache miss), got %d: %v", len(objects), objects)
+		t.Errorf("expected 0 files (null RPC block), got %d: %v", len(objects), objects)
 	}
 }
 
@@ -1186,7 +1342,7 @@ func TestIntegration_TransientRedisError(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, brokenCache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, brokenCache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1301,7 +1457,7 @@ func TestIntegration_ChainIDMismatch(t *testing.T) {
 			eventChainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1387,7 +1543,7 @@ func TestIntegration_GzipContentIntegrity(t *testing.T) {
 			chainID: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1473,7 +1629,7 @@ func TestIntegration_ChainExpectationsMismatch(t *testing.T) {
 			},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1570,7 +1726,7 @@ func TestIntegration_ChainExpectationsMetSuccessfully(t *testing.T) {
 			},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}
@@ -1658,7 +1814,7 @@ func TestIntegration_UnknownChainNoExpectations(t *testing.T) {
 			},
 		},
 		Logger: infra.Logger,
-	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter)
+	}, infra.Consumer, infra.Cache, infra.Writer, infra.DeadLetter, &stubBlockchainClient{})
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)
 	}

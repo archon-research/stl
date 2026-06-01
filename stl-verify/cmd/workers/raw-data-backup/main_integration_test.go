@@ -133,4 +133,8 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("REDIS_ADDR", "127.0.0.1:6379")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEPLOY_ENV", "test")
+	// The RPC fallback only needs a non-empty URL to build the Alchemy client; no
+	// network call is made at startup, so a placeholder is sufficient here.
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 }
