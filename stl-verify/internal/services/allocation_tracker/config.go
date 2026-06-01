@@ -46,7 +46,7 @@ func DefaultProxies() []ProxyConfig {
 func LoadDefaultProxies() ([]ProxyConfig, error) {
 	contract, err := axis_synome_contract.LoadDefaultContract()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
 	}
 
 	almProxyByStar := contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy

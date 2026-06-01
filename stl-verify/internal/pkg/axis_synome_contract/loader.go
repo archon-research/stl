@@ -75,12 +75,12 @@ type TokenEntry struct {
 func LoadDefault() (*Bundle, error) {
 	contract, err := LoadDefaultContract()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load default contract: %w", err)
 	}
 
 	schema, err := LoadDefaultSchema()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load default schema: %w", err)
 	}
 
 	return &Bundle{Contract: *contract, Schema: schema}, nil

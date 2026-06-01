@@ -73,7 +73,7 @@ func NewService(
 		return nil, fmt.Errorf("at least one token entry is required for chain ID %d", config.ChainID)
 	}
 	if err := validateScopedEntriesAndProxies(entries, proxies, config.ChainID); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating scoped entries/proxies: %w", err)
 	}
 
 	return &Service{
@@ -96,7 +96,10 @@ func validateScopedEntriesAndProxies(entries []*TokenEntry, proxies []ProxyConfi
 	}
 
 	seenEntries := make(map[EntryKey]struct{}, len(entries))
-	for _, entry := range entries {
+	for i, entry := range entries {
+		if entry == nil {
+			return fmt.Errorf("entry at index %d is nil", i)
+		}
 		if entry.Chain != chainName {
 			return fmt.Errorf(
 				"entry %s/%s has chain %s, want %s",
