@@ -284,3 +284,48 @@ class TestTokenPriceQuoteValidation:
                 timestamp=datetime(2026, 1, 1, tzinfo=UTC),
                 staleness_seconds=-5,
             )
+
+
+def test_core_model_details_in_rrc_result():
+    from decimal import Decimal
+    from app.domain.entities.risk import CoreModelDetails, RrcResult
+
+    details = CoreModelDetails(
+        risk_model="core_model",
+        crr_el_pct=Decimal("12.5"),
+        crr_es_pct=Decimal("15.0"),
+        crr_var_pct=Decimal("10.0"),
+        hhi=Decimal("22.3"),
+        protocol="MORPHO",
+        forecast_step=14,
+        n_mc=10000,
+        copula_type="T-COPULA",
+    )
+    result = RrcResult(
+        asset_id=1,
+        prime_id="0xBcca60bB61934080951369a648Fb03DF4F96263C",
+        rrc_usd=Decimal("1250.00"),
+        comparable_crr_pct=Decimal("12.5"),
+        risk_model="core_model",
+        details=details,
+    )
+    assert result.risk_model == "core_model"
+    assert result.details.crr_el_pct == Decimal("12.5")
+
+
+def test_core_model_details_null_hhi():
+    from decimal import Decimal
+    from app.domain.entities.risk import CoreModelDetails
+
+    d = CoreModelDetails(
+        risk_model="core_model",
+        crr_el_pct=Decimal("5"),
+        crr_es_pct=Decimal("6"),
+        crr_var_pct=Decimal("4"),
+        hhi=None,
+        protocol="SPARKLEND",
+        forecast_step=7,
+        n_mc=1000,
+        copula_type="GAUSSIAN",
+    )
+    assert d.hhi is None
