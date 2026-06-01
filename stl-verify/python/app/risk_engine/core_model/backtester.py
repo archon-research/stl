@@ -6,10 +6,10 @@
 # statistical hit tests such as Kupiec and Christoffersen tests.
 # ============================================================
 
-import pandas as pd
 import numpy as np
-from scipy.stats import chi2
+import pandas as pd
 from arch import arch_model
+from scipy.stats import chi2
 
 
 class Backtester:

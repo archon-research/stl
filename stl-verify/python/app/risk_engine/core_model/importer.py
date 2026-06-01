@@ -1,4 +1,5 @@
 import os
+
 import pandas as pd
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -65,7 +66,7 @@ def load_price_data(
         A DataFrame containing the price data for the specified ticker.
     """
     _path = lambda filename: os.path.join("inputs", filename)
-    price_df = pd.read_parquet(_path(f"prices_df.parquet"))
+    price_df = pd.read_parquet(_path("prices_df.parquet"))
     price_df = price_df[collateral_list]
     return price_df
 

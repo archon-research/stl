@@ -1,8 +1,6 @@
-import pandas as pd
 import numpy as np
-from scipy.stats import t, norm
-from scipy.special import gammaln
-from scipy.optimize import minimize
+import pandas as pd
+from scipy.stats import norm, t
 
 
 class Aggregator:

@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

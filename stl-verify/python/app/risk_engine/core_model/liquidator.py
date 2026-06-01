@@ -8,8 +8,8 @@
 # Slippage --> CEXs based or Hyperlend based or Uniswap V3-based
 # ============================================================
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from app.risk_engine.core_model import importer
 

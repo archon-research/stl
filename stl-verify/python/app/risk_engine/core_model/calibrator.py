@@ -7,19 +7,20 @@
 # model forecasts using statistical backtests.
 # ============================================================
 
-import pandas as pd
-import numpy as np
-from typing import Optional, Tuple, Dict, Any
-import warnings
-from joblib import Parallel, delayed
 import random
+import warnings
+from typing import Any, Dict, Optional, Tuple
 
-from arch import arch_model
+import numpy as np
+import pandas as pd
 import scipy.stats as stats
-from statsmodels.tsa.stattools import adfuller
-from statsmodels.tsa.arima.model import ARIMA, ARIMAResults
+from arch import arch_model
+from arch.univariate.base import ARCHModel, ARCHModelResult
+from joblib import Parallel, delayed
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
-from arch.univariate.base import ARCHModelResult, ARCHModel
+from statsmodels.tsa.arima.model import ARIMA, ARIMAResults
+from statsmodels.tsa.stattools import adfuller
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 from app.risk_engine.core_model.backtester import Backtester

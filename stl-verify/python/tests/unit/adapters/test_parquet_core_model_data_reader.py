@@ -1,8 +1,9 @@
 """Unit tests for ParquetCoreModelDataReader."""
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
-from pathlib import Path
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 

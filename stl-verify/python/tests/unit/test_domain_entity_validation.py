@@ -288,6 +288,7 @@ class TestTokenPriceQuoteValidation:
 
 def test_core_model_details_in_rrc_result():
     from decimal import Decimal
+
     from app.domain.entities.risk import CoreModelDetails, RrcResult
 
     details = CoreModelDetails(
@@ -315,6 +316,7 @@ def test_core_model_details_in_rrc_result():
 
 def test_core_model_details_null_hhi():
     from decimal import Decimal
+
     from app.domain.entities.risk import CoreModelDetails
 
     d = CoreModelDetails(
