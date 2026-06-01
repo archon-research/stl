@@ -25,8 +25,8 @@
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
   "dependencies": {
-    "@archon-research/http-client-core": "0.4.0",
-    "@archon-research/http-client-react": "0.4.0",
+    "@archon-research/http-client-core": "0.5.0",
+    "@archon-research/http-client-react": "0.5.0",
     "@tanstack/react-query": "^5.99.2",
     "@tanstack/react-table": "^8.20.0",
     "lucide-react": "^1.14.0",
@@ -37,10 +37,10 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@archon-research/design-system": "0.4.0",
-    "@archon-research/oxfmt-config": "0.4.0",
-    "@archon-research/oxlint-config": "0.4.0",
-    "@archon-research/tsconfig": "0.4.0",
+    "@archon-research/design-system": "0.5.0",
+    "@archon-research/oxfmt-config": "0.5.0",
+    "@archon-research/oxlint-config": "0.5.0",
+    "@archon-research/tsconfig": "0.5.0",
     "@pandacss/dev": "^1.9.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
