@@ -26,7 +26,12 @@ ALTER TABLE core_model_results SET (
 
 SELECT add_compression_policy('core_model_results', INTERVAL '7 days');
 
-SELECT add_tiering_policy('core_model_results', INTERVAL '30 days');
+DO $$
+BEGIN
+    PERFORM add_tiering_policy('core_model_results', INTERVAL '30 days', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for core_model_results';
+END $$;
 
 -- Track this migration (filename must match exactly!)
 INSERT INTO migrations (filename)
