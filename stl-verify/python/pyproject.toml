@@ -18,6 +18,11 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.41.0,<2",
     "pandas>=2.2.0",
     "numpy",
+    "arch>=8.0.0",
+    "statsmodels>=0.14.6",
+    "scipy>=1.17.1",
+    "joblib>=1.5.3",
+    "tqdm>=4.67.3",
 ]
 
 [project.optional-dependencies]
