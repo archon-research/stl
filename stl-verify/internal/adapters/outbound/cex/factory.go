@@ -37,7 +37,6 @@ func NewExchangeOrderBookStreamer(exchange string, cfg Config) (outbound.Exchang
 			HTTPClient:        cfg.HTTPClient,
 			PollInterval:      cfg.PollInterval,
 			ChannelBufferSize: cfg.ChannelBufferSize,
-			DepthLimit:        cfg.DepthLimit,
 		})
 	default:
 		return nil, fmt.Errorf("unsupported exchange %q, supported: %v", exchange, SupportedExchanges())

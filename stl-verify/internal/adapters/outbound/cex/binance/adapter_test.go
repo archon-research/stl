@@ -8,11 +8,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cex/binance"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
-
-// Compile-time interface check.
-var _ outbound.ExchangeOrderBookStreamer = (*binance.Adapter)(nil)
 
 const depthResponse = `{
 	"lastUpdateId": 12345,
@@ -44,19 +40,93 @@ func TestAdapter_Name(t *testing.T) {
 	}
 }
 
+func TestNewAdapter_RejectsNegativeConfig(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  binance.Config
+	}{
+		{name: "negative PollInterval", cfg: binance.Config{PollInterval: -1}},
+		{name: "negative ChannelBufferSize", cfg: binance.Config{ChannelBufferSize: -1}},
+		{name: "negative DepthLimit", cfg: binance.Config{DepthLimit: -1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := binance.NewAdapter(tt.cfg)
+			if err == nil {
+				t.Error("expected error for invalid config, got nil")
+			}
+		})
+	}
+}
+
 func TestAdapter_Connect_RejectsEmptySymbols(t *testing.T) {
 	a, _ := binance.NewAdapter(binance.Config{})
-	err := a.Connect(context.Background(), []string{})
-	if err == nil {
+	if err := a.Connect(context.Background(), []string{}); err == nil {
 		t.Error("Connect(empty) should return error")
 	}
 }
 
 func TestAdapter_Connect_RejectsNilSymbols(t *testing.T) {
 	a, _ := binance.NewAdapter(binance.Config{})
-	err := a.Connect(context.Background(), nil)
-	if err == nil {
+	if err := a.Connect(context.Background(), nil); err == nil {
 		t.Error("Connect(nil) should return error")
+	}
+}
+
+func TestAdapter_Connect_RejectsBlankSymbol(t *testing.T) {
+	a, _ := binance.NewAdapter(binance.Config{})
+	if err := a.Connect(context.Background(), []string{""}); err == nil {
+		t.Error("Connect with blank symbol should return error")
+	}
+}
+
+func TestAdapter_Stream_BeforeConnect_ReturnsError(t *testing.T) {
+	a, _ := binance.NewAdapter(binance.Config{})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, errCh := a.Stream(ctx)
+	select {
+	case err, ok := <-errCh:
+		if !ok {
+			t.Fatal("error channel closed without error")
+		}
+		if err == nil {
+			t.Error("expected non-nil error for Stream before Connect")
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for error")
+	}
+}
+
+func TestAdapter_Stream_CalledTwice_ReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"lastUpdateId":1,"bids":[],"asks":[]}`))
+	}))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if err := a.Connect(ctx, []string{"BTCUSDT"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	a.Stream(ctx) // first call — ignore channels
+	_, errCh := a.Stream(ctx)
+
+	select {
+	case err, ok := <-errCh:
+		if !ok {
+			t.Fatal("error channel closed without error on second Stream call")
+		}
+		if err == nil {
+			t.Error("expected non-nil error on second Stream call")
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for error from second Stream call")
 	}
 }
 
@@ -189,7 +259,8 @@ func TestAdapter_Close_StopsStreaming(t *testing.T) {
 	defer server.Close()
 
 	a := newTestAdapter(t, server)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	if err := a.Connect(ctx, []string{"BTCUSDT"}); err != nil {
 		t.Fatalf("Connect: %v", err)
