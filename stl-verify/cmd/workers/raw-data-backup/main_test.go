@@ -84,6 +84,12 @@ func TestParseConfig(t *testing.T) {
 			wantError: "cannot derive DLQ URL",
 		},
 		{
+			name:      "non-fifo DLQ_QUEUE_URL override rejected",
+			env:       with(requiredEnv(), "DLQ_QUEUE_URL", "https://sqs.eu-west-1.amazonaws.com/123/dlq-standard"),
+			workers:   2,
+			wantError: "DLQ_QUEUE_URL must be a FIFO queue URL",
+		},
+		{
 			name:      "missing S3_BUCKET",
 			env:       without(requiredEnv(), "S3_BUCKET"),
 			workers:   2,

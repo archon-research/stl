@@ -396,6 +396,9 @@ func newTestService(t *testing.T, config Config, consumer outbound.SQSConsumer, 
 	if config.Logger == nil {
 		config.Logger = testutil.DiscardLogger()
 	}
+	if deadLetter == nil {
+		deadLetter = newMockDeadLetterPublisher()
+	}
 	svc, err := NewService(config, consumer, cache, writer, deadLetter)
 	if err != nil {
 		t.Fatalf("failed to create service: %v", err)

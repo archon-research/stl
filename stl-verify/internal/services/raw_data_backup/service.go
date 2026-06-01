@@ -96,7 +96,9 @@ type Config struct {
 	// first) to re-read a cache value before treating a miss as permanent.
 	// This absorbs the not-in-cache-yet race between publish and consume.
 	// Set to 0 to fail fast on the first miss (recommended during a backlog
-	// drain). Defaults to ConfigDefaults().CacheMissMaxRetries.
+	// drain). NewService does NOT default this field; an unset value is taken as
+	// 0. The worker's parseConfig supplies ConfigDefaults().CacheMissMaxRetries (3)
+	// when CACHE_MISS_MAX_RETRIES is unset in the environment.
 	CacheMissMaxRetries int
 
 	// Metrics is the metrics recorder (optional).

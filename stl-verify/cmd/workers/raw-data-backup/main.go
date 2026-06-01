@@ -112,6 +112,13 @@ func parseConfig(workers int) (workerConfig, error) {
 		}
 		cfg.dlqQueueURL = derived
 	}
+	// The DLQ is FIFO and the publisher always sends a MessageGroupId, which a
+	// standard queue rejects at runtime. Reject a non-FIFO override early so a
+	// misconfigured DLQ_QUEUE_URL fails fast rather than silently re-blocking the
+	// main queue (permanent failures would be preserved instead of dead-lettered).
+	if !strings.HasSuffix(cfg.dlqQueueURL, ".fifo") {
+		return workerConfig{}, fmt.Errorf("DLQ_QUEUE_URL must be a FIFO queue URL ending in .fifo, got %q", cfg.dlqQueueURL)
+	}
 
 	cfg.bucket = os.Getenv("S3_BUCKET")
 	if cfg.bucket == "" {
