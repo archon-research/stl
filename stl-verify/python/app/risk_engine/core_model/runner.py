@@ -21,6 +21,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pandas as pd
+
 from app.risk_engine.core_model import importer
 from app.risk_engine.core_model.calibrator import Calibrator
 from app.risk_engine.core_model.forecaster import Simulator
@@ -188,11 +190,24 @@ async def run(
         vol_floor_pct=p["VOL_FLOOR_PCT"],
     )
 
+    # Step 4 from original main.py: rename simulated price columns to a proper
+    # datetime index. Liquidator.get_delta() subtracts adjacent column values
+    # to infer the time step, so columns must be Timestamps not strings.
+    FREQ = "1h" if p["HOURLY_CONV"] else "1D"
+    PERIODS = p["FORECAST_STEP"] * 24 if p["HOURLY_CONV"] else p["FORECAST_STEP"]
+    for token in all_simulated_prices:
+        all_simulated_prices[token].columns = pd.date_range(
+            start=prices_df.index[-1],
+            periods=PERIODS,
+            freq=FREQ,
+        )
+
     protection_usd = _load_protection_usd(p["PROTOCOL"], inputs_dir)
 
-    # Liquidator.__init__ calls importer.load_orderbook_data() which uses
-    # CWD-relative paths -- temporarily chdir to inputs_dir to satisfy this.
-    with _chdir(inputs_dir):
+    # Liquidator.__init__ calls importer.load_orderbook_data() which resolves
+    # files as os.path.join("inputs", filename) -- chdir to the parent of
+    # inputs_dir so that relative path resolves correctly.
+    with _chdir(inputs_dir.parent):
         init_positions = Liquidator(borrowers_df=users_df, market_df=market_df)
 
     liq_results = init_positions.simulate_liquidations(
