@@ -346,9 +346,62 @@ func (m *mockS3Writer) PresetFileExists(bucket, key string) {
 	m.files[bucket+"/"+key] = []byte{}
 }
 
+// mockDeadLetterPublisher is a mock implementation of outbound.DeadLetterPublisher.
+type mockDeadLetterPublisher struct {
+	mu         sync.Mutex
+	published  []dlqPublish
+	publishErr error
+	calls      atomic.Int32
+}
+
+type dlqPublish struct {
+	body    string
+	groupID string
+}
+
+var _ outbound.DeadLetterPublisher = (*mockDeadLetterPublisher)(nil)
+
+func newMockDeadLetterPublisher() *mockDeadLetterPublisher {
+	return &mockDeadLetterPublisher{}
+}
+
+func (m *mockDeadLetterPublisher) Publish(ctx context.Context, body string, groupID string) error {
+	m.calls.Add(1)
+	if m.publishErr != nil {
+		return m.publishErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.published = append(m.published, dlqPublish{body: body, groupID: groupID})
+	return nil
+}
+
+func (m *mockDeadLetterPublisher) Published() []dlqPublish {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]dlqPublish, len(m.published))
+	copy(result, m.published)
+	return result
+}
+
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+// newTestService builds a Service with mocks for the public-API driven tests.
+// It wires a discard-logger and a no-op dead-letter publisher unless the caller
+// supplies its own via the Config/arguments.
+func newTestService(t *testing.T, config Config, consumer outbound.SQSConsumer, cache outbound.BlockCache, writer outbound.S3Writer, deadLetter outbound.DeadLetterPublisher) *Service {
+	t.Helper()
+	if config.Logger == nil {
+		config.Logger = testutil.DiscardLogger()
+	}
+	svc, err := NewService(config, consumer, cache, writer, deadLetter)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	return svc
+}
 
 // blockOnlyExpectations returns chain expectations where only block data is required.
 // Use this for unit tests that only set block data in cache.
@@ -394,7 +447,7 @@ func TestNewService_Success(t *testing.T) {
 		Bucket:  "test-bucket",
 		Workers: 2,
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -410,7 +463,7 @@ func TestNewService_NilConsumer(t *testing.T) {
 
 	_, err := NewService(Config{
 		Bucket: "test-bucket",
-	}, nil, cache, writer)
+	}, nil, cache, writer, newMockDeadLetterPublisher())
 
 	if err == nil {
 		t.Fatal("expected error for nil consumer")
@@ -426,7 +479,7 @@ func TestNewService_NilCache(t *testing.T) {
 
 	_, err := NewService(Config{
 		Bucket: "test-bucket",
-	}, consumer, nil, writer)
+	}, consumer, nil, writer, newMockDeadLetterPublisher())
 
 	if err == nil {
 		t.Fatal("expected error for nil cache")
@@ -442,12 +495,29 @@ func TestNewService_NilWriter(t *testing.T) {
 
 	_, err := NewService(Config{
 		Bucket: "test-bucket",
-	}, consumer, cache, nil)
+	}, consumer, cache, nil, newMockDeadLetterPublisher())
 
 	if err == nil {
 		t.Fatal("expected error for nil writer")
 	}
 	if !strings.Contains(err.Error(), "writer is required") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestNewService_NilDeadLetter(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+
+	_, err := NewService(Config{
+		Bucket: "test-bucket",
+	}, consumer, cache, writer, nil)
+
+	if err == nil {
+		t.Fatal("expected error for nil dead-letter publisher")
+	}
+	if !strings.Contains(err.Error(), "dead-letter publisher is required") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -459,7 +529,7 @@ func TestNewService_EmptyBucket(t *testing.T) {
 
 	_, err := NewService(Config{
 		Bucket: "",
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	if err == nil {
 		t.Fatal("expected error for empty bucket")
@@ -477,7 +547,7 @@ func TestNewService_DefaultsApplied(t *testing.T) {
 	svc, err := NewService(Config{
 		Bucket:  "test-bucket",
 		Workers: 0, // Should use default
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -506,7 +576,7 @@ func TestProcessMessage_Success(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Set up cache with block data
 	event := createBlockEvent(1, 100, 0)
@@ -560,7 +630,7 @@ func TestProcessMessage_AllDataTypesWithExplicitExpectations(t *testing.T) {
 			1: {ExpectReceipts: true, ExpectTraces: true, ExpectBlobs: true},
 		},
 		Logger: testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -592,7 +662,7 @@ func TestProcessMessage_BlockOnlyNoOptionalData(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Set up cache with ONLY block data (no receipts, traces, blobs)
 	event := createBlockEvent(1, 100, 0)
@@ -621,10 +691,11 @@ func TestProcessMessage_BlockNotInCache(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 1,
-		Bucket:  "test-bucket",
-		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+		ChainID:             1,
+		Bucket:              "test-bucket",
+		CacheMissMaxRetries: 0,
+		Logger:              testutil.DiscardLogger(),
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Don't put any data in cache
 	event := createBlockEvent(1, 100, 0)
@@ -638,6 +709,9 @@ func TestProcessMessage_BlockNotInCache(t *testing.T) {
 	if !strings.Contains(err.Error(), "block data not found in cache") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+	if !errors.Is(err, ErrPermanent) {
+		t.Errorf("expected missing block to be permanent, got: %v", err)
+	}
 }
 
 func TestProcessMessage_InvalidJSON(t *testing.T) {
@@ -649,7 +723,7 @@ func TestProcessMessage_InvalidJSON(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	msg := outbound.SQSMessage{
 		MessageID:     "msg1",
@@ -677,7 +751,7 @@ func TestProcessMessage_ChainIDMismatch(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Event comes from chain 137 (Polygon)
 	event := createBlockEvent(137, 100, 0)
@@ -714,7 +788,7 @@ func TestProcessMessage_CacheGetBlockError(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	cache.SetGetError("block", 1, 100, 0, errors.New("redis connection failed"))
@@ -739,7 +813,7 @@ func TestProcessMessage_CacheGetReceiptsError(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -770,7 +844,7 @@ func TestProcessMessage_CacheGetTracesError(t *testing.T) {
 			1: {ExpectReceipts: false, ExpectTraces: true, ExpectBlobs: false},
 		},
 		Logger: testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -801,7 +875,7 @@ func TestProcessMessage_CacheGetBlobsError(t *testing.T) {
 			1: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: true},
 		},
 		Logger: testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -817,6 +891,9 @@ func TestProcessMessage_CacheGetBlobsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to get blobs from cache") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+	if errors.Is(err, ErrPermanent) {
+		t.Error("a cache getter error must be transient, not ErrPermanent")
+	}
 }
 
 func TestProcessMessage_S3WriteError(t *testing.T) {
@@ -829,7 +906,7 @@ func TestProcessMessage_S3WriteError(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -846,6 +923,9 @@ func TestProcessMessage_S3WriteError(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to write block to S3") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+	if errors.Is(err, ErrPermanent) {
+		t.Error("an S3 write error must be transient, not ErrPermanent")
+	}
 }
 
 func TestProcessMessage_S3ExistsError(t *testing.T) {
@@ -858,7 +938,7 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -875,6 +955,9 @@ func TestProcessMessage_S3ExistsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "failed to check") {
 		t.Errorf("unexpected error message: %v", err)
 	}
+	if errors.Is(err, ErrPermanent) {
+		t.Error("an S3 exists-check error must be transient, not ErrPermanent")
+	}
 }
 
 func TestProcessMessage_Idempotent_SkipsExistingFile(t *testing.T) {
@@ -887,7 +970,7 @@ func TestProcessMessage_Idempotent_SkipsExistingFile(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -920,7 +1003,7 @@ func TestProcessMessage_DifferentVersionsAreSeparate(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 
@@ -961,7 +1044,7 @@ func TestProcessMessage_SameBlockNumberSameKeyPattern(t *testing.T) {
 		Bucket:            "mainnet-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 
@@ -1002,7 +1085,7 @@ func TestRun_ProcessesMessages(t *testing.T) {
 		BatchSize:         1,
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 
@@ -1058,7 +1141,7 @@ func TestRun_StopsOnContextCancel(t *testing.T) {
 		Bucket:  "test-bucket",
 		Workers: 1,
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Make consumer block on receive
 	consumer.receiveDelay = 10 * time.Second
@@ -1096,7 +1179,7 @@ func TestRun_StopsOnStopSignal(t *testing.T) {
 		Bucket:  "test-bucket",
 		Workers: 1,
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Make consumer return empty immediately
 	consumer.receiveCallback = func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
@@ -1141,7 +1224,7 @@ func TestRun_ContinuesOnReceiveError(t *testing.T) {
 		Bucket:  "test-bucket",
 		Workers: 1,
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	errorReturned := make(chan struct{})
 	consumer.receiveCallback = func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
@@ -1177,10 +1260,11 @@ func TestRun_ContinuesOnReceiveError(t *testing.T) {
 	}
 }
 
-func TestRun_DoesNotDeleteMessageOnProcessError(t *testing.T) {
+func TestRun_DoesNotDeleteMessageOnTransientError(t *testing.T) {
 	consumer := newMockSQSConsumer()
 	cache := newMockBlockCache()
 	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
 
 	svc, _ := NewService(Config{
 		ChainID:   1,
@@ -1188,12 +1272,13 @@ func TestRun_DoesNotDeleteMessageOnProcessError(t *testing.T) {
 		Workers:   1,
 		BatchSize: 1,
 		Logger:    testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, dlq)
 
 	ctx := context.Background()
 
-	// Add message but DON'T add block data to cache - this will cause process error
+	// A transient Redis error on the block read must NOT delete or dead-letter.
 	event := createBlockEvent(1, 100, 0)
+	cache.SetGetError("block", 1, 100, 0, errors.New("redis connection refused"))
 	consumer.AddMessage(createSQSMessage("msg1", event))
 
 	callCount := atomic.Int32{}
@@ -1213,15 +1298,19 @@ func TestRun_DoesNotDeleteMessageOnProcessError(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 
 	_ = svc.Run(ctx)
 
-	// Message should NOT be deleted because processing failed
+	// Message should NOT be deleted because the failure is transient.
 	deletedHandles := consumer.GetDeletedHandles()
 	if len(deletedHandles) != 0 {
-		t.Errorf("expected 0 deleted messages (process failed), got %d", len(deletedHandles))
+		t.Errorf("expected 0 deleted messages (transient failure), got %d", len(deletedHandles))
+	}
+	// And it must NOT be dead-lettered.
+	if calls := dlq.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 DLQ publishes for transient failure, got %d", calls)
 	}
 }
 
@@ -1237,7 +1326,7 @@ func TestRun_DeletesMessageOnSuccess(t *testing.T) {
 		BatchSize:         1,
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 
@@ -1290,7 +1379,7 @@ func TestRun_HandlesDeleteMessageError(t *testing.T) {
 		BatchSize:         1,
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 
@@ -1352,7 +1441,7 @@ func TestRun_MultipleWorkersProcessConcurrently(t *testing.T) {
 		BatchSize:         10,
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 
@@ -1421,7 +1510,7 @@ func TestProcessMessage_ZeroBlockNumber(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 0, 0)
 	ctx := context.Background()
@@ -1451,7 +1540,7 @@ func TestProcessMessage_LargeBlockNumber(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	blockNum := int64(20000000) // Block 20 million
 	event := createBlockEvent(1, blockNum, 0)
@@ -1484,7 +1573,7 @@ func TestProcessMessage_HighVersion(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// High version number (many reorgs)
 	event := createBlockEvent(1, 100, 999)
@@ -1514,7 +1603,7 @@ func TestProcessMessage_EmptyBlockData(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -1539,7 +1628,7 @@ func TestProcessMessage_LargeBlockData(t *testing.T) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -1578,7 +1667,7 @@ func TestStop_CanBeCalledMultipleTimes(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Should not panic
 	svc.Stop()
@@ -1634,7 +1723,7 @@ func TestProcessMessage_AvalancheSkipsTracesAndBlobs(t *testing.T) {
 		ChainID: 43114,
 		Bucket:  "avax-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(43114, 500, 0)
 	ctx := context.Background()
@@ -1677,7 +1766,7 @@ func TestProcessMessage_AvalancheDoesNotFetchTraces(t *testing.T) {
 		ChainID: 43114,
 		Bucket:  "avax-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(43114, 500, 0)
 	ctx := context.Background()
@@ -1702,10 +1791,11 @@ func TestProcessMessage_AvalancheMissingReceipts(t *testing.T) {
 	writer := newMockS3Writer()
 
 	svc, _ := NewService(Config{
-		ChainID: 43114,
-		Bucket:  "avax-bucket",
-		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+		ChainID:             43114,
+		Bucket:              "avax-bucket",
+		CacheMissMaxRetries: 0,
+		Logger:              testutil.DiscardLogger(),
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(43114, 500, 0)
 	ctx := context.Background()
@@ -1719,8 +1809,11 @@ func TestProcessMessage_AvalancheMissingReceipts(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing receipts on Avalanche")
 	}
-	if !strings.Contains(err.Error(), "receipts data expected but not found") {
+	if !strings.Contains(err.Error(), "receipts data not found in cache") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+	if !errors.Is(err, ErrPermanent) {
+		t.Errorf("expected receipts miss to be permanent, got: %v", err)
 	}
 }
 
@@ -1738,7 +1831,7 @@ func BenchmarkProcessMessage(b *testing.B) {
 		Bucket:            "test-bucket",
 		ChainExpectations: blockOnlyExpectations(),
 		Logger:            testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx := context.Background()
 	event := createBlockEvent(1, 100, 0)
@@ -1773,7 +1866,7 @@ func TestProcessMessage_ReceiptsWriteError(t *testing.T) {
 			1: {ExpectReceipts: true, ExpectTraces: false, ExpectBlobs: false},
 		},
 		Logger: testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -1805,7 +1898,7 @@ func TestProcessMessage_TracesWriteError(t *testing.T) {
 			1: {ExpectReceipts: false, ExpectTraces: true, ExpectBlobs: false},
 		},
 		Logger: testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -1837,7 +1930,7 @@ func TestProcessMessage_BlobsWriteError(t *testing.T) {
 			1: {ExpectReceipts: false, ExpectTraces: false, ExpectBlobs: true},
 		},
 		Logger: testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -1868,7 +1961,7 @@ func TestRun_ContextCancelledDuringMessageSend(t *testing.T) {
 		Workers:   1,
 		BatchSize: 100,
 		Logger:    testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	// Create many messages
 	for i := range 100 {
@@ -1924,7 +2017,7 @@ func TestRun_ReceiveMessagesReturnsContextError(t *testing.T) {
 		Bucket:  "test-bucket",
 		Workers: 1,
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -1950,7 +2043,7 @@ func TestProcessMessage_AllDataTypesWithContent(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -2000,7 +2093,7 @@ func TestProcessMessage_RejectsNullBlockPayload(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -2044,7 +2137,7 @@ func TestProcessMessage_RejectsEmptyBlockPayload(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -2076,7 +2169,7 @@ func TestProcessMessage_RejectsNullReceiptsPayload(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -2120,7 +2213,7 @@ func TestProcessMessage_RejectsEmptyReceiptsPayload(t *testing.T) {
 		ChainID: 1,
 		Bucket:  "test-bucket",
 		Logger:  testutil.DiscardLogger(),
-	}, consumer, cache, writer)
+	}, consumer, cache, writer, newMockDeadLetterPublisher())
 
 	event := createBlockEvent(1, 100, 0)
 	ctx := context.Background()
@@ -2140,5 +2233,510 @@ func TestProcessMessage_RejectsEmptyReceiptsPayload(t *testing.T) {
 
 	if _, exists := writer.GetFile("test-bucket", "0-999/100_0_receipts.json.gz"); exists {
 		t.Error("receipts key should NOT have been written")
+	}
+}
+
+// =============================================================================
+// Tests: dead-letter routing (permanent vs transient classification)
+// =============================================================================
+
+// runUntilProcessed drives the service via its public Run API for a single
+// message and waits for the worker to reach a terminal action: either it
+// deleted the message (success or dead-lettered+deleted) or it called the DLQ
+// publisher (covers the publish-fails case where no delete happens). It is used
+// by the tests where the worker is expected to act on the message.
+func runUntilProcessed(t *testing.T, svc *Service, consumer *mockSQSConsumer, dlq *mockDeadLetterPublisher) {
+	t.Helper()
+	runAndWait(t, svc, consumer, func() bool {
+		return consumer.deleteCalled.Load() > 0 || dlq.calls.Load() > 0
+	})
+}
+
+// runUntilTransient drives the service via its public Run API for a single
+// message that fails transiently: the worker leaves the message untouched (no
+// delete, no DLQ publish). We detect completion via the second fetcher poll,
+// which only happens after the single worker has finished its only message.
+func runUntilTransient(t *testing.T, svc *Service, consumer *mockSQSConsumer) {
+	t.Helper()
+	runAndWait(t, svc, consumer, func() bool {
+		return consumer.receiveCalled.Load() >= 2
+	})
+}
+
+func runAndWait(t *testing.T, svc *Service, consumer *mockSQSConsumer, done func() bool) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	delivered := atomic.Bool{}
+	consumer.receiveCallback = func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
+		if delivered.CompareAndSwap(false, true) {
+			consumer.mu.Lock()
+			defer consumer.mu.Unlock()
+			count := min(maxMessages, len(consumer.messages))
+			msgs := consumer.messages[:count]
+			consumer.messages = consumer.messages[count:]
+			return msgs, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	finished := make(chan struct{})
+	go func() {
+		_ = svc.Run(ctx)
+		close(finished)
+	}()
+
+	testutil.WaitForCondition(t, 6*time.Second, done, "worker to reach a terminal state")
+
+	// Give the worker a brief moment to finish bookkeeping after the terminal action.
+	time.Sleep(50 * time.Millisecond)
+
+	svc.Stop()
+	cancel()
+	<-finished
+}
+
+func newDLQTestService(t *testing.T, config Config, consumer outbound.SQSConsumer, cache outbound.BlockCache, writer outbound.S3Writer, deadLetter outbound.DeadLetterPublisher) *Service {
+	t.Helper()
+	if config.Bucket == "" {
+		config.Bucket = "test-bucket"
+	}
+	if config.ChainID == 0 {
+		config.ChainID = 1
+	}
+	config.Workers = 1
+	config.BatchSize = 1
+	return newTestService(t, config, consumer, cache, writer, deadLetter)
+}
+
+func TestRun_ConfirmedMiss_PublishesToDLQAndDeletes(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	svc := newDLQTestService(t, Config{
+		ChainID:             43114,
+		Bucket:              "avax-bucket",
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 0, // fail fast on miss
+	}, consumer, cache, writer, dlq)
+
+	// No block data in cache -> confirmed permanent miss.
+	event := createBlockEvent(43114, 100, 0)
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	published := dlq.Published()
+	if len(published) != 1 {
+		t.Fatalf("expected 1 DLQ publish, got %d", len(published))
+	}
+	if published[0].groupID != "43114" {
+		t.Errorf("expected groupID 43114, got %q", published[0].groupID)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 1 {
+		t.Errorf("expected 1 deleted message after DLQ publish, got %d", len(deleted))
+	}
+}
+
+func TestRun_TransientRedisError_NoPublishNoDelete(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 3,
+	}, consumer, cache, writer, dlq)
+
+	event := createBlockEvent(1, 100, 0)
+	// Redis error on every attempt -> transient, must NOT be dead-lettered.
+	cache.SetGetError("block", 1, 100, 0, errors.New("redis connection refused"))
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilTransient(t, svc, consumer)
+
+	if calls := dlq.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 DLQ publishes for transient error, got %d", calls)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 0 {
+		t.Errorf("expected 0 deleted messages for transient error, got %d", len(deleted))
+	}
+}
+
+func TestRun_PublishFails_MessagePreserved(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	dlq.publishErr = errors.New("dlq send failed")
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 0,
+	}, consumer, cache, writer, dlq)
+
+	// Confirmed miss -> permanent -> tries to publish, publish fails.
+	event := createBlockEvent(1, 100, 0)
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if calls := dlq.calls.Load(); calls != 1 {
+		t.Errorf("expected 1 DLQ publish attempt, got %d", calls)
+	}
+	// Publish failed -> message must NOT be deleted (preserved for redelivery).
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 0 {
+		t.Errorf("expected 0 deleted messages when DLQ publish fails, got %d", len(deleted))
+	}
+}
+
+func TestRun_Success_DeletesOnlyNoPublish(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+	}, consumer, cache, writer, dlq)
+
+	ctx := context.Background()
+	event := createBlockEvent(1, 100, 0)
+	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if calls := dlq.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 DLQ publishes on success, got %d", calls)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 1 {
+		t.Errorf("expected 1 deleted message on success, got %d", len(deleted))
+	}
+}
+
+func TestRun_JSONParseFailure_PublishesToDLQAndDeletes(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	svc := newDLQTestService(t, Config{}, consumer, cache, writer, dlq)
+
+	consumer.AddMessage(outbound.SQSMessage{
+		MessageID:     "msg1",
+		ReceiptHandle: "receipt-msg1",
+		Body:          "this is not json",
+	})
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if calls := dlq.calls.Load(); calls != 1 {
+		t.Errorf("expected 1 DLQ publish for malformed JSON, got %d", calls)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 1 {
+		t.Errorf("expected 1 deleted message for malformed JSON, got %d", len(deleted))
+	}
+}
+
+func TestRun_ChainMismatch_PublishesToDLQAndDeletes(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	svc := newDLQTestService(t, Config{ChainID: 1}, consumer, cache, writer, dlq)
+
+	// Event for chain 137 hits a service configured for chain 1.
+	event := createBlockEvent(137, 100, 0)
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if calls := dlq.calls.Load(); calls != 1 {
+		t.Errorf("expected 1 DLQ publish for chain mismatch, got %d", calls)
+	}
+	published := dlq.Published()
+	if len(published) == 1 && published[0].groupID != "1" {
+		t.Errorf("expected groupID to be the service chain ID 1, got %q", published[0].groupID)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 1 {
+		t.Errorf("expected 1 deleted message for chain mismatch, got %d", len(deleted))
+	}
+}
+
+func TestRun_NullPayload_PublishesToDLQAndDeletes(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+	}, consumer, cache, writer, dlq)
+
+	ctx := context.Background()
+	event := createBlockEvent(1, 100, 0)
+	// Block is "present" in cache but null -> permanent null-payload guard.
+	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage("null"))
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if calls := dlq.calls.Load(); calls != 1 {
+		t.Errorf("expected 1 DLQ publish for null payload, got %d", calls)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 1 {
+		t.Errorf("expected 1 deleted message for null payload, got %d", len(deleted))
+	}
+}
+
+// TestRun_MissThenHitAcrossRetry exercises the app-level retry: the first cache
+// reads are misses, a later read succeeds. The race must be absorbed and the
+// message processed successfully (no DLQ).
+func TestRun_MissThenHitAcrossRetry(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+
+	cache := newMissThenHitCache(2) // miss twice, then hit
+	cache.blockData = json.RawMessage(`{"number":100}`)
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 5,
+	}, consumer, cache, writer, dlq)
+
+	event := createBlockEvent(1, 100, 0)
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if calls := dlq.calls.Load(); calls != 0 {
+		t.Errorf("expected 0 DLQ publishes when retry absorbs the miss, got %d", calls)
+	}
+	if deleted := consumer.GetDeletedHandles(); len(deleted) != 1 {
+		t.Errorf("expected 1 deleted message after retry success, got %d", len(deleted))
+	}
+	if keys := writer.GetAllKeys(); len(keys) != 1 {
+		t.Errorf("expected 1 file written after retry success, got %d", len(keys))
+	}
+}
+
+// missThenHitCache returns nil (a miss) for the first missCount GetBlock calls
+// and then the configured block data. Other getters return nothing.
+type missThenHitCache struct {
+	mu        sync.Mutex
+	missCount int
+	calls     int
+	blockData json.RawMessage
+}
+
+var _ outbound.BlockCache = (*missThenHitCache)(nil)
+
+func newMissThenHitCache(missCount int) *missThenHitCache {
+	return &missThenHitCache{missCount: missCount}
+}
+
+func (m *missThenHitCache) GetBlock(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if m.calls <= m.missCount {
+		return nil, nil
+	}
+	return m.blockData, nil
+}
+
+func (m *missThenHitCache) GetReceipts(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
+	return nil, nil
+}
+
+func (m *missThenHitCache) GetTraces(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
+	return nil, nil
+}
+
+func (m *missThenHitCache) GetBlobs(ctx context.Context, chainID, blockNumber int64, version int) (json.RawMessage, error) {
+	return nil, nil
+}
+
+func (m *missThenHitCache) SetBlock(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	return nil
+}
+
+func (m *missThenHitCache) SetReceipts(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	return nil
+}
+
+func (m *missThenHitCache) SetTraces(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	return nil
+}
+
+func (m *missThenHitCache) SetBlobs(ctx context.Context, chainID, blockNumber int64, version int, data json.RawMessage) error {
+	return nil
+}
+
+func (m *missThenHitCache) SetBlockData(ctx context.Context, chainID, blockNumber int64, version int, data outbound.BlockDataInput) error {
+	return nil
+}
+
+func (m *missThenHitCache) DeleteBlock(ctx context.Context, chainID, blockNumber int64, version int) error {
+	return nil
+}
+
+func (m *missThenHitCache) Close() error { return nil }
+
+func TestConfigDefaults_CacheMissRetries(t *testing.T) {
+	defaults := ConfigDefaults()
+	if defaults.CacheMissMaxRetries != 3 {
+		t.Errorf("expected CacheMissMaxRetries=3, got %d", defaults.CacheMissMaxRetries)
+	}
+}
+
+// =============================================================================
+// Tests: metrics recording
+// =============================================================================
+
+// mockMetrics records the status labels passed to the metrics recorder.
+type mockMetrics struct {
+	mu        sync.Mutex
+	processed []string
+	latencies []string
+}
+
+var _ outbound.BackupMetricsRecorder = (*mockMetrics)(nil)
+
+func (m *mockMetrics) RecordProcessingLatency(ctx context.Context, duration time.Duration, status string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.latencies = append(m.latencies, status)
+}
+
+func (m *mockMetrics) RecordBlockProcessed(ctx context.Context, status string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.processed = append(m.processed, status)
+}
+
+func (m *mockMetrics) ProcessedStatuses() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.processed))
+	copy(out, m.processed)
+	return out
+}
+
+func (m *mockMetrics) LatencyStatuses() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.latencies))
+	copy(out, m.latencies)
+	return out
+}
+
+func TestRun_Metrics_SuccessStatus(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	metrics := &mockMetrics{}
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations: blockOnlyExpectations(),
+		Metrics:           metrics,
+	}, consumer, cache, writer, dlq)
+
+	ctx := context.Background()
+	event := createBlockEvent(1, 100, 0)
+	_ = cache.SetBlock(ctx, 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if !slices.Contains(metrics.ProcessedStatuses(), "success") {
+		t.Errorf("expected a success processed metric, got %v", metrics.ProcessedStatuses())
+	}
+	if !slices.Contains(metrics.LatencyStatuses(), "success") {
+		t.Errorf("expected a success latency metric, got %v", metrics.LatencyStatuses())
+	}
+}
+
+func TestRun_Metrics_DeadLetteredStatus(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	metrics := &mockMetrics{}
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 0,
+		Metrics:             metrics,
+	}, consumer, cache, writer, dlq)
+
+	event := createBlockEvent(1, 100, 0)
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if !slices.Contains(metrics.ProcessedStatuses(), "dead_lettered") {
+		t.Errorf("expected a dead_lettered processed metric, got %v", metrics.ProcessedStatuses())
+	}
+	if !slices.Contains(metrics.LatencyStatuses(), "error") {
+		t.Errorf("expected an error latency metric, got %v", metrics.LatencyStatuses())
+	}
+}
+
+func TestRun_Metrics_TransientStatus(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	metrics := &mockMetrics{}
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 0,
+		Metrics:             metrics,
+	}, consumer, cache, writer, dlq)
+
+	event := createBlockEvent(1, 100, 0)
+	cache.SetGetError("block", 1, 100, 0, errors.New("redis down"))
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilTransient(t, svc, consumer)
+
+	if !slices.Contains(metrics.ProcessedStatuses(), "transient_error") {
+		t.Errorf("expected a transient_error processed metric, got %v", metrics.ProcessedStatuses())
+	}
+}
+
+func TestRun_Metrics_DLQPublishFailedStatus(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	dlq := newMockDeadLetterPublisher()
+	dlq.publishErr = errors.New("dlq unavailable")
+	metrics := &mockMetrics{}
+
+	svc := newDLQTestService(t, Config{
+		ChainExpectations:   blockOnlyExpectations(),
+		CacheMissMaxRetries: 0,
+		Metrics:             metrics,
+	}, consumer, cache, writer, dlq)
+
+	event := createBlockEvent(1, 100, 0)
+	consumer.AddMessage(createSQSMessage("msg1", event))
+
+	runUntilProcessed(t, svc, consumer, dlq)
+
+	if !slices.Contains(metrics.ProcessedStatuses(), "dlq_publish_failed") {
+		t.Errorf("expected a dlq_publish_failed processed metric, got %v", metrics.ProcessedStatuses())
 	}
 }
