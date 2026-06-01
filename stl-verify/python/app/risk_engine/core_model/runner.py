@@ -93,6 +93,9 @@ async def run(
     """
     p = config.params
 
+    if str(p.get("LIQ_ANALYSIS", "YES")).upper() != "YES":
+        raise ValueError("LIQ_ANALYSIS must be YES — the runner requires liquidation analysis to produce a CRR result")
+
     users_df, market_df = await data_reader.get_protocol_data(
         protocol=p["PROTOCOL"],
         network=p["NETWORK"],

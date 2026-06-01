@@ -15,8 +15,8 @@ import asyncio
 import logging
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 from app.risk_engine.core_model.runner import CoreModelConfig, CoreModelPipelineResult, run

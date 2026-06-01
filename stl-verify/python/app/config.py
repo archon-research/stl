@@ -28,7 +28,9 @@ class Settings(BaseSettings):
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
     suraf_mappings_file: Path = ENV_DIR / "suraf" / "mappings" / "asset_to_rating.json"
-    core_model_mappings_file: Path = ENV_DIR / "app" / "risk_engine" / "core_model" / "mappings" / "asset_to_market_key.json"
+    core_model_mappings_file: Path = (
+        ENV_DIR / "app" / "risk_engine" / "core_model" / "mappings" / "asset_to_market_key.json"
+    )
     # Injected as a Docker build arg; see stl-verify/python/Dockerfile.
     # Falls back to "unknown" so local dev and tests don't need it set.
     git_commit: str = "unknown"
