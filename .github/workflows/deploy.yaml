@@ -456,8 +456,8 @@ jobs:
 
   notify-staging-failure:
     name: Notify Staging Deploy Failure
-    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
-    needs: [build-push-staging, update-staging]
+    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure' || needs.wait-staging-healthy.result == 'failure') }}
+    needs: [build-push-staging, update-staging, wait-staging-healthy]
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
@@ -465,6 +465,7 @@ jobs:
       failed-jobs: |
         Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
         Update Staging Image Tags=${{ needs.update-staging.result }}
+        Wait for Staging Healthy=${{ needs.wait-staging-healthy.result }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
