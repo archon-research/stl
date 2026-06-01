@@ -4,31 +4,22 @@ from scipy.stats import norm, t
 
 
 class Aggregator:
-
-
-    def __init__(
-        self,
-        residuals_df: pd.DataFrame,
-        seed: int = 0
-    ) -> None:
+    def __init__(self, residuals_df: pd.DataFrame, seed: int = 0) -> None:
         """
         Input: prices_df --> matrix T x n, where T is the time variable and
         n is the number of different assets.
         Output: aggregate_prices_df --> matrix T x n where the asset prices are
-        correlated through Kendall metric. 
+        correlated through Kendall metric.
         """
-        
+
         # from prices_df, compute correlation matrix
-        # metric used: Spearman --> monotonic relationships (not necessarily linear) | uses rank ordering → reduces effect of outliers
-        
+        # metric used: Spearman --> monotonic relationships (not necessarily linear) | uses rank ordering → reduces
+        # effect of outliers
+
         rho_s = residuals_df.corr(method="spearman")
-        p_corr_matrix = pd.DataFrame(
-            2 * np.sin(np.pi * rho_s / 6),
-            index=rho_s.index,
-            columns=rho_s.columns
-        )
+        p_corr_matrix = pd.DataFrame(2 * np.sin(np.pi * rho_s / 6), index=rho_s.index, columns=rho_s.columns)
         p_corr_matrix = p_corr_matrix.sort_index(axis=0).sort_index(axis=1)
-        
+
         values = p_corr_matrix.values.copy()
         np.fill_diagonal(values, 1.0)
         p_corr_matrix = pd.DataFrame(values, index=p_corr_matrix.index, columns=p_corr_matrix.columns)
@@ -42,22 +33,13 @@ class Aggregator:
         self.residuals_df = residuals_df
         self.rng = np.random.default_rng(seed)
 
-
     @staticmethod
-    def is_psd(
-        matrix: pd.DataFrame,
-        tol: float = 1e-10
-    ) -> bool:
+    def is_psd(matrix: pd.DataFrame, tol: float = 1e-10) -> bool:
         eigvals = np.linalg.eigvalsh(matrix)
         return np.min(eigvals) >= -tol
 
-
     @staticmethod
-    def rebonato_jackel(
-        corr_matrix: pd.DataFrame,
-        *,
-        eps: float = 1e-8
-    ) -> pd.DataFrame:
+    def rebonato_jackel(corr_matrix: pd.DataFrame, *, eps: float = 1e-8) -> pd.DataFrame:
         """
         Nearest PSD correlation matrix via Rebonato-Jäckel eigenvalue flooring.
         """
@@ -76,18 +58,9 @@ class Aggregator:
         if not Aggregator.is_psd(A_corr):
             raise ValueError("Rebonato-Jäckel regularization failed: matrix still not PSD.")
 
-        return pd.DataFrame(
-            A_corr,
-            index=corr_matrix.index,
-            columns=corr_matrix.columns
-        )
+        return pd.DataFrame(A_corr, index=corr_matrix.index, columns=corr_matrix.columns)
 
-
-    def generate_gaussian_copula_samples(
-        self,
-        n_sims: int,
-        forecasted_step: int
-    ) -> dict:
+    def generate_gaussian_copula_samples(self, n_sims: int, forecasted_step: int) -> dict:
         """
         Generates correlated samples using a Gaussian copula.
 
@@ -106,7 +79,7 @@ class Aggregator:
         n_assets = self.corr_matrix.shape[0]
         tokens = list(self.corr_matrix.columns)
         n_total = n_sims * forecasted_step
-        
+
         L = np.linalg.cholesky(self.corr_matrix)
         Z = self.rng.standard_normal(size=(n_total, n_assets))
 
@@ -119,22 +92,18 @@ class Aggregator:
         assert np.all(np.isfinite(L))
         assert np.all(np.isfinite(Z))
 
-        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
             correlated_Z = Z @ L.T
 
         U = norm.cdf(correlated_Z).reshape(n_sims, forecasted_step, n_assets)
-        
-        U_dict = {tokens[j]: pd.DataFrame(U[:, :, j],
-                                          columns=[f"Step_{i+1}" for i in range(forecasted_step)])
-                                          for j in range(n_assets)}
+
+        U_dict = {
+            tokens[j]: pd.DataFrame(U[:, :, j], columns=[f"Step_{i + 1}" for i in range(forecasted_step)])
+            for j in range(n_assets)
+        }
         return U_dict
 
-
-    def generate_t_copula_samples(
-        self,
-        n_sims: int,
-        forecasted_step: int
-    ) -> dict:
+    def generate_t_copula_samples(self, n_sims: int, forecasted_step: int) -> dict:
         """
         Generates correlated samples using a t-copula.
 
@@ -157,10 +126,10 @@ class Aggregator:
         L = np.linalg.cholesky(self.corr_matrix)
 
         # def estimate_t_dof(
-        #     residuals_df: pd.DataFrame, 
+        #     residuals_df: pd.DataFrame,
         #     corr_matrix: pd.DataFrame
         # ) -> float:
-            
+
         #     Z = residuals_df.values
         #     Sigma = corr_matrix.values
         #     inv_S = np.linalg.inv(Sigma)
@@ -217,33 +186,22 @@ class Aggregator:
         assert np.all(np.isfinite(L))
         assert np.all(np.isfinite(Z))
 
-        with np.errstate(divide='ignore', over='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
             t_samples = (Z @ L.T) * scaling
-            
+
         U = t.cdf(t_samples, df=nu).reshape(n_sims, forecasted_step, n_assets)
-        
-        U_dict = {tokens[j]: pd.DataFrame(U[:, :, j],
-                                      columns=[f"Step_{i+1}" for i in range(forecasted_step)])
-                                      for j in range(n_assets)}
+
+        U_dict = {
+            tokens[j]: pd.DataFrame(U[:, :, j], columns=[f"Step_{i + 1}" for i in range(forecasted_step)])
+            for j in range(n_assets)
+        }
         return U_dict
 
+    def copula_aggregator(self, copula_type: str, n_sims: int, forecasted_step: int) -> np.ndarray:
 
-    def copula_aggregator(
-        self,
-        copula_type: str,
-        n_sims: int,
-        forecasted_step: int
-    ) -> np.ndarray:
-        
         copula_type = copula_type.upper()
-        
+
         if "GAUSSIAN" in copula_type:
-            return self.generate_gaussian_copula_samples(
-                n_sims = n_sims,
-                forecasted_step = forecasted_step
-            )
+            return self.generate_gaussian_copula_samples(n_sims=n_sims, forecasted_step=forecasted_step)
         else:
-            return self.generate_t_copula_samples(
-                n_sims = n_sims,
-                forecasted_step = forecasted_step
-            )
+            return self.generate_t_copula_samples(n_sims=n_sims, forecasted_step=forecasted_step)

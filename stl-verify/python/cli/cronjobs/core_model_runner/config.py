@@ -23,11 +23,7 @@ class RunnerConfig:
 
     @classmethod
     def from_env(cls) -> "RunnerConfig":
-        overrides = {
-            k: _coerce(k, os.environ[env_key])
-            for k, env_key in _ENV_MAP.items()
-            if env_key in os.environ
-        }
+        overrides = {k: _coerce(k, os.environ[env_key]) for k, env_key in _ENV_MAP.items() if env_key in os.environ}
         params = {**DEFAULTS, **overrides}
         return cls(
             database_url=os.environ["DATABASE_URL"],
@@ -39,29 +35,29 @@ class RunnerConfig:
 
 # Maps CORE param name -> env var name
 _ENV_MAP: dict[str, str] = {
-    "PROTOCOL":          "CORE_MODEL_PROTOCOL",
-    "NETWORK":           "CORE_MODEL_NETWORK",
-    "MORPHO_MARKET":     "CORE_MODEL_MORPHO_MARKET",
-    "GALAXY_TYPE":       "CORE_MODEL_GALAXY_TYPE",
-    "LOAN_TOKEN":        "CORE_MODEL_LOAN_TOKEN",
-    "N_MC":              "CORE_MODEL_N_MC",
-    "FORECAST_STEP":     "CORE_MODEL_FORECAST_STEP",
-    "TRAIN_SIZE":        "CORE_MODEL_TRAIN_SIZE",
-    "COPULA_TYPE":       "CORE_MODEL_COPULA_TYPE",
-    "SEED":              "CORE_MODEL_SEED",
-    "LIQ_ANALYSIS":      "CORE_MODEL_LIQ_ANALYSIS",
-    "JUMPS":             "CORE_MODEL_JUMPS",
-    "HOURLY_CONV":       "CORE_MODEL_HOURLY_CONV",
-    "USE_LOG_RETURNS":   "CORE_MODEL_USE_LOG_RETURNS",
+    "PROTOCOL": "CORE_MODEL_PROTOCOL",
+    "NETWORK": "CORE_MODEL_NETWORK",
+    "MORPHO_MARKET": "CORE_MODEL_MORPHO_MARKET",
+    "GALAXY_TYPE": "CORE_MODEL_GALAXY_TYPE",
+    "LOAN_TOKEN": "CORE_MODEL_LOAN_TOKEN",
+    "N_MC": "CORE_MODEL_N_MC",
+    "FORECAST_STEP": "CORE_MODEL_FORECAST_STEP",
+    "TRAIN_SIZE": "CORE_MODEL_TRAIN_SIZE",
+    "COPULA_TYPE": "CORE_MODEL_COPULA_TYPE",
+    "SEED": "CORE_MODEL_SEED",
+    "LIQ_ANALYSIS": "CORE_MODEL_LIQ_ANALYSIS",
+    "JUMPS": "CORE_MODEL_JUMPS",
+    "HOURLY_CONV": "CORE_MODEL_HOURLY_CONV",
+    "USE_LOG_RETURNS": "CORE_MODEL_USE_LOG_RETURNS",
     "FOCUS_ON_NEGATIVE": "CORE_MODEL_FOCUS_ON_NEGATIVE",
-    "WORST_CASE":        "CORE_MODEL_WORST_CASE",
-    "PERC":              "CORE_MODEL_PERC",
-    "VOL_FLOOR_PCT":     "CORE_MODEL_VOL_FLOOR_PCT",
-    "GAS_FEE_USD":       "CORE_MODEL_GAS_FEE_USD",
-    "SWAP_FEE_USD":      "CORE_MODEL_SWAP_FEE_USD",
-    "MC_TRIGGER":        "CORE_MODEL_MC_TRIGGER",
-    "MC_TARGET_LTV":     "CORE_MODEL_MC_TARGET_LTV",
-    "MC_CURE_PROB":      "CORE_MODEL_MC_CURE_PROB",
+    "WORST_CASE": "CORE_MODEL_WORST_CASE",
+    "PERC": "CORE_MODEL_PERC",
+    "VOL_FLOOR_PCT": "CORE_MODEL_VOL_FLOOR_PCT",
+    "GAS_FEE_USD": "CORE_MODEL_GAS_FEE_USD",
+    "SWAP_FEE_USD": "CORE_MODEL_SWAP_FEE_USD",
+    "MC_TRIGGER": "CORE_MODEL_MC_TRIGGER",
+    "MC_TARGET_LTV": "CORE_MODEL_MC_TARGET_LTV",
+    "MC_CURE_PROB": "CORE_MODEL_MC_CURE_PROB",
 }
 
 

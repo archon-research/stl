@@ -31,7 +31,8 @@ from typing import Any
 # Canonical defaults file — lives next to the other input files
 _DEFAULTS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "inputs", "default_params.json",
+    "inputs",
+    "default_params.json",
 )
 
 
@@ -61,6 +62,7 @@ DEFAULTS: dict[str, Any] = _flatten(SCHEMA)
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
+
 
 def load_params(
     path: str | None = None,

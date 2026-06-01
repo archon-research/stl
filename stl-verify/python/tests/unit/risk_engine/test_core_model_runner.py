@@ -41,16 +41,18 @@ class _TruncatedReader(ParquetCoreModelDataReader):
 @pytest.mark.skipif(not INPUTS_DIR.exists(), reason="core_model inputs not present")
 async def test_runner_returns_valid_result():
     """Full pipeline smoke test: 1 token, truncated price history, N_MC=10."""
-    params = load_params(overrides={
-        "PROTOCOL": "MORPHO",
-        "MORPHO_MARKET": "CBBTC",
-        "LOAN_TOKEN": "USDC",
-        "TRAIN_SIZE": _TRAIN_SIZE,
-        "N_MC": 10,
-        "FORECAST_STEP": 2,
-        "LIQ_ANALYSIS": "YES",
-        "JUMPS": False,
-    })
+    params = load_params(
+        overrides={
+            "PROTOCOL": "MORPHO",
+            "MORPHO_MARKET": "CBBTC",
+            "LOAN_TOKEN": "USDC",
+            "TRAIN_SIZE": _TRAIN_SIZE,
+            "N_MC": 10,
+            "FORECAST_STEP": 2,
+            "LIQ_ANALYSIS": "YES",
+            "JUMPS": False,
+        }
+    )
     config = CoreModelConfig(market_key="morpho_cbbtc_usdc", params=params)
     data_reader = _TruncatedReader(INPUTS_DIR)
 

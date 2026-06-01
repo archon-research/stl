@@ -11,18 +11,22 @@ from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataRead
 @pytest.fixture()
 def inputs_dir(tmp_path: Path) -> Path:
     """Minimal parquet fixtures for protocol data tests."""
-    users = pd.DataFrame({
-        "total_borrow_usd": [1000.0],
-        "lltv": [0.8],
-        "ltv": [0.7],
-        "health_factor": [1.2],
-        "liquidation_incentive": [1.05],
-    })
-    market = pd.DataFrame({
-        "token_symbol": ["WBTC"],
-        "oracle_price": [60000.0],
-        "lltv": [0.8],
-    })
+    users = pd.DataFrame(
+        {
+            "total_borrow_usd": [1000.0],
+            "lltv": [0.8],
+            "ltv": [0.7],
+            "health_factor": [1.2],
+            "liquidation_incentive": [1.05],
+        }
+    )
+    market = pd.DataFrame(
+        {
+            "token_symbol": ["WBTC"],
+            "oracle_price": [60000.0],
+            "lltv": [0.8],
+        }
+    )
     prices = pd.DataFrame(
         {"WBTC": [60000.0, 61000.0]},
         index=pd.to_datetime(["2024-01-01", "2024-01-02"]),
@@ -44,8 +48,11 @@ def inputs_dir(tmp_path: Path) -> Path:
 async def test_get_protocol_data_sparklend(inputs_dir: Path):
     reader = ParquetCoreModelDataReader(inputs_dir)
     users_df, market_df = await reader.get_protocol_data(
-        protocol="SPARKLEND", network="ethereum",
-        morpho_market="CBBTC", loan_token="USDC", galaxy_type="no-class-a",
+        protocol="SPARKLEND",
+        network="ethereum",
+        morpho_market="CBBTC",
+        loan_token="USDC",
+        galaxy_type="no-class-a",
     )
     assert "total_borrow_usd" in users_df.columns
     assert "token_symbol" in market_df.columns
@@ -54,8 +61,11 @@ async def test_get_protocol_data_sparklend(inputs_dir: Path):
 async def test_get_protocol_data_morpho(inputs_dir: Path):
     reader = ParquetCoreModelDataReader(inputs_dir)
     users_df, market_df = await reader.get_protocol_data(
-        protocol="morpho", network="ethereum",
-        morpho_market="CBBTC", loan_token="USDC", galaxy_type="no-class-a",
+        protocol="morpho",
+        network="ethereum",
+        morpho_market="CBBTC",
+        loan_token="USDC",
+        galaxy_type="no-class-a",
     )
     assert not users_df.empty
 
@@ -63,8 +73,11 @@ async def test_get_protocol_data_morpho(inputs_dir: Path):
 async def test_get_protocol_data_galaxy_no_class_a(inputs_dir: Path):
     reader = ParquetCoreModelDataReader(inputs_dir)
     users_df, _ = await reader.get_protocol_data(
-        protocol="galaxy", network="ethereum",
-        morpho_market="CBBTC", loan_token="USDC", galaxy_type="no-class-a",
+        protocol="galaxy",
+        network="ethereum",
+        morpho_market="CBBTC",
+        loan_token="USDC",
+        galaxy_type="no-class-a",
     )
     assert not users_df.empty
 
@@ -72,8 +85,11 @@ async def test_get_protocol_data_galaxy_no_class_a(inputs_dir: Path):
 async def test_get_protocol_data_galaxy_with_class_a(inputs_dir: Path):
     reader = ParquetCoreModelDataReader(inputs_dir)
     users_df, _ = await reader.get_protocol_data(
-        protocol="galaxy", network="ethereum",
-        morpho_market="CBBTC", loan_token="USDC", galaxy_type="with-class-a",
+        protocol="galaxy",
+        network="ethereum",
+        morpho_market="CBBTC",
+        loan_token="USDC",
+        galaxy_type="with-class-a",
     )
     assert not users_df.empty
 
@@ -81,8 +97,11 @@ async def test_get_protocol_data_galaxy_with_class_a(inputs_dir: Path):
 async def test_get_protocol_data_anchorage(inputs_dir: Path):
     reader = ParquetCoreModelDataReader(inputs_dir)
     users_df, _ = await reader.get_protocol_data(
-        protocol="anchorage", network="ethereum",
-        morpho_market="CBBTC", loan_token="USDC", galaxy_type="no-class-a",
+        protocol="anchorage",
+        network="ethereum",
+        morpho_market="CBBTC",
+        loan_token="USDC",
+        galaxy_type="no-class-a",
     )
     assert not users_df.empty
 

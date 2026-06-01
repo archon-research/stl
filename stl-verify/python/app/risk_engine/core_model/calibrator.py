@@ -1,9 +1,9 @@
 # ============================================================
 # Calibrator: Fits and evaluates ARMA-GARCH models for financial time series.
 
-# The Calibrator class automates the process of identifying the best-fitting 
+# The Calibrator class automates the process of identifying the best-fitting
 # mean (ARMA/ARIMA) and volatility (GARCH/EGARCH/GJR-GARCH) models for a given
-# price series. It optionally tests for jumps and evaluates the quality of 
+# price series. It optionally tests for jumps and evaluates the quality of
 # model forecasts using statistical backtests.
 # ============================================================
 
@@ -21,31 +21,22 @@ from statsmodels.stats.diagnostic import acorr_ljungbox, het_arch
 from statsmodels.tsa.arima.model import ARIMA, ARIMAResults
 from statsmodels.tsa.stattools import adfuller
 
-warnings.filterwarnings("ignore", category=UserWarning)
-
 from app.risk_engine.core_model.backtester import Backtester
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 
 class Calibrator:
+    def __init__(self, price_series: pd.Series, seed: int) -> None:
 
+        list_models = ["FIGARCH", "GJR-GARCH", "GARCH", "EGARCH"]
 
-    def __init__(
-        self, 
-        price_series: pd.Series,
-        seed: int
-    ) -> None:
-        
-        list_models = ['FIGARCH', 'GJR-GARCH', 'GARCH', 'EGARCH']
-        
         self.price_series = price_series
         self.list_models = list_models
         self.seed = seed
 
-
     @staticmethod
-    def calculate_returns(
-        series: pd.Series
-    ) -> tuple[pd.Series, pd.Series]:
+    def calculate_returns(series: pd.Series) -> tuple[pd.Series, pd.Series]:
 
         returns = series.pct_change().dropna()
         log_returns = np.log(series / series.shift(1)).dropna()
@@ -54,11 +45,8 @@ class Calibrator:
         log_returns.name = "LogReturns"
         return returns, log_returns
 
-
     @staticmethod
-    def check_stationarity(
-        hist_series: pd.Series
-    ) -> bool:
+    def check_stationarity(hist_series: pd.Series) -> bool:
         """
         Runs the Augmented Dickey-Fuller (ADF) test on the series
         to check for stationarity.
@@ -79,13 +67,9 @@ class Calibrator:
             # print("Series is stationary.")
             return True
 
-
     @staticmethod
     def find_best_mean_model(
-        hist_series: pd.Series,
-        max_lag: int,
-        seed: int,
-        verbose: bool = True
+        hist_series: pd.Series, max_lag: int, seed: int, verbose: bool = True
     ) -> Tuple[ARIMAResults, pd.DataFrame]:
         """
         Iterates over ARMA(p,q) combinations (p, q <= max_lag)
@@ -116,42 +100,35 @@ class Calibrator:
                 try:
                     model = ARIMA(hist_series, order=(p, 0, q))
                     model_fit: ARIMAResults = model.fit()
-                    results.append({
-                        "p": p,
-                        "q": q,
-                        "AIC": model_fit.aic,
-                        "BIC": model_fit.bic,
-                        "LogLik": model_fit.llf,
-                        "Model_Fit": model_fit
-                    })
+                    results.append(
+                        {
+                            "p": p,
+                            "q": q,
+                            "AIC": model_fit.aic,
+                            "BIC": model_fit.bic,
+                            "LogLik": model_fit.llf,
+                            "Model_Fit": model_fit,
+                        }
+                    )
                 except Exception as e:
                     if verbose:
                         print(f"Skipping ARIMA({p},0,{q}) due to error: {e}")
                     continue
 
-        df = (
-            pd.DataFrame(results)
-            .dropna(subset=["BIC"])
-            .sort_values("BIC", ascending=True)
-            .reset_index(drop=True)
-        )
+        df = pd.DataFrame(results).dropna(subset=["BIC"]).sort_values("BIC", ascending=True).reset_index(drop=True)
         best_model_fit: ARIMAResults = df.loc[0, "Model_Fit"]
         best_order = (df.loc[0, "p"], 0, df.loc[0, "q"])
 
         if verbose:
             print(
-                f"Calculation complete! Best model is ARIMA({df.loc[0,'p']},0,{df.loc[0,'q']}) "
-                f"with AIC={df.loc[0,'AIC']:.2f} and BIC={df.loc[0,'BIC']:.2f}"
+                f"Calculation complete! Best model is ARIMA({df.loc[0, 'p']},0,{df.loc[0, 'q']}) "
+                f"with AIC={df.loc[0, 'AIC']:.2f} and BIC={df.loc[0, 'BIC']:.2f}"
             )
 
         return best_model_fit, best_order, df
 
-
     @staticmethod
-    def check_arima_residuals(
-        model_fit: ARIMAResults, 
-        returns: pd.Series
-    ) -> Tuple[pd.Series, bool]:
+    def check_arima_residuals(model_fit: ARIMAResults, returns: pd.Series) -> Tuple[pd.Series, bool]:
         resid = model_fit.resid
         ticker = returns.name
         white_noise = False
@@ -169,7 +146,7 @@ class Calibrator:
 
         # Ljung-Box test on residuals
         lb_test = acorr_ljungbox(resid, lags=50, return_df=True)
-        pval = lb_test['lb_pvalue'].iloc[-1]
+        pval = lb_test["lb_pvalue"].iloc[-1]
 
         if pval > 0.05:
             print(f"\nLjung-Box Test: Residuals appear to be white noise (p-value={pval:.4f})")
@@ -179,13 +156,8 @@ class Calibrator:
 
         return resid, white_noise
 
-
     @staticmethod
-    def check_arch_effects(
-        residuals: pd.Series,
-        nlags: int = 10,
-        alpha: float = 0.05
-    ) -> bool:
+    def check_arch_effects(residuals: pd.Series, nlags: int = 10, alpha: float = 0.05) -> bool:
         """
         ARCH-LM test on raw residuals to determine whether a GARCH model is warranted.
         Returns True if heteroskedasticity is detected (GARCH should be fitted).
@@ -197,16 +169,13 @@ class Calibrator:
         print(f"ARCH-LM test p-value: {p_value:.4f} → GARCH {'warranted' if arch_present else 'not warranted'}")
         return arch_present
 
-
     @staticmethod
     def find_best_vol_model(
-        hist_series: pd.Series,
-        seed: int,
-        model_type: Optional[str] = None
+        hist_series: pd.Series, seed: int, model_type: Optional[str] = None
     ) -> Tuple[ARCHModelResult, ARCHModel, pd.DataFrame]:
         """
         Grid search over several GARCH-family models with Student-t innovations.
-        
+
         Parameters
         ----------
         series : pd.Series
@@ -235,86 +204,72 @@ class Calibrator:
 
         for try_dist in dist_list:
             if model_type == "GJR-GARCH":
-                vol_type = "GARCH"   # arch_model only understands "GARCH" here
-                o_list = [1]      # include asymmetry
+                vol_type = "GARCH"  # arch_model only understands "GARCH" here
+                o_list = [1]  # include asymmetry
             else:
                 vol_type = model_type
                 o_list = [0]
             for o in o_list:
                 try:
                     model = arch_model(
-                        hist_series.squeeze() * 100,
-                        p=1,
-                        o=o,
-                        q=1,
-                        vol=vol_type,
-                        dist=try_dist,
-                        rescale=False
+                        hist_series.squeeze() * 100, p=1, o=o, q=1, vol=vol_type, dist=try_dist, rescale=False
                     )
-                    fit: ARCHModelResult = model.fit(disp="off", update_freq=0,
-                                                        options={'maxiter': 1000})
-                    results.append({
-                        "p": 1,
-                        "o": o,
-                        "q": 1,
-                        "Model_type": model_type,
-                        "Dist": fit.model.distribution.name,
-                        "AIC": fit.aic,
-                        "BIC": fit.bic,
-                        "LogLik": fit.loglikelihood,
-                        "Model": model,
-                        "Model_Fit": fit
-                    })
+                    fit: ARCHModelResult = model.fit(disp="off", update_freq=0, options={"maxiter": 1000})
+                    results.append(
+                        {
+                            "p": 1,
+                            "o": o,
+                            "q": 1,
+                            "Model_type": model_type,
+                            "Dist": fit.model.distribution.name,
+                            "AIC": fit.aic,
+                            "BIC": fit.bic,
+                            "LogLik": fit.loglikelihood,
+                            "Model": model,
+                            "Model_Fit": fit,
+                        }
+                    )
                 except Exception as e:
                     print(f"Skipping model {model_type}({1},{o},{1}) due to {e}")
                     continue
 
-        df = (
-            pd.DataFrame(results)
-            .sort_values("BIC", ascending=True)
-            .reset_index(drop=True)
-        )
+        df = pd.DataFrame(results).sort_values("BIC", ascending=True).reset_index(drop=True)
 
         best_model_fitted: ARCHModelResult = df.loc[0, "Model_Fit"]
         best_model: arch_model = df.loc[0, "Model"]
         best_model_dist = df.loc[0, "Dist"]
-        print(f"Calculation complete! Best volatility model (p,o,q) is: {df.loc[0, 'Model_type']}({df.loc[0, 'p']},{df.loc[0, 'o']},{df.loc[0, 'q']}) - {best_model_dist}")
+        print(
+            f"Calculation complete! Best volatility model (p,o,q) is: "
+            f"{df.loc[0, 'Model_type']}({df.loc[0, 'p']},{df.loc[0, 'o']},{df.loc[0, 'q']}) - {best_model_dist}"
+        )
 
         return best_model_fitted, best_model, best_model_dist
 
-
     @staticmethod
     def check_garch_residuals(
-        model_fit: ARCHModelResult, 
-        max_lag: int = 50, 
-        alpha: int = 0.05
+        model_fit: ARCHModelResult, max_lag: int = 50, alpha: int = 0.05
     ) -> tuple[bool, Dict[str, bool]]:
         std_resid = model_fit.std_resid
-        std_resid_sq = std_resid ** 2
+        std_resid_sq = std_resid**2
 
         # Ljung–Box on residuals (mean)
         lb_resid = acorr_ljungbox(std_resid, lags=max_lag, return_df=True)
-        lb_resid_pass = lb_resid['lb_pvalue'].iloc[-1] > alpha
+        lb_resid_pass = lb_resid["lb_pvalue"].iloc[-1] > alpha
 
         # Ljung–Box on squared residuals (ARCH)
         lb_sq = acorr_ljungbox(std_resid_sq, lags=max_lag, return_df=True)
-        lb_sq_pass = lb_sq['lb_pvalue'].iloc[-1] > alpha
+        lb_sq_pass = lb_sq["lb_pvalue"].iloc[-1] > alpha
 
         # ARCH–LM
         lm = model_fit.arch_lm_test(standardized=True)
         lm_pass = lm.pval > alpha
 
-        diagnostics = {
-            "LB_resid_pass": lb_resid_pass,
-            "LB_sq_pass": lb_sq_pass,
-            "LM_pass": lm_pass
-        }
+        diagnostics = {"LB_resid_pass": lb_resid_pass, "LB_sq_pass": lb_sq_pass, "LM_pass": lm_pass}
 
         # accept_model = lb_sq_pass and lm_pass
         accept_model = lb_sq_pass or lm_pass
 
         return accept_model, diagnostics
-
 
     @staticmethod
     def fit_poisson_intensity(
@@ -323,7 +278,7 @@ class Calibrator:
         lower_q: float = 0.05,
         upper_q: float = 0.95,
         focus_on_negative: bool = False,
-        fixed_df: Optional[float] = 4.0
+        fixed_df: Optional[float] = 4.0,
     ) -> Dict[str, Any]:
         """
         Estimate Poisson jump intensity and jump size distribution using tail events.
@@ -381,9 +336,8 @@ class Calibrator:
             "jump_mean": loc,
             "jump_std": scale,
             "n_jumps": len(jumps),
-            "crisis_cap": crisis_cap
+            "crisis_cap": crisis_cap,
         }
-
 
     def total_fitter(
         self,
@@ -410,17 +364,13 @@ class Calibrator:
         best_arima = None
         arima_spech = None
         if use_arma_model:
-            best_arima, arima_order, _ = self.find_best_mean_model(
-                hist_series=returns,
-                seed=self.seed,
-                max_lag=5
-            )
+            best_arima, arima_order, _ = self.find_best_mean_model(hist_series=returns, seed=self.seed, max_lag=5)
             arima_spech = {
                 "p": arima_order[0],
                 "d": arima_order[1],
                 "q": arima_order[2],
                 "model": "ARIMA",
-                "criterion": "BIC"
+                "criterion": "BIC",
             }
             _, _ = self.check_arima_residuals(best_arima, returns)
             returns = best_arima.resid.dropna()
@@ -441,9 +391,7 @@ class Calibrator:
 
             for model in self.list_models:
                 cand_fitted, cand_model, best_model_dist = self.find_best_vol_model(
-                    hist_series=returns,
-                    model_type=model,
-                    seed=self.seed
+                    hist_series=returns, model_type=model, seed=self.seed
                 )
                 accept_model, _ = self.check_garch_residuals(cand_fitted)
 
@@ -457,7 +405,7 @@ class Calibrator:
                     "o": getattr(vol_spec, "o", 0),
                     "q": getattr(vol_spec, "q", 0),
                     "vol": "GARCH" if model == "GJR-GARCH" else model,
-                    "dist": best_model_dist.lower()
+                    "dist": best_model_dist.lower(),
                 }
 
                 # Rolling VaR backtest
@@ -469,8 +417,7 @@ class Calibrator:
                 )
 
                 hit_list = Parallel(n_jobs=-1)(
-                    delayed(backtester.hit_backtest)(i)
-                    for i in range(0, len(self.price_series) - train_size)
+                    delayed(backtester.hit_backtest)(i) for i in range(0, len(self.price_series) - train_size)
                 )
                 all_hits = np.concatenate(hit_list)
                 total_exceedance_rate = all_hits.mean()
@@ -508,4 +455,3 @@ class Calibrator:
             garch_cand_spech = None
 
         return best_arima, best_garch_fitted, arima_spech, garch_cand_spech
-

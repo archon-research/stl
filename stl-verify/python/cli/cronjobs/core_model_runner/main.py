@@ -44,18 +44,21 @@ async def _write_result(engine, result: CoreModelPipelineResult) -> None:
              :protocol, :forecast_step, :n_mc, :copula_type, :computed_at)
     """)
     async with engine.begin() as conn:
-        await conn.execute(query, {
-            "market_key":    result.market_key,
-            "crr_el_pct":    float(result.crr_el_pct),
-            "crr_es_pct":    float(result.crr_es_pct),
-            "crr_var_pct":   float(result.crr_var_pct),
-            "hhi":           float(result.hhi) if result.hhi is not None else None,
-            "protocol":      result.protocol,
-            "forecast_step": result.forecast_step,
-            "n_mc":          result.n_mc,
-            "copula_type":   result.copula_type,
-            "computed_at":   result.computed_at,
-        })
+        await conn.execute(
+            query,
+            {
+                "market_key": result.market_key,
+                "crr_el_pct": float(result.crr_el_pct),
+                "crr_es_pct": float(result.crr_es_pct),
+                "crr_var_pct": float(result.crr_var_pct),
+                "hhi": float(result.hhi) if result.hhi is not None else None,
+                "protocol": result.protocol,
+                "forecast_step": result.forecast_step,
+                "n_mc": result.n_mc,
+                "copula_type": result.copula_type,
+                "computed_at": result.computed_at,
+            },
+        )
 
 
 async def main() -> None:

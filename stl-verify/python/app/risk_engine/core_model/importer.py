@@ -6,13 +6,14 @@ import pandas as pd
 # Import Market and User Data for each Product
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def load_protocol_data(
     protocol: str,
     loan_token: str,
     *,
     network: str = "ethereum",
     morpho_market: str = "CBBTC",
-    galaxy_type: str = "no-class-a"
+    galaxy_type: str = "no-class-a",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Loads user-level and market-level protocol data.
@@ -22,16 +23,20 @@ def load_protocol_data(
     Returns:
         A tuple of (users_df, market_df):
         - users_df: DataFrame with per-user position data.
-        - market_df: DataFrame with market-level metrics (this is important only to understand which collateral are suitable for the calibration process, since we upload prices through an API).
+        - market_df: DataFrame with market-level metrics (this is important only to understand
+          which collateral are suitable for the calibration process, since we upload prices through an API).
     """
-    _path = lambda filename: os.path.join("inputs", filename)
+
+    def _path(filename):
+        return os.path.join("inputs", filename)
+
     protocol = protocol.lower()
     network = network.lower()
     if protocol == "morpho":
         loan_token = f"{morpho_market}-{loan_token}".lower()
         users_df = pd.read_parquet(_path(f"users_{protocol}_{loan_token}.parquet"))
         market_df = pd.read_parquet(_path(f"market_{protocol}_{loan_token}.parquet"))
-    
+
     elif protocol == "galaxy":
         if "no" in galaxy_type.lower():
             type = "no-class-a"
@@ -39,15 +44,15 @@ def load_protocol_data(
             type = "w-class-a"
         users_df = pd.read_parquet(_path(f"users_{protocol}_{type}.parquet"))
         market_df = pd.read_parquet(_path(f"market_{protocol}.parquet"))
-    
+
     elif protocol == "anchorage":
         users_df = pd.read_parquet(_path(f"users_{protocol}.parquet"))
         market_df = pd.read_parquet(_path(f"market_{protocol}.parquet"))
-    
+
     else:
         users_df = pd.read_parquet(_path(f"users_{protocol}_{loan_token}.parquet"))
         market_df = pd.read_parquet(_path(f"market_{protocol}_{loan_token}.parquet"))
-    
+
     return users_df, market_df
 
 
@@ -55,9 +60,8 @@ def load_protocol_data(
 # Import OHLCV Prices
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_price_data(
-    collateral_list: list[str]
-) -> pd.DataFrame:
+
+def load_price_data(collateral_list: list[str]) -> pd.DataFrame:
     """
     Loads price data for a given ticker from a local parquet file.
     Args:
@@ -65,7 +69,10 @@ def load_price_data(
     Returns:
         A DataFrame containing the price data for the specified ticker.
     """
-    _path = lambda filename: os.path.join("inputs", filename)
+
+    def _path(filename):
+        return os.path.join("inputs", filename)
+
     price_df = pd.read_parquet(_path("prices_df.parquet"))
     price_df = price_df[collateral_list]
     return price_df
@@ -75,9 +82,8 @@ def load_price_data(
 # Import Sell Orderbook Data
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_orderbook_data(
-    collateral_list: list[str]
-) -> pd.DataFrame:
+
+def load_orderbook_data(collateral_list: list[str]) -> pd.DataFrame:
     """
     Loads orderbook data for a given ticker from a local parquet file.
     Args:
@@ -85,7 +91,10 @@ def load_orderbook_data(
     Returns:
         A DataFrame containing the orderbook data for the specified ticker.
     """
-    _path = lambda filename: os.path.join("inputs", filename)
+
+    def _path(filename):
+        return os.path.join("inputs", filename)
+
     all_orderbooks = {}
     for collateral in collateral_list:
         all_orderbooks[collateral] = pd.read_parquet(_path(f"{collateral}_sell_orderbook.parquet"))
@@ -96,10 +105,8 @@ def load_orderbook_data(
 # Change each user LTV under the worst case scenario assumption HF = 1
 # ──────────────────────────────────────────────────────────────────────────────
 
-def change_user_ltvs(
-    users_df: pd.DataFrame,
-    market_df: pd.DataFrame
-) -> pd.DataFrame:
+
+def change_user_ltvs(users_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.DataFrame:
     """
     Adjusts user collateral positions so that every user's health factor equals 1.
 
@@ -119,25 +126,18 @@ def change_user_ltvs(
         columns, and health factor set to 1.0 for all users.
     """
     new_user_df = users_df.fillna(0).copy()
-    oracle_price_dict = market_df.set_index('token_symbol')['oracle_price'].to_dict()
+    oracle_price_dict = market_df.set_index("token_symbol")["oracle_price"].to_dict()
 
-    new_user_df['new_total_collateral_usd'] = (
-        new_user_df['total_borrow_usd']
-        .div(new_user_df['lltv'].replace(0, pd.NA))
-    )
+    new_user_df["new_total_collateral_usd"] = new_user_df["total_borrow_usd"].div(new_user_df["lltv"].replace(0, pd.NA))
 
-    new_user_df['new_health_factor'] = 1.0
+    new_user_df["new_health_factor"] = 1.0
 
     # Select asset supply columns
-    columns_usd = [
-        col for col in new_user_df.columns
-        if "_supply_usd" in col and "total_supply_usd" not in col
-    ]
+    columns_usd = [col for col in new_user_df.columns if "_supply_usd" in col and "total_supply_usd" not in col]
     columns_qty = [
-        col for col in new_user_df.columns
-        if "_supply" in col
-        and "_supply_usd" not in col
-        and "total_supply" not in col
+        col
+        for col in new_user_df.columns
+        if "_supply" in col and "_supply_usd" not in col and "total_supply" not in col
     ]
 
     new_supply_usd_df = new_user_df[columns_usd].copy()
@@ -145,21 +145,13 @@ def change_user_ltvs(
 
     row_sums = new_supply_usd_df.sum(axis=1)
 
-    weights = (
-        new_supply_usd_df
-        .div(row_sums.replace(0, pd.NA), axis=0)
-        .fillna(0)
-    )
+    weights = new_supply_usd_df.div(row_sums.replace(0, pd.NA), axis=0).fillna(0)
 
-    new_supply_usd_df = weights.mul(
-        new_user_df['new_total_collateral_usd'],
-        axis=0
-    )
+    new_supply_usd_df = weights.mul(new_user_df["new_total_collateral_usd"], axis=0)
 
     new_supply_qty_df = pd.DataFrame(index=new_supply_usd_df.index)
 
     for usd_col in columns_usd:
-
         token = usd_col.replace("_supply_usd", "").upper()
         qty_col = usd_col.replace("_supply_usd", "_supply")
 
@@ -172,9 +164,6 @@ def change_user_ltvs(
 
     base_df = new_user_df.drop(columns=columns_usd + columns_qty + ["new_total_collateral_usd"])
 
-    final_df = pd.concat(
-        [base_df, new_supply_usd_df, new_supply_qty_df],
-        axis=1
-    )
+    final_df = pd.concat([base_df, new_supply_usd_df, new_supply_qty_df], axis=1)
 
     return final_df

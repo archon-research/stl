@@ -101,17 +101,11 @@ class CoreModelRiskService:
         try:
             usd_exposure = raw if isinstance(raw, Decimal) else Decimal(str(raw))
         except Exception as exc:
-            raise InvalidOverrideError(
-                f"invalid usd_exposure: expected a positive finite number, got {raw!r}"
-            ) from exc
+            raise InvalidOverrideError(f"invalid usd_exposure: expected a positive finite number, got {raw!r}") from exc
         if not usd_exposure.is_finite():
-            raise InvalidOverrideError(
-                f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}"
-            )
+            raise InvalidOverrideError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
         if usd_exposure <= Decimal("0"):
-            raise InvalidOverrideError(
-                f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}"
-            )
+            raise InvalidOverrideError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
         if usd_exposure > _USD_EXPOSURE_MAX:
             raise InvalidOverrideError(f"usd_exposure must be <= {_USD_EXPOSURE_MAX:E}, got {usd_exposure}")
         return usd_exposure
