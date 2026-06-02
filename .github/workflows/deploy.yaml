@@ -37,6 +37,9 @@ jobs:
       AWS_REGION: eu-west-1
       STAGING_REGISTRY: 579039992622.dkr.ecr.eu-west-1.amazonaws.com
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+      # Set explicitly so the build can form valid image tags without an AWS STS
+      # call. Lets build-only runs (push=false) work with no AWS credentials.
+      AWS_ACCOUNT_ID: "579039992622"
     permissions:
       id-token: write
       contents: read
@@ -54,13 +57,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
+      # OIDC role assumption is only permitted from main, so skip AWS/ECR on
+      # build-only runs (push=false), which can run from any branch.
       - name: Configure AWS credentials (staging)
+        if: ${{ inputs.push }}
         uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to staging ECR
+        if: ${{ inputs.push }}
         run: |
           aws ecr get-login-password --region "$AWS_REGION" | \
             docker login --username AWS --password-stdin "$STAGING_REGISTRY"
@@ -76,7 +83,7 @@ jobs:
 
       - name: Build (and, when push=true, push) all images to staging ECR
         working-directory: stl-verify
-        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO"
+        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO" DOCKER_PUSH=${{ inputs.push && '1' || '0' }}
 
   update-staging:
     name: Update Staging Image Tags
@@ -266,7 +273,7 @@ jobs:
   create-prod-pr:
     name: Create Prod Deploy PR
     needs: build-push-prod
-    if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-prod-pr
