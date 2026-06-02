@@ -1,0 +1,726 @@
+{
+  "version": "0.1.1.dev152+g1931035e9.d19800101",
+  "axis_synome_git_commit": "1931035e91cf9fa527292e45f048df533b840013",
+  "axis_synome": {
+    "spec": {
+      "asc": {
+        "entities": {
+          "assets_by_prime": {
+            "ASSETS_BY_PRIME": {
+              "grove": [
+                {
+                  "contract_address": "0x1121f4e21ed8b9bc1bb9a2952cdd8639ac897784",
+                  "wallet_address": "0x7107dd8f56642327945294a18a4280c78e153644",
+                  "asset_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                  "star": "grove",
+                  "chain": "avalanche-c",
+                  "protocol": "centrifuge",
+                  "allocation_type": "allocation",
+                  "token_type": "centrifuge",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a",
+                  "wallet_address": "0x7107dd8f56642327945294a18a4280c78e153644",
+                  "asset_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                  "star": "grove",
+                  "chain": "avalanche-c",
+                  "protocol": "centrifuge",
+                  "allocation_type": "allocation",
+                  "token_type": "centrifuge",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xbeef2d50b428675a1921bc6bbf4bfb9d8cf1461a",
+                  "wallet_address": "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee",
+                  "asset_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "star": "grove",
+                  "chain": "base",
+                  "protocol": "morpho",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xbeef0e0834849acc03f0089f01f4f1eeb06873c9",
+                  "wallet_address": "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee",
+                  "asset_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "star": "grove",
+                  "chain": "base",
+                  "protocol": "morpho",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x98c23e9d8f34fefb1b7bd6a91b7ff122f4e16f5c",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "aave-core-v3",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xfa82580c16a31d0c1bc632a36f82e83efef3eec0",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "aave-core-v3",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xe3190143eb552456f88464662f0c0c4ac67a77eb",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "aave-horizon",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x68215b6533c47ff9f7125ac95adf00fe4a62f79e",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "aave-horizon",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "agora-ausd",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x6a9da2d710bb9b700acde7cb81f10f1ff8c89041",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "blackrock",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x4880799ee5200fc58da299e965df644fbf46780b",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "centrifuge",
+                  "allocation_type": "allocation",
+                  "token_type": "centrifuge",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "centrifuge",
+                  "allocation_type": "allocation",
+                  "token_type": "centrifuge",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "ethena",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "ethena",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "ethena-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xbeeff0d672ab7f5018dfb614c93981045d4aa98a",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "grove-x-steakhouse-ausd-morpho-vault",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xbeeff08df54897e7544ab01d0e86f013da354111",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "grove-x-steakhouse-usdc-high-yield-vault-v2",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xbeef2b5fd3d94469b7782aebe6364e6e6fb1b709",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "morpho",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "ripple",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x51c2d74017390cbbd30550179a16a1c28f7210fc",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "securitize",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xd8a6511979d9c5d387c819e9f8ed9f3a5c6c5379",
+                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                  "asset_address": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "protocol": "steakhouse-pyusd-morpho-vault",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x5d72a9d9a9510cd8cbdba12ac62593a58930a948",
+                  "wallet_address": "0x0c462fff7cc975bc9f2b0aeb8270feba5fd71e1b",
+                  "asset_address": "0x8292bb45bf1ee4d140127049757c2e0ff06317ed",
+                  "star": "grove",
+                  "chain": "plasma",
+                  "protocol": "aave-v3",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                }
+              ],
+              "spark": [
+                {
+                  "contract_address": "0x724dc807b04555b71ed48a6896b6f41593b8c637",
+                  "wallet_address": "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709",
+                  "asset_address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                  "star": "spark",
+                  "chain": "arbitrum",
+                  "protocol": "aave",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x3459fcc94390c3372c0f7b4cd3f8795f0e5afe96",
+                  "wallet_address": "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709",
+                  "asset_address": "0xddb46999f8891663a8f2828d25298f70416d7610",
+                  "star": "spark",
+                  "chain": "arbitrum",
+                  "protocol": "fluid-finance-erc4626-vault",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x625e7708f30ca75bfd92586e17077590c60eb4cd",
+                  "wallet_address": "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec",
+                  "asset_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                  "star": "spark",
+                  "chain": "avalanche-c",
+                  "protocol": "aave",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
+                  "wallet_address": "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec",
+                  "asset_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+                  "star": "spark",
+                  "chain": "avalanche-c",
+                  "protocol": "spark-savings-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "wallet_address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca",
+                  "asset_address": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab",
+                  "star": "spark",
+                  "chain": "base",
+                  "protocol": "aave",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xf62e339f21d8018940f188f6987bcdf02a849619",
+                  "wallet_address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca",
+                  "asset_address": "0x5875eee11cf8398102fdad704c9e96607675467a",
+                  "star": "spark",
+                  "chain": "base",
+                  "protocol": "fluid-finance-erc4626-vault",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x7bfa7c4f149e7415b73bdedfe609237e29cbf34a",
+                  "wallet_address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca",
+                  "asset_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "star": "spark",
+                  "chain": "base",
+                  "protocol": "morpho-blue-erc4626-vault",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x98c23e9d8f34fefb1b7bd6a91b7ff122f4e16f5c",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "aave-core",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x4f5923fc5fd4a93352581b38b7cd26943012decf",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "aave-core",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x32a6268f9ba3642dda7892add74f1d34469a4259",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "aave-core",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x23878914efe38d27c4d67ab83ed1b93a74d4086a",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "aave-core",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x09aa30b182488f769a9824f15e6ce58591da4781",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "aave-prime",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x377c3bd93f2a2984e1e7be6a5c22c525ed4a4815",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "arkis",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x6a9da2d710bb9b700acde7cb81f10f1ff8c89041",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "blackrock",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x8c213ee79581ff4984583c6a801e5263418c4b86",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "centrifuge",
+                  "allocation_type": "allocation",
+                  "token_type": "centrifuge",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x4f493b7de8aac7d55f71853688b1f7c8f0243c85",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "curve",
+                  "allocation_type": "allocation",
+                  "token_type": "curve",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xdb74dfdd3bb46be8ce6c33dc9d82777bcfc3ded5",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "curve",
+                  "allocation_type": "allocation",
+                  "token_type": "curve",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x00836fe54625be242bcfa286207795405ca4fd10",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "curve",
+                  "allocation_type": "allocation",
+                  "token_type": "curve",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "ethena-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x2bbe31d63e6813e3ac858c04dae43fb2a72b0d11",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa3931d71877c0e7a3148cb7eb4463524fec27fbd",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "fluid-finance-erc4626-vault",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "maple",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "maple",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x56a76b428244a50513ec81e225a293d128fd581d",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "morpho",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xe41a0583334f0dc4e023acd0bfef3667f6fe0597",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "morpho",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x73e65dbd630f90604062f6e02fab9138e713edd9",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "morpho",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x4dedf26112b3ec8ec46e7e31ea5e123490b05b8b",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "sparklend-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x779224df1c756b4edd899854f32a53e8c2b2ce5d",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "sparklend-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x377c3bd93f2a2984e1e7be6a5c22c525ed4a4815",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "sparklend-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "sparklend-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xe7df13b8e3d6740fe17cbe928c7334243d86c92f",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "sparklend-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "sparklend-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "atoken",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xfe6eb3b609a7c8352a241f7f3a21cea4e9209b8f",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "spark-savings-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x80128dbb9f07b93dde62a6daeadb69ed14a7d354",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "spark-savings-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x28b3a8fb53b741a8fd78c0fb9a6b2393d896a43d",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "spark-savings-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0xe2e7a17dff93280dec073c995595155283e3c372",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "spark-savings-protocol",
+                  "allocation_type": "allocation",
+                  "token_type": "erc4626",
+                  "created_at_block": null
+                },
+                {
+                  "contract_address": "0x43415eb6ff9db7e26a15b704e7a3edce97d31c4e",
+                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "protocol": "superstate",
+                  "allocation_type": "allocation",
+                  "token_type": "erc20",
+                  "created_at_block": null
+                }
+              ]
+            }
+          },
+          "alm_proxies": {
+            "AlmProxy": {
+              "spark": {
+                "mainnet": {
+                  "star": "spark",
+                  "chain": "mainnet",
+                  "address": "0x1601843c5e9bc251a3272907010afa41fa18347e"
+                },
+                "base": {
+                  "star": "spark",
+                  "chain": "base",
+                  "address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
+                },
+                "arbitrum": {
+                  "star": "spark",
+                  "chain": "arbitrum",
+                  "address": "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709"
+                },
+                "unichain": {
+                  "star": "spark",
+                  "chain": "unichain",
+                  "address": "0x345e368fccd62266b3f5f37c9a131fd1c39f5869"
+                },
+                "optimism": {
+                  "star": "spark",
+                  "chain": "optimism",
+                  "address": "0x876664f0c9ff24d1aa355ce9f1680ae1a5bf36fb"
+                },
+                "avalanche-c": {
+                  "star": "spark",
+                  "chain": "avalanche-c",
+                  "address": "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+                }
+              },
+              "grove": {
+                "mainnet": {
+                  "star": "grove",
+                  "chain": "mainnet",
+                  "address": "0x491edfb0b8b608044e227225c715981a30f3a44e"
+                },
+                "avalanche-c": {
+                  "star": "grove",
+                  "chain": "avalanche-c",
+                  "address": "0x7107dd8f56642327945294a18a4280c78e153644"
+                },
+                "base": {
+                  "star": "grove",
+                  "chain": "base",
+                  "address": "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee"
+                },
+                "plasma": {
+                  "star": "grove",
+                  "chain": "plasma",
+                  "address": "0x0c462fff7cc975bc9f2b0aeb8270feba5fd71e1b"
+                },
+                "plume": {
+                  "star": "grove",
+                  "chain": "plume",
+                  "address": "0x1db91ad50446a671e2231f77e00948e68876f812"
+                },
+                "monad": {
+                  "star": "grove",
+                  "chain": "monad",
+                  "address": "0x94b398acb2fce988871218221ea6a4a2b26cccbc"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

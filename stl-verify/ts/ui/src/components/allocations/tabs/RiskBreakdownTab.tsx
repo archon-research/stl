@@ -31,7 +31,7 @@ import type {
   Token,
   TokenPrice,
 } from '../../../types/allocation';
-import { ChainLogo, SummaryMetric } from '../../shared';
+import { ChainLogo, SummaryMetric, TokenAddress } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
 import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
 
@@ -41,7 +41,110 @@ type RiskBreakdownTabProps = {
   selectedReceiptToken: Allocation | null;
 };
 
+const tableHeaderTypographyClassName = css({
+  '& thead th': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'uppercase',
+    color: 'text.default',
+  },
+  '& thead th button': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'uppercase',
+    color: 'text.default',
+  },
+});
+
 type RiskItem = RiskBreakdown['items'][number];
+
+function RiskSymbolCell({
+  chainId,
+  symbol,
+}: {
+  chainId: number;
+  symbol: string;
+}) {
+  return (
+    <div
+      className={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '2',
+      })}
+    >
+      <ChainLogo chainId={chainId} size="6" />
+      <span>{symbol}</span>
+    </div>
+  );
+}
+
+function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
+  return [
+    {
+      id: 'symbol',
+      header: 'Symbol',
+      accessorKey: 'symbol',
+      cell: (info: CellContext<RiskItem, unknown>) => (
+        <RiskSymbolCell chainId={chainId} symbol={info.getValue() as string} />
+      ),
+    },
+    {
+      id: 'amount',
+      header: 'Amount',
+      accessorKey: 'amount',
+      cell: (info: CellContext<RiskItem, unknown>) => {
+        const value = info.getValue();
+        return typeof value === 'string'
+          ? parseFloat(value).toFixed(2)
+          : (value as number).toFixed(2);
+      },
+    },
+    {
+      id: 'price_usd',
+      header: 'Price USD',
+      accessorKey: 'price_usd',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatUsdValue(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'amount_usd',
+      header: 'Amount USD',
+      accessorKey: 'amount_usd',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatUsdValue(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'backing_pct',
+      header: 'Backing %',
+      accessorKey: 'backing_pct',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatPercentValue(
+          info.getValue() as string | number | null | undefined,
+        ),
+    },
+    {
+      id: 'lt',
+      header: 'Liquidation Threshold',
+      accessorKey: 'liquidation_threshold',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatRatioPercent(
+          info.getValue() as string | number | null | undefined,
+        ),
+    },
+    {
+      id: 'bonus',
+      header: 'Liquidation Bonus',
+      accessorKey: 'liquidation_bonus',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatMultiplier(info.getValue() as string | number | null | undefined),
+    },
+  ];
+}
 
 function RiskTable({
   chainId,
@@ -74,80 +177,7 @@ function RiskTable({
   );
 
   const columns = useMemo<ColumnDef<RiskItem>[]>(
-    () => [
-      {
-        id: 'symbol',
-        header: 'Symbol',
-        accessorKey: 'symbol',
-        cell: (info: CellContext<RiskItem, unknown>) => {
-          const symbol = info.getValue() as string;
-          return (
-            <div
-              className={css({
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '2',
-              })}
-            >
-              <ChainLogo chainId={chainId} size="6" />
-              <span>{symbol}</span>
-            </div>
-          );
-        },
-      },
-      {
-        id: 'amount',
-        header: 'Amount',
-        accessorKey: 'amount',
-        cell: (info: CellContext<RiskItem, unknown>) => {
-          const value = info.getValue();
-          return typeof value === 'string'
-            ? parseFloat(value).toFixed(2)
-            : (value as number).toFixed(2);
-        },
-      },
-      {
-        id: 'price_usd',
-        header: 'Price USD',
-        accessorKey: 'price_usd',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatUsdValue(info.getValue() as string | number | null | undefined),
-      },
-      {
-        id: 'amount_usd',
-        header: 'Amount USD',
-        accessorKey: 'amount_usd',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatUsdValue(info.getValue() as string | number | null | undefined),
-      },
-      {
-        id: 'backing_pct',
-        header: 'Backing %',
-        accessorKey: 'backing_pct',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatPercentValue(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-      {
-        id: 'lt',
-        header: 'Liquidation Threshold',
-        accessorKey: 'liquidation_threshold',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatRatioPercent(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-      {
-        id: 'bonus',
-        header: 'Liquidation Bonus',
-        accessorKey: 'liquidation_bonus',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatMultiplier(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-    ],
+    () => createRiskColumns(chainId),
     [chainId],
   );
 
@@ -156,23 +186,25 @@ function RiskTable({
   });
 
   return (
-    <DataTable
-      table={table}
-      isLoading={isLoading}
-      getRowKey={(item) => String(item.token_id)}
-      skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
-      minWidth="76rem"
-      renderCell={(children) => (
-        <div
-          className={css({
-            fontSize: 'sm',
-            color: 'text.strong',
-          })}
-        >
-          {children}
-        </div>
-      )}
-    />
+    <div className={tableHeaderTypographyClassName}>
+      <DataTable
+        table={table}
+        isLoading={isLoading}
+        getRowKey={(item) => String(item.token_id)}
+        skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
+        minWidth="76rem"
+        renderCell={(children) => (
+          <div
+            className={css({
+              fontSize: 'sm',
+              color: 'text.strong',
+            })}
+          >
+            {children}
+          </div>
+        )}
+      />
+    </div>
   );
 }
 
@@ -451,7 +483,22 @@ export function RiskBreakdownTab({
               isTokenMetaLoading
                 ? 'Fetching token metadata'
                 : tokenCatalog
-                  ? `${tokenCatalog.address} · ${tokenCatalog.decimals ?? 'Unknown'} decimals`
+                  ? (
+                      <span
+                        className={css({
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '1.5',
+                          flexWrap: 'wrap',
+                        })}
+                      >
+                        <TokenAddress
+                          address={tokenCatalog.address}
+                          chainId={selectedReceiptToken.chain_id}
+                        />
+                        <span>{tokenCatalog.decimals ?? 'Unknown'} decimals</span>
+                      </span>
+                    )
                   : 'Token metadata unavailable'
             }
           />

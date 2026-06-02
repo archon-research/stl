@@ -30,6 +30,7 @@ metadata:
   name: backup-worker-config
 data:
   CHAIN_ID: "1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   WORKERS: "2"
   DEPLOY_ENV: "staging"
@@ -97,6 +98,7 @@ metadata:
   name: avalanche-backup-worker-config
 data:
   CHAIN_ID: "43114"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   WORKERS: "2"
   DEPLOY_ENV: "staging"
@@ -200,9 +202,9 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
-  # Arbitrum produces ~4 blocks/s; the 10/30s defaults can't keep up with live,
-  # let alone drain a backlog. 100 blocks every 5s = ~20 blk/s, ~5x live.
-  BACKFILL_BATCH_SIZE: "100"
+  # Arbitrum produces ~4 blocks/s (measured 3.98 blk/s over 7d in prod).
+  # 20 blocks every 5s = 4 blk/s, matching the incoming rate exactly.
+  BACKFILL_BATCH_SIZE: "20"
   BACKFILL_POLL_INTERVAL: "5s"
 ---
 apiVersion: v1
@@ -211,6 +213,7 @@ metadata:
   name: base-backup-worker-config
 data:
   CHAIN_ID: "8453"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   WORKERS: "2"
   DEPLOY_ENV: "staging"
@@ -222,6 +225,7 @@ metadata:
   name: optimism-backup-worker-config
 data:
   CHAIN_ID: "10"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   WORKERS: "2"
   DEPLOY_ENV: "staging"
@@ -233,6 +237,7 @@ metadata:
   name: unichain-backup-worker-config
 data:
   CHAIN_ID: "130"
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   WORKERS: "2"
   DEPLOY_ENV: "staging"
@@ -244,6 +249,7 @@ metadata:
   name: arbitrum-backup-worker-config
 data:
   CHAIN_ID: "42161"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
   AWS_REGION: "eu-west-1"
   WORKERS: "2"
   DEPLOY_ENV: "staging"

@@ -1,0 +1,96 @@
+name: Python Sentinel Verify Compatibility
+
+on:
+  workflow_call:
+    inputs:
+      stl_ref:
+        description: Ref of archon-research/stl to test against
+        required: false
+        type: string
+        default: main
+  workflow_dispatch:
+    inputs:
+      stl_ref:
+        description: Ref of archon-research/stl to test against
+        required: false
+        default: main
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  compatibility:
+    name: Compatibility Gate (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout stl at selected ref
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/stl
+          ref: ${{ inputs.stl_ref }}
+          path: stl
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          working-directory: stl/stl-verify/python
+
+      - name: Download wheel artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: axis-synome-wheel
+          path: caller-wheel
+
+      - name: Install stl Python dependencies
+        working-directory: stl/stl-verify/python
+        run: uv sync --all-extras
+
+      - name: Replace dependency with caller artifact
+        working-directory: stl/stl-verify/python
+        run: |
+          set -euo pipefail
+          uv pip install --no-deps --python .venv/bin/python --force-reinstall "$GITHUB_WORKSPACE"/caller-wheel/*.whl
+
+          uv pip show --python .venv/bin/python axis-synome
+
+      - name: Type check
+        working-directory: stl/stl-verify/python
+        env:
+          UV_NO_SYNC: '1'
+        run: make typecheck
+
+      - name: Lint
+        working-directory: stl/stl-verify/python
+        env:
+          UV_NO_SYNC: '1'
+        run: make lint
+
+      - name: Unit tests
+        working-directory: stl/stl-verify/python
+        env:
+          UV_NO_SYNC: '1'
+        run: make test-unit
+
+      - name: Summarize run
+        if: ${{ always() }}
+        env:
+          STL_REF: ${{ inputs.stl_ref }}
+        run: |
+          {
+            echo "## Python Sentinel Verify Compatibility Summary"
+            echo ""
+            echo "- stl_ref: $STL_REF"
+            echo "- wheel_artifact_name: axis-synome-wheel"
+            echo "- install_target: $GITHUB_WORKSPACE/caller-wheel/*.whl"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { Avatar } from '@archon-research/design-system';
+import { useEffect, useMemo, useState } from 'react';
 
 import { logging } from '#src/lib/logging';
 import { css } from '#styled-system/css';
@@ -17,6 +18,11 @@ type LogoAvatarProps =
   | (LogoAvatarBaseProps & { size?: PandaSizeToken; sizePx?: never })
   | (LogoAvatarBaseProps & { size?: never; sizePx: number });
 
+type AvatarStatusChangeDetails = { status: 'loading' | 'loaded' | 'error' };
+
+// Cache known-bad logo URLs to avoid repeated failed requests and duplicate warnings.
+const failedLogoUrls = new Set<string>();
+
 export function LogoAvatar({
   alt,
   fallbackText,
@@ -26,18 +32,45 @@ export function LogoAvatar({
   sizePx,
   fallbackColor = 'text.default',
 }: LogoAvatarProps) {
-  const [hasImageError, setHasImageError] = useState(false);
+  const normalizedImageUrl = useMemo(() => imageUrl ?? null, [imageUrl]);
+  const [hasImageError, setHasImageError] = useState<boolean>(
+    normalizedImageUrl !== null && failedLogoUrls.has(normalizedImageUrl),
+  );
 
   useEffect(() => {
-    setHasImageError(false);
-  }, [imageUrl]);
+    if (!normalizedImageUrl) {
+      setHasImageError(true);
+      return;
+    }
+
+    setHasImageError(failedLogoUrls.has(normalizedImageUrl));
+  }, [normalizedImageUrl]);
 
   const sizingStyle = sizePx
     ? { width: `${sizePx}px`, height: `${sizePx}px` }
     : undefined;
 
+  const shouldRenderImage = normalizedImageUrl !== null && !hasImageError;
+
   return (
-    <div
+    <Avatar.Root
+      onStatusChange={(details: AvatarStatusChangeDetails) => {
+        if (details.status === 'error' && normalizedImageUrl) {
+          const isFirstFailure = !failedLogoUrls.has(normalizedImageUrl);
+          failedLogoUrls.add(normalizedImageUrl);
+          setHasImageError(true);
+
+          if (!isFirstFailure) {
+            return;
+          }
+
+          logging.warn('Logo image failed to load', {
+            imageUrl: normalizedImageUrl,
+            alt,
+            fallbackText,
+          });
+        }
+      }}
       style={sizingStyle}
       className={css({
         width: sizePx ? undefined : size,
@@ -51,42 +84,33 @@ export function LogoAvatar({
         flexShrink: 0,
       })}
     >
-      {!imageUrl || hasImageError ? (
-        <div
-          className={css({
-            width: 'full',
-            height: 'full',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: isSelected ? 'white' : fallbackColor,
-            fontSize: '2xs',
-            fontWeight: 'semibold',
-            userSelect: 'none',
-          })}
-        >
-          {fallbackText}
-        </div>
-      ) : (
-        <img
+      <Avatar.Fallback
+        className={css({
+          width: 'full',
+          height: 'full',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: isSelected ? 'white' : fallbackColor,
+          fontSize: '2xs',
+          fontWeight: 'semibold',
+          userSelect: 'none',
+        })}
+      >
+        {fallbackText}
+      </Avatar.Fallback>
+      {shouldRenderImage ? (
+        <Avatar.Image
           alt={alt}
+          src={normalizedImageUrl}
           className={css({
             width: 'full',
             height: 'full',
             objectFit: 'cover',
             display: 'block',
           })}
-          onError={() => {
-            setHasImageError(true);
-            logging.warn('Logo image failed to load', {
-              imageUrl,
-              alt,
-              fallbackText,
-            });
-          }}
-          src={imageUrl}
         />
-      )}
-    </div>
+      ) : null}
+    </Avatar.Root>
   );
 }

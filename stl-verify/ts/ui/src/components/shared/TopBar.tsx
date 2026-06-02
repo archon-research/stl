@@ -2,7 +2,6 @@ import { StyledSelect } from '@archon-research/design-system';
 import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
-import { flex } from '#styled-system/patterns';
 
 import type { FilterOption } from '../../lib/dashboard';
 
@@ -32,7 +31,12 @@ function FilterField({
   value: string | null;
 }) {
   return (
-    <div className={css({ minWidth: '13rem' })}>
+    <div
+      className={css({
+        minWidth: '0',
+        width: '100%',
+      })}
+    >
       <StyledSelect
         aria-label={ariaLabel}
         value={value ?? ''}
@@ -62,7 +66,17 @@ export function TopBar({
   selectedProtocol,
 }: TopBarProps) {
   return (
-    <div className={flex({ align: 'end', gap: '3', wrap: 'wrap' })}>
+    <div
+      className={css({
+        display: 'grid',
+        gridTemplateColumns: {
+          base: '1fr',
+          sm: 'repeat(2, minmax(0, 1fr))',
+        },
+        gap: { base: '2.5', md: '3' },
+        alignItems: 'end',
+      })}
+    >
       <FilterField
         ariaLabel="Filter allocations by network"
         disabled={!hasSelectedPrime || networkOptions.length === 0}
