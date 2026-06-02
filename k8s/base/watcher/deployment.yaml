@@ -20,6 +20,13 @@ spec:
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           image: watcher
+          env:
+            # Inject the deployment name so each per-chain watcher emits a
+            # distinct OTEL service.name (e.g. "watcher", "arbitrum-watcher").
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
           envFrom:
             - configMapRef:
                 name: otel-config
