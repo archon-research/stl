@@ -116,8 +116,7 @@ type ClientConfig struct {
 	// endpoint. A nil limiter is the valid "disabled" state and lets all
 	// requests pass through unmetered. Typically constructed with
 	// rate.NewLimiter(rps, burst) to bound how aggressively a single Client
-	// can spend the Alchemy budget (see the VEC-NA Arbitrum incident, where
-	// republish + backfill jointly saturated the account).
+	// can spend the Alchemy budget
 	//
 	// Scope and caveats:
 	//   - This limiter is per-Client, intra-process only. It does NOT
