@@ -8,7 +8,8 @@
 #   BIN       output binary name. Kept per-service on purpose: the k8s liveness
 #             probes match the process with `pgrep -f <BIN>`, so the running
 #             process name must stay the service-specific binary name.
-# Defaults build the watcher, so a bare `docker build .` still works.
+# CMD_PATH/BIN default to the watcher, so only GO_VERSION must be supplied
+# (the Makefile passes it): `docker build --build-arg GO_VERSION=... .`
 #
 # IMPORTANT: the versioning args (GIT_COMMIT/GIT_BRANCH/BUILD_TIME) and the
 # target args (CMD_PATH/BIN) are declared AFTER `go mod download`, so a changing

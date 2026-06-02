@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       push:
-        description: "Push images to ECR and run the deploy/promote jobs. Set false to build-only (validate + warm the cache)."
+        description: "Push images to ECR and run the deploy/promote jobs. Set false to build-only: validate and reuse the cache without exporting (warming) it."
         required: false
         type: boolean
         default: false

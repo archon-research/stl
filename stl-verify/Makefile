@@ -779,9 +779,10 @@ endif
 #   IMG_CACHE_KEY   unique cache tag for this image
 #   IMG_TAG         image tag (default: $(IMAGE_TAG))
 #   IMG_LATEST_TAG  moving tag pushed alongside IMG_TAG (default: latest)
-# Set DOCKER_PUSH=0 to build only (validate the build and warm the cache)
-# without loading or pushing the final image; useful for a CI build check that
-# needs no ECR credentials.
+# Set DOCKER_PUSH=0 to build only: validate the build and import the registry
+# cache, without loading or pushing the final image. Cache export is gated on
+# DOCKER_PUSH, so a build-only run reuses the cache but does not warm/overwrite
+# it. Useful for a CI build check that needs no ECR credentials.
 IMG_TAG        ?= $(IMAGE_TAG)
 IMG_LATEST_TAG ?= latest
 DOCKER_PUSH    ?= 1

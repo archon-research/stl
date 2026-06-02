@@ -16,16 +16,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# These are the ceiling for the reusable workflows this file calls; a called
-# workflow's job cannot request more than is granted here, or the run fails at
-# startup. id-token: write is for deploy.yaml's AWS OIDC; packages: write is for
-# deploy.yaml pushing the BuildKit layer cache to GHCR. Must be at the workflow
-# level (callers can't grant per-job). GitHub blocks OIDC and downgrades
-# packages to read for fork PRs, so this is not an attack vector.
+# Minimal default ceiling for every job: detect-changes and the go/python/ts
+# reusable callers only need read access. The elevated id-token: write (AWS
+# OIDC) and packages: write (GHCR cache push) that deploy.yaml requires are
+# granted on the call-deploy job alone (below), so the other jobs don't inherit
+# them.
 permissions:
   contents: read
-  packages: write
-  id-token: write
+  packages: read
 
 jobs:
   detect-changes:
@@ -90,6 +88,12 @@ jobs:
 
   call-deploy:
     name: Deploy
+    # Grant the elevated permissions deploy.yaml needs here (not workflow-wide):
+    # this job's permissions are the ceiling for the called reusable workflow.
+    permissions:
+      contents: read
+      packages: write  # push BuildKit layer cache to GHCR
+      id-token: write  # AWS OIDC
     needs:
       - detect-changes
       - ci-passed
