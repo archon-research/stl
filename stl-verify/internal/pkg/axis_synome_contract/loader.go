@@ -72,8 +72,8 @@ type TokenEntry struct {
 	CreatedAtBlock  *int64  `json:"created_at_block"`
 }
 
-// GetAlmProxy returns the ALM proxy configurations keyed by star and then chain.
-func (c *Contract) GetAlmProxy() map[string]map[string]ProxyConfig {
+// GetAlmProxies returns the ALM proxy configurations keyed by star and then chain.
+func (c *Contract) GetAlmProxies() map[string]map[string]ProxyConfig {
 	return c.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
 }
 
@@ -153,7 +153,7 @@ func LoadContract(path string) (*Contract, error) {
 }
 
 func validateAddresses(contract *Contract) error {
-	for star, byChain := range contract.GetAlmProxy() {
+	for star, byChain := range contract.GetAlmProxies() {
 		for chain, proxy := range byChain {
 			context := fmt.Sprintf("alm_proxy star=%s chain=%s", star, chain)
 			if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
