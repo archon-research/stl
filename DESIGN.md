@@ -162,7 +162,7 @@ Depth is mostly tonal rather than shadow-driven. Most surfaces remain flat, with
 ### Shadow Vocabulary
 - **Overlay Lift** (`0 8px 20px rgba(15, 23, 42, 0.05)`): Lightweight lift for elevated table zones.
 - **Panel Lift** (`0 24px 80px rgba(15, 23, 42, 0.08)`): Main dashboard section framing.
-- **Focus Ring Inset** (`inset 0 0 0 1px #d1d5db`): Selected row emphasis without heavy glow.
+- **Selected Row Inset** (`inset 0 0 0 1px #d1d5db`): Selected row emphasis without heavy glow.
 
 ### Named Rules
 **The Flat-by-Default Rule.** Base states stay flat, elevation appears only to clarify layering or active context.
