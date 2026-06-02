@@ -122,3 +122,23 @@ async def test_compute_rejects_exceeding_max_usd_exposure():
     svc = _service()
     with pytest.raises(InvalidOverrideError, match="must be <="):
         await svc.compute(1, _PRIME, {"usd_exposure": "2e15"})
+
+
+async def test_get_latest_result_returns_result_for_known_asset():
+    svc = _service()
+    result = await svc.get_latest_result(1)
+    assert result is not None
+    assert result.market_key == "sparklend_usdc"
+    assert result.crr_el_pct == Decimal("12.5")
+
+
+async def test_get_latest_result_returns_none_for_unknown_asset():
+    svc = _service()
+    result = await svc.get_latest_result(99)
+    assert result is None
+
+
+async def test_get_latest_result_returns_none_when_no_db_row():
+    svc = _service(get_latest_return=None)
+    result = await svc.get_latest_result(1)
+    assert result is None

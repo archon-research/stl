@@ -13,7 +13,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import CoreModelDetails, ModelName, RrcResult
 from app.domain.exceptions import InvalidOverrideError
 from app.ports.allocation_repository import AllocationRepository
-from app.ports.core_model_results_reader import CoreModelResultsReader
+from app.ports.core_model_results_reader import CoreModelResult, CoreModelResultsReader
 
 _HUNDRED = Decimal("100")
 _USD_CENT = Decimal("0.01")
@@ -43,6 +43,12 @@ class CoreModelRiskService:
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:  # noqa: ARG002
         return asset_id in self._asset_to_market_key
+
+    async def get_latest_result(self, asset_id: int) -> CoreModelResult | None:
+        market_key = self._asset_to_market_key.get(asset_id)
+        if market_key is None:
+            return None
+        return await self._results_reader.get_latest(market_key)
 
     async def compute(
         self,

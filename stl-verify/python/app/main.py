@@ -207,6 +207,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
             app.state.suraf_ratings = suraf_ratings
             app.state.asset_to_rating = asset_to_rating
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
+            app.state.core_model_risk_service = core_model_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 
