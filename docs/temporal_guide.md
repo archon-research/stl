@@ -211,14 +211,14 @@ Open **http://localhost:8233** → namespace `sentinel`. You should see:
 
 ## Docker Build & Push
 
-All cronjobs share a single multi-stage Dockerfile (`cmd/cronjobs/Dockerfile`). The `CRONJOB` build arg selects which one to build:
+All cronjobs (and every Go service) share the unified multi-stage `Dockerfile`. The `CMD_PATH` build arg selects which package to build and `BIN` names the output binary:
 
 ```bash
 # Build a specific cronjob image
 make docker-build-cronjob-offchain-price-indexer
 
 # Or directly:
-docker build --build-arg GO_VERSION="$(cat ../.go-version)" --build-arg CRONJOB=offchain-price-indexer -t stl-offchain-price-indexer:local -f cmd/cronjobs/Dockerfile .
+docker build --build-arg GO_VERSION="$(cat ../.go-version)" --build-arg CMD_PATH=cmd/cronjobs/offchain-price-indexer --build-arg BIN=cronjob -t stl-offchain-price-indexer:local -f Dockerfile .
 ```
 
 The image injects `GitCommit`, `GitBranch`, and `BuildTime` via ldflags for observability.

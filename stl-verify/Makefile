@@ -823,7 +823,7 @@ _docker-release-internal:
 		IMG_NAME="Watcher" \
 		IMG_REPO="$(ECR_REPO)" \
 		IMG_DOCKERFILE=Dockerfile \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=watcher
 
@@ -1011,7 +1011,9 @@ docker-build-backup:
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.backup \
+		--build-arg CMD_PATH=cmd/workers/raw-data-backup \
+		--build-arg BIN=raw-data-backup \
+		-f Dockerfile \
 		-t $(ECR_REPO_BACKUP):$(IMAGE_TAG) \
 		-t $(ECR_REPO_BACKUP):latest \
 		--load .
@@ -1029,8 +1031,8 @@ _docker-release-backup-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Backup Worker" \
 		IMG_REPO="$(ECR_REPO_BACKUP)" \
-		IMG_DOCKERFILE=Dockerfile.backup \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/raw-data-backup --build-arg BIN=raw-data-backup" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=backup-worker
 
@@ -1057,7 +1059,7 @@ ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws
 # Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
 docker-build-oracle-price-worker:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-oracle-price-worker:local -f Dockerfile.oracle-price-worker .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker -t stl-oracle-price-worker:local -f Dockerfile .
 else
 	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
@@ -1069,7 +1071,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.oracle-price-worker \
+		--build-arg CMD_PATH=cmd/workers/oracle-price-indexer \
+		--build-arg BIN=oracle_price_worker \
+		-f Dockerfile \
 		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
 		--load .
@@ -1088,8 +1092,8 @@ _docker-release-oracle-price-worker-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Oracle Price Worker" \
 		IMG_REPO="$(ECR_REPO_ORACLE_PRICE_WORKER)" \
-		IMG_DOCKERFILE=Dockerfile.oracle-price-worker \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=oracle-price-worker
 
@@ -1126,7 +1130,7 @@ ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).am
 # Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
 docker-build-sparklend-position-tracker:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-sparklend-position-tracker:local -f Dockerfile.sparklend-position-tracker .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker -t stl-sparklend-position-tracker:local -f Dockerfile .
 else
 	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
@@ -1138,7 +1142,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.sparklend-position-tracker \
+		--build-arg CMD_PATH=cmd/workers/sparklend-indexer \
+		--build-arg BIN=sparklend_position_tracker \
+		-f Dockerfile \
 		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
 		--load .
@@ -1157,8 +1163,8 @@ _docker-release-sparklend-position-tracker-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="SparkLend Position Tracker" \
 		IMG_REPO="$(ECR_REPO_SPARKLEND_POSITION_TRACKER)" \
-		IMG_DOCKERFILE=Dockerfile.sparklend-position-tracker \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=sparklend-position-tracker
 
@@ -1186,7 +1192,7 @@ ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/
 # Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
 docker-build-morpho-indexer:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-morpho-indexer:local -f Dockerfile.morpho-indexer .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer -t stl-morpho-indexer:local -f Dockerfile .
 else
 	@echo "==> Building Morpho Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
@@ -1198,7 +1204,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.morpho-indexer \
+		--build-arg CMD_PATH=cmd/workers/morpho-indexer \
+		--build-arg BIN=morpho-indexer \
+		-f Dockerfile \
 		-t $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_MORPHO_INDEXER):latest \
 		--load .
@@ -1217,8 +1225,8 @@ _docker-release-morpho-indexer-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Morpho Indexer" \
 		IMG_REPO="$(ECR_REPO_MORPHO_INDEXER)" \
-		IMG_DOCKERFILE=Dockerfile.morpho-indexer \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=morpho-indexer
 
@@ -1244,7 +1252,7 @@ ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.
 # Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
 docker-build-prime-debt-indexer:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer -t stl-prime-debt-indexer:local -f Dockerfile .
 else
 	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
@@ -1256,7 +1264,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.prime-debt-indexer \
+		--build-arg CMD_PATH=cmd/workers/prime-debt-indexer \
+		--build-arg BIN=prime-debt-indexer \
+		-f Dockerfile \
 		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
 		--load .
@@ -1275,8 +1285,8 @@ _docker-release-prime-debt-indexer-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Prime Debt Indexer" \
 		IMG_REPO="$(ECR_REPO_PRIME_DEBT_INDEXER)" \
-		IMG_DOCKERFILE=Dockerfile.prime-debt-indexer \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=prime-debt-indexer
 
@@ -1308,7 +1318,9 @@ docker-build-allocation-tracker:
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.allocation-tracker \
+		--build-arg CMD_PATH=cmd/workers/prime-allocation-indexer \
+		--build-arg BIN=allocation-tracker \
+		-f Dockerfile \
 		-t $(ECR_REPO_ALLOCATION_TRACKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_ALLOCATION_TRACKER):latest \
 		--load .
@@ -1326,8 +1338,8 @@ _docker-release-allocation-tracker-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Allocation Tracker" \
 		IMG_REPO="$(ECR_REPO_ALLOCATION_TRACKER)" \
-		IMG_DOCKERFILE=Dockerfile.allocation-tracker \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-allocation-indexer --build-arg BIN=allocation-tracker" \
 		IMG_GIT_ARGS=full \
 		IMG_CACHE_KEY=allocation-tracker
 
@@ -1698,11 +1710,10 @@ kind-deploy-python-api:
 # Auto-discovered from cmd/cronjobs/*/main.go — no changes needed when adding a new cronjob.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:local -f Dockerfile .
 
 # Pattern rule: release a cronjob image to ECR (build + push).
 # All cronjobs share a single ECR repo; the cronjob name is part of the tag.
@@ -1713,8 +1724,8 @@ _docker-release-cronjob-%-internal:
 	@$(MAKE) _docker-release-image \
 		IMG_NAME="Cronjob $*" \
 		IMG_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" \
-		IMG_DOCKERFILE="$(CRONJOB_DOCKERFILE)" \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CRONJOB=$*" \
+		IMG_DOCKERFILE=Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob" \
 		IMG_GIT_ARGS=full \
 		IMG_TAG="$*-$(IMAGE_TAG)" \
 		IMG_LATEST_TAG="$*-latest" \
