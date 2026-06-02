@@ -40,7 +40,7 @@ jobs:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
       - name: Configure AWS credentials (staging)
         uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
@@ -67,7 +67,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
@@ -145,9 +145,39 @@ jobs:
           echo "Failed to update main after ${MAX_RETRIES} attempts"
           exit 1
 
+  wait-staging-healthy:
+    name: Wait for Staging Healthy
+    needs: update-staging
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-wait-staging
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: a42ba946a0cb774eef6a0d321a2545d2c1310b29  # argocd-wait (DNS fix #20)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - uses: ./.github-actions/argocd-wait
+        with:
+          app: stl-staging
+          server: http://argocd-prod-archon
+          timeout: "300"
+          min-wait: "30"
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
+          tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
+          argocd-token-secret-id: archon-prod-argocd-ci-token
+
   build-push-prod:
     name: Build & Push Images (Prod)
-    needs: build-push-staging
+    needs: [build-push-staging, wait-staging-healthy]
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -225,7 +255,7 @@ jobs:
     steps:
       - name: Generate GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
@@ -426,8 +456,8 @@ jobs:
 
   notify-staging-failure:
     name: Notify Staging Deploy Failure
-    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure') }}
-    needs: [build-push-staging, update-staging]
+    if: ${{ always() && (needs.build-push-staging.result == 'failure' || needs.update-staging.result == 'failure' || needs.wait-staging-healthy.result == 'failure') }}
+    needs: [build-push-staging, update-staging, wait-staging-healthy]
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
@@ -435,6 +465,7 @@ jobs:
       failed-jobs: |
         Build & Push Images (Staging)=${{ needs.build-push-staging.result }}
         Update Staging Image Tags=${{ needs.update-staging.result }}
+        Wait for Staging Healthy=${{ needs.wait-staging-healthy.result }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

@@ -4,7 +4,6 @@ import {
   ErrorState,
   SearchInput,
   StyledSelect,
-  Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
@@ -56,7 +55,11 @@ function parseCategoryParam(value: string | null): AllocationCategory | '' {
 
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '7', px: '2', fontSize: 'xs' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({
+  minHeight: '8',
+  px: '2.5',
+  fontSize: 'sm',
+})}`;
 
 export function BottomPanel({
   allocations,
@@ -249,10 +252,10 @@ export function BottomPanel({
           wrap: 'wrap',
         })}
       >
-        <ToggleGroup
+        <ToggleGroup.Root
           value={[activeTab]}
-          onValueChange={(value: readonly string[]) => {
-            const nextValue = value[0];
+          onValueChange={(details: { value: string[] }) => {
+            const nextValue = details.value[0];
 
             if (
               nextValue === 'risk' ||
@@ -265,16 +268,16 @@ export function BottomPanel({
           aria-label="Risk views"
           className={toggleGroupClassName}
         >
-          <Toggle value="risk" className={toggleClassName}>
+          <ToggleGroup.Item value="risk" className={toggleClassName}>
             Risk breakdown
-          </Toggle>
-          <Toggle value="rrc" className={toggleClassName}>
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="rrc" className={toggleClassName}>
             Required risk capital
-          </Toggle>
-          <Toggle value="activity" className={toggleClassName}>
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="activity" className={toggleClassName}>
             Activity
-          </Toggle>
-        </ToggleGroup>
+          </ToggleGroup.Item>
+        </ToggleGroup.Root>
       </div>
 
       <div
@@ -299,7 +302,7 @@ export function BottomPanel({
             className={css({
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.14em',
+              letterSpacing: '0.1em',
               color: 'text.muted',
             })}
           >
@@ -339,7 +342,7 @@ export function BottomPanel({
             className={css({
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.14em',
+              letterSpacing: '0.1em',
               color: 'text.muted',
             })}
           >

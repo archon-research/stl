@@ -7,6 +7,66 @@ import (
 	"time"
 )
 
+func TestResolveServiceName(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "defaults when nothing set",
+			env:  map[string]string{},
+			want: "stl-watcher",
+		},
+		{
+			name: "SERVICE_NAME wins",
+			env:  map[string]string{"SERVICE_NAME": "arbitrum-watcher"},
+			want: "arbitrum-watcher",
+		},
+		{
+			name: "OTEL_SERVICE_NAME used when SERVICE_NAME unset",
+			env:  map[string]string{"OTEL_SERVICE_NAME": "base-watcher"},
+			want: "base-watcher",
+		},
+		{
+			name: "SERVICE_NAME takes precedence over OTEL_SERVICE_NAME",
+			env: map[string]string{
+				"SERVICE_NAME":      "optimism-watcher",
+				"OTEL_SERVICE_NAME": "ignored",
+			},
+			want: "optimism-watcher",
+		},
+		{
+			name: "empty SERVICE_NAME falls through to OTEL_SERVICE_NAME",
+			env: map[string]string{
+				"SERVICE_NAME":      "",
+				"OTEL_SERVICE_NAME": "unichain-watcher",
+			},
+			want: "unichain-watcher",
+		},
+		{
+			name: "whitespace-only SERVICE_NAME falls through to default",
+			env:  map[string]string{"SERVICE_NAME": "   "},
+			want: "stl-watcher",
+		},
+		{
+			name: "leading/trailing whitespace is trimmed",
+			env:  map[string]string{"SERVICE_NAME": "  avalanche-watcher  "},
+			want: "avalanche-watcher",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string { return tc.env[key] }
+			got := resolveServiceName(getenv)
+			if got != tc.want {
+				t.Errorf("resolveServiceName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadBackfillConfig(t *testing.T) {
 	logger := slog.Default()
 
