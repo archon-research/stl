@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/trace"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,6 +40,10 @@ var (
 	GitBranch string
 	BuildTime string
 )
+
+// defaultServiceName is the OTEL service.name used when no chain-specific
+// override is provided via the environment (e.g. local dev, tests).
+const defaultServiceName = "stl-watcher"
 
 func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
@@ -107,9 +112,14 @@ func main() {
 		}()
 	}
 
-	// Initialize OpenTelemetry tracing and metrics
+	// Initialize OpenTelemetry tracing and metrics.
+	// ServiceName is resolved from the environment so that each per-chain
+	// watcher deployment (arbitrum-watcher, base-watcher, etc.) reports a
+	// distinct service.name in Prometheus/Tempo, instead of all collapsing
+	// into a single "stl-watcher" time series.
+	serviceName := resolveServiceName(os.Getenv)
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "stl-watcher",
+		ServiceName:    serviceName,
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -366,6 +376,27 @@ func main() {
 		logger.Error("shutdown timed out, forcing exit")
 		os.Exit(1)
 	}
+}
+
+// resolveServiceName returns the OTEL service.name for this watcher process.
+//
+// In k8s, each per-chain watcher Deployment injects SERVICE_NAME via the
+// downward API (sourced from the pod's `app` label, e.g. "arbitrum-watcher"),
+// so each chain reports a distinct service.name in Prometheus and Tempo.
+//
+// Resolution order:
+//  1. SERVICE_NAME           (explicit, set by k8s downward API)
+//  2. OTEL_SERVICE_NAME      (standard OTEL env var, honoured if a user sets it)
+//  3. defaultServiceName     ("stl-watcher") for local dev / tests
+//
+// Whitespace is trimmed; empty values are treated as unset.
+func resolveServiceName(getenv func(string) string) string {
+	for _, key := range []string{"SERVICE_NAME", "OTEL_SERVICE_NAME"} {
+		if v := strings.TrimSpace(getenv(key)); v != "" {
+			return v
+		}
+	}
+	return defaultServiceName
 }
 
 // requireEnv returns the value of an environment variable or exits if not set.
