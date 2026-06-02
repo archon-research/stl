@@ -46,6 +46,17 @@ export default defineConfig({
             strong: {
               value: { base: '{colors.gray.950}', _dark: '{colors.gray.50}' },
             },
+            inverse: {
+              value: { base: '{colors.gray.50}', _dark: '{colors.gray.50}' },
+            },
+          },
+          overlay: {
+            backdrop: {
+              value: { base: 'rgb(15 23 42 / 0.28)', _dark: 'rgb(3 7 18 / 0.48)' },
+            },
+            tooltip: {
+              value: { base: 'rgb(15 23 42 / 0.96)', _dark: 'rgb(3 7 18 / 0.96)' },
+            },
           },
           interactive: {
             hover: {

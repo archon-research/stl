@@ -1,4 +1,4 @@
-import { css } from '#styled-system/css';
+import { Badge } from '@archon-research/design-system';
 
 type BadgeTone = 'green' | 'yellow' | 'red' | 'neutral';
 
@@ -11,50 +11,23 @@ type StatusBadgeProps = {
 function getToneStyles(tone: BadgeTone) {
   switch (tone) {
     case 'green':
-      return {
-        bg: { _dark: 'green.950', base: 'green.50' },
-        color: { _dark: 'green.200', base: 'green.700' },
-      };
+      return 'success';
     case 'yellow':
-      return {
-        bg: { _dark: 'yellow.950', base: 'yellow.50' },
-        color: { _dark: 'yellow.200', base: 'yellow.800' },
-      };
+      return 'warning';
     case 'red':
-      return {
-        bg: { _dark: 'red.950', base: 'red.100' },
-        color: { _dark: 'red.300', base: 'red.800' },
-      };
+      return 'danger';
     case 'neutral':
     default:
-      return {
-        bg: { _dark: 'gray.800', base: 'gray.100' },
-        color: { _dark: 'gray.200', base: 'gray.600' },
-      };
+      return 'neutral';
   }
 }
 
 export function StatusBadge({ tone, label, className }: StatusBadgeProps) {
-  const toneStyles = getToneStyles(tone);
+  const badgeTone = getToneStyles(tone);
 
   return (
-    <span
-      className={
-        className ??
-        css({
-          display: 'inline-flex',
-          alignItems: 'center',
-          borderRadius: 'sm',
-          bg: toneStyles.bg,
-          color: toneStyles.color,
-          fontSize: 'xs',
-          fontWeight: 'semibold',
-          px: '3',
-          py: '1.5',
-        })
-      }
-    >
+    <Badge tone={badgeTone} className={className}>
       {label}
-    </span>
+    </Badge>
   );
 }

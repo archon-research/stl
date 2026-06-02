@@ -20,3 +20,6 @@ build/
 # Local env
 .env.local
 .env.*.local
+
+# Local AI plugin setup (consumer app scoped)
+.copilot-marketplace/uikit-agent-marketplace/
