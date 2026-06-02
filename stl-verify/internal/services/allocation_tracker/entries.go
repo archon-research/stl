@@ -42,7 +42,7 @@ func LoadDefaultTokenEntries() ([]*TokenEntry, error) {
 		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
 	}
 
-	entriesByStar := contract.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime
+	entriesByStar := contract.GetAssetsByPrime()
 	starKeys := make([]string, 0, len(entriesByStar))
 	for star := range entriesByStar {
 		starKeys = append(starKeys, star)

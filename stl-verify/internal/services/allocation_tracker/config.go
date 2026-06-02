@@ -49,7 +49,7 @@ func LoadDefaultProxies() ([]ProxyConfig, error) {
 		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
 	}
 
-	almProxyByStar := contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
+	almProxyByStar := contract.GetAlmProxy()
 	proxies := make([]ProxyConfig, 0)
 	proxyByAddress := make(map[proxyConfigKey]ProxyConfig)
 

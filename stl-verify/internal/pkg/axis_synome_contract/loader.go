@@ -72,6 +72,16 @@ type TokenEntry struct {
 	CreatedAtBlock  *int64  `json:"created_at_block"`
 }
 
+// GetAlmProxy returns the ALM proxy configurations keyed by star and then chain.
+func (c *Contract) GetAlmProxy() map[string]map[string]ProxyConfig {
+	return c.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
+}
+
+// GetAssetsByPrime returns the token entries keyed by star.
+func (c *Contract) GetAssetsByPrime() map[string][]TokenEntry {
+	return c.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime
+}
+
 func LoadDefault() (*Bundle, error) {
 	contract, err := LoadDefaultContract()
 	if err != nil {
@@ -143,7 +153,7 @@ func LoadContract(path string) (*Contract, error) {
 }
 
 func validateAddresses(contract *Contract) error {
-	for star, byChain := range contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy {
+	for star, byChain := range contract.GetAlmProxy() {
 		for chain, proxy := range byChain {
 			context := fmt.Sprintf("alm_proxy star=%s chain=%s", star, chain)
 			if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
@@ -152,7 +162,7 @@ func validateAddresses(contract *Contract) error {
 		}
 	}
 
-	for star, entries := range contract.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime {
+	for star, entries := range contract.GetAssetsByPrime() {
 		for i, entry := range entries {
 			context := fmt.Sprintf("token_entry star=%s index=%d", star, i)
 			if err := validateEthereumAddress(entry.ContractAddress, "contract_address", context); err != nil {
