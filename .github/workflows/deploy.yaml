@@ -8,12 +8,22 @@ on:
       sha:
         required: true
         type: string
+      push:
+        description: "Push images to ECR and run the deploy/promote jobs. Set false to build-only (validate + warm the cache)."
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       sha:
         description: "Commit SHA to deploy (defaults to HEAD of selected branch)"
         required: false
         type: string
+      push:
+        description: "Push images to ECR and run the deploy jobs. Uncheck to build-only."
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   build-push-staging:
@@ -64,13 +74,14 @@ jobs:
       - name: Resolve build-cache repo
         run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
 
-      - name: Build and push all images to staging ECR
+      - name: Build (and, when push=true, push) all images to staging ECR
         working-directory: stl-verify
         run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO"
 
   update-staging:
     name: Update Staging Image Tags
     needs: build-push-staging
+    if: ${{ inputs.push }}  # skip on build-only runs (nothing was pushed)
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-update-staging
@@ -159,7 +170,7 @@ jobs:
   wait-staging-healthy:
     name: Wait for Staging Healthy
     needs: update-staging
-    if: github.event_name != 'workflow_dispatch'
+    if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -189,7 +200,7 @@ jobs:
   build-push-prod:
     name: Build & Push Images (Prod)
     needs: [build-push-staging, wait-staging-healthy]
-    if: github.event_name != 'workflow_dispatch'
+    if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -255,7 +266,7 @@ jobs:
   create-prod-pr:
     name: Create Prod Deploy PR
     needs: build-push-prod
-    if: github.event_name != 'workflow_dispatch'
+    if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-prod-pr

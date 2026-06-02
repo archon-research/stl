@@ -109,3 +109,4 @@ jobs:
     secrets: inherit
     with:
       sha: ${{ github.sha }}
+      push: true

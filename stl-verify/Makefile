@@ -756,7 +756,9 @@ docker-push: ecr-login
 # stay cache-free and cannot fail on it. CI provides the driver via
 # docker/setup-buildx-action and passes both vars. `ignore-error=true` keeps a
 # failed cache push (auth/network) from failing an otherwise-good build, and a
-# missing cache on import is a normal miss.
+# missing cache on import is a normal miss. The cache is only *exported* when
+# DOCKER_PUSH != 0, so a build-only check (DOCKER_PUSH=0) imports the cache but
+# never overwrites it; only real pushes update the shared cache.
 #   $(1) = cache key, unique per image (used as the cache tag)
 ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
@@ -764,7 +766,7 @@ $(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/b
 endif
 docker_cache_flags = \
 	--cache-from type=registry,ref=$(DOCKER_CACHE_REPO):$(1) \
-	--cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
+	$(if $(filter-out 0,$(DOCKER_PUSH)),--cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true)
 endif
 
 # Canonical arm64 build + push for a single image. Internal target; callers set:
@@ -776,8 +778,12 @@ endif
 #   IMG_CACHE_KEY   unique cache tag for this image
 #   IMG_TAG         image tag (default: $(IMAGE_TAG))
 #   IMG_LATEST_TAG  moving tag pushed alongside IMG_TAG (default: latest)
+# Set DOCKER_PUSH=0 to build only (validate the build and warm the cache)
+# without loading or pushing the final image; useful for a CI build check that
+# needs no ECR credentials.
 IMG_TAG        ?= $(IMAGE_TAG)
 IMG_LATEST_TAG ?= latest
+DOCKER_PUSH    ?= 1
 _docker-release-image:
 	@COMMIT=$$(git rev-parse HEAD) && \
 	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
@@ -788,6 +794,7 @@ _docker-release-image:
 	elif [ "$(IMG_GIT_ARGS)" = "commit" ]; then \
 		GIT_ARGS="--build-arg GIT_COMMIT=$$COMMIT"; \
 	fi && \
+	if [ "$(DOCKER_PUSH)" = "0" ]; then OUTPUT="--output type=cacheonly"; else OUTPUT="--load"; fi && \
 	echo "==> Building $(IMG_NAME) image for linux/arm64..." && \
 	echo "    Repository: $(IMG_REPO)" && \
 	echo "    Tag: $(IMG_TAG)" && \
@@ -797,11 +804,15 @@ _docker-release-image:
 		-f $(IMG_DOCKERFILE) \
 		-t $(IMG_REPO):$(IMG_TAG) \
 		-t $(IMG_REPO):$(IMG_LATEST_TAG) \
-		--load . && \
-	echo "==> Pushing $(IMG_NAME) image..." && \
-	docker push $(IMG_REPO):$(IMG_TAG) && \
-	docker push $(IMG_REPO):$(IMG_LATEST_TAG) && \
-	echo "==> $(IMG_NAME) image released: $(IMG_REPO):$(IMG_TAG)"
+		$$OUTPUT . && \
+	if [ "$(DOCKER_PUSH)" = "0" ]; then \
+		echo "==> Built $(IMG_NAME) image (push skipped: DOCKER_PUSH=0)"; \
+	else \
+		echo "==> Pushing $(IMG_NAME) image..." && \
+		docker push $(IMG_REPO):$(IMG_TAG) && \
+		docker push $(IMG_REPO):$(IMG_LATEST_TAG) && \
+		echo "==> $(IMG_NAME) image released: $(IMG_REPO):$(IMG_TAG)"; \
+	fi
 
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
 docker-release: ecr-login _docker-release-internal
@@ -870,7 +881,7 @@ docker-release-all:
 		echo "Error: ENV is required. Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
-	@$(MAKE) ecr-login ENV=$(ENV)
+	@if [ "$(DOCKER_PUSH)" != "0" ]; then $(MAKE) ecr-login ENV=$(ENV); else echo "==> DOCKER_PUSH=0: skipping ECR login (build-only)"; fi
 	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
 	@echo ""
 	@$(MAKE) _docker-release-migrate-internal ENV=$(ENV)
