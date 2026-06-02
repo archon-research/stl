@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # =============================================================================
 # Unified Go service Dockerfile
 # =============================================================================
@@ -43,8 +44,14 @@ ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
 ARG BUILD_TIME=unknown
 
-# Build the binary for the target architecture (ARM64 for Graviton)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+# Build the binary for the target architecture (ARM64 for Graviton). The
+# --mount cache persists Go's compiled-package cache (GOCACHE) on the builder
+# across the per-service builds in a run, so the shared standard library and
+# internal packages compile once and are reused instead of recompiled for every
+# service. Modules still come from the cached `go mod download` layer above, so
+# /go/pkg/mod is intentionally not mounted (an empty mount would hide them).
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.GitCommit=${GIT_COMMIT} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
     -o /${BIN} \
     ./${CMD_PATH}
