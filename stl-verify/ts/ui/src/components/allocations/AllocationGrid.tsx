@@ -67,8 +67,6 @@ type AllocationGridProps = {
   sorting: SortingState;
 };
 
-type UiVariant = 'a' | 'b' | 'c';
-
 const tableHeaderTypographyClassName = css({
   '& thead th': {
     fontSize: 'sm',
@@ -87,10 +85,6 @@ const tableHeaderTypographyClassName = css({
     color: 'text.default',
   },
 });
-
-function getDefaultUiVariant(): UiVariant {
-  return 'c';
-}
 
 function getCategoryColor(category: AllocationCategory | undefined): string {
   switch (category) {
@@ -406,7 +400,6 @@ export function AllocationGrid({
   sorting,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
-  const uiVariant = getDefaultUiVariant();
 
   useEffect(() => {
     setLocalSearchValue(searchValue);
@@ -499,9 +492,9 @@ export function AllocationGrid({
     borderRadius: 'sm',
     borderStyle: 'solid',
     borderWidth: '1px',
-    borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
-    bg: uiVariant === 'b' ? 'surface.default' : 'surface.subtle',
-    p: { base: '3', md: uiVariant === 'b' ? '3' : '3.5' },
+    borderColor: 'border.default',
+    bg: 'surface.subtle',
+    p: { base: '3', md: '3.5' },
     boxShadow: 'none',
   });
 
@@ -510,35 +503,25 @@ export function AllocationGrid({
       className={css({
         minHeight: '100%',
         bg: 'surface.subtle',
-        px:
-          uiVariant === 'b' || uiVariant === 'c'
-            ? { base: '4', md: '5' }
-            : { base: '5', md: '7' },
-        py:
-          uiVariant === 'b' || uiVariant === 'c'
-            ? { base: '4', md: '5' }
-            : { base: '6', md: '7' },
+        px: { base: '4', md: '5' },
+        py: { base: '4', md: '5' },
       })}
     >
       <section
         className={css({
-          borderRadius: uiVariant === 'c' ? 'lg' : 'md',
+          borderRadius: 'lg',
           borderStyle: 'solid',
           borderWidth: '1px',
-          borderColor: uiVariant === 'c' ? 'border.default' : 'border.subtle',
+          borderColor: 'border.default',
           bg: 'surface.default',
-          p:
-            uiVariant === 'b' || uiVariant === 'c'
-              ? { base: '4', md: '5' }
-              : { base: '5', md: '6' },
-          boxShadow:
-            uiVariant === 'c' ? '2xl' : 'xl',
+          p: { base: '4', md: '5' },
+          boxShadow: '2xl',
         })}
       >
         <div
           className={css({
             display: 'grid',
-            gap: uiVariant === 'b' ? '3' : '4',
+            gap: '4',
           })}
         >
           <div
@@ -564,10 +547,7 @@ export function AllocationGrid({
                 <h1
                   className={css({
                     m: 0,
-                    fontSize:
-                      uiVariant === 'c'
-                        ? { base: '3xl', md: '4xl' }
-                        : { base: '2xl', md: '3xl' },
+                    fontSize: { base: '3xl', md: '4xl' },
                     lineHeight: 'tight',
                     color: 'text.strong',
                   })}
@@ -703,7 +683,7 @@ export function AllocationGrid({
                   sm: 'repeat(2, minmax(0, 1fr))',
                   lg: 'repeat(4, minmax(0, 1fr))',
                 },
-                gap: uiVariant === 'b' ? '2' : '3',
+                gap: '3',
               })}
             >
               {summary ? (
@@ -836,12 +816,9 @@ export function AllocationGrid({
                 width: 'fit-content',
                 alignItems: 'center',
                 borderRadius: 'full',
-                bg:
-                  uiVariant === 'c'
-                    ? { _dark: 'gray.700', base: 'gray.200' }
-                    : { _dark: 'gray.800', base: 'gray.100' },
-                px: uiVariant === 'b' ? '2.5' : '3',
-                py: uiVariant === 'b' ? '0.5' : '1',
+                bg: { _dark: 'gray.700', base: 'gray.200' },
+                px: '3',
+                py: '1',
                 fontSize: 'xs',
                 fontWeight: 'semibold',
                 letterSpacing: '0.1em',
