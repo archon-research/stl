@@ -322,13 +322,30 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
+// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
+// Used by the backfill loop to self-heal rows that were over-orphaned by a
+// previous reorg whose new canonical chain actually contained the same hash.
+// Idempotent: clearing an already-canonical row is a no-op.
+// Returns an error if the block does not exist.
+func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+	query := `UPDATE block_states SET is_orphaned = FALSE WHERE chain_id = $1 AND hash = $2`
+	tag, err := r.pool.Exec(ctx, query, r.chainID, hash)
+	if err != nil {
+		return fmt.Errorf("failed to clear block orphan flag: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+	}
+	return nil
+}
+
 // HandleReorgAtomic atomically performs all reorg-related database operations in a single transaction.
 // This ensures consistency: either all operations succeed, or none do.
 // The commonAncestor is derived from the ReorgEvent (BlockNumber - Depth).
 //
 // Uses SERIALIZABLE isolation (consistent with SaveBlock) and includes retry logic
 // for transient tx errors (SQLSTATE 40001 serialization failure, 40P01 deadlock).
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState, preserveChain []outbound.CanonicalBlock) (int, error) {
 	if newBlock.BlockTimestamp == 0 {
 		return 0, fmt.Errorf("BlockTimestamp is required (used as created_at for hypertable partitioning)")
 	}
@@ -369,7 +386,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	}
 
 	version, err := retry.Do(ctx, cfg, isRetryableTxError, onRetry, func() (int, error) {
-		return r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock)
+		return r.handleReorgAtomicOnce(ctx, commonAncestor, event, newBlock, preserveChain)
 	})
 
 	if err != nil {
@@ -380,7 +397,11 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 }
 
 // handleReorgAtomicOnce attempts a single reorg operation with SERIALIZABLE isolation.
-func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+// preserveChain lists (number, hash) pairs that MUST NOT be orphaned (they are
+// part of the new canonical chain — e.g. rows backfill already inserted, or
+// parents the reorg walk discovered on the new chain). Passing nil/empty
+// reproduces the pre-fix blanket-orphan behaviour.
+func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState, preserveChain []outbound.CanonicalBlock) (int, error) {
 	// Use READ COMMITTED with advisory lock, consistent with saveBlockOnce.
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
@@ -421,9 +442,27 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 		return 0, fmt.Errorf("failed to save reorg event: %w", err)
 	}
 
-	// 4. Mark old blocks as orphaned
-	orphanQuery := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND number > $2 AND NOT is_orphaned`
-	_, err = tx.Exec(ctx, orphanQuery, r.chainID, commonAncestor)
+	// 4. Mark old blocks as orphaned, EXCEPT rows whose (number, hash) is in
+	// preserveChain. preserveChain carries the new canonical chain so we don't
+	// orphan rows backfill already inserted with the correct hash, nor any
+	// parents the reorg walk discovered on the new chain. See VEC-277 arbitrum
+	// backfill loop. Using (number, hash) tuples (not hash alone) keeps the
+	// predicate height-explicit and safe even if hashes were ever re-used.
+	if len(preserveChain) > 0 {
+		preserveNumbers := make([]int64, len(preserveChain))
+		preserveHashes := make([]string, len(preserveChain))
+		for i, cb := range preserveChain {
+			preserveNumbers[i] = cb.Number
+			preserveHashes[i] = cb.Hash
+		}
+		orphanQuery := `UPDATE block_states SET is_orphaned = TRUE
+			WHERE chain_id = $1 AND number > $2 AND NOT is_orphaned
+			  AND (number, hash) NOT IN (SELECT * FROM unnest($3::bigint[], $4::text[]))`
+		_, err = tx.Exec(ctx, orphanQuery, r.chainID, commonAncestor, preserveNumbers, preserveHashes)
+	} else {
+		orphanQuery := `UPDATE block_states SET is_orphaned = TRUE WHERE chain_id = $1 AND number > $2 AND NOT is_orphaned`
+		_, err = tx.Exec(ctx, orphanQuery, r.chainID, commonAncestor)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("failed to mark blocks orphaned: %w", err)
 	}

@@ -10,8 +10,12 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Compile-time assertion that ServiceTelemetry implements ReorgRecorder.
-var _ outbound.ReorgRecorder = (*ServiceTelemetry)(nil)
+// Compile-time assertion that ServiceTelemetry implements ReorgRecorder and
+// BackfillRecorder.
+var (
+	_ outbound.ReorgRecorder    = (*ServiceTelemetry)(nil)
+	_ outbound.BackfillRecorder = (*ServiceTelemetry)(nil)
+)
 
 const (
 	// instrumentationName is the name used for OpenTelemetry instrumentation.
@@ -27,6 +31,9 @@ type ServiceTelemetry struct {
 	// Chain metrics
 	reorgsTotal        metric.Int64Counter
 	reorgsDroppedTotal metric.Int64Counter
+
+	// Backfill invariant metrics
+	backfillGapNoCanonicalTotal metric.Int64Counter
 }
 
 // NewServiceTelemetry creates a new ServiceTelemetry instance with OpenTelemetry instrumentation.
@@ -61,6 +68,18 @@ func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry
 		return nil, err
 	}
 
+	// backfill.gap_fill.no_canonical.total fires once per per-block gap-fill
+	// cycle that completed without producing a non-orphaned canonical row.
+	// Steady-state expectation is zero; any non-zero rate signals the silent
+	// failure mode behind the 2026-06-02 arbitrum backfill incident.
+	t.backfillGapNoCanonicalTotal, err = meter.Int64Counter(
+		"backfill.gap_fill.no_canonical.total",
+		metric.WithDescription("Total per-block gap-fill cycles that completed without a non-orphaned canonical row in block_states (silent-failure invariant)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return t, nil
 }
 
@@ -83,5 +102,15 @@ func (t *ServiceTelemetry) RecordReorg(ctx context.Context, depth int, fromBlock
 func (t *ServiceTelemetry) RecordReorgDropped(ctx context.Context, reason string) {
 	t.reorgsDroppedTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("reorg.dropped_reason", reason),
+	))
+}
+
+// RecordBackfillGapNoCanonical increments the silent-failure counter that
+// catches gap-fill cycles which returned success but did not yield a
+// non-orphaned canonical row. Labelled by chain so per-chain Grafana panels
+// and alerts can be written.
+func (t *ServiceTelemetry) RecordBackfillGapNoCanonical(ctx context.Context, chainID int64) {
+	t.backfillGapNoCanonicalTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.Int64("chain.id", chainID),
 	))
 }

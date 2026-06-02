@@ -801,3 +801,141 @@ func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
 		t.Errorf("expected watermark %d, got %d", lastBlock, watermark)
 	}
 }
+
+// TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch verifies the
+// VEC-277 backfill self-heal: when the only DB row for a fetched block's hash
+// is orphaned (caused by a prior over-orphaning reorg), processBlockData must
+// clear the orphan flag rather than silently logging "block already exists".
+// Without this, FindGaps keeps reporting the block as missing forever and the
+// backfill loop never drains the gap (locked floor of ~584 blocks on arbitrum).
+func TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const (
+		num        int64 = 500
+		blockHash        = "0xVECNA_clear_500"
+		parentHash       = "0xVECNA_clear_499"
+	)
+
+	// Seed: a single row at this height, marked orphaned. This mirrors the
+	// production state after the buggy HandleReorgAtomic over-orphaned a row
+	// whose hash is in fact part of the new canonical chain.
+	if _, err := pgRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         num,
+		Hash:           blockHash,
+		ParentHash:     parentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed save: %v", err)
+	}
+	if err := pgRepo.MarkBlockOrphaned(ctx, blockHash); err != nil {
+		t.Fatalf("mark orphaned: %v", err)
+	}
+
+	// Pre-condition: FindGaps sees a gap (orphan-only row is invisible to
+	// the canonical view). Without the fix the loop below would never drain it.
+	gaps, err := pgRepo.FindGaps(ctx, num, num)
+	if err != nil {
+		t.Fatalf("FindGaps pre: %v", err)
+	}
+	if len(gaps) != 1 {
+		t.Fatalf("expected pre-fix gap to exist, got %v", gaps)
+	}
+
+	svc, err := NewBackfillService(BackfillConfigDefaults(), newMockClient(), pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	blockData := outbound.BlockData{
+		BlockNumber: num,
+		Block: json.RawMessage(fmt.Sprintf(
+			`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x123456"}`,
+			num, blockHash, parentHash)),
+	}
+
+	if err := svc.processBlockData(ctx, blockData); err != nil {
+		t.Fatalf("processBlockData: %v", err)
+	}
+
+	// Post: the same hash must now be canonical (no duplicate insert, no error).
+	got, err := pgRepo.GetBlockByHash(ctx, blockHash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected row to still exist")
+	}
+	if got.IsOrphaned {
+		t.Fatal("expected orphan flag to be cleared after re-fetch")
+	}
+
+	// Gap finder must now agree there is no gap (the canonical view sees the row).
+	gapsAfter, err := pgRepo.FindGaps(ctx, num, num)
+	if err != nil {
+		t.Fatalf("FindGaps post: %v", err)
+	}
+	if len(gapsAfter) != 0 {
+		t.Fatalf("expected zero gaps after self-heal, got %v", gapsAfter)
+	}
+}
+
+// TestIntegration_ProcessBlockData_DifferentHashSkipsUnchanged verifies the
+// orphan-clear self-heal does NOT trigger when the fetched hash differs from
+// the stored hash (i.e. the existing row really is from a different fork).
+// The pre-existing "different block at this height" skip path must still apply.
+func TestIntegration_ProcessBlockData_DifferentHashSkipsUnchanged(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	const num int64 = 600
+	const storedHash = "0xVECNA_storedhash_600"
+	const fetchedHash = "0xVECNA_fetchedhash_600"
+
+	// Seed: a non-orphan row at height 600 with storedHash.
+	if _, err := pgRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         num,
+		Hash:           storedHash,
+		ParentHash:     "0xVECNA_storedhash_599",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	svc, err := NewBackfillService(BackfillConfigDefaults(), newMockClient(), pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	// Fetched block has a DIFFERENT hash for the same height — must be treated
+	// as stale-fork and skipped, not "self-healed".
+	blockData := outbound.BlockData{
+		BlockNumber: num,
+		Block: json.RawMessage(fmt.Sprintf(
+			`{"number":"0x%x","hash":%q,"parentHash":"0xVECNA_fetchedhash_599","timestamp":"0x123456"}`,
+			num, fetchedHash)),
+	}
+	if err := svc.processBlockData(ctx, blockData); err != nil {
+		t.Fatalf("processBlockData: %v", err)
+	}
+
+	// Stored row must still be canonical and unchanged. Fetched-hash row must NOT exist.
+	stored, err := pgRepo.GetBlockByHash(ctx, storedHash)
+	if err != nil || stored == nil || stored.IsOrphaned {
+		t.Fatalf("stored row should remain non-orphaned, got %+v err=%v", stored, err)
+	}
+	fetched, err := pgRepo.GetBlockByHash(ctx, fetchedHash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash fetched: %v", err)
+	}
+	if fetched != nil {
+		t.Fatalf("expected no row for fetched (stale-fork) hash, got %+v", fetched)
+	}
+}

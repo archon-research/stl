@@ -388,6 +388,12 @@ type reorgDecision struct {
 	commonAncestor int64
 	reorgEvent     *outbound.ReorgEvent
 	depth          int
+	// newChain is the list of (number, hash) pairs the reorg walk discovered
+	// on the new canonical chain above commonAncestor (excluding the incoming
+	// block itself, which the caller threads in explicitly). Passed to
+	// HandleReorgAtomic as preserveChain so any rows backfill has already
+	// inserted on the new chain are not blanket-orphaned.
+	newChain []outbound.CanonicalBlock
 }
 
 // decideReorgAction runs detectReorg and, when a reorg is detected, gates the
@@ -403,7 +409,7 @@ type reorgDecision struct {
 // read and we drop the reorg — the next live broadcast will trigger a fresh
 // detect→verify→commit pass against the new state.
 func (s *LiveService) decideReorgAction(ctx context.Context, span trace.Span, block LightBlock, receivedAt time.Time) (reorgDecision, error) {
-	isReorg, depth, commonAncestor, reorgEvent, err := s.detectReorg(ctx, block, receivedAt)
+	isReorg, depth, commonAncestor, reorgEvent, walkedChain, err := s.detectReorg(ctx, block, receivedAt)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "reorg detection failed")
@@ -485,6 +491,7 @@ func (s *LiveService) decideReorgAction(ctx context.Context, span trace.Span, bl
 		commonAncestor: commonAncestor,
 		reorgEvent:     reorgEvent,
 		depth:          depth,
+		newChain:       walkedChain,
 	}, nil
 }
 
@@ -557,7 +564,14 @@ func buildBlockState(block LightBlock, header outbound.BlockHeader, receivedAt t
 // depending on the decision and returns the assigned version.
 func (s *LiveService) persistBlockState(ctx context.Context, span trace.Span, state outbound.BlockState, decision reorgDecision) (int, error) {
 	if decision.action == reorgActionReorg && decision.reorgEvent != nil {
-		version, err := s.stateRepo.HandleReorgAtomic(ctx, decision.commonAncestor, *decision.reorgEvent, state)
+		// preserveChain carries the new canonical chain: the incoming block plus
+		// any (number, hash) pairs the reorg walk discovered above the common
+		// ancestor. Without this, HandleReorgAtomic would blanket-orphan rows
+		// backfill already inserted on the new chain, producing orphan-only rows
+		// that the backfill loop's hash-only idempotency check cannot drain
+		// (see VEC-277).
+		preserveChain := append([]outbound.CanonicalBlock{{Number: state.Number, Hash: state.Hash}}, decision.newChain...)
+		version, err := s.stateRepo.HandleReorgAtomic(ctx, decision.commonAncestor, *decision.reorgEvent, state, preserveChain)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to handle reorg atomically")
@@ -606,17 +620,36 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 	)
 	defer span.End()
 
-	// Check DB for duplicates (includes blocks added by backfill)
+	// Check DB for duplicates (includes blocks added by backfill).
+	// An orphan-only row is NOT a duplicate: the canonical row never landed
+	// (e.g. live broadcast lost the race with a stale-fork reorg that
+	// over-orphaned the new chain). Treating it as duplicate would leave the
+	// row orphaned forever, since FindGaps filters out orphaned rows and the
+	// backfill loop's hash-only idempotency check would also skip the insert.
+	// Mirrors the orphan-resurrection branch in backfill processBlockData and
+	// lets the live path self-heal at head speed instead of waiting for the
+	// backfill loop to rotate around. See
+	// docs/incidents/2026-06-02-arbitrum-backfill-loop.md.
 	existing, err := s.stateRepo.GetBlockByHash(ctx, hash)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to check DB for duplicate")
 		return false, fmt.Errorf("failed to check DB for duplicate: %w", err)
 	}
-	if existing != nil {
+	if existing != nil && !existing.IsOrphaned {
 		span.SetAttributes(attribute.Bool("duplicate", true))
 		s.logger.Debug("block already in DB, skipping", "block", blockNum)
 		return true, nil
+	}
+	if existing != nil && existing.IsOrphaned {
+		span.SetAttributes(
+			attribute.Bool("duplicate", false),
+			attribute.Bool("existing.orphaned", true),
+		)
+		s.logger.Info("live re-arrival of orphan-only block; proceeding to write canonical row",
+			"block", blockNum,
+			"hash", hash)
+		return false, nil
 	}
 
 	span.SetAttributes(attribute.Bool("duplicate", false))
@@ -625,8 +658,10 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 
 // detectReorg detects chain reorganizations by querying the database for the latest
 // canonical block and comparing parent hashes.
-// Returns: isReorg, reorgDepth, commonAncestor, reorgEvent (if reorg), error
-func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+// Returns: isReorg, reorgDepth, commonAncestor, reorgEvent (if reorg),
+// walkedChain ((number, hash) pairs the walk discovered on the new canonical
+// chain above the common ancestor), error.
+func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, []outbound.CanonicalBlock, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "live.detectReorg",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -643,13 +678,13 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to get latest block from DB")
-		return false, 0, 0, nil, fmt.Errorf("failed to get latest block from DB: %w", err)
+		return false, 0, 0, nil, nil, fmt.Errorf("failed to get latest block from DB: %w", err)
 	}
 
 	// No blocks in DB yet - this is the first block, no reorg possible
 	if latestBlock == nil {
 		span.SetAttributes(attribute.Bool("reorg.detected", false))
-		return false, 0, 0, nil, nil
+		return false, 0, 0, nil, nil, nil
 	}
 
 	span.SetAttributes(
@@ -666,7 +701,7 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 	if block.Number == latestBlock.Number+1 {
 		if block.ParentHash == latestBlock.Hash {
 			span.SetAttributes(attribute.Bool("reorg.detected", false))
-			return false, 0, 0, nil, nil
+			return false, 0, 0, nil, nil, nil
 		}
 		// Parent hash mismatch - reorg
 		return s.handleReorg(ctx, block, receivedAt)
@@ -677,7 +712,7 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 		attribute.Bool("reorg.detected", false),
 		attribute.Bool("block.gap", true),
 	)
-	return false, 0, 0, nil, nil
+	return false, 0, 0, nil, nil, nil
 }
 
 // handleReorg processes a detected reorg and returns the reorg event for atomic handling.
@@ -686,7 +721,7 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 //
 // This method queries the database to find the common ancestor, ensuring consistency
 // with blocks added by other services (e.g., BackfillService).
-func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, error) {
+func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receivedAt time.Time) (bool, int, int64, *outbound.ReorgEvent, []outbound.CanonicalBlock, error) {
 	tracer := otel.Tracer(tracerName)
 	ctx, span := tracer.Start(ctx, "live.handleReorg",
 		trace.WithSpanKind(trace.SpanKindInternal),
@@ -702,7 +737,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to get latest block")
-		return false, 0, 0, nil, fmt.Errorf("failed to get latest block from DB: %w", err)
+		return false, 0, 0, nil, nil, fmt.Errorf("failed to get latest block from DB: %w", err)
 	}
 
 	// Calculate finality boundary based on latest known block
@@ -711,9 +746,15 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 		finalityBoundary = max(latestBlock.Number-int64(s.config.FinalityBlockCount), 0)
 	}
 
-	// Walk back to find common ancestor
-	// Start with the incoming block (already normalized), then walk to its parent each iteration
+	// Walk back to find common ancestor.
+	// Start with the incoming block (already normalized), then walk to its parent each iteration.
+	// walkedChain accumulates the (number, hash) pairs the walk discovered on
+	// the new canonical chain (above the common ancestor). These are threaded
+	// through to HandleReorgAtomic as preserveChain so the SQL doesn't blanket-
+	// orphan rows backfill already inserted on the new chain. Pre-sized to the
+	// finality window since the walk cannot exceed it.
 	walkBlock := block
+	walkedChain := make([]outbound.CanonicalBlock, 0, s.config.FinalityBlockCount)
 
 	var commonAncestor int64 = -1
 	walkCount := 0
@@ -723,7 +764,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to query parent block")
-			return false, 0, 0, nil, fmt.Errorf("failed to query parent block %s from DB: %w", walkBlock.ParentHash, err)
+			return false, 0, 0, nil, nil, fmt.Errorf("failed to query parent block %s from DB: %w", walkBlock.ParentHash, err)
 		}
 		if parentInDB != nil && !parentInDB.IsOrphaned {
 			commonAncestor = parentInDB.Number
@@ -736,7 +777,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 				walkBlock.Number, finalityBoundary)
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "block below finality")
-			return false, 0, 0, nil, err
+			return false, 0, 0, nil, nil, err
 		}
 
 		// Fetch parent from network
@@ -744,17 +785,26 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to fetch parent block")
-			return false, 0, 0, nil, fmt.Errorf("failed to fetch parent block %s during reorg walk: %w", walkBlock.ParentHash, err)
+			return false, 0, 0, nil, nil, fmt.Errorf("failed to fetch parent block %s during reorg walk: %w", walkBlock.ParentHash, err)
 		}
 
-		// Walk to parent block to continue searching for common ancestor
-		// Normalize RPC response at the point of ingestion
+		// Walk to parent block to continue searching for common ancestor.
+		// Normalize RPC response at the point of ingestion. We need parentNum
+		// to record the parent on the new canonical chain by (number, hash).
 		parentNum, err := hexutil.ParseInt64(parentHeader.Number)
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to parse parent block number")
-			return false, 0, 0, nil, fmt.Errorf("failed to parse parent block number %q: %w", parentHeader.Number, err)
+			return false, 0, 0, nil, nil, fmt.Errorf("failed to parse parent block number %q: %w", parentHeader.Number, err)
 		}
+
+		// The parent we just fetched is on the new canonical chain; collect
+		// its (number, hash) so HandleReorgAtomic doesn't orphan a matching DB row.
+		walkedChain = append(walkedChain, outbound.CanonicalBlock{
+			Number: parentNum,
+			Hash:   walkBlock.ParentHash,
+		})
+
 		walkBlock = LightBlock{
 			Number:     parentNum,
 			ParentHash: normalizeHash(parentHeader.ParentHash),
@@ -767,7 +817,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 		err := fmt.Errorf("no common ancestor found after walking %d blocks (chain diverged beyond finality window)", s.config.FinalityBlockCount)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "no common ancestor found")
-		return false, 0, 0, nil, err
+		return false, 0, 0, nil, nil, err
 	}
 
 	// Query DB for blocks that will be orphaned (non-orphaned blocks > commonAncestor)
@@ -776,7 +826,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to get recent blocks")
-		return false, 0, 0, nil, fmt.Errorf("failed to get recent blocks from DB: %w", err)
+		return false, 0, 0, nil, nil, fmt.Errorf("failed to get recent blocks from DB: %w", err)
 	}
 
 	orphanedBlocks := make([]LightBlock, 0)
@@ -824,7 +874,7 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 		}
 	}
 
-	return true, reorgDepth, commonAncestor, reorgEvent, nil
+	return true, reorgDepth, commonAncestor, reorgEvent, walkedChain, nil
 }
 
 // verifyIncomingIsCanonical asks RPC whether the incoming block's hash is the

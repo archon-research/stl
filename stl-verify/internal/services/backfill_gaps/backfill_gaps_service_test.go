@@ -2239,3 +2239,204 @@ func TestCacheAndPublishBlockData_RejectsLiteralNullBytes(t *testing.T) {
 		})
 	}
 }
+
+// ============================================================================
+// Piece 2: post-cycle invariant — backfill.gap_fill.no_canonical.total
+// ============================================================================
+
+// fakeBackfillRecorder counts RecordBackfillGapNoCanonical invocations so
+// tests can assert the invariant fired. Keep it tiny: this is observability
+// glue, not a full mock.
+type fakeBackfillRecorder struct {
+	mu        sync.Mutex
+	calls     int
+	lastChain int64
+}
+
+func (f *fakeBackfillRecorder) RecordBackfillGapNoCanonical(_ context.Context, chainID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastChain = chainID
+}
+
+func (f *fakeBackfillRecorder) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *fakeBackfillRecorder) LastChain() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastChain
+}
+
+// stuckOrphanRepo wraps the in-memory state repo and makes ClearBlockOrphaned
+// a silent no-op. This simulates a hypothetical future code path that
+// reports success but leaves the canonical row orphaned — exactly the
+// silent-failure mode the Piece 2 invariant check is meant to catch.
+type stuckOrphanRepo struct {
+	outbound.BlockStateRepository
+}
+
+func (s *stuckOrphanRepo) ClearBlockOrphaned(_ context.Context, _ string) error {
+	// Pretend to succeed without actually clearing the flag.
+	return nil
+}
+
+// captureHandler records every slog record so we can assert the ERROR log
+// fired with the expected fields.
+type captureHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *captureHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(_ string) slog.Handler      { return h }
+
+func (h *captureHandler) findError(msgContains string) (slog.Record, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Level == slog.LevelError && strings.Contains(r.Message, msgContains) {
+			return r, true
+		}
+	}
+	return slog.Record{}, false
+}
+
+// TestProcessBlockData_NoCanonicalRow_FiresInvariant proves the Piece 2
+// invariant check: when processBlockData returns nil but the post-cycle DB
+// state still has no non-orphaned row for the block, the counter is
+// incremented and a single ERROR log is emitted. The block is driven through
+// the orphan-resurrection branch; ClearBlockOrphaned is stubbed out so the
+// row stays orphaned even though the cycle reports success.
+func TestProcessBlockData_NoCanonicalRow_FiresInvariant(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	client.AddBlock(42, "")
+	header := client.GetHeader(42)
+
+	mem := memory.NewBlockStateRepository()
+	// Seed the orphan-only row.
+	if _, err := mem.SaveBlock(ctx, outbound.BlockState{
+		Number:         42,
+		Hash:           header.Hash,
+		ParentHash:     header.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("failed to seed block: %v", err)
+	}
+	if err := mem.MarkBlockOrphaned(ctx, header.Hash); err != nil {
+		t.Fatalf("failed to orphan seeded block: %v", err)
+	}
+	repo := &stuckOrphanRepo{BlockStateRepository: mem}
+
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	rec := &fakeBackfillRecorder{}
+	handler := &captureHandler{}
+
+	service, err := NewBackfillService(BackfillConfig{
+		ChainID:   42161, // arbitrum, the chain this incident hit
+		BatchSize: 10,
+		Logger:    slog.New(handler),
+		Metrics:   rec,
+	}, client, repo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Fetch the block payload the way the real loop would.
+	batch, err := client.GetBlocksBatch(ctx, []int64{42}, true)
+	if err != nil {
+		t.Fatalf("failed to fetch block batch: %v", err)
+	}
+	if len(batch) != 1 {
+		t.Fatalf("expected 1 block in batch, got %d", len(batch))
+	}
+
+	// processBlockData should return nil — the orphan-clear branch reports
+	// success even though ClearBlockOrphaned is a stub. The invariant check
+	// must catch this.
+	if err := service.processBlockData(ctx, batch[0]); err != nil {
+		t.Fatalf("processBlockData returned error, expected silent success: %v", err)
+	}
+
+	if got := rec.Calls(); got != 1 {
+		t.Fatalf("expected RecordBackfillGapNoCanonical to fire exactly once, got %d", got)
+	}
+	if got := rec.LastChain(); got != 42161 {
+		t.Errorf("expected counter label chain=42161, got %d", got)
+	}
+
+	rec2, ok := handler.findError("backfill completed but no canonical row produced")
+	if !ok {
+		t.Fatal("expected ERROR log mentioning no canonical row, none found")
+	}
+	// Confirm the structured fields land.
+	var sawChain, sawBlock, sawHash bool
+	rec2.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "chain":
+			sawChain = true
+		case "block":
+			sawBlock = true
+		case "hash":
+			sawHash = true
+		}
+		return true
+	})
+	if !sawChain || !sawBlock || !sawHash {
+		t.Errorf("ERROR log missing required attrs (chain=%v block=%v hash=%v)", sawChain, sawBlock, sawHash)
+	}
+}
+
+// TestProcessBlockData_CanonicalRowExists_NoInvariantFires is the
+// negative-control: the steady-state happy path must not fire the
+// silent-failure counter.
+func TestProcessBlockData_CanonicalRowExists_NoInvariantFires(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	client.AddBlock(7, "")
+
+	stateRepo := memory.NewBlockStateRepository()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	rec := &fakeBackfillRecorder{}
+
+	service, err := NewBackfillService(BackfillConfig{
+		ChainID:   1,
+		BatchSize: 10,
+		Logger:    slog.Default(),
+		Metrics:   rec,
+	}, client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	batch, err := client.GetBlocksBatch(ctx, []int64{7}, true)
+	if err != nil {
+		t.Fatalf("failed to fetch block batch: %v", err)
+	}
+	if err := service.processBlockData(ctx, batch[0]); err != nil {
+		t.Fatalf("processBlockData failed: %v", err)
+	}
+
+	if got := rec.Calls(); got != 0 {
+		t.Fatalf("expected invariant counter to stay at zero on happy path, got %d", got)
+	}
+}

@@ -41,6 +41,18 @@ const (
 	ReorgDropReasonStateShifted = "state_shifted"
 )
 
+// BackfillRecorder records observability events from the backfill gap-fill
+// loop. The single hook today is RecordBackfillGapNoCanonical, fired by the
+// post-cycle invariant check that catches "gap-fill returned success but no
+// canonical row exists" (the silent-failure mode behind VEC-277 arbitrum
+// backfill).
+type BackfillRecorder interface {
+	// RecordBackfillGapNoCanonical increments the counter that fires when a
+	// per-block gap-fill cycle completes without producing a non-orphaned
+	// canonical row. Labelled by chain.
+	RecordBackfillGapNoCanonical(ctx context.Context, chainID int64)
+}
+
 // BackupMetricsRecorder records metrics for backup processing.
 // Used by services that process messages from queues (e.g., raw_data_backup).
 type BackupMetricsRecorder interface {

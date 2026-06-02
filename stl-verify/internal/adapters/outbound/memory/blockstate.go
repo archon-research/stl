@@ -165,9 +165,24 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
+// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
+// Returns an error if the block does not exist.
+func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	b, ok := r.blocks[hash]
+	if !ok {
+		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+	}
+	b.IsOrphaned = false
+	r.blocks[hash] = b
+	return nil
+}
+
 // HandleReorgAtomic atomically performs all reorg-related operations.
 // In the memory implementation, this is naturally atomic since we hold the lock.
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState, preserveChain []outbound.CanonicalBlock) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -179,9 +194,22 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	// 1. Save reorg event
 	r.reorgEvents = append(r.reorgEvents, event)
 
-	// 2. Mark old blocks as orphaned
+	// Build preserve-set (height -> hash) for O(1) lookup. preserveChain carries
+	// the new canonical chain so we don't orphan rows backfill already inserted
+	// with the correct (number, hash). Passing nil/empty reproduces blanket-
+	// orphan behaviour. Matching on (number, hash) (not hash alone) mirrors the
+	// postgres SQL and keeps height an explicit part of the predicate.
+	preserve := make(map[int64]string, len(preserveChain))
+	for _, cb := range preserveChain {
+		preserve[cb.Number] = cb.Hash
+	}
+
+	// 2. Mark old blocks as orphaned, EXCEPT rows whose (number, hash) is preserved
 	for hash, b := range r.blocks {
 		if b.Number > commonAncestor && !b.IsOrphaned {
+			if keepHash, ok := preserve[b.Number]; ok && keepHash == hash {
+				continue
+			}
 			b.IsOrphaned = true
 			r.blocks[hash] = b
 		}

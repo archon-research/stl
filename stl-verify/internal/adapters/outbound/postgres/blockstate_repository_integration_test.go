@@ -169,7 +169,7 @@ func TestHandleReorgAtomic_AllOrNothingSemantics(t *testing.T) {
 	}
 
 	// Execute atomic reorg
-	version, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
+	version, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -744,13 +744,13 @@ func TestHandleReorgAtomic_Idempotency(t *testing.T) {
 	}
 
 	// First call
-	version1, err := repo.HandleReorgAtomic(ctx, 99, reorgEvent, newBlock)
+	version1, err := repo.HandleReorgAtomic(ctx, 99, reorgEvent, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("first HandleReorgAtomic failed: %v", err)
 	}
 
 	// Second call with same block hash should be idempotent
-	version2, err := repo.HandleReorgAtomic(ctx, 99, reorgEvent, newBlock)
+	version2, err := repo.HandleReorgAtomic(ctx, 99, reorgEvent, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("second HandleReorgAtomic failed: %v", err)
 	}
@@ -1316,7 +1316,7 @@ func TestHandleReorgAtomic_MultipleBlocksOrphaned(t *testing.T) {
 		BlockTimestamp: time.Now().Unix(),
 	}
 
-	_, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
+	_, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -1387,7 +1387,7 @@ func TestHandleReorgAtomic_ShortNewChainPreservesCommonAncestor(t *testing.T) {
 	// We pass commonAncestor=100 explicitly.
 	// Previous buggy logic calculated: 101 - 2 = 99. Orphans > 99 (orphans 100).
 	// Correct logic: Orphans > 100.
-	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -1447,7 +1447,7 @@ func TestHandleReorgAtomic_MultiBlockReorgGap(t *testing.T) {
 	}
 
 	// Executing atomic reorg for the tip 102'
-	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -1539,7 +1539,7 @@ func TestHandleReorgAtomic_ConcurrentCallsWithSerializableMustAllSucceed(t *test
 			}
 
 			// Call the actual HandleReorgAtomic which now has SERIALIZABLE + retry logic
-			version, err := repo.HandleReorgAtomic(ctx, 105, event, newBlock)
+			version, err := repo.HandleReorgAtomic(ctx, 105, event, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 			resultCh <- struct {
 				id      int
 				version int
@@ -1613,7 +1613,7 @@ func TestFindGaps_DetectsReorgGap(t *testing.T) {
 		Depth:       2,
 	}
 
-	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock)
+	_, err := repo.HandleReorgAtomic(ctx, 100, event, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
@@ -1888,5 +1888,135 @@ func TestSaveBlock_TriggerQueryPlanIsEfficient(t *testing.T) {
 	const maxBuffers = 200
 	if buffers > maxBuffers {
 		t.Fatalf("trigger query touched %d buffers; expected ≤%d. A matching index on (chain_id, number, version DESC) is required.\nplan:\n%s", buffers, maxBuffers, planText)
+	}
+}
+
+// TestHandleReorgAtomic_PreserveHashesNotOrphaned verifies the VEC-277 fix:
+// when a reorg's new canonical chain contains a hash that is already present
+// in the DB (e.g. backfill inserted it before live observed the reorg), that
+// row MUST remain non-orphaned. Pre-fix the SQL blanket-orphaned every row
+// above the common ancestor and produced "orphan-only" rows that the backfill
+// loop's hash-only idempotency check could not drain.
+func TestHandleReorgAtomic_PreserveHashesNotOrphaned(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	// Setup: blocks 100, 101, 102 on chain A. Block 102's hash "0xshared_102"
+	// is also part of the new canonical chain (think: backfill saved it first
+	// and the live-data reorg detection later confirmed it as canonical).
+	chainA := map[int64]string{
+		100: "0xorig_100",
+		101: "0xorig_101",
+		102: "0xshared_102", // <-- shared with new chain
+	}
+	for _, num := range []int64{100, 101, 102} {
+		parent := chainA[num-1]
+		if num == 100 {
+			parent = "0xorig_99"
+		}
+		if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:         num,
+			Hash:           chainA[num],
+			ParentHash:     parent,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("save block %d: %v", num, err)
+		}
+	}
+
+	// Reorg from chain A to chain B at common ancestor 100. The new canonical
+	// chain at heights 101..103 has a fresh 101', the same 102 (0xshared_102),
+	// and a fresh 103'. preserveChain identifies them by (number, hash).
+	preserveChain := []outbound.CanonicalBlock{
+		{Number: 101, Hash: "0xnew_101"},
+		{Number: 102, Hash: "0xshared_102"},
+		{Number: 103, Hash: "0xnew_103"},
+	}
+
+	reorgEvent := outbound.ReorgEvent{
+		DetectedAt:  time.Now(),
+		BlockNumber: 103,
+		OldHash:     "0xorig_101",
+		NewHash:     "0xnew_103",
+		Depth:       2,
+	}
+	newBlock := outbound.BlockState{
+		Number:         103,
+		Hash:           "0xnew_103",
+		ParentHash:     "0xshared_102",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}
+
+	if _, err := repo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock, preserveChain); err != nil {
+		t.Fatalf("HandleReorgAtomic failed: %v", err)
+	}
+
+	// Assertion: the shared hash row must still be non-orphaned.
+	shared, err := repo.GetBlockByHash(ctx, "0xshared_102")
+	if err != nil {
+		t.Fatalf("GetBlockByHash shared: %v", err)
+	}
+	if shared == nil {
+		t.Fatal("expected shared-hash row to exist")
+	}
+	if shared.IsOrphaned {
+		t.Fatalf("expected shared-hash row to remain non-orphaned (preserveHashes contract violated)")
+	}
+
+	// Assertion: the orig_101 row (NOT in preserveHashes) must be orphaned.
+	orig101, err := repo.GetBlockByHash(ctx, "0xorig_101")
+	if err != nil {
+		t.Fatalf("GetBlockByHash orig_101: %v", err)
+	}
+	if orig101 == nil || !orig101.IsOrphaned {
+		t.Fatalf("expected orig_101 to be orphaned, got %+v", orig101)
+	}
+}
+
+// TestClearBlockOrphaned verifies the new self-heal port: clearing the orphan
+// flag on a known hash flips is_orphaned back to FALSE; clearing on a missing
+// hash returns an error so callers cannot silently mask an unknown block.
+func TestClearBlockOrphaned(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         200,
+		Hash:           "0xclear_200",
+		ParentHash:     "0xclear_199",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("save block: %v", err)
+	}
+	if err := repo.MarkBlockOrphaned(ctx, "0xclear_200"); err != nil {
+		t.Fatalf("mark orphaned: %v", err)
+	}
+
+	if err := repo.ClearBlockOrphaned(ctx, "0xclear_200"); err != nil {
+		t.Fatalf("ClearBlockOrphaned: %v", err)
+	}
+	got, err := repo.GetBlockByHash(ctx, "0xclear_200")
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if got == nil || got.IsOrphaned {
+		t.Fatalf("expected non-orphaned row, got %+v", got)
+	}
+
+	// Idempotent: clearing an already-canonical row is fine.
+	if err := repo.ClearBlockOrphaned(ctx, "0xclear_200"); err != nil {
+		t.Fatalf("ClearBlockOrphaned (idempotent call): %v", err)
+	}
+
+	// Unknown hash -> error.
+	if err := repo.ClearBlockOrphaned(ctx, "0xdoes_not_exist"); err == nil {
+		t.Fatal("expected error for unknown hash, got nil")
 	}
 }

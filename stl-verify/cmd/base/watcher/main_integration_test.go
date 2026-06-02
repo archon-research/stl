@@ -543,7 +543,7 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 		BlockTimestamp: time.Now().Unix(),
 	}
 
-	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
+	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}
