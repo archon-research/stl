@@ -116,12 +116,9 @@ groups:
       # ---------------------------------------------------------------------
 
       - alert: VectorWatcherAlchemyLatencyHigh
-        # p99 Alchemy RPC latency >8s for 15m. Healthy p99 is sub-second.
-        # Sustained high p99 means the poll loop is degraded but not broken
-        # — early warning before VectorWatcherNoBlocks fires.
-        #
-        # If the SDK ever switches to finer histogram buckets, this threshold
-        # should be re-tuned to something tighter than 5s.
+        # p99 Alchemy RPC latency >5s for 15m. Healthy p99 is sub-second.
+        # 5s sustained means the poll loop is degraded but not broken —
+        # early warning before VectorWatcherNoBlocks fires.
         #
         # Assumes the SDK exposes histogram
         # `alchemy_client_request_duration_seconds`. Adjust if the metric
@@ -135,7 +132,7 @@ groups:
                 service_name=~".*watcher"
               }[10m])
             )
-          ) > 8
+          ) > 5
         for: 15m
         labels:
           team: vector
@@ -143,7 +140,7 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy p99 latency >8s on {{ $labels.service_name }}"
+          summary: "Vector watcher Alchemy p99 latency >5s on {{ $labels.service_name }}"
           description: |
             p99 Alchemy RPC latency for watcher
             `{{ $labels.service_name }}` is `{{ $value | printf "%.2fs" }}`
