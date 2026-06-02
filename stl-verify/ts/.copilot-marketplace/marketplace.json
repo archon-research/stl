@@ -1,0 +1,14 @@
+{
+  "name": "uikit-plugins",
+  "owner": {
+    "name": "Archon Research"
+  },
+  "plugins": [
+    {
+      "name": "uikit-agent-marketplace",
+      "version": "0.1.0",
+      "description": "UI skills and specialist agents for code assistants.",
+      "source": "./uikit-agent-marketplace"
+    }
+  ]
+}
