@@ -16,13 +16,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# id-token: write is needed by deploy.yaml (AWS OIDC). It must be at the
-# workflow level because reusable-workflow callers can't grant permissions
-# at the job level. GitHub blocks OIDC token minting for fork PRs, so this
-# is not an attack vector.
+# These are the ceiling for the reusable workflows this file calls; a called
+# workflow's job cannot request more than is granted here, or the run fails at
+# startup. id-token: write is for deploy.yaml's AWS OIDC; packages: write is for
+# deploy.yaml pushing the BuildKit layer cache to GHCR. Must be at the workflow
+# level (callers can't grant per-job). GitHub blocks OIDC and downgrades
+# packages to read for fork PRs, so this is not an attack vector.
 permissions:
   contents: read
-  packages: read
+  packages: write
   id-token: write
 
 jobs:
