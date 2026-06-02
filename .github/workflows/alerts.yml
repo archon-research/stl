@@ -1,0 +1,120 @@
+name: Alerts
+
+on:
+  pull_request:
+    paths:
+      - "alerts/**"
+      - ".github/workflows/alerts.yml"
+  push:
+    branches: [main]
+    paths:
+      - "alerts/**"
+      - ".github/workflows/alerts.yml"
+
+concurrency:
+  group: alerts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Staging runs on PRs (for the diff preview comment) and on push to main.
+  # Fork-PR guard: secrets aren't passed to fork PRs, but we also refuse to
+  # run the job at all so it can't accidentally hit AWS even if the secret
+  # check is ever moved around.
+  staging:
+    name: staging
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # AWS OIDC assume
+      pull-requests: write  # diff comment upsert
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out internal actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - name: Configure AWS credentials (staging)
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        with:
+          role-to-assume: arn:aws:iam::579039992622:role/archonstaging-github-actions-mimir-rules
+          aws-region: eu-west-1
+
+      - name: Fetch Grafana Cloud Mimir token (staging)
+        uses: aws-actions/aws-secretsmanager-get-secrets@5e19ff380d035695bdd56bbad320ca535c9063f2  # v2.0.10
+        with:
+          secret-ids: |
+            GC,archonstaging-mimir-rules-token-vector
+          parse-json-secrets: true
+
+      - name: Sync rules
+        uses: ./.github-actions/mimir-rules-sync
+        with:
+          team: vector
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers)$'
+          rules-dir: alerts
+          mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
+          mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
+          mimir-token: ${{ env.GC_TOKEN }}
+          cluster-label: ${{ env.GC_CLUSTER_LABEL }}
+          env-label: ${{ env.GC_ENV_LABEL }}
+
+  # Prod only runs on push to main, and only after a `vector-engineers`
+  # reviewer approves the `production` environment. PRs never reach this job
+  # and the prod IAM role's trust policy should not include `:pull_request`.
+  prod:
+    name: prod
+    if: github.event_name == 'push'
+    needs: staging
+    environment: production
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write       # AWS OIDC assume
+      pull-requests: write  # diff comment upsert
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out internal actions
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: archon-research/github-actions
+          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - name: Configure AWS credentials (prod)
+        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-mimir-rules
+          aws-region: eu-west-1
+
+      - name: Fetch Grafana Cloud Mimir token (prod)
+        uses: aws-actions/aws-secretsmanager-get-secrets@5e19ff380d035695bdd56bbad320ca535c9063f2  # v2.0.10
+        with:
+          secret-ids: |
+            GC,archonprod-mimir-rules-token-vector
+          parse-json-secrets: true
+
+      - name: Sync rules
+        uses: ./.github-actions/mimir-rules-sync
+        with:
+          team: vector
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers)$'
+          rules-dir: alerts
+          mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
+          mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
+          mimir-token: ${{ env.GC_TOKEN }}
+          cluster-label: ${{ env.GC_CLUSTER_LABEL }}
+          env-label: ${{ env.GC_ENV_LABEL }}
