@@ -9,8 +9,11 @@
 #   - service_name=~".*watcher"            (OTel service.name) (see note below)
 #   - k8s_namespace_name="vector"          (k8sattributes processor)
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
-#   - chain                                (per-chain label, set by app code)
 #   - rpc_method                           (e.g. eth_getBlockByNumber)
+#
+# NB: there is NO `chain` label on alchemy_client_requests_total today.
+# Per-chain attribution comes from `service_name`. Alerts here `sum by (service_name, cluster)` and the
+# annotation templates reference `{{ $labels.service_name }}`.
 #
 # `cluster` is propagated from the source metric (preserved through `sum by`)
 # so the Alertmanager Slack template's `Cluster:` header is populated.
@@ -46,7 +49,7 @@ groups:
         # If we're not seeing eth_getBlockByNumber for a full minute, the
         # watcher is stuck — no benign reason to wait longer.
         expr: |
-          sum by (chain, cluster) (
+          sum by (service_name, cluster) (
             rate(alchemy_client_requests_total{
               k8s_namespace_name="vector",
               service_name=~".*watcher",
@@ -60,10 +63,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher not polling blocks on {{ $labels.chain }}"
+          summary: "Vector watcher not polling blocks on {{ $labels.service_name }}"
           description: |
-            `stl-watcher` on chain `{{ $labels.chain }}` has not issued a
-            single `eth_getBlockByNumber` call to Alchemy for >1m. The chain
+            Watcher `{{ $labels.service_name }}` has not issued a single
+            `eth_getBlockByNumber` call to Alchemy for >1m. The chain
             ingestion pipeline is stalled at the head — every downstream
             indexer will go idle shortly.
 
@@ -76,7 +79,7 @@ groups:
         # retry logic should absorb it.
         expr: |
           (
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name=~".*watcher",
@@ -84,7 +87,7 @@ groups:
               }[5m])
             )
             /
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name=~".*watcher"
@@ -98,10 +101,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy error rate >50% on {{ $labels.chain }}"
+          summary: "Vector watcher Alchemy error rate >50% on {{ $labels.service_name }}"
           description: |
-            `stl-watcher` on chain `{{ $labels.chain }}` is seeing >50% of
-            Alchemy RPC calls fail for >10m. Likely an upstream outage, an
+            Watcher `{{ $labels.service_name }}` is seeing >50% of Alchemy
+            RPC calls fail for >10m. Likely an upstream outage, an
             auth/quota issue, or a misconfigured endpoint.
 
             Verify the Alchemy status page and the `ALCHEMY_API_KEY` secret
@@ -113,9 +116,12 @@ groups:
       # ---------------------------------------------------------------------
 
       - alert: VectorWatcherAlchemyLatencyHigh
-        # p99 Alchemy RPC latency >5s for 15m. Healthy p99 is sub-second.
-        # 5s sustained means the poll loop is degraded but not broken —
-        # early warning before VectorWatcherNoBlocks fires.
+        # p99 Alchemy RPC latency >8s for 15m. Healthy p99 is sub-second.
+        # Sustained high p99 means the poll loop is degraded but not broken
+        # — early warning before VectorWatcherNoBlocks fires.
+        #
+        # If the SDK ever switches to finer histogram buckets, this threshold
+        # should be re-tuned to something tighter than 5s.
         #
         # Assumes the SDK exposes histogram
         # `alchemy_client_request_duration_seconds`. Adjust if the metric
@@ -123,13 +129,13 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (chain, cluster, le) (
+            sum by (service_name, cluster, le) (
               rate(alchemy_client_request_duration_seconds_bucket{
                 k8s_namespace_name="vector",
                 service_name=~".*watcher"
               }[10m])
             )
-          ) > 5
+          ) > 8
         for: 15m
         labels:
           team: vector
@@ -137,10 +143,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy p99 latency >5s on {{ $labels.chain }}"
+          summary: "Vector watcher Alchemy p99 latency >8s on {{ $labels.service_name }}"
           description: |
-            p99 Alchemy RPC latency for `stl-watcher` on chain
-            `{{ $labels.chain }}` is `{{ $value | printf "%.2fs" }}`
+            p99 Alchemy RPC latency for watcher
+            `{{ $labels.service_name }}` is `{{ $value | printf "%.2fs" }}`
             sustained over 15m. Pipeline is degraded; expect block lag.
 
       - alert: VectorWatcherAlchemyRetriesHigh
@@ -151,14 +157,14 @@ groups:
         # existing `alchemy_client_requests_total`.
         expr: |
           (
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_retries_total{
                 k8s_namespace_name="vector",
                 service_name=~".*watcher"
               }[10m])
             )
             /
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
                 service_name=~".*watcher"
@@ -172,9 +178,9 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy retry ratio >20% on {{ $labels.chain }}"
+          summary: "Vector watcher Alchemy retry ratio >20% on {{ $labels.service_name }}"
           description: |
-            `stl-watcher` on chain `{{ $labels.chain }}` is retrying
+            Watcher `{{ $labels.service_name }}` is retrying
             `{{ $value | humanizePercentage }}` of Alchemy calls over 15m.
             Upstream is flaky; if this escalates we'll see
             VectorWatcherAlchemyErrorsHigh.
@@ -206,7 +212,7 @@ groups:
         # similar) is exported and re-write the expression as:
         #
         #   (
-        #     sum by (chain, cluster) (vector_backfill_gaps_open{
+        #     sum by (service_name, cluster) (vector_backfill_gaps_open{
         #       k8s_namespace_name="vector", service_name=~".*watcher"
         #     }) > 100
         #   ) and (
@@ -217,7 +223,7 @@ groups:
         # non-zero rate of the no-canonical invariant for 30m is a clear
         # signal something is wrong, even if it overlaps with Rule B.
         expr: |
-          sum by (chain, cluster) (
+          sum by (service_name, cluster) (
             rate(backfill_gap_fill_no_canonical_total{
               k8s_namespace_name="vector",
               service_name=~".*watcher"
@@ -230,9 +236,9 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher backfill backlog growing on {{ $labels.chain }}"
+          summary: "Vector watcher backfill backlog growing on {{ $labels.service_name }}"
           description: |
-            Backfill gap-fill on `{{ $labels.chain }}` has been emitting the
+            Backfill gap-fill on `{{ $labels.service_name }}` has been emitting the
             silent-failure invariant for >30m. Either the gap finder is
             rediscovering the same blocks every cycle without draining (the
             VEC-277 arbitrum failure mode), or upstream RPC is degraded
@@ -252,7 +258,7 @@ groups:
         # ~584 missing blocks for ~13 days. This is the highest-confidence
         # leading indicator we have for that bug class returning.
         expr: |
-          sum by (chain, cluster) (
+          sum by (service_name, cluster) (
             rate(backfill_gap_fill_no_canonical_total{
               k8s_namespace_name="vector",
               service_name=~".*watcher"
@@ -265,10 +271,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher backfill produced no canonical row on {{ $labels.chain }}"
+          summary: "Vector watcher backfill produced no canonical row on {{ $labels.service_name }}"
           description: |
             `backfill_gap_fill_no_canonical_total` is non-zero for chain
-            `{{ $labels.chain }}` over the last 10m. A per-block gap-fill
+            `{{ $labels.service_name }}` over the last 10m. A per-block gap-fill
             cycle finished without producing a non-orphaned row in
             `block_states`. This is the exact silent-failure shape that
             caused the 2026-06-02 arbitrum backfill incident (loop locked
