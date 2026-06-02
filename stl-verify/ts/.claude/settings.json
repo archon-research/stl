@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "uikit-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "archon-research/uikit",
+        "ref": "2c5f444eaf6debbd1ebdbc1b969e9c24e7e0fe81"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "uikit-agent-marketplace@uikit-plugins": true
+  }
+}

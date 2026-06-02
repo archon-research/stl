@@ -9,6 +9,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    optimizeDeps: {
+      exclude: ['@archon-research/design-system'],
+    },
     resolve: {
       preserveSymlinks: true,
       dedupe: ['react', 'react-dom'],
