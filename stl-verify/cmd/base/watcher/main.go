@@ -19,6 +19,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"golang.org/x/time/rate"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 
@@ -172,6 +173,12 @@ func main() {
 		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
 	}
 
+	rateLimiter, err := loadAlchemyRateLimiter()
+	if err != nil {
+		logger.Error("invalid alchemy rate limiter config", "error", err)
+		os.Exit(1)
+	}
+
 	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
 		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
@@ -180,6 +187,7 @@ func main() {
 		ParallelRPC:  *parallelRPC,
 		Logger:       logger,
 		Telemetry:    alchemyTelemetry,
+		RateLimiter:  rateLimiter,
 	})
 	if err != nil {
 		logger.Error("failed to create client", "error", err)
@@ -191,6 +199,7 @@ func main() {
 		"enableBlobs", *enableBlobs,
 		"parallelRPC", *parallelRPC,
 		"chainID", chainID,
+		"rateLimiterEnabled", rateLimiter != nil,
 	)
 
 	// Create Redis cache
@@ -376,6 +385,47 @@ func requireEnv(key string) string {
 		os.Exit(1)
 	}
 	return value
+}
+
+// loadAlchemyRateLimiter constructs a client-side rate limiter for the Alchemy
+// HTTP client from env vars. Returns (nil, nil) when the limiter is disabled
+// (the zero-impact default — Alchemy is unmetered by this process unless the
+// operator opts in via ALCHEMY_RATE_LIMIT_RPS). Validation mirrors the
+// BACKFILL_BATCH_SIZE pattern: zero is the disabled sentinel, negatives are
+// loud errors.
+//
+// Note: the limit is per-process (one limiter per watcher pod). Multiple pods
+// pointing at the same Alchemy account multiply the effective cap; size
+// accordingly.
+//
+// Env vars:
+//   - ALCHEMY_RATE_LIMIT_RPS   (float, default 0 = disabled)
+//   - ALCHEMY_RATE_LIMIT_BURST (int,   default max(1, int(rps)) — fractional
+//     rps is truncated toward zero before the max, so rps=1.9 yields default
+//     burst 1 and rps=2.5 yields default burst 2. Set the env var explicitly
+//     when sub-integer precision matters.)
+func loadAlchemyRateLimiter() (*rate.Limiter, error) {
+	rps, err := env.GetFloat("ALCHEMY_RATE_LIMIT_RPS", 0)
+	if err != nil {
+		return nil, err
+	}
+	if rps < 0 {
+		return nil, fmt.Errorf("ALCHEMY_RATE_LIMIT_RPS must be >= 0, got %v", rps)
+	}
+	if rps == 0 {
+		return nil, nil
+	}
+	// int(rps) truncates toward zero; max(_, 1) ensures even sub-1 rps gets a
+	// usable burst since rate.NewLimiter treats burst=0 as "never admit".
+	defaultBurst := max(int(rps), 1)
+	burst, err := env.GetInt("ALCHEMY_RATE_LIMIT_BURST", defaultBurst)
+	if err != nil {
+		return nil, err
+	}
+	if burst < 1 {
+		return nil, fmt.Errorf("ALCHEMY_RATE_LIMIT_BURST must be >= 1, got %d", burst)
+	}
+	return rate.NewLimiter(rate.Limit(rps), burst), nil
 }
 
 // loadBackfillConfig reads the env-driven backfill knobs. Defaults preserve the

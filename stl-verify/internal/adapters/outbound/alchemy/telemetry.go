@@ -36,10 +36,12 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// HTTP Client metrics
-	requestDuration metric.Float64Histogram
-	requestsTotal   metric.Int64Counter
-	retriesTotal    metric.Int64Counter
-	batchSize       metric.Int64Histogram
+	requestDuration   metric.Float64Histogram
+	requestsTotal     metric.Int64Counter
+	retriesTotal      metric.Int64Counter
+	batchSize         metric.Int64Histogram
+	rateLimitWaits    metric.Int64Counter
+	rateLimitWaitTime metric.Float64Histogram
 
 	// WebSocket Subscriber metrics
 	reconnectionsTotal  metric.Int64Counter
@@ -98,6 +100,27 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 	t.batchSize, err = meter.Int64Histogram(
 		"alchemy.client.batch.size",
 		metric.WithDescription("Size of batch RPC requests"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Names use underscores to match the Prometheus exposition format the
+	// runbook references (alchemy_client_rate_limit_waits_total etc.). The
+	// OTEL→Prom mapping converts dots to underscores anyway, but we make the
+	// intent explicit so operators searching by Prom name find it here.
+	t.rateLimitWaits, err = meter.Int64Counter(
+		"alchemy.client.rate_limit_waits.total",
+		metric.WithDescription("Total number of requests that blocked on the client-side rate limiter"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	t.rateLimitWaitTime, err = meter.Float64Histogram(
+		"alchemy.client.rate_limit_waits.duration",
+		metric.WithDescription("Time spent waiting for the client-side rate limiter, in seconds"),
+		metric.WithUnit("s"),
 	)
 	if err != nil {
 		return nil, err
@@ -181,6 +204,17 @@ func (t *Telemetry) RecordRetry(ctx context.Context, method string, attempt int)
 // RecordBatchSize records the size of a batch request.
 func (t *Telemetry) RecordBatchSize(ctx context.Context, size int) {
 	t.batchSize.Record(ctx, int64(size))
+}
+
+// RecordRateLimitWait records that a request blocked on the client-side rate
+// limiter for the given duration. Callers should only invoke this for waits
+// that actually blocked (above a small threshold); instantaneous admissions
+// and scheduler-jitter samples are skipped upstream so the metric reflects
+// contention rather than steady-state throughput.
+func (t *Telemetry) RecordRateLimitWait(ctx context.Context, method string, waited time.Duration) {
+	attrs := []attribute.KeyValue{attribute.String("rpc.method", method)}
+	t.rateLimitWaits.Add(ctx, 1, metric.WithAttributes(attrs...))
+	t.rateLimitWaitTime.Record(ctx, waited.Seconds(), metric.WithAttributes(attrs...))
 }
 
 // --- WebSocket Subscriber instrumentation ---

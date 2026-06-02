@@ -45,6 +45,47 @@ func TestGetInt(t *testing.T) {
 	}
 }
 
+func TestGetFloat(t *testing.T) {
+	const key = "STL_TEST_GET_FLOAT"
+
+	tests := []struct {
+		name    string
+		value   string
+		def     float64
+		want    float64
+		wantErr bool
+	}{
+		{name: "unset returns default", def: 1.5, want: 1.5},
+		{name: "integer is parsed as float", value: "25", def: 0, want: 25},
+		{name: "decimal is parsed", value: "0.5", def: 0, want: 0.5},
+		{name: "negative is parsed", value: "-2.5", def: 0, want: -2.5},
+		{name: "scientific notation is parsed", value: "1e3", def: 0, want: 1000},
+		{name: "garbage returns error", value: "not-a-float", def: 1, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.value != "" {
+				t.Setenv(key, tc.value)
+			}
+
+			got, err := GetFloat(key, tc.def)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (got=%v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GetFloat = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetDuration(t *testing.T) {
 	const key = "STL_TEST_GET_DURATION"
 

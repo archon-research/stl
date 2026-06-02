@@ -5,7 +5,139 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/time/rate"
 )
+
+func TestLoadAlchemyRateLimiter(t *testing.T) {
+	tests := []struct {
+		name             string
+		setRPS           bool
+		rpsEnv           string
+		setBurst         bool
+		burstEnv         string
+		wantNil          bool
+		wantLimit        rate.Limit
+		wantBurst        int
+		wantErrSubstring string
+	}{
+		{
+			name:    "defaults to disabled",
+			wantNil: true,
+		},
+		{
+			name:    "explicit zero is disabled",
+			setRPS:  true,
+			rpsEnv:  "0",
+			wantNil: true,
+		},
+		{
+			// Mirrors BACKFILL_BATCH_SIZE: invalid input is loud, not silently coerced.
+			name:             "negative rps rejected",
+			setRPS:           true,
+			rpsEnv:           "-1",
+			wantErrSubstring: "ALCHEMY_RATE_LIMIT_RPS must be >= 0",
+		},
+		{
+			name:             "unparseable rps rejected",
+			setRPS:           true,
+			rpsEnv:           "not-a-number",
+			wantErrSubstring: "ALCHEMY_RATE_LIMIT_RPS",
+		},
+		{
+			name:      "rps with implicit burst defaults to int(rps)",
+			setRPS:    true,
+			rpsEnv:    "25",
+			wantLimit: rate.Limit(25),
+			wantBurst: 25,
+		},
+		{
+			// Sub-1 rps would otherwise yield burst=0, which rate.NewLimiter treats
+			// as "never admit". Coerce to 1 so the limiter actually works.
+			name:      "fractional rps coerces default burst to 1",
+			setRPS:    true,
+			rpsEnv:    "0.5",
+			wantLimit: rate.Limit(0.5),
+			wantBurst: 1,
+		},
+		{
+			name:      "explicit burst overrides default",
+			setRPS:    true,
+			rpsEnv:    "10",
+			setBurst:  true,
+			burstEnv:  "20",
+			wantLimit: rate.Limit(10),
+			wantBurst: 20,
+		},
+		{
+			name:             "burst < 1 rejected",
+			setRPS:           true,
+			rpsEnv:           "10",
+			setBurst:         true,
+			burstEnv:         "0",
+			wantErrSubstring: "ALCHEMY_RATE_LIMIT_BURST must be >= 1",
+		},
+		{
+			name:             "negative burst rejected",
+			setRPS:           true,
+			rpsEnv:           "10",
+			setBurst:         true,
+			burstEnv:         "-5",
+			wantErrSubstring: "ALCHEMY_RATE_LIMIT_BURST must be >= 1",
+		},
+		{
+			name:             "unparseable burst rejected",
+			setRPS:           true,
+			rpsEnv:           "10",
+			setBurst:         true,
+			burstEnv:         "abc",
+			wantErrSubstring: "ALCHEMY_RATE_LIMIT_BURST",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setRPS {
+				t.Setenv("ALCHEMY_RATE_LIMIT_RPS", tc.rpsEnv)
+			}
+			if tc.setBurst {
+				t.Setenv("ALCHEMY_RATE_LIMIT_BURST", tc.burstEnv)
+			}
+
+			lim, err := loadAlchemyRateLimiter()
+			if tc.wantErrSubstring != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErrSubstring)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSubstring) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrSubstring)
+				}
+				if lim != nil {
+					t.Errorf("expected nil limiter on error, got %+v", lim)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantNil {
+				if lim != nil {
+					t.Errorf("expected nil limiter, got %+v", lim)
+				}
+				return
+			}
+			if lim == nil {
+				t.Fatal("expected non-nil limiter, got nil")
+			}
+			if lim.Limit() != tc.wantLimit {
+				t.Errorf("Limit = %v, want %v", lim.Limit(), tc.wantLimit)
+			}
+			if lim.Burst() != tc.wantBurst {
+				t.Errorf("Burst = %d, want %d", lim.Burst(), tc.wantBurst)
+			}
+		})
+	}
+}
 
 func TestLoadBackfillConfig(t *testing.T) {
 	logger := slog.Default()

@@ -26,6 +26,16 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// RateWaiter is the minimal surface the client needs from a rate limiter:
+// block until one token is available, or return ctx.Err() if cancelled.
+// *golang.org/x/time/rate.Limiter satisfies this interface, as would a
+// future distributed (e.g. Redis-backed) implementation. Keeping the
+// dependency on the concrete limiter type out of ClientConfig means
+// swapping the implementation later does not churn every call site.
+type RateWaiter interface {
+	Wait(ctx context.Context) error
+}
+
 // Compile-time check that Client implements outbound.BlockchainClient
 var _ outbound.BlockchainClient = (*Client)(nil)
 
@@ -101,6 +111,28 @@ type ClientConfig struct {
 	// If nil, a default client with OpenTelemetry instrumentation is used.
 	// Use this to configure custom transport settings like connection pooling.
 	HTTPClient *http.Client
+
+	// RateLimiter optionally caps the per-Client request rate to the Alchemy
+	// endpoint. A nil limiter is the valid "disabled" state and lets all
+	// requests pass through unmetered. Typically constructed with
+	// rate.NewLimiter(rps, burst) to bound how aggressively a single Client
+	// can spend the Alchemy budget (see the VEC-NA Arbitrum incident, where
+	// republish + backfill jointly saturated the account).
+	//
+	// Scope and caveats:
+	//   - This limiter is per-Client, intra-process only. It does NOT
+	//     coordinate across multiple Client instances, goroutines using
+	//     different clients, or across pods that share an Alchemy account.
+	//     Size the per-pod cap accordingly when fan-out is significant.
+	//   - The limiter is shared by every caller of this Client: the live-data
+	//     tip fetcher and any in-process backfill/gap-fill calls draw from
+	//     the same bucket. A backfill burst can therefore starve the
+	//     latency-sensitive live path if the cap is set too tightly. If you
+	//     need isolation, construct two Clients with two limiters.
+	//   - Tokens are spent per HTTP request, not per inner RPC method, so a
+	//     batched call consumes one token regardless of batch size. The
+	//     limiter targets HTTP RPS; Alchemy bills by Compute Units upstream.
+	RateLimiter RateWaiter
 }
 
 // ClientConfigDefaults returns a config with default values.
@@ -169,6 +201,34 @@ func NewClient(config ClientConfig) (*Client, error) {
 		logger:     config.Logger.With("component", "alchemy-client"),
 		telemetry:  config.Telemetry,
 	}, nil
+}
+
+// rateLimitTelemetryThreshold filters out near-zero waits from the rate-limit
+// telemetry. time.Since on a monotonic clock effectively never returns 0, so
+// every admitted call would otherwise record a sample of tens-to-hundreds of
+// nanoseconds (goroutine scheduling jitter), drowning real contention in
+// near-zero entries. 100µs is well below any meaningful pacing delay (a 1000
+// rps limit spaces tokens at 1ms) but well above scheduler noise.
+const rateLimitTelemetryThreshold = 100 * time.Microsecond
+
+// waitForRateLimit blocks until the limiter admits one token, or returns the
+// context error if the wait is cancelled. A nil limiter is the disabled state
+// and returns immediately. Only waits that exceeded rateLimitTelemetryThreshold
+// are reported to telemetry, so the metric reflects actual contention rather
+// than steady-state throughput plus scheduling jitter.
+func (c *Client) waitForRateLimit(ctx context.Context, method string) error {
+	if c.config.RateLimiter == nil {
+		return nil
+	}
+	start := time.Now()
+	if err := c.config.RateLimiter.Wait(ctx); err != nil {
+		return err
+	}
+	waited := time.Since(start)
+	if waited > rateLimitTelemetryThreshold && c.telemetry != nil {
+		c.telemetry.RecordRateLimitWait(ctx, method, waited)
+	}
+	return nil
 }
 
 // callSingle dispatches a single JSON-RPC request and decodes the result
@@ -573,6 +633,12 @@ func (c *Client) callBatch(ctx context.Context, requests []jsonRPCRequest) ([]js
 		// Reset responses to avoid leftover data from previous attempts
 		rpcResponses = nil
 
+		// 1 token per HTTP request; batch size is intentional — the limiter
+		// targets HTTP RPS, not Alchemy CU spend. CU accounting lives upstream.
+		if err := c.waitForRateLimit(ctx, "batch"); err != nil {
+			return &nonRetryableError{err: err}
+		}
+
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
 		if err != nil {
 			return &nonRetryableError{err: fmt.Errorf("failed to create request: %w", err)}
@@ -636,6 +702,10 @@ func (c *Client) call(ctx context.Context, req jsonRPCRequest) (*jsonRPCResponse
 	err = c.doWithRetry(ctx, req.Method, func() error {
 		// Reset response to avoid leftover error field from previous attempts
 		rpcResp = jsonRPCResponse{}
+
+		if err := c.waitForRateLimit(ctx, req.Method); err != nil {
+			return &nonRetryableError{err: err}
+		}
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.HTTPURL, bytes.NewReader(reqBytes))
 		if err != nil {
