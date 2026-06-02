@@ -202,6 +202,10 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
+  # Arbitrum produces ~4 blocks/s (measured 3.98 blk/s over 7d in prod).
+  # 20 blocks every 5s = 4 blk/s, matching the incoming rate exactly.
+  BACKFILL_BATCH_SIZE: "20"
+  BACKFILL_POLL_INTERVAL: "5s"
 ---
 apiVersion: v1
 kind: ConfigMap
