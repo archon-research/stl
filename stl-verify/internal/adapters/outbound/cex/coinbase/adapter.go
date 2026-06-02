@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -28,7 +27,6 @@ const (
 
 type Config struct {
 	BaseURL           string
-	Logger            *slog.Logger
 	HTTPClient        *http.Client
 	PollInterval      time.Duration
 	ChannelBufferSize int
@@ -44,16 +42,13 @@ type Adapter struct {
 
 func NewAdapter(cfg Config) (*Adapter, error) {
 	if cfg.PollInterval < 0 {
-		return nil, errors.New("PollInterval must not be negative")
+		return nil, errors.New("poll interval must not be negative")
 	}
 	if cfg.ChannelBufferSize < 0 {
-		return nil, errors.New("ChannelBufferSize must not be negative")
+		return nil, errors.New("channel buffer size must not be negative")
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.exchange.coinbase.com"
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -81,6 +76,9 @@ func (a *Adapter) Connect(_ context.Context, symbols []string) error {
 	for _, s := range symbols {
 		if strings.TrimSpace(s) == "" {
 			return errors.New("symbol must not be blank")
+		}
+		if strings.TrimSpace(s) != s {
+			return fmt.Errorf("symbol %q must not have surrounding whitespace", s)
 		}
 	}
 	cp := make([]string, len(symbols))
@@ -185,32 +183,35 @@ func (a *Adapter) fetchSnapshot(ctx context.Context, symbol string) (entity.Orde
 		return entity.OrderBookSnapshot{}, fmt.Errorf("decoding response: %w", err)
 	}
 
-	bids, err := parseLevels(raw.Bids, a.cfg.Logger, symbol, "bid")
+	bids, err := parseLevels(raw.Bids)
 	if err != nil {
 		return entity.OrderBookSnapshot{}, fmt.Errorf("parsing bids: %w", err)
 	}
 
-	asks, err := parseLevels(raw.Asks, a.cfg.Logger, symbol, "ask")
+	asks, err := parseLevels(raw.Asks)
 	if err != nil {
 		return entity.OrderBookSnapshot{}, fmt.Errorf("parsing asks: %w", err)
 	}
 
-	return entity.OrderBookSnapshot{
+	snap := entity.OrderBookSnapshot{
 		Exchange:   name,
 		Token:      symbol,
 		CapturedAt: time.Now().UTC(),
 		Bids:       bids,
 		Asks:       asks,
-	}, nil
+	}
+	if err := snap.Validate(); err != nil {
+		return entity.OrderBookSnapshot{}, fmt.Errorf("invalid snapshot: %w", err)
+	}
+	return snap, nil
 }
 
 // parseLevels extracts price and size from Coinbase's [price, size, num_orders] tuples.
-func parseLevels(raw [][]json.RawMessage, logger *slog.Logger, symbol, side string) ([]entity.OrderBookLevel, error) {
+func parseLevels(raw [][]json.RawMessage) ([]entity.OrderBookLevel, error) {
 	levels := make([]entity.OrderBookLevel, 0, len(raw))
 	for i, row := range raw {
 		if len(row) < 2 {
-			logger.Warn("skipping malformed level", "symbol", symbol, "side", side, "index", i, "length", len(row))
-			continue
+			return nil, fmt.Errorf("malformed level at index %d: got %d fields", i, len(row))
 		}
 		var price, qty string
 		if err := json.Unmarshal(row[0], &price); err != nil {

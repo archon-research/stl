@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	neturl "net/url"
 	"strings"
@@ -28,7 +27,6 @@ const (
 
 type Config struct {
 	BaseURL           string
-	Logger            *slog.Logger
 	HTTPClient        *http.Client
 	PollInterval      time.Duration
 	ChannelBufferSize int
@@ -45,19 +43,16 @@ type Adapter struct {
 
 func NewAdapter(cfg Config) (*Adapter, error) {
 	if cfg.PollInterval < 0 {
-		return nil, errors.New("PollInterval must not be negative")
+		return nil, errors.New("poll interval must not be negative")
 	}
 	if cfg.ChannelBufferSize < 0 {
-		return nil, errors.New("ChannelBufferSize must not be negative")
+		return nil, errors.New("channel buffer size must not be negative")
 	}
 	if cfg.DepthLimit < 0 {
-		return nil, errors.New("DepthLimit must not be negative")
+		return nil, errors.New("depth limit must not be negative")
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://api.binance.com"
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -88,6 +83,9 @@ func (a *Adapter) Connect(_ context.Context, symbols []string) error {
 	for _, s := range symbols {
 		if strings.TrimSpace(s) == "" {
 			return errors.New("symbol must not be blank")
+		}
+		if strings.TrimSpace(s) != s {
+			return fmt.Errorf("symbol %q must not have surrounding whitespace", s)
 		}
 	}
 	cp := make([]string, len(symbols))
@@ -196,8 +194,7 @@ func (a *Adapter) fetchSnapshot(ctx context.Context, symbol string) (entity.Orde
 	bids := make([]entity.OrderBookLevel, 0, len(raw.Bids))
 	for i, b := range raw.Bids {
 		if len(b) < 2 {
-			a.cfg.Logger.Warn("skipping malformed bid level", "symbol", symbol, "index", i, "length", len(b))
-			continue
+			return entity.OrderBookSnapshot{}, fmt.Errorf("malformed bid at index %d: got %d fields", i, len(b))
 		}
 		bids = append(bids, entity.OrderBookLevel{Price: b[0], Qty: b[1]})
 	}
@@ -205,17 +202,20 @@ func (a *Adapter) fetchSnapshot(ctx context.Context, symbol string) (entity.Orde
 	asks := make([]entity.OrderBookLevel, 0, len(raw.Asks))
 	for i, ask := range raw.Asks {
 		if len(ask) < 2 {
-			a.cfg.Logger.Warn("skipping malformed ask level", "symbol", symbol, "index", i, "length", len(ask))
-			continue
+			return entity.OrderBookSnapshot{}, fmt.Errorf("malformed ask at index %d: got %d fields", i, len(ask))
 		}
 		asks = append(asks, entity.OrderBookLevel{Price: ask[0], Qty: ask[1]})
 	}
 
-	return entity.OrderBookSnapshot{
+	snap := entity.OrderBookSnapshot{
 		Exchange:   name,
 		Token:      symbol,
 		CapturedAt: time.Now().UTC(),
 		Bids:       bids,
 		Asks:       asks,
-	}, nil
+	}
+	if err := snap.Validate(); err != nil {
+		return entity.OrderBookSnapshot{}, fmt.Errorf("invalid snapshot: %w", err)
+	}
+	return snap, nil
 }

@@ -2,7 +2,6 @@ package cex
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -14,7 +13,6 @@ import (
 )
 
 type Config struct {
-	Logger            *slog.Logger
 	HTTPClient        *http.Client
 	PollInterval      time.Duration
 	ChannelBufferSize int
@@ -25,7 +23,6 @@ func NewExchangeOrderBookStreamer(exchange string, cfg Config) (outbound.Exchang
 	switch strings.ToLower(strings.TrimSpace(exchange)) {
 	case "binance":
 		return binance.NewAdapter(binance.Config{
-			Logger:            cfg.Logger,
 			HTTPClient:        cfg.HTTPClient,
 			PollInterval:      cfg.PollInterval,
 			ChannelBufferSize: cfg.ChannelBufferSize,
@@ -33,7 +30,6 @@ func NewExchangeOrderBookStreamer(exchange string, cfg Config) (outbound.Exchang
 		})
 	case "coinbase":
 		return coinbase.NewAdapter(coinbase.Config{
-			Logger:            cfg.Logger,
 			HTTPClient:        cfg.HTTPClient,
 			PollInterval:      cfg.PollInterval,
 			ChannelBufferSize: cfg.ChannelBufferSize,
