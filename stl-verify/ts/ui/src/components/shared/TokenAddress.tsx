@@ -1,5 +1,5 @@
+import { Menu } from '@archon-research/design-system';
 import { Copy, ExternalLink } from 'lucide-react';
-import { useEffect, useState } from 'react';
 import type React from 'react';
 
 import { css } from '#styled-system/css';
@@ -38,35 +38,48 @@ export function TokenAddress({
   style,
   className,
 }: TokenAddressProps) {
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const monoStyle: React.CSSProperties = {
+    ...style,
+    fontFamily: 'var(--fonts-mono), monospace',
+  };
 
-  useEffect(() => {
-    if (!isMenuOpen) {
-      return;
-    }
+  const emptyClassName = css({
+    fontFamily: 'mono',
+    fontSize: type === 'tx' ? 'xs' : '2xs',
+    color: 'text.muted',
+  });
 
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsMenuOpen(false);
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isMenuOpen]);
+  const triggerClassName = css({
+    flex: '1 1 0',
+    minWidth: '0',
+    minHeight: '11',
+    fontFamily: 'mono',
+    fontSize: type === 'tx' ? 'xs' : '2xs',
+    color: { base: 'blue.500', _dark: 'blue.400' },
+    bg: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    paddingInline: '1',
+    paddingBlock: '1',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    textAlign: 'left',
+    _hover: {
+      color: 'interactive.accent',
+    },
+    _focus: {
+      outline: '2px solid',
+      outlineColor: 'interactive.accent',
+      outlineOffset: '1px',
+    },
+  });
 
   if (!address) {
     return (
       <span
-        style={style}
-        className={
-          className ??
-          css({
-            fontFamily: 'mono',
-            fontSize: type === 'tx' ? 'xs' : '2xs',
-            color: 'text.muted',
-          })
-        }
+        style={monoStyle}
+        className={className ? `${emptyClassName} ${className}` : emptyClassName}
       >
         —
       </span>
@@ -87,14 +100,12 @@ export function TokenAddress({
       document.execCommand('copy');
       document.body.removeChild(textarea);
     }
-    setIsMenuOpen(false);
   };
 
   const handleViewExplorer = () => {
     if (explorerUrl) {
       window.open(explorerUrl, '_blank', 'noopener,noreferrer');
     }
-    setIsMenuOpen(false);
   };
 
   return (
@@ -105,133 +116,84 @@ export function TokenAddress({
         alignItems: 'center',
       })}
     >
-      {/* Clickable address display */}
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setIsMenuOpen(!isMenuOpen);
-        }}
-        title={address}
-        aria-haspopup="menu"
-        aria-expanded={isMenuOpen}
-        style={style}
-        className={
-          className ??
-          css({
-            flex: '1 1 0',
-            minWidth: '0', // Allows flex shrinking to work
-            fontFamily: 'mono',
-            fontSize: type === 'tx' ? 'xs' : '2xs',
-            color: { base: 'blue.500', _dark: 'blue.400' },
-            bg: 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            padding: '0',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            textAlign: 'left',
-            _hover: {
-              color: 'interactive.accent',
-            },
-            _focus: {
-              outline: '2px solid',
-              outlineColor: 'interactive.accent',
-              outlineOffset: '1px',
-            },
-          })
-        }
-      >
-        {truncateMiddle(address, 20)}
-      </button>
-
-      {/* Context Menu */}
-      {isMenuOpen && (
-        <div
-          className={css({
-            position: 'absolute',
-            top: '100%',
-            right: '0',
-            mt: '1',
-            bg: 'surface.default',
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.1)',
-            zIndex: '50',
-            minWidth: '200px',
-            overflow: 'hidden',
-          })}
-        >
+      <Menu.Root positioning={{ placement: 'bottom-end' }}>
+        <Menu.Trigger asChild>
           <button
             type="button"
-            onClick={handleViewExplorer}
-            disabled={!explorerUrl}
+            title={address}
+            style={monoStyle}
+            className={
+              className ? `${triggerClassName} ${className}` : triggerClassName
+            }
+          >
+            {truncateMiddle(address, 20)}
+          </button>
+        </Menu.Trigger>
+        <Menu.Positioner>
+          <Menu.Content
             className={css({
-              display: 'flex',
-              alignItems: 'center',
-              gap: '2',
-              width: '100%',
-              px: '3',
-              py: '2',
-              fontSize: 'sm',
-              fontWeight: 'medium',
-              color: explorerUrl ? 'text.strong' : 'text.muted',
-              bg: 'transparent',
-              border: 'none',
-              cursor: explorerUrl ? 'pointer' : 'not-allowed',
-              _hover: explorerUrl
-                ? {
-                    bg: 'surface.subtle',
-                  }
-                : undefined,
+              bg: 'surface.default',
+              borderRadius: 'md',
+              borderStyle: 'solid',
+              borderWidth: '1px',
+              borderColor: 'border.subtle',
+              boxShadow: 'lg',
+              minWidth: '200px',
+              overflow: 'hidden',
+              zIndex: '50',
             })}
           >
-            <ExternalLink size={16} />
-            View on explorer
-          </button>
+            <Menu.Item
+              value="view-explorer"
+              disabled={!explorerUrl}
+              onSelect={handleViewExplorer}
+              className={css({
+                display: 'flex',
+                alignItems: 'center',
+                gap: '2',
+                width: '100%',
+                px: '3',
+                py: '2.5',
+                fontSize: 'sm',
+                fontWeight: 'medium',
+                color: explorerUrl ? 'text.strong' : 'text.muted',
+                cursor: explorerUrl ? 'pointer' : 'not-allowed',
+                _hover: explorerUrl
+                  ? {
+                      bg: 'surface.subtle',
+                    }
+                  : undefined,
+              })}
+            >
+              <ExternalLink size={16} />
+              View on explorer
+            </Menu.Item>
 
-          <button
-            type="button"
-            onClick={handleCopy}
-            className={css({
-              display: 'flex',
-              alignItems: 'center',
-              gap: '2',
-              width: '100%',
-              px: '3',
-              py: '2',
-              fontSize: 'sm',
-              fontWeight: 'medium',
-              color: 'text.strong',
-              bg: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              _hover: {
-                bg: 'surface.subtle',
-              },
-            })}
-          >
-            <Copy size={16} />
-            Copy address
-          </button>
-        </div>
-      )}
-
-      {/* Close menu when clicking outside */}
-      {isMenuOpen && (
-        <div
-          className={css({
-            position: 'fixed',
-            inset: '0',
-            zIndex: '40',
-          })}
-          onClick={() => setIsMenuOpen(false)}
-          role="presentation"
-        />
-      )}
+            <Menu.Item
+              value="copy-address"
+              onSelect={handleCopy}
+              className={css({
+                display: 'flex',
+                alignItems: 'center',
+                gap: '2',
+                width: '100%',
+                px: '3',
+                py: '2.5',
+                fontSize: 'sm',
+                fontWeight: 'medium',
+                color: 'text.strong',
+                cursor: 'pointer',
+                _hover: {
+                  bg: 'surface.subtle',
+                },
+              })}
+            >
+              <Copy size={16} />
+              Copy address
+            </Menu.Item>
+          </Menu.Content>
+        </Menu.Positioner>
+      </Menu.Root>
     </div>
   );
 }

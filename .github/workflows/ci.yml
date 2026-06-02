@@ -16,6 +16,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# id-token: write is needed by deploy.yaml (AWS OIDC). It must be at the
+# workflow level because reusable-workflow callers can't grant permissions
+# at the job level. GitHub blocks OIDC token minting for fork PRs, so this
+# is not an attack vector.
 permissions:
   contents: read
   packages: read
@@ -34,6 +38,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect changed files
         id: changed-files
