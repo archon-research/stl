@@ -756,17 +756,18 @@ docker-push: ecr-login
 # stay cache-free and cannot fail on it. CI provides the driver via
 # docker/setup-buildx-action and passes both vars. `ignore-error=true` keeps a
 # failed cache push (auth/network) from failing an otherwise-good build, and a
-# missing cache on import is a normal miss. Cache export is independent of
-# DOCKER_PUSH: it runs on every build with DOCKER_CACHE=1, so a build-only run
-# (DOCKER_PUSH=0) still updates the shared cache without needing ECR/AWS.
+# missing cache on import is a normal miss. The cache is only *exported* when
+# DOCKER_PUSH != 0, so a build-only run (DOCKER_PUSH=0) imports the cache but
+# never overwrites it; only real pushes update the shared cache.
 #   $(1) = cache key, unique per image (used as the cache tag)
 ifeq ($(DOCKER_CACHE),1)
 ifndef DOCKER_CACHE_REPO
 $(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/buildcache)
 endif
+docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
 docker_cache_flags = \
 	--cache-from type=registry,ref=$(DOCKER_CACHE_REPO):$(1) \
-	--cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
+	$(if $(filter-out 0,$(DOCKER_PUSH)),$(call docker_cache_to,$(1)))
 endif
 
 # Canonical arm64 build + push for a single image. Internal target; callers set:
