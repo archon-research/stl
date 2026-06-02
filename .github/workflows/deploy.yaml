@@ -20,10 +20,10 @@ on:
         required: false
         type: string
       push:
-        description: "Push images to ECR and run the deploy jobs. Uncheck to build-only."
+        description: "Push images to ECR and run the deploy jobs. Defaults to build-only (safe on any branch); check to actually push and deploy."
         required: false
         type: boolean
-        default: true
+        default: false
 
 jobs:
   build-push-staging:
