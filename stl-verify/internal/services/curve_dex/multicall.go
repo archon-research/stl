@@ -19,11 +19,11 @@ type blockchainService struct {
 	multicaller outbound.Multicaller
 	logger      *slog.Logger
 
-	v1Read          *abi.ABI
-	ngRead          *abi.ABI
-	ngOracleNoArg   *abi.ABI
-	lpRead          *abi.ABI
-	gaugeRead       *abi.ABI
+	v1Read        *abi.ABI
+	ngRead        *abi.ABI
+	ngOracleNoArg *abi.ABI
+	lpRead        *abi.ABI
+	gaugeRead     *abi.ABI
 }
 
 func newBlockchainService(mc outbound.Multicaller, logger *slog.Logger) (*blockchainService, error) {

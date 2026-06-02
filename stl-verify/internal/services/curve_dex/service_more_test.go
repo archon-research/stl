@@ -42,11 +42,11 @@ func (h *harness) poolStateResultsNG() []outbound.Result {
 		{Success: true, ReturnData: h.packUint256(big.NewInt(4e6))},      // fee
 		{Success: true, ReturnData: h.packUint256(big.NewInt(2e18))},     // last_price(0)
 		{Success: true, ReturnData: h.packUint256(big.NewInt(1_999e15))}, // price_oracle(0)
-		{Success: false},                                                 // last_price() — no-arg variant absent on true NG
-		{Success: false},                                                 // price_oracle() — no-arg variant absent on true NG
-		{Success: true, ReturnData: h.packUint256(big.NewInt(300))},      // totalSupply
-		{Success: true, ReturnData: h.packUint256(big.NewInt(99))},       // get_dy(0,1)
-		{Success: true, ReturnData: h.packUint256(big.NewInt(101))},      // get_dy(1,0)
+		{Success: false}, // last_price() — no-arg variant absent on true NG
+		{Success: false}, // price_oracle() — no-arg variant absent on true NG
+		{Success: true, ReturnData: h.packUint256(big.NewInt(300))}, // totalSupply
+		{Success: true, ReturnData: h.packUint256(big.NewInt(99))},  // get_dy(0,1)
+		{Success: true, ReturnData: h.packUint256(big.NewInt(101))}, // get_dy(1,0)
 	}
 }
 
@@ -401,18 +401,18 @@ func TestProcessReceipt_NGTokenExchange_NoArgOracleFallback(t *testing.T) {
 		// totalSupply, get_dy×2. Indexed oracle calls revert (factory-v2
 		// pool); the no-arg variants succeed.
 		return []outbound.Result{
-			{Success: true, ReturnData: h.packUint256(big.NewInt(100))},                    // balances(0)
-			{Success: true, ReturnData: h.packUint256(big.NewInt(200))},                    // balances(1)
-			{Success: true, ReturnData: h.packUint256(big.NewInt(1e9))},                    // get_virtual_price
-			{Success: true, ReturnData: h.packUint256(big.NewInt(100))},                    // A
-			{Success: true, ReturnData: h.packUint256(big.NewInt(4e6))},                    // fee
-			{Success: false},                                                               // last_price(0) — reverts
-			{Success: false},                                                               // price_oracle(0) — reverts
-			{Success: true, ReturnData: h.packUint256(big.NewInt(999847548204443202))},     // last_price()
-			{Success: true, ReturnData: h.packUint256(big.NewInt(999844490224437801))},     // price_oracle()
-			{Success: true, ReturnData: h.packUint256(big.NewInt(300))},                    // totalSupply
-			{Success: true, ReturnData: h.packUint256(big.NewInt(99))},                     // get_dy(0,1)
-			{Success: true, ReturnData: h.packUint256(big.NewInt(101))},                    // get_dy(1,0)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(100))}, // balances(0)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(200))}, // balances(1)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(1e9))}, // get_virtual_price
+			{Success: true, ReturnData: h.packUint256(big.NewInt(100))}, // A
+			{Success: true, ReturnData: h.packUint256(big.NewInt(4e6))}, // fee
+			{Success: false}, // last_price(0) — reverts
+			{Success: false}, // price_oracle(0) — reverts
+			{Success: true, ReturnData: h.packUint256(big.NewInt(999847548204443202))}, // last_price()
+			{Success: true, ReturnData: h.packUint256(big.NewInt(999844490224437801))}, // price_oracle()
+			{Success: true, ReturnData: h.packUint256(big.NewInt(300))},                // totalSupply
+			{Success: true, ReturnData: h.packUint256(big.NewInt(99))},                 // get_dy(0,1)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(101))},                // get_dy(1,0)
 		}, nil
 	}
 
@@ -945,8 +945,8 @@ func TestProcessReceipt_V1GaugeWithoutIsKilled_DegradesGracefully(t *testing.T) 
 				{Success: true, ReturnData: h.packUint256(big.NewInt(1e15))}, // inflation_rate
 				{Success: true, ReturnData: h.packUint256(big.NewInt(500))},  // working_supply
 				{Success: true, ReturnData: h.packUint256(big.NewInt(300))},  // totalSupply
-				{Success: false},                                             // is_killed — V1 gauge: reverts
-				{Success: false},                                             // reward_count — V1 gauge: reverts
+				{Success: false}, // is_killed — V1 gauge: reverts
+				{Success: false}, // reward_count — V1 gauge: reverts
 			}, nil
 		}
 		return nil, fmt.Errorf("unexpected multicall layout: %d calls", len(calls))
