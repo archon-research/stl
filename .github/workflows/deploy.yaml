@@ -29,6 +29,8 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
     permissions:
       id-token: write
+      contents: read
+      packages: write  # push BuildKit layer cache to GHCR
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -53,9 +55,18 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" | \
             docker login --username AWS --password-stdin "$STAGING_REGISTRY"
 
+      # Layer cache lives in GHCR not ECR.
+      # Only the final images are pushed to ECR; the cache manifests
+      # are stored under one `buildcache` package, one tag per image.
+      - name: Login to GHCR (build cache)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Resolve build-cache repo
+        run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
+
       - name: Build and push all images to staging ECR
         working-directory: stl-verify
-        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }}
+        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO"
 
   update-staging:
     name: Update Staging Image Tags
