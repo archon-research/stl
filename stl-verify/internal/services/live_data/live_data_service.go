@@ -620,36 +620,17 @@ func (s *LiveService) isDuplicateBlock(ctx context.Context, hash string, blockNu
 	)
 	defer span.End()
 
-	// Check DB for duplicates (includes blocks added by backfill).
-	// An orphan-only row is NOT a duplicate: the canonical row never landed
-	// (e.g. live broadcast lost the race with a stale-fork reorg that
-	// over-orphaned the new chain). Treating it as duplicate would leave the
-	// row orphaned forever, since FindGaps filters out orphaned rows and the
-	// backfill loop's hash-only idempotency check would also skip the insert.
-	// Mirrors the orphan-resurrection branch in backfill processBlockData and
-	// lets the live path self-heal at head speed instead of waiting for the
-	// backfill loop to rotate around. See
-	// docs/incidents/2026-06-02-arbitrum-backfill-loop.md.
+	// Check DB for duplicates (includes blocks added by backfill)
 	existing, err := s.stateRepo.GetBlockByHash(ctx, hash)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "failed to check DB for duplicate")
 		return false, fmt.Errorf("failed to check DB for duplicate: %w", err)
 	}
-	if existing != nil && !existing.IsOrphaned {
+	if existing != nil {
 		span.SetAttributes(attribute.Bool("duplicate", true))
 		s.logger.Debug("block already in DB, skipping", "block", blockNum)
 		return true, nil
-	}
-	if existing != nil && existing.IsOrphaned {
-		span.SetAttributes(
-			attribute.Bool("duplicate", false),
-			attribute.Bool("existing.orphaned", true),
-		)
-		s.logger.Info("live re-arrival of orphan-only block; proceeding to write canonical row",
-			"block", blockNum,
-			"hash", hash)
-		return false, nil
 	}
 
 	span.SetAttributes(attribute.Bool("duplicate", false))
@@ -829,9 +810,65 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 		return false, 0, 0, nil, nil, fmt.Errorf("failed to get recent blocks from DB: %w", err)
 	}
 
+	// Late-arrival heal: in the canonical late-arrival shape, the walk-back
+	// loop above broke on its first iteration (parent already in DB) so
+	// walkedChain is empty. Without help, every existing canonical row above
+	// the common ancestor — including rows that chain *forward from* the
+	// incoming block — would be blanket-orphaned by handleReorgAtomicOnce.
+	//
+	// To detect "chains forward from the incoming block", we build a hash
+	// frontier starting at the incoming block and walk the recentBlocks set
+	// in ascending order, including any row whose parent_hash matches the
+	// current frontier hash (i.e. the row genuinely extends the new
+	// canonical chain). Anything else is a true orphan candidate. This is
+	// safe even if recentBlocks contains rows from multiple competing
+	// histories: we only extend the frontier via real parent->hash links.
+	type recentRow struct {
+		number     int64
+		hash       string
+		parentHash string
+	}
+	abovesByNumber := make(map[int64]recentRow)
+	for _, b := range recentBlocks {
+		if b.Number > commonAncestor {
+			abovesByNumber[b.Number] = recentRow{number: b.Number, hash: b.Hash, parentHash: b.ParentHash}
+		}
+	}
+	frontierHash := block.Hash
+	frontierNumber := block.Number
+	preserveFromForward := make([]outbound.CanonicalBlock, 0, len(abovesByNumber))
+	for {
+		next, ok := abovesByNumber[frontierNumber+1]
+		if !ok {
+			break
+		}
+		if normalizeHash(next.parentHash) != frontierHash {
+			break
+		}
+		preserveFromForward = append(preserveFromForward, outbound.CanonicalBlock{
+			Number: next.number,
+			Hash:   next.hash,
+		})
+		frontierHash = next.hash
+		frontierNumber = next.number
+	}
+	// Merge the forward-preserved rows into walkedChain (the latter came
+	// from the parent-walk loop above). Both feed preserveChain in
+	// persistBlockState, so HandleReorgAtomic will skip them.
+	walkedChain = append(walkedChain, preserveFromForward...)
+
+	preserved := make(map[string]struct{}, len(walkedChain)+1)
+	preserved[block.Hash] = struct{}{}
+	for _, cb := range walkedChain {
+		preserved[cb.Hash] = struct{}{}
+	}
+
 	orphanedBlocks := make([]LightBlock, 0)
 	for i := len(recentBlocks) - 1; i >= 0; i-- {
 		if recentBlocks[i].Number > commonAncestor {
+			if _, kept := preserved[recentBlocks[i].Hash]; kept {
+				continue
+			}
 			orphanedBlocks = append(orphanedBlocks, LightBlock{
 				Number:     recentBlocks[i].Number,
 				Hash:       recentBlocks[i].Hash,

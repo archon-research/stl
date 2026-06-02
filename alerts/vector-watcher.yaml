@@ -196,58 +196,15 @@ groups:
       # backlog — and (B) the bug class itself, via the new
       # `backfill_gap_fill_no_canonical_total` counter wired in the same PR.
 
-      - alert: VectorWatcherBackfillBacklogGrowing
-        # Premise: in steady state totalMissing on every chain should sit
-        # near zero. A sustained, growing backlog is the early surface for
-        # the silent backfill failure mode and for upstream RPC degradation
-        # that exceeds the watcher's catch-up rate.
-        #
-        # TODO(VEC-277): emit totalMissing as a metric so we can alert on it
-        # directly. The current `found gaps to backfill` log line at
-        # backfill_gaps_service.go:344-348 is the only signal, and we cannot
-        # alert on it reliably. Until that metric exists this rule fires off
-        # the new no-canonical counter (Rule B's input) so the
-        # symptom-by-proxy is at least caught — but it duplicates Rule B's
-        # signal. Delete this rule once `vector_backfill_gaps_open` (or
-        # similar) is exported and re-write the expression as:
-        #
-        #   (
-        #     sum by (service_name, cluster) (vector_backfill_gaps_open{
-        #       k8s_namespace_name="vector", service_name=~".*watcher"
-        #     }) > 100
-        #   ) and (
-        #     deriv(vector_backfill_gaps_open[30m]) > 0
-        #   )
-        #
-        # The placeholder expression below is intentionally noisy — any
-        # non-zero rate of the no-canonical invariant for 30m is a clear
-        # signal something is wrong, even if it overlaps with Rule B.
-        expr: |
-          sum by (service_name, cluster) (
-            rate(backfill_gap_fill_no_canonical_total{
-              k8s_namespace_name="vector",
-              service_name=~".*watcher"
-            }[30m])
-          ) > 0
-        for: 30m
-        labels:
-          team: vector
-          severity: critical
-          component: watcher
-          namespace: vector
-        annotations:
-          summary: "Vector watcher backfill backlog growing on {{ $labels.service_name }}"
-          description: |
-            Backfill gap-fill on `{{ $labels.service_name }}` has been emitting the
-            silent-failure invariant for >30m. Either the gap finder is
-            rediscovering the same blocks every cycle without draining (the
-            VEC-277 arbitrum failure mode), or upstream RPC is degraded
-            beyond the watcher's catch-up rate.
-
-            Inspect the watcher logs for the
-            `backfill completed but no canonical row produced` ERROR and the
-            referenced incident doc before restarting.
-          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcherbackfillbackloggrowing
+      # TODO(VEC-277-followup): re-add a real `VectorWatcherBackfillBacklogGrowing`
+      # rule once a dedicated backlog-size metric exists (planned
+      # `vector_backfill_gaps_open` gauge — emit from FindGaps's
+      # `totalMissing`). The previous placeholder version of this rule fired
+      # off the same `backfill_gap_fill_no_canonical_total` counter that
+      # drives `VectorWatcherSilentBackfillNoCanonical` below, just at a
+      # longer window (30m vs 10m), producing duplicate critical pages for
+      # one signal. Until the gauge exists the silent-failure rule covers
+      # the bug class on its own. PR #373 review (item 7).
 
       - alert: VectorWatcherSilentBackfillNoCanonical
         # Premise: the new counter wired in the Piece 2 change should be

@@ -2020,3 +2020,62 @@ func TestClearBlockOrphaned(t *testing.T) {
 		t.Fatal("expected error for unknown hash, got nil")
 	}
 }
+
+// TestClearBlockOrphaned_RefusesWhenConflictingCanonicalExists covers PR #373
+// review Finding 6: ClearBlockOrphaned must NOT produce a second canonical
+// row at the same number. Setup an orphan-only row at height N, then insert
+// a different canonical row at the same N (simulating a live reorg that won
+// the race). Clearing the orphan flag on the original row must fail rather
+// than break the "highest version = canonical" invariant.
+func TestClearBlockOrphaned_RefusesWhenConflictingCanonicalExists(t *testing.T) {
+	repo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	const num int64 = 700
+	const orphanHash = "0xclear_race_orphan_700"
+	const canonicalHash = "0xclear_race_canonical_700"
+
+	// Seed the orphan-only row.
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         num,
+		Hash:           orphanHash,
+		ParentHash:     "0xclear_race_699",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed orphan-only row: %v", err)
+	}
+	if err := repo.MarkBlockOrphaned(ctx, orphanHash); err != nil {
+		t.Fatalf("mark orphaned: %v", err)
+	}
+
+	// Simulate a live reorg insert at the same number with a different hash.
+	if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+		Number:         num,
+		Hash:           canonicalHash,
+		ParentHash:     "0xclear_race_699",
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed new canonical row: %v", err)
+	}
+
+	// Attempting to clear the orphan flag on the losing row must fail — the
+	// guard inside ClearBlockOrphaned should detect the conflicting
+	// canonical row and bail.
+	if err := repo.ClearBlockOrphaned(ctx, orphanHash); err == nil {
+		t.Fatal("expected ClearBlockOrphaned to refuse with conflicting canonical row, got nil")
+	}
+
+	// Invariant: exactly one non-orphaned row at this number.
+	var canonicalCount int
+	if err := blockstatePool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM block_states WHERE chain_id = $1 AND number = $2 AND NOT is_orphaned`,
+		1, num).Scan(&canonicalCount); err != nil {
+		t.Fatalf("count canonical: %v", err)
+	}
+	if canonicalCount != 1 {
+		t.Fatalf("expected exactly 1 canonical row at number %d, got %d", num, canonicalCount)
+	}
+}

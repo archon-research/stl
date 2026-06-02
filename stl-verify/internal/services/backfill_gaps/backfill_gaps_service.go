@@ -26,6 +26,16 @@ const (
 	tracerName = "github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 )
 
+// errStaleForkSkip is a sentinel returned by processBlockDataInner when the
+// fetched block is intentionally dropped because a different block already
+// exists at the same height (routine stale-fork rejection). The outer
+// processBlockData wrapper treats this as a benign success — the block is
+// already represented canonically by the other-hash row — and skips the
+// post-cycle invariant check so it does not page on routine arbitrum
+// stale-fork broadcast. It MUST stay internal:
+// callers above processBlockData never see it.
+var errStaleForkSkip = errors.New("stale-fork skip: different block already at this height")
+
 // BackfillConfig holds configuration for the BackfillService.
 type BackfillConfig struct {
 	// ChainID is the blockchain chain ID (e.g., 1 for Ethereum mainnet).
@@ -464,6 +474,15 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 	err := s.processBlockDataInner(ctx, bd)
 	if err == nil {
 		s.assertCanonicalRowExists(ctx, bd)
+		return nil
+	}
+	// Stale-fork rejections are routine on chains with frequent reorgs
+	// (arbitrum). They are not silent failures: the canonical row at this
+	// height already exists under a different hash, so asserting on the
+	// fetched hash would always be wrong. Treat as benign success — no
+	// invariant check, no caller-visible error.
+	if errors.Is(err, errStaleForkSkip) {
+		return nil
 	}
 	return err
 }
@@ -539,7 +558,12 @@ func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound
 			"block", blockNum,
 			"existingHash", truncateHash(existingAtHeight.Hash),
 			"fetchedHash", truncateHash(header.Hash))
-		return nil
+		// Return the typed sentinel so the outer wrapper can suppress the
+		// post-cycle invariant check (the canonical row exists under the OTHER
+		// hash; asserting canonicity on the fetched hash would always fail
+		// here and fire VectorWatcherSilentBackfillNoCanonical critically
+		// every 10m on every routine arbitrum stale-fork broadcast).
+		return errStaleForkSkip
 	}
 
 	// Validate that fetched block matches the expected chain.

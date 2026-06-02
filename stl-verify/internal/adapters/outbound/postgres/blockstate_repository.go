@@ -327,14 +327,88 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 // previous reorg whose new canonical chain actually contained the same hash.
 // Idempotent: clearing an already-canonical row is a no-op.
 // Returns an error if the block does not exist.
+//
+// Runs inside a transaction that takes the same per-(chain_id, number)
+// advisory lock used by saveBlockOnce and handleReorgAtomicOnce. Without the
+// lock a concurrent live reorg can insert a new canonical row at the same
+// number between this method's lookup and update, leaving two non-orphaned
+// rows at one height and breaking the "highest version = canonical"
+// invariant. The lookup is split from the UPDATE (two statements) to avoid
+// the TimescaleDB XX000 quirk on self-referencing UPDATE-with-SELECT-from-
+// same-hypertable that the external review flagged. See VEC-277 / PR #373
+// review Finding 6.
 func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
-	query := `UPDATE block_states SET is_orphaned = FALSE WHERE chain_id = $1 AND hash = $2`
-	tag, err := r.pool.Exec(ctx, query, r.chainID, hash)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && rbErr != pgx.ErrTxClosed {
+			r.logger.Warn("failed to rollback ClearBlockOrphaned transaction", "error", rbErr)
+		}
+	}()
+
+	// Look up the row first to find its number (used for the advisory lock
+	// namespace). If the row does not exist at all, surface the same
+	// not-found error callers have always seen.
+	var number int64
+	var isOrphaned bool
+	err = tx.QueryRow(ctx,
+		`SELECT number, is_orphaned FROM block_states WHERE chain_id = $1 AND hash = $2`,
+		r.chainID, hash).Scan(&number, &isOrphaned)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+		}
+		return fmt.Errorf("failed to look up block by hash: %w", err)
+	}
+
+	// Acquire the same per-block advisory lock saveBlockOnce uses, so a
+	// concurrent live insert/reorg at this number is serialised against us.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::int, $2::int)`, r.chainID, number); err != nil {
+		return fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+
+	// Idempotent: if the row is already canonical there is nothing to do.
+	if !isOrphaned {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+		return nil
+	}
+
+	// Guard: never clear the orphan flag if a different canonical row already
+	// exists at this number. That would leave two non-orphaned rows at one
+	// height and break "highest version = canonical". The live writer must
+	// win in that case — the orphan stays.
+	var conflicting int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM block_states
+		 WHERE chain_id = $1 AND number = $2 AND hash <> $3 AND NOT is_orphaned`,
+		r.chainID, number, hash).Scan(&conflicting); err != nil {
+		return fmt.Errorf("failed to check for conflicting canonical row: %w", err)
+	}
+	if conflicting > 0 {
+		// Surface as an error so the caller (backfill loop) knows the heal
+		// did not happen and a real reorg is in flight. The backfill retry
+		// path treats this as transient — the new canonical row will be
+		// picked up by the regular gap finder on the next cycle.
+		return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d hash %s: another canonical row already exists at this number", number, hash)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE block_states SET is_orphaned = FALSE WHERE chain_id = $1 AND hash = $2`,
+		r.chainID, hash)
 	if err != nil {
 		return fmt.Errorf("failed to clear block orphan flag: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
+		// Should be unreachable — we already saw the row above under the same
+		// transaction — but kept for defence-in-depth.
 		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
@@ -419,7 +493,7 @@ func (r *BlockStateRepository) handleReorgAtomicOnce(ctx context.Context, common
 		return 0, fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
 
-	// 2. Check if this block hash already exists (idempotency)
+	// 2. Check if this block hash already exists (idempotency).
 	var existingVersion int
 	err = tx.QueryRow(ctx, `SELECT version FROM block_states WHERE chain_id = $1 AND hash = $2`, r.chainID, newBlock.Hash).Scan(&existingVersion)
 	if err == nil {

@@ -364,56 +364,6 @@ func TestIsDuplicateBlock_DBError(t *testing.T) {
 	}
 }
 
-// TestIsDuplicateBlock_OrphanOnlyRow covers the live re-arrival path for a
-// block whose only DB row is orphan-only. Treating that row as a duplicate
-// would leave it orphaned forever (FindGaps filters orphaned rows; the
-// hash-only backfill idempotency check would also skip the insert). The fix
-// drops the dedup short-circuit when IsOrphaned is true so the live path
-// proceeds past dedup — letting the downstream save / resurrection logic
-// produce a canonical row. See
-// docs/incidents/2026-06-02-arbitrum-backfill-loop.md.
-func TestIsDuplicateBlock_OrphanOnlyRow(t *testing.T) {
-	ctx := context.Background()
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	const (
-		blockNum = int64(100)
-		hash     = "0xorphan_only_hash"
-	)
-
-	// Seed the DB with an orphan-only row for this canonical hash, simulating
-	// the post-incident state where HandleReorgAtomic over-orphaned the new
-	// chain.
-	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number:         blockNum,
-		Hash:           hash,
-		ParentHash:     "0xparent",
-		BlockTimestamp: time.Now().Unix(),
-	}); err != nil {
-		t.Fatalf("failed to seed block: %v", err)
-	}
-	if err := stateRepo.MarkBlockOrphaned(ctx, hash); err != nil {
-		t.Fatalf("failed to orphan seeded block: %v", err)
-	}
-
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("failed to create service: %v", err)
-	}
-
-	// isDuplicateBlock must NOT treat the orphan-only row as a duplicate;
-	// otherwise the live path would skip and leave the row orphaned forever.
-	isDup, err := svc.isDuplicateBlock(ctx, hash, blockNum)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if isDup {
-		t.Fatal("expected isDuplicateBlock to return false for orphan-only row; got true")
-	}
-}
-
 // ============================================================================
 // detectReorg scenario tests
 // ============================================================================
@@ -909,6 +859,88 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 	}
 	if reorgEvent.Depth != depth {
 		t.Errorf("expected depth %d, got %d", depth, reorgEvent.Depth)
+	}
+}
+
+// TestHandleReorg_LateArrivalDoesNotOrphanCanonicalSuccessors covers PR #373
+// review Finding 4. When N+1 arrives after N+2 is already in the DB
+// (canonical late-arrival), the walk-back loop breaks immediately at the
+// common ancestor N — walkedChain is empty. Without the forward-frontier
+// heuristic in handleReorg, persistBlockState's preserveChain would contain
+// only the incoming N+1 row, and HandleReorgAtomic would blanket-orphan the
+// previously-canonical N+2. The fix detects that N+2's parent_hash matches
+// the incoming block's hash (forward chain link) and preserves it.
+func TestHandleReorg_LateArrivalDoesNotOrphanCanonicalSuccessors(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Seed: N (block 100) and N+2 (block 102, parent_hash = hash of late N+1).
+	// N+1 is missing — it will arrive late.
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
+	})
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number: 102, Hash: "0xblock102", ParentHash: "0xblock101_late", BlockTimestamp: time.Now().Unix(),
+	})
+
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("NewLiveService: %v", err)
+	}
+
+	// Late-arriving N+1.
+	block := LightBlock{
+		Number:     101,
+		Hash:       "0xblock101_late",
+		ParentHash: "0xblock100",
+	}
+
+	_, _, ancestor, reorgEvent, walkedChain, err := svc.handleReorg(ctx, block, time.Now())
+	if err != nil {
+		t.Fatalf("handleReorg: %v", err)
+	}
+	if ancestor != 100 {
+		t.Fatalf("expected common ancestor 100, got %d", ancestor)
+	}
+	if reorgEvent == nil {
+		t.Fatal("expected reorgEvent")
+	}
+
+	// Verify the forward-preservation populated walkedChain with block 102.
+	var sawSuccessor bool
+	for _, cb := range walkedChain {
+		if cb.Number == 102 && cb.Hash == "0xblock102" {
+			sawSuccessor = true
+		}
+	}
+	if !sawSuccessor {
+		t.Fatalf("expected walkedChain to include canonical successor (102, 0xblock102), got %+v", walkedChain)
+	}
+
+	// Drive the same path persistBlockState takes so the assertion is
+	// integration-level: HandleReorgAtomic must preserve 102.
+	preserveChain := append([]outbound.CanonicalBlock{{Number: block.Number, Hash: block.Hash}}, walkedChain...)
+	if _, err := stateRepo.HandleReorgAtomic(ctx, ancestor, *reorgEvent, outbound.BlockState{
+		Number:         block.Number,
+		Hash:           block.Hash,
+		ParentHash:     block.ParentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}, preserveChain); err != nil {
+		t.Fatalf("HandleReorgAtomic: %v", err)
+	}
+
+	got, err := stateRepo.GetBlockByHash(ctx, "0xblock102")
+	if err != nil {
+		t.Fatalf("GetBlockByHash: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected 0xblock102 row to still exist")
+	}
+	if got.IsOrphaned {
+		t.Fatal("expected canonical successor 0xblock102 to NOT be orphaned after late-arrival N+1")
 	}
 }
 

@@ -107,10 +107,15 @@ func (t *ServiceTelemetry) RecordReorgDropped(ctx context.Context, reason string
 
 // RecordBackfillGapNoCanonical increments the silent-failure counter that
 // catches gap-fill cycles which returned success but did not yield a
-// non-orphaned canonical row. Labelled by chain so per-chain Grafana panels
-// and alerts can be written.
+// non-orphaned canonical row. Per-chain attribution comes from the OTel
+// resource attribute `service.name` (e.g. "arbitrum-watcher"), which is set
+// per pod via the k8s downward API and is what the Vector alerts group by
+// — see alerts/vector-watcher.yaml. The chain ID is intentionally NOT
+// attached as a metric attribute: it would inflate cardinality without
+// adding a label that any rule queries (PR #373 review Finding 2). The
+// chainID parameter is kept on the port for future use (per-chain
+// dashboards, exemplars, etc.) and to avoid a ripple-changing port edit.
 func (t *ServiceTelemetry) RecordBackfillGapNoCanonical(ctx context.Context, chainID int64) {
-	t.backfillGapNoCanonicalTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.Int64("chain.id", chainID),
-	))
+	_ = chainID
+	t.backfillGapNoCanonicalTotal.Add(ctx, 1)
 }

@@ -2440,3 +2440,70 @@ func TestProcessBlockData_CanonicalRowExists_NoInvariantFires(t *testing.T) {
 		t.Fatalf("expected invariant counter to stay at zero on happy path, got %d", got)
 	}
 }
+
+// TestProcessBlockData_StaleForkSkip_DoesNotFireInvariant covers the PR #373
+// review Finding 3 regression: when a backfill cycle fetches a stale-fork
+// block at a height where a DIFFERENT hash is already canonical, the cycle
+// should silently skip (success) AND not fire the post-cycle invariant
+// counter. Pre-fix, the inner returned nil, the outer wrapper ran
+// assertCanonicalRowExists, which looked up the fetched (stale) hash, found
+// nothing, and critical-paged every routine arbitrum stale-fork broadcast.
+func TestProcessBlockData_StaleForkSkip_DoesNotFireInvariant(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	const num int64 = 42
+	const canonicalHash = "0xcanonical_at_42"
+	const staleHash = "0xstale_fork_at_42"
+	const parentHash = "0xparent_at_41"
+
+	stateRepo := memory.NewBlockStateRepository()
+	// Seed the canonical row at height 42 with the WINNING hash so the loop's
+	// "different block already exists at this height" branch fires when we
+	// process the fetched-but-stale hash below.
+	if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number:         num,
+		Hash:           canonicalHash,
+		ParentHash:     parentHash,
+		ReceivedAt:     time.Now().Unix(),
+		BlockTimestamp: time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("seed canonical block: %v", err)
+	}
+
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+	rec := &fakeBackfillRecorder{}
+	handler := &captureHandler{}
+
+	svc, err := NewBackfillService(BackfillConfig{
+		ChainID:   42161,
+		BatchSize: 10,
+		Logger:    slog.New(handler),
+		Metrics:   rec,
+	}, newMockClient(), stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	// Craft a stale-fork payload: same number, different hash than what is
+	// canonical in the DB. The inner save path will hit the
+	// existingAtHeight != nil && existingAtHeight.Hash != header.Hash branch.
+	staleBlock := outbound.BlockData{
+		BlockNumber: num,
+		Block: json.RawMessage(fmt.Sprintf(
+			`{"number":"0x%x","hash":%q,"parentHash":%q,"timestamp":"0x%x"}`,
+			num, staleHash, parentHash, time.Now().Unix())),
+	}
+
+	if err := svc.processBlockData(ctx, staleBlock); err != nil {
+		t.Fatalf("processBlockData should silently succeed on stale-fork skip, got: %v", err)
+	}
+
+	if got := rec.Calls(); got != 0 {
+		t.Fatalf("expected invariant counter to stay at zero on stale-fork skip, got %d", got)
+	}
+	if _, found := handler.findError("backfill completed but no canonical row produced"); found {
+		t.Fatal("stale-fork skip must not emit the silent-failure ERROR log")
+	}
+}

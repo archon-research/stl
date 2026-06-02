@@ -46,7 +46,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Check if block with this hash already exists (matches postgres behavior)
+	// Check if block with this hash already exists (matches postgres behavior).
 	if existing, ok := r.blocks[state.Hash]; ok {
 		return existing.Version, nil
 	}
@@ -186,7 +186,7 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Check if block already exists (idempotency)
+	// Check if block already exists (idempotency).
 	if existing, ok := r.blocks[newBlock.Hash]; ok {
 		return existing.Version, nil
 	}
