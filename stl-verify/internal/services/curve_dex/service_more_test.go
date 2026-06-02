@@ -29,8 +29,10 @@ import (
 
 // poolStateResultsNG returns mock results matching readPoolState's call layout
 // for a 2-coin NG pool (balances×2 + virtual_price + A + fee + last_price(0) +
-// price_oracle(0) + totalSupply + get_dy×2). NG pools have NCoins=2 ⇒ one
-// last_price/price_oracle pair.
+// price_oracle(0) + no-arg last_price() + no-arg price_oracle() + totalSupply +
+// get_dy×2). NG pools have NCoins=2 ⇒ one indexed last_price/price_oracle pair
+// plus the factory-v2 no-arg fallback pair. Here the indexed calls succeed, so
+// the fallback values must be ignored.
 func (h *harness) poolStateResultsNG() []outbound.Result {
 	return []outbound.Result{
 		{Success: true, ReturnData: h.packUint256(big.NewInt(100))},      // balances(0)
@@ -40,6 +42,8 @@ func (h *harness) poolStateResultsNG() []outbound.Result {
 		{Success: true, ReturnData: h.packUint256(big.NewInt(4e6))},      // fee
 		{Success: true, ReturnData: h.packUint256(big.NewInt(2e18))},     // last_price(0)
 		{Success: true, ReturnData: h.packUint256(big.NewInt(1_999e15))}, // price_oracle(0)
+		{Success: false},                                                 // last_price() — no-arg variant absent on true NG
+		{Success: false},                                                 // price_oracle() — no-arg variant absent on true NG
 		{Success: true, ReturnData: h.packUint256(big.NewInt(300))},      // totalSupply
 		{Success: true, ReturnData: h.packUint256(big.NewInt(99))},       // get_dy(0,1)
 		{Success: true, ReturnData: h.packUint256(big.NewInt(101))},      // get_dy(1,0)
@@ -372,6 +376,60 @@ func TestProcessReceipt_NGTokenExchange_WritesNGStateWithOracles(t *testing.T) {
 	}
 	if len(savedState.PriceOracle) != 1 || savedState.PriceOracle[0] == nil {
 		t.Errorf("PriceOracle = %v, want non-nil 1-element slice", savedState.PriceOracle)
+	}
+}
+
+// Factory-v2-era 2-coin NG pools (e.g. stETH-ng 0x21E27a5E…843a) expose
+// last_price()/price_oracle() WITHOUT the index argument — the indexed
+// last_price(uint256) selector deterministically reverts there. Verified live
+// at block 25229189 in the 2026-06-02 E2E run. The worker must fall back to
+// the no-arg variant so the EMA oracle for the pool is captured instead of
+// silently storing NULL forever.
+func TestProcessReceipt_NGTokenExchange_NoArgOracleFallback(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolNG()
+	h.svc.registry.addPool(pool)
+
+	var savedState *entity.CurvePoolState
+	h.curveRepo.SaveCurvePoolStateFn = func(_ context.Context, _ pgx.Tx, s *entity.CurvePoolState) error {
+		savedState = s
+		return nil
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		// 12-call layout for a 2-coin NG pool: balances×2, vp, A, fee,
+		// last_price(0), price_oracle(0), last_price(), price_oracle(),
+		// totalSupply, get_dy×2. Indexed oracle calls revert (factory-v2
+		// pool); the no-arg variants succeed.
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(big.NewInt(100))},                    // balances(0)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(200))},                    // balances(1)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(1e9))},                    // get_virtual_price
+			{Success: true, ReturnData: h.packUint256(big.NewInt(100))},                    // A
+			{Success: true, ReturnData: h.packUint256(big.NewInt(4e6))},                    // fee
+			{Success: false},                                                               // last_price(0) — reverts
+			{Success: false},                                                               // price_oracle(0) — reverts
+			{Success: true, ReturnData: h.packUint256(big.NewInt(999847548204443202))},     // last_price()
+			{Success: true, ReturnData: h.packUint256(big.NewInt(999844490224437801))},     // price_oracle()
+			{Success: true, ReturnData: h.packUint256(big.NewInt(300))},                    // totalSupply
+			{Success: true, ReturnData: h.packUint256(big.NewInt(99))},                     // get_dy(0,1)
+			{Success: true, ReturnData: h.packUint256(big.NewInt(101))},                    // get_dy(1,0)
+		}, nil
+	}
+
+	log := h.makeNGSwapLog("TokenExchange", pool.Address, testUser, 0, 1, big.NewInt(70), big.NewInt(69))
+	if err := h.runProcess(t, 100, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if savedState == nil {
+		t.Fatal("NG pool state row not persisted")
+	}
+	if len(savedState.LastPrice) != 1 || savedState.LastPrice[0] == nil ||
+		savedState.LastPrice[0].Int64() != 999847548204443202 {
+		t.Errorf("LastPrice = %v, want [999847548204443202] from no-arg fallback", savedState.LastPrice)
+	}
+	if len(savedState.PriceOracle) != 1 || savedState.PriceOracle[0] == nil ||
+		savedState.PriceOracle[0].Int64() != 999844490224437801 {
+		t.Errorf("PriceOracle = %v, want [999844490224437801] from no-arg fallback", savedState.PriceOracle)
 	}
 }
 
@@ -861,6 +919,54 @@ func TestProcessReceipt_UpdateLiquidityLimit_WritesGaugeState(t *testing.T) {
 	}
 	if !called {
 		t.Error("gauge state save was not invoked for UpdateLiquidityLimit")
+	}
+}
+
+// V1 gauges (e.g. 3pool's 0xbFcF63294aD7105dEa65aA58F8AE5BE2D9d0952A, deployed
+// 2020) predate is_killed() and reward_count() — both revert on-chain. The
+// worker must degrade gracefully (IsKilled=nil, RewardCount=nil) instead of
+// failing the block: the revert is deterministic, so erroring would poison the
+// FIFO queue with infinite redeliveries. Found in the live E2E run 2026-06-02.
+func TestProcessReceipt_V1GaugeWithoutIsKilled_DegradesGracefully(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolV1()
+	h.svc.registry.addPool(pool)
+	gauge := makeGauge(pool.ID, testGaugeAddr)
+	h.svc.registry.addGauge(gauge)
+
+	var saved *entity.CurveGaugeState
+	h.curveRepo.SaveCurveGaugeStateFn = func(_ context.Context, _ pgx.Tx, s *entity.CurveGaugeState) error {
+		saved = s
+		return nil
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 5 { // readGaugeState layout
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packUint256(big.NewInt(1e15))}, // inflation_rate
+				{Success: true, ReturnData: h.packUint256(big.NewInt(500))},  // working_supply
+				{Success: true, ReturnData: h.packUint256(big.NewInt(300))},  // totalSupply
+				{Success: false},                                             // is_killed — V1 gauge: reverts
+				{Success: false},                                             // reward_count — V1 gauge: reverts
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected multicall layout: %d calls", len(calls))
+	}
+
+	log := h.makeGaugeDepositLog(gauge.Address, testUser, big.NewInt(42))
+	if err := h.runProcess(t, 310, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}); err != nil {
+		t.Fatalf("processBlockEvent must not fail on a V1 gauge without is_killed/reward_count: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("gauge state row not persisted for V1 gauge")
+	}
+	if saved.IsKilled != nil {
+		t.Errorf("IsKilled = %v, want nil for V1 gauge (method unsupported)", *saved.IsKilled)
+	}
+	if saved.RewardCount != nil {
+		t.Errorf("RewardCount = %v, want nil for V1 gauge (method unsupported)", *saved.RewardCount)
+	}
+	if saved.InflationRate == nil || saved.WorkingSupply == nil || saved.TotalSupply == nil {
+		t.Errorf("core V1 fields must still be captured, got %+v", saved)
 	}
 }
 

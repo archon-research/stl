@@ -177,3 +177,29 @@ func GetCurveStableswapNGReadABI() (*abi.ABI, error) {
 		}
 	]`)
 }
+
+// GetCurveStableswapNGNoArgOracleABI returns the no-argument variants of
+// `last_price` / `price_oracle`. Factory-v2-era 2-coin pools (e.g. stETH-ng
+// 0x21E27a5E5513D6e65C4f830167390997aA84843a, May 2023) expose the oracle
+// WITHOUT the index argument; the indexed selector deterministically reverts
+// on them (verified live at block 25229189, 2026-06-02 E2E run). A separate
+// ABI is required because go-ethereum's abi package cannot hold two methods
+// with the same name.
+func GetCurveStableswapNGNoArgOracleABI() (*abi.ABI, error) {
+	return ParseABI(`[
+		{
+			"inputs": [],
+			"name": "last_price",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "price_oracle",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`)
+}

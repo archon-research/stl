@@ -371,10 +371,12 @@ func (s *Service) handleNFPMLog(ctx context.Context, log shared.Log, chainID, bl
 }
 
 // handleNFPMSideEffects applies side effects keyed on event type — owner
-// change (Transfer) or burned flag (Decrease to liquidity=0).
+// change (Transfer) — plus burned-flag persistence for any event whose
+// resolvePosition pass flagged the position as burned (DecreaseLiquidity to
+// liquidity=0, or any event on a token whose positions() read reverted
+// because the NFT was burned in the same block).
 func (s *Service) handleNFPMSideEffects(ctx context.Context, tx pgx.Tx, decoded *decodedEvent, position *entity.UniswapV3Position) error {
-	switch decoded.Name {
-	case eventNFPMTransfer:
+	if decoded.Name == eventNFPMTransfer {
 		t := decoded.NFPMTransfer
 		zero := common.Address{}
 		if t.From != zero && t.To != zero {
@@ -383,15 +385,14 @@ func (s *Service) handleNFPMSideEffects(ctx context.Context, tx pgx.Tx, decoded 
 			}
 			position.Owner = t.To
 		}
-	case eventNFPMDecreaseLiquidity:
-		// resolvePosition (called above) already invoked markBurned via the
-		// cache write lock if the post-event positions.liquidity dropped to
-		// zero. Read the cached `Burned` directly — no need to re-fetch the
-		// cache entry; `position` is the same pointer the cache holds.
-		if position.Burned {
-			if err := s.uniswapRepo.SetUniswapV3PositionBurned(ctx, tx, position.ID); err != nil {
-				return fmt.Errorf("burning position id %d: %w", position.ID, err)
-			}
+	}
+	// resolvePosition (called above) invoked markBurned via the cache write
+	// lock if the post-event positions.liquidity dropped to zero OR the
+	// positions() read reverted (NFT burned). Read the cached `Burned`
+	// directly — `position` is the same pointer the cache holds.
+	if position.Burned {
+		if err := s.uniswapRepo.SetUniswapV3PositionBurned(ctx, tx, position.ID); err != nil {
+			return fmt.Errorf("burning position id %d: %w", position.ID, err)
 		}
 	}
 	return nil
@@ -422,6 +423,24 @@ func (s *Service) resolvePosition(ctx context.Context, decoded *decodedEvent, to
 	pos, err := s.blockchain.readNFPMPosition(ctx, s.config.NFPMAddress, tokenID, blockNumber)
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading positions(%s): %w", tokenID, err)
+	}
+	if pos == nil {
+		// positions(tokenId) reverted — the NFT was burned at (or before) this
+		// block. Deterministic, so never retry.
+		if cached == nil {
+			// Cold path: the poolKey is unrecoverable, so scope is unknowable.
+			// Treat as out-of-scope; the raw protocol_event row is still the
+			// audit trail for the triggering event.
+			s.logger.Warn("positions() reverted for unknown tokenId (burned); marking out-of-scope",
+				"tokenId", tokenID.String(), "block", blockNumber)
+			s.posCache.putMissing(tokenID)
+			return nil, nil, nil
+		}
+		// Warm path: a tracked position was burned this block. Flag it; the
+		// caller persists Burned via handleNFPMSideEffects and skips the state
+		// row (there is no position state left to read).
+		s.posCache.markBurned(cached.TokenID)
+		return cached, nil, nil
 	}
 
 	if cached == nil {

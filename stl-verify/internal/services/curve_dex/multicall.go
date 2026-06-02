@@ -19,10 +19,11 @@ type blockchainService struct {
 	multicaller outbound.Multicaller
 	logger      *slog.Logger
 
-	v1Read    *abi.ABI
-	ngRead    *abi.ABI
-	lpRead    *abi.ABI
-	gaugeRead *abi.ABI
+	v1Read          *abi.ABI
+	ngRead          *abi.ABI
+	ngOracleNoArg   *abi.ABI
+	lpRead          *abi.ABI
+	gaugeRead       *abi.ABI
 }
 
 func newBlockchainService(mc outbound.Multicaller, logger *slog.Logger) (*blockchainService, error) {
@@ -33,6 +34,10 @@ func newBlockchainService(mc outbound.Multicaller, logger *slog.Logger) (*blockc
 	ng, err := abis.GetCurveStableswapNGReadABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading NG read ABI: %w", err)
+	}
+	ngNoArg, err := abis.GetCurveStableswapNGNoArgOracleABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading NG no-arg oracle ABI: %w", err)
 	}
 	lp, err := abis.GetCurveLPTokenReadABI()
 	if err != nil {
@@ -46,12 +51,13 @@ func newBlockchainService(mc outbound.Multicaller, logger *slog.Logger) (*blockc
 		logger = slog.Default()
 	}
 	return &blockchainService{
-		multicaller: mc,
-		logger:      logger,
-		v1Read:      v1,
-		ngRead:      ng,
-		lpRead:      lp,
-		gaugeRead:   gauge,
+		multicaller:   mc,
+		logger:        logger,
+		v1Read:        v1,
+		ngRead:        ng,
+		ngOracleNoArg: ngNoArg,
+		lpRead:        lp,
+		gaugeRead:     gauge,
 	}, nil
 }
 
@@ -112,6 +118,27 @@ func (b *blockchainService) readPoolState(ctx context.Context, pool *entity.Curv
 				outbound.Call{Target: pool.Address, CallData: poData, AllowFailure: true},
 			)
 		}
+	}
+
+	// NG 2-coin fallback: factory-v2-era pools (e.g. stETH-ng) expose
+	// last_price()/price_oracle() WITHOUT the index argument — the indexed
+	// selector deterministically reverts on them. Issue both variants in the
+	// same round-trip; decode prefers indexed, falls back to no-arg. Only
+	// meaningful for n==2 (the no-arg oracle is the coin1/coin0 price).
+	hasNoArgFallback := isNG && n == 2
+	if hasNoArgFallback {
+		lpData, err := b.ngOracleNoArg.Pack("last_price")
+		if err != nil {
+			return nil, fmt.Errorf("packing last_price(): %w", err)
+		}
+		poData, err := b.ngOracleNoArg.Pack("price_oracle")
+		if err != nil {
+			return nil, fmt.Errorf("packing price_oracle(): %w", err)
+		}
+		calls = append(calls,
+			outbound.Call{Target: pool.Address, CallData: lpData, AllowFailure: true},
+			outbound.Call{Target: pool.Address, CallData: poData, AllowFailure: true},
+		)
 	}
 
 	// totalSupply (LP token contract if separate, else the pool itself).
@@ -193,6 +220,22 @@ func (b *blockchainService) readPoolState(ctx context.Context, pool *entity.Curv
 			pos[i] = b.tryUnpackUint(ctx, readABI, "price_oracle", results[idx], pool.Address, blockNumber)
 			idx++
 		}
+		if hasNoArgFallback {
+			// Factory-v2-era pools: indexed selector reverts, no-arg works.
+			// Prefer the indexed value when present (true NG pools), else
+			// take the no-arg one. Both reverting leaves nil (uninitialised
+			// oracle), which the writer stores as a NULL element.
+			lpNoArg := b.tryUnpackUint(ctx, b.ngOracleNoArg, "last_price", results[idx], pool.Address, blockNumber)
+			idx++
+			poNoArg := b.tryUnpackUint(ctx, b.ngOracleNoArg, "price_oracle", results[idx], pool.Address, blockNumber)
+			idx++
+			if lps[0] == nil {
+				lps[0] = lpNoArg
+			}
+			if pos[0] == nil {
+				pos[0] = poNoArg
+			}
+		}
 		out.LastPrice = lps
 		out.PriceOracle = pos
 	}
@@ -252,14 +295,20 @@ func (b *blockchainService) readGaugeState(ctx context.Context, gauge common.Add
 		return nil, fmt.Errorf("gauge multicall returned %d results, expected %d", len(results), len(calls))
 	}
 
-	// inflation_rate / working_supply / totalSupply / is_killed / reward_count
-	// are core view methods on every Curve LiquidityGauge contract. A revert
-	// here means the contract isn't a recognisable gauge (corrupted ABI,
-	// wrong address, mid-upgrade proxy, etc.) — UNEXPECTED, so propagate so
-	// the SQS handler can retry. AllowFailure: true is set per call only so
-	// the multicall itself succeeds and we can attribute the failure to the
-	// specific method below; the unpackUint helper turns r.Success=false into
-	// an error which we re-wrap with method + block context.
+	// inflation_rate / working_supply / totalSupply exist on every Curve
+	// LiquidityGauge version, V1 (2020) onward. A revert on those means the
+	// contract isn't a recognisable gauge (corrupted ABI, wrong address,
+	// mid-upgrade proxy, etc.) — UNEXPECTED, so propagate so the SQS handler
+	// can retry. AllowFailure: true is set per call only so the multicall
+	// itself succeeds and we can attribute the failure to the specific method
+	// below; the unpackUint helper turns r.Success=false into an error which
+	// we re-wrap with method + block context.
+	//
+	// is_killed / reward_count were ADDED in LiquidityGaugeV2 — V1 gauges
+	// (e.g. 3pool's 0xbFcF63294aD7105dEa65aA58F8AE5BE2D9d0952A) revert on
+	// both, deterministically. Erroring here would poison the FIFO queue with
+	// infinite redeliveries, so degrade to nil (= unknown / unsupported)
+	// instead. Verified against mainnet in the 2026-06-02 E2E run.
 	out := &gaugeMulticallResult{}
 	inf, err := unpackUint(b.gaugeRead, "inflation_rate", results[0])
 	if err != nil {
@@ -276,24 +325,31 @@ func (b *blockchainService) readGaugeState(ctx context.Context, gauge common.Add
 		return nil, fmt.Errorf("decoding totalSupply for gauge %s at block %d: %w", gauge.Hex(), blockNumber, err)
 	}
 	out.TotalSupply = ts
-	if !results[3].Success {
-		return nil, fmt.Errorf("is_killed reverted on gauge %s at block %d", gauge.Hex(), blockNumber)
+	if results[3].Success {
+		unpacked, err := b.gaugeRead.Unpack("is_killed", results[3].ReturnData)
+		if err != nil || len(unpacked) != 1 {
+			return nil, fmt.Errorf("decoding is_killed for gauge %s at block %d: %w", gauge.Hex(), blockNumber, err)
+		}
+		killed, ok := unpacked[0].(bool)
+		if !ok {
+			return nil, fmt.Errorf("is_killed returned %T, want bool", unpacked[0])
+		}
+		out.IsKilled = &killed
+	} else {
+		b.logger.Warn("is_killed unsupported on gauge (pre-V2); storing NULL",
+			"gauge", gauge.Hex(), "block", blockNumber)
 	}
-	unpacked, err := b.gaugeRead.Unpack("is_killed", results[3].ReturnData)
-	if err != nil || len(unpacked) != 1 {
-		return nil, fmt.Errorf("decoding is_killed for gauge %s at block %d: %w", gauge.Hex(), blockNumber, err)
+	if results[4].Success {
+		rc, err := unpackUint(b.gaugeRead, "reward_count", results[4])
+		if err != nil {
+			return nil, fmt.Errorf("decoding reward_count for gauge %s at block %d: %w", gauge.Hex(), blockNumber, err)
+		}
+		c := int32(rc.Int64())
+		out.RewardCount = &c
+	} else {
+		b.logger.Warn("reward_count unsupported on gauge (pre-V2); storing NULL",
+			"gauge", gauge.Hex(), "block", blockNumber)
 	}
-	killed, ok := unpacked[0].(bool)
-	if !ok {
-		return nil, fmt.Errorf("is_killed returned %T, want bool", unpacked[0])
-	}
-	out.IsKilled = &killed
-	rc, err := unpackUint(b.gaugeRead, "reward_count", results[4])
-	if err != nil {
-		return nil, fmt.Errorf("decoding reward_count for gauge %s at block %d: %w", gauge.Hex(), blockNumber, err)
-	}
-	c := int32(rc.Int64())
-	out.RewardCount = &c
 	return out, nil
 }
 

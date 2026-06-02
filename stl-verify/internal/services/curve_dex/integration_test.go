@@ -186,6 +186,134 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 	}
 }
 
+// TestIntegration_NGSwap_UninitialisedOracleWritesNullElements drives an NG
+// TokenExchange through the full service against a real TimescaleDB where
+// EVERY oracle sub-call (indexed and no-arg) reverts — the multicall stores
+// nil elements and the repository must serialise them as SQL NULL elements
+// instead of erroring. Pre-fix this failed with "converting price_oracle:
+// element 0 must not be nil", poisoning the SQS message (observed live at
+// block 25229189 in the 2026-06-02 E2E run).
+func TestIntegration_NGSwap_UninitialisedOracleWritesNullElements(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "integration-test-ng-null-oracle")
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		t.Fatalf("buildregistry.New: %v", err)
+	}
+	txm, err := postgres.NewTxManager(pool, nil)
+	if err != nil {
+		t.Fatalf("NewTxManager: %v", err)
+	}
+	protoRepo, err := postgres.NewProtocolRepository(pool, nil, buildReg.BuildID(), 0)
+	if err != nil {
+		t.Fatalf("NewProtocolRepository: %v", err)
+	}
+	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+	eventRepo := postgres.NewEventRepository(nil, buildReg.BuildID())
+	curveRepo, err := postgres.NewCurvePoolRepository(pool, nil, buildReg.BuildID())
+	if err != nil {
+		t.Fatalf("NewCurvePoolRepository: %v", err)
+	}
+
+	mc := testutil.NewMockMulticaller()
+	cache := testutil.NewMockBlockCache()
+	consumer := &testutil.MockSQSConsumer{}
+
+	cfg := Config{SQSConsumerConfig: shared.SQSConsumerConfigDefaults()}
+	cfg.ChainID = 1
+	svc, err := NewService(cfg, consumer, cache, mc, txm, curveRepo, tokenRepo, protoRepo, eventRepo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: true, ReturnData: common.LeftPadBytes(common.Address{}.Bytes(), 32)}}, nil
+	}
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = svc.Stop() }()
+
+	stETHNG := common.HexToAddress("0x21E27a5E5513D6e65C4f830167390997aA84843a")
+	if svc.registry.poolByAddress(stETHNG) == nil {
+		t.Fatal("seeded stETH-ng pool not present in registry; check migration seed")
+	}
+
+	// 12-call layout for 2-coin NG (balances×2, vp, A, fee, indexed oracle×2,
+	// no-arg oracle×2, totalSupply, get_dy×2). All four oracle calls revert.
+	uintT, _ := abi.NewType("uint256", "", nil)
+	uintArgs := abi.Arguments{{Type: uintT}}
+	mk := func(v int64) outbound.Result {
+		data, _ := uintArgs.Pack(big.NewInt(v))
+		return outbound.Result{Success: true, ReturnData: data}
+	}
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			mk(1_000_000), mk(2_000_000), mk(1_000_000_000), mk(100), mk(4_000_000),
+			{Success: false}, {Success: false}, // last_price(0) / price_oracle(0)
+			{Success: false}, {Success: false}, // last_price() / price_oracle()
+			mk(3_000_000), mk(999_999), mk(1_000_001),
+		}, nil
+	}
+
+	ngEvents, err := abis.GetCurveStableswapNGEventsABI()
+	if err != nil {
+		t.Fatalf("ng events ABI: %v", err)
+	}
+	ev := ngEvents.Events["TokenExchange"]
+	buyer := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	data, err := ev.Inputs.NonIndexed().Pack(big.NewInt(0), big.NewInt(50_000), big.NewInt(1), big.NewInt(49_900))
+	if err != nil {
+		t.Fatalf("pack TokenExchange: %v", err)
+	}
+	const txHashHex = "0xbbbbefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+	log := shared.Log{
+		Address:         stETHNG.Hex(),
+		Topics:          []string{ev.ID.Hex(), common.BytesToHash(buyer.Bytes()).Hex()},
+		Data:            "0x" + common.Bytes2Hex(data),
+		TransactionHash: txHashHex,
+		LogIndex:        "0x8",
+	}
+	receipt := shared.TransactionReceipt{TransactionHash: txHashHex, Logs: []shared.Log{log}}
+	body, _ := json.Marshal([]shared.TransactionReceipt{receipt})
+
+	const blockNumber int64 = 19_600_000
+	cache.SetReceipts(1, blockNumber, 0, body)
+
+	if err := svc.processBlockEvent(ctx, outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    blockNumber,
+		Version:        0,
+		BlockTimestamp: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC).Unix(),
+	}); err != nil {
+		t.Fatalf("processBlockEvent must not fail when oracle slots are uninitialised: %v", err)
+	}
+
+	// The state row must exist with NULL oracle elements.
+	var states int
+	var oracleElemIsNull, lastPriceElemIsNull bool
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM curve_pool_state WHERE block_number = $1`, blockNumber).Scan(&states); err != nil {
+		t.Fatalf("count curve_pool_state: %v", err)
+	}
+	if states != 1 {
+		t.Fatalf("curve_pool_state rows = %d, want 1", states)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT price_oracle[1] IS NULL, last_price[1] IS NULL FROM curve_pool_state WHERE block_number = $1`,
+		blockNumber).Scan(&oracleElemIsNull, &lastPriceElemIsNull); err != nil {
+		t.Fatalf("read oracle elements: %v", err)
+	}
+	if !oracleElemIsNull || !lastPriceElemIsNull {
+		t.Errorf("oracle elements: price_oracle[1] null=%v, last_price[1] null=%v — want both NULL", oracleElemIsNull, lastPriceElemIsNull)
+	}
+}
+
 // TestIntegration_ProcessingVersionRetryAndReprocessing exercises both halves
 // of the ADR-0002 retry/reprocessing contract end-to-end against a real
 // TimescaleDB schema:

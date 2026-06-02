@@ -670,6 +670,52 @@ func TestProcessBlockEvent_NoRelevantLogs(t *testing.T) {
 }
 
 // Test row #1: Swap.
+// The balanceOf sub-calls in the pool-state multicall must ask each token for
+// THE POOL's balance — Target=tokenN, holder argument=pool.Address. The
+// 2026-06-02 E2E run caught the holder argument set to the token's own
+// address (token.balanceOf(token-itself)): DB stored 0.059 wstETH / 763.77
+// WETH where the pool actually held 883.47 / 1163.02 — values proven via
+// block-pinned cast calls to be each token's self-balance.
+func TestProcessReceipt_Swap_BalanceOfTargetsPoolAsHolder(t *testing.T) {
+	h := newHarness(t)
+	pool := makePool()
+	h.primePool(pool)
+
+	addrT, _ := abi.NewType("address", "", nil)
+	addrArgs := abi.Arguments{{Type: addrT}}
+	var holders []common.Address
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 5 {
+			return nil, errors.New("unexpected multicall arg count")
+		}
+		// calls[3] / calls[4] are the balanceOf reads. Decode the holder arg.
+		for _, c := range calls[3:5] {
+			vals, err := addrArgs.Unpack(c.CallData[4:])
+			if err != nil {
+				t.Fatalf("unpacking balanceOf holder arg: %v", err)
+			}
+			holders = append(holders, vals[0].(common.Address))
+		}
+		// Targets must be the two token contracts.
+		if calls[3].Target != testToken0 || calls[4].Target != testToken1 {
+			t.Errorf("balanceOf targets = %s/%s, want token0/token1", calls[3].Target, calls[4].Target)
+		}
+		return h.poolStateResults(), nil
+	}
+
+	if err := h.deliverReceipt(t, 100, 0, []shared.Log{h.buildSwapLog(t)}); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if len(holders) != 2 {
+		t.Fatalf("captured %d balanceOf holder args, want 2", len(holders))
+	}
+	for i, hAddr := range holders {
+		if hAddr != testPoolAddr {
+			t.Errorf("balanceOf call %d holder = %s, want pool %s (token self-balance bug)", i, hAddr.Hex(), testPoolAddr.Hex())
+		}
+	}
+}
+
 func TestProcessReceipt_Swap_WritesAllRows(t *testing.T) {
 	h := newHarness(t)
 	pool := makePool()
@@ -1165,6 +1211,93 @@ func TestProcessReceipt_NFPMCollect_WritesPositionStateOnly(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&poolStateCalls); got != 0 {
 		t.Errorf("pool state writes = %d, want 0 for NFPM Collect", got)
+	}
+}
+
+// positions(tokenId) reverts with "Invalid token ID" when the NFT was burned
+// in the same block (Collect/Decrease + burn() in one tx) — observed live at
+// block 25229156 (tokenIds 1297532/1297533) in the 2026-06-02 E2E run. The
+// revert is deterministic; erroring poisons the FIFO queue with infinite
+// redeliveries. Cold path (unknown tokenId): treat as out-of-scope.
+func TestProcessReceipt_NFPMPositionsRevert_ColdPath_OutOfScope(t *testing.T) {
+	h := newHarness(t)
+	pool := makePool()
+	h.primePool(pool)
+	tokenID := big.NewInt(1297532)
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 1 { // positions(tokenId)
+			return []outbound.Result{{Success: false}}, nil // burned: "Invalid token ID"
+		}
+		return nil, errors.New("unexpected calls")
+	}
+
+	var auditRows int32
+	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error {
+		atomic.AddInt32(&auditRows, 1)
+		return nil
+	}
+	var posStateCalls int32
+	h.uniswapRepo.SaveUniswapV3PositionStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.UniswapV3PositionState) error {
+		atomic.AddInt32(&posStateCalls, 1)
+		return nil
+	}
+
+	if err := h.deliverReceipt(t, 100, 0, []shared.Log{h.buildNFPMCollectLog(t, tokenID)}); err != nil {
+		t.Fatalf("processBlockEvent must not fail when positions() reverts for a burned token: %v", err)
+	}
+	if got := atomic.LoadInt32(&auditRows); got != 1 {
+		t.Errorf("protocol_event rows = %d, want 1 (audit row still persisted)", got)
+	}
+	if got := atomic.LoadInt32(&posStateCalls); got != 0 {
+		t.Errorf("position state writes = %d, want 0 for burned token", got)
+	}
+	// Burned tokenId must be cached as missing so the next event short-circuits.
+	if cached := h.svc.posCache.get(tokenID); !isMissingMarker(cached) {
+		t.Errorf("tokenId %s not cached as missing after positions() revert", tokenID)
+	}
+}
+
+// Warm path: a KNOWN in-scope position whose positions() read reverts was
+// burned this block — mark + persist burned, skip the state row, don't error.
+func TestProcessReceipt_NFPMPositionsRevert_WarmPath_MarksBurned(t *testing.T) {
+	h := newHarness(t)
+	pool := makePool()
+	h.primePool(pool)
+	tokenID := big.NewInt(1297533)
+
+	h.svc.posCache.put(&entity.UniswapV3Position{
+		ID: 88, ChainID: 1, NFPMAddress: testNFPMAddr,
+		TokenID: tokenID, UniswapV3PoolID: pool.ID, Owner: testUser,
+		TickLower: -887220, TickUpper: 887220, Fee: 500, CreatedAtBlock: 99,
+	})
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 1 { // positions(tokenId)
+			return []outbound.Result{{Success: false}}, nil
+		}
+		return nil, errors.New("unexpected calls")
+	}
+
+	var burnedID int64
+	h.uniswapRepo.SetUniswapV3PositionBurnedFn = func(_ context.Context, _ pgx.Tx, positionID int64) error {
+		burnedID = positionID
+		return nil
+	}
+	var posStateCalls int32
+	h.uniswapRepo.SaveUniswapV3PositionStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.UniswapV3PositionState) error {
+		atomic.AddInt32(&posStateCalls, 1)
+		return nil
+	}
+
+	if err := h.deliverReceipt(t, 100, 0, []shared.Log{h.buildNFPMCollectLog(t, tokenID)}); err != nil {
+		t.Fatalf("processBlockEvent must not fail when positions() reverts on a known position: %v", err)
+	}
+	if burnedID != 88 {
+		t.Errorf("SetUniswapV3PositionBurned called with %d, want 88", burnedID)
+	}
+	if got := atomic.LoadInt32(&posStateCalls); got != 0 {
+		t.Errorf("position state writes = %d, want 0 when positions() is gone", got)
 	}
 }
 

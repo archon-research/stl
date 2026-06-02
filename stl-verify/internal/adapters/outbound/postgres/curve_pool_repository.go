@@ -235,14 +235,13 @@ func (r *CurvePoolRepository) SaveCurvePoolState(ctx context.Context, tx pgx.Tx,
 	virtualPrice := bigIntToNullableNumeric(state.VirtualPrice)
 	aFactor := bigIntToNullableNumeric(state.AFactor)
 	fee := bigIntToNullableNumeric(state.Fee)
-	priceOracle, err := bigIntsToNullableNumericArray(state.PriceOracle)
-	if err != nil {
-		return fmt.Errorf("converting price_oracle: %w", err)
-	}
-	lastPrice, err := bigIntsToNullableNumericArray(state.LastPrice)
-	if err != nil {
-		return fmt.Errorf("converting last_price: %w", err)
-	}
+	// Oracle slots tolerate nil per-element: NG EMA oracles stay uninitialised
+	// until the pool's first swap, and the indexed selector can revert on
+	// factory-v2-era pools (multicall stores nil for the failed sub-call).
+	// A nil element becomes a SQL NULL inside the NUMERIC[]; a nil slice
+	// (V1 pool — no oracle at all) becomes a NULL column.
+	priceOracle := bigIntsToNullableElementArrayOrNull(state.PriceOracle)
+	lastPrice := bigIntsToNullableElementArrayOrNull(state.LastPrice)
 
 	// processing_version is assigned by the assign_processing_version_*
 	// BEFORE INSERT trigger per ADR-0002: same (natural key, build_id) →
@@ -521,6 +520,18 @@ func bigIntsToNullableNumericArray(bs []*big.Int) (any, error) {
 		return nil, nil
 	}
 	return bigIntsToNumericArray(bs)
+}
+
+// bigIntsToNullableElementArrayOrNull converts a slice to a NUMERIC[] payload
+// where nil slice → SQL NULL column and nil elements → SQL NULL elements.
+// Used by the NG oracle columns (price_oracle / last_price) where individual
+// slots are legitimately absent: the EMA is uninitialised before the pool's
+// first swap, or the indexed selector reverts on factory-v2-era pools.
+func bigIntsToNullableElementArrayOrNull(bs []*big.Int) any {
+	if bs == nil {
+		return nil
+	}
+	return bigIntsToNullableElementNumericArray(bs)
 }
 
 // bigIntsToNullableElementNumericArray converts a slice of *big.Int to a

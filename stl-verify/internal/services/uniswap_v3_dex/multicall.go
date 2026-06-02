@@ -75,13 +75,13 @@ func (b *blockchainService) buildPoolStateCalls(pool *entity.UniswapV3Pool, toke
 	if err != nil {
 		return nil, fmt.Errorf("packing observe: %w", err)
 	}
-	bal0Data, err := b.poolRead.Pack("balanceOf", token0Addr)
+	// balanceOf(pool) on each token contract: Target = the token, holder
+	// argument = THE POOL. Packing the token's own address here reads the
+	// token's self-balance instead of the pool reserve (caught live in the
+	// 2026-06-02 E2E run — WETH.balanceOf(WETH) is ~763 WETH of dust).
+	balData, err := b.poolRead.Pack("balanceOf", pool.Address)
 	if err != nil {
-		return nil, fmt.Errorf("packing balanceOf(token0): %w", err)
-	}
-	bal1Data, err := b.poolRead.Pack("balanceOf", token1Addr)
-	if err != nil {
-		return nil, fmt.Errorf("packing balanceOf(token1): %w", err)
+		return nil, fmt.Errorf("packing balanceOf(pool): %w", err)
 	}
 	return []outbound.Call{
 		{Target: pool.Address, CallData: slotData},
@@ -89,8 +89,8 @@ func (b *blockchainService) buildPoolStateCalls(pool *entity.UniswapV3Pool, toke
 		// observe can revert if cardinality not initialised — allow failure but
 		// still expect callers to inspect the captured cumulatives.
 		{Target: pool.Address, CallData: obsData, AllowFailure: true},
-		{Target: token0Addr, CallData: bal0Data, AllowFailure: true},
-		{Target: token1Addr, CallData: bal1Data, AllowFailure: true},
+		{Target: token0Addr, CallData: balData, AllowFailure: true},
+		{Target: token1Addr, CallData: balData, AllowFailure: true},
 	}, nil
 }
 
@@ -193,6 +193,15 @@ func (b *blockchainService) readPoolStatic(ctx context.Context, poolAddr common.
 // readNFPMPosition reads NFPM.positions(tokenId) and returns the typed result.
 // Used both for cold-path position discovery (IncreaseLiquidity on an unknown
 // tokenId) and for per-event state row population.
+//
+// Returns (nil, nil) — position-not-found — when positions(tokenId) reverts.
+// NFPM reverts with "Invalid token ID" for burned NFTs; a token burned in the
+// same block as the event being processed (Collect/Decrease + burn() in one
+// tx) deterministically hits this at the event's block. Observed live at
+// block 25229156 in the 2026-06-02 E2E run. Treating it as an error would
+// poison the FIFO queue with infinite redeliveries; callers decide whether
+// not-found means out-of-scope (cold path) or burned (warm path). Errors are
+// reserved for transport/decode problems, which are retryable.
 func (b *blockchainService) readNFPMPosition(ctx context.Context, nfpm common.Address, tokenID *big.Int, blockNumber int64) (*nfpmPositionResult, error) {
 	data, err := b.nfpmRead.Pack("positions", tokenID)
 	if err != nil {
@@ -202,8 +211,12 @@ func (b *blockchainService) readNFPMPosition(ctx context.Context, nfpm common.Ad
 	if err != nil {
 		return nil, fmt.Errorf("multicall positions(%s): %w", tokenID, err)
 	}
-	if len(results) != 1 || !results[0].Success {
-		return nil, fmt.Errorf("positions(%s) reverted", tokenID)
+	if len(results) != 1 {
+		return nil, fmt.Errorf("positions(%s): multicall returned %d results, want 1", tokenID, len(results))
+	}
+	if !results[0].Success {
+		// Deterministic revert: token burned or nonexistent at this block.
+		return nil, nil
 	}
 	unpacked, err := b.nfpmRead.Unpack("positions", results[0].ReturnData)
 	if err != nil {
