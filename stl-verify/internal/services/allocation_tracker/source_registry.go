@@ -6,17 +6,22 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"sync"
 )
 
 // SourceRegistry routes token entries to the appropriate PositionSource.
 type SourceRegistry struct {
 	sources []PositionSource
 	logger  *slog.Logger
+
+	mu              sync.Mutex
+	seenUnsupported map[string]struct{}
 }
 
 func NewSourceRegistry(logger *slog.Logger) *SourceRegistry {
 	return &SourceRegistry{
-		logger: logger.With("component", "source-registry"),
+		logger:          logger.With("component", "source-registry"),
+		seenUnsupported: make(map[string]struct{}),
 	}
 }
 
@@ -34,6 +39,29 @@ func (r *SourceRegistry) Route(entry *TokenEntry) PositionSource {
 	return nil
 }
 
+// warnUnsupportedOnce logs an unsupported (untracked) entry at Warn, but only
+// once per distinct (token type, protocol). A configured entry with no matching
+// source means its positions silently stop being tracked; this surfaces the gap
+// without flooding the logs on every sweep.
+func (r *SourceRegistry) warnUnsupportedOnce(entry *TokenEntry) {
+	key := entry.TokenType + "|" + entry.Protocol
+
+	r.mu.Lock()
+	_, seen := r.seenUnsupported[key]
+	if !seen {
+		r.seenUnsupported[key] = struct{}{}
+	}
+	r.mu.Unlock()
+
+	if seen {
+		return
+	}
+	r.logger.Warn("unsupported entry skipped; position not tracked",
+		"type", entry.TokenType,
+		"protocol", entry.Protocol,
+		"exampleContract", entry.ContractAddress.Hex())
+}
+
 // FetchAll groups entries by source, fetches in batch, unions both the balance
 // and supply maps across sources, and returns the aggregated FetchResult.
 func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
@@ -41,10 +69,7 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 	for _, entry := range entries {
 		source := r.Route(entry)
 		if source == nil {
-			r.logger.Debug("unsupported entry skipped",
-				"contract", entry.ContractAddress.Hex(),
-				"type", entry.TokenType,
-				"protocol", entry.Protocol)
+			r.warnUnsupportedOnce(entry)
 			continue
 		}
 		grouped[source] = append(grouped[source], entry)
