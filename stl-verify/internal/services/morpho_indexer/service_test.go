@@ -1869,7 +1869,7 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 		}
 	})
 
-	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
+	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider(), "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders: %v", err)
 	}
@@ -1924,7 +1924,7 @@ func TestProcessReceipt_KnownNotVault_SkipsSpan(t *testing.T) {
 		}
 	})
 
-	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
+	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider(), "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders: %v", err)
 	}

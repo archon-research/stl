@@ -13,7 +13,7 @@
 # these can collapse into a single rule per signal.
 #
 # Metric source: OTel SDK in each indexer. Series carry:
-#   - service_name="stl-morpho-indexer" | "stl-oracle-indexer"
+#   - service_name="morpho-indexer" | "oracle-price-worker"
 #   - k8s_namespace_name="vector"
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain (for multi-chain indexers)
@@ -46,7 +46,7 @@ groups:
         annotations:
           summary: "Vector morpho-indexer stalled on {{ $labels.chain }}"
           description: |
-            `stl-morpho-indexer` on chain `{{ $labels.chain }}` has not
+            `morpho-indexer` on chain `{{ $labels.chain }}` has not
             advanced for >15m. Morpho position state in TimescaleDB will
             go stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphoindexerstalled
@@ -65,7 +65,7 @@ groups:
         annotations:
           summary: "Vector oracle-indexer stalled on {{ $labels.chain }}"
           description: |
-            `stl-oracle-indexer` on chain `{{ $labels.chain }}` has not
+            `oracle-price-worker` on chain `{{ $labels.chain }}` has not
             advanced for >15m. Oracle price state in TimescaleDB will go
             stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleindexerstalled
@@ -88,7 +88,7 @@ groups:
         annotations:
           summary: "Vector morpho-indexer error rate >0.1/s on {{ $labels.chain }}"
           description: |
-            `stl-morpho-indexer` on chain `{{ $labels.chain }}` is throwing
+            `morpho-indexer` on chain `{{ $labels.chain }}` is throwing
             `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
             pod logs before this turns into a stall.
 
@@ -106,7 +106,7 @@ groups:
         annotations:
           summary: "Vector oracle-indexer error rate >0.1/s on {{ $labels.chain }}"
           description: |
-            `stl-oracle-indexer` on chain `{{ $labels.chain }}` is throwing
+            `oracle-price-worker` on chain `{{ $labels.chain }}` is throwing
             `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
             pod logs before this turns into a stall.
 
@@ -135,7 +135,7 @@ groups:
         annotations:
           summary: "Vector morpho-indexer p99 RPC latency >3s on {{ $labels.chain }}"
           description: |
-            `stl-morpho-indexer` on chain `{{ $labels.chain }}` p99 RPC
+            `morpho-indexer` on chain `{{ $labels.chain }}` p99 RPC
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream Morpho position state.
 
@@ -160,6 +160,6 @@ groups:
         annotations:
           summary: "Vector oracle-indexer p99 RPC latency >3s on {{ $labels.chain }}"
           description: |
-            `stl-oracle-indexer` on chain `{{ $labels.chain }}` p99 RPC
+            `oracle-price-worker` on chain `{{ $labels.chain }}` p99 RPC
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
