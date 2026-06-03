@@ -7,7 +7,7 @@ include lint.mk
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
-		_docker-release-image \
+		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -821,17 +821,27 @@ _docker-release-image:
 		echo "==> $(IMG_NAME) image released: $(IMG_REPO):$(IMG_TAG)"; \
 	fi
 
+# Build a Go service/cronjob from the unified Dockerfile.common. Fills in the
+# parts every Go image shares (Dockerfile, the GO_VERSION build-arg, full git
+# metadata) so callers pass only what differs. Required: GO_NAME, GO_REPO,
+# GO_CMD_PATH, GO_BIN, GO_CACHE_KEY. Optional: GO_TAG / GO_LATEST_TAG (cronjobs
+# use name-prefixed tags; services default to IMAGE_TAG / latest).
+_docker-release-go-service:
+	@$(MAKE) _docker-release-image \
+		IMG_NAME="$(GO_NAME)" \
+		IMG_REPO="$(GO_REPO)" \
+		IMG_DOCKERFILE=Dockerfile.common \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN)" \
+		IMG_GIT_ARGS=full \
+		IMG_CACHE_KEY="$(GO_CACHE_KEY)" \
+		$(if $(GO_TAG),IMG_TAG="$(GO_TAG)") \
+		$(if $(GO_LATEST_TAG),IMG_LATEST_TAG="$(GO_LATEST_TAG)")
+
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
 docker-release: ecr-login _docker-release-internal
 
 _docker-release-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Watcher" \
-		IMG_REPO="$(ECR_REPO)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=watcher
+	@$(MAKE) _docker-release-go-service GO_NAME="Watcher" GO_REPO="$(ECR_REPO)" GO_CMD_PATH=cmd/base/watcher GO_BIN=watcher GO_CACHE_KEY=watcher
 
 # Clean up local Docker images
 docker-clean:
@@ -1034,13 +1044,7 @@ docker-push-backup: ecr-login
 docker-release-backup: ecr-login _docker-release-backup-internal
 
 _docker-release-backup-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Backup Worker" \
-		IMG_REPO="$(ECR_REPO_BACKUP)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/raw-data-backup --build-arg BIN=raw-data-backup" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=backup-worker
+	@$(MAKE) _docker-release-go-service GO_NAME="Backup Worker" GO_REPO="$(ECR_REPO_BACKUP)" GO_CMD_PATH=cmd/workers/raw-data-backup GO_BIN=raw-data-backup GO_CACHE_KEY=backup-worker
 
 # =============================================================================
 # Sentinelstaging Backup Worker Docker Shortcuts
@@ -1095,13 +1099,7 @@ docker-push-oracle-price-worker: ecr-login
 docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
 
 _docker-release-oracle-price-worker-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Oracle Price Worker" \
-		IMG_REPO="$(ECR_REPO_ORACLE_PRICE_WORKER)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=oracle-price-worker
+	@$(MAKE) _docker-release-go-service GO_NAME="Oracle Price Worker" GO_REPO="$(ECR_REPO_ORACLE_PRICE_WORKER)" GO_CMD_PATH=cmd/workers/oracle-price-indexer GO_BIN=oracle_price_worker GO_CACHE_KEY=oracle-price-worker
 
 # =============================================================================
 # Sentinelstaging Oracle Price Worker Docker Shortcuts
@@ -1166,13 +1164,7 @@ docker-push-sparklend-position-tracker: ecr-login
 docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
 
 _docker-release-sparklend-position-tracker-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="SparkLend Position Tracker" \
-		IMG_REPO="$(ECR_REPO_SPARKLEND_POSITION_TRACKER)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=sparklend-position-tracker
+	@$(MAKE) _docker-release-go-service GO_NAME="SparkLend Position Tracker" GO_REPO="$(ECR_REPO_SPARKLEND_POSITION_TRACKER)" GO_CMD_PATH=cmd/workers/sparklend-indexer GO_BIN=sparklend_position_tracker GO_CACHE_KEY=sparklend-position-tracker
 
 # =============================================================================
 # Sentinelstaging SparkLend Position Tracker Docker Shortcuts
@@ -1228,13 +1220,7 @@ docker-push-morpho-indexer: ecr-login
 docker-release-morpho-indexer: ecr-login _docker-release-morpho-indexer-internal
 
 _docker-release-morpho-indexer-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Morpho Indexer" \
-		IMG_REPO="$(ECR_REPO_MORPHO_INDEXER)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=morpho-indexer
+	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Indexer" GO_REPO="$(ECR_REPO_MORPHO_INDEXER)" GO_CMD_PATH=cmd/workers/morpho-indexer GO_BIN=morpho-indexer GO_CACHE_KEY=morpho-indexer
 
 # =============================================================================
 # Sentinelstaging Morpho Indexer Docker Shortcuts
@@ -1288,13 +1274,7 @@ docker-push-prime-debt-indexer: ecr-login
 docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
 
 _docker-release-prime-debt-indexer-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Prime Debt Indexer" \
-		IMG_REPO="$(ECR_REPO_PRIME_DEBT_INDEXER)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=prime-debt-indexer
+	@$(MAKE) _docker-release-go-service GO_NAME="Prime Debt Indexer" GO_REPO="$(ECR_REPO_PRIME_DEBT_INDEXER)" GO_CMD_PATH=cmd/workers/prime-debt-indexer GO_BIN=prime-debt-indexer GO_CACHE_KEY=prime-debt-indexer
 
 docker-build-prime-debt-indexer-staging:
 	@$(MAKE) docker-build-prime-debt-indexer ENV=sentinelstaging
@@ -1341,13 +1321,7 @@ docker-push-allocation-tracker: ecr-login
 docker-release-allocation-tracker: ecr-login _docker-release-allocation-tracker-internal
 
 _docker-release-allocation-tracker-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Allocation Tracker" \
-		IMG_REPO="$(ECR_REPO_ALLOCATION_TRACKER)" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-allocation-indexer --build-arg BIN=allocation-tracker" \
-		IMG_GIT_ARGS=full \
-		IMG_CACHE_KEY=allocation-tracker
+	@$(MAKE) _docker-release-go-service GO_NAME="Allocation Tracker" GO_REPO="$(ECR_REPO_ALLOCATION_TRACKER)" GO_CMD_PATH=cmd/workers/prime-allocation-indexer GO_BIN=allocation-tracker GO_CACHE_KEY=allocation-tracker
 
 # =============================================================================
 # Sentinelstaging Allocation Tracker Docker Shortcuts
@@ -1727,15 +1701,7 @@ docker-build-cronjob-%:
 docker-release-cronjob-%: ecr-login _docker-release-cronjob-%-internal
 
 _docker-release-cronjob-%-internal:
-	@$(MAKE) _docker-release-image \
-		IMG_NAME="Cronjob $*" \
-		IMG_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" \
-		IMG_DOCKERFILE=Dockerfile.common \
-		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob" \
-		IMG_GIT_ARGS=full \
-		IMG_TAG="$*-$(IMAGE_TAG)" \
-		IMG_LATEST_TAG="$*-latest" \
-		IMG_CACHE_KEY="cronjob-$*"
+	@$(MAKE) _docker-release-go-service GO_NAME="Cronjob $*" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/$* GO_BIN=cronjob GO_CACHE_KEY="cronjob-$*" GO_TAG="$*-$(IMAGE_TAG)" GO_LATEST_TAG="$*-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"
