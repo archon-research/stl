@@ -58,6 +58,7 @@ class CoreModelPipelineResult:
     n_mc: int
     copula_type: str
     computed_at: datetime
+    params: dict
 
 
 @contextmanager
@@ -233,4 +234,5 @@ async def run(
         n_mc=int(p["N_MC"]),
         copula_type=p["COPULA_TYPE"],
         computed_at=datetime.now(UTC),
+        params=dict(p),
     )

@@ -1,0 +1,47 @@
+{
+  "_comment": "Per-market required params. Each entry overrides default_params.json for that market. Env vars (CORE_MODEL_*) override these at runtime.",
+
+  "sparklend_dai": {
+    "PROTOCOL": "SPARKLEND",
+    "LOAN_TOKEN": "DAI",
+  },
+  "sparklend_usdc": {
+    "PROTOCOL": "SPARKLEND",
+    "LOAN_TOKEN": "USDC"
+  },
+  "sparklend_usds": {
+    "PROTOCOL": "SPARKLEND",
+    "LOAN_TOKEN": "USDS"
+  },
+  "sparklend_usdt": {
+    "PROTOCOL": "SPARKLEND",
+    "LOAN_TOKEN": "USDT"
+  },
+  "morpho_cbbtc-usdc": {
+    "PROTOCOL": "MORPHO",
+    "MORPHO_MARKET": "CBBTC",
+    "LOAN_TOKEN": "USDC",
+    "N_MC": 5000
+  },
+  "morpho_weth-usdc": {
+    "PROTOCOL": "MORPHO",
+    "MORPHO_MARKET": "WETH",
+    "LOAN_TOKEN": "USDC"
+  },
+  "syrup_usdc": {
+    "PROTOCOL": "SYRUP",
+    "LOAN_TOKEN": "USDC"
+  },
+  "syrup_usdt": {
+    "PROTOCOL": "SYRUP",
+    "LOAN_TOKEN": "USDT"
+  },
+  "anchorage": {
+    "PROTOCOL": "ANCHORAGE",
+    "LOAN_TOKEN": "ALL"
+  },
+  "galaxy": {
+    "PROTOCOL": "GALAXY",
+    "LOAN_TOKEN": "ALL"
+  }
+}
