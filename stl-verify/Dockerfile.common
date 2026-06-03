@@ -8,8 +8,9 @@
 #   BIN       output binary name. Kept per-service on purpose: the k8s liveness
 #             probes match the process with `pgrep -f <BIN>`, so the running
 #             process name must stay the service-specific binary name.
-# CMD_PATH/BIN default to the watcher, so only GO_VERSION must be supplied
-# (the Makefile passes it): `docker build --build-arg GO_VERSION=... .`
+# None of the build args have defaults: callers must pass GO_VERSION, CMD_PATH
+# and BIN (the Makefile targets that build from this file do). A missing arg
+# fails the build instead of silently defaulting to a particular service.
 #
 # IMPORTANT: the versioning args (GIT_COMMIT/GIT_BRANCH/BUILD_TIME) and the
 # target args (CMD_PATH/BIN) are declared AFTER `go mod download`, so a changing
@@ -39,11 +40,11 @@ COPY . .
 
 # Target + versioning args declared here, after the cached dependency layers, so
 # they only invalidate the build step below.
-ARG CMD_PATH=cmd/base/watcher
-ARG BIN=watcher
-ARG GIT_COMMIT=unknown
-ARG GIT_BRANCH=unknown
-ARG BUILD_TIME=unknown
+ARG CMD_PATH
+ARG BIN
+ARG GIT_COMMIT
+ARG GIT_BRANCH
+ARG BUILD_TIME
 
 # Build the binary for the target architecture (ARM64 for Graviton). The
 # --mount cache persists Go's compiled-package cache (GOCACHE) on the builder
@@ -52,6 +53,7 @@ ARG BUILD_TIME=unknown
 # service. Modules still come from the cached `go mod download` layer above, so
 # /go/pkg/mod is intentionally not mounted (an empty mount would hide them).
 RUN --mount=type=cache,target=/root/.cache/go-build \
+    : "${CMD_PATH:?CMD_PATH build-arg is required}" "${BIN:?BIN build-arg is required}" && \
     CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -extldflags '-static' -X main.GitCommit=${GIT_COMMIT} -X main.GitBranch=${GIT_BRANCH} -X main.BuildTime=${BUILD_TIME} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.GitCommit=${GIT_COMMIT} -X github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo.BuildTime=${BUILD_TIME}" \
     -o /${BIN} \
@@ -71,7 +73,7 @@ RUN adduser -D -g '' appuser
 WORKDIR /app
 
 # Copy the service binary, keeping its per-service name (see BIN note above)
-ARG BIN=watcher
+ARG BIN
 COPY --from=builder /${BIN} /app/${BIN}
 ENV APP_BIN=/app/${BIN}
 

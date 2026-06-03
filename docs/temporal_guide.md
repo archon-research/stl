@@ -218,7 +218,7 @@ All cronjobs (and every Go service) share the unified multi-stage `Dockerfile`. 
 make docker-build-cronjob-offchain-price-indexer
 
 # Or directly:
-docker build --build-arg GO_VERSION="$(cat ../.go-version)" --build-arg CMD_PATH=cmd/cronjobs/offchain-price-indexer --build-arg BIN=cronjob -t stl-offchain-price-indexer:local -f Dockerfile .
+docker build --build-arg GO_VERSION="$(cat ../.go-version)" --build-arg CMD_PATH=cmd/cronjobs/offchain-price-indexer --build-arg BIN=cronjob -t stl-offchain-price-indexer:local -f Dockerfile.common .
 ```
 
 The image injects `GitCommit`, `GitBranch`, and `BuildTime` via ldflags for observability.
