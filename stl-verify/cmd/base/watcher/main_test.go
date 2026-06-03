@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 func TestResolveServiceName(t *testing.T) {
@@ -167,7 +169,7 @@ func TestLoadBackfillConfig(t *testing.T) {
 				t.Setenv("BACKFILL_RETRY_MIN_AGE", tc.retryMinAgeEnv)
 			}
 
-			cfg, err := loadBackfillConfig(42161, false, false, logger)
+			cfg, err := loadBackfillConfig(42161, false, false, logger, nil)
 			if tc.wantErrSubstring != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil (cfg=%+v)", tc.wantErrSubstring, cfg)
@@ -193,5 +195,30 @@ func TestLoadBackfillConfig(t *testing.T) {
 				t.Errorf("ChainID = %d, want 42161", cfg.ChainID)
 			}
 		})
+	}
+}
+
+// TestLoadBackfillConfig_WiresMetricsRecorder is the regression guard for the
+// VEC-277 blocker: the BackfillRecorder must be
+// threaded into BackfillConfig.Metrics so the post-cycle invariant counter
+// (`backfill_gap_fill_no_canonical_total`) is actually emitted.
+func TestLoadBackfillConfig_WiresMetricsRecorder(t *testing.T) {
+	logger := slog.Default()
+
+	recorder, err := shared.NewServiceTelemetry()
+	if err != nil {
+		t.Fatalf("NewServiceTelemetry: %v", err)
+	}
+
+	cfg, err := loadBackfillConfig(42161, false, false, logger, recorder)
+	if err != nil {
+		t.Fatalf("loadBackfillConfig: %v", err)
+	}
+	if cfg.Metrics == nil {
+		t.Fatal("BackfillConfig.Metrics is nil — recorder was not threaded through")
+	}
+	// The concrete type passed in should round-trip unchanged.
+	if cfg.Metrics != recorder {
+		t.Fatalf("BackfillConfig.Metrics != recorder (got %T, want *shared.ServiceTelemetry)", cfg.Metrics)
 	}
 }

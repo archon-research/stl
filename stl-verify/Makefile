@@ -7,6 +7,7 @@ include lint.mk
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
+		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -734,6 +735,9 @@ docker-build:
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=cmd/base/watcher \
+		--build-arg BIN=watcher \
+		-f Dockerfile.common \
 		-t $(ECR_REPO):$(IMAGE_TAG) \
 		-t $(ECR_REPO):latest \
 		--load .
@@ -744,29 +748,100 @@ docker-push: ecr-login
 	docker push $(ECR_REPO):$(IMAGE_TAG)
 	docker push $(ECR_REPO):latest
 
+# =============================================================================
+# Shared image build + push
+# =============================================================================
+# Optional BuildKit layer caching. Set DOCKER_CACHE=1 to import/export a
+# registry cache; DOCKER_CACHE_REPO is the registry path that holds the cache
+# manifests, one tag per image (e.g. ghcr.io/<owner>/<repo>/buildcache). Caching
+# is off by default because cache export requires the docker-container buildx
+# driver (the default `docker` driver rejects --cache-to), so plain local builds
+# stay cache-free and cannot fail on it. CI provides the driver via
+# docker/setup-buildx-action and passes both vars. `ignore-error=true` keeps a
+# failed cache push (auth/network) from failing an otherwise-good build, and a
+# missing cache on import is a normal miss. The cache is only *exported* when
+# DOCKER_PUSH != 0, so a build-only run (DOCKER_PUSH=0) imports the cache but
+# never overwrites it; only real pushes update the shared cache.
+#   $(1) = cache key, unique per image (used as the cache tag)
+ifeq ($(DOCKER_CACHE),1)
+ifndef DOCKER_CACHE_REPO
+$(error DOCKER_CACHE=1 requires DOCKER_CACHE_REPO, e.g. ghcr.io/<owner>/<repo>/buildcache)
+endif
+docker_cache_to = --cache-to type=registry,ref=$(DOCKER_CACHE_REPO):$(1),mode=max,oci-mediatypes=true,image-manifest=true,ignore-error=true
+docker_cache_flags = \
+	--cache-from type=registry,ref=$(DOCKER_CACHE_REPO):$(1) \
+	$(if $(filter-out 0,$(DOCKER_PUSH)),$(call docker_cache_to,$(1)))
+endif
+
+# Canonical arm64 build + push for a single image. Internal target; callers set:
+#   IMG_NAME        human-readable label for logs
+#   IMG_REPO        target image repo (without tag)
+#   IMG_DOCKERFILE  path to the Dockerfile
+#   IMG_EXTRA_ARGS  static --build-arg flags this image's Dockerfile declares
+#   IMG_GIT_ARGS    full | commit | (unset); git-metadata build-args to add
+#   IMG_CACHE_KEY   unique cache tag for this image
+#   IMG_TAG         image tag (default: $(IMAGE_TAG))
+#   IMG_LATEST_TAG  moving tag pushed alongside IMG_TAG (default: latest)
+# Set DOCKER_PUSH=0 to build only: validate the build and import the registry
+# cache, without loading or pushing the final image. Cache export is gated on
+# DOCKER_PUSH, so a build-only run reuses the cache but does not warm/overwrite
+# it. Useful for a CI build check that needs no ECR credentials.
+IMG_TAG        ?= $(IMAGE_TAG)
+IMG_LATEST_TAG ?= latest
+DOCKER_PUSH    ?= 1
+_docker-release-image:
+	@COMMIT=$$(git rev-parse HEAD) && \
+	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
+	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
+	GIT_ARGS="" && \
+	if [ "$(IMG_GIT_ARGS)" = "full" ]; then \
+		GIT_ARGS="--build-arg GIT_COMMIT=$$COMMIT --build-arg GIT_BRANCH=$$BRANCH --build-arg BUILD_TIME=$$TIME"; \
+	elif [ "$(IMG_GIT_ARGS)" = "commit" ]; then \
+		GIT_ARGS="--build-arg GIT_COMMIT=$$COMMIT"; \
+	fi && \
+	if [ "$(DOCKER_PUSH)" = "0" ]; then \
+		OUTPUT="--output type=cacheonly"; TAGS=""; \
+	else \
+		OUTPUT="--load"; TAGS="-t $(IMG_REPO):$(IMG_TAG) -t $(IMG_REPO):$(IMG_LATEST_TAG)"; \
+	fi && \
+	echo "==> Building $(IMG_NAME) image for linux/arm64..." && \
+	echo "    Tag: $(IMG_TAG)" && \
+	docker buildx build --platform linux/arm64 \
+		$(call docker_cache_flags,$(IMG_CACHE_KEY)) \
+		$(IMG_EXTRA_ARGS) $$GIT_ARGS \
+		-f $(IMG_DOCKERFILE) \
+		$$TAGS \
+		$$OUTPUT . && \
+	if [ "$(DOCKER_PUSH)" = "0" ]; then \
+		echo "==> Built $(IMG_NAME) image (push skipped: DOCKER_PUSH=0)"; \
+	else \
+		echo "==> Pushing $(IMG_NAME) image..." && \
+		docker push $(IMG_REPO):$(IMG_TAG) && \
+		docker push $(IMG_REPO):$(IMG_LATEST_TAG) && \
+		echo "==> $(IMG_NAME) image released: $(IMG_REPO):$(IMG_TAG)"; \
+	fi
+
+# Build a Go service/cronjob from the unified Dockerfile.common. Fills in the
+# parts every Go image shares (Dockerfile, the GO_VERSION build-arg, full git
+# metadata) so callers pass only what differs. Required: GO_NAME, GO_REPO,
+# GO_CMD_PATH, GO_BIN, GO_CACHE_KEY. Optional: GO_TAG / GO_LATEST_TAG (cronjobs
+# use name-prefixed tags; services default to IMAGE_TAG / latest).
+_docker-release-go-service:
+	@$(MAKE) _docker-release-image \
+		IMG_NAME="$(GO_NAME)" \
+		IMG_REPO="$(GO_REPO)" \
+		IMG_DOCKERFILE=Dockerfile.common \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=$(GO_CMD_PATH) --build-arg BIN=$(GO_BIN)" \
+		IMG_GIT_ARGS=full \
+		IMG_CACHE_KEY="$(GO_CACHE_KEY)" \
+		$(if $(GO_TAG),IMG_TAG="$(GO_TAG)") \
+		$(if $(GO_LATEST_TAG),IMG_LATEST_TAG="$(GO_LATEST_TAG)")
+
 # Build and push in one step (single recipe to ensure consistent IMAGE_TAG)
 docker-release: ecr-login _docker-release-internal
 
 _docker-release-internal:
-	@IMAGE_TAG=$(IMAGE_TAG) && \
-	GIT_COMMIT_FULL=$$(git rev-parse HEAD) && \
-	GIT_BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	BUILD_TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO)" && \
-	echo "    Tag: $$IMAGE_TAG" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$GIT_COMMIT_FULL \
-		--build-arg GIT_BRANCH=$$GIT_BRANCH \
-		--build-arg BUILD_TIME=$$BUILD_TIME \
-		-t $(ECR_REPO):$$IMAGE_TAG \
-		-t $(ECR_REPO):latest \
-		--load . && \
-	echo "==> Pushing Docker image to ECR..." && \
-	docker push $(ECR_REPO):$$IMAGE_TAG && \
-	docker push $(ECR_REPO):latest && \
-	echo "==> Docker image released: $(ECR_REPO):$$IMAGE_TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Watcher" GO_REPO="$(ECR_REPO)" GO_CMD_PATH=cmd/base/watcher GO_BIN=watcher GO_CACHE_KEY=watcher
 
 # Clean up local Docker images
 docker-clean:
@@ -785,7 +860,7 @@ ecs-deploy-watcher:
 # Named aliases for consistency with other service targets
 docker-build-watcher:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-watcher:local -f Dockerfile .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:local -f Dockerfile.common .
 else
 	@$(MAKE) docker-build
 endif
@@ -823,7 +898,7 @@ docker-release-all:
 		echo "Error: ENV is required. Usage: make docker-release-all ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
-	@$(MAKE) ecr-login ENV=$(ENV)
+	@if [ "$(DOCKER_PUSH)" != "0" ]; then $(MAKE) ecr-login ENV=$(ENV); else echo "==> DOCKER_PUSH=0: skipping ECR login (build-only)"; fi
 	@echo "==> Releasing all Docker images for ENV=$(ENV)..."
 	@echo ""
 	@$(MAKE) _docker-release-migrate-internal ENV=$(ENV)
@@ -952,7 +1027,9 @@ docker-build-backup:
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.backup \
+		--build-arg CMD_PATH=cmd/workers/raw-data-backup \
+		--build-arg BIN=raw-data-backup \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_BACKUP):$(IMAGE_TAG) \
 		-t $(ECR_REPO_BACKUP):latest \
 		--load .
@@ -967,28 +1044,7 @@ docker-push-backup: ecr-login
 docker-release-backup: ecr-login _docker-release-backup-internal
 
 _docker-release-backup-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Backup Worker Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_BACKUP)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.backup \
-		-t $(ECR_REPO_BACKUP):$$TAG \
-		-t $(ECR_REPO_BACKUP):latest \
-		--load . && \
-	echo "==> Pushing Backup Worker Docker image to ECR..." && \
-	docker push $(ECR_REPO_BACKUP):$$TAG && \
-	docker push $(ECR_REPO_BACKUP):latest && \
-	echo "==> Backup Worker Docker image released: $(ECR_REPO_BACKUP):$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Backup Worker" GO_REPO="$(ECR_REPO_BACKUP)" GO_CMD_PATH=cmd/workers/raw-data-backup GO_BIN=raw-data-backup GO_CACHE_KEY=backup-worker
 
 # =============================================================================
 # Sentinelstaging Backup Worker Docker Shortcuts
@@ -1013,7 +1069,7 @@ ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws
 # Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
 docker-build-oracle-price-worker:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-oracle-price-worker:local -f Dockerfile.oracle-price-worker .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker -t stl-oracle-price-worker:local -f Dockerfile.common .
 else
 	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
@@ -1025,7 +1081,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.oracle-price-worker \
+		--build-arg CMD_PATH=cmd/workers/oracle-price-indexer \
+		--build-arg BIN=oracle_price_worker \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
 		--load .
@@ -1041,28 +1099,7 @@ docker-push-oracle-price-worker: ecr-login
 docker-release-oracle-price-worker: ecr-login _docker-release-oracle-price-worker-internal
 
 _docker-release-oracle-price-worker-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Oracle Price Worker Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.oracle-price-worker \
-		-t $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG \
-		-t $(ECR_REPO_ORACLE_PRICE_WORKER):latest \
-		--load . && \
-	echo "==> Pushing Oracle Price Worker Docker image to ECR..." && \
-	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG && \
-	docker push $(ECR_REPO_ORACLE_PRICE_WORKER):latest && \
-	echo "==> Oracle Price Worker Docker image released: $(ECR_REPO_ORACLE_PRICE_WORKER):$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Oracle Price Worker" GO_REPO="$(ECR_REPO_ORACLE_PRICE_WORKER)" GO_CMD_PATH=cmd/workers/oracle-price-indexer GO_BIN=oracle_price_worker GO_CACHE_KEY=oracle-price-worker
 
 # =============================================================================
 # Sentinelstaging Oracle Price Worker Docker Shortcuts
@@ -1097,7 +1134,7 @@ ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).am
 # Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
 docker-build-sparklend-position-tracker:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-sparklend-position-tracker:local -f Dockerfile.sparklend-position-tracker .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker -t stl-sparklend-position-tracker:local -f Dockerfile.common .
 else
 	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
@@ -1109,7 +1146,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.sparklend-position-tracker \
+		--build-arg CMD_PATH=cmd/workers/sparklend-indexer \
+		--build-arg BIN=sparklend_position_tracker \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
 		--load .
@@ -1125,28 +1164,7 @@ docker-push-sparklend-position-tracker: ecr-login
 docker-release-sparklend-position-tracker: ecr-login _docker-release-sparklend-position-tracker-internal
 
 _docker-release-sparklend-position-tracker-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building SparkLend Position Tracker Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.sparklend-position-tracker \
-		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG \
-		-t $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest \
-		--load . && \
-	echo "==> Pushing SparkLend Position Tracker Docker image to ECR..." && \
-	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG && \
-	docker push $(ECR_REPO_SPARKLEND_POSITION_TRACKER):latest && \
-	echo "==> SparkLend Position Tracker Docker image released: $(ECR_REPO_SPARKLEND_POSITION_TRACKER):$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="SparkLend Position Tracker" GO_REPO="$(ECR_REPO_SPARKLEND_POSITION_TRACKER)" GO_CMD_PATH=cmd/workers/sparklend-indexer GO_BIN=sparklend_position_tracker GO_CACHE_KEY=sparklend-position-tracker
 
 # =============================================================================
 # Sentinelstaging SparkLend Position Tracker Docker Shortcuts
@@ -1172,7 +1190,7 @@ ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/
 # Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
 docker-build-morpho-indexer:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-morpho-indexer:local -f Dockerfile.morpho-indexer .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer -t stl-morpho-indexer:local -f Dockerfile.common .
 else
 	@echo "==> Building Morpho Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
@@ -1184,7 +1202,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.morpho-indexer \
+		--build-arg CMD_PATH=cmd/workers/morpho-indexer \
+		--build-arg BIN=morpho-indexer \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_MORPHO_INDEXER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_MORPHO_INDEXER):latest \
 		--load .
@@ -1200,28 +1220,7 @@ docker-push-morpho-indexer: ecr-login
 docker-release-morpho-indexer: ecr-login _docker-release-morpho-indexer-internal
 
 _docker-release-morpho-indexer-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Morpho Indexer Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.morpho-indexer \
-		-t $(ECR_REPO_MORPHO_INDEXER):$$TAG \
-		-t $(ECR_REPO_MORPHO_INDEXER):latest \
-		--load . && \
-	echo "==> Pushing Morpho Indexer Docker image to ECR..." && \
-	docker push $(ECR_REPO_MORPHO_INDEXER):$$TAG && \
-	docker push $(ECR_REPO_MORPHO_INDEXER):latest && \
-	echo "==> Morpho Indexer Docker image released: $(ECR_REPO_MORPHO_INDEXER):$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Indexer" GO_REPO="$(ECR_REPO_MORPHO_INDEXER)" GO_CMD_PATH=cmd/workers/morpho-indexer GO_BIN=morpho-indexer GO_CACHE_KEY=morpho-indexer
 
 # =============================================================================
 # Sentinelstaging Morpho Indexer Docker Shortcuts
@@ -1245,7 +1244,7 @@ ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.
 # Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
 docker-build-prime-debt-indexer:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) -t stl-prime-debt-indexer:local -f Dockerfile.prime-debt-indexer .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer -t stl-prime-debt-indexer:local -f Dockerfile.common .
 else
 	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
@@ -1257,7 +1256,9 @@ else
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.prime-debt-indexer \
+		--build-arg CMD_PATH=cmd/workers/prime-debt-indexer \
+		--build-arg BIN=prime-debt-indexer \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
 		--load .
@@ -1273,28 +1274,7 @@ docker-push-prime-debt-indexer: ecr-login
 docker-release-prime-debt-indexer: ecr-login _docker-release-prime-debt-indexer-internal
 
 _docker-release-prime-debt-indexer-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Prime Debt Indexer Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.prime-debt-indexer \
-		-t $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG \
-		-t $(ECR_REPO_PRIME_DEBT_INDEXER):latest \
-		--load . && \
-	echo "==> Pushing Prime Debt Indexer Docker image to ECR..." && \
-	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG && \
-	docker push $(ECR_REPO_PRIME_DEBT_INDEXER):latest && \
-	echo "==> Prime Debt Indexer Docker image released: $(ECR_REPO_PRIME_DEBT_INDEXER):$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Prime Debt Indexer" GO_REPO="$(ECR_REPO_PRIME_DEBT_INDEXER)" GO_CMD_PATH=cmd/workers/prime-debt-indexer GO_BIN=prime-debt-indexer GO_CACHE_KEY=prime-debt-indexer
 
 docker-build-prime-debt-indexer-staging:
 	@$(MAKE) docker-build-prime-debt-indexer ENV=sentinelstaging
@@ -1324,7 +1304,9 @@ docker-build-allocation-tracker:
 		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
 		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		-f Dockerfile.allocation-tracker \
+		--build-arg CMD_PATH=cmd/workers/prime-allocation-indexer \
+		--build-arg BIN=allocation-tracker \
+		-f Dockerfile.common \
 		-t $(ECR_REPO_ALLOCATION_TRACKER):$(IMAGE_TAG) \
 		-t $(ECR_REPO_ALLOCATION_TRACKER):latest \
 		--load .
@@ -1339,28 +1321,7 @@ docker-push-allocation-tracker: ecr-login
 docker-release-allocation-tracker: ecr-login _docker-release-allocation-tracker-internal
 
 _docker-release-allocation-tracker-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Allocation Tracker Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_ALLOCATION_TRACKER)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f Dockerfile.allocation-tracker \
-		-t $(ECR_REPO_ALLOCATION_TRACKER):$$TAG \
-		-t $(ECR_REPO_ALLOCATION_TRACKER):latest \
-		--load . && \
-	echo "==> Pushing Allocation Tracker Docker image to ECR..." && \
-	docker push $(ECR_REPO_ALLOCATION_TRACKER):$$TAG && \
-	docker push $(ECR_REPO_ALLOCATION_TRACKER):latest && \
-	echo "==> Allocation Tracker Docker image released: $(ECR_REPO_ALLOCATION_TRACKER):$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Allocation Tracker" GO_REPO="$(ECR_REPO_ALLOCATION_TRACKER)" GO_CMD_PATH=cmd/workers/prime-allocation-indexer GO_BIN=allocation-tracker GO_CACHE_KEY=allocation-tracker
 
 # =============================================================================
 # Sentinelstaging Allocation Tracker Docker Shortcuts
@@ -1386,20 +1347,12 @@ ECR_REPO_MIGRATE = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(E
 docker-release-migrate: ecr-login _docker-release-migrate-internal
 
 _docker-release-migrate-internal:
-	@TAG=$(IMAGE_TAG) && \
-	echo "==> Building Migrate Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_MIGRATE)" && \
-	echo "    Tag: $$TAG" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		-f Dockerfile.migrate \
-		-t $(ECR_REPO_MIGRATE):$$TAG \
-		-t $(ECR_REPO_MIGRATE):latest \
-		--load . && \
-	echo "==> Pushing Migrate Docker image to ECR..." && \
-	docker push $(ECR_REPO_MIGRATE):$$TAG && \
-	docker push $(ECR_REPO_MIGRATE):latest && \
-	echo "==> Migrate Docker image released: $(ECR_REPO_MIGRATE):$$TAG"
+	@$(MAKE) _docker-release-image \
+		IMG_NAME="Migrate" \
+		IMG_REPO="$(ECR_REPO_MIGRATE)" \
+		IMG_DOCKERFILE=Dockerfile.migrate \
+		IMG_EXTRA_ARGS="--build-arg GO_VERSION=$(GO_VERSION)" \
+		IMG_CACHE_KEY=migrate
 
 # Sentinelstaging Migrate Docker Shortcuts
 docker-release-migrate-staging:
@@ -1737,11 +1690,10 @@ kind-deploy-python-api:
 # Auto-discovered from cmd/cronjobs/*/main.go — no changes needed when adding a new cronjob.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DOCKERFILE = cmd/cronjobs/Dockerfile
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CRONJOB=$* -t stl-$*:local -f $(CRONJOB_DOCKERFILE) .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:local -f Dockerfile.common .
 
 # Pattern rule: release a cronjob image to ECR (build + push).
 # All cronjobs share a single ECR repo; the cronjob name is part of the tag.
@@ -1749,30 +1701,7 @@ docker-build-cronjob-%:
 docker-release-cronjob-%: ecr-login _docker-release-cronjob-%-internal
 
 _docker-release-cronjob-%-internal:
-	@TAG=$(IMAGE_TAG) && \
-	REPO=$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
-	echo "==> Building Cronjob $* Docker image for ARM64..." && \
-	echo "    Repository: $$REPO" && \
-	echo "    Tag: $*-$$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg CRONJOB=$* \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
-		-f $(CRONJOB_DOCKERFILE) \
-		-t $$REPO:$*-$$TAG \
-		-t $$REPO:$*-latest \
-		--load . && \
-	echo "==> Pushing Cronjob $* Docker image to ECR..." && \
-	docker push $$REPO:$*-$$TAG && \
-	docker push $$REPO:$*-latest && \
-	echo "==> Cronjob $* Docker image released: $$REPO:$*-$$TAG"
+	@$(MAKE) _docker-release-go-service GO_NAME="Cronjob $*" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/cronjobs/$* GO_BIN=cronjob GO_CACHE_KEY="cronjob-$*" GO_TAG="$*-$(IMAGE_TAG)" GO_LATEST_TAG="$*-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"
@@ -1864,23 +1793,13 @@ docker-push-python-api: ecr-login
 docker-release-python-api: ecr-login _docker-release-python-api-internal
 
 _docker-release-python-api-internal:
-	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	echo "==> Building Python API Docker image for ARM64..." && \
-	echo "    Repository: $(ECR_REPO_PYTHON_API)" && \
-	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	docker buildx build --platform linux/arm64 \
-		--build-arg PYTHON_VERSION=$(PYTHON_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		-f python/Dockerfile \
-		-t $(ECR_REPO_PYTHON_API):$$TAG \
-		-t $(ECR_REPO_PYTHON_API):latest \
-		--load . && \
-	echo "==> Pushing Python API Docker image to ECR..." && \
-	docker push $(ECR_REPO_PYTHON_API):$$TAG && \
-	docker push $(ECR_REPO_PYTHON_API):latest && \
-	echo "==> Python API Docker image released: $(ECR_REPO_PYTHON_API):$$TAG"
+	@$(MAKE) _docker-release-image \
+		IMG_NAME="Python API" \
+		IMG_REPO="$(ECR_REPO_PYTHON_API)" \
+		IMG_DOCKERFILE=python/Dockerfile \
+		IMG_EXTRA_ARGS="--build-arg PYTHON_VERSION=$(PYTHON_VERSION)" \
+		IMG_GIT_ARGS=commit \
+		IMG_CACHE_KEY=python-api
 
 docker-release-python-api-staging:
 	@$(MAKE) docker-release-python-api ENV=sentinelstaging
@@ -1919,19 +1838,11 @@ docker-release-mock-blockchain-server: ecr-login _docker-release-mock-blockchain
 
 _docker-release-mock-blockchain-server-internal:
 	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
 	echo "==> Building Mock Blockchain Server Docker image for ARM64..." && \
 	echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)" && \
 	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
 		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
 		-f Dockerfile.mock-blockchain-server \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
