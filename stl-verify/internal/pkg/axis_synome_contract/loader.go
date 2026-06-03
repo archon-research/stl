@@ -51,13 +51,19 @@ type AssetsByPrimeModel struct {
 }
 
 type AlmProxiesModel struct {
-	AlmProxy map[string]map[string]ProxyConfig `json:"AlmProxy"`
+	// AlmProxy is keyed by star then chain, and holds a list of proxies: the
+	// canonical ALM proxy plus any additional SubProxy/treasury wallets that
+	// must be tracked separately for the same (star, chain).
+	AlmProxy map[string]map[string][]ProxyConfig `json:"AlmProxy"`
 }
 
 type ProxyConfig struct {
 	Star    string `json:"star"`
 	Chain   string `json:"chain"`
 	Address string `json:"address"`
+	// Role distinguishes the canonical ALM proxy ("alm") from additional
+	// SubProxy/treasury wallets ("subproxy") for the same (star, chain).
+	Role string `json:"role"`
 }
 
 type TokenEntry struct {
@@ -72,8 +78,10 @@ type TokenEntry struct {
 	CreatedAtBlock  *int64  `json:"created_at_block"`
 }
 
-// GetAlmProxies returns the ALM proxy configurations keyed by star and then chain.
-func (c *Contract) GetAlmProxies() map[string]map[string]ProxyConfig {
+// GetAlmProxies returns the ALM proxy configurations keyed by star and then
+// chain. Each (star, chain) maps to a list of proxies (canonical ALM proxy plus
+// any additional SubProxy/treasury wallets).
+func (c *Contract) GetAlmProxies() map[string]map[string][]ProxyConfig {
 	return c.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
 }
 
@@ -154,10 +162,12 @@ func LoadContract(path string) (*Contract, error) {
 
 func validateAddresses(contract *Contract) error {
 	for star, byChain := range contract.GetAlmProxies() {
-		for chain, proxy := range byChain {
-			context := fmt.Sprintf("alm_proxy star=%s chain=%s", star, chain)
-			if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
-				return err
+		for chain, proxies := range byChain {
+			for i, proxy := range proxies {
+				context := fmt.Sprintf("alm_proxy star=%s chain=%s index=%d", star, chain, i)
+				if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
+					return err
+				}
 			}
 		}
 	}

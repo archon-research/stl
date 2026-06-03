@@ -15,6 +15,9 @@ type ProxyConfig struct {
 	Star    string
 	Chain   string
 	Address common.Address
+	// Role distinguishes the canonical ALM proxy ("alm") from additional
+	// SubProxy/treasury wallets ("subproxy").
+	Role string
 }
 
 type Config struct {
@@ -54,26 +57,33 @@ func LoadDefaultProxies() ([]ProxyConfig, error) {
 	proxyByAddress := make(map[proxyConfigKey]ProxyConfig)
 
 	for star, byChain := range almProxyByStar {
-		for chain, proxy := range byChain {
-			proxyConfig := ProxyConfig{
-				Star:    star,
-				Chain:   chain,
-				Address: common.HexToAddress(proxy.Address),
-			}
-			key := proxyConfigKey{Chain: proxyConfig.Chain, Address: proxyConfig.Address}
-			if existing, ok := proxyByAddress[key]; ok {
-				return nil, fmt.Errorf(
-					"duplicate proxy address %s for chain %s (%s and %s)",
-					proxyConfig.Address.Hex(),
-					proxyConfig.Chain,
-					existing.Star,
-					proxyConfig.Star,
-				)
-			}
+		for chain, chainProxies := range byChain {
+			for _, proxy := range chainProxies {
+				proxyConfig := ProxyConfig{
+					Star:    star,
+					Chain:   chain,
+					Address: common.HexToAddress(proxy.Address),
+					Role:    proxy.Role,
+				}
+				key := proxyConfigKey{Chain: proxyConfig.Chain, Address: proxyConfig.Address}
+				if existing, ok := proxyByAddress[key]; ok {
+					return nil, fmt.Errorf(
+						"duplicate proxy address %s for chain %s (%s and %s)",
+						proxyConfig.Address.Hex(),
+						proxyConfig.Chain,
+						existing.Star,
+						proxyConfig.Star,
+					)
+				}
 
-			proxyByAddress[key] = proxyConfig
-			proxies = append(proxies, proxyConfig)
+				proxyByAddress[key] = proxyConfig
+				proxies = append(proxies, proxyConfig)
+			}
 		}
+	}
+
+	if len(proxies) == 0 {
+		return nil, fmt.Errorf("no ALM proxies loaded from axis-synome contract")
 	}
 
 	sort.Slice(proxies, func(i int, j int) bool {

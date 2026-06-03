@@ -1,103 +1,94 @@
 {
   "$defs": {
-    "AlmProxiesModule": {
+    "AlmProxiesContainer": {
       "additionalProperties": false,
       "properties": {
-        "AlmProxy": {
+        "proxies": {
           "additionalProperties": {
             "additionalProperties": {
-              "$ref": "#/$defs/StlProxyConfig"
+              "items": {
+                "$ref": "#/$defs/ProxyEntry"
+              },
+              "type": "array"
             },
             "type": "object"
           },
-          "title": "Almproxy",
+          "title": "Proxies",
           "type": "object"
         }
       },
       "required": [
-        "AlmProxy"
+        "proxies"
       ],
-      "title": "AlmProxiesModule",
+      "title": "AlmProxiesContainer",
       "type": "object"
     },
-    "AscModule": {
+    "AscModel": {
       "additionalProperties": false,
       "properties": {
         "entities": {
-          "$ref": "#/$defs/EntitiesModule"
+          "$ref": "#/$defs/EntitiesModel"
         }
       },
       "required": [
         "entities"
       ],
-      "title": "AscModule",
+      "title": "AscModel",
       "type": "object"
     },
-    "AssetsByPrimeModule": {
+    "AssetsByPrimeContainer": {
       "additionalProperties": false,
       "properties": {
-        "ASSETS_BY_PRIME": {
+        "entries": {
           "additionalProperties": {
             "items": {
-              "$ref": "#/$defs/StlTokenEntry"
+              "$ref": "#/$defs/TokenEntryModel"
             },
             "type": "array"
           },
-          "title": "Assets By Prime",
+          "title": "Entries",
           "type": "object"
         }
       },
       "required": [
-        "ASSETS_BY_PRIME"
+        "entries"
       ],
-      "title": "AssetsByPrimeModule",
+      "title": "AssetsByPrimeContainer",
       "type": "object"
     },
-    "AxisSynomeModule": {
+    "AxisSynomeModel": {
       "additionalProperties": false,
       "properties": {
         "spec": {
-          "$ref": "#/$defs/SpecModule"
+          "$ref": "#/$defs/SpecModel"
         }
       },
       "required": [
         "spec"
       ],
-      "title": "AxisSynomeModule",
+      "title": "AxisSynomeModel",
       "type": "object"
     },
-    "EntitiesModule": {
+    "EntitiesModel": {
       "additionalProperties": false,
       "properties": {
         "assets_by_prime": {
-          "$ref": "#/$defs/AssetsByPrimeModule"
+          "$ref": "#/$defs/AssetsByPrimeContainer"
         },
         "alm_proxies": {
-          "$ref": "#/$defs/AlmProxiesModule"
+          "$ref": "#/$defs/AlmProxiesContainer"
         }
       },
       "required": [
         "assets_by_prime",
         "alm_proxies"
       ],
-      "title": "EntitiesModule",
+      "title": "EntitiesModel",
       "type": "object"
     },
-    "SpecModule": {
+    "ProxyEntry": {
       "additionalProperties": false,
-      "properties": {
-        "asc": {
-          "$ref": "#/$defs/AscModule"
-        }
-      },
-      "required": [
-        "asc"
-      ],
-      "title": "SpecModule",
-      "type": "object"
-    },
-    "StlProxyConfig": {
-      "additionalProperties": false,
+      "description": "A single ALM-controlled wallet exported for a (star, chain).\n\nMore than one may exist per (star, chain): the canonical ALM Proxy plus any\nadditional SubProxy/treasury wallets. ``role`` lets consumers tell them apart\nwithout relying on list position.",
       "properties": {
         "star": {
           "title": "Star",
@@ -110,17 +101,35 @@
         "address": {
           "title": "Address",
           "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
         }
       },
       "required": [
         "star",
         "chain",
-        "address"
+        "address",
+        "role"
       ],
-      "title": "StlProxyConfig",
+      "title": "ProxyEntry",
       "type": "object"
     },
-    "StlTokenEntry": {
+    "SpecModel": {
+      "additionalProperties": false,
+      "properties": {
+        "asc": {
+          "$ref": "#/$defs/AscModel"
+        }
+      },
+      "required": [
+        "asc"
+      ],
+      "title": "SpecModel",
+      "type": "object"
+    },
+    "TokenEntryModel": {
       "additionalProperties": false,
       "properties": {
         "contract_address": {
@@ -140,7 +149,6 @@
               "type": "null"
             }
           ],
-          "default": null,
           "title": "Asset Address"
         },
         "star": {
@@ -172,20 +180,21 @@
               "type": "null"
             }
           ],
-          "default": null,
           "title": "Created At Block"
         }
       },
       "required": [
         "contract_address",
         "wallet_address",
+        "asset_address",
         "star",
         "chain",
         "protocol",
         "allocation_type",
-        "token_type"
+        "token_type",
+        "created_at_block"
       ],
-      "title": "StlTokenEntry",
+      "title": "TokenEntryModel",
       "type": "object"
     }
   },
@@ -200,7 +209,7 @@
       "type": "string"
     },
     "axis_synome": {
-      "$ref": "#/$defs/AxisSynomeModule"
+      "$ref": "#/$defs/AxisSynomeModel"
     }
   },
   "required": [

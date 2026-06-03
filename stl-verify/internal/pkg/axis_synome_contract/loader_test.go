@@ -42,10 +42,19 @@ func TestLoad_OK(t *testing.T) {
 						"alm_proxies": map[string]any{
 							"AlmProxy": map[string]any{
 								"spark": map[string]any{
-									"mainnet": map[string]any{
-										"star":    "spark",
-										"chain":   "mainnet",
-										"address": "0x3333333333333333333333333333333333333333",
+									"mainnet": []map[string]any{
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x3333333333333333333333333333333333333333",
+											"role":    "alm",
+										},
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x4444444444444444444444444444444444444444",
+											"role":    "subproxy",
+										},
 									},
 								},
 							},
@@ -73,9 +82,15 @@ func TestLoad_OK(t *testing.T) {
 		t.Fatalf("axis_synome_git_commit = %q, want %q", bundle.Contract.AxisSynomeGitCommit, "deadbeef")
 	}
 
-	got := bundle.Contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"].Address
-	if got != "0x3333333333333333333333333333333333333333" {
+	sparkMainnet := bundle.Contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"]
+	if len(sparkMainnet) != 2 {
+		t.Fatalf("spark/mainnet proxies = %d, want 2", len(sparkMainnet))
+	}
+	if got := sparkMainnet[0].Address; got != "0x3333333333333333333333333333333333333333" {
 		t.Fatalf("address = %q, want %q", got, "0x3333333333333333333333333333333333333333")
+	}
+	if got := sparkMainnet[0].Role; got != "alm" {
+		t.Fatalf("role = %q, want %q", got, "alm")
 	}
 }
 
@@ -141,10 +156,19 @@ func TestLoadContract_InvalidAddressFails(t *testing.T) {
 						"alm_proxies": map[string]any{
 							"AlmProxy": map[string]any{
 								"spark": map[string]any{
-									"mainnet": map[string]any{
-										"star":    "spark",
-										"chain":   "mainnet",
-										"address": "0x3333333333333333333333333333333333333333",
+									"mainnet": []map[string]any{
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x3333333333333333333333333333333333333333",
+											"role":    "alm",
+										},
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x4444444444444444444444444444444444444444",
+											"role":    "subproxy",
+										},
 									},
 								},
 							},

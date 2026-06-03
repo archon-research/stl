@@ -1,6 +1,6 @@
 {
-  "version": "0.1.1.dev152+g1931035e9.d19800101",
-  "axis_synome_git_commit": "1931035e91cf9fa527292e45f048df533b840013",
+  "version": "0.1.1.dev187+g37b212def.d20260602",
+  "axis_synome_git_commit": "37b212defbfcc0cfd990d7c5e45b53063683f59e",
   "axis_synome": {
     "spec": {
       "asc": {
@@ -385,17 +385,6 @@
                   "created_at_block": null
                 },
                 {
-                  "contract_address": "0x377c3bd93f2a2984e1e7be6a5c22c525ed4a4815",
-                  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                  "star": "spark",
-                  "chain": "mainnet",
-                  "protocol": "arkis",
-                  "allocation_type": "allocation",
-                  "token_type": "erc4626",
-                  "created_at_block": null
-                },
-                {
                   "contract_address": "0x6a9da2d710bb9b700acde7cb81f10f1ff8c89041",
                   "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
                   "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -654,68 +643,116 @@
           "alm_proxies": {
             "AlmProxy": {
               "spark": {
-                "mainnet": {
-                  "star": "spark",
-                  "chain": "mainnet",
-                  "address": "0x1601843c5e9bc251a3272907010afa41fa18347e"
-                },
-                "base": {
-                  "star": "spark",
-                  "chain": "base",
-                  "address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
-                },
-                "arbitrum": {
-                  "star": "spark",
-                  "chain": "arbitrum",
-                  "address": "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709"
-                },
-                "unichain": {
-                  "star": "spark",
-                  "chain": "unichain",
-                  "address": "0x345e368fccd62266b3f5f37c9a131fd1c39f5869"
-                },
-                "optimism": {
-                  "star": "spark",
-                  "chain": "optimism",
-                  "address": "0x876664f0c9ff24d1aa355ce9f1680ae1a5bf36fb"
-                },
-                "avalanche-c": {
-                  "star": "spark",
-                  "chain": "avalanche-c",
-                  "address": "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
-                }
+                "mainnet": [
+                  {
+                    "star": "spark",
+                    "chain": "mainnet",
+                    "address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+                    "role": "alm"
+                  },
+                  {
+                    "star": "spark",
+                    "chain": "mainnet",
+                    "address": "0x3300f198988e4c9c63f75df86de36421f06af8c4",
+                    "role": "subproxy"
+                  }
+                ],
+                "base": [
+                  {
+                    "star": "spark",
+                    "chain": "base",
+                    "address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca",
+                    "role": "alm"
+                  }
+                ],
+                "arbitrum": [
+                  {
+                    "star": "spark",
+                    "chain": "arbitrum",
+                    "address": "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709",
+                    "role": "alm"
+                  }
+                ],
+                "unichain": [
+                  {
+                    "star": "spark",
+                    "chain": "unichain",
+                    "address": "0x345e368fccd62266b3f5f37c9a131fd1c39f5869",
+                    "role": "alm"
+                  }
+                ],
+                "optimism": [
+                  {
+                    "star": "spark",
+                    "chain": "optimism",
+                    "address": "0x876664f0c9ff24d1aa355ce9f1680ae1a5bf36fb",
+                    "role": "alm"
+                  }
+                ],
+                "avalanche-c": [
+                  {
+                    "star": "spark",
+                    "chain": "avalanche-c",
+                    "address": "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec",
+                    "role": "alm"
+                  }
+                ]
               },
               "grove": {
-                "mainnet": {
-                  "star": "grove",
-                  "chain": "mainnet",
-                  "address": "0x491edfb0b8b608044e227225c715981a30f3a44e"
-                },
-                "avalanche-c": {
-                  "star": "grove",
-                  "chain": "avalanche-c",
-                  "address": "0x7107dd8f56642327945294a18a4280c78e153644"
-                },
-                "base": {
-                  "star": "grove",
-                  "chain": "base",
-                  "address": "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee"
-                },
-                "plasma": {
-                  "star": "grove",
-                  "chain": "plasma",
-                  "address": "0x0c462fff7cc975bc9f2b0aeb8270feba5fd71e1b"
-                },
-                "plume": {
-                  "star": "grove",
-                  "chain": "plume",
-                  "address": "0x1db91ad50446a671e2231f77e00948e68876f812"
-                },
-                "monad": {
-                  "star": "grove",
-                  "chain": "monad",
-                  "address": "0x94b398acb2fce988871218221ea6a4a2b26cccbc"
-                }
+                "mainnet": [
+                  {
+                    "star": "grove",
+                    "chain": "mainnet",
+                    "address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
+                    "role": "alm"
+                  },
+                  {
+                    "star": "grove",
+                    "chain": "mainnet",
+                    "address": "0x1369f7b2b38c76b6478c0f0e66d94923421891ba",
+                    "role": "subproxy"
+                  }
+                ],
+                "avalanche-c": [
+                  {
+                    "star": "grove",
+                    "chain": "avalanche-c",
+                    "address": "0x7107dd8f56642327945294a18a4280c78e153644",
+                    "role": "alm"
+                  }
+                ],
+                "base": [
+                  {
+                    "star": "grove",
+                    "chain": "base",
+                    "address": "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee",
+                    "role": "alm"
+                  }
+                ],
+                "plasma": [
+                  {
+                    "star": "grove",
+                    "chain": "plasma",
+                    "address": "0x0c462fff7cc975bc9f2b0aeb8270feba5fd71e1b",
+                    "role": "alm"
+                  }
+                ],
+                "plume": [
+                  {
+                    "star": "grove",
+                    "chain": "plume",
+                    "address": "0x1db91ad50446a671e2231f77e00948e68876f812",
+                    "role": "alm"
+                  }
+                ],
+                "monad": [
+                  {
+                    "star": "grove",
+                    "chain": "monad",
+                    "address": "0x94b398acb2fce988871218221ea6a4a2b26cccbc",
+                    "role": "alm"
+                  }
+                ]
               }
             }
           }
