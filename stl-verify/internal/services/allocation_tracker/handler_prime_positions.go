@@ -22,6 +22,11 @@ type PrimePositionHandler struct {
 	metadata    *metadataCache
 	primeLookup map[string]int64 // star name → prime.id
 	logger      *slog.Logger
+
+	// Tracks tokens already warned about for an estimated created_at_block, so
+	// the warning fires once per token rather than on every snapshot.
+	estimatedMu     sync.Mutex
+	estimatedTokens map[common.Address]struct{}
 }
 
 func NewPrimePositionHandler(
@@ -157,9 +162,16 @@ func (h *PrimePositionHandler) buildPositions(
 			return nil, fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
 		}
 
-		var createdAtBlock int64
-		if s.Entry.CreatedAtBlock != nil {
+		// The axis-synome export does not yet carry on-chain creation blocks
+		// (they are null), so fall back to the observation block as a non-zero
+		// floor. The token upsert applies LEAST(existing, new), so a later write
+		// with the actual deploy block self-corrects downward. Passing 0 would
+		// permanently pin token.created_at_block to 0; see buildSupplyEntities.
+		createdAtBlock := s.BlockNumber
+		if s.Entry.CreatedAtBlock != nil && *s.Entry.CreatedAtBlock > 0 {
 			createdAtBlock = *s.Entry.CreatedAtBlock
+		} else {
+			h.noteEstimatedCreatedAtBlock(s.Entry.ContractAddress, s.BlockNumber)
 		}
 
 		positions = append(positions, &entity.AllocationPosition{
@@ -182,6 +194,29 @@ func (h *PrimePositionHandler) buildPositions(
 		})
 	}
 	return positions, nil
+}
+
+// noteEstimatedCreatedAtBlock warns, once per token, that the persisted
+// created_at_block is an estimate (the observation block) because the
+// axis-synome export carries a null on-chain creation block. This keeps the
+// data gap observable without flooding the logs on every snapshot.
+func (h *PrimePositionHandler) noteEstimatedCreatedAtBlock(token common.Address, block int64) {
+	h.estimatedMu.Lock()
+	if h.estimatedTokens == nil {
+		h.estimatedTokens = make(map[common.Address]struct{})
+	}
+	_, seen := h.estimatedTokens[token]
+	if !seen {
+		h.estimatedTokens[token] = struct{}{}
+	}
+	h.estimatedMu.Unlock()
+
+	if seen {
+		return
+	}
+	h.logger.Warn("created_at_block estimated from observation block (axis-synome export has null)",
+		"token", token.Hex(),
+		"estimatedBlock", block)
 }
 
 func (h *PrimePositionHandler) buildSupplyEntities(
