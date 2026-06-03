@@ -711,22 +711,28 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 // the VEC-277 failure mode, where a late-but-canonical header was treated as a
 // reorg and blanket-orphaned its real canonical successors.
 //
-// It returns true only when no canonical row already holds this height AND the
-// block links into our canonical chain without breaking it:
+// It returns true (clean gap fill, save without orphaning) only when no
+// canonical row already holds this height AND one of:
 //
-//   - If a canonical successor at number+1 exists, that successor MUST reference
-//     this block (successor.parent_hash == block.hash). When it does, our own
-//     chain already names this block as the parent of number+1, so the block is
-//     provably canonical and safe to fill. This also covers multi-block gaps
-//     (e.g. 100 -> 103 -> 102, where 101 has not arrived yet). When the
-//     successor references a different hash, filling this block would dangle the
-//     forward link, so it is routed to reorg handling instead.
-//   - If there is no canonical successor yet, the block is a clean fill when its
-//     parent is the canonical block at number-1.
+//   - A canonical successor at number+1 exists and references this block
+//     (successor.parent_hash == block.hash). Our own chain already names this
+//     block as the parent of number+1, so it is provably canonical without an
+//     RPC round-trip. This covers multi-block gaps (e.g. 100 -> 103 -> 102,
+//     where 101 has not arrived yet). A successor that references a different
+//     hash means filling this block would dangle the forward link, so it is
+//     routed to reorg handling instead.
+//   - No canonical successor vouches for the block, but RPC confirms the
+//     incoming hash is canonical at this height. Parent-hash linkage alone is
+//     NOT trusted here: a stale fork shares the same parent number-1, so only
+//     the RPC canonical check distinguishes a genuine late arrival from a fork.
+//     This also covers a late arrival landing deep in a multi-block gap with
+//     neither neighbor present.
 //
-// Anything else (a different canonical block at this height, or no clean link on
-// either side) returns false and is routed to handleReorg, which verifies the
-// incoming hash against RPC before mutating state.
+// Anything else (a different canonical block at this height, a dangling forward
+// link, a non-canonical hash, or an RPC error) returns false and is routed to
+// handleReorg, which re-verifies against RPC before mutating state. The net
+// invariant: a block at or below head with no competing canonical row never
+// triggers a blanket orphan of its successors.
 func (s *LiveService) classifyOutOfOrderArrival(ctx context.Context, block LightBlock) (bool, error) {
 	existingAtHeight, err := s.stateRepo.GetBlockByNumber(ctx, block.Number)
 	if err != nil {
@@ -747,13 +753,19 @@ func (s *LiveService) classifyOutOfOrderArrival(ctx context.Context, block Light
 		return successor.ParentHash == block.Hash, nil
 	}
 
-	// No canonical successor yet: fall back to backward linkage. A clean fill
-	// when the parent is the canonical block at number-1.
-	parent, err := s.stateRepo.GetBlockByNumber(ctx, block.Number-1)
+	// No canonical successor vouches for this block. Parent-hash linkage alone
+	// cannot prove canonicity (a stale fork shares parent number-1), so confirm
+	// the incoming hash against RPC's canonical hash at this height. Only a
+	// confirmed-canonical block is a clean gap fill; a stale fork (or an RPC
+	// failure) returns false and is routed to handleReorg, where the same
+	// verification gate drops it. A confirmed block is saved without orphaning
+	// its canonical successors, preserving the invariant that a block at or
+	// below head with no competing canonical row never triggers a blanket orphan.
+	canonical, err := s.verifyIncomingIsCanonical(ctx, block.Number, block.Hash)
 	if err != nil {
-		return false, fmt.Errorf("failed to check parent block %d: %w", block.Number-1, err)
+		return false, fmt.Errorf("verify canonical for out-of-order block %d: %w", block.Number, err)
 	}
-	return parent != nil && parent.Hash == block.ParentHash, nil
+	return canonical, nil
 }
 
 // handleReorg processes a detected reorg and returns the reorg event for atomic handling.
