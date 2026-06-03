@@ -2248,9 +2248,11 @@ func TestCacheAndPublishBlockData_RejectsLiteralNullBytes(t *testing.T) {
 // tests can assert the invariant fired. Keep it tiny: this is observability
 // glue, not a full mock.
 type fakeBackfillRecorder struct {
-	mu        sync.Mutex
-	calls     int
-	lastChain int64
+	mu          sync.Mutex
+	calls       int
+	lastChain   int64
+	lastLag     int64
+	lagRecorded bool
 }
 
 func (f *fakeBackfillRecorder) RecordBackfillGapNoCanonical(_ context.Context, chainID int64) {
@@ -2258,6 +2260,13 @@ func (f *fakeBackfillRecorder) RecordBackfillGapNoCanonical(_ context.Context, c
 	defer f.mu.Unlock()
 	f.calls++
 	f.lastChain = chainID
+}
+
+func (f *fakeBackfillRecorder) RecordWatermarkLag(_ context.Context, lag int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastLag = lag
+	f.lagRecorded = true
 }
 
 func (f *fakeBackfillRecorder) Calls() int {
@@ -2270,6 +2279,18 @@ func (f *fakeBackfillRecorder) LastChain() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lastChain
+}
+
+func (f *fakeBackfillRecorder) LagRecorded() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lagRecorded
+}
+
+func (f *fakeBackfillRecorder) LastLag() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastLag
 }
 
 // stuckOrphanRepo wraps the in-memory state repo and makes ClearBlockOrphaned
@@ -2505,5 +2526,54 @@ func TestProcessBlockData_StaleForkSkip_DoesNotFireInvariant(t *testing.T) {
 	}
 	if _, found := handler.findError("backfill completed but no canonical row produced"); found {
 		t.Fatal("stale-fork skip must not emit the silent-failure ERROR log")
+	}
+}
+
+// TestBackfillService_RecordsWatermarkLag verifies advanceWatermark emits the
+// backfill.watermark_lag gauge each cycle (head - watermark). This is the
+// symptom gauge that was missing during the VEC-277 incident.
+func TestBackfillService_RecordsWatermarkLag(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newMockClient()
+	for i := int64(1); i <= 10; i++ {
+		client.AddBlock(i, "")
+	}
+	stateRepo := memory.NewBlockStateRepository()
+	for i := int64(1); i <= 10; i++ {
+		h := client.GetHeader(i)
+		if _, err := stateRepo.SaveBlock(ctx, outbound.BlockState{
+			Number: i, Hash: h.Hash, ParentHash: h.ParentHash, BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+		if err := stateRepo.MarkPublishComplete(ctx, h.Hash); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+
+	rec := &fakeBackfillRecorder{}
+	svc, err := NewBackfillService(BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		BoundaryCheckDepth: -1,
+		Logger:             slog.Default(),
+		Metrics:            rec,
+	}, client, stateRepo, memory.NewBlockCache(), memory.NewEventSink())
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if !rec.LagRecorded() {
+		t.Fatal("expected watermark lag to be recorded during advanceWatermark")
+	}
+	// Lag is recorded at cycle start: head=10, watermark=0 → 10.
+	if got := rec.LastLag(); got != 10 {
+		t.Errorf("expected recorded lag 10 (head 10 - watermark 0), got %d", got)
 	}
 }

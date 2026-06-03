@@ -31,9 +31,11 @@ type ServiceTelemetry struct {
 	// Chain metrics
 	reorgsTotal        metric.Int64Counter
 	reorgsDroppedTotal metric.Int64Counter
+	outOfOrderBlocks   metric.Int64Counter
 
 	// Backfill invariant metrics
 	backfillGapNoCanonicalTotal metric.Int64Counter
+	backfillWatermarkLag        metric.Int64Gauge
 }
 
 // NewServiceTelemetry creates a new ServiceTelemetry instance with OpenTelemetry instrumentation.
@@ -80,6 +82,29 @@ func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry
 		return nil, err
 	}
 
+	// live.block.out_of_order.total counts blocks delivered with a number at or
+	// below the current head (out-of-order / late upstream delivery), labelled
+	// by outcome (late_arrival vs reorg). This is the direct trigger signal for
+	// the 2026-06-02 arbitrum incident; steady state is ~zero.
+	t.outOfOrderBlocks, err = meter.Int64Counter(
+		"live.block.out_of_order.total",
+		metric.WithDescription("Blocks received with number <= current head (out-of-order/late delivery), labelled by outcome"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// backfill.watermark_lag is the highest known block minus the backfill
+	// watermark. Sustained/growing lag is the symptom that went unseen for 26
+	// days in the VEC-277 incident.
+	t.backfillWatermarkLag, err = meter.Int64Gauge(
+		"backfill.watermark_lag",
+		metric.WithDescription("Highest known block number minus the backfill watermark (blocks behind)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return t, nil
 }
 
@@ -112,6 +137,17 @@ func (t *ServiceTelemetry) RecordReorgDropped(ctx context.Context, reason string
 	))
 }
 
+// RecordOutOfOrderBlock counts a block delivered with a number at or below the
+// current head, labelled by outcome (outbound.OutOfOrderOutcome*). Low
+// cardinality (one bounded label); per-chain attribution comes from
+// service.name. A sustained nonzero rate is the direct fingerprint of
+// out-of-order upstream delivery (the VEC-277 trigger).
+func (t *ServiceTelemetry) RecordOutOfOrderBlock(ctx context.Context, outcome string) {
+	t.outOfOrderBlocks.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("outcome", outcome),
+	))
+}
+
 // RecordBackfillGapNoCanonical increments the silent-failure counter that
 // catches gap-fill cycles which returned success but did not yield a
 // non-orphaned canonical row. Per-chain attribution comes from the OTel
@@ -125,4 +161,11 @@ func (t *ServiceTelemetry) RecordReorgDropped(ctx context.Context, reason string
 func (t *ServiceTelemetry) RecordBackfillGapNoCanonical(ctx context.Context, chainID int64) {
 	_ = chainID
 	t.backfillGapNoCanonicalTotal.Add(ctx, 1)
+}
+
+// RecordWatermarkLag records the current backfill lag (highest known block
+// minus the watermark) as a gauge. Per-chain attribution comes from
+// service.name; no per-block attribute, so cardinality stays flat.
+func (t *ServiceTelemetry) RecordWatermarkLag(ctx context.Context, lag int64) {
+	t.backfillWatermarkLag.Record(ctx, lag)
 }

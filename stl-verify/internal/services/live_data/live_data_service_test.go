@@ -637,6 +637,73 @@ func TestDetectReorg_LateArrivalFillsGap_NoReorg(t *testing.T) {
 	}
 }
 
+// TestDetectReorg_OutOfOrderMetric verifies the diagnostic counter fires when a
+// block arrives with number <= head, labelled by outcome: late_arrival for a
+// clean gap fill, reorg for a conflicting low block. This counter is the direct
+// fingerprint of out-of-order upstream delivery (the VEC-277 trigger).
+func TestDetectReorg_OutOfOrderMetric(t *testing.T) {
+	ctx := context.Background()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	t.Run("late_arrival", func(t *testing.T) {
+		stateRepo := newMockStateRepo()
+		metrics := &mockMetrics{}
+		// 100 and 102 canonical; 101 missing (gap), arrives late and links cleanly.
+		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix()})
+		_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{Number: 102, Hash: "0xblock102", ParentHash: "0xblock101", BlockTimestamp: time.Now().Unix()})
+		svc, err := NewLiveService(LiveConfig{Metrics: metrics}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
+		if err != nil {
+			t.Fatalf("NewLiveService: %v", err)
+		}
+		isReorg, _, _, _, err := svc.detectReorg(ctx, LightBlock{Number: 101, Hash: "0xblock101", ParentHash: "0xblock100"}, time.Now())
+		if err != nil {
+			t.Fatalf("detectReorg: %v", err)
+		}
+		if isReorg {
+			t.Error("expected no reorg for clean late arrival")
+		}
+		if got := metrics.OutOfOrderCount(outbound.OutOfOrderOutcomeLateArrival); got != 1 {
+			t.Errorf("expected 1 late_arrival out-of-order record, got %d", got)
+		}
+		if got := metrics.OutOfOrderCount(outbound.OutOfOrderOutcomeReorg); got != 0 {
+			t.Errorf("expected 0 reorg out-of-order records, got %d", got)
+		}
+	})
+
+	t.Run("reorg", func(t *testing.T) {
+		stateRepo := newMockStateRepo()
+		metrics := &mockMetrics{}
+		client := testutil.NewMockBlockchainClient()
+		client.SetBlockHeader(99, "0xblock99", "0xblock98")
+		for _, b := range []outbound.BlockState{
+			{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", BlockTimestamp: time.Now().Unix()},
+			{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix()},
+			{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix()},
+		} {
+			_, _ = stateRepo.SaveBlock(ctx, b)
+		}
+		svc, err := NewLiveService(LiveConfig{Metrics: metrics}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+		if err != nil {
+			t.Fatalf("NewLiveService: %v", err)
+		}
+		// Block 99 with a DIFFERENT hash → conflicting low block → reorg.
+		isReorg, _, _, _, err := svc.detectReorg(ctx, LightBlock{Number: 99, Hash: "0xblock99_alt", ParentHash: "0xblock98"}, time.Now())
+		if err != nil {
+			t.Fatalf("detectReorg: %v", err)
+		}
+		if !isReorg {
+			t.Error("expected reorg for conflicting low block")
+		}
+		if got := metrics.OutOfOrderCount(outbound.OutOfOrderOutcomeReorg); got != 1 {
+			t.Errorf("expected 1 reorg out-of-order record, got %d", got)
+		}
+		if got := metrics.OutOfOrderCount(outbound.OutOfOrderOutcomeLateArrival); got != 0 {
+			t.Errorf("expected 0 late_arrival records, got %d", got)
+		}
+	})
+}
+
 // TestDetectReorg_LowerNumberConflictingHash_Reorg is the guard that the
 // late-arrival fast-path does NOT swallow a genuine reorg: when a DIFFERENT
 // canonical block already occupies the incoming height, it must still be
@@ -1879,9 +1946,10 @@ func TestProcessBlock_WithMetrics_RecordsReorg(t *testing.T) {
 }
 
 type mockMetrics struct {
-	mu            sync.Mutex
-	reorgCount    int
-	dropsByReason map[string]int
+	mu                  sync.Mutex
+	reorgCount          int
+	dropsByReason       map[string]int
+	outOfOrderByOutcome map[string]int
 }
 
 func (m *mockMetrics) RecordReorg(ctx context.Context, depth int, commonAncestor, blockNum int64) {
@@ -1899,10 +1967,25 @@ func (m *mockMetrics) RecordReorgDropped(ctx context.Context, reason string) {
 	m.mu.Unlock()
 }
 
+func (m *mockMetrics) RecordOutOfOrderBlock(ctx context.Context, outcome string) {
+	m.mu.Lock()
+	if m.outOfOrderByOutcome == nil {
+		m.outOfOrderByOutcome = make(map[string]int)
+	}
+	m.outOfOrderByOutcome[outcome]++
+	m.mu.Unlock()
+}
+
 func (m *mockMetrics) DropCount(reason string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.dropsByReason[reason]
+}
+
+func (m *mockMetrics) OutOfOrderCount(outcome string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.outOfOrderByOutcome[outcome]
 }
 
 func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {

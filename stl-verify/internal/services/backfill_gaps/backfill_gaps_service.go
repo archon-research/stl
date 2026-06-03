@@ -970,6 +970,13 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 		return nil
 	}
 
+	// Emit the current backfill lag (head minus watermark) as a gauge. In
+	// steady state this sits near zero; a sustained or growing value is the
+	// symptom that went unseen for 26 days in the VEC-277 incident.
+	if s.metrics != nil {
+		s.metrics.RecordWatermarkLag(ctx, maxBlock-currentWatermark)
+	}
+
 	// Start checking from the block after the current watermark
 	startBlock := max(currentWatermark+1, minBlock)
 

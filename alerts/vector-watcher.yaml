@@ -240,3 +240,66 @@ groups:
             `docs/incidents/2026-06-02-arbitrum-backfill-loop.md` for the
             recovery playbook.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchersilentbackfillnocanonical
+
+      - alert: VectorWatcherBackfillWatermarkLagHigh
+        # The backfill watermark should track close to the chain head. In the
+        # 2026-06-02 arbitrum incident the watermark sat pinned for ~13 days
+        # while head advanced, growing the lag without bound — and nothing
+        # watched it. `backfill_watermark_lag` (head - watermark) is the direct
+        # symptom gauge. Steady state is near zero; normal post-restart catch-up
+        # drains within minutes, so a sustained large lag is anomalous.
+        expr: |
+          max by (service_name, cluster) (
+            backfill_watermark_lag{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }
+          ) > 1000
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher backfill watermark lag high on {{ $labels.service_name }}"
+          description: |
+            `backfill_watermark_lag` (highest known block minus the backfill
+            watermark) on `{{ $labels.service_name }}` has been >1000 for 30m.
+            The backfill is not draining toward head. Either a gap is stuck
+            (the VEC-277 orphan-only failure mode) or upstream RPC is degraded
+            beyond the catch-up rate.
+
+            Check the watcher logs and
+            `docs/incidents/2026-06-02-arbitrum-backfill-loop.md`.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcherbackfillwatermarklaghigh
+
+      - alert: VectorWatcherOutOfOrderBlocksHigh
+        # Leading indicator: blocks delivered with number <= head (out-of-order
+        # / late upstream delivery). Near zero in steady state; a sustained
+        # rate means upstream (Alchemy) is delivering headers out of order,
+        # which under load is what misclassified as reorgs and over-orphaned
+        # canonical blocks in the 2026-06-02 incident. Warning severity — it
+        # front-runs the backfill symptom above.
+        expr: |
+          sum by (service_name, cluster) (
+            rate(live_block_out_of_order_total{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher receiving out-of-order blocks on {{ $labels.service_name }}"
+          description: |
+            `live_block_out_of_order_total` on `{{ $labels.service_name }}` is
+            sustained above 0.1/s over 15m — upstream is delivering headers
+            out of order (the VEC-277 trigger). Correlate with the Alchemy
+            429/error rate; if it escalates, expect reorg churn and backfill
+            lag to follow.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderblockshigh

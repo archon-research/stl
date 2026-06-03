@@ -685,11 +685,17 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 					attribute.Bool("reorg.detected", false),
 					attribute.Bool("block.late_arrival", true),
 				)
+				if s.metrics != nil {
+					s.metrics.RecordOutOfOrderBlock(ctx, outbound.OutOfOrderOutcomeLateArrival)
+				}
 				return false, 0, 0, nil, nil
 			}
 		}
 		// A different canonical block holds this height, or the incoming block
 		// does not link onto our chain → genuine reorg.
+		if s.metrics != nil {
+			s.metrics.RecordOutOfOrderBlock(ctx, outbound.OutOfOrderOutcomeReorg)
+		}
 		return s.handleReorg(ctx, block, receivedAt)
 	}
 

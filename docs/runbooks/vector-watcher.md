@@ -111,6 +111,68 @@ interval; confirm the counter returns to zero and `totalMissing` drains.
 
 ---
 
+## VectorWatcherBackfillWatermarkLagHigh
+
+**Severity:** critical · **For:** 30m
+
+### What it means
+
+`backfill_watermark_lag` (highest known block minus the backfill watermark) on
+the labelled `service_name` has been over 1000 for 30 minutes. The backfill is
+not draining toward head. In steady state this gauge sits near zero; normal
+post-restart catch-up drains within minutes.
+
+### First checks (≤5 min)
+
+1. **Is a gap stuck?** Query the chain DB for an orphaned row with no canonical
+   row at the same number (the VEC-277 shape) — see the silent-backfill runbook
+   above.
+2. **Upstream RPC** — check the Alchemy 429 / error rate; degraded RPC beyond
+   the catch-up rate also grows lag.
+3. **Watcher logs** for repeated gap-fill of the same numbers.
+
+### Recovery
+
+If it is the VEC-277 orphan-only shape, the self-heal drains it automatically
+once the fix is deployed; otherwise follow
+[docs/incidents/2026-06-02-arbitrum-backfill-loop.md](../incidents/2026-06-02-arbitrum-backfill-loop.md).
+
+### Verify recovery
+
+`backfill_watermark_lag` returns toward zero.
+
+---
+
+## VectorWatcherOutOfOrderBlocksHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+`live_block_out_of_order_total` (blocks delivered with number ≤ head) on the
+labelled `service_name` is sustained above 0.1/s over 15m. Upstream (Alchemy) is
+delivering headers out of order — the VEC-277 trigger. The `outcome` label
+splits benign late-arrival fills from reorg-classified blocks.
+
+### First checks (≤5 min)
+
+1. **Correlate with the Alchemy 429 / error rate** — out-of-order delivery
+   clusters under upstream rate-limit storms.
+2. **Watch the reorg rate** (`chain.reorgs.total`) and
+   `backfill_watermark_lag`; if they rise, the trigger is turning into churn.
+
+### Notes
+
+This is a leading indicator, not itself damage: the fix classifies clean
+late arrivals as gap fills and the backfill self-heals any over-orphaning. Use
+it to catch upstream degradation early.
+
+### Verify recovery
+
+`rate(live_block_out_of_order_total[10m])` returns toward zero.
+
+---
+
 ## See also
 
 - Pipeline overview: [docs/live_data_architecture.png](../live_data_architecture.png)
