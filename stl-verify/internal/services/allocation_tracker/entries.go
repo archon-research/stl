@@ -49,26 +49,14 @@ func LoadDefaultTokenEntries() ([]*TokenEntry, error) {
 	}
 	sort.Strings(starKeys)
 
+	// The axis-synome export guarantees unique (chain, contract, wallet) token
+	// entries (it hard-errors on duplicates) and NewService rejects any that
+	// slip through, so entries are appended without local de-duplication.
 	entries := make([]*TokenEntry, 0)
-	entryIndexByKey := make(map[defaultEntryKey]int)
-
 	for _, star := range starKeys {
 		sourceEntries := entriesByStar[star]
 		for i := range sourceEntries {
-			entry := contractTokenEntryToAllocationEntry(star, &sourceEntries[i])
-			key := defaultEntryKey{Chain: entry.Chain, EntryKey: entry.Key()}
-			if existingIndex, ok := entryIndexByKey[key]; ok {
-				resolvedEntry, err := resolveDuplicateTokenEntry(entries[existingIndex], entry)
-				if err != nil {
-					return nil, err
-				}
-
-				entries[existingIndex] = resolvedEntry
-				continue
-			}
-
-			entryIndexByKey[key] = len(entries)
-			entries = append(entries, entry)
+			entries = append(entries, contractTokenEntryToAllocationEntry(star, &sourceEntries[i]))
 		}
 	}
 
@@ -95,73 +83,6 @@ func LoadDefaultTokenEntries() ([]*TokenEntry, error) {
 	})
 
 	return entries, nil
-}
-
-type defaultEntryKey struct {
-	Chain string
-	EntryKey
-}
-
-func resolveDuplicateTokenEntry(existing *TokenEntry, candidate *TokenEntry) (*TokenEntry, error) {
-	if tokenEntriesEquivalent(existing, candidate) {
-		return candidate, nil
-	}
-	if shouldPreferSparkLendAToken(existing, candidate) {
-		return existing, nil
-	}
-	if shouldPreferSparkLendAToken(candidate, existing) {
-		return candidate, nil
-	}
-
-	return nil, fmt.Errorf(
-		"conflicting duplicate token entry for contract=%s wallet=%s: existing protocol=%s token_type=%s allocation_type=%s candidate protocol=%s token_type=%s allocation_type=%s",
-		existing.ContractAddress.Hex(),
-		existing.WalletAddress.Hex(),
-		existing.Protocol,
-		existing.TokenType,
-		existing.AllocationType,
-		candidate.Protocol,
-		candidate.TokenType,
-		candidate.AllocationType,
-	)
-}
-
-func tokenEntriesEquivalent(left *TokenEntry, right *TokenEntry) bool {
-	return left.ContractAddress == right.ContractAddress &&
-		left.WalletAddress == right.WalletAddress &&
-		left.Star == right.Star &&
-		left.Chain == right.Chain &&
-		left.Protocol == right.Protocol &&
-		left.AllocationType == right.AllocationType &&
-		left.TokenType == right.TokenType &&
-		commonAddressPointersEqual(left.AssetAddress, right.AssetAddress) &&
-		int64PointersEqual(left.CreatedAtBlock, right.CreatedAtBlock)
-}
-
-func shouldPreferSparkLendAToken(preferred *TokenEntry, other *TokenEntry) bool {
-	return preferred.ContractAddress == other.ContractAddress &&
-		preferred.WalletAddress == other.WalletAddress &&
-		preferred.Star == other.Star &&
-		preferred.Chain == other.Chain &&
-		commonAddressPointersEqual(preferred.AssetAddress, other.AssetAddress) &&
-		(preferred.Protocol == "sparklend" || preferred.Protocol == "sparklend-protocol") &&
-		preferred.TokenType == "atoken" &&
-		other.Protocol == "arkis" &&
-		other.TokenType == "erc4626"
-}
-
-func commonAddressPointersEqual(left *common.Address, right *common.Address) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return *left == *right
-}
-
-func int64PointersEqual(left *int64, right *int64) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return *left == *right
 }
 
 func contractTokenEntryToAllocationEntry(star string, source *axis_synome_contract.TokenEntry) *TokenEntry {
