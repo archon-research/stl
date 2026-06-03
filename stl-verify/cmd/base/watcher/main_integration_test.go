@@ -712,6 +712,197 @@ func TestWatcherLive_OutOfOrderArrival_DoesNotOrphanCanonicalSuccessor(t *testin
 	})
 }
 
+// TestWatcherLive_MultiBlockOutOfOrderArrival_DoesNotOrphanSuccessor extends the
+// out-of-order regression to a MULTI-block gap (PR #377 review, CodeRabbit):
+// 100 -> 103 -> 102 -> 101. When 102 arrives its immediate parent (101) has not
+// arrived yet, so a one-hop "is the block at number-1 present" check
+// misclassifies 102 as a reorg and the blanket orphan wrongly orphans canonical
+// 103. The fix classifies 102 as a clean late arrival because the canonical
+// successor 103 already links back to it (103.parent_hash == 102.hash). Driven
+// end to end through the live service against real Postgres.
+func TestWatcherLive_MultiBlockOutOfOrderArrival_DoesNotOrphanSuccessor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	mockSub := testutil.NewMockSubscriber()
+	mockClient := newTestBlockchainClient()
+	for _, n := range []int64{100, 101, 102, 103} {
+		mockClient.AddBlock(n, "")
+	}
+
+	liveService, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 1, FinalityBlockCount: 16, Logger: slog.Default()},
+		mockSub,
+		mockClient,
+		infra.BlockStateRepo,
+		infra.Cache,
+		infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("NewLiveService: %v", err)
+	}
+	if err := liveService.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer liveService.Stop()
+
+	canonicalAt := func(num int64) bool {
+		st, err := infra.BlockStateRepo.GetBlockByNumber(ctx, num)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber(%d): %v", num, err)
+		}
+		return st != nil && !st.IsOrphaned && st.Hash == fmt.Sprintf("0x%064x", num)
+	}
+
+	// 100 becomes head.
+	mockSub.SendHeader(mockClient.GetHeader(100))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(100) }) {
+		t.Fatal("block 100 never became canonical")
+	}
+	// 103 arrives early: a two-block forward gap (101 and 102 missing). Saved
+	// canonically with parent_hash = 102.
+	mockSub.SendHeader(mockClient.GetHeader(103))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(103) }) {
+		t.Fatal("block 103 never became canonical")
+	}
+	// 102 arrives: number <= head(103), and 101 is still missing. Must be a clean
+	// late arrival (canonical 103 links back to it), NOT a reorg that orphans 103.
+	mockSub.SendHeader(mockClient.GetHeader(102))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(102) }) {
+		t.Fatal("late block 102 never became canonical")
+	}
+	// 101 arrives last, filling the final gap.
+	mockSub.SendHeader(mockClient.GetHeader(101))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(101) }) {
+		t.Fatal("late block 101 never became canonical")
+	}
+
+	t.Run("canonical successor 103 not orphaned by the multi-block late arrival", func(t *testing.T) {
+		if !canonicalAt(103) {
+			row, _ := infra.BlockStateRepo.GetBlockByHash(ctx, fmt.Sprintf("0x%064x", 103))
+			t.Fatalf("block 103 was wrongly orphaned by the out-of-order arrival of 102 across a multi-block gap (the VEC-277 bug for deeper gaps); row=%+v", row)
+		}
+	})
+
+	t.Run("chain is contiguous and canonical 100..103", func(t *testing.T) {
+		for _, n := range []int64{100, 101, 102, 103} {
+			if !canonicalAt(n) {
+				t.Errorf("expected block %d canonical with hash 0x%064x", n, n)
+			}
+		}
+		gaps, err := infra.BlockStateRepo.FindGaps(ctx, 100, 103)
+		if err != nil {
+			t.Fatalf("FindGaps: %v", err)
+		}
+		if len(gaps) != 0 {
+			t.Errorf("expected no gaps across 100..103 after out-of-order delivery, got %v", gaps)
+		}
+	})
+}
+
+// TestWatcherLive_StaleForkLowBlock_DoesNotClobberCanonicalChain covers the
+// Copilot review point: a low block that links backward to canonical number-1
+// but whose canonical successor references a DIFFERENT hash must NOT be saved as
+// a clean late arrival. Saving it would leave canonical number+1 pointing at a
+// hash that no longer matches canonical number (a dangling forward link). The
+// fix routes such a block to reorg handling, where the RPC canonical check drops
+// the stale fork. Driven end to end against real Postgres.
+func TestWatcherLive_StaleForkLowBlock_DoesNotClobberCanonicalChain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	mockSub := testutil.NewMockSubscriber()
+	mockClient := newTestBlockchainClient()
+	// Real chain 100..103; canonical 102's parent_hash is the REAL 101.
+	for _, n := range []int64{100, 101, 102, 103} {
+		mockClient.AddBlock(n, "")
+	}
+
+	liveService, err := live_data.NewLiveService(
+		live_data.LiveConfig{ChainID: 1, FinalityBlockCount: 16, Logger: slog.Default()},
+		mockSub,
+		mockClient,
+		infra.BlockStateRepo,
+		infra.Cache,
+		infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("NewLiveService: %v", err)
+	}
+	if err := liveService.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer liveService.Stop()
+
+	canonicalAt := func(num int64) bool {
+		st, err := infra.BlockStateRepo.GetBlockByNumber(ctx, num)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber(%d): %v", num, err)
+		}
+		return st != nil && !st.IsOrphaned && st.Hash == fmt.Sprintf("0x%064x", num)
+	}
+
+	// 100 head, then 102 as a forward gap (canonical, parent_hash = real 101).
+	mockSub.SendHeader(mockClient.GetHeader(100))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(100) }) {
+		t.Fatal("block 100 never became canonical")
+	}
+	mockSub.SendHeader(mockClient.GetHeader(102))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(102) }) {
+		t.Fatal("block 102 never became canonical")
+	}
+
+	// A STALE FORK at 101: shares parent 100 but has a hash that canonical 102
+	// does NOT reference. Pre-fix the one-hop check saw "parent 100 matches" and
+	// saved it as a clean late arrival, breaking 102's forward link.
+	const forkHash = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	forkHeader := mockClient.GetHeader(101)
+	forkHeader.Hash = forkHash
+	mockSub.SendHeader(forkHeader)
+
+	// Sentinel: 103 is sent after the fork. processHeaders is strictly
+	// sequential, so once 103 is canonical the fork at 101 has been fully
+	// processed and we can assert on its (non-)effect.
+	mockSub.SendHeader(mockClient.GetHeader(103))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(103) }) {
+		t.Fatal("sentinel block 103 never became canonical")
+	}
+
+	t.Run("stale fork is not saved as canonical 101", func(t *testing.T) {
+		b101, err := infra.BlockStateRepo.GetBlockByNumber(ctx, 101)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber(101): %v", err)
+		}
+		if b101 != nil && b101.Hash == forkHash {
+			t.Fatalf("stale fork %s was saved as canonical 101, breaking 102's forward link", forkHash)
+		}
+	})
+
+	t.Run("canonical 102 is intact and still links to the real 101", func(t *testing.T) {
+		b102, err := infra.BlockStateRepo.GetBlockByNumber(ctx, 102)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber(102): %v", err)
+		}
+		if b102 == nil || b102.IsOrphaned || b102.ParentHash != fmt.Sprintf("0x%064x", 101) {
+			t.Fatalf("expected canonical 102 to keep parent_hash = real 101 (0x..101), got %+v", b102)
+		}
+	})
+}
+
 // TestMultiChain_ReorgIsolation verifies that a reorg on one chain
 // does not affect blocks on another chain.
 func TestMultiChain_ReorgIsolation(t *testing.T) {

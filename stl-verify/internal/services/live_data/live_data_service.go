@@ -657,42 +657,30 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 		attribute.String("chain.latest_hash", latestBlock.Hash),
 	)
 
-	// Block number decreased or same - possible reorg, OR a late/out-of-order
-	// arrival filling a gap. Distinguish the two before treating it as a reorg:
-	// blanket-orphaning on a misclassified late arrival is the VEC-277 root
-	// cause. A block is a late arrival (NOT a reorg) when no canonical block
-	// occupies its height AND it links cleanly onto our canonical chain (its
-	// parent is the canonical block at number-1). In that case we save it
-	// normally and leave its canonical successors untouched.
+	// Block number at or below our canonical tip: either a genuine reorg, or a
+	// late / out-of-order arrival filling a gap. Blanket-orphaning a
+	// misclassified late arrival is the VEC-277 root cause, so classify before
+	// routing. classifyOutOfOrderArrival returns true only for a clean gap fill
+	// that links into our canonical chain without breaking it.
 	if block.Number <= latestBlock.Number {
-		existingAtHeight, err := s.stateRepo.GetBlockByNumber(ctx, block.Number)
+		lateArrival, err := s.classifyOutOfOrderArrival(ctx, block)
 		if err != nil {
 			span.RecordError(err)
-			span.SetStatus(codes.Error, "failed to check existing block at height")
-			return false, 0, 0, nil, fmt.Errorf("failed to check existing block at height %d: %w", block.Number, err)
+			span.SetStatus(codes.Error, "failed to classify out-of-order arrival")
+			return false, 0, 0, nil, err
 		}
-		if existingAtHeight == nil {
-			parent, err := s.stateRepo.GetBlockByNumber(ctx, block.Number-1)
-			if err != nil {
-				span.RecordError(err)
-				span.SetStatus(codes.Error, "failed to check parent block")
-				return false, 0, 0, nil, fmt.Errorf("failed to check parent block %d: %w", block.Number-1, err)
+		if lateArrival {
+			span.SetAttributes(
+				attribute.Bool("reorg.detected", false),
+				attribute.Bool("block.late_arrival", true),
+			)
+			if s.metrics != nil {
+				s.metrics.RecordOutOfOrderBlock(ctx, outbound.OutOfOrderOutcomeLateArrival)
 			}
-			if parent != nil && parent.Hash == block.ParentHash {
-				// Clean late-arrival fill: links onto the canonical chain and
-				// no competing block holds this height.
-				span.SetAttributes(
-					attribute.Bool("reorg.detected", false),
-					attribute.Bool("block.late_arrival", true),
-				)
-				if s.metrics != nil {
-					s.metrics.RecordOutOfOrderBlock(ctx, outbound.OutOfOrderOutcomeLateArrival)
-				}
-				return false, 0, 0, nil, nil
-			}
+			return false, 0, 0, nil, nil
 		}
 		// A different canonical block holds this height, or the incoming block
-		// does not link onto our chain → genuine reorg.
+		// does not link cleanly onto our chain: genuine reorg.
 		if s.metrics != nil {
 			s.metrics.RecordOutOfOrderBlock(ctx, outbound.OutOfOrderOutcomeReorg)
 		}
@@ -715,6 +703,57 @@ func (s *LiveService) detectReorg(ctx context.Context, block LightBlock, receive
 		attribute.Bool("block.gap", true),
 	)
 	return false, 0, 0, nil, nil
+}
+
+// classifyOutOfOrderArrival decides whether a block whose number is at or below
+// our canonical tip is a benign late / out-of-order arrival (a gap fill that
+// belongs on our canonical chain) rather than a reorg. It is the guard against
+// the VEC-277 failure mode, where a late-but-canonical header was treated as a
+// reorg and blanket-orphaned its real canonical successors.
+//
+// It returns true only when no canonical row already holds this height AND the
+// block links into our canonical chain without breaking it:
+//
+//   - If a canonical successor at number+1 exists, that successor MUST reference
+//     this block (successor.parent_hash == block.hash). When it does, our own
+//     chain already names this block as the parent of number+1, so the block is
+//     provably canonical and safe to fill. This also covers multi-block gaps
+//     (e.g. 100 -> 103 -> 102, where 101 has not arrived yet). When the
+//     successor references a different hash, filling this block would dangle the
+//     forward link, so it is routed to reorg handling instead.
+//   - If there is no canonical successor yet, the block is a clean fill when its
+//     parent is the canonical block at number-1.
+//
+// Anything else (a different canonical block at this height, or no clean link on
+// either side) returns false and is routed to handleReorg, which verifies the
+// incoming hash against RPC before mutating state.
+func (s *LiveService) classifyOutOfOrderArrival(ctx context.Context, block LightBlock) (bool, error) {
+	existingAtHeight, err := s.stateRepo.GetBlockByNumber(ctx, block.Number)
+	if err != nil {
+		return false, fmt.Errorf("failed to check existing block at height %d: %w", block.Number, err)
+	}
+	if existingAtHeight != nil {
+		// A canonical block already occupies this height: not a gap fill.
+		return false, nil
+	}
+
+	successor, err := s.stateRepo.GetBlockByNumber(ctx, block.Number+1)
+	if err != nil {
+		return false, fmt.Errorf("failed to check successor block %d: %w", block.Number+1, err)
+	}
+	if successor != nil {
+		// Clean fill iff our canonical successor links back to this block;
+		// otherwise filling it would leave the chain forward-inconsistent.
+		return successor.ParentHash == block.Hash, nil
+	}
+
+	// No canonical successor yet: fall back to backward linkage. A clean fill
+	// when the parent is the canonical block at number-1.
+	parent, err := s.stateRepo.GetBlockByNumber(ctx, block.Number-1)
+	if err != nil {
+		return false, fmt.Errorf("failed to check parent block %d: %w", block.Number-1, err)
+	}
+	return parent != nil && parent.Hash == block.ParentHash, nil
 }
 
 // handleReorg processes a detected reorg and returns the reorg event for atomic handling.

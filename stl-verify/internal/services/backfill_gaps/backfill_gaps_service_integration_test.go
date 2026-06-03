@@ -802,6 +802,70 @@ func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
 	}
 }
 
+// TestBackfillService_WatermarkLag_ClampedNonNegative covers PR #377 review
+// (CodeRabbit): the watermark-lag gauge is head(maxBlock) - watermark, but the
+// canonical head can dip below an already-advanced watermark while blocks are
+// being orphaned. The recorded gauge must be clamped at zero, never negative
+// (a negative gauge under-reports lag exactly when the alert should fire).
+// Driven through the public RunOnce entrypoint against real Postgres.
+func TestBackfillService_WatermarkLag_ClampedNonNegative(t *testing.T) {
+	ctx := context.Background()
+
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	const testChainID int64 = 998
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES ($1, $2)`,
+		testChainID, "VEC-277 lag clamp",
+	); err != nil {
+		t.Fatalf("insert chain: %v", err)
+	}
+
+	repo := postgres.NewBlockStateRepository(pool, testChainID, nil)
+	// Canonical head is 5, all published.
+	const head int64 = 5
+	for i := int64(1); i <= head; i++ {
+		saveBlock(t, ctx, repo, i)
+		if err := repo.MarkPublishComplete(ctx, fmt.Sprintf("0x%064x", i)); err != nil {
+			t.Fatalf("publish block %d: %v", i, err)
+		}
+	}
+	// Watermark sits AHEAD of the canonical head (the post-orphaning state):
+	// head(5) - watermark(100) = -95 before clamping.
+	if err := repo.SetBackfillWatermark(ctx, 100); err != nil {
+		t.Fatalf("set watermark: %v", err)
+	}
+
+	rec := &fakeBackfillRecorder{}
+	svc, err := NewBackfillService(
+		BackfillConfig{
+			ChainID:            testChainID,
+			BoundaryCheckDepth: -1,
+			Logger:             slog.Default(),
+			Metrics:            rec,
+		},
+		newMockClient(),
+		repo,
+		memory.NewBlockCache(),
+		&integrationMockEventSink{},
+	)
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if !rec.LagRecorded() {
+		t.Fatal("expected watermark lag to be recorded")
+	}
+	if got := rec.LastLag(); got != 0 {
+		t.Fatalf("expected clamped lag 0 when head < watermark, got %d", got)
+	}
+}
+
 // TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch verifies the
 // VEC-277 backfill self-heal: when the only DB row for a fetched block's hash
 // is orphaned (caused by a prior over-orphaning reorg), processBlockData must

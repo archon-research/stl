@@ -205,20 +205,22 @@ groups:
 
       - alert: VectorWatcherSilentBackfillNoCanonical
         # Premise: the new counter wired in the Piece 2 change should be
-        # exactly zero in steady state. Any non-zero rate over 10m means a
+        # exactly zero in steady state. Any nonzero increase over 10m means a
         # per-block gap-fill cycle reported success without producing a
-        # canonical (non-orphaned) row in `block_states` — the silent-
-        # failure shape that caused the arbitrum backfill loop to lock at
-        # ~584 missing blocks for ~13 days. This is the highest-confidence
-        # leading indicator we have for that bug class returning.
+        # canonical (non-orphaned) row in `block_states`: the silent-failure
+        # shape that caused the arbitrum backfill loop to lock at ~584 missing
+        # blocks for ~13 days. increase()>0 with a short dwell latches even a
+        # single isolated occurrence, which rate()>0 with for:10m can miss when
+        # the lone positive window lines up with the dwell boundary. This is the
+        # highest-confidence leading indicator we have for that bug class.
         expr: |
           sum by (service_name, cluster) (
-            rate(backfill_gap_fill_no_canonical_total{
+            increase(backfill_gap_fill_no_canonical_total{
               k8s_namespace_name="vector",
               service_name=~".*watcher"
             }[10m])
           ) > 0
-        for: 10m
+        for: 1m
         labels:
           team: vector
           severity: critical
@@ -302,4 +304,40 @@ groups:
             out of order (the VEC-277 trigger). Correlate with the Alchemy
             429/error rate; if it escalates, expect reorg churn and backfill
             lag to follow.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderblockshigh
+
+      - alert: VectorWatcherOutOfOrderReorgClassification
+        # The dangerous subset of out-of-order delivery: a low/late block routed
+        # to reorg handling (outcome="reorg") rather than classified as a clean
+        # gap fill. This is the exact path that over-orphaned canonical blocks in
+        # the 2026-06-02 incident. On single-sequencer chains (e.g. Arbitrum) a
+        # real reorg is essentially impossible, so any occurrence is the
+        # over-orphaning trigger firing. increase()>0 with a short dwell catches
+        # even a single burst, which the broader sustained-rate
+        # VectorWatcherOutOfOrderBlocksHigh rule can miss.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(live_block_out_of_order_total{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher",
+              outcome="reorg"
+            }[10m])
+          ) > 0
+        for: 1m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher routed an out-of-order block to reorg handling on {{ $labels.service_name }}"
+          description: |
+            `live_block_out_of_order_total{outcome="reorg"}` on
+            `{{ $labels.service_name }}` is nonzero over the last 10m: a header
+            arrived at or below the canonical head and did not link cleanly onto
+            our chain, so it was routed to reorg handling. On a single-sequencer
+            chain this should essentially never happen; it is the over-orphaning
+            trigger from the 2026-06-02 incident. Correlate with the Alchemy
+            429/error rate and check `backfill_watermark_lag` and
+            `backfill_gap_fill_no_canonical_total` for orphan churn.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderblockshigh
