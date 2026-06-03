@@ -799,16 +799,18 @@ _docker-release-image:
 	elif [ "$(IMG_GIT_ARGS)" = "commit" ]; then \
 		GIT_ARGS="--build-arg GIT_COMMIT=$$COMMIT"; \
 	fi && \
-	if [ "$(DOCKER_PUSH)" = "0" ]; then OUTPUT="--output type=cacheonly"; else OUTPUT="--load"; fi && \
+	if [ "$(DOCKER_PUSH)" = "0" ]; then \
+		OUTPUT="--output type=cacheonly"; TAGS=""; \
+	else \
+		OUTPUT="--load"; TAGS="-t $(IMG_REPO):$(IMG_TAG) -t $(IMG_REPO):$(IMG_LATEST_TAG)"; \
+	fi && \
 	echo "==> Building $(IMG_NAME) image for linux/arm64..." && \
-	echo "    Repository: $(IMG_REPO)" && \
 	echo "    Tag: $(IMG_TAG)" && \
 	docker buildx build --platform linux/arm64 \
 		$(call docker_cache_flags,$(IMG_CACHE_KEY)) \
 		$(IMG_EXTRA_ARGS) $$GIT_ARGS \
 		-f $(IMG_DOCKERFILE) \
-		-t $(IMG_REPO):$(IMG_TAG) \
-		-t $(IMG_REPO):$(IMG_LATEST_TAG) \
+		$$TAGS \
 		$$OUTPUT . && \
 	if [ "$(DOCKER_PUSH)" = "0" ]; then \
 		echo "==> Built $(IMG_NAME) image (push skipped: DOCKER_PUSH=0)"; \

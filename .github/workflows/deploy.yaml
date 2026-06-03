@@ -20,7 +20,7 @@ on:
         required: false
         type: string
       push:
-        description: "Push images to ECR and run the deploy jobs. Defaults to build-only (safe on any branch); check to actually push and deploy."
+        description: "Push images to ECR and update the staging image tags. Defaults to build-only (safe on any branch). Note: manual runs go to staging only; prod promotion and the staging health gate run only on the automated main deploy."
         required: false
         type: boolean
         default: false
