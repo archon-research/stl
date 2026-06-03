@@ -97,7 +97,7 @@ def load_orderbook_data(collateral_list: list[str]) -> pd.DataFrame:
 
     all_orderbooks = {}
     for collateral in collateral_list:
-        all_orderbooks[collateral] = pd.read_parquet(_path(f"{collateral}_sell_orderbook.parquet"))
+        all_orderbooks[collateral] = pd.read_parquet(_path(f"{collateral.lower()}_sell_orderbook.parquet"))
     return all_orderbooks
 
 
