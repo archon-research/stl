@@ -1872,19 +1872,11 @@ docker-release-mock-blockchain-server: ecr-login _docker-release-mock-blockchain
 
 _docker-release-mock-blockchain-server-internal:
 	@TAG=$(IMAGE_TAG) && \
-	COMMIT=$$(git rev-parse HEAD) && \
-	BRANCH=$$(git rev-parse --abbrev-ref HEAD) && \
-	TIME=$$(date -u +"%Y-%m-%dT%H:%M:%SZ") && \
 	echo "==> Building Mock Blockchain Server Docker image for ARM64..." && \
 	echo "    Repository: $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER)" && \
 	echo "    Tag: $$TAG" && \
-	echo "    Commit: $$COMMIT" && \
-	echo "    Branch: $$BRANCH" && \
 	docker buildx build --platform linux/arm64 \
 		--build-arg GO_VERSION=$(GO_VERSION) \
-		--build-arg GIT_COMMIT=$$COMMIT \
-		--build-arg GIT_BRANCH=$$BRANCH \
-		--build-arg BUILD_TIME=$$TIME \
 		-f Dockerfile.mock-blockchain-server \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):$$TAG \
 		-t $(ECR_REPO_MOCK_BLOCKCHAIN_SERVER):latest \
