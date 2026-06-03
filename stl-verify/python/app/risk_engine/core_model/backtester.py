@@ -167,8 +167,8 @@ class Backtester:
         # 7. Compute hits
         hits = (actual_losses < var_forecast).astype(int)
         exceedances = hits.sum()
-        exceedance_rate = exceedances / len(hits)
-
-        print(f"Exceedances: {exceedances}/{len(hits)} ({exceedance_rate:.2%})")
+        # TODO: use logging and set this to debug level.
+        # exceedance_rate = exceedances / len(hits)
+        # print(f"Exceedances: {exceedances}/{len(hits)} ({exceedance_rate:.2%})")
 
         return np.array(hits)

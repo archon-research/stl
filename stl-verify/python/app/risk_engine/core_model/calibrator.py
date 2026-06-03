@@ -416,7 +416,7 @@ class Calibrator:
                     garch_spec=garch_spec,
                 )
 
-                hit_list = Parallel(n_jobs=-1)(
+                hit_list = Parallel(n_jobs=4)(
                     delayed(backtester.hit_backtest)(i) for i in range(0, len(self.price_series) - train_size)
                 )
                 all_hits = np.concatenate(hit_list)

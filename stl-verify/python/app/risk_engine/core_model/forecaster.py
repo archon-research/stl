@@ -486,7 +486,7 @@ class Simulator:
                 )
                 return {"prices": forecasted_prices.values}
 
-            sim_results = Parallel(-1)(delayed(run_simulation)(i) for i in tqdm(range(n_sims)))
+            sim_results = Parallel(jobs=4)(delayed(run_simulation)(i) for i in tqdm(range(n_sims)))
 
             all_prices = [res["prices"] if res is not None else np.full(forecasted_step, np.nan) for res in sim_results]
 
