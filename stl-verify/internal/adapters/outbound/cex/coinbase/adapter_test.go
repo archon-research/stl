@@ -2,12 +2,16 @@ package coinbase_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cex/coinbase"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
 const bookResponse = `{
@@ -273,5 +277,182 @@ func TestAdapter_Close_StopsStreaming(t *testing.T) {
 		case <-timeout:
 			t.Fatal("snapshot channel not closed after Close()")
 		}
+	}
+}
+
+// buildBookJSON renders a Coinbase level=2 book response from [price,size,num_orders] levels.
+func buildBookJSON(t *testing.T, bids, asks [][]any) string {
+	t.Helper()
+	b, err := json.Marshal(struct {
+		Bids     [][]any `json:"bids"`
+		Asks     [][]any `json:"asks"`
+		Sequence int64   `json:"sequence"`
+	}{Bids: bids, Asks: asks, Sequence: 1})
+	if err != nil {
+		t.Fatalf("marshal book response: %v", err)
+	}
+	return string(b)
+}
+
+func serveBody(body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// firstSnapshot streams and returns the first snapshot, failing on error/timeout.
+func firstSnapshot(t *testing.T, a *coinbase.Adapter, ctx context.Context) entity.OrderBookSnapshot {
+	t.Helper()
+	snapCh, errCh := a.Stream(ctx)
+	select {
+	case snap, ok := <-snapCh:
+		if !ok {
+			t.Fatal("snapshot channel closed before first value")
+		}
+		return snap
+	case err := <-errCh:
+		t.Fatalf("unexpected error: %v", err)
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for snapshot")
+	}
+	return entity.OrderBookSnapshot{}
+}
+
+// firstStreamError streams and returns the first error, failing if a snapshot
+// arrives first or the deadline passes.
+func firstStreamError(t *testing.T, a *coinbase.Adapter, ctx context.Context) error {
+	t.Helper()
+	snapCh, errCh := a.Stream(ctx)
+	select {
+	case err, ok := <-errCh:
+		if !ok || err == nil {
+			t.Fatal("expected a non-nil error")
+		}
+		return err
+	case <-snapCh:
+		t.Fatal("expected an error, got a snapshot")
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for error")
+	}
+	return nil
+}
+
+func TestAdapter_Stream_MalformedLevelReturnsError(t *testing.T) {
+	// A level tuple missing its size field must be rejected before normalization.
+	server := serveBody(buildBookJSON(t, [][]any{{"50000.00"}}, [][]any{}))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Connect(ctx, []string{"BTC-USD"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	if err := firstStreamError(t, a, ctx); !strings.Contains(err.Error(), "malformed level") {
+		t.Errorf("error = %v, want it to mention a malformed level", err)
+	}
+}
+
+func TestAdapter_Stream_WrongTypeLevelReturnsError(t *testing.T) {
+	// price arrives as a JSON number rather than a string: unmarshal must fail.
+	server := serveBody(buildBookJSON(t, [][]any{{50000, "1.0", 1}}, [][]any{}))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Connect(ctx, []string{"BTC-USD"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	if err := firstStreamError(t, a, ctx); !strings.Contains(err.Error(), "price") {
+		t.Errorf("error = %v, want it to mention the price field", err)
+	}
+}
+
+func TestAdapter_Stream_CrossedBookReturnsError(t *testing.T) {
+	// best bid (100) >= best ask (99): Validate must reject the snapshot.
+	bids := [][]any{{"100.00", "1.0", 1}}
+	asks := [][]any{{"99.00", "1.0", 1}}
+	server := serveBody(buildBookJSON(t, bids, asks))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Connect(ctx, []string{"BTC-USD"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	if err := firstStreamError(t, a, ctx); !strings.Contains(err.Error(), "invalid snapshot") {
+		t.Errorf("error = %v, want it to mention an invalid snapshot", err)
+	}
+}
+
+func TestAdapter_Stream_EmptyBook(t *testing.T) {
+	server := serveBody(buildBookJSON(t, [][]any{}, [][]any{}))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Connect(ctx, []string{"BTC-USD"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	snap := firstSnapshot(t, a, ctx)
+	if len(snap.Bids) != 0 || len(snap.Asks) != 0 {
+		t.Errorf("empty book: got %d bids, %d asks; want 0, 0", len(snap.Bids), len(snap.Asks))
+	}
+}
+
+func TestAdapter_Stream_OneSidedBook(t *testing.T) {
+	// Asks present, bids empty: must not trip the crossed-book check.
+	asks := [][]any{{"50001.00", "0.8", 1}, {"50002.00", "1.1", 2}}
+	server := serveBody(buildBookJSON(t, [][]any{}, asks))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := a.Connect(ctx, []string{"BTC-USD"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	snap := firstSnapshot(t, a, ctx)
+	if len(snap.Bids) != 0 || len(snap.Asks) != 2 {
+		t.Errorf("one-sided book: got %d bids, %d asks; want 0, 2", len(snap.Bids), len(snap.Asks))
+	}
+}
+
+func TestAdapter_Stream_LargeBook(t *testing.T) {
+	const n = 1000
+	bids := make([][]any, n)
+	asks := make([][]any, n)
+	for i := range n {
+		bids[i] = []any{strconv.Itoa(50000 - i), "1.0", 1} // descending, best first
+		asks[i] = []any{strconv.Itoa(50001 + i), "1.0", 1} // ascending, above best bid
+	}
+	server := serveBody(buildBookJSON(t, bids, asks))
+	defer server.Close()
+
+	a := newTestAdapter(t, server)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := a.Connect(ctx, []string{"BTC-USD"}); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	snap := firstSnapshot(t, a, ctx)
+	if len(snap.Bids) != n || len(snap.Asks) != n {
+		t.Fatalf("large book: got %d bids, %d asks; want %d each", len(snap.Bids), len(snap.Asks), n)
+	}
+	if snap.Bids[0].Price != "50000" || snap.Asks[0].Price != "50001" {
+		t.Errorf("best levels = bid %q / ask %q; want 50000 / 50001", snap.Bids[0].Price, snap.Asks[0].Price)
+	}
+	if want := strconv.Itoa(50000 - (n - 1)); snap.Bids[n-1].Price != want {
+		t.Errorf("deepest bid = %q; want %q", snap.Bids[n-1].Price, want)
 	}
 }

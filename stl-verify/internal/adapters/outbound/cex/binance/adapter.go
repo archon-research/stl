@@ -8,11 +8,9 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cex/poller"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -21,9 +19,17 @@ import (
 var _ outbound.ExchangeOrderBookStreamer = (*Adapter)(nil)
 
 const (
-	name         = "binance"
+	name = "binance"
+	// maxBodyBytes caps the response body we decode to guard against a
+	// malformed or hostile endpoint exhausting memory. Binance depth at the
+	// maximum limit=5000 is a few hundred KB; 4 MiB is generous headroom.
 	maxBodyBytes = 4 << 20 // 4 MiB
 )
+
+// This adapter is REST polling only. A live WebSocket streamer would be a
+// distinct adapter shape: Binance diff-depth requires buffering depthUpdate
+// events, fetching a REST snapshot, dropping events with u <= lastUpdateId,
+// then applying the remainder with gap detection and resync handling.
 
 type Config struct {
 	BaseURL           string
@@ -33,126 +39,51 @@ type Config struct {
 	DepthLimit        int
 }
 
+// withDefaults validates the config and fills zero-valued fields with defaults.
+func (c Config) withDefaults() (Config, error) {
+	if c.PollInterval < 0 {
+		return Config{}, errors.New("poll interval must not be negative")
+	}
+	if c.ChannelBufferSize < 0 {
+		return Config{}, errors.New("channel buffer size must not be negative")
+	}
+	if c.DepthLimit < 0 {
+		return Config{}, errors.New("depth limit must not be negative")
+	}
+	if c.BaseURL == "" {
+		c.BaseURL = "https://api.binance.com"
+	}
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if c.PollInterval == 0 {
+		c.PollInterval = 1 * time.Second
+	}
+	if c.ChannelBufferSize == 0 {
+		c.ChannelBufferSize = 100
+	}
+	if c.DepthLimit == 0 {
+		c.DepthLimit = 100
+	}
+	return c, nil
+}
+
+// Adapter streams Binance spot order books over REST. Lifecycle (Connect,
+// Stream, Close) is provided by the embedded poller.Poller; this type supplies
+// only the Binance-specific snapshot fetch.
 type Adapter struct {
-	cfg       Config
-	symbols   []string
-	once      sync.Once
-	streaming atomic.Bool
-	closeCh   chan struct{}
+	*poller.Poller
+	cfg Config
 }
 
 func NewAdapter(cfg Config) (*Adapter, error) {
-	if cfg.PollInterval < 0 {
-		return nil, errors.New("poll interval must not be negative")
+	cfg, err := cfg.withDefaults()
+	if err != nil {
+		return nil, err
 	}
-	if cfg.ChannelBufferSize < 0 {
-		return nil, errors.New("channel buffer size must not be negative")
-	}
-	if cfg.DepthLimit < 0 {
-		return nil, errors.New("depth limit must not be negative")
-	}
-	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.binance.com"
-	}
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
-	}
-	if cfg.PollInterval == 0 {
-		cfg.PollInterval = 1 * time.Second
-	}
-	if cfg.ChannelBufferSize == 0 {
-		cfg.ChannelBufferSize = 100
-	}
-	if cfg.DepthLimit == 0 {
-		cfg.DepthLimit = 100
-	}
-	return &Adapter{
-		cfg:     cfg,
-		closeCh: make(chan struct{}),
-	}, nil
-}
-
-func (a *Adapter) Name() string {
-	return name
-}
-
-func (a *Adapter) Connect(_ context.Context, symbols []string) error {
-	if len(symbols) == 0 {
-		return errors.New("symbols must not be empty")
-	}
-	for _, s := range symbols {
-		if strings.TrimSpace(s) == "" {
-			return errors.New("symbol must not be blank")
-		}
-		if strings.TrimSpace(s) != s {
-			return fmt.Errorf("symbol %q must not have surrounding whitespace", s)
-		}
-	}
-	cp := make([]string, len(symbols))
-	copy(cp, symbols)
-	a.symbols = cp
-	return nil
-}
-
-func (a *Adapter) Stream(ctx context.Context) (<-chan entity.OrderBookSnapshot, <-chan error) {
-	snapCh := make(chan entity.OrderBookSnapshot, a.cfg.ChannelBufferSize)
-	errCh := make(chan error, 1)
-
-	if len(a.symbols) == 0 {
-		errCh <- errors.New("Connect must be called before Stream")
-		close(snapCh)
-		close(errCh)
-		return snapCh, errCh
-	}
-
-	if !a.streaming.CompareAndSwap(false, true) {
-		errCh <- errors.New("Stream already called; create a new Adapter to start a new stream")
-		close(snapCh)
-		close(errCh)
-		return snapCh, errCh
-	}
-
-	symbols := make([]string, len(a.symbols))
-	copy(symbols, a.symbols)
-
-	go func() {
-		defer close(snapCh)
-		defer close(errCh)
-
-		ticker := time.NewTicker(a.cfg.PollInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-a.closeCh:
-				return
-			case <-ticker.C:
-				for _, sym := range symbols {
-					snap, err := a.fetchSnapshot(ctx, sym)
-					if err != nil {
-						errCh <- fmt.Errorf("fetching %s: %w", sym, err)
-						return
-					}
-					select {
-					case snapCh <- snap:
-					case <-ctx.Done():
-						return
-					case <-a.closeCh:
-						return
-					}
-				}
-			}
-		}
-	}()
-
-	return snapCh, errCh
-}
-
-func (a *Adapter) Close() error {
-	a.once.Do(func() { close(a.closeCh) })
-	return nil
+	a := &Adapter{cfg: cfg}
+	a.Poller = poller.New(name, a.fetchSnapshot, cfg.PollInterval, cfg.ChannelBufferSize)
+	return a, nil
 }
 
 type binanceDepthResponse struct {
@@ -161,6 +92,10 @@ type binanceDepthResponse struct {
 	Asks         [][]string `json:"asks"`
 }
 
+// fetchSnapshot pulls a single REST depth snapshot for one symbol.
+// Binance GET /api/v3/depth returns {lastUpdateId, bids[[price,qty]], asks[[price,qty]]}
+// with price and qty as decimal strings, ordered best-first.
+// Docs: https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints#order-book
 func (a *Adapter) fetchSnapshot(ctx context.Context, symbol string) (entity.OrderBookSnapshot, error) {
 	params := neturl.Values{
 		"symbol": {symbol},
@@ -178,6 +113,9 @@ func (a *Adapter) fetchSnapshot(ctx context.Context, symbol string) (entity.Orde
 		return entity.OrderBookSnapshot{}, fmt.Errorf("doing request: %w", err)
 	}
 	defer func() {
+		// Drain so the keep-alive connection can be reused on the next poll;
+		// Close alone does not read the unread remainder, and the transport
+		// only pools a connection whose body was consumed to EOF.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()

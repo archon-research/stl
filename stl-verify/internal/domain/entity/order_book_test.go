@@ -166,6 +166,42 @@ func TestOrderBookSnapshot_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "invalid qty string rejected",
+			snap: OrderBookSnapshot{
+				Exchange:   "binance",
+				Token:      "BTCUSDT",
+				CapturedAt: now,
+				Bids: []OrderBookLevel{
+					{Price: "100.00", Qty: "not-a-number"},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "empty qty string rejected",
+			snap: OrderBookSnapshot{
+				Exchange:   "binance",
+				Token:      "BTCUSDT",
+				CapturedAt: now,
+				Bids: []OrderBookLevel{
+					{Price: "100.00", Qty: ""},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "NaN qty rejected",
+			snap: OrderBookSnapshot{
+				Exchange:   "binance",
+				Token:      "BTCUSDT",
+				CapturedAt: now,
+				Asks: []OrderBookLevel{
+					{Price: "100.00", Qty: "NaN"},
+				},
+			},
+			wantErr: true,
+		},
+		{
 			name: "zero qty is valid (resting at zero)",
 			snap: OrderBookSnapshot{
 				Exchange:   "binance",
@@ -202,6 +238,44 @@ func TestOrderBookSnapshot_Validate(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			// Pins the crossed-book check at >= : best bid == best ask is rejected.
+			name: "equal best bid and ask rejected",
+			snap: OrderBookSnapshot{
+				Exchange:   "binance",
+				Token:      "BTCUSDT",
+				CapturedAt: now,
+				Bids:       []OrderBookLevel{{Price: "100.00", Qty: "1.0"}},
+				Asks:       []OrderBookLevel{{Price: "100.00", Qty: "0.8"}},
+			},
+			wantErr: true,
+		},
+		{
+			// Documents that equal adjacent prices on one side are allowed
+			// (e.g. two aggregated levels reported at the same price).
+			name: "equal adjacent bid prices allowed",
+			snap: OrderBookSnapshot{
+				Exchange:   "binance",
+				Token:      "BTCUSDT",
+				CapturedAt: now,
+				Bids: []OrderBookLevel{
+					{Price: "100.00", Qty: "1.0"},
+					{Price: "100.00", Qty: "0.5"},
+				},
+			},
+		},
+		{
+			name: "equal adjacent ask prices allowed",
+			snap: OrderBookSnapshot{
+				Exchange:   "binance",
+				Token:      "BTCUSDT",
+				CapturedAt: now,
+				Asks: []OrderBookLevel{
+					{Price: "101.00", Qty: "1.0"},
+					{Price: "101.00", Qty: "0.5"},
+				},
+			},
 		},
 	}
 
