@@ -340,4 +340,4 @@ groups:
             trigger from the 2026-06-02 incident. Correlate with the Alchemy
             429/error rate and check `backfill_watermark_lag` and
             `backfill_gap_fill_no_canonical_total` for orphan churn.
-          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderblockshigh
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderreorgclassification

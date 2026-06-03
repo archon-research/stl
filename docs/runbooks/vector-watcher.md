@@ -173,6 +173,44 @@ it to catch upstream degradation early.
 
 ---
 
+## VectorWatcherOutOfOrderReorgClassification
+
+**Severity:** warning · **For:** 1m
+
+### What it means
+
+`live_block_out_of_order_total{outcome="reorg"}` on the labelled `service_name`
+is nonzero over the last 10m: a header arrived at or below the canonical head
+and did NOT link cleanly onto our chain, so it was routed to reorg handling
+rather than classified as a clean gap fill. On single-sequencer chains (e.g.
+Arbitrum) a real reorg is essentially impossible, so this is the over-orphaning
+trigger from the 2026-06-02 incident. Unlike VectorWatcherOutOfOrderBlocksHigh
+(a sustained-rate warning across all outcomes), this fires on a single
+occurrence of the dangerous subset.
+
+### First checks (≤5 min)
+
+1. Correlate with the Alchemy 429 / error rate: this path clusters under
+   upstream rate-limit storms.
+2. Check `backfill_watermark_lag` and `backfill_gap_fill_no_canonical_total`
+   for orphan churn following the reorg classification.
+3. Pull the watcher logs for the block number to see whether the reorg was
+   committed or dropped by the RPC canonical-hash check.
+
+### Notes
+
+A reorg-classified out-of-order block is routed through RPC canonical-hash
+verification before any state mutation, and the backfill self-heals any
+over-orphaning, so a single occurrence is a signal rather than confirmed damage.
+Sustained occurrences mean upstream is degraded and the watcher is doing
+defensive work it should not need to.
+
+### Verify recovery
+
+`increase(live_block_out_of_order_total{outcome="reorg"}[10m])` returns to zero.
+
+---
+
 ## See also
 
 - Pipeline overview: [docs/live_data_architecture.png](../live_data_architecture.png)
