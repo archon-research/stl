@@ -173,29 +173,57 @@ CRR (EL) is the headline metric. It equals `PD × LGD` in Basel notation.
 
 CORE runs as a two-step process: a cronjob pre-computes the CRR and writes results to the `core_model_results` DB table; the API service reads the latest result at request time.
 
-### Step 1 — Run the pre-compute cronjob
+### Step 1 — Seed the local database (dev only)
 
-From `stl-verify/python/`:
+On a fresh local cluster the `receipt_token` table is empty. Run the seed script before starting the API:
 
 ```bash
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/stl_verify \
+uv run python scripts/seed_dev_sparklend.py
+```
+
+### Step 2 — Run the pre-compute cronjob
+
+From `stl-verify/python/`. Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded automatically from `inputs/market_configs.json` — only `CORE_MODEL_MARKET_KEY` is required:
+
+```bash
+# Single market
 DATABASE_URL=postgresql://... \
-CORE_MODEL_MARKET_KEY=sparklend_usdc \
-CORE_MODEL_PROTOCOL=SPARKLEND \
-CORE_MODEL_LOAN_TOKEN=USDC \
-python -m cli.cronjobs.core_model_runner.main
+CORE_MODEL_MARKET_KEY=sparklend_usdt \
+uv run python -m cli.cronjobs.core_model_runner.main
+
+# All configured markets
+DATABASE_URL=postgresql://... \
+CORE_MODEL_MARKET_KEY=all \
+uv run python -m cli.cronjobs.core_model_runner.main
+
+# Quick smoke test (override N_MC for all markets)
+DATABASE_URL=postgresql://... \
+CORE_MODEL_MARKET_KEY=all \
+CORE_MODEL_N_MC=100 \
+uv run python -m cli.cronjobs.core_model_runner.main
 ```
 
-Override any model parameter via env var (e.g. `CORE_MODEL_N_MC=5000`). See `cli/cronjobs/core_model_runner/config.py` for the full list of overridable parameters and their defaults.
+Params are resolved in three layers (lowest wins):
+1. `inputs/default_params.json` — canonical defaults
+2. `inputs/market_configs.json[market_key]` — per-market overrides
+3. `CORE_MODEL_*` env vars — runtime overrides
 
-### Step 2 — Query via the risk API
+The full params dict is stored as JSONB in `core_model_results.params` for auditability.
 
-Once a result has been written, the `CoreModelRiskService` serves it through the standard risk endpoint:
+### Step 3 — Query via the risk API
 
 ```
-GET /v1/risk/rrc?asset_id=<id>&prime_id=<address>
+GET /v1/risk/1/{receipt_token_address}/core-model
 ```
 
-The service multiplies `crr_el_pct` from the latest pre-computed result by the prime's USD exposure.
+Returns the latest pre-computed CRR result for the receipt token (no `prime_id` required — this is raw model output, not exposure-weighted RRC).
+
+The existing RRC endpoint also includes core model results when the asset is mapped:
+
+```
+GET /v1/risk/rrc?chain_id=1&token_address={address}&prime_id={address}
+```
 
 ### asset_id → market_key mapping
 
@@ -203,11 +231,20 @@ To enable a market, add an entry to `mappings/asset_to_market_key.json`:
 
 ```json
 {
-  "1:0xYourReceiptTokenAddress": "sparklend_usdc"
+  "1:0xReceiptTokenAddress": "market_key"
 }
 ```
 
-The key is `chain_id:0xAddress` (same format as the SURAF mapping). The value is the `market_key` used when running the cronjob.
+The key is `chain_id:0xAddress` (same format as the SURAF mapping). The value must match a key in `inputs/market_configs.json` and a `market_key` value in `core_model_results`.
+
+**Currently mapped markets (SparkLend):**
+
+| Receipt token | Address | Market key |
+|---|---|---|
+| spDAI | `0x4dedf26112b3ec8ec46e7e31ea5e123490b05b8b` | `sparklend_dai` |
+| spUSDC | `0x377c3bd93f2a2984e1e7be6a5c22c525ed4a4815` | `sparklend_usdc` |
+| spUSDS | `0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359` | `sparklend_usds` |
+| spUSDT | `0xe7df13b8e3d6740fe17cbe928c7334243d86c92f` | `sparklend_usdt` |
 
 ---
 
@@ -256,3 +293,56 @@ These bugs exist in the original model code and have not been fixed during integ
 | #3 | `backtester.py` | ~111 | High | `hit_backtest` defaults `use_log_returns=False` but production uses `USE_LOG_RETURNS=True`. Kupiec/Christoffersen model selection runs on the wrong return type — the "winning" GARCH model may not be the best for simulation. |
 | #4 | `aggregator.py` | ~203 | High | t-Copula `nu` is hardcoded to 3. MLE estimation exists but is disabled. `nu=3` produces very fat tails and is a material assumption that ignores the data. |
 | #5 | `runner.py` | | Medium | Jump parameters are calibrated from one token and applied uniformly to all tokens. Per-token override path exists in `forecaster.py` but is never populated. |
+
+---
+
+## Next Steps
+
+### Morpho — receipt token mapping is not straightforward
+
+The current `asset_to_market_key.json` mapping assumes a 1:1 relationship between an on-chain receipt token and a core model market key. This works cleanly for SparkLend (one spToken per loan token), but **does not work for Morpho Blue** for the following reason:
+
+- The STL `receipt_token` table stores **MetaMorpho vault** addresses (e.g. steakUSDC, bbqUSDC). A single MetaMorpho vault lends USDC across many Morpho Blue markets simultaneously — it may be exposed to cbBTC, WETH, and other collaterals at the same time.
+- The core model market keys `morpho_cbbtc-usdc` and `morpho_weth-usdc` represent **all Morpho Blue borrowers** using a given collateral/loan pair across the entire protocol, regardless of which vault is lending to them.
+- There is an **n:m mismatch**: one vault → many collateral markets, one market → many vaults. No single receipt token maps 1:1 to a core model Morpho market key.
+
+**Options to resolve:**
+
+1. **Pick a representative vault per market key** (pragmatic, approximate): choose the largest MetaMorpho vault that primarily exposes to the target collateral and accept it as a proxy. This is imprecise but unblocks the API.
+2. **Virtual receipt tokens**: introduce a synthetic receipt token in the DB (not backed by a real on-chain address) to represent the aggregate Morpho cbBTC/USDC or WETH/USDC market. Requires a schema decision.
+3. **Separate query path**: add a market-key-based endpoint that bypasses receipt token resolution entirely — useful if the Morpho core model result is consumed without a specific prime's exposure context.
+
+Until this is resolved, `morpho_cbbtc-usdc` and `morpho_weth-usdc` remain configured in `market_configs.json` and can be run by the cronjob, but cannot be served through the `asset_to_market_key.json` mapping or the `/core-model` API endpoint.
+
+### Syrup, Anchorage, Galaxy — no receipt tokens in the DB
+
+These three protocols do not appear in the STL `receipt_token` table. They are off-chain or institutional clients without on-chain receipt tokens tracked by the watcher. Before these markets can be wired into the API, they require:
+
+- Protocol entries in the `protocol` table
+- A mechanism to track user positions (off-chain feed or watcher extension)
+- Receipt token rows for their position tokens (if any)
+
+The cronjob can still run these markets against the parquet snapshots -- only the API mapping is blocked.
+
+### Galaxy -- missing ETH, SOL, and JITOSOL order books
+
+The Galaxy market data (`market_galaxy.parquet`) uses `ETH`, `SOL`, `JITOSOL`, `XRP`, `BTC` as collateral token symbols. `XRP` and `BTC` already have matching order book files. The three remaining collaterals are blocked:
+
+- `eth_sell_orderbook.parquet` -- missing. Galaxy uses the unwrapped `ETH` symbol; the existing file is `weth_sell_orderbook.parquet` (used by SparkLend/Morpho markets which report `WETH`). These need to be treated as the same asset or a separate `eth_sell_orderbook.parquet` file needs to be provided.
+- `sol_sell_orderbook.parquet` -- missing, needed for SOL-collateralised positions
+- `jitosol_sell_orderbook.parquet` -- missing, needed for JitoSOL-collateralised positions
+
+Until these are provided, the Galaxy cronjob will fail at the liquidity loading step.
+
+Note: `importer.load_orderbook_data` now lowercases all symbol names before constructing filenames, fixing a latent case-sensitivity bug that would have caused other markets to fail on Linux (e.g. `WETH` would have looked for `WETH_sell_orderbook.parquet` on a case-sensitive filesystem).
+
+### Parquet data is temporary
+
+All position, price, and order book data is currently loaded from static snapshots in `inputs/`. These files are a temporary scaffold to enable early development and testing -- they are **not updated automatically** and will become stale. CRR results computed from them reflect a historical snapshot, not current protocol state.
+
+The long-term target for each data layer:
+- **Position data** -- live on-chain via the existing block RPC watcher workers (same pipeline used by SparkLend today)
+- **Price data** -- the existing `offchain-price-indexer`, extended to 180-day retention
+- **Order book data** -- a new `orderbook-indexer` cronjob
+
+Until that pipeline is complete, the parquet files in `inputs/` must be manually refreshed to keep results meaningful.
