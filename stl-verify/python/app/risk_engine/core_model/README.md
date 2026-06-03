@@ -8,7 +8,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 ## Note
 
-This directory contains the CORE model as integrated into the STL service. The original standalone version lives in `core_model_copy/`. The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
+This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
 ---
 
@@ -308,6 +308,7 @@ These bugs exist in the original model code and have not been fixed during integ
 | #3 | `backtester.py` | ~111 | High | `hit_backtest` defaults `use_log_returns=False` but production uses `USE_LOG_RETURNS=True`. Kupiec/Christoffersen model selection runs on the wrong return type — the "winning" GARCH model may not be the best for simulation. |
 | #4 | `aggregator.py` | ~203 | High | t-Copula `nu` is hardcoded to 3. MLE estimation exists but is disabled. `nu=3` produces very fat tails and is a material assumption that ignores the data. |
 | #5 | `runner.py` | | Medium | Jump parameters are calibrated from one token and applied uniformly to all tokens. Per-token override path exists in `forecaster.py` but is never populated. |
+| #6 | `forecaster.py` | ~192 | High | Student-t distribution check uses `.startswith("student")` but the arch library names the distribution `"Standardized Student's t"`, which starts with `"Standardized"`. The check silently falls through to the Normal branch, causing t-distributed innovations to be treated as Gaussian and **underestimating tail risk**. Fix: replace `startswith("student")` with `"student" in name`, consistent with `_get_garch_distribution` at line 126. |
 
 ---
 

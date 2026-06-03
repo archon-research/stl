@@ -189,6 +189,10 @@ class Forecaster:
 
             if hasattr(self.garch_model.model, "distribution"):
                 dist = self.garch_model.model.distribution
+                # TODO(bug#6): startswith("student") misses arch distributions whose name begins
+                # with "Standardized" (e.g. "Standardized Student's t"). Use "student" in name
+                # as _get_garch_distribution does. Until fixed, Student-t innovations fall through
+                # to the Normal branch, underestimating tail risk.
                 if dist.name.lower().startswith("student"):
                     # Read nu from the *fitted* parameter vector (same fix as _get_garch_distribution)
                     _params = self.garch_model.params
