@@ -179,7 +179,9 @@ func contractTokenEntryToAllocationEntry(star string, source *axis_synome_contra
 		Protocol:        legacyAllocationTrackerProtocol(source),
 		AllocationType:  source.AllocationType,
 		TokenType:       source.TokenType,
-		CreatedAtBlock:  copyCreatedAtBlock(source.CreatedAtBlock),
+		// created_at_block is chain-observed, not carried by the axis-synome
+		// contract; the allocation tracker owns it via knownCreatedAtBlocks.
+		CreatedAtBlock: lookupCreatedAtBlock(source.Chain, common.HexToAddress(source.ContractAddress)),
 	}
 }
 
@@ -207,15 +209,6 @@ func optionalEntryAssetAddress(value *string) *common.Address {
 
 	address := common.HexToAddress(*value)
 	return &address
-}
-
-func copyCreatedAtBlock(value *int64) *int64 {
-	if value == nil {
-		return nil
-	}
-
-	createdAtBlock := *value
-	return &createdAtBlock
 }
 
 func BuildEntryLookup(entries []*TokenEntry) map[EntryKey]*TokenEntry {

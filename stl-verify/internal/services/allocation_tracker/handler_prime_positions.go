@@ -162,11 +162,13 @@ func (h *PrimePositionHandler) buildPositions(
 			return nil, fmt.Errorf("unknown star %q: no matching prime_id", s.Entry.Star)
 		}
 
-		// The axis-synome export does not yet carry on-chain creation blocks
-		// (they are null), so fall back to the observation block as a non-zero
-		// floor. The token upsert applies LEAST(existing, new), so a later write
-		// with the actual deploy block self-corrects downward. Passing 0 would
-		// permanently pin token.created_at_block to 0; see buildSupplyEntities.
+		// created_at_block comes from the tracker-owned knownCreatedAtBlocks
+		// registry (it is chain-observed, not carried by the axis-synome
+		// contract). For positions absent from that registry, fall back to the
+		// observation block as a non-zero floor. The token upsert applies
+		// LEAST(existing, new), so a later write with the actual deploy block
+		// self-corrects downward. Passing 0 would permanently pin
+		// token.created_at_block to 0; see buildSupplyEntities.
 		createdAtBlock := s.BlockNumber
 		if s.Entry.CreatedAtBlock != nil && *s.Entry.CreatedAtBlock > 0 {
 			createdAtBlock = *s.Entry.CreatedAtBlock
@@ -197,9 +199,9 @@ func (h *PrimePositionHandler) buildPositions(
 }
 
 // noteEstimatedCreatedAtBlock warns, once per token, that the persisted
-// created_at_block is an estimate (the observation block) because the
-// axis-synome export carries a null on-chain creation block. This keeps the
-// data gap observable without flooding the logs on every snapshot.
+// created_at_block is an estimate (the observation block) because the position
+// is not recorded in the tracker-owned knownCreatedAtBlocks registry. This keeps
+// the data gap observable without flooding the logs on every snapshot.
 func (h *PrimePositionHandler) noteEstimatedCreatedAtBlock(token common.Address, block int64) {
 	h.estimatedMu.Lock()
 	if h.estimatedTokens == nil {
@@ -214,7 +216,7 @@ func (h *PrimePositionHandler) noteEstimatedCreatedAtBlock(token common.Address,
 	if seen {
 		return
 	}
-	h.logger.Warn("created_at_block estimated from observation block (axis-synome export has null)",
+	h.logger.Warn("created_at_block estimated from observation block (no entry in knownCreatedAtBlocks)",
 		"token", token.Hex(),
 		"estimatedBlock", block)
 }

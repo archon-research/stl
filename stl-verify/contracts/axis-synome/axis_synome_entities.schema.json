@@ -170,17 +170,6 @@
         "token_type": {
           "title": "Token Type",
           "type": "string"
-        },
-        "created_at_block": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Created At Block"
         }
       },
       "required": [
@@ -191,8 +180,7 @@
         "chain",
         "protocol",
         "allocation_type",
-        "token_type",
-        "created_at_block"
+        "token_type"
       ],
       "title": "TokenEntryModel",
       "type": "object"

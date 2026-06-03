@@ -75,7 +75,9 @@ type TokenEntry struct {
 	Protocol        string  `json:"protocol"`
 	AllocationType  string  `json:"allocation_type"`
 	TokenType       string  `json:"token_type"`
-	CreatedAtBlock  *int64  `json:"created_at_block"`
+	// created_at_block is intentionally absent: it is on-chain observed data,
+	// not Atlas-sourced, so the axis-synome contract does not carry it. The
+	// allocation tracker owns it via knownCreatedAtBlocks (see entries.go).
 }
 
 // GetAlmProxies returns the ALM proxy configurations keyed by star and then
