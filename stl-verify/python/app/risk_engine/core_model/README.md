@@ -12,6 +12,21 @@ This directory contains the CORE model as integrated into the STL service. The o
 
 ---
 
+## Changes from the original standalone version
+
+The financial model logic (ARMA-GARCH calibration, copula simulation, liquidation mechanics) is **mathematically unchanged**. The following modifications were made for service integration:
+
+| Change | Reason |
+|---|---|
+| `main.py` replaced by `runner.py` | Original `main.py` printed results to stdout. `runner.py` is a pure function that accepts typed inputs and returns a typed `CoreModelPipelineResult` dataclass, making it testable and composable. |
+| Import paths updated (`from app.risk_engine.core_model.X import Y`) | Required for Python package structure; original used bare module imports only valid when run from the same directory. |
+| `Parallel(n_jobs=-1)` changed to `Parallel(n_jobs=4)` | `-1` consumed all available CPUs and caused OOM in constrained environments. |
+| `orderbook_data` lookup lowercased (`symbol.lower()`) | Original assumed the working directory was case-insensitive (macOS). Lowercase normalisation is required for Linux where the service runs. |
+| Bare `except:` changed to `except Exception:` | Required by the project linter (ruff). |
+| Three `# TODO` comments added | Document known bugs in the original code that were not fixed during integration (see **Known Issues** section). |
+
+---
+
 ## Supported Protocols
 
 | Protocol | Data Source |
