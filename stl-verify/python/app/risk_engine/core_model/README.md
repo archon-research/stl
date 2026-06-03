@@ -304,7 +304,7 @@ These bugs exist in the original model code and have not been fixed during integ
 
 | ID | File | Line | Severity | Description |
 |---|---|---|---|---|
-| #2 | `liquidator.py` | ~510 | Low | `final_collat_totals` is never populated — always zero. `summary_df['final_total_collateral']` is silent wrong data in every run. |
+| #2 | `liquidator.py` | ~510 | Cosmetic | `final_collat_totals` is never populated — always zero. However `final_total_collateral` is excluded from the `summary_df` subset before any CRR computation and is never read downstream. No metric stored in `core_model_results` is affected. |
 | #3 | `backtester.py` | ~111 | High | `hit_backtest` defaults `use_log_returns=False` but production uses `USE_LOG_RETURNS=True`. Kupiec/Christoffersen model selection runs on the wrong return type — the "winning" GARCH model may not be the best for simulation. |
 | #4 | `aggregator.py` | ~203 | High | t-Copula `nu` is hardcoded to 3. MLE estimation exists but is disabled. `nu=3` produces very fat tails and is a material assumption that ignores the data. |
 | #5 | `runner.py` | | Medium | Jump parameters are calibrated from one token and applied uniformly to all tokens. Per-token override path exists in `forecaster.py` but is never populated. |

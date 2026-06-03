@@ -454,6 +454,9 @@ class Liquidator:
         recoveries_totals = np.zeros(N_SCEN)
         final_debt_totals = np.zeros(N_SCEN)
         # TODO(bug#2): final_collat_totals is never populated -- always zero.
+        # Impact: none on CRR or any stored metric. final_total_collateral is
+        # included in the intermediate 'summary' DataFrame but excluded from
+        # 'summary_df' before any computation; it is never read downstream.
         # The assignment is commented out below and `q` is undefined in that scope.
         final_collat_totals = np.zeros(N_SCEN)
         max_delta_ltv = np.zeros(N_SCEN)
