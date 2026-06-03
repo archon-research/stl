@@ -884,6 +884,118 @@ func TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch(t *testing
 	}
 }
 
+// TestIntegration_BackfillLoop_DrainsWronglyOrphanedGap_AdvancesWatermark is the
+// end-to-end reproduction of the VEC-277 arbitrum incident. Unlike
+// TestIntegration_ProcessBlockData_ClearsOrphanOnIdempotentReFetch (which calls
+// processBlockData directly), this drives the FULL backfill pass via RunOnce:
+// FindGaps → fetch → processBlockData → advanceWatermark. It reproduces the
+// incident's defining symptom — a wrongly-orphaned canonical block that pins the
+// backfill watermark and makes the gap finder re-find the same block forever —
+// and asserts that one pass drains the gap AND advances the watermark past it.
+//
+// On the pre-fix code this loops indefinitely: processBlockData's hash-only
+// idempotency check skips the orphan-only row, FindGaps keeps reporting block N
+// as a gap, and the watermark stays pinned below N. Post-fix, the orphan is
+// resurrected and the watermark jumps to head in a single pass.
+func TestIntegration_BackfillLoop_DrainsWronglyOrphanedGap_AdvancesWatermark(t *testing.T) {
+	pgRepo, cleanup := setupPostgres(t)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+
+	// The mock client knows the canonical chain 1..5. Seeding the DB from the
+	// same client headers guarantees parent_hash linkage is consistent, so the
+	// heal's linkage re-check passes.
+	client := newMockClient()
+	for i := int64(1); i <= 5; i++ {
+		client.AddBlock(i, "")
+	}
+
+	const orphanedNum int64 = 3
+	for i := int64(1); i <= 5; i++ {
+		h := client.GetHeader(i)
+		if _, err := pgRepo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           h.Hash,
+			ParentHash:     h.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed block %d: %v", i, err)
+		}
+		// All blocks were published before the incident; mark them so watermark
+		// advancement is not capped by GetMinUnpublishedBlock.
+		if err := pgRepo.MarkPublishComplete(ctx, h.Hash); err != nil {
+			t.Fatalf("mark published %d: %v", i, err)
+		}
+	}
+
+	// Wrongly orphan block 3 with NO replacement — exactly what the buggy
+	// blanket-orphan did to a canonical successor of a late-arriving block.
+	orphanHash := client.GetHeader(orphanedNum).Hash
+	if err := pgRepo.MarkBlockOrphaned(ctx, orphanHash); err != nil {
+		t.Fatalf("orphan block %d: %v", orphanedNum, err)
+	}
+
+	// Pre-condition: the gap exists and the watermark is pinned below it.
+	gaps, err := pgRepo.FindGaps(ctx, 1, 5)
+	if err != nil {
+		t.Fatalf("FindGaps pre: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0].From != orphanedNum || gaps[0].To != orphanedNum {
+		t.Fatalf("expected single gap [%d,%d] pre-fix, got %v", orphanedNum, orphanedNum, gaps)
+	}
+
+	// Disable the RPC boundary check so the test isolates the gap-fill → heal →
+	// watermark path.
+	cfg := BackfillConfigDefaults()
+	cfg.BoundaryCheckDepth = -1
+	svc, err := NewBackfillService(cfg, client, pgRepo, memory.NewBlockCache(), &integrationMockEventSink{})
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+
+	if err := svc.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	t.Run("gap drained", func(t *testing.T) {
+		gapsAfter, err := pgRepo.FindGaps(ctx, 1, 5)
+		if err != nil {
+			t.Fatalf("FindGaps post: %v", err)
+		}
+		if len(gapsAfter) != 0 {
+			t.Errorf("expected no gaps after the pass, got %v", gapsAfter)
+		}
+	})
+
+	t.Run("orphan resurrected with original hash", func(t *testing.T) {
+		got, err := pgRepo.GetBlockByNumber(ctx, orphanedNum)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber: %v", err)
+		}
+		if got == nil {
+			t.Fatalf("expected canonical block at %d, got nil", orphanedNum)
+		}
+		if got.Hash != orphanHash {
+			t.Errorf("expected original hash %s, got %s", orphanHash, got.Hash)
+		}
+		if got.IsOrphaned {
+			t.Error("expected block to be canonical, still orphaned")
+		}
+	})
+
+	t.Run("watermark advances past the healed gap", func(t *testing.T) {
+		wm, err := pgRepo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		if wm != 5 {
+			t.Errorf("expected watermark 5 after heal, got %d (pre-fix it stays pinned at %d)", wm, orphanedNum-1)
+		}
+	})
+}
+
 // TestIntegration_ProcessBlockData_DifferentHashSkipsUnchanged verifies the
 // orphan-clear self-heal does NOT trigger when the fetched hash differs from
 // the stored hash (i.e. the existing row really is from a different fork).

@@ -166,7 +166,9 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 }
 
 // ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
-// Returns an error if the block does not exist.
+// Returns an error if the block does not exist. Mirrors the postgres adapter
+// contract: idempotent on already-canonical rows, and refuses to un-orphan
+// when a different canonical row already occupies the same number.
 func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -175,6 +177,19 @@ func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash stri
 	if !ok {
 		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
 	}
+	// Idempotent: clearing an already-canonical row is a no-op.
+	if !b.IsOrphaned {
+		return nil
+	}
+	// Guard: refuse to un-orphan if a different canonical row already occupies
+	// this number, mirroring the postgres adapter so unit tests exercise the
+	// same contract (PR #373 review). Leaving the orphan in place keeps the
+	// "highest version = canonical" invariant; the live writer wins.
+	for h, other := range r.blocks {
+		if h != hash && other.Number == b.Number && !other.IsOrphaned {
+			return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d hash %s: another canonical row already exists at this number", b.Number, hash)
+		}
+	}
 	b.IsOrphaned = false
 	r.blocks[hash] = b
 	return nil
@@ -182,7 +197,7 @@ func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash stri
 
 // HandleReorgAtomic atomically performs all reorg-related operations.
 // In the memory implementation, this is naturally atomic since we hold the lock.
-func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState, preserveChain []outbound.CanonicalBlock) (int, error) {
+func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -194,22 +209,9 @@ func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAnce
 	// 1. Save reorg event
 	r.reorgEvents = append(r.reorgEvents, event)
 
-	// Build preserve-set (height -> hash) for O(1) lookup. preserveChain carries
-	// the new canonical chain so we don't orphan rows backfill already inserted
-	// with the correct (number, hash). Passing nil/empty reproduces blanket-
-	// orphan behaviour. Matching on (number, hash) (not hash alone) mirrors the
-	// postgres SQL and keeps height an explicit part of the predicate.
-	preserve := make(map[int64]string, len(preserveChain))
-	for _, cb := range preserveChain {
-		preserve[cb.Number] = cb.Hash
-	}
-
-	// 2. Mark old blocks as orphaned, EXCEPT rows whose (number, hash) is preserved
+	// 2. Mark old blocks as orphaned
 	for hash, b := range r.blocks {
 		if b.Number > commonAncestor && !b.IsOrphaned {
-			if keepHash, ok := preserve[b.Number]; ok && keepHash == hash {
-				continue
-			}
 			b.IsOrphaned = true
 			r.blocks[hash] = b
 		}

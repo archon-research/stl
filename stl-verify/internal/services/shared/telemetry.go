@@ -86,11 +86,18 @@ func NewServiceTelemetryWithProvider(mp metric.MeterProvider) (*ServiceTelemetry
 // RecordReorg records a chain reorganization event.
 // depth is how many blocks were reorganized, fromBlock is the common ancestor,
 // and toBlock is the new chain head after the reorg.
+//
+// Only reorg.depth is attached as a metric attribute: it is bounded by the
+// finality window, so its cardinality is small and fixed. fromBlock/toBlock
+// are intentionally NOT attached — raw block numbers are unbounded and would
+// mint a new Prometheus series per reorg, ballooning storage. This is the same
+// reason RecordReorgDropped omits the block number. The parameters remain on
+// the signature for callers/logs and possible future use as span exemplars.
 func (t *ServiceTelemetry) RecordReorg(ctx context.Context, depth int, fromBlock, toBlock int64) {
+	_ = fromBlock
+	_ = toBlock
 	t.reorgsTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.Int("reorg.depth", depth),
-		attribute.Int64("reorg.from_block", fromBlock),
-		attribute.Int64("reorg.to_block", toBlock),
 	))
 }
 

@@ -98,32 +98,19 @@ type BlockStateRepository interface {
 	MarkBlockOrphaned(ctx context.Context, hash string) error
 
 	// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
-	// Used by the backfill loop to self-heal rows that were over-orphaned by a
-	// reorg handler whose new canonical chain actually contained the same hash
-	// (see HandleReorgAtomic preserveHashes contract). Idempotent: clearing an
+	// Used by the backfill loop to self-heal rows that were over-orphaned (e.g. a
+	// late-arriving block misclassified as a reorg). Idempotent: clearing an
 	// already-canonical row is a no-op. Returns an error if the block does not
 	// exist; the caller is responsible for verifying the row exists first.
 	ClearBlockOrphaned(ctx context.Context, hash string) error
 
 	// HandleReorgAtomic atomically performs all reorg-related database operations:
 	// 1. Saves the reorg event
-	// 2. Marks blocks above commonAncestor as orphaned, EXCEPT rows whose
-	//    (number, hash) is in preserveChain (these are part of the new
-	//    canonical chain and must remain non-orphaned, e.g. rows that backfill
-	//    already inserted with a hash the reorg walk discovered on the new chain).
+	// 2. Marks all blocks after commonAncestor as orphaned
 	// 3. Saves the new canonical block
 	// This prevents inconsistent state if a crash occurs mid-reorg.
 	// Returns the version assigned to the new block.
-	//
-	// preserveChain MUST include the new block's (Number, Hash) plus any other
-	// (number, hash) pairs the caller has identified as belonging to the new
-	// canonical chain. Using (number, hash) tuples (rather than hash alone)
-	// keeps the SQL safe against any future scenario where a hash might be
-	// re-used across heights — height is then an explicit part of the predicate.
-	// Passing a nil or empty slice reproduces the pre-fix blanket-orphan
-	// behaviour and is unsafe in production paths; tests may use empty for
-	// backwards compatibility.
-	HandleReorgAtomic(ctx context.Context, commonAncestor int64, event ReorgEvent, newBlock BlockState, preserveChain []CanonicalBlock) (int, error)
+	HandleReorgAtomic(ctx context.Context, commonAncestor int64, event ReorgEvent, newBlock BlockState) (int, error)
 
 	// GetMinBlockNumber returns the lowest canonical block number in the repository.
 	// Returns 0 if no blocks exist.

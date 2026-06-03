@@ -23,6 +23,7 @@ import (
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -484,6 +485,233 @@ func TestMultiChain_BackfillWithGaps(t *testing.T) {
 	})
 }
 
+// TestWatcherBackfill_SelfHealsWronglyOrphanedGap is the from-the-outside
+// reproduction of the VEC-277 arbitrum incident. It wires a BackfillService
+// the way the watcher main does — real Postgres, real Redis cache, real SNS
+// event sink, mock blockchain client — and drives the REAL gap-fill loop via
+// Start() (not the RunOnce test helper).
+//
+// It seeds the production-shaped stuck state: a canonical block wrongly
+// orphaned with no replacement (what the blanket-orphan did to a late-arriving
+// block's canonical successor), with the watermark pinned below it. It then
+// asserts the running service drains the gap and advances the watermark on its
+// own, within a deadline. Pre-fix this never converges: the loop refetches the
+// orphan-only row every poll as a no-op, FindGaps keeps reporting it, and the
+// watermark stays pinned — so this test would time out, which is exactly the
+// signal the incident lacked.
+func TestWatcherBackfill_SelfHealsWronglyOrphanedGap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	repo := postgres.NewBlockStateRepository(infra.Pool, 1, logger)
+
+	// Mock the canonical chain 1..5 and seed the DB from the same headers so
+	// parent_hash linkage is consistent (the heal's linkage re-check passes).
+	client := newTestBlockchainClient()
+	for i := int64(1); i <= 5; i++ {
+		client.AddBlock(i, "")
+	}
+	const orphanedNum int64 = 3
+	for i := int64(1); i <= 5; i++ {
+		h := client.GetHeader(i)
+		if _, err := repo.SaveBlock(ctx, outbound.BlockState{
+			Number:         i,
+			Hash:           h.Hash,
+			ParentHash:     h.ParentHash,
+			ReceivedAt:     time.Now().Unix(),
+			BlockTimestamp: time.Now().Unix(),
+		}); err != nil {
+			t.Fatalf("seed block %d: %v", i, err)
+		}
+		// All published before the incident; otherwise watermark advancement
+		// would be capped by GetMinUnpublishedBlock rather than by the gap.
+		if err := repo.MarkPublishComplete(ctx, h.Hash); err != nil {
+			t.Fatalf("mark published %d: %v", i, err)
+		}
+	}
+	orphanHash := client.GetHeader(orphanedNum).Hash
+	if err := repo.MarkBlockOrphaned(ctx, orphanHash); err != nil {
+		t.Fatalf("orphan block %d: %v", orphanedNum, err)
+	}
+	if err := repo.SetBackfillWatermark(ctx, orphanedNum-1); err != nil {
+		t.Fatalf("pin watermark: %v", err)
+	}
+
+	// Pre-condition: the gap exists and the watermark is pinned below it.
+	gaps, err := repo.FindGaps(ctx, 1, 5)
+	if err != nil {
+		t.Fatalf("FindGaps pre: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0].From != orphanedNum || gaps[0].To != orphanedNum {
+		t.Fatalf("expected single pre-fix gap [%d,%d], got %v", orphanedNum, orphanedNum, gaps)
+	}
+
+	// Start the REAL backfill loop (BoundaryCheckDepth -1 isolates the gap-fill
+	// → heal → watermark path from the RPC boundary check).
+	svc, err := backfill_gaps.NewBackfillService(backfill_gaps.BackfillConfig{
+		ChainID:            1,
+		BatchSize:          10,
+		PollInterval:       200 * time.Millisecond,
+		BoundaryCheckDepth: -1,
+		Logger:             logger,
+	}, client, repo, infra.Cache, infra.EventSink)
+	if err != nil {
+		t.Fatalf("NewBackfillService: %v", err)
+	}
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer svc.Stop()
+
+	// The running loop must drain the gap and advance the watermark to head on
+	// its own. Pre-fix this never happens and we hit the deadline.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		wm, err := repo.GetBackfillWatermark(ctx)
+		if err != nil {
+			t.Fatalf("GetBackfillWatermark: %v", err)
+		}
+		gapsNow, err := repo.FindGaps(ctx, 1, 5)
+		if err != nil {
+			t.Fatalf("FindGaps poll: %v", err)
+		}
+		if wm == 5 && len(gapsNow) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backfill loop did not self-heal within deadline: watermark=%d gaps=%v (pre-fix it never converges)", wm, gapsNow)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// The orphan must be resurrected as canonical with its original hash, not
+	// re-inserted as a new row.
+	got, err := repo.GetBlockByNumber(ctx, orphanedNum)
+	if err != nil {
+		t.Fatalf("GetBlockByNumber: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("expected canonical block at %d, got nil", orphanedNum)
+	}
+	if got.IsOrphaned || got.Hash != orphanHash {
+		t.Fatalf("expected canonical block %d with original hash %s, got %+v", orphanedNum, orphanHash, got)
+	}
+}
+
+// TestWatcherLive_OutOfOrderArrival_DoesNotOrphanCanonicalSuccessor reproduces
+// the VEC-277 TRIGGER through the live service's real path: headers arriving
+// out of order on a fast chain. It drives the public entrypoint
+// (subscriber → processHeaders → detectReorg → handleReorg → HandleReorgAtomic)
+// against real Postgres, with no pre-seeded orphan — the orphaning, if the bug
+// were present, would be produced by the code itself.
+//
+// Sequence: block 100 arrives, then 102 (a forward gap; saved canonical), then
+// 101 arrives LATE. Pre-fix, 101 is misclassified as a reorg and the blanket
+// orphan UPDATE (number > commonAncestor) wrongly orphans the still-canonical
+// 102, creating the orphan-only row that pins the backfill loop. Post-fix, the
+// forward-frontier preserveChain keeps 102 canonical. The test asserts all
+// three heights end canonical and contiguous — i.e. out-of-order delivery is
+// handled correctly end to end.
+func TestWatcherLive_OutOfOrderArrival_DoesNotOrphanCanonicalSuccessor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	infra := setupTestInfrastructure(t, ctx)
+	t.Cleanup(infra.Cleanup)
+
+	mockSub := testutil.NewMockSubscriber()
+	mockClient := newTestBlockchainClient()
+	// Canonical chain 100,101,102 with linked parent hashes (AddBlock links
+	// hash(N)=0x..N to parent 0x..N-1).
+	for _, n := range []int64{100, 101, 102} {
+		mockClient.AddBlock(n, "")
+	}
+
+	liveService, err := live_data.NewLiveService(
+		live_data.LiveConfig{
+			ChainID:            1,
+			FinalityBlockCount: 16,
+			Logger:             slog.Default(),
+		},
+		mockSub,
+		mockClient,
+		infra.BlockStateRepo,
+		infra.Cache,
+		infra.EventSink,
+	)
+	if err != nil {
+		t.Fatalf("NewLiveService: %v", err)
+	}
+	if err := liveService.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer liveService.Stop()
+
+	canonicalAt := func(num int64) bool {
+		st, err := infra.BlockStateRepo.GetBlockByNumber(ctx, num)
+		if err != nil {
+			t.Fatalf("GetBlockByNumber(%d): %v", num, err)
+		}
+		return st != nil && !st.IsOrphaned && st.Hash == fmt.Sprintf("0x%064x", num)
+	}
+
+	// 100 arrives and becomes head.
+	mockSub.SendHeader(mockClient.GetHeader(100))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(100) }) {
+		t.Fatal("block 100 never became canonical")
+	}
+
+	// 102 arrives before 101 — a forward gap. detectReorg saves it canonically
+	// (number > head+1), so 102 is a canonical successor with parent_hash = 101.
+	mockSub.SendHeader(mockClient.GetHeader(102))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(102) }) {
+		t.Fatal("block 102 never became canonical")
+	}
+
+	// 101 arrives LATE. number <= head(102) → handleReorg path. This is the
+	// exact step that wrongly orphaned 102 pre-fix.
+	mockSub.SendHeader(mockClient.GetHeader(101))
+	if !testutil.WaitFor(t, 10*time.Second, 50*time.Millisecond, func() bool { return canonicalAt(101) }) {
+		t.Fatal("late block 101 never became canonical")
+	}
+
+	t.Run("canonical successor 102 not orphaned by the late arrival", func(t *testing.T) {
+		// The defining regression: 102 must still be canonical after 101's
+		// reorg-classified arrival.
+		if !canonicalAt(102) {
+			row, _ := infra.BlockStateRepo.GetBlockByHash(ctx, fmt.Sprintf("0x%064x", 102))
+			t.Fatalf("block 102 was wrongly orphaned by out-of-order arrival of 101 (the VEC-277 bug); row=%+v", row)
+		}
+	})
+
+	t.Run("chain is contiguous and canonical 100..102", func(t *testing.T) {
+		for _, n := range []int64{100, 101, 102} {
+			if !canonicalAt(n) {
+				t.Errorf("expected block %d canonical with hash 0x%064x", n, n)
+			}
+		}
+		gaps, err := infra.BlockStateRepo.FindGaps(ctx, 100, 102)
+		if err != nil {
+			t.Fatalf("FindGaps: %v", err)
+		}
+		if len(gaps) != 0 {
+			t.Errorf("expected no gaps across 100..102 after out-of-order delivery, got %v", gaps)
+		}
+	})
+}
+
 // TestMultiChain_ReorgIsolation verifies that a reorg on one chain
 // does not affect blocks on another chain.
 func TestMultiChain_ReorgIsolation(t *testing.T) {
@@ -543,7 +771,7 @@ func TestMultiChain_ReorgIsolation(t *testing.T) {
 		BlockTimestamp: time.Now().Unix(),
 	}
 
-	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock, []outbound.CanonicalBlock{{Number: newBlock.Number, Hash: newBlock.Hash}})
+	_, err := ethRepo.HandleReorgAtomic(ctx, 100, reorgEvent, newBlock)
 	if err != nil {
 		t.Fatalf("HandleReorgAtomic failed: %v", err)
 	}

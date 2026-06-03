@@ -85,7 +85,7 @@ func (m *mockStateRepo) GetBlockVersionCount(ctx context.Context, number int64) 
 	return m.BlockStateRepository.GetBlockVersionCount(ctx, number)
 }
 
-func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState, preserveChain []outbound.CanonicalBlock) (int, error) {
+func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	m.mu.RLock()
 	err := m.handleReorgAtomicErr
 	m.mu.RUnlock()
@@ -93,7 +93,7 @@ func (m *mockStateRepo) HandleReorgAtomic(ctx context.Context, commonAncestor in
 	if err != nil {
 		return 0, err
 	}
-	return m.BlockStateRepository.HandleReorgAtomic(ctx, commonAncestor, event, newBlock, preserveChain)
+	return m.BlockStateRepository.HandleReorgAtomic(ctx, commonAncestor, event, newBlock)
 }
 
 // TestLateBlockAfterPruning tests the scenario where a live block arrives after
@@ -386,7 +386,7 @@ func TestDetectReorg_EmptyChain_NoReorg(t *testing.T) {
 		ParentHash: "0xparent",
 	}
 
-	isReorg, depth, ancestor, reorgEvent, _, err := svc.detectReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -433,7 +433,7 @@ func TestDetectReorg_NextBlock_ParentMatches_NoReorg(t *testing.T) {
 		ParentHash: "0xblock100", // Matches latest
 	}
 
-	isReorg, depth, ancestor, reorgEvent, _, err := svc.detectReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestDetectReorg_NextBlock_ParentMismatch_Reorg(t *testing.T) {
 		ParentHash: "0xblock100_alt", // Different parent - triggers reorg
 	}
 
-	isReorg, depth, ancestor, reorgEvent, _, err := svc.detectReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestDetectReorg_LowerBlockNumber_Reorg(t *testing.T) {
 		ParentHash: "0xblock98", // Same ancestor
 	}
 
-	isReorg, depth, ancestor, reorgEvent, _, err := svc.detectReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -577,7 +577,7 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 		ParentHash: "0xblock104",
 	}
 
-	isReorg, depth, ancestor, reorgEvent, _, err := svc.detectReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -589,6 +589,93 @@ func TestDetectReorg_Gap_NoReorg(t *testing.T) {
 	}
 	if reorgEvent != nil {
 		t.Error("expected no reorg event for gap")
+	}
+}
+
+// TestDetectReorg_LateArrivalFillsGap_NoReorg covers the VEC-277 root-cause
+// fix: a block whose number is <= head but which has no competing canonical row
+// at its height and links cleanly onto the canonical chain (parent is the
+// canonical block at number-1) is a late/out-of-order arrival, NOT a reorg. It
+// must be saved without orphaning its canonical successors.
+func TestDetectReorg_LateArrivalFillsGap_NoReorg(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	// Canonical chain has 100 and 102; 101 is missing (a forward gap). 102's
+	// parent_hash points at the late 101 that is about to arrive.
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
+	})
+	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
+		Number: 102, Hash: "0xblock102", ParentHash: "0xblock101", BlockTimestamp: time.Now().Unix(),
+	})
+
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Late-arriving 101: number (101) <= head (102), no canonical row at 101,
+	// parent (0xblock100) is the canonical block at 100 → clean late arrival.
+	block := LightBlock{
+		Number:     101,
+		Hash:       "0xblock101",
+		ParentHash: "0xblock100",
+	}
+
+	isReorg, depth, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if isReorg {
+		t.Error("expected NO reorg for a clean late-arrival gap fill")
+	}
+	if depth != 0 || ancestor != 0 || reorgEvent != nil {
+		t.Errorf("expected no reorg metadata, got depth=%d ancestor=%d event=%v", depth, ancestor, reorgEvent)
+	}
+}
+
+// TestDetectReorg_LowerNumberConflictingHash_Reorg is the guard that the
+// late-arrival fast-path does NOT swallow a genuine reorg: when a DIFFERENT
+// canonical block already occupies the incoming height, it must still be
+// treated as a reorg.
+func TestDetectReorg_LowerNumberConflictingHash_Reorg(t *testing.T) {
+	ctx := context.Background()
+	stateRepo := newMockStateRepo()
+	cache := memory.NewBlockCache()
+	eventSink := memory.NewEventSink()
+
+	client := testutil.NewMockBlockchainClient()
+	client.SetBlockHeader(99, "0xblock99", "0xblock98")
+
+	for _, b := range []outbound.BlockState{
+		{Number: 98, Hash: "0xblock98", ParentHash: "0xblock97", BlockTimestamp: time.Now().Unix()},
+		{Number: 99, Hash: "0xblock99", ParentHash: "0xblock98", BlockTimestamp: time.Now().Unix()},
+		{Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix()},
+	} {
+		_, _ = stateRepo.SaveBlock(ctx, b)
+	}
+
+	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), client, stateRepo, cache, eventSink)
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	// Block 99 arrives with a DIFFERENT hash than the canonical 99 → conflict,
+	// even though its parent (0xblock98) links to canonical 98.
+	block := LightBlock{Number: 99, Hash: "0xblock99_alt", ParentHash: "0xblock98"}
+
+	isReorg, _, ancestor, reorgEvent, err := svc.detectReorg(ctx, block, time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !isReorg {
+		t.Error("expected a reorg when a different canonical block holds the height")
+	}
+	if ancestor != 98 || reorgEvent == nil {
+		t.Errorf("expected reorg at ancestor 98 with event, got ancestor=%d event=%v", ancestor, reorgEvent)
 	}
 }
 
@@ -627,7 +714,7 @@ func TestHandleReorg_FindsCommonAncestorInDB(t *testing.T) {
 		ParentHash: "0xblock98", // Matches our block 98
 	}
 
-	isReorg, depth, ancestor, reorgEvent, _, err := svc.handleReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, reorgEvent, err := svc.handleReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -653,7 +740,7 @@ func TestHandleReorg_FindsCommonAncestorInDB(t *testing.T) {
 		ParentHash:     block.ParentHash,
 		ReceivedAt:     time.Now().Unix(),
 		BlockTimestamp: time.Now().Unix(),
-	}, []outbound.CanonicalBlock{{Number: block.Number, Hash: block.Hash}})
+	})
 
 	// After HandleReorgAtomic, DB should have blocks 95-98 (non-orphaned) + 99_alt (new block) = 5 blocks
 	recentBlocks, err := stateRepo.GetRecentBlocks(ctx, 100)
@@ -718,7 +805,7 @@ func TestHandleReorg_WalksBackViaNetwork(t *testing.T) {
 		ParentHash: "0xblock98_alt", // Not in our chain
 	}
 
-	isReorg, depth, ancestor, _, _, err := svc.handleReorg(ctx, block, time.Now())
+	isReorg, depth, ancestor, _, err := svc.handleReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -762,7 +849,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 			ParentHash: "0xunknown",
 		}
 
-		_, _, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
+		_, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
 		if err == nil {
 			t.Error("expected error for block below finality boundary, got nil")
 		} else if !strings.Contains(err.Error(), "at or below finality boundary") {
@@ -800,7 +887,7 @@ func TestHandleReorg_Errors(t *testing.T) {
 			ParentHash: "0xunknown_parent",
 		}
 
-		_, _, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
+		_, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
 		if err == nil {
 			t.Error("expected error, got nil")
 		} else if !strings.Contains(err.Error(), "no common ancestor found") {
@@ -838,7 +925,7 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 		ParentHash: "0xblock98",
 	}
 
-	_, depth, _, reorgEvent, _, err := svc.handleReorg(ctx, block, time.Now())
+	_, depth, _, reorgEvent, err := svc.handleReorg(ctx, block, time.Now())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -861,95 +948,6 @@ func TestHandleReorg_ReturnsReorgEvent(t *testing.T) {
 		t.Errorf("expected depth %d, got %d", depth, reorgEvent.Depth)
 	}
 }
-
-// TestHandleReorg_LateArrivalDoesNotOrphanCanonicalSuccessors covers PR #373
-// review Finding 4. When N+1 arrives after N+2 is already in the DB
-// (canonical late-arrival), the walk-back loop breaks immediately at the
-// common ancestor N — walkedChain is empty. Without the forward-frontier
-// heuristic in handleReorg, persistBlockState's preserveChain would contain
-// only the incoming N+1 row, and HandleReorgAtomic would blanket-orphan the
-// previously-canonical N+2. The fix detects that N+2's parent_hash matches
-// the incoming block's hash (forward chain link) and preserves it.
-func TestHandleReorg_LateArrivalDoesNotOrphanCanonicalSuccessors(t *testing.T) {
-	ctx := context.Background()
-	stateRepo := newMockStateRepo()
-	cache := memory.NewBlockCache()
-	eventSink := memory.NewEventSink()
-
-	// Seed: N (block 100) and N+2 (block 102, parent_hash = hash of late N+1).
-	// N+1 is missing — it will arrive late.
-	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 100, Hash: "0xblock100", ParentHash: "0xblock99", BlockTimestamp: time.Now().Unix(),
-	})
-	_, _ = stateRepo.SaveBlock(ctx, outbound.BlockState{
-		Number: 102, Hash: "0xblock102", ParentHash: "0xblock101_late", BlockTimestamp: time.Now().Unix(),
-	})
-
-	svc, err := NewLiveService(LiveConfig{}, testutil.NewMockSubscriber(), testutil.NewMockBlockchainClient(), stateRepo, cache, eventSink)
-	if err != nil {
-		t.Fatalf("NewLiveService: %v", err)
-	}
-
-	// Late-arriving N+1.
-	block := LightBlock{
-		Number:     101,
-		Hash:       "0xblock101_late",
-		ParentHash: "0xblock100",
-	}
-
-	_, _, ancestor, reorgEvent, walkedChain, err := svc.handleReorg(ctx, block, time.Now())
-	if err != nil {
-		t.Fatalf("handleReorg: %v", err)
-	}
-	if ancestor != 100 {
-		t.Fatalf("expected common ancestor 100, got %d", ancestor)
-	}
-	if reorgEvent == nil {
-		t.Fatal("expected reorgEvent")
-	}
-
-	// Verify the forward-preservation populated walkedChain with block 102.
-	var sawSuccessor bool
-	for _, cb := range walkedChain {
-		if cb.Number == 102 && cb.Hash == "0xblock102" {
-			sawSuccessor = true
-		}
-	}
-	if !sawSuccessor {
-		t.Fatalf("expected walkedChain to include canonical successor (102, 0xblock102), got %+v", walkedChain)
-	}
-
-	// Drive the same path persistBlockState takes so the assertion is
-	// integration-level: HandleReorgAtomic must preserve 102.
-	preserveChain := append([]outbound.CanonicalBlock{{Number: block.Number, Hash: block.Hash}}, walkedChain...)
-	if _, err := stateRepo.HandleReorgAtomic(ctx, ancestor, *reorgEvent, outbound.BlockState{
-		Number:         block.Number,
-		Hash:           block.Hash,
-		ParentHash:     block.ParentHash,
-		ReceivedAt:     time.Now().Unix(),
-		BlockTimestamp: time.Now().Unix(),
-	}, preserveChain); err != nil {
-		t.Fatalf("HandleReorgAtomic: %v", err)
-	}
-
-	got, err := stateRepo.GetBlockByHash(ctx, "0xblock102")
-	if err != nil {
-		t.Fatalf("GetBlockByHash: %v", err)
-	}
-	if got == nil {
-		t.Fatal("expected 0xblock102 row to still exist")
-	}
-	if got.IsOrphaned {
-		t.Fatal("expected canonical successor 0xblock102 to NOT be orphaned after late-arrival N+1")
-	}
-}
-
-// Note: updateFinalizedBlock and restoreInMemoryChain tests removed - functionality no longer exists.
-// The service now uses the database as the source of truth and doesn't maintain in-memory chain state.
-
-// ============================================================================
-// processBlock error handling tests
-// ============================================================================
 
 func TestProcessBlock_Errors(t *testing.T) {
 	t.Run("invalid_block_number", func(t *testing.T) {
@@ -1939,7 +1937,7 @@ func TestHandleReorg_FetchParentError_ReturnsError(t *testing.T) {
 		ParentHash: "0xunknown_parent",
 	}
 
-	_, _, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
+	_, _, _, _, err = svc.handleReorg(ctx, block, time.Now())
 	if err == nil {
 		t.Error("expected error when fetching parent fails")
 	}

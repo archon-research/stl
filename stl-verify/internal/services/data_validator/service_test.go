@@ -54,7 +54,7 @@ func (m *mockBlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash 
 	return nil
 }
 
-func (m *mockBlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState, preserveChain []outbound.CanonicalBlock) (int, error) {
+func (m *mockBlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	return 0, nil
 }
 

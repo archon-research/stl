@@ -77,6 +77,40 @@ absorb the failures; above that, the watcher will start lagging.
 
 ---
 
+## VectorWatcherSilentBackfillNoCanonical
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+`backfill_gap_fill_no_canonical_total` is non-zero for the labelled
+`service_name`. A per-block gap-fill cycle completed without producing a
+non-orphaned canonical row in `block_states`. This is the exact silent-failure
+shape behind the 2026-06-02 arbitrum backfill incident, where the gap finder
+re-found the same blocks every cycle and the backfill refetched them as no-ops.
+
+### First checks (≤5 min)
+
+1. **Pull the matching ERROR log** (`backfill completed but no canonical row
+   produced`) for the block number and hash.
+2. **Inspect the row** for that number on the chain's DB:
+   `SELECT number, hash, is_orphaned, version FROM block_states WHERE chain_id = <id> AND number = <N> ORDER BY version;`
+   The failure mode is an orphaned row with no non-orphaned row at the number.
+3. **Check for a concurrent bulk refill / backfill tool** sharing the Alchemy
+   key (429 storms are the known trigger).
+
+### Recovery
+
+Follow [docs/incidents/2026-06-02-arbitrum-backfill-loop.md](../incidents/2026-06-02-arbitrum-backfill-loop.md).
+With the VEC-277 fix deployed the backfill loop self-heals within one poll
+interval; confirm the counter returns to zero and `totalMissing` drains.
+
+### Verify recovery
+
+`rate(backfill_gap_fill_no_canonical_total[10m])` returns to zero sustained.
+
+---
+
 ## See also
 
 - Pipeline overview: [docs/live_data_architecture.png](../live_data_architecture.png)
