@@ -3,82 +3,6 @@ import os
 import pandas as pd
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Import Market and User Data for each Product
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def load_protocol_data(
-    protocol: str,
-    loan_token: str,
-    *,
-    network: str = "ethereum",
-    morpho_market: str = "CBBTC",
-    galaxy_type: str = "no-class-a",
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Loads user-level and market-level protocol data.
-
-    Reads 'users_df.parquet' and 'market_df.parquet' from the input folder.
-
-    Returns:
-        A tuple of (users_df, market_df):
-        - users_df: DataFrame with per-user position data.
-        - market_df: DataFrame with market-level metrics (this is important only to understand
-          which collateral are suitable for the calibration process, since we upload prices through an API).
-    """
-
-    def _path(filename):
-        return os.path.join("inputs", filename)
-
-    protocol = protocol.lower()
-    network = network.lower()
-    if protocol == "morpho":
-        loan_token = f"{morpho_market}-{loan_token}".lower()
-        users_df = pd.read_parquet(_path(f"users_{protocol}_{loan_token}.parquet"))
-        market_df = pd.read_parquet(_path(f"market_{protocol}_{loan_token}.parquet"))
-
-    elif protocol == "galaxy":
-        if "no" in galaxy_type.lower():
-            type = "no-class-a"
-        else:
-            type = "w-class-a"
-        users_df = pd.read_parquet(_path(f"users_{protocol}_{type}.parquet"))
-        market_df = pd.read_parquet(_path(f"market_{protocol}.parquet"))
-
-    elif protocol == "anchorage":
-        users_df = pd.read_parquet(_path(f"users_{protocol}.parquet"))
-        market_df = pd.read_parquet(_path(f"market_{protocol}.parquet"))
-
-    else:
-        users_df = pd.read_parquet(_path(f"users_{protocol}_{loan_token}.parquet"))
-        market_df = pd.read_parquet(_path(f"market_{protocol}_{loan_token}.parquet"))
-
-    return users_df, market_df
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Import OHLCV Prices
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def load_price_data(collateral_list: list[str]) -> pd.DataFrame:
-    """
-    Loads price data for a given ticker from a local parquet file.
-    Args:
-        ticker: The ticker symbol for which to load price data.
-    Returns:
-        A DataFrame containing the price data for the specified ticker.
-    """
-
-    def _path(filename):
-        return os.path.join("inputs", filename)
-
-    price_df = pd.read_parquet(_path("prices_df.parquet"))
-    price_df = price_df[collateral_list]
-    return price_df
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Import Sell Orderbook Data
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -141,7 +65,6 @@ def change_user_ltvs(users_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.Data
     ]
 
     new_supply_usd_df = new_user_df[columns_usd].copy()
-    new_supply_qty_df = new_user_df[columns_qty].copy()
 
     row_sums = new_supply_usd_df.sum(axis=1)
 

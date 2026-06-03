@@ -45,7 +45,6 @@ class Liquidator:
     def slippage_calculator(ticks_df: pd.DataFrame, amount_liq_usd: np.ndarray, sim_price: float) -> np.ndarray:
 
         N = amount_liq_usd.shape[0]
-        slippage = np.zeros(N)
         add_slippage = np.zeros(N)
 
         prices = ticks_df["price"].to_numpy(dtype=np.float64)
@@ -86,7 +85,6 @@ class Liquidator:
     ) -> np.ndarray:
 
         N = amount_liq_usd.shape[0]
-        slippage = np.zeros(N)
         add_slippage = np.zeros(N)
 
         prices = ticks_df["price"].to_numpy(dtype=np.float64)
@@ -571,7 +569,6 @@ class Liquidator:
                         best_token_arr[better] = token
 
                     profit = best_profit
-                    P = best_price
                 else:
                     profit = 0.0
 
