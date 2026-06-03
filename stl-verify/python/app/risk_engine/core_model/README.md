@@ -23,7 +23,7 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 | `Parallel(n_jobs=-1)` changed to `Parallel(n_jobs=4)` | `-1` consumed all available CPUs and caused OOM in constrained environments. |
 | `orderbook_data` lookup lowercased (`symbol.lower()`) | Original assumed the working directory was case-insensitive (macOS). Lowercase normalisation is required for Linux where the service runs. |
 | Bare `except:` changed to `except Exception:` | Required by the project linter (ruff). |
-| `load_protocol_data` and `load_price_data` removed from `importer.py` | Both functions are dead code in the integration: protocol and price data are loaded through the `CoreModelDataReader` port (`ParquetCoreModelDataReader`). Removing them eliminates a duplicate code path and the associated Copilot lint warnings. |
+| `importer.py` reduced to `change_user_ltvs` only | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
 | Dead variable assignments removed (`slippage`, `P`, `new_supply_qty_df`) | Three variables were initialized then immediately overwritten before first use, producing no-op assignments. Removed to reduce noise. |
 | Three `# TODO` comments added | Document known bugs in the original code that were not fixed during integration (see **Known Issues** section). |
 

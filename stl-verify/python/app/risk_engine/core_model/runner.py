@@ -2,19 +2,12 @@
 
 Pure orchestration function: accepts a config + data reader, runs
 calibration + simulation + liquidation, returns per-market CRR metrics.
-
-The runner temporarily changes the working directory to ``inputs_dir``
-before instantiating ``Liquidator``. This is required because Liquidator
-calls ``importer.load_orderbook_data()`` which uses CWD-relative paths
-(a known constraint of the original codebase -- see README.md).
 """
 
 from __future__ import annotations
 
 import json
-import os
 import warnings
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -23,9 +16,9 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from app.risk_engine.core_model import importer
 from app.risk_engine.core_model.calibrator import Calibrator
 from app.risk_engine.core_model.forecaster import Simulator
+from app.risk_engine.core_model.importer import change_user_ltvs
 from app.risk_engine.core_model.liquidator import Liquidator
 
 if TYPE_CHECKING:
@@ -59,17 +52,6 @@ class CoreModelPipelineResult:
     copula_type: str
     computed_at: datetime
     params: dict
-
-
-@contextmanager
-def _chdir(path: Path):
-    """Temporarily change the working directory."""
-    orig = Path.cwd()
-    try:
-        os.chdir(path)
-        yield
-    finally:
-        os.chdir(orig)
 
 
 def _load_protection_usd(protocol: str, inputs_dir: Path) -> float:
@@ -108,7 +90,7 @@ async def run(
     )
 
     if p["WORST_CASE"]:
-        users_df = importer.change_user_ltvs(users_df, market_df)
+        users_df = change_user_ltvs(users_df, market_df)
 
     collateral_list = market_df["token_symbol"].unique()
     prices_df = await data_reader.get_prices(collateral_list)
@@ -143,15 +125,12 @@ async def run(
 
         if p["JUMPS"]:
             if p["HOURLY_CONV"]:
-                # TODO: importer.load_data_yahoo is not implemented (yfinance not
+                # TODO: load_data_yahoo is not implemented (yfinance is not
                 # a service dependency). JUMPS + HOURLY_CONV requires a data source.
-                prices_df_hourly, _ = importer.load_data_yahoo(
-                    ticker=TICKER,
-                    period="max",
-                    time_interval="1h",
+                raise NotImplementedError(
+                    "JUMPS + HOURLY_CONV requires a Yahoo Finance data source that is not available in this service. "
+                    "Set HOURLY_CONV=False or JUMPS=False."
                 )
-                prices_jumps = prices_df_hourly["Close"]
-                prices_jumps.name = TICKER
             else:
                 prices_jumps = prices.copy()
             returns, log_returns = Calibrator.calculate_returns(prices_jumps)
@@ -205,11 +184,8 @@ async def run(
 
     protection_usd = _load_protection_usd(p["PROTOCOL"], inputs_dir)
 
-    # Liquidator.__init__ calls importer.load_orderbook_data() which resolves
-    # files as os.path.join("inputs", filename) -- chdir to the parent of
-    # inputs_dir so that relative path resolves correctly.
-    with _chdir(inputs_dir.parent):
-        init_positions = Liquidator(borrowers_df=users_df, market_df=market_df)
+    sell_orderbooks = await data_reader.get_orderbooks(list(collateral_list))
+    init_positions = Liquidator(borrowers_df=users_df, market_df=market_df, sell_orderbooks=sell_orderbooks)
 
     liq_results = init_positions.simulate_liquidations(
         all_prices=all_simulated_prices,

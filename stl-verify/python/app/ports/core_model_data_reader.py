@@ -1,8 +1,7 @@
 """CoreModelDataReader port — input data for the CORE pipeline.
 
-Implementations provide protocol position data and price history.
-The orderbook is loaded internally by Liquidator from the inputs directory
-(see runner.py for the chdir strategy that satisfies this constraint).
+Implementations provide protocol position data, price history, and
+sell-side order book depth for each collateral token.
 """
 
 from typing import Protocol
@@ -28,4 +27,8 @@ class CoreModelDataReader(Protocol):
         Columns are token symbols matching ``collateral_list``.
         Must cover at least TRAIN_SIZE days of history.
         """
+        ...
+
+    async def get_orderbooks(self, collateral_list: list[str]) -> dict[str, pd.DataFrame]:
+        """Return sell-side order book DataFrames keyed by token symbol."""
         ...

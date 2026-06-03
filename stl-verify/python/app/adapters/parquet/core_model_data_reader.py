@@ -1,9 +1,4 @@
-"""Parquet-backed implementation of CoreModelDataReader.
-
-Reads static parquet snapshots from ``inputs_dir``. Mirrors the file
-naming conventions of the original ``importer.py`` so the snapshots from
-``core_model_copy/inputs/`` work without transformation.
-"""
+"""Parquet-backed implementation of CoreModelDataReader."""
 
 from pathlib import Path
 
@@ -46,3 +41,9 @@ class ParquetCoreModelDataReader:
     async def get_prices(self, collateral_list: list[str]) -> pd.DataFrame:
         prices_df = pd.read_parquet(self._path("prices_df.parquet"))
         return prices_df[list(collateral_list)]
+
+    async def get_orderbooks(self, collateral_list: list[str]) -> dict[str, pd.DataFrame]:
+        return {
+            token: pd.read_parquet(self._path(f"{token.lower()}_sell_orderbook.parquet"))
+            for token in collateral_list
+        }

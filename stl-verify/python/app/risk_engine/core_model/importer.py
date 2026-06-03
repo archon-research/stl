@@ -1,29 +1,4 @@
-import os
-
 import pandas as pd
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Import Sell Orderbook Data
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def load_orderbook_data(collateral_list: list[str]) -> pd.DataFrame:
-    """
-    Loads orderbook data for a given ticker from a local parquet file.
-    Args:
-        ticker: The ticker symbol for which to load orderbook data.
-    Returns:
-        A DataFrame containing the orderbook data for the specified ticker.
-    """
-
-    def _path(filename):
-        return os.path.join("inputs", filename)
-
-    all_orderbooks = {}
-    for collateral in collateral_list:
-        all_orderbooks[collateral] = pd.read_parquet(_path(f"{collateral.lower()}_sell_orderbook.parquet"))
-    return all_orderbooks
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Change each user LTV under the worst case scenario assumption HF = 1

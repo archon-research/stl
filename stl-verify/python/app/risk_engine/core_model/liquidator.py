@@ -11,15 +11,17 @@
 import numpy as np
 import pandas as pd
 
-from app.risk_engine.core_model import importer
-
-
 class Liquidator:
-    def __init__(self, borrowers_df: pd.DataFrame, market_df: pd.DataFrame, *, seed: int = 0) -> None:
-        """Initializes the Liquidator with borrower and market data.
-        Compute for every modeled collateral its sell orderbook."""
+    def __init__(
+        self,
+        borrowers_df: pd.DataFrame,
+        market_df: pd.DataFrame,
+        sell_orderbooks: dict,
+        *,
+        seed: int = 0,
+    ) -> None:
+        """Initializes the Liquidator with borrower and market data."""
 
-        # New user final DataFrame after cleaning
         users_final = borrowers_df.copy()
         market_final = market_df.copy()
 
@@ -27,10 +29,7 @@ class Liquidator:
         LTV = users_final["ltv"].reset_index(drop=True)
         HF = users_final["health_factor"].reset_index(drop=True)
         LB = users_final["liquidation_incentive"].reset_index(drop=True)
-        tokens = market_df["token_symbol"].to_list()
         oracle_prices_dict = market_final.set_index("token_symbol")["oracle_price"].to_dict()
-
-        all_sell_orderbooks = importer.load_orderbook_data(tokens)
 
         self.HF = HF
         self.LT = LT
@@ -39,7 +38,7 @@ class Liquidator:
         self.seed = seed
         self.user_df = users_final
         self.oracle_prices = oracle_prices_dict
-        self.sell_orderbooks = all_sell_orderbooks
+        self.sell_orderbooks = sell_orderbooks
 
     @staticmethod
     def slippage_calculator(ticks_df: pd.DataFrame, amount_liq_usd: np.ndarray, sim_price: float) -> np.ndarray:
