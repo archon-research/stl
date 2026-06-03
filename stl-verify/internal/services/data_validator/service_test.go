@@ -50,6 +50,10 @@ func (m *mockBlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash s
 	return nil
 }
 
+func (m *mockBlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+	return nil
+}
+
 func (m *mockBlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	return 0, nil
 }

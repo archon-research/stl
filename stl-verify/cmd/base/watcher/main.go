@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/trace"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info
@@ -39,6 +41,10 @@ var (
 	GitBranch string
 	BuildTime string
 )
+
+// defaultServiceName is the OTEL service.name used when no chain-specific
+// override is provided via the environment (e.g. local dev, tests).
+const defaultServiceName = "stl-watcher"
 
 func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
@@ -107,9 +113,14 @@ func main() {
 		}()
 	}
 
-	// Initialize OpenTelemetry tracing and metrics
+	// Initialize OpenTelemetry tracing and metrics.
+	// ServiceName is resolved from the environment so that each per-chain
+	// watcher deployment (arbitrum-watcher, base-watcher, etc.) reports a
+	// distinct service.name in Prometheus/Tempo, instead of all collapsing
+	// into a single "stl-watcher" time series.
+	serviceName := resolveServiceName(os.Getenv)
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "stl-watcher",
+		ServiceName:    serviceName,
 		ServiceVersion: GitCommit,
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -261,6 +272,17 @@ func main() {
 		"topic", snsTopicARN,
 	)
 
+	// Construct the service-level telemetry recorder once and share it
+	// between live and backfill. This wires both:
+	//   - ReorgRecorder       (LiveConfig.Metrics)
+	//   - BackfillRecorder    (BackfillConfig.Metrics)
+	// onto the OTel global meter provider initialised above.
+	serviceTelemetry, err := shared.NewServiceTelemetry()
+	if err != nil {
+		logger.Error("failed to create service telemetry", "error", err)
+		os.Exit(1)
+	}
+
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
 		ChainID:            chainID,
@@ -268,6 +290,7 @@ func main() {
 		EnableTraces:       *enableTraces,
 		EnableBlobs:        *enableBlobs,
 		Logger:             logger,
+		Metrics:            serviceTelemetry,
 	}
 
 	liveService, err := live_data.NewLiveService(
@@ -287,7 +310,7 @@ func main() {
 	var backfillService *backfill_gaps.BackfillService
 	enableBackfill := env.Get("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
-		backfillConfig, err := loadBackfillConfig(chainID, *enableTraces, *enableBlobs, logger)
+		backfillConfig, err := loadBackfillConfig(chainID, *enableTraces, *enableBlobs, logger, serviceTelemetry)
 		if err != nil {
 			logger.Error("invalid backfill config", "error", err)
 			os.Exit(1)
@@ -368,6 +391,27 @@ func main() {
 	}
 }
 
+// resolveServiceName returns the OTEL service.name for this watcher process.
+//
+// In k8s, each per-chain watcher Deployment injects SERVICE_NAME via the
+// downward API (sourced from the pod's `app` label, e.g. "arbitrum-watcher"),
+// so each chain reports a distinct service.name in Prometheus and Tempo.
+//
+// Resolution order:
+//  1. SERVICE_NAME           (explicit, set by k8s downward API)
+//  2. OTEL_SERVICE_NAME      (standard OTEL env var, honoured if a user sets it)
+//  3. defaultServiceName     ("stl-watcher") for local dev / tests
+//
+// Whitespace is trimmed; empty values are treated as unset.
+func resolveServiceName(getenv func(string) string) string {
+	for _, key := range []string{"SERVICE_NAME", "OTEL_SERVICE_NAME"} {
+		if v := strings.TrimSpace(getenv(key)); v != "" {
+			return v
+		}
+	}
+	return defaultServiceName
+}
+
 // requireEnv returns the value of an environment variable or exits if not set.
 func requireEnv(key string) string {
 	value := os.Getenv(key)
@@ -387,7 +431,7 @@ func requireEnv(key string) string {
 //   - BACKFILL_BATCH_SIZE      (int,      default 10)
 //   - BACKFILL_POLL_INTERVAL   (duration, default 30s)
 //   - BACKFILL_RETRY_MIN_AGE   (duration, default 30s)
-func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger) (backfill_gaps.BackfillConfig, error) {
+func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger, metrics *shared.ServiceTelemetry) (backfill_gaps.BackfillConfig, error) {
 	batchSize, err := env.GetInt("BACKFILL_BATCH_SIZE", 10)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
@@ -417,5 +461,6 @@ func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *s
 		EnableTraces: enableTraces,
 		EnableBlobs:  enableBlobs,
 		Logger:       logger,
+		Metrics:      metrics,
 	}, nil
 }
