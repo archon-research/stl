@@ -476,11 +476,17 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 		s.assertCanonicalRowExists(ctx, bd)
 		return nil
 	}
-	// Stale-fork rejections are routine on chains with frequent reorgs
-	// (arbitrum). They are not silent failures: the canonical row at this
-	// height already exists under a different hash, so asserting on the
-	// fetched hash would always be wrong. Treat as benign success — no
-	// invariant check, no caller-visible error.
+	// Stale-fork rejection: a DIFFERENT canonical block already exists at this
+	// height (e.g. backfill fetched a block that the live path has since
+	// superseded). This is not a silent failure — a canonical row DOES exist
+	// at this height, just under another hash — so asserting on the fetched
+	// hash would always be wrong. Treat as benign success: no invariant check,
+	// no caller-visible error.
+	//
+	// On Arbitrum this happens often, but NOT because the chain reorgs (its
+	// single sequencer effectively never does). It is driven by out-of-order
+	// header delivery under load (VEC-277): the misclassified-reorg head churn
+	// leaves backfill fetching now-superseded blocks.
 	if errors.Is(err, errStaleForkSkip) {
 		return nil
 	}
