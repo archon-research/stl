@@ -15,7 +15,10 @@ import (
 func TestMetricsRecordBlockProcessedCarriesChainLabel(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
 
 	m, err := telemetry.NewMetrics("test-backup", "arbitrum")
 	if err != nil {
