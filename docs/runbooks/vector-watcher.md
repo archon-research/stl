@@ -182,11 +182,16 @@ it to catch upstream degradation early.
 `live_block_out_of_order_total{outcome="reorg"}` on the labelled `service_name`
 is nonzero over the last 10m: a header arrived at or below the canonical head
 and did NOT link cleanly onto our chain, so it was routed to reorg handling
-rather than classified as a clean gap fill. On single-sequencer chains (e.g.
-Arbitrum) a real reorg is essentially impossible, so this is the over-orphaning
-trigger from the 2026-06-02 incident. Unlike VectorWatcherOutOfOrderBlocksHigh
-(a sustained-rate warning across all outcomes), this fires on a single
-occurrence of the dangerous subset.
+rather than classified as a clean gap fill. The rule is scoped to an explicit
+allow-list of the single-sequencer rollup watchers (arbitrum, optimism, base,
+unichain, avalanche), where a real reorg is essentially impossible, so this is
+the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the bare
+`watcher`) reorgs normally (depth 1, a few times a day) and is deliberately not
+listed. New single-sequencer chains must be added to the allow-list when
+onboarded. Scoping by service name is interim; the proper fix is a chain-behavior
+label so alerts stop hardcoding chain names (see VEC-295). Unlike
+VectorWatcherOutOfOrderBlocksHigh (a sustained-rate warning across all outcomes),
+this fires on a single occurrence of the dangerous subset.
 
 ### First checks (≤5 min)
 
