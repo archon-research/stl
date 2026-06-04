@@ -1,4 +1,4 @@
-package oracle_price_worker
+package morpho_indexer
 
 import (
 	"context"
@@ -12,97 +12,11 @@ import (
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
-func TestNewTelemetry(t *testing.T) {
-	tel, err := NewTelemetry("mainnet")
-	if err != nil {
-		t.Fatalf("NewTelemetry() returned error: %v", err)
-	}
-	if tel == nil {
-		t.Fatal("NewTelemetry() returned nil")
-	}
-
-	exerciseAllMethods(t, tel)
-}
-
-func TestNewTelemetryWithProviders(t *testing.T) {
-	tp := tracenoop.NewTracerProvider()
-	mp := metricnoop.NewMeterProvider()
-
-	tel, err := NewTelemetryWithProviders(tp, mp, "mainnet")
-	if err != nil {
-		t.Fatalf("NewTelemetryWithProviders() returned error: %v", err)
-	}
-	if tel == nil {
-		t.Fatal("NewTelemetryWithProviders() returned nil")
-	}
-
-	exerciseAllMethods(t, tel)
-}
-
-// exerciseAllMethods calls every public method, covering both the success and
-// error-status branches of the recorders.
-func exerciseAllMethods(t *testing.T, tel *Telemetry) {
-	t.Helper()
-	ctx := context.Background()
-	someErr := errors.New("e")
-	tel.RecordBlockProcessed(ctx, time.Second, nil)
-	tel.RecordBlockProcessed(ctx, time.Second, someErr)
-	tel.RecordPricesChanged(ctx, "test", 1)
-	tel.RecordRPCCall(ctx, "getAssetsPrices", time.Millisecond, nil)
-	tel.RecordRPCCall(ctx, "getAssetsPrices", time.Millisecond, someErr)
-	tel.RecordError(ctx, "op", someErr)
-
-	_, span := tel.StartBlockSpan(ctx, 1)
-	span.End()
-	_, span = tel.StartSpan(ctx, "test.span")
-	span.End()
-}
-
-func TestNewTelemetryWithProviders_CreatesSpans(t *testing.T) {
-	exporter := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-	mp := metricnoop.NewMeterProvider()
-
-	tel, err := NewTelemetryWithProviders(tp, mp, "mainnet")
-	if err != nil {
-		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
-	}
-
-	ctx := context.Background()
-	ctx, blockSpan := tel.StartBlockSpan(ctx, 42)
-	_, childSpan := tel.StartSpan(ctx, "oracle.fetchPrices", attribute.String("rpc.method", "getAssetsPrices"))
-	childSpan.End()
-	blockSpan.End()
-
-	_ = tp.ForceFlush(context.Background())
-
-	spans := exporter.GetSpans()
-	if len(spans) != 2 {
-		t.Fatalf("expected 2 spans, got %d", len(spans))
-	}
-
-	// Child span is exported first (ended first).
-	if spans[0].Name != "oracle.fetchPrices" {
-		t.Errorf("span[0].Name = %q, want %q", spans[0].Name, "oracle.fetchPrices")
-	}
-	if spans[1].Name != "oracle.processBlock" {
-		t.Errorf("span[1].Name = %q, want %q", spans[1].Name, "oracle.processBlock")
-	}
-
-	// Verify parent-child relationship.
-	if spans[0].Parent.SpanID() != spans[1].SpanContext.SpanID() {
-		t.Error("fetchPrices span should be a child of processBlock span")
-	}
-}
-
 // newRecordingTelemetry returns a Telemetry wired to an in-memory metric reader
-// so tests can record RPC calls and inspect the resulting histogram.
+// so tests can record calls and inspect the resulting metrics.
 func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -144,7 +58,7 @@ func collectHistogramBounds(t *testing.T, reader sdkmetric.Reader, name string) 
 }
 
 // TestSecondsHistograms_UseSecondsBuckets guards against the bucket-boundary bug
-// behind the VectorOracleIndexerRPCLatencyHigh alert. Without explicit
+// behind the VectorMorphoIndexerRPCLatencyHigh alert. Without explicit
 // boundaries the SDK applies its default millisecond-scale buckets
 // ([0,5,10,...]), so a seconds-valued metric collapses into the (0,5] bucket and
 // histogram_quantile(0.99,...) interpolates to 0.99*5 = 4.95s, tripping the >3s
@@ -154,11 +68,11 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	tel, reader := newRecordingTelemetry(t)
 	ctx := context.Background()
 	tel.RecordBlockProcessed(ctx, 30*time.Millisecond, nil)
-	tel.RecordRPCCall(ctx, "getAssetsPrices", 30*time.Millisecond, nil)
+	tel.RecordRPCCall(ctx, "getMarketState", 30*time.Millisecond, nil)
 
 	for _, name := range []string{
-		"oracle.block.duration_seconds",
-		"oracle.rpc.duration_seconds",
+		"morpho.block.duration_seconds",
+		"morpho.rpc.duration_seconds",
 	} {
 		if bounds := collectHistogramBounds(t, reader, name); !slices.Equal(bounds, telemetry.SecondsDurationBuckets) {
 			t.Errorf("%s bounds = %v, want %v", name, bounds, telemetry.SecondsDurationBuckets)
@@ -166,24 +80,67 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
+func TestNewTelemetry(t *testing.T) {
+	tel, err := NewTelemetry("mainnet")
+	if err != nil {
+		t.Fatalf("NewTelemetry() returned error: %v", err)
+	}
+	if tel == nil {
+		t.Fatal("NewTelemetry() returned nil")
+	}
+
+	exerciseAllMethods(t, tel)
+}
+
+func TestNewTelemetryWithProviders(t *testing.T) {
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), metricnoop.NewMeterProvider(), "mainnet")
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders() returned error: %v", err)
+	}
+	if tel == nil {
+		t.Fatal("NewTelemetryWithProviders() returned nil")
+	}
+
+	exerciseAllMethods(t, tel)
+}
+
+// exerciseAllMethods calls every public method, covering both the success and
+// error-status branches of the recorders.
+func exerciseAllMethods(t *testing.T, tel *Telemetry) {
+	t.Helper()
+	ctx := context.Background()
+	someErr := errors.New("e")
+	tel.RecordBlockProcessed(ctx, time.Second, nil)
+	tel.RecordBlockProcessed(ctx, time.Second, someErr)
+	tel.RecordEventProcessed(ctx, "Supply")
+	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, nil)
+	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, someErr)
+	tel.RecordError(ctx, "op", someErr)
+
+	_, span := tel.StartBlockSpan(ctx, 1)
+	span.End()
+	_, span = tel.StartSpan(ctx, "test.span", attribute.String("key", "value"))
+	span.End()
+}
+
 func TestTelemetry_NilSafe(t *testing.T) {
 	var tel *Telemetry // nil pointer
 	ctx := context.Background()
 	someErr := errors.New("test error")
 
-	// All methods must be no-ops on nil receiver: no panics.
+	// All methods must be no-ops on a nil receiver: no panics.
 	t.Run("RecordBlockProcessed", func(t *testing.T) {
 		tel.RecordBlockProcessed(ctx, time.Second, nil)
 		tel.RecordBlockProcessed(ctx, time.Second, someErr)
 	})
 
-	t.Run("RecordPricesChanged", func(t *testing.T) {
-		tel.RecordPricesChanged(ctx, "test-oracle", 5)
+	t.Run("RecordEventProcessed", func(t *testing.T) {
+		tel.RecordEventProcessed(ctx, "Supply")
 	})
 
 	t.Run("RecordRPCCall", func(t *testing.T) {
-		tel.RecordRPCCall(ctx, "eth_call", time.Millisecond*100, nil)
-		tel.RecordRPCCall(ctx, "eth_call", time.Millisecond*100, someErr)
+		tel.RecordRPCCall(ctx, "getMarketState", 100*time.Millisecond, nil)
+		tel.RecordRPCCall(ctx, "getMarketState", 100*time.Millisecond, someErr)
 	})
 
 	t.Run("RecordError", func(t *testing.T) {
@@ -215,7 +172,6 @@ func TestTelemetry_NilSafe(t *testing.T) {
 
 	t.Run("SetSpanError", func(t *testing.T) {
 		// SetSpanError is a package-level function, not a method.
-		// It should handle nil errors gracefully.
 		span := noopSpan()
 		SetSpanError(span, nil, "should be no-op")
 		SetSpanError(span, someErr, "test error description")

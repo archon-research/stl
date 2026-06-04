@@ -32,6 +32,7 @@ func NewMetrics(meterName, chain string) (*Metrics, error) {
 		"processing_duration_seconds",
 		metric.WithDescription("Time taken to process a block backup message"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create processing_duration_seconds histogram: %w", err)
