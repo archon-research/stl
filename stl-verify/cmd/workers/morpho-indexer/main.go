@@ -22,6 +22,7 @@ import (
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -234,6 +235,14 @@ func run(ctx context.Context, args []string) error {
 	buildReg, err := buildregistry.New(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
+	}
+
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "morpho")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		mc = wrap(mc)
 	}
 
 	logger.Info("starting morpho indexer",

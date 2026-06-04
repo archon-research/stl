@@ -27,6 +27,7 @@ import (
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -226,6 +227,15 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	var archiveWrap func(outbound.Multicaller) outbound.Multicaller
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "oracle-price")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		archiveWrap = wrap
+	}
+
 	service, err := oracle_price_worker.NewService(
 		shared.SQSConsumerConfig{
 			Logger:  logger,
@@ -235,10 +245,22 @@ func run(ctx context.Context, args []string) error {
 		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
+			var (
+				mc  outbound.Multicaller
+				err error
+			)
 			if oracleType == entity.OracleTypeChronicle {
-				return multicall.NewDirectCaller(ethClient.Client())
+				mc, err = multicall.NewDirectCaller(ethClient.Client())
+			} else {
+				mc, err = multicall.NewClient(ethClient, blockchain.Multicall3)
 			}
-			return multicall.NewClient(ethClient, blockchain.Multicall3)
+			if err != nil {
+				return nil, err
+			}
+			if archiveWrap != nil {
+				mc = archiveWrap(mc)
+			}
+			return mc, nil
 		},
 	)
 	if err != nil {

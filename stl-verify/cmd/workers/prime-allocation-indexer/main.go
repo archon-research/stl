@@ -24,6 +24,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -209,6 +210,23 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating cache reader: %w", err)
 	}
 
+	// Database (opened early so we can register a build before constructing
+	// the multicaller — needed for the SC-call archiver to tag keys with build_id).
+	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer dbPool.Close()
+	if err := dbPool.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	logger.Info("PostgreSQL connected")
+
+	buildReg, err := buildregistry.New(ctx, dbPool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
 	// Ethereum
 	rawClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
@@ -220,6 +238,14 @@ func run(ctx context.Context, args []string) error {
 	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
+	}
+
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "prime-allocation")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		mc = wrap(mc)
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
@@ -269,22 +295,6 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	proxies := at.ProxiesForChainID(at.DefaultProxies(), cfg.chainID)
-
-	// Database
-	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer dbPool.Close()
-	if err := dbPool.Ping(ctx); err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
-	logger.Info("PostgreSQL connected")
-
-	buildReg, err := buildregistry.New(ctx, dbPool)
-	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
-	}
 
 	logger.Info("starting allocation tracker",
 		"queue", cfg.queueURL,

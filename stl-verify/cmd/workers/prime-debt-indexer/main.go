@@ -22,6 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -184,6 +185,14 @@ func run(ctx context.Context, args []string) error {
 	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
+	}
+
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, chainID, int(buildReg.BuildID()), "prime-debt")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		mc = wrap(mc)
 	}
 
 	// Vat caller (backed by multicall)

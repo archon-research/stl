@@ -24,6 +24,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
@@ -239,6 +240,15 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Service
+	var svcOpts []aavelike_position_tracker.Option
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "sparklend")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		svcOpts = append(svcOpts, aavelike_position_tracker.WithMulticallerWrap(wrap))
+	}
+
 	service, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
 			MaxMessages: cfg.maxMessages,
@@ -255,6 +265,7 @@ func run(ctx context.Context, args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		svcOpts...,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
