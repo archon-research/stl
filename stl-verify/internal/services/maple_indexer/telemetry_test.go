@@ -21,7 +21,11 @@ func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		if err := mp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutting down meter provider: %v", err)
+		}
+	})
 
 	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp)
 	if err != nil {
