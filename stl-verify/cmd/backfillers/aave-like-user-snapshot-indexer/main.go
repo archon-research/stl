@@ -27,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -290,6 +291,16 @@ func run(args []string) error {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
 
+	var svcOpts []aavelike_position_tracker.Option
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "sparklend")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		mc = wrap(mc)
+		svcOpts = append(svcOpts, aavelike_position_tracker.WithMulticallerWrap(wrap))
+	}
+
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		return fmt.Errorf("loading ERC20 ABI: %w", err)
@@ -312,6 +323,7 @@ func run(args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		svcOpts...,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)

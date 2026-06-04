@@ -44,6 +44,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
@@ -142,6 +143,14 @@ func run(ctx context.Context, args []string) error {
 	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
+	}
+
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "morpho")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		multicaller = wrap(multicaller)
 	}
 
 	// Shared vault prober (handles MetaMorpho ABI internally)

@@ -19,6 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
@@ -204,6 +205,15 @@ func run(args []string) error {
 	}
 
 	// Build position tracker (nil consumer and nil redisClient for backfill mode)
+	var svcOpts []aavelike_position_tracker.Option
+	if archivingwire.Enabled() {
+		wrap, err := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int(buildReg.BuildID()), "sparklend")
+		if err != nil {
+			return fmt.Errorf("init SC-call archiver: %w", err)
+		}
+		svcOpts = append(svcOpts, aavelike_position_tracker.WithMulticallerWrap(wrap))
+	}
+
 	trackerSvc, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
 			Logger:  logger,
@@ -219,6 +229,7 @@ func run(args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		svcOpts...,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)
