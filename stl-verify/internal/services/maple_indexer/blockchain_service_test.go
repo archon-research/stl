@@ -11,6 +11,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// mustNewBlockchainService builds a BlockchainService for tests, failing fast if
+// construction (ABI loading, validation) errors so downstream assertions never
+// run against a nil service.
+func mustNewBlockchainService(t *testing.T, mc outbound.Multicaller) *BlockchainService {
+	t.Helper()
+	bs, err := NewBlockchainService(mc, nil)
+	if err != nil {
+		t.Fatalf("NewBlockchainService failed: %v", err)
+	}
+	return bs
+}
+
 func TestNewBlockchainService_RejectsNilMulticaller(t *testing.T) {
 	if _, err := NewBlockchainService(nil, nil); err == nil {
 		t.Fatal("expected error for nil multicaller")
@@ -86,7 +98,7 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 func TestFetchVaultState_PropagatesMulticallError(t *testing.T) {
 	wantErr := errors.New("network down")
 	mc := &multicallStub{Err: wantErr}
-	bs, _ := NewBlockchainService(mc, nil)
+	bs := mustNewBlockchainService(t, mc)
 	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), big.NewInt(1))
 	if err == nil || !errors.Is(err, wantErr) {
 		t.Fatalf("expected wrapped multicall error, got %v", err)
@@ -94,7 +106,7 @@ func TestFetchVaultState_PropagatesMulticallError(t *testing.T) {
 }
 
 func TestFetchVaultState_FailsOnRevertedCall(t *testing.T) {
-	bs, _ := NewBlockchainService(&multicallStub{}, nil)
+	bs := mustNewBlockchainService(t, &multicallStub{})
 	mc := &reverteringMulticaller{}
 	bs.multicaller = mc
 	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), big.NewInt(1))
@@ -118,7 +130,7 @@ func (r *reverteringMulticaller) Address() common.Address { return common.Addres
 
 func TestFetchUserPositions_EmptyUsers_ShortCircuits(t *testing.T) {
 	mc := &multicallStub{}
-	bs, _ := NewBlockchainService(mc, nil)
+	bs := mustNewBlockchainService(t, mc)
 	out, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), nil, big.NewInt(1))
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +157,7 @@ func TestFetchUserPositions_TwoBatches(t *testing.T) {
 			encodeUint256(big.NewInt(825)),
 		},
 	}
-	bs, _ := NewBlockchainService(mc, nil)
+	bs := mustNewBlockchainService(t, mc)
 	vault := common.HexToAddress(syrupUSDCAddr)
 	u1 := common.HexToAddress(userA)
 	u2 := common.HexToAddress(userB)
@@ -178,7 +190,7 @@ func TestFetchUserPositions_TwoBatches(t *testing.T) {
 func TestFetchUserPositions_PropagatesBalanceOfError(t *testing.T) {
 	wantErr := errors.New("rpc 502")
 	mc := &multicallStub{Err: wantErr}
-	bs, _ := NewBlockchainService(mc, nil)
+	bs := mustNewBlockchainService(t, mc)
 	_, err := bs.FetchUserPositions(context.Background(),
 		common.HexToAddress(syrupUSDCAddr),
 		[]common.Address{common.HexToAddress(userA)},
@@ -195,7 +207,7 @@ func TestFetchUserPositions_PassesBlockNumberThrough(t *testing.T) {
 			encodeUint256(big.NewInt(2)),
 		},
 	}
-	bs, _ := NewBlockchainService(mc, nil)
+	bs := mustNewBlockchainService(t, mc)
 	block := big.NewInt(18_700_000)
 	if _, err := bs.FetchUserPositions(context.Background(),
 		common.HexToAddress(syrupUSDCAddr),

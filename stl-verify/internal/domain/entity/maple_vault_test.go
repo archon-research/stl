@@ -23,51 +23,53 @@ func TestNewMapleVault_Valid(t *testing.T) {
 	}
 }
 
-func TestNewMapleVault_RejectsBadAddress(t *testing.T) {
-	if _, err := NewMapleVault(1, 7, 9, []byte{0x01}, "n", "s",
-		bytes.Repeat([]byte{0xcd}, 20), 1, 0); err == nil {
-		t.Fatal("expected error on 1-byte vault address")
+// mapleVaultArgs is a complete set of valid NewMapleVault arguments. Each
+// rejection case clones this baseline and corrupts exactly one field so a
+// failure isolates the single invariant under test (single-fault).
+type mapleVaultArgs struct {
+	chainID, protocolID, assetTokenID int64
+	address                           []byte
+	name, symbol                      string
+	poolAddress                       []byte
+	vaultVersion                      int16
+	createdAtBlock                    int64
+}
+
+func validMapleVaultArgs() mapleVaultArgs {
+	return mapleVaultArgs{
+		chainID:        1,
+		protocolID:     7,
+		assetTokenID:   9,
+		address:        bytes.Repeat([]byte{0xab}, 20),
+		name:           "Syrup USDC",
+		symbol:         "syrupUSDC",
+		poolAddress:    bytes.Repeat([]byte{0xcd}, 20),
+		vaultVersion:   1,
+		createdAtBlock: 20231245,
 	}
 }
 
-func TestNewMapleVault_RejectsBadPool(t *testing.T) {
-	if _, err := NewMapleVault(1, 7, 9, bytes.Repeat([]byte{0xab}, 20),
-		"n", "s", []byte{0x01}, 1, 0); err == nil {
-		t.Fatal("expected error on 1-byte pool address")
+func TestNewMapleVault_Rejects(t *testing.T) {
+	cases := []struct {
+		name    string
+		corrupt func(*mapleVaultArgs)
+	}{
+		{"bad vault address", func(a *mapleVaultArgs) { a.address = []byte{0x01} }},
+		{"bad pool address", func(a *mapleVaultArgs) { a.poolAddress = []byte{0x01} }},
+		{"zero chain id", func(a *mapleVaultArgs) { a.chainID = 0 }},
+		{"zero protocol id", func(a *mapleVaultArgs) { a.protocolID = 0 }},
+		{"zero asset token id", func(a *mapleVaultArgs) { a.assetTokenID = 0 }},
+		{"zero vault version", func(a *mapleVaultArgs) { a.vaultVersion = 0 }},
+		{"negative created at block", func(a *mapleVaultArgs) { a.createdAtBlock = -1 }},
 	}
-}
-
-func TestNewMapleVault_RejectsZeroChain(t *testing.T) {
-	if _, err := NewMapleVault(0, 7, 9, bytes.Repeat([]byte{0xab}, 20),
-		"n", "s", bytes.Repeat([]byte{0xcd}, 20), 1, 0); err == nil {
-		t.Fatal("expected error on zero chain id")
-	}
-}
-
-func TestNewMapleVault_RejectsZeroProtocol(t *testing.T) {
-	if _, err := NewMapleVault(1, 0, 9, bytes.Repeat([]byte{0xab}, 20),
-		"n", "s", bytes.Repeat([]byte{0xcd}, 20), 1, 0); err == nil {
-		t.Fatal("expected error on zero protocol id")
-	}
-}
-
-func TestNewMapleVault_RejectsZeroAssetToken(t *testing.T) {
-	if _, err := NewMapleVault(1, 7, 0, bytes.Repeat([]byte{0xab}, 20),
-		"n", "s", bytes.Repeat([]byte{0xcd}, 20), 1, 0); err == nil {
-		t.Fatal("expected error on zero asset token id")
-	}
-}
-
-func TestNewMapleVault_RejectsZeroVaultVersion(t *testing.T) {
-	if _, err := NewMapleVault(1, 7, 9, bytes.Repeat([]byte{0xab}, 20),
-		"n", "s", bytes.Repeat([]byte{0xcd}, 20), 0, 0); err == nil {
-		t.Fatal("expected error on zero vault version")
-	}
-}
-
-func TestNewMapleVault_RejectsNegativeCreatedAtBlock(t *testing.T) {
-	if _, err := NewMapleVault(1, 7, 9, bytes.Repeat([]byte{0xab}, 20),
-		"n", "s", bytes.Repeat([]byte{0xcd}, 20), 1, -1); err == nil {
-		t.Fatal("expected error on negative createdAtBlock")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := validMapleVaultArgs()
+			tc.corrupt(&a)
+			if _, err := NewMapleVault(a.chainID, a.protocolID, a.assetTokenID, a.address,
+				a.name, a.symbol, a.poolAddress, a.vaultVersion, a.createdAtBlock); err == nil {
+				t.Fatalf("expected error on %s", tc.name)
+			}
+		})
 	}
 }

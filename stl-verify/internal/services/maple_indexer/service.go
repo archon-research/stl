@@ -160,6 +160,13 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 // the indexer when the cache TTL drops is preferable to silently skipping
 // a block.
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	// Guard against misrouted SQS messages: the vault registry was loaded for
+	// s.config.ChainID, so processing an event from another chain would mix one
+	// chain's users with another chain's vault metadata and write bad rows.
+	if event.ChainID != s.config.ChainID {
+		return fmt.Errorf("unexpected block event chain_id %d: expected %d", event.ChainID, s.config.ChainID)
+	}
+
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 

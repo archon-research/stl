@@ -31,6 +31,9 @@ type EventExtractor struct {
 // NewEventExtractor loads the Syrup events ABI and caches the three
 // topic-hashes the extractor recognises.
 func NewEventExtractor(logger *slog.Logger) (*EventExtractor, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	a, err := abis.GetSyrupVaultEventsABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading Syrup events ABI: %w", err)
@@ -156,5 +159,11 @@ func addUser(users map[common.Address]struct{}, topicHex string) {
 // addressMatches compares a hex-encoded log address (possibly without 0x or
 // with mixed case) against a canonical common.Address.
 func addressMatches(logAddress string, vault common.Address) bool {
+	// HexToAddress silently coerces malformed input (truncating/padding), which
+	// could falsely match the vault. Reject anything that is not a valid hex
+	// address first.
+	if !common.IsHexAddress(logAddress) {
+		return false
+	}
 	return common.HexToAddress(logAddress) == vault
 }

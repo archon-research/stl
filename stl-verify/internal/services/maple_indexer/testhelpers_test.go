@@ -109,7 +109,10 @@ var _ outbound.Multicaller = (*multicallStub)(nil)
 
 // encodeUint256 produces an ABI-encoded uint256 return value.
 func encodeUint256(n *big.Int) []byte {
-	ty, _ := abi.NewType("uint256", "", nil)
+	ty, err := abi.NewType("uint256", "", nil)
+	if err != nil {
+		panic("creating uint256 ABI type: " + err.Error())
+	}
 	args := abi.Arguments{{Type: ty}}
 	out, err := args.Pack(n)
 	if err != nil {

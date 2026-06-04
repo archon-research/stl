@@ -197,13 +197,28 @@ func (s *BlockchainService) FetchUserPositions(
 		balances[i] = bal
 	}
 
-	assetCalls := make([]outbound.Call, len(users))
+	// convertToAssets(0) is deterministically 0, so short-circuit zero-share
+	// users locally and only batch non-zero accounts. This cuts RPC fan-out and
+	// latency on a hot path.
+	out := make(map[common.Address]*UserPosition, len(users))
+	nonZeroUsers := make([]common.Address, 0, len(users))
+	nonZeroBalances := make([]*big.Int, 0, len(users))
+	assetCalls := make([]outbound.Call, 0, len(users))
 	for i, b := range balances {
+		if b.Sign() == 0 {
+			out[users[i]] = &UserPosition{Shares: b, Assets: big.NewInt(0)}
+			continue
+		}
 		data, err := s.viewABI.Pack("convertToAssets", b)
 		if err != nil {
 			return nil, fmt.Errorf("packing convertToAssets: %w", err)
 		}
-		assetCalls[i] = outbound.Call{Target: vault, CallData: data}
+		nonZeroUsers = append(nonZeroUsers, users[i])
+		nonZeroBalances = append(nonZeroBalances, b)
+		assetCalls = append(assetCalls, outbound.Call{Target: vault, CallData: data})
+	}
+	if len(assetCalls) == 0 {
+		return out, nil
 	}
 	assetStart := time.Now()
 	assetResults, err := s.multicaller.Execute(ctx, assetCalls, blockNumber)
@@ -211,17 +226,16 @@ func (s *BlockchainService) FetchUserPositions(
 	if err != nil {
 		return nil, fmt.Errorf("multicall convertToAssets for vault %s: %w", vault.Hex(), err)
 	}
-	if len(assetResults) != len(users) {
-		return nil, fmt.Errorf("convertToAssets returned %d results, expected %d", len(assetResults), len(users))
+	if len(assetResults) != len(assetCalls) {
+		return nil, fmt.Errorf("convertToAssets returned %d results, expected %d", len(assetResults), len(assetCalls))
 	}
 
-	out := make(map[common.Address]*UserPosition, len(users))
-	for i, u := range users {
+	for i, u := range nonZeroUsers {
 		assets, err := s.decodeUint256("convertToAssets", assetResults[i])
 		if err != nil {
 			return nil, fmt.Errorf("convertToAssets(%s): %w", u.Hex(), err)
 		}
-		out[u] = &UserPosition{Shares: balances[i], Assets: assets}
+		out[u] = &UserPosition{Shares: nonZeroBalances[i], Assets: assets}
 	}
 	return out, nil
 }
