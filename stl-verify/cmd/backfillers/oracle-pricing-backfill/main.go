@@ -16,8 +16,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -141,6 +144,23 @@ func run(args []string) error {
 		return fmt.Errorf("registering build: %w", err)
 	}
 
+	// VEC-81: optionally wrap the multicaller so every batch is archived to S3.
+	// Backfills are canonical (no reorgs), so bv defaults to 0 without context plumbing.
+	if env.Get("ARCHIVE_SC_CALLS", "") == "true" {
+		wrap, wrapErr := newOracleArchivingWrap(ctx, logger, cfg.chainID, int(buildReg.BuildID()))
+		if wrapErr != nil {
+			return fmt.Errorf("init SC-call archiver: %w", wrapErr)
+		}
+		inner := newMulticaller
+		newMulticaller = func(ot entity.OracleType) (outbound.Multicaller, error) {
+			mc, err := inner(ot)
+			if err != nil {
+				return nil, err
+			}
+			return wrap(mc), nil
+		}
+	}
+
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), cfg.batchSize)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
@@ -162,4 +182,31 @@ func run(args []string) error {
 	}
 
 	return service.Run(ctx, cfg.fromBlock, cfg.toBlock)
+}
+
+// newOracleArchivingWrap builds an S3-backed call archiver and returns a
+// closure that wraps any outbound.Multicaller so every Execute is archived to
+// the bucket named by RAW_SC_BUCKET (VEC-81). Returns an error if the bucket
+// or AWS config cannot be resolved — callers should only invoke this when the
+// ARCHIVE_SC_CALLS feature flag is enabled.
+func newOracleArchivingWrap(ctx context.Context, logger *slog.Logger, chainID int64, buildID int) (func(outbound.Multicaller) outbound.Multicaller, error) {
+	bucket := env.Get("RAW_SC_BUCKET", "")
+	if bucket == "" {
+		return nil, fmt.Errorf("RAW_SC_BUCKET must be set when ARCHIVE_SC_CALLS=true")
+	}
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		Endpoint:                 env.Get("AWS_ENDPOINT_URL", ""),
+		StaticCredentialsFromEnv: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	archiver, err := s3adapter.NewCallArchiver(awsCfg, bucket, logger)
+	if err != nil {
+		return nil, fmt.Errorf("building S3 call archiver: %w", err)
+	}
+	logger.Info("raw SC-call archiving enabled", "bucket", bucket)
+	return func(mc outbound.Multicaller) outbound.Multicaller {
+		return archiving.New(mc, archiver, chainID, buildID, "oracle-price")
+	}, nil
 }
