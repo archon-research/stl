@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -86,6 +87,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"oracle.block.duration_seconds",
 		metric.WithDescription("Duration of block processing in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockDuration histogram: %w", err)
@@ -95,6 +97,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"oracle.rpc.duration_seconds",
 		metric.WithDescription("Duration of RPC calls in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
