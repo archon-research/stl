@@ -216,7 +216,11 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name for metrics: %w", err)
+	}
+	oracleTelemetry, err := oracle_price_worker.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
 	}

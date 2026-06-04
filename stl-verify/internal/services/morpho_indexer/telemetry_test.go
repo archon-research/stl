@@ -23,7 +23,7 @@ func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp)
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 }
 
 func TestNewTelemetry(t *testing.T) {
-	tel, err := NewTelemetry()
+	tel, err := NewTelemetry("mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetry() returned error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestNewTelemetry(t *testing.T) {
 }
 
 func TestNewTelemetryWithProviders(t *testing.T) {
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), metricnoop.NewMeterProvider())
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), metricnoop.NewMeterProvider(), "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() returned error: %v", err)
 	}
