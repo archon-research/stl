@@ -83,6 +83,7 @@ func NewService(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 	receiptTokenRepo outbound.ReceiptTokenRepository,
+	opts ...Option,
 ) (*Service, error) {
 	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, err
@@ -93,9 +94,18 @@ func NewService(
 		return nil, err
 	}
 
+	options := serviceOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	var mc outbound.Multicaller
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create multicall client: %w", err)
+	}
+	if options.multicallerWrap != nil {
+		mc = options.multicallerWrap(mc)
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
