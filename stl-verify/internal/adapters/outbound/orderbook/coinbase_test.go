@@ -21,11 +21,11 @@ func TestCoinbaseHandlerSnapshotThenUpdate(t *testing.T) {
 		t.Fatalf("expected 1 snapshot signal, got %+v", sigs)
 	}
 	book := sigs[0].book
-	if bb, _ := book.BestBid(); bb.Price != 100 || bb.Size != 2 {
-		t.Errorf("best bid = %+v, want {100 2}", bb)
+	if sz, ok := sizeAt(book.Bids(), "100"); !ok || sz != "2" {
+		t.Errorf("bid 100 = %q (ok=%v), want 2", sz, ok)
 	}
-	if ba, _ := book.BestAsk(); ba.Price != 101 || ba.Size != 3 {
-		t.Errorf("best ask = %+v, want {101 3}", ba)
+	if sz, ok := sizeAt(book.Asks(), "101"); !ok || sz != "3" {
+		t.Errorf("ask 101 = %q (ok=%v), want 3", sz, ok)
 	}
 
 	update := `{"channel":"l2_data","sequence_num":1,"timestamp":"2023-02-09T20:32:51Z","events":[
@@ -40,11 +40,11 @@ func TestCoinbaseHandlerSnapshotThenUpdate(t *testing.T) {
 		t.Fatalf("expected 1 non-snapshot signal, got %+v", sigs)
 	}
 	book = sigs[0].book
-	if _, ok := sizeAt(book.Bids(), 100); ok {
+	if _, ok := sizeAt(book.Bids(), "100"); ok {
 		t.Error("bid 100 should be removed by zero quantity")
 	}
-	if bb, _ := book.BestBid(); bb.Price != 99 || bb.Size != 5 {
-		t.Errorf("best bid after update = %+v, want {99 5}", bb)
+	if sz, ok := sizeAt(book.Bids(), "99"); !ok || sz != "5" {
+		t.Errorf("bid 99 after update = %q (ok=%v), want 5", sz, ok)
 	}
 }
 

@@ -21,20 +21,30 @@ func TestSideString(t *testing.T) {
 	}
 }
 
+// sizeAt returns the size string at price, or ok=false when absent.
+func sizeAt(levels []PriceLevel, price string) (string, bool) {
+	for _, l := range levels {
+		if l.Price == price {
+			return l.Size, true
+		}
+	}
+	return "", false
+}
+
 func TestOrderbookApplyLevel(t *testing.T) {
 	tests := []struct {
 		name      string
 		side      Side
-		price     float64
-		size      float64
+		price     string
+		size      string
 		wantDepth int
-		wantSize  float64 // expected size at price after apply (0 == absent)
+		wantSize  string // size at price after apply ("" == absent)
 	}{
-		{name: "insert bid", side: Bid, price: 100, size: 2, wantDepth: 1, wantSize: 2},
-		{name: "insert ask", side: Ask, price: 101, size: 3, wantDepth: 1, wantSize: 3},
-		{name: "zero size removes", side: Bid, price: 100, size: 0, wantDepth: 0, wantSize: 0},
-		{name: "negative size removes", side: Bid, price: 100, size: -1, wantDepth: 0, wantSize: 0},
-		{name: "non-positive price ignored", side: Bid, price: 0, size: 5, wantDepth: 0, wantSize: 0},
+		{name: "insert bid", side: Bid, price: "100", size: "2", wantDepth: 1, wantSize: "2"},
+		{name: "insert ask", side: Ask, price: "101", size: "3", wantDepth: 1, wantSize: "3"},
+		{name: "zero size removes", side: Bid, price: "100", size: "0", wantDepth: 0, wantSize: ""},
+		{name: "negative size removes", side: Bid, price: "100", size: "-1", wantDepth: 0, wantSize: ""},
+		{name: "non-finite size removes", side: Bid, price: "100", size: "NaN", wantDepth: 0, wantSize: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -47,126 +57,45 @@ func TestOrderbookApplyLevel(t *testing.T) {
 			if tt.side == Ask {
 				levels = ob.Asks()
 			}
-			var gotSize float64
-			for _, l := range levels {
-				if l.Price == tt.price {
-					gotSize = l.Size
-				}
-			}
-			if gotSize != tt.wantSize {
-				t.Errorf("size at %v = %v, want %v", tt.price, gotSize, tt.wantSize)
+			got, _ := sizeAt(levels, tt.price)
+			if got != tt.wantSize {
+				t.Errorf("size at %s = %q, want %q", tt.price, got, tt.wantSize)
 			}
 		})
 	}
 }
 
-func TestOrderbookApplyLevelUpdatesAbsolute(t *testing.T) {
+func TestOrderbookApplyLevelIsAbsolute(t *testing.T) {
 	ob := NewOrderbook("test", "BTCUSDT")
-	ob.ApplyLevel(Bid, 100, 5)
-	ob.ApplyLevel(Bid, 100, 9) // absolute replace, not additive
-	bb, ok := ob.BestBid()
-	if !ok || bb.Size != 9 {
-		t.Fatalf("BestBid = %+v ok=%v, want size 9", bb, ok)
+	ob.ApplyLevel(Bid, "100", "5")
+	ob.ApplyLevel(Bid, "100", "9") // absolute replace, not additive
+	if sz, ok := sizeAt(ob.Bids(), "100"); !ok || sz != "9" {
+		t.Fatalf("size at 100 = %q ok=%v, want 9", sz, ok)
 	}
 	if ob.Depth(Bid) != 1 {
 		t.Errorf("Depth(Bid) = %d, want 1", ob.Depth(Bid))
 	}
 }
 
-func TestOrderbookIgnoresNonFinite(t *testing.T) {
-	ob := NewOrderbook("test", "BTCUSDT")
-	inf := 1.0 / zero()
-	nan := inf - inf
-	ob.ApplyLevel(Bid, nan, 1)
-	ob.ApplyLevel(Bid, inf, 1)
-	ob.ApplyLevel(Bid, 100, nan) // non-finite size removes (no-op on empty)
-	if ob.Depth(Bid) != 0 {
-		t.Errorf("Depth(Bid) = %d, want 0 (non-finite inputs ignored)", ob.Depth(Bid))
-	}
-}
-
-// zero returns 0.0 without a constant divide-by-zero the compiler would reject.
-func zero() float64 { return float64(len("")) }
-
-func TestOrderbookSorting(t *testing.T) {
-	ob := NewOrderbook("test", "BTCUSDT")
-	for _, p := range []float64{100, 102, 101} {
-		ob.ApplyLevel(Bid, p, 1)
-	}
-	for _, p := range []float64{200, 198, 199} {
-		ob.ApplyLevel(Ask, p, 1)
-	}
-
-	bids := ob.Bids()
-	wantBids := []float64{102, 101, 100} // descending
-	for i, w := range wantBids {
-		if bids[i].Price != w {
-			t.Errorf("bids[%d].Price = %v, want %v", i, bids[i].Price, w)
-		}
-	}
-	asks := ob.Asks()
-	wantAsks := []float64{198, 199, 200} // ascending
-	for i, w := range wantAsks {
-		if asks[i].Price != w {
-			t.Errorf("asks[%d].Price = %v, want %v", i, asks[i].Price, w)
-		}
-	}
-}
-
-func TestOrderbookBestEmpty(t *testing.T) {
-	ob := NewOrderbook("test", "BTCUSDT")
-	if _, ok := ob.BestBid(); ok {
-		t.Error("BestBid on empty book should be ok=false")
-	}
-	if _, ok := ob.BestAsk(); ok {
-		t.Error("BestAsk on empty book should be ok=false")
-	}
-}
-
 func TestOrderbookReplaceSide(t *testing.T) {
 	ob := NewOrderbook("test", "BTCUSDT")
-	ob.ApplyLevel(Bid, 1, 1) // should be cleared by ReplaceSide
-	ob.ReplaceSide(Bid, []PriceLevel{{Price: 100, Size: 2}, {Price: 99, Size: 3}})
+	ob.ApplyLevel(Bid, "1", "1") // should be cleared by ReplaceSide
+	ob.ReplaceSide(Bid, []PriceLevel{{Price: "100", Size: "2"}, {Price: "99", Size: "3"}})
 	if ob.Depth(Bid) != 2 {
 		t.Fatalf("Depth(Bid) = %d, want 2", ob.Depth(Bid))
 	}
-	bb, _ := ob.BestBid()
-	if bb.Price != 100 || bb.Size != 2 {
-		t.Errorf("BestBid = %+v, want {100 2}", bb)
+	if sz, ok := sizeAt(ob.Bids(), "100"); !ok || sz != "2" {
+		t.Errorf("size at 100 = %q ok=%v, want 2", sz, ok)
 	}
-}
-
-func TestOrderbookCrossed(t *testing.T) {
-	tests := []struct {
-		name string
-		bid  float64
-		ask  float64
-		set  bool // set both sides
-		want bool
-	}{
-		{name: "normal", bid: 100, ask: 101, set: true, want: false},
-		{name: "crossed", bid: 102, ask: 101, set: true, want: true},
-		{name: "locked is not crossed", bid: 101, ask: 101, set: true, want: false},
-		{name: "empty", set: false, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ob := NewOrderbook("test", "BTCUSDT")
-			if tt.set {
-				ob.ApplyLevel(Bid, tt.bid, 1)
-				ob.ApplyLevel(Ask, tt.ask, 1)
-			}
-			if got := ob.Crossed(); got != tt.want {
-				t.Errorf("Crossed() = %v, want %v", got, tt.want)
-			}
-		})
+	if _, ok := sizeAt(ob.Bids(), "1"); ok {
+		t.Error("price 1 should have been cleared by ReplaceSide")
 	}
 }
 
 func TestOrderbookReset(t *testing.T) {
 	ob := NewOrderbook("test", "BTCUSDT")
-	ob.ApplyLevel(Bid, 100, 1)
-	ob.ApplyLevel(Ask, 101, 1)
+	ob.ApplyLevel(Bid, "100", "1")
+	ob.ApplyLevel(Ask, "101", "1")
 	ob.LastUpdateID = 42
 	ob.Reset()
 	if ob.Depth(Bid) != 0 || ob.Depth(Ask) != 0 {
@@ -177,21 +106,32 @@ func TestOrderbookReset(t *testing.T) {
 	}
 }
 
+func TestOrderbookPreservesExactStrings(t *testing.T) {
+	// A value with more significant digits than float64 can hold must be stored
+	// and returned byte-for-byte — this is the whole point of string keys/values.
+	ob := NewOrderbook("test", "BTCUSDT")
+	const price = "0.000000000000001234"
+	const size = "12345.678901234567890"
+	ob.ApplyLevel(Bid, price, size)
+	if sz, ok := sizeAt(ob.Bids(), price); !ok || sz != size {
+		t.Errorf("size at %s = %q ok=%v, want %q (exact string preserved)", price, sz, ok, size)
+	}
+}
+
 func TestOrderbookCloneIsIndependent(t *testing.T) {
 	ob := NewOrderbook("binance", "BTCUSDT")
-	ob.ApplyLevel(Bid, 100, 1)
-	ob.ApplyLevel(Ask, 101, 1)
+	ob.ApplyLevel(Bid, "100", "1")
+	ob.ApplyLevel(Ask, "101", "1")
 	ob.LastUpdateID = 7
 
 	clone := ob.Clone()
 	// Mutate the original after cloning.
-	ob.ApplyLevel(Bid, 100, 5)
-	ob.ApplyLevel(Bid, 99, 2)
+	ob.ApplyLevel(Bid, "100", "5")
+	ob.ApplyLevel(Bid, "99", "2")
 	ob.LastUpdateID = 8
 
-	cb, _ := clone.BestBid()
-	if cb.Size != 1 {
-		t.Errorf("clone bid size = %v, want 1 (clone must not see later mutation)", cb.Size)
+	if sz, ok := sizeAt(clone.Bids(), "100"); !ok || sz != "1" {
+		t.Errorf("clone size at 100 = %q ok=%v, want 1 (clone must not see later mutation)", sz, ok)
 	}
 	if clone.Depth(Bid) != 1 {
 		t.Errorf("clone Depth(Bid) = %d, want 1", clone.Depth(Bid))
@@ -206,7 +146,7 @@ func TestOrderbookCloneIsIndependent(t *testing.T) {
 
 func TestNewOrderbookUpdate(t *testing.T) {
 	ob := NewOrderbook("binance", "BTCUSDT")
-	ob.ApplyLevel(Bid, 100, 1)
+	ob.ApplyLevel(Bid, "100", "1")
 	now := time.Unix(1700000000, 0)
 
 	upd := NewOrderbookUpdate(ob, true, now)
@@ -216,10 +156,12 @@ func TestNewOrderbookUpdate(t *testing.T) {
 	if !upd.IsSnapshot || !upd.Time.Equal(now) {
 		t.Errorf("update flags: IsSnapshot=%v Time=%v", upd.IsSnapshot, upd.Time)
 	}
+	if upd.Time.Location() != time.UTC {
+		t.Errorf("update Time location = %v, want UTC", upd.Time.Location())
+	}
 	// The update's book must be a clone, independent of later mutation.
-	ob.ApplyLevel(Bid, 100, 9)
-	bb, _ := upd.Book.BestBid()
-	if bb.Size != 1 {
-		t.Errorf("update book bid size = %v, want 1 (must be a clone)", bb.Size)
+	ob.ApplyLevel(Bid, "100", "9")
+	if sz, ok := sizeAt(upd.Book.Bids(), "100"); !ok || sz != "1" {
+		t.Errorf("update book size at 100 = %q ok=%v, want 1 (must be a clone)", sz, ok)
 	}
 }

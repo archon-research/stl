@@ -21,8 +21,8 @@ func TestOKXHandlerSnapshotThenUpdate(t *testing.T) {
 	if len(sigs) != 1 || !sigs[0].isSnapshot {
 		t.Fatalf("expected snapshot signal, got %+v", sigs)
 	}
-	if bb, _ := sigs[0].book.BestBid(); bb.Price != 100 || bb.Size != 2 {
-		t.Errorf("best bid = %+v, want {100 2}", bb)
+	if sz, ok := sizeAt(sigs[0].book.Bids(), "100"); !ok || sz != "2" {
+		t.Errorf("bid 100 = %q (ok=%v), want 2", sz, ok)
 	}
 	if sigs[0].book.LastUpdateID != 10 {
 		t.Errorf("LastUpdateID = %d, want 10", sigs[0].book.LastUpdateID)
@@ -39,11 +39,11 @@ func TestOKXHandlerSnapshotThenUpdate(t *testing.T) {
 		t.Fatalf("expected non-snapshot signal, got %+v", sigs)
 	}
 	book := sigs[0].book
-	if _, ok := sizeAt(book.Bids(), 100); ok {
+	if _, ok := sizeAt(book.Bids(), "100"); ok {
 		t.Error("bid 100 should be removed by zero size")
 	}
-	if bb, _ := book.BestBid(); bb.Price != 99 || bb.Size != 7 {
-		t.Errorf("best bid after update = %+v, want {99 7}", bb)
+	if sz, ok := sizeAt(book.Bids(), "99"); !ok || sz != "7" {
+		t.Errorf("bid 99 after update = %q (ok=%v), want 7", sz, ok)
 	}
 }
 

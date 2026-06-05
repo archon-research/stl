@@ -59,12 +59,13 @@ func TestParseLevel(t *testing.T) {
 		name      string
 		price     string
 		size      string
-		wantPrice float64
-		wantSize  float64
+		wantPrice string
+		wantSize  string
 		wantErr   bool
 	}{
-		{name: "ok", price: "100.5", size: "2.25", wantPrice: 100.5, wantSize: 2.25},
-		{name: "zero size ok", price: "100", size: "0", wantPrice: 100, wantSize: 0},
+		{name: "ok", price: "100.5", size: "2.25", wantPrice: "100.5", wantSize: "2.25"},
+		{name: "zero size ok", price: "100", size: "0", wantPrice: "100", wantSize: "0"},
+		{name: "high precision preserved verbatim", price: "0.000000000000001234", size: "12345.678901234567890", wantPrice: "0.000000000000001234", wantSize: "12345.678901234567890"},
 		{name: "bad price", price: "abc", size: "1", wantErr: true},
 		{name: "bad size", price: "1", size: "xyz", wantErr: true},
 		{name: "negative price rejected", price: "-1", size: "1", wantErr: true},
@@ -85,7 +86,7 @@ func TestParseLevel(t *testing.T) {
 				return
 			}
 			if lvl.Price != tt.wantPrice || lvl.Size != tt.wantSize {
-				t.Errorf("parseLevel = %+v, want {%v %v}", lvl, tt.wantPrice, tt.wantSize)
+				t.Errorf("parseLevel = %+v, want {%q %q}", lvl, tt.wantPrice, tt.wantSize)
 			}
 		})
 	}
@@ -96,7 +97,7 @@ func TestParseLevels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseLevels err = %v", err)
 	}
-	if len(levels) != 2 || levels[0].Price != 100 || levels[1].Size != 2 {
+	if len(levels) != 2 || levels[0].Price != "100" || levels[1].Size != "2" {
 		t.Errorf("parseLevels = %+v", levels)
 	}
 
@@ -107,7 +108,7 @@ func TestParseLevels(t *testing.T) {
 
 func TestApplyDeltaLevels(t *testing.T) {
 	ob := entity.NewOrderbook("test", "X")
-	ob.ApplyLevel(entity.Bid, 100, 5)
+	ob.ApplyLevel(entity.Bid, "100", "5")
 	// Update 100 -> 7, add 99 -> 3, remove a non-existent level (no-op).
 	err := applyDeltaLevels(ob, entity.Bid, [][]string{{"100", "7"}, {"99", "3"}, {"50", "0"}})
 	if err != nil {
@@ -116,35 +117,12 @@ func TestApplyDeltaLevels(t *testing.T) {
 	if ob.Depth(entity.Bid) != 2 {
 		t.Errorf("Depth(Bid) = %d, want 2", ob.Depth(entity.Bid))
 	}
-	bb, _ := ob.BestBid()
-	if bb.Price != 100 || bb.Size != 7 {
-		t.Errorf("BestBid = %+v, want {100 7}", bb)
+	if sz, ok := sizeAt(ob.Bids(), "100"); !ok || sz != "7" {
+		t.Errorf("size at 100 = %q (ok=%v), want 7", sz, ok)
 	}
 
 	if err := applyDeltaLevels(ob, entity.Bid, [][]string{{"bad"}}); err == nil {
 		t.Error("applyDeltaLevels with malformed level should error")
-	}
-}
-
-func TestFirstCrossed(t *testing.T) {
-	book := func(bid, ask float64) *entity.Orderbook {
-		ob := entity.NewOrderbook("test", "BTCUSDT")
-		ob.ApplyLevel(entity.Bid, bid, 1)
-		ob.ApplyLevel(entity.Ask, ask, 1)
-		return ob
-	}
-
-	if err := firstCrossed("test", []emitSignal{{book: book(100, 101)}}); err != nil {
-		t.Errorf("healthy book: err = %v, want nil", err)
-	}
-	if err := firstCrossed("test", []emitSignal{{book: book(101, 101)}}); err != nil {
-		t.Errorf("locked book should not be crossed: err = %v", err)
-	}
-
-	// A crossed book anywhere in the batch is reported as an errSequenceGap.
-	err := firstCrossed("test", []emitSignal{{book: book(100, 101)}, {book: book(102, 101)}})
-	if !errors.Is(err, errSequenceGap) {
-		t.Errorf("crossed book: err = %v, want errSequenceGap", err)
 	}
 }
 
@@ -153,12 +131,12 @@ func TestEmitDeliversCloneAndDropsWhenFull(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate, 1)
 
 	book := entity.NewOrderbook("test", "X")
-	book.ApplyLevel(entity.Bid, 100, 1)
+	book.ApplyLevel(entity.Bid, "100", "1")
 
 	emit(ctx, out, book, true, time.Unix(1, 0))
 
 	// Buffer is now full; this emit must be dropped without blocking.
-	book.ApplyLevel(entity.Bid, 100, 9)
+	book.ApplyLevel(entity.Bid, "100", "9")
 	emit(ctx, out, book, false, time.Unix(2, 0))
 
 	if len(out) != 1 {
@@ -168,9 +146,8 @@ func TestEmitDeliversCloneAndDropsWhenFull(t *testing.T) {
 	if !upd.IsSnapshot {
 		t.Error("expected the first (snapshot) update to survive")
 	}
-	bb, _ := upd.Book.BestBid()
-	if bb.Size != 1 {
-		t.Errorf("emitted book bid size = %v, want 1 (must be a clone taken at emit time)", bb.Size)
+	if sz, ok := sizeAt(upd.Book.Bids(), "100"); !ok || sz != "1" {
+		t.Errorf("emitted book size at 100 = %q (ok=%v), want 1 (must be a clone taken at emit time)", sz, ok)
 	}
 }
 
@@ -181,7 +158,7 @@ func TestEmitNeverDropsSnapshot(t *testing.T) {
 
 	// Fill the buffer with a delta so it is full.
 	book := entity.NewOrderbook("test", "X")
-	book.ApplyLevel(entity.Bid, 100, 1)
+	book.ApplyLevel(entity.Bid, "100", "1")
 	emit(ctx, out, book, false, time.Unix(1, 0))
 	if len(out) != 1 {
 		t.Fatalf("setup: expected buffer full, got len %d", len(out))
@@ -283,6 +260,9 @@ func TestRunConnectionsClosesChannelWhenAllReturn(t *testing.T) {
 func TestParseTimeHelpers(t *testing.T) {
 	if got := parseUnixMillisOrNow("1700000000000"); !got.Equal(time.UnixMilli(1700000000000)) {
 		t.Errorf("parseUnixMillisOrNow = %v", got)
+	}
+	if got := parseUnixMillisOrNow("1700000000000"); got.Location() != time.UTC {
+		t.Errorf("parseUnixMillisOrNow location = %v, want UTC", got.Location())
 	}
 	// Malformed input falls back to ~now.
 	if got := parseUnixMillisOrNow("nope"); time.Since(got) > time.Minute {

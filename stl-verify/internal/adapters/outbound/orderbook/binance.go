@@ -246,12 +246,6 @@ func (p *BinanceProvider) applySnapshot(ctx context.Context, states map[string]*
 		}
 	}
 
-	if st.book.Crossed() {
-		// A freshly seeded book that is already crossed is corrupt at the source;
-		// drop the connection so it reconnects and re-snapshots from scratch.
-		return fmt.Errorf("snapshot for %s produced a crossed book", res.symbol)
-	}
-
 	emit(ctx, out, st.book, true, time.Now())
 	return nil
 }
@@ -287,12 +281,6 @@ func (p *BinanceProvider) handleDiff(ctx context.Context, states map[string]*bin
 			return nil
 		}
 		return fmt.Errorf("apply diff for %s: %w", diff.Symbol, err)
-	}
-
-	if st.book.Crossed() {
-		p.logger.Warn("crossed book after diff, resyncing", "symbol", diff.Symbol, "lastID", st.lastID)
-		p.beginResync(ctx, st, diff.Symbol, snapCh, diff)
-		return nil
 	}
 
 	emit(ctx, out, st.book, false, time.UnixMilli(diff.EventTime))

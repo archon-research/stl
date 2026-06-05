@@ -31,10 +31,10 @@ type fakeHandler struct{ books *bookSet }
 
 func (h *fakeHandler) handle(raw []byte) ([]emitSignal, error) {
 	var m struct {
-		Symbol   string  `json:"symbol"`
-		Snapshot bool    `json:"snapshot"`
-		Price    float64 `json:"price"`
-		Size     float64 `json:"size"`
+		Symbol   string      `json:"symbol"`
+		Snapshot bool        `json:"snapshot"`
+		Price    json.Number `json:"price"`
+		Size     json.Number `json:"size"`
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, err
@@ -43,7 +43,7 @@ func (h *fakeHandler) handle(raw []byte) ([]emitSignal, error) {
 	if m.Snapshot {
 		book.Reset()
 	}
-	book.ApplyLevel(entity.Bid, m.Price, m.Size)
+	book.ApplyLevel(entity.Bid, m.Price.String(), m.Size.String())
 	return []emitSignal{{book: book, isSnapshot: m.Snapshot, t: time.Now()}}, nil
 }
 
@@ -69,16 +69,16 @@ func TestWSSnapshotProviderStreamsAndCloses(t *testing.T) {
 	if !u1.IsSnapshot {
 		t.Error("first update should be a snapshot")
 	}
-	if bb, _ := u1.Book.BestBid(); bb.Price != 100 || bb.Size != 1 {
-		t.Errorf("snapshot best bid = %+v, want {100 1}", bb)
+	if sz, ok := sizeAt(u1.Book.Bids(), "100"); !ok || sz != "1" {
+		t.Errorf("snapshot bid 100 = %q (ok=%v), want 1", sz, ok)
 	}
 
 	u2 := receiveWithin(t, ch, 2*time.Second)
 	if u2.IsSnapshot {
 		t.Error("second update should not be a snapshot")
 	}
-	if bb, _ := u2.Book.BestBid(); bb.Price != 101 || bb.Size != 2 {
-		t.Errorf("update best bid = %+v, want {101 2}", bb)
+	if sz, ok := sizeAt(u2.Book.Bids(), "101"); !ok || sz != "2" {
+		t.Errorf("update bid 101 = %q (ok=%v), want 2", sz, ok)
 	}
 
 	// Cancellation must drain connections and close the channel.

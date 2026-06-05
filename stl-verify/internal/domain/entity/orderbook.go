@@ -2,7 +2,7 @@ package entity
 
 import (
 	"math"
-	"sort"
+	"strconv"
 	"time"
 )
 
@@ -29,9 +29,14 @@ func (s Side) String() string {
 }
 
 // PriceLevel is a single aggregated L2 level: the total resting size at a price.
+//
+// Price and Size are the exact decimal strings the exchange published. They are
+// never parsed into a float for storage, so the value written downstream (e.g.
+// the 1s JSONB/NUMERIC dump to TimescaleDB) byte-matches what the venue sent and
+// loses no precision.
 type PriceLevel struct {
-	Price float64
-	Size  float64
+	Price string
+	Size  string
 }
 
 // Orderbook is the aggregated L2 state for one symbol on one exchange. It is
@@ -39,13 +44,10 @@ type PriceLevel struct {
 //
 // Storage and performance:
 //
-// Bids and asks are stored as maps keyed by price so that delta application —
-// the high-frequency hot path — is O(1) per level. Decimal price strings from
-// an exchange are parsed once by the adapter; identical prices parse to the
-// same float64, so the map naturally de-duplicates levels without relying on
-// string formatting. Sorted views (Bids/Asks) are produced on demand, so only
-// callers that actually need ordering (e.g. a periodic persistence dump) pay
-// the O(n log n) sort.
+// Bids and asks are stored as maps keyed by the exact price string, so delta
+// application — the high-frequency hot path — is O(1) per level, and a delete
+// matches its insert exactly (an exchange formats a given price consistently
+// within one stream). Values are the exchange's size strings, kept verbatim.
 //
 // Concurrency: an Orderbook is NOT safe for concurrent use. Each book is owned
 // by exactly one goroutine (the connection that maintains it). Adapters hand a
@@ -61,8 +63,8 @@ type Orderbook struct {
 	// update has been applied yet.
 	LastUpdateID int64
 
-	bids map[float64]float64 // price -> size
-	asks map[float64]float64 // price -> size
+	bids map[string]string // price -> size, exact exchange text
+	asks map[string]string
 }
 
 // NewOrderbook returns an empty book for the given exchange and symbol.
@@ -70,8 +72,8 @@ func NewOrderbook(exchange, symbol string) *Orderbook {
 	return &Orderbook{
 		Exchange: exchange,
 		Symbol:   symbol,
-		bids:     make(map[float64]float64),
-		asks:     make(map[float64]float64),
+		bids:     make(map[string]string),
+		asks:     make(map[string]string),
 	}
 }
 
@@ -83,23 +85,21 @@ func (ob *Orderbook) Reset() {
 	ob.LastUpdateID = 0
 }
 
-func (ob *Orderbook) side(s Side) map[float64]float64 {
+func (ob *Orderbook) side(s Side) map[string]string {
 	if s == Ask {
 		return ob.asks
 	}
 	return ob.bids
 }
 
-// ApplyLevel upserts a price level in O(1). A size of zero (the exchange
-// convention for "level removed") deletes the level. Non-finite or
-// non-positive prices and non-finite sizes are ignored so a malformed delta can
-// never poison the map (a NaN key is impossible to delete).
-func (ob *Orderbook) ApplyLevel(s Side, price, size float64) {
-	if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
-		return
-	}
+// ApplyLevel upserts a price level in O(1), keyed and valued by the exact
+// exchange strings. A size of zero (the exchange convention for "level removed")
+// — or any non-positive/non-finite size — deletes the level. Price validation is
+// the adapter's responsibility (see parseLevel); this only decides set vs delete.
+func (ob *Orderbook) ApplyLevel(s Side, price, size string) {
 	m := ob.side(s)
-	if size <= 0 || math.IsNaN(size) || math.IsInf(size, 0) {
+	v, err := strconv.ParseFloat(size, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
 		delete(m, price)
 		return
 	}
@@ -114,60 +114,25 @@ func (ob *Orderbook) ReplaceSide(s Side, levels []PriceLevel) {
 	}
 }
 
-// Bids returns the buy levels sorted best-first (highest price first).
-func (ob *Orderbook) Bids() []PriceLevel { return sortedLevels(ob.bids, true) }
+// Bids returns the buy levels. Asks returns the sell levels. Both are returned
+// in unspecified order: the package does no ordering, leaving any sort to the
+// consumer (e.g. ORDER BY price at query time) so no decimal parsing is needed
+// here.
+func (ob *Orderbook) Bids() []PriceLevel { return levels(ob.bids) }
 
-// Asks returns the sell levels sorted best-first (lowest price first).
-func (ob *Orderbook) Asks() []PriceLevel { return sortedLevels(ob.asks, false) }
+// Asks returns the sell levels (see Bids for ordering semantics).
+func (ob *Orderbook) Asks() []PriceLevel { return levels(ob.asks) }
 
-func sortedLevels(m map[float64]float64, descending bool) []PriceLevel {
+func levels(m map[string]string) []PriceLevel {
 	out := make([]PriceLevel, 0, len(m))
-	for p, sz := range m {
-		out = append(out, PriceLevel{Price: p, Size: sz})
+	for p, s := range m {
+		out = append(out, PriceLevel{Price: p, Size: s})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if descending {
-			return out[i].Price > out[j].Price
-		}
-		return out[i].Price < out[j].Price
-	})
 	return out
-}
-
-// BestBid returns the highest bid, or ok=false when the bid side is empty.
-func (ob *Orderbook) BestBid() (PriceLevel, bool) { return bestLevel(ob.bids, true) }
-
-// BestAsk returns the lowest ask, or ok=false when the ask side is empty.
-func (ob *Orderbook) BestAsk() (PriceLevel, bool) { return bestLevel(ob.asks, false) }
-
-func bestLevel(m map[float64]float64, max bool) (PriceLevel, bool) {
-	found := false
-	var bestPrice float64
-	for p := range m {
-		if !found || (max && p > bestPrice) || (!max && p < bestPrice) {
-			bestPrice, found = p, true
-		}
-	}
-	if !found {
-		return PriceLevel{}, false
-	}
-	return PriceLevel{Price: bestPrice, Size: m[bestPrice]}, true
 }
 
 // Depth returns the number of distinct price levels on a side.
 func (ob *Orderbook) Depth(s Side) int { return len(ob.side(s)) }
-
-// Crossed reports whether the best bid is strictly above the best ask, which
-// signals a corrupt or desynchronised book. It returns false when either side
-// is empty.
-func (ob *Orderbook) Crossed() bool {
-	bb, okBid := ob.BestBid()
-	ba, okAsk := ob.BestAsk()
-	if !okBid || !okAsk {
-		return false
-	}
-	return bb.Price > ba.Price
-}
 
 // Clone returns an independent deep copy of the book.
 func (ob *Orderbook) Clone() *Orderbook {
@@ -175,8 +140,8 @@ func (ob *Orderbook) Clone() *Orderbook {
 		Exchange:     ob.Exchange,
 		Symbol:       ob.Symbol,
 		LastUpdateID: ob.LastUpdateID,
-		bids:         make(map[float64]float64, len(ob.bids)),
-		asks:         make(map[float64]float64, len(ob.asks)),
+		bids:         make(map[string]string, len(ob.bids)),
+		asks:         make(map[string]string, len(ob.asks)),
 	}
 	for p, s := range ob.bids {
 		cp.bids[p] = s
@@ -201,6 +166,9 @@ type OrderbookUpdate struct {
 }
 
 // NewOrderbookUpdate builds an update carrying an independent clone of book.
+// Time is normalised to UTC so every emitted update is zone-consistent
+// regardless of the source timestamp's location (event time, ingestion time, or
+// a parsed exchange string).
 func NewOrderbookUpdate(book *Orderbook, isSnapshot bool, t time.Time) OrderbookUpdate {
 	return OrderbookUpdate{
 		Exchange:   book.Exchange,

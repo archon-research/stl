@@ -244,14 +244,15 @@ func emit(
 	}
 }
 
-// parseLevel parses an exchange [price, size] string pair into a PriceLevel.
+// parseLevel validates an exchange [price, size] string pair and returns the
+// original decimal strings (never a float, so no precision is lost on the way to
+// storage).
 //
 // strconv.ParseFloat accepts "NaN"/"Inf"/"-Inf" and negative numbers, none of
-// which are valid book values. Rather than let the entity silently drop or
-// mis-interpret such input (a non-finite price is undeletable; a negative size
-// would look like a removal), corrupt numbers are rejected here so the caller
-// fails the frame and re-synchronises. A size of exactly zero is valid — it is
-// the exchange convention for "level removed".
+// which are valid book values, so they are rejected here and the frame is failed
+// (forcing a resync) rather than stored. The parsed float is used only to
+// validate and is then discarded. A size of exactly zero is valid: it is the
+// exchange convention for "level removed".
 func parseLevel(price, size string) (entity.PriceLevel, error) {
 	p, err := strconv.ParseFloat(price, 64)
 	if err != nil {
@@ -267,7 +268,7 @@ func parseLevel(price, size string) (entity.PriceLevel, error) {
 	if math.IsNaN(s) || math.IsInf(s, 0) || s < 0 {
 		return entity.PriceLevel{}, fmt.Errorf("invalid size %q: must be finite and non-negative", size)
 	}
-	return entity.PriceLevel{Price: p, Size: s}, nil
+	return entity.PriceLevel{Price: price, Size: size}, nil
 }
 
 // parseLevels parses a list of [price, size] string pairs. Each entry must have
@@ -305,28 +306,11 @@ func applyDeltaLevels(book *entity.Orderbook, side entity.Side, raw [][]string) 
 }
 
 // errSequenceGap signals that an adapter detected a gap in an exchange's update
-// sequence (or a crossed book, which means the same thing: local state has
-// drifted) and must re-synchronise from a fresh snapshot. Handling differs by
+// sequence and must re-synchronise from a fresh snapshot. Handling differs by
 // engine: the WS-snapshot engine treats it (like any handler error) as
 // connection-fatal and reconnects, while the Binance adapter intercepts it to
 // re-sync a single symbol without dropping the shared connection.
 var errSequenceGap = errors.New("orderbook update sequence gap")
-
-// firstCrossed returns an errSequenceGap-wrapped error for the first crossed
-// book among signals, or nil if every book is healthy. A crossed book (best bid
-// strictly above best ask) means the local book has desynchronised and must be
-// re-synced rather than emitted as if it were valid liquidity.
-func firstCrossed(exchange string, signals []emitSignal) error {
-	for _, s := range signals {
-		if s.book.Crossed() {
-			bb, _ := s.book.BestBid()
-			ba, _ := s.book.BestAsk()
-			return fmt.Errorf("%w: %s %s book crossed (bid %v > ask %v)",
-				errSequenceGap, exchange, s.book.Symbol, bb.Price, ba.Price)
-		}
-	}
-	return nil
-}
 
 // parseRFC3339OrNow parses an RFC3339 timestamp, falling back to the current
 // time when the string is empty or malformed (a timestamp is informational, not

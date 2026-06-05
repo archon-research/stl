@@ -155,9 +155,6 @@ func (p *wsSnapshotProvider) runConnection(ctx context.Context, group []string, 
 		if err != nil {
 			return err
 		}
-		if err := firstCrossed(p.exchange.name(), signals); err != nil {
-			return err
-		}
 		for _, s := range signals {
 			emit(ctx, out, s.book, s.isSnapshot, s.t)
 		}

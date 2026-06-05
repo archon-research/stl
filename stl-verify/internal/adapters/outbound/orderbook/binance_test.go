@@ -51,13 +51,13 @@ func newBinanceRESTServer(t *testing.T, snap binanceSnapshot) string {
 	return srv.URL
 }
 
-func sizeAt(levels []entity.PriceLevel, price float64) (float64, bool) {
+func sizeAt(levels []entity.PriceLevel, price string) (string, bool) {
 	for _, l := range levels {
 		if l.Price == price {
 			return l.Size, true
 		}
 	}
-	return 0, false
+	return "", false
 }
 
 // --- sync-state-machine tests ------------------------------------------------
@@ -103,65 +103,20 @@ func TestBinanceReconcileBufferedDiffs(t *testing.T) {
 
 	// Expected: bid 100 added by diff2 then removed by diff3; ask 110 added.
 	bids, asks := upd.Book.Bids(), upd.Book.Asks()
-	if sz, ok := sizeAt(bids, 99); !ok || sz != 5 {
-		t.Errorf("bid 99 = %v (ok=%v), want 5", sz, ok)
+	if sz, ok := sizeAt(bids, "99"); !ok || sz != "5" {
+		t.Errorf("bid 99 = %q (ok=%v), want 5", sz, ok)
 	}
-	if _, ok := sizeAt(bids, 100); ok {
+	if _, ok := sizeAt(bids, "100"); ok {
 		t.Error("bid 100 should have been removed by the zero-size delta")
 	}
 	if len(bids) != 2 {
 		t.Errorf("bid depth = %d, want 2", len(bids))
 	}
-	if sz, ok := sizeAt(asks, 110); !ok || sz != 3 {
-		t.Errorf("ask 110 = %v (ok=%v), want 3", sz, ok)
+	if sz, ok := sizeAt(asks, "110"); !ok || sz != "3" {
+		t.Errorf("ask 110 = %q (ok=%v), want 3", sz, ok)
 	}
-	if sz, ok := sizeAt(asks, 120); !ok || sz != 7 {
-		t.Errorf("ask 120 = %v (ok=%v), want 7", sz, ok)
-	}
-	if bb, _ := upd.Book.BestAsk(); bb.Price != 110 {
-		t.Errorf("best ask = %v, want 110", bb.Price)
-	}
-}
-
-// TestBinanceResyncsOnCrossedBook verifies that a contiguous, sequence-valid
-// diff that nonetheless leaves the book crossed (best bid above best ask)
-// triggers a per-symbol re-sync and is not emitted.
-func TestBinanceResyncsOnCrossedBook(t *testing.T) {
-	p := NewBinanceProvider(testConfig())
-	// beginResync re-requests a snapshot; point it at a mock so the goroutine
-	// never reaches the real Binance REST endpoint.
-	p.restBase = newBinanceRESTServer(t, binanceSnapshot{
-		LastUpdateID: 200,
-		Bids:         [][]string{{"100", "1"}},
-		Asks:         [][]string{{"110", "1"}},
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	out := make(chan entity.OrderbookUpdate, 4)
-	snapCh := make(chan binanceSnapshotResult, 4)
-
-	st := &binanceState{book: entity.NewOrderbook(exchangeBinance, "BTCUSDT"), synced: true, lastID: 100}
-	st.book.ApplyLevel(entity.Bid, 100, 1)
-	st.book.ApplyLevel(entity.Ask, 110, 1)
-	states := map[string]*binanceState{"BTCUSDT": st}
-
-	// Contiguous diff (U == lastID+1) that inserts a bid above the best ask.
-	raw := combinedFrame(t, bDiff("BTCUSDT", 101, 105, [][]string{{"115", "1"}}, nil))
-	if err := p.handleDiff(ctx, states, raw, out, snapCh); err != nil {
-		t.Fatalf("handleDiff: %v", err)
-	}
-
-	if st.synced {
-		t.Error("crossed book should clear synced state for re-sync")
-	}
-	if !st.fetching {
-		t.Error("crossed book should trigger a snapshot re-request")
-	}
-	select {
-	case upd := <-out:
-		t.Errorf("crossed book must not be emitted, got %+v", upd)
-	default:
+	if sz, ok := sizeAt(asks, "120"); !ok || sz != "7" {
+		t.Errorf("ask 120 = %q (ok=%v), want 7", sz, ok)
 	}
 }
 
@@ -233,7 +188,7 @@ func TestBinanceApplyDiffSequenceRules(t *testing.T) {
 			if st.lastID != tt.wantLastID {
 				t.Errorf("lastID = %d, want %d", st.lastID, tt.wantLastID)
 			}
-			_, ok := sizeAt(st.book.Bids(), 50)
+			_, ok := sizeAt(st.book.Bids(), "50")
 			if ok != tt.wantApplied {
 				t.Errorf("level applied = %v, want %v", ok, tt.wantApplied)
 			}
@@ -385,20 +340,17 @@ func TestBinanceWatchEndToEnd(t *testing.T) {
 	if len(bids) != 3 {
 		t.Errorf("final bid depth = %d, want 3 (99,98,97)", len(bids))
 	}
-	if _, ok := sizeAt(bids, 100); ok {
+	if _, ok := sizeAt(bids, "100"); ok {
 		t.Error("bid 100 should have been removed")
 	}
-	if sz, ok := sizeAt(bids, 97); !ok || sz != 1 {
-		t.Errorf("bid 97 = %v (ok=%v), want 1", sz, ok)
+	if sz, ok := sizeAt(bids, "97"); !ok || sz != "1" {
+		t.Errorf("bid 97 = %q (ok=%v), want 1", sz, ok)
 	}
-	if bb, _ := final.BestAsk(); bb.Price != 110 {
-		t.Errorf("best ask = %v, want 110", bb.Price)
+	if sz, ok := sizeAt(asks, "110"); !ok || sz != "3" {
+		t.Errorf("ask 110 = %q (ok=%v), want 3", sz, ok)
 	}
-	if sz, ok := sizeAt(asks, 121); !ok || sz != 2 {
-		t.Errorf("ask 121 = %v (ok=%v), want 2", sz, ok)
-	}
-	if final.Crossed() {
-		t.Error("converged book must not be crossed")
+	if sz, ok := sizeAt(asks, "121"); !ok || sz != "2" {
+		t.Errorf("ask 121 = %q (ok=%v), want 2", sz, ok)
 	}
 }
 

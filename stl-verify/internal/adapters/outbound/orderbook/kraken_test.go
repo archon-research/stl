@@ -17,11 +17,11 @@ func TestKrakenHandlerSnapshotThenUpdate(t *testing.T) {
 		t.Fatalf("expected snapshot signal, got %+v", sigs)
 	}
 	book := sigs[0].book
-	if bb, _ := book.BestBid(); bb.Price != 100 || bb.Size != 2 {
-		t.Errorf("best bid = %+v, want {100 2}", bb)
+	if sz, ok := sizeAt(book.Bids(), "100.0"); !ok || sz != "2.0" {
+		t.Errorf("bid 100.0 = %q (ok=%v), want 2.0", sz, ok)
 	}
-	if ba, _ := book.BestAsk(); ba.Price != 101 || ba.Size != 3 {
-		t.Errorf("best ask = %+v, want {101 3}", ba)
+	if sz, ok := sizeAt(book.Asks(), "101.0"); !ok || sz != "3.0" {
+		t.Errorf("ask 101.0 = %q (ok=%v), want 3.0", sz, ok)
 	}
 
 	// Update frame: [channelID, {b}, channelName, pair]; zero volume removes.
@@ -34,14 +34,14 @@ func TestKrakenHandlerSnapshotThenUpdate(t *testing.T) {
 		t.Fatalf("expected non-snapshot signal, got %+v", sigs)
 	}
 	book = sigs[0].book
-	if _, ok := sizeAt(book.Bids(), 100); ok {
-		t.Error("bid 100 should be removed by zero volume")
+	if _, ok := sizeAt(book.Bids(), "100.0"); ok {
+		t.Error("bid 100.0 should be removed by zero volume")
 	}
-	if bb, _ := book.BestBid(); bb.Price != 99 || bb.Size != 4 {
-		t.Errorf("best bid after update = %+v, want {99 4}", bb)
+	if sz, ok := sizeAt(book.Bids(), "99.0"); !ok || sz != "4.0" {
+		t.Errorf("bid 99.0 after update = %q (ok=%v), want 4.0", sz, ok)
 	}
-	if sz, ok := sizeAt(book.Bids(), 98.5); !ok || sz != 5 {
-		t.Errorf("bid 98.5 = %v (ok=%v), want 5", sz, ok)
+	if sz, ok := sizeAt(book.Bids(), "98.5"); !ok || sz != "5.0" {
+		t.Errorf("bid 98.5 = %q (ok=%v), want 5.0", sz, ok)
 	}
 }
 
@@ -61,14 +61,14 @@ func TestKrakenHandlerCombinedUpdate(t *testing.T) {
 		t.Fatalf("expected 1 signal, got %d", len(sigs))
 	}
 	book := sigs[0].book
-	if _, ok := sizeAt(book.Asks(), 101); ok {
+	if _, ok := sizeAt(book.Asks(), "101"); ok {
 		t.Error("ask 101 should be removed")
 	}
-	if ba, _ := book.BestAsk(); ba.Price != 103 || ba.Size != 1 {
-		t.Errorf("best ask = %+v, want {103 1}", ba)
+	if sz, ok := sizeAt(book.Asks(), "103"); !ok || sz != "1" {
+		t.Errorf("ask 103 = %q (ok=%v), want 1", sz, ok)
 	}
-	if bb, _ := book.BestBid(); bb.Price != 100 || bb.Size != 9 {
-		t.Errorf("best bid = %+v, want {100 9}", bb)
+	if sz, ok := sizeAt(book.Bids(), "100"); !ok || sz != "9" {
+		t.Errorf("bid 100 = %q (ok=%v), want 9", sz, ok)
 	}
 }
 
