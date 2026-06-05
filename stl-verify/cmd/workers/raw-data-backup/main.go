@@ -24,6 +24,7 @@ import (
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	rawdatabackup "github.com/archon-research/stl/stl-verify/internal/services/raw_data_backup"
@@ -285,7 +286,11 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 	}
 	defer shutdownOTEL(context.Background())
 
-	metricsRec, err := telemetry.NewMetrics("stl-verify/raw_data_backup")
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name for metrics: %w", err)
+	}
+	metricsRec, err := telemetry.NewMetrics("stl-verify/raw_data_backup", chainName)
 	if err != nil {
 		logger.Error("failed to update metrics recorder", "error", err)
 		// Proceed without metrics

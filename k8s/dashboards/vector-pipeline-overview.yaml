@@ -97,7 +97,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -182,7 +182,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[5m])), 0.001)",
             "refId": "A"
           }]
         },
@@ -209,7 +209,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -231,7 +231,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[5m])), 0.001)",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -252,7 +252,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(alchemy_client_request_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])))",
+            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(alchemy_client_request_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[10m])))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -274,7 +274,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_retries_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])), 0.001)",
+            "expr": "sum by (chain) (rate(alchemy_client_retries_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[10m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[10m])), 0.001)",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -498,7 +498,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[5m]))",
             "refId": "A",
             "legendFormat": "all chains"
           }]
@@ -583,7 +583,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "expr": "sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum(rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[5m])), 0.001)",
             "refId": "A"
           }]
         },
@@ -610,7 +610,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", rpc_method=\"eth_getBlockByNumber\", chain=~\"$chain\"}[1m]))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -632,7 +632,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[5m])), 0.001)",
+            "expr": "sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", status=\"error\", chain=~\"$chain\"}[5m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[5m])), 0.001)",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -653,7 +653,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(alchemy_client_request_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])))",
+            "expr": "histogram_quantile(0.99, sum by (chain, le) (rate(alchemy_client_request_duration_seconds_bucket{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[10m])))",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]
@@ -675,7 +675,7 @@ spec:
             }
           },
           "targets": [{
-            "expr": "sum by (chain) (rate(alchemy_client_retries_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=\"stl-watcher\", chain=~\"$chain\"}[10m])), 0.001)",
+            "expr": "sum by (chain) (rate(alchemy_client_retries_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[10m])) / clamp_min(sum by (chain) (rate(alchemy_client_requests_total{cluster=\"$cluster\", k8s_namespace_name=\"vector\", service_name=~\".*watcher\", chain=~\"$chain\"}[10m])), 0.001)",
             "refId": "A",
             "legendFormat": "{{chain}}"
           }]

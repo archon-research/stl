@@ -18,7 +18,7 @@ import (
 )
 
 func TestNewTelemetry(t *testing.T) {
-	tel, err := NewTelemetry()
+	tel, err := NewTelemetry("mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetry() returned error: %v", err)
 	}
@@ -30,7 +30,10 @@ func TestNewTelemetry(t *testing.T) {
 }
 
 func TestNewTelemetryWithProviders(t *testing.T) {
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), metricnoop.NewMeterProvider())
+	tp := tracenoop.NewTracerProvider()
+	mp := metricnoop.NewMeterProvider()
+
+	tel, err := NewTelemetryWithProviders(tp, mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() returned error: %v", err)
 	}
@@ -66,7 +69,7 @@ func TestNewTelemetryWithProviders_CreatesSpans(t *testing.T) {
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	mp := metricnoop.NewMeterProvider()
 
-	tel, err := NewTelemetryWithProviders(tp, mp)
+	tel, err := NewTelemetryWithProviders(tp, mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}
@@ -106,7 +109,7 @@ func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp)
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}
