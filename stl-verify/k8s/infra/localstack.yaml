@@ -158,6 +158,25 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
+    # Allocation tracker is Ethereum-only
+    echo "Creating Ethereum allocation-tracker queues..."
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-allocation-tracker-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-allocation-tracker.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-allocation-tracker.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
     echo "Creating S3 buckets..."
     $AWS s3 mb s3://${S3_BUCKET} --region $REGION
     $AWS s3 mb s3://stl-sentineldevelopment-avalanche-raw --region $REGION
