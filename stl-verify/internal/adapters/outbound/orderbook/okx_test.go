@@ -1,0 +1,127 @@
+package orderbook
+
+import (
+	"errors"
+	"testing"
+)
+
+func newOKXHandler() *okxHandler {
+	return &okxHandler{books: newBookSet(exchangeOKX), lastSeq: make(map[string]int64)}
+}
+
+func TestOKXHandlerSnapshotThenUpdate(t *testing.T) {
+	h := newOKXHandler()
+
+	snapshot := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[
+		{"asks":[["101","3","0","1"]],"bids":[["100","2","0","1"]],"ts":"1700000000000","seqId":10,"prevSeqId":-1}]}`
+	sigs, err := h.handle([]byte(snapshot))
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if len(sigs) != 1 || !sigs[0].isSnapshot {
+		t.Fatalf("expected snapshot signal, got %+v", sigs)
+	}
+	if bb, _ := sigs[0].book.BestBid(); bb.Price != 100 || bb.Size != 2 {
+		t.Errorf("best bid = %+v, want {100 2}", bb)
+	}
+	if sigs[0].book.LastUpdateID != 10 {
+		t.Errorf("LastUpdateID = %d, want 10", sigs[0].book.LastUpdateID)
+	}
+
+	// Contiguous update: prevSeqId must equal the last applied seqId.
+	update := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[
+		{"asks":[],"bids":[["100","0","0","0"],["99","7","0","1"]],"ts":"1700000000001","seqId":11,"prevSeqId":10}]}`
+	sigs, err = h.handle([]byte(update))
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(sigs) != 1 || sigs[0].isSnapshot {
+		t.Fatalf("expected non-snapshot signal, got %+v", sigs)
+	}
+	book := sigs[0].book
+	if _, ok := sizeAt(book.Bids(), 100); ok {
+		t.Error("bid 100 should be removed by zero size")
+	}
+	if bb, _ := book.BestBid(); bb.Price != 99 || bb.Size != 7 {
+		t.Errorf("best bid after update = %+v, want {99 7}", bb)
+	}
+}
+
+func TestOKXHandlerSequenceGap(t *testing.T) {
+	h := newOKXHandler()
+	snapshot := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[
+		{"asks":[["101","3"]],"bids":[["100","2"]],"ts":"1","seqId":10,"prevSeqId":-1}]}`
+	if _, err := h.handle([]byte(snapshot)); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// prevSeqId 99 does not match last applied seqId 10.
+	gap := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[
+		{"bids":[["100","1"]],"ts":"2","seqId":100,"prevSeqId":99}]}`
+	_, err := h.handle([]byte(gap))
+	if !errors.Is(err, errSequenceGap) {
+		t.Fatalf("err = %v, want errSequenceGap", err)
+	}
+}
+
+func TestOKXHandlerUpdateBeforeSnapshotIsRejected(t *testing.T) {
+	h := newOKXHandler()
+	// An update arriving with no prior snapshot must not be applied to an empty
+	// book; it must force a re-sync.
+	update := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[
+		{"bids":[["100","1"]],"ts":"1","seqId":11,"prevSeqId":10}]}`
+	_, err := h.handle([]byte(update))
+	if !errors.Is(err, errSequenceGap) {
+		t.Fatalf("err = %v, want errSequenceGap", err)
+	}
+}
+
+func TestOKXHandlerNoOpRefreshSkipped(t *testing.T) {
+	h := newOKXHandler()
+	snapshot := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[
+		{"asks":[["101","3"]],"bids":[["100","2"]],"ts":"1","seqId":10,"prevSeqId":-1}]}`
+	if _, err := h.handle([]byte(snapshot)); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// A no-change push (seqId == prevSeqId) is skipped without error or signal.
+	noop := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[
+		{"asks":[],"bids":[],"ts":"2","seqId":20,"prevSeqId":20}]}`
+	sigs, err := h.handle([]byte(noop))
+	if err != nil {
+		t.Fatalf("no-op: %v", err)
+	}
+	if len(sigs) != 0 {
+		t.Errorf("no-op refresh should emit no signals, got %d", len(sigs))
+	}
+}
+
+func TestOKXHandlerControlFrames(t *testing.T) {
+	h := newOKXHandler()
+	if sigs, err := h.handle([]byte("pong")); err != nil || sigs != nil {
+		t.Errorf("pong: sigs=%v err=%v", sigs, err)
+	}
+	if sigs, err := h.handle([]byte(`{"event":"subscribe","arg":{"channel":"books","instId":"BTC-USDT"}}`)); err != nil || sigs != nil {
+		t.Errorf("subscribe ack: sigs=%v err=%v", sigs, err)
+	}
+	if _, err := h.handle([]byte(`{"event":"error","code":"60012","msg":"bad request"}`)); err == nil {
+		t.Error("error event should return an error")
+	}
+}
+
+func TestOKXSubscribeMessageAndPing(t *testing.T) {
+	e := &okxExchange{wsBase: okxWSBase}
+	msgs, err := e.subscribeMessages([]string{"BTC-USDT", "ETH-USDT"})
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("subscribeMessages = %v err %v", msgs, err)
+	}
+	m := msgs[0].(map[string]any)
+	if m["op"] != "subscribe" {
+		t.Errorf("op = %v", m["op"])
+	}
+	args := m["args"].([]map[string]string)
+	if len(args) != 2 || args[0]["instId"] != "BTC-USDT" || args[0]["channel"] != "books" {
+		t.Errorf("args = %v", args)
+	}
+	if frame, interval := e.appPing(); string(frame) != "ping" || interval <= 0 {
+		t.Errorf("appPing = %q %v", frame, interval)
+	}
+}
