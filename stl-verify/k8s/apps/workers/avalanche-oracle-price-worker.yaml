@@ -24,10 +24,6 @@ spec:
           env:
             - name: CHAIN_ID
               value: "43114"
-            # Override the shared stl-config S3_BUCKET (ethereum) so the raw-data
-            # bucket prefix matches chain 43114 (see chainutil.ValidateS3BucketForChain).
-            - name: S3_BUCKET
-              value: stl-sentineldevelopment-avalanche-raw
             - name: ALCHEMY_HTTP_URL
               value: https://avax-mainnet.g.alchemy.com/v2
             - name: AWS_SQS_QUEUE_URL
