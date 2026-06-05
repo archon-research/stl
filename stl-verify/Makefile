@@ -88,15 +88,19 @@ run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
 	@set -a && . cmd/workers/morpho-indexer/.env && [ -f cmd/workers/morpho-indexer/.env.local ] && . cmd/workers/morpho-indexer/.env.local; set +a && go run ./cmd/workers/morpho-indexer
 
-# Run the allocation tracker (requires dev-up first)
+# Run the allocation tracker (requires dev-up first).
+# Local runs target localstack with static test creds, so unset any ambient
+# AWS_PROFILE; `go run` doesn't stamp VCS info here, so pass BUILD_GIT_HASH for
+# buildregistry (falls back to "dev" outside a git checkout).
 run-allocation-tracker:
 	@echo "==> Running allocation tracker..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
-# Run the Avalanche allocation tracker (requires dev-up first)
+# Run the Avalanche allocation tracker (requires dev-up first). See run-allocation-tracker
+# for why AWS_PROFILE is unset and BUILD_GIT_HASH is passed.
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
