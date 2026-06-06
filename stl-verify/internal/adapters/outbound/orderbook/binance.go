@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/wsclient"
@@ -29,8 +31,13 @@ const (
 	// binanceDepthStream is the diff-depth stream suffix. The 100ms variant gives
 	// lower latency than the default 1000ms stream for high-frequency books.
 	binanceDepthStream = "@depth@100ms"
-	// binanceSnapshotLimit is the REST depth requested (max supported is 5000).
-	binanceSnapshotLimit = 5000
+	// binanceSnapshotLimit is the REST depth requested. Binance weights the spot
+	// /depth endpoint by limit: 1-100 = 5, 101-500 = 25, 501-1000 = 50,
+	// 1001-5000 = 250 (out of a ~6000/min IP budget). 1000 levels is far more than
+	// a persisted book needs, while keeping the per-snapshot weight (50) low so a
+	// reconnect or resync burst cannot easily trip an IP ban. Weight table:
+	// https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints
+	binanceSnapshotLimit = 1000
 
 	// binanceMaxStreamsPerConn caps streams per connection well under Binance's
 	// 1024 limit, so typical symbol sets ride a single connection.
@@ -63,6 +70,15 @@ func NewBinanceProvider(cfg Config) *BinanceProvider {
 
 	httpCfg := httpclient.DefaultConfig()
 	httpCfg.Timeout = 30 * time.Second
+	// Throttle REST snapshots to stay within Binance's spot weight budget: each
+	// snapshot costs weight 50 (binanceSnapshotLimit=1000) and the IP budget is
+	// ~6000/min (~100 weight/s, i.e. ~2 requests/s). The burst lets a fresh
+	// connection fan out its initial per-symbol snapshots quickly, while sustained
+	// load (e.g. a resync storm) is capped at the safe steady rate so reconnects
+	// cannot escalate a ban. Rate limits:
+	// https://developers.binance.com/docs/binance-spot-api-docs/rest-api/limits
+	httpCfg.RateLimit = rate.Limit(2)
+	httpCfg.RateBurst = 5
 	return &BinanceProvider{
 		cfg:        cfg,
 		logger:     logger,

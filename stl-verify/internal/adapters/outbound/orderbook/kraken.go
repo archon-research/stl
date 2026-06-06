@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -27,12 +31,16 @@ var _ outbound.OrderbookProvider = (*KrakenProvider)(nil)
 // pushes a snapshot frame (as/bs) followed by update frames (a/b); a zero
 // volume removes a level.
 //
-// Integrity note: Kraken v1 carries no per-message sequence numbers — its only
-// in-band integrity signal is the CRC32 "c" checksum, which this version does
-// not validate. Because frames arrive in order over a single TCP stream, the
-// only way to miss updates is a disconnect, which is detected and triggers a
-// fresh snapshot on reconnect. Checksum validation can be layered into the
-// handler later without changing the provider interface.
+// Integrity: Kraken v1 carries no per-message sequence numbers, so the CRC32 "c"
+// checksum over the top 10 levels is the only in-band way to detect a divergent
+// book. Each update is validated against it (see verifyKrakenChecksum); a
+// mismatch forces a reconnect and fresh snapshot. The feed is also fixed-depth
+// top-N: an insert that brings a better price into range pushes the outermost
+// level out of scope, and Kraken sends no explicit delete for that pushed-out
+// level, so the book is trimmed to krakenDepth after every frame.
+//
+// Docs: https://docs.kraken.com/api/docs/guides/spot-ws-book-v1/ and
+// https://support.kraken.com/articles/360027821131
 type KrakenProvider struct {
 	*wsSnapshotProvider
 }
@@ -80,6 +88,7 @@ type krakenBookData struct {
 	Bs [][]string `json:"bs"`
 	A  [][]string `json:"a"`
 	B  [][]string `json:"b"`
+	C  string     `json:"c"` // CRC32 checksum, present on update frames
 }
 
 // handle dispatches between Kraken's two frame shapes: JSON objects are control
@@ -141,10 +150,11 @@ func (h *krakenHandler) handleBook(raw []byte) ([]emitSignal, error) {
 
 	isSnapshot := false
 	applied := false
+	checksum := ""
 	// Data objects sit between the channel id (index 0) and the trailing channel
 	// name + pair (last two elements). Kraken v1 has no sequence numbers, so a
 	// data object we fail to decode would be silently lost with nothing to detect
-	// it later — treat a decode failure here as fatal so the connection reconnects
+	// it later: treat a decode failure here as fatal so the connection reconnects
 	// and re-snapshots rather than serving a quietly stale book.
 	for i := 1; i <= len(parts)-3; i++ {
 		var d krakenBookData
@@ -157,11 +167,29 @@ func (h *krakenHandler) handleBook(raw []byte) ([]emitSignal, error) {
 		}
 		applied = applied || didApply
 		isSnapshot = isSnapshot || snap
+		if d.C != "" {
+			checksum = d.C
+		}
 	}
 
 	if !applied {
 		return nil, nil
 	}
+
+	// Kraken's book is fixed-depth top-N: an insert that brings a better price into
+	// range pushes the outermost level out of scope with no explicit delete for it,
+	// so trim the tail to keep the book at the subscribed depth.
+	trimKrakenSide(book, entity.Bid, krakenDepth)
+	trimKrakenSide(book, entity.Ask, krakenDepth)
+
+	// The CRC32 over the top 10 levels is the only divergence signal Kraken v1
+	// gives; a mismatch means the local book has drifted, so force a re-sync.
+	if checksum != "" {
+		if err := verifyKrakenChecksum(book, checksum); err != nil {
+			return nil, err
+		}
+	}
+
 	return []emitSignal{{book: book, isSnapshot: isSnapshot, t: time.Now()}}, nil
 }
 
@@ -190,4 +218,93 @@ func applyKrakenData(book *entity.Orderbook, d krakenBookData) (applied, snapsho
 		return true, false, nil
 	}
 	return false, false, nil // e.g. checksum-only object
+}
+
+// trimKrakenSide drops levels beyond depth, keeping the best-priced ones (highest
+// bids, lowest asks). Kraken pushes the outermost level out of scope when an
+// insert brings a better price into range, with no explicit delete for the
+// pushed-out level, so without trimming the tail would grow unbounded.
+func trimKrakenSide(book *entity.Orderbook, side entity.Side, depth int) {
+	levels := book.Bids()
+	ascending := false // bids: keep the highest prices
+	if side == entity.Ask {
+		levels = book.Asks()
+		ascending = true // asks: keep the lowest prices
+	}
+	if len(levels) <= depth {
+		return
+	}
+	sorted := krakenSortByPrice(levels, ascending)
+	for _, lvl := range sorted[depth:] {
+		book.ApplyLevel(side, lvl.Price, "0") // zero size removes the level
+	}
+}
+
+// verifyKrakenChecksum recomputes the CRC32 over the top 10 levels and compares
+// it to Kraken's checksum field (an unsigned 32-bit integer in decimal). A
+// mismatch is reported as errSequenceGap so the engine reconnects and re-snapshots.
+func verifyKrakenChecksum(book *entity.Orderbook, want string) error {
+	got := strconv.FormatUint(uint64(krakenChecksum(book)), 10)
+	if got != want {
+		return fmt.Errorf("%w: kraken %s checksum mismatch (got %s, want %s)",
+			errSequenceGap, book.Symbol, got, want)
+	}
+	return nil
+}
+
+// krakenChecksum implements Kraken's WebSocket v1 book checksum: concatenate the
+// top 10 asks (lowest price first) then the top 10 bids (highest price first),
+// each as price+volume with the decimal point and leading zeros removed, and take
+// the CRC32 (IEEE) of the resulting ASCII string.
+// See https://docs.kraken.com/api/docs/guides/spot-ws-book-v1/
+func krakenChecksum(book *entity.Orderbook) uint32 {
+	var sb strings.Builder
+	writeTop := func(levels []entity.PriceLevel) {
+		for _, lvl := range levels[:min(len(levels), 10)] {
+			sb.WriteString(krakenChecksumToken(lvl.Price))
+			sb.WriteString(krakenChecksumToken(lvl.Size))
+		}
+	}
+	writeTop(krakenSortByPrice(book.Asks(), true))
+	writeTop(krakenSortByPrice(book.Bids(), false))
+	return crc32.ChecksumIEEE([]byte(sb.String()))
+}
+
+// krakenChecksumToken formats one price or volume for the checksum: remove the
+// decimal point and any leading zeros (e.g. "0.50000" -> "50000", "101.5" -> "1015").
+func krakenChecksumToken(s string) string {
+	s = strings.Replace(s, ".", "", 1)
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return "0"
+	}
+	return s
+}
+
+// krakenSortByPrice returns levels sorted by numeric price. Prices are parsed
+// only to order them (never stored as floats); an unparseable price is skipped.
+func krakenSortByPrice(levels []entity.PriceLevel, ascending bool) []entity.PriceLevel {
+	type priced struct {
+		lvl entity.PriceLevel
+		p   float64
+	}
+	parsed := make([]priced, 0, len(levels))
+	for _, l := range levels {
+		p, err := strconv.ParseFloat(l.Price, 64)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, priced{l, p})
+	}
+	sort.Slice(parsed, func(i, j int) bool {
+		if ascending {
+			return parsed[i].p < parsed[j].p
+		}
+		return parsed[i].p > parsed[j].p
+	})
+	out := make([]entity.PriceLevel, len(parsed))
+	for i, pp := range parsed {
+		out[i] = pp.lvl
+	}
+	return out
 }
