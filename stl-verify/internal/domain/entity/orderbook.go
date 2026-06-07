@@ -158,23 +158,37 @@ func (ob *Orderbook) Clone() *Orderbook {
 // (not an incremental delta), a consumer that falls behind may safely skip
 // intermediate updates and still hold a correct book.
 type OrderbookUpdate struct {
-	Exchange   string
-	Symbol     string
-	Book       *Orderbook
-	Time       time.Time
+	Exchange string
+	Symbol   string
+	Book     *Orderbook
+	// Time is the venue event time (when the exchange produced the update), in
+	// UTC, or nil when the feed carries no per-message event time (e.g. Kraken v1)
+	// or the timestamp was absent/unparseable. A nil Time is never fabricated from
+	// the local clock; persist it as NULL and use IngestedAt for a timestamp that
+	// is always present.
+	Time *time.Time
+	// IngestedAt is the wall-clock time this process produced the update, in UTC.
+	// It is always set, and lets a consumer distinguish event time from ingestion
+	// time and spot a stale or mis-stamped event.
+	IngestedAt time.Time
 	IsSnapshot bool // true for the first update emitted after a (re)sync
 }
 
-// NewOrderbookUpdate builds an update carrying an independent clone of book.
-// Time is normalised to UTC so every emitted update is zone-consistent
-// regardless of the source timestamp's location (event time, ingestion time, or
-// a parsed exchange string).
-func NewOrderbookUpdate(book *Orderbook, isSnapshot bool, t time.Time) OrderbookUpdate {
-	return OrderbookUpdate{
+// NewOrderbookUpdate builds an update carrying an independent clone of book. A
+// zero eventTime is treated as "no venue event time" and left as a nil Time
+// rather than fabricated from the local clock; ingestedAt is always recorded.
+// Both timestamps are normalised to UTC.
+func NewOrderbookUpdate(book *Orderbook, isSnapshot bool, eventTime, ingestedAt time.Time) OrderbookUpdate {
+	upd := OrderbookUpdate{
 		Exchange:   book.Exchange,
 		Symbol:     book.Symbol,
 		Book:       book.Clone(),
-		Time:       t.UTC(),
+		IngestedAt: ingestedAt.UTC(),
 		IsSnapshot: isSnapshot,
 	}
+	if !eventTime.IsZero() {
+		t := eventTime.UTC()
+		upd.Time = &t
+	}
+	return upd
 }

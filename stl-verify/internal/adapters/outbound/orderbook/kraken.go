@@ -190,7 +190,9 @@ func (h *krakenHandler) handleBook(raw []byte) ([]emitSignal, error) {
 		}
 	}
 
-	return []emitSignal{{book: book, isSnapshot: isSnapshot, t: time.Now()}}, nil
+	// Kraken v1 book frames carry no usable per-message event time, so leave it
+	// zero (a nil OrderbookUpdate.Time); IngestedAt records when we received it.
+	return []emitSignal{{book: book, isSnapshot: isSnapshot, t: time.Time{}}}, nil
 }
 
 // applyKrakenData applies one data object, reporting whether it changed the book

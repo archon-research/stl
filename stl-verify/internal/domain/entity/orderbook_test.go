@@ -147,17 +147,26 @@ func TestOrderbookCloneIsIndependent(t *testing.T) {
 func TestNewOrderbookUpdate(t *testing.T) {
 	ob := NewOrderbook("binance", "BTCUSDT")
 	ob.ApplyLevel(Bid, "100", "1")
-	now := time.Unix(1700000000, 0)
+	eventTime := time.Unix(1700000000, 0)
+	ingestedAt := time.Unix(1700000005, 0)
 
-	upd := NewOrderbookUpdate(ob, true, now)
+	upd := NewOrderbookUpdate(ob, true, eventTime, ingestedAt)
 	if upd.Exchange != "binance" || upd.Symbol != "BTCUSDT" {
 		t.Errorf("update metadata = %s/%s", upd.Exchange, upd.Symbol)
 	}
-	if !upd.IsSnapshot || !upd.Time.Equal(now) {
-		t.Errorf("update flags: IsSnapshot=%v Time=%v", upd.IsSnapshot, upd.Time)
+	if !upd.IsSnapshot || upd.Time == nil || !upd.Time.Equal(eventTime) || !upd.IngestedAt.Equal(ingestedAt) {
+		t.Errorf("update flags: IsSnapshot=%v Time=%v IngestedAt=%v", upd.IsSnapshot, upd.Time, upd.IngestedAt)
 	}
-	if upd.Time.Location() != time.UTC {
-		t.Errorf("update Time location = %v, want UTC", upd.Time.Location())
+	if upd.Time.Location() != time.UTC || upd.IngestedAt.Location() != time.UTC {
+		t.Errorf("times not UTC: Time=%v IngestedAt=%v", upd.Time.Location(), upd.IngestedAt.Location())
+	}
+	// A zero event time must be left nil, not fabricated from the local clock.
+	z := NewOrderbookUpdate(ob, false, time.Time{}, ingestedAt)
+	if z.Time != nil {
+		t.Errorf("zero eventTime should yield nil Time, got %v", *z.Time)
+	}
+	if z.IngestedAt.IsZero() {
+		t.Error("IngestedAt must always be set")
 	}
 	// The update's book must be a clone, independent of later mutation.
 	ob.ApplyLevel(Bid, "100", "9")

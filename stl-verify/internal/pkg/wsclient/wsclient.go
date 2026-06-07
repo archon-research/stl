@@ -148,6 +148,10 @@ func (c *Conn) reportError(err error) {
 	select {
 	case c.errc <- err:
 	default:
+		// errc already holds the first error, which is the one the consumer acts
+		// on; this later error is usually a follow-on symptom of the same teardown.
+		// Log it at debug so the root cause is not silently masked in diagnostics.
+		c.logger.Debug("dropping subsequent websocket error", "error", err)
 	}
 }
 

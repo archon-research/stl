@@ -137,7 +137,7 @@ func (h *okxHandler) handle(raw []byte) ([]emitSignal, error) {
 		}
 		h.lastSeq[instID] = d.SeqID
 		book.LastUpdateID = d.SeqID
-		signals = append(signals, emitSignal{book: book, isSnapshot: isSnapshot, t: parseUnixMillisOrNow(d.TS)})
+		signals = append(signals, emitSignal{book: book, isSnapshot: isSnapshot, t: parseUnixMillisOrZero(d.TS)})
 	}
 	return signals, nil
 }

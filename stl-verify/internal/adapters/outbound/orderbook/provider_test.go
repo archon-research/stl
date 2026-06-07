@@ -258,21 +258,21 @@ func TestRunConnectionsClosesChannelWhenAllReturn(t *testing.T) {
 }
 
 func TestParseTimeHelpers(t *testing.T) {
-	if got := parseUnixMillisOrNow("1700000000000"); !got.Equal(time.UnixMilli(1700000000000)) {
-		t.Errorf("parseUnixMillisOrNow = %v", got)
+	if got := parseUnixMillisOrZero("1700000000000"); !got.Equal(time.UnixMilli(1700000000000)) {
+		t.Errorf("parseUnixMillisOrZero = %v", got)
 	}
-	if got := parseUnixMillisOrNow("1700000000000"); got.Location() != time.UTC {
-		t.Errorf("parseUnixMillisOrNow location = %v, want UTC", got.Location())
+	if got := parseUnixMillisOrZero("1700000000000"); got.Location() != time.UTC {
+		t.Errorf("parseUnixMillisOrZero location = %v, want UTC", got.Location())
 	}
-	// Malformed input falls back to ~now.
-	if got := parseUnixMillisOrNow("nope"); time.Since(got) > time.Minute {
-		t.Errorf("parseUnixMillisOrNow fallback = %v, want ~now", got)
+	// Malformed input returns the zero Time, never the local clock.
+	if got := parseUnixMillisOrZero("nope"); !got.IsZero() {
+		t.Errorf("parseUnixMillisOrZero(bad) = %v, want zero", got)
 	}
 	want := time.Date(2023, 2, 9, 20, 32, 50, 0, time.UTC)
-	if got := parseRFC3339OrNow("2023-02-09T20:32:50Z"); !got.Equal(want) {
-		t.Errorf("parseRFC3339OrNow = %v, want %v", got, want)
+	if got := parseRFC3339OrZero("2023-02-09T20:32:50Z"); !got.Equal(want) {
+		t.Errorf("parseRFC3339OrZero = %v, want %v", got, want)
 	}
-	if got := parseRFC3339OrNow(""); time.Since(got) > time.Minute {
-		t.Errorf("parseRFC3339OrNow fallback = %v, want ~now", got)
+	if got := parseRFC3339OrZero(""); !got.IsZero() {
+		t.Errorf("parseRFC3339OrZero(empty) = %v, want zero", got)
 	}
 }

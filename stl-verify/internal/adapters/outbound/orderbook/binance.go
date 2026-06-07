@@ -262,7 +262,9 @@ func (p *BinanceProvider) applySnapshot(ctx context.Context, states map[string]*
 		}
 	}
 
-	emit(ctx, out, st.book, true, time.Now())
+	// A snapshot is a (re)sync point, not a single venue event, so it has no event
+	// time; leave it zero (a nil OrderbookUpdate.Time).
+	emit(ctx, out, st.book, true, time.Time{})
 	return nil
 }
 
@@ -299,7 +301,13 @@ func (p *BinanceProvider) handleDiff(ctx context.Context, states map[string]*bin
 		return fmt.Errorf("apply diff for %s: %w", diff.Symbol, err)
 	}
 
-	emit(ctx, out, st.book, false, time.UnixMilli(diff.EventTime))
+	var eventTime time.Time
+	if diff.EventTime != 0 {
+		eventTime = time.UnixMilli(diff.EventTime)
+	}
+	// A zero EventTime stays the zero Time (a nil OrderbookUpdate.Time) rather
+	// than the 1970 epoch; IngestedAt still records when we processed it.
+	emit(ctx, out, st.book, false, eventTime)
 	return nil
 }
 

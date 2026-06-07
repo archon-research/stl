@@ -7,7 +7,7 @@ import (
 )
 
 func TestCoinbaseHandlerSnapshotThenUpdate(t *testing.T) {
-	h := &coinbaseHandler{books: newBookSet(exchangeCoinbase)}
+	h := newCoinbaseHandler(nil)
 
 	snapshot := `{"channel":"l2_data","sequence_num":0,"timestamp":"2023-02-09T20:32:50Z","events":[
 		{"type":"snapshot","product_id":"BTC-USD","updates":[
@@ -49,7 +49,7 @@ func TestCoinbaseHandlerSnapshotThenUpdate(t *testing.T) {
 }
 
 func TestCoinbaseHandlerSequenceGap(t *testing.T) {
-	h := &coinbaseHandler{books: newBookSet(exchangeCoinbase)}
+	h := newCoinbaseHandler(nil)
 	first := `{"channel":"l2_data","sequence_num":0,"events":[{"type":"snapshot","product_id":"BTC-USD","updates":[]}]}`
 	if _, err := h.handle([]byte(first)); err != nil {
 		t.Fatalf("first handle: %v", err)
@@ -62,19 +62,55 @@ func TestCoinbaseHandlerSequenceGap(t *testing.T) {
 	}
 }
 
+func TestCoinbaseHandlerUpdateBeforeSnapshotIsRejected(t *testing.T) {
+	h := newCoinbaseHandler(nil)
+	// An update for a product with no prior snapshot must not be applied to an
+	// empty book; it must force a re-sync.
+	update := `{"channel":"l2_data","sequence_num":0,"events":[
+		{"type":"update","product_id":"BTC-USD","updates":[
+			{"side":"bid","price_level":"100","new_quantity":"1"}]}]}`
+	if _, err := h.handle([]byte(update)); !errors.Is(err, errSequenceGap) {
+		t.Fatalf("err = %v, want errSequenceGap", err)
+	}
+}
+
 func TestCoinbaseHandlerIgnoresControlFrames(t *testing.T) {
-	h := &coinbaseHandler{books: newBookSet(exchangeCoinbase)}
+	h := newCoinbaseHandler(nil)
 	for _, raw := range []string{
-		`{"channel":"subscriptions","events":[]}`,
-		`{"channel":"heartbeats"}`,
+		`{"channel":"subscriptions","sequence_num":0,"events":[]}`,
+		`{"channel":"heartbeats","sequence_num":1}`,
 	} {
 		sigs, err := h.handle([]byte(raw))
 		if err != nil || sigs != nil {
 			t.Errorf("control frame %s: sigs=%v err=%v", raw, sigs, err)
 		}
 	}
-	if _, err := h.handle([]byte(`{"channel":"error","message":"boom"}`)); err == nil {
+	if _, err := h.handle([]byte(`{"channel":"error","sequence_num":2,"message":"boom"}`)); err == nil {
 		t.Error("error frame should return an error")
+	}
+}
+
+// TestCoinbaseHandlerAdvancesSequenceAcrossChannels guards the e2e-found bug:
+// sequence_num is connection-wide, so a non-l2_data frame between two l2_data
+// frames consumes a sequence number and must not be read as a gap.
+func TestCoinbaseHandlerAdvancesSequenceAcrossChannels(t *testing.T) {
+	h := newCoinbaseHandler(nil)
+	snap := `{"channel":"l2_data","sequence_num":0,"events":[
+		{"type":"snapshot","product_id":"BTC-USD","updates":[
+			{"side":"bid","price_level":"100","new_quantity":"1"}]}]}`
+	if _, err := h.handle([]byte(snap)); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// A heartbeat at seq 1 consumes a sequence number (not l2_data).
+	if _, err := h.handle([]byte(`{"channel":"heartbeats","sequence_num":1}`)); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+	// The next l2_data is seq 2; it must not be treated as a gap.
+	upd := `{"channel":"l2_data","sequence_num":2,"events":[
+		{"type":"update","product_id":"BTC-USD","updates":[
+			{"side":"bid","price_level":"99","new_quantity":"2"}]}]}`
+	if _, err := h.handle([]byte(upd)); err != nil {
+		t.Fatalf("update after interleaved heartbeat should not gap: %v", err)
 	}
 }
 

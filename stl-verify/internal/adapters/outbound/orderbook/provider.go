@@ -229,7 +229,7 @@ func emit(
 			return // best-effort drop for deltas only
 		}
 	}
-	upd := entity.NewOrderbookUpdate(book, isSnapshot, t)
+	upd := entity.NewOrderbookUpdate(book, isSnapshot, t, time.Now())
 	if isSnapshot {
 		select {
 		case out <- upd:
@@ -312,26 +312,27 @@ func applyDeltaLevels(book *entity.Orderbook, side entity.Side, raw [][]string) 
 // re-sync a single symbol without dropping the shared connection.
 var errSequenceGap = errors.New("orderbook update sequence gap")
 
-// parseRFC3339OrNow parses an RFC3339 timestamp, falling back to the current
-// time when the string is empty or malformed (a timestamp is informational, not
-// worth dropping an otherwise valid update over).
-func parseRFC3339OrNow(s string) time.Time {
+// parseRFC3339OrZero parses an RFC3339 venue timestamp, returning the zero Time
+// when the string is empty or malformed. The zero Time signals "no usable venue
+// event time"; callers must not substitute the local clock for it (the local
+// clock is recorded separately as OrderbookUpdate.IngestedAt).
+func parseRFC3339OrZero(s string) time.Time {
 	if s == "" {
-		return time.Now().UTC()
+		return time.Time{}
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		return time.Now().UTC()
+		return time.Time{}
 	}
 	return t.UTC()
 }
 
-// parseUnixMillisOrNow parses a Unix-millisecond timestamp string, falling back
-// to the current time on error. The result is always UTC.
-func parseUnixMillisOrNow(s string) time.Time {
+// parseUnixMillisOrZero parses a Unix-millisecond venue timestamp string,
+// returning the zero Time when it is empty or unparseable (see parseRFC3339OrZero).
+func parseUnixMillisOrZero(s string) time.Time {
 	ms, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
-		return time.Now().UTC()
+		return time.Time{}
 	}
 	return time.UnixMilli(ms).UTC()
 }
