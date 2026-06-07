@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,6 +127,48 @@ func validateSymbols(symbols []string) error {
 	return nil
 }
 
+// normalizeSymbols applies normalize to each symbol, returning the normalized
+// slice or the first error.
+func normalizeSymbols(symbols []string, normalize func(string) (string, error)) ([]string, error) {
+	out := make([]string, len(symbols))
+	for i, s := range symbols {
+		n, err := normalize(s)
+		if err != nil {
+			return nil, fmt.Errorf("symbol %q: %w", s, err)
+		}
+		out[i] = n
+	}
+	return out, nil
+}
+
+// normalizeSeparatedPair upper-cases symbol and requires exactly two non-empty
+// parts split on sep (e.g. "btc-usd" -> "BTC-USD"); it errors otherwise.
+func normalizeSeparatedPair(symbol, sep string) (string, error) {
+	up := strings.ToUpper(symbol)
+	parts := strings.Split(up, sep)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("expected two non-empty parts separated by %q, got %q", sep, symbol)
+	}
+	return up, nil
+}
+
+// normalizeConcatSymbol upper-cases symbol and requires it be non-empty and
+// alphanumeric with no separator (e.g. Binance "btcusdt" -> "BTCUSDT").
+func normalizeConcatSymbol(symbol string) (string, error) {
+	if symbol == "" {
+		return "", errors.New("symbol is empty")
+	}
+	up := strings.ToUpper(symbol)
+	for _, r := range up {
+		isDigit := r >= '0' && r <= '9'
+		isLetter := r >= 'A' && r <= 'Z'
+		if !isDigit && !isLetter {
+			return "", fmt.Errorf("expected alphanumeric symbol with no separator, got %q", symbol)
+		}
+	}
+	return up, nil
+}
+
 // chunkSymbols splits symbols into groups of at most size entries. A size of
 // zero (or one group that fits) yields a single group.
 func chunkSymbols(symbols []string, size int) [][]string {
@@ -209,7 +252,7 @@ func reconnectLoop(
 //
 // Incremental (delta) updates are best-effort: if the consumer is behind (buffer
 // full) the update is dropped, which is safe because every update carries the
-// complete book — the consumer simply receives the next one. Skipping the clone
+// complete book, so the consumer simply receives the next one. Skipping the clone
 // in that case also keeps the high-frequency apply path from paying for work
 // that would be discarded.
 //
@@ -271,27 +314,9 @@ func parseLevel(price, size string) (entity.PriceLevel, error) {
 	return entity.PriceLevel{Price: price, Size: size}, nil
 }
 
-// parseLevels parses a list of [price, size] string pairs. Each entry must have
-// at least two elements; extra elements (e.g. Kraken timestamps) are ignored.
-func parseLevels(raw [][]string) ([]entity.PriceLevel, error) {
-	levels := make([]entity.PriceLevel, 0, len(raw))
-	for i, pair := range raw {
-		if len(pair) < 2 {
-			return nil, fmt.Errorf("level %d: expected [price, size], got %d fields", i, len(pair))
-		}
-		lvl, err := parseLevel(pair[0], pair[1])
-		if err != nil {
-			return nil, fmt.Errorf("level %d: %w", i, err)
-		}
-		levels = append(levels, lvl)
-	}
-	return levels, nil
-}
-
-// applyDeltaLevels applies a delta's [price, size] pairs to one side of book.
-// Unlike parseLevels it mutates the book in place (a zero size removes a level)
-// rather than returning a fresh slice, which is the hot path for WS deltas.
-func applyDeltaLevels(book *entity.Orderbook, side entity.Side, raw [][]string) error {
+// forEachLevel parses each [price, size] pair (validating shape and contents via
+// parseLevel) and invokes fn with the parsed level, stopping at the first error.
+func forEachLevel(raw [][]string, fn func(entity.PriceLevel) error) error {
 	for i, pair := range raw {
 		if len(pair) < 2 {
 			return fmt.Errorf("level %d: expected [price, size], got %d fields", i, len(pair))
@@ -300,9 +325,35 @@ func applyDeltaLevels(book *entity.Orderbook, side entity.Side, raw [][]string) 
 		if err != nil {
 			return fmt.Errorf("level %d: %w", i, err)
 		}
-		book.ApplyLevel(side, lvl.Price, lvl.Size)
+		if err := fn(lvl); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// parseLevels parses a list of [price, size] string pairs. Each entry must have
+// at least two elements; extra elements (e.g. Kraken timestamps) are ignored.
+func parseLevels(raw [][]string) ([]entity.PriceLevel, error) {
+	levels := make([]entity.PriceLevel, 0, len(raw))
+	err := forEachLevel(raw, func(lvl entity.PriceLevel) error {
+		levels = append(levels, lvl)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return levels, nil
+}
+
+// applyDeltaLevels applies a delta's [price, size] pairs to one side of book.
+// Unlike parseLevels it mutates the book in place (a zero size removes a level)
+// rather than returning a fresh slice, which is the hot path for WS deltas.
+func applyDeltaLevels(book *entity.Orderbook, side entity.Side, raw [][]string) error {
+	return forEachLevel(raw, func(lvl entity.PriceLevel) error {
+		book.ApplyLevel(side, lvl.Price, lvl.Size)
+		return nil
+	})
 }
 
 // errSequenceGap signals that an adapter detected a gap in an exchange's update

@@ -108,7 +108,7 @@ func TestOrderbookReset(t *testing.T) {
 
 func TestOrderbookPreservesExactStrings(t *testing.T) {
 	// A value with more significant digits than float64 can hold must be stored
-	// and returned byte-for-byte — this is the whole point of string keys/values.
+	// and returned byte-for-byte, which is the whole point of string keys/values.
 	ob := NewOrderbook("test", "BTCUSDT")
 	const price = "0.000000000000001234"
 	const size = "12345.678901234567890"

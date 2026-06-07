@@ -364,6 +364,65 @@ func TestBinanceNameAndValidation(t *testing.T) {
 	}
 }
 
+func TestBinanceWatchRejectsMalformedSymbol(t *testing.T) {
+	p := NewBinanceProvider(testConfig())
+	// Binance symbols are concatenated (e.g. "BTCUSDT"); a dash-separated pair
+	// is the wrong format and must be rejected at Watch entry.
+	if _, err := p.Watch(context.Background(), []string{"BTC-USDT"}); err == nil {
+		t.Error("Binance Watch should reject a dash-separated symbol")
+	}
+}
+
+func TestBinanceWatchAcceptsLowercaseSymbol(t *testing.T) {
+	p := NewBinanceProvider(testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// A valid lower-case symbol is accepted (and upper-cased internally).
+	if _, err := p.Watch(ctx, []string{"btcusdt"}); err != nil {
+		t.Errorf("Binance Watch should accept a valid lower-case symbol, got %v", err)
+	}
+}
+
+func TestCoinbaseWatchRejectsMalformedSymbol(t *testing.T) {
+	p := NewCoinbaseProvider(testConfig())
+	if _, err := p.Watch(context.Background(), []string{"BTCUSD"}); err == nil {
+		t.Error("Coinbase Watch should reject a symbol with no dash separator")
+	}
+}
+
+func TestCoinbaseWatchAcceptsLowercaseSymbol(t *testing.T) {
+	p := NewCoinbaseProvider(testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := p.Watch(ctx, []string{"btc-usd"}); err != nil {
+		t.Errorf("Coinbase Watch should accept a valid lower-case symbol, got %v", err)
+	}
+}
+
+func TestOKXWatchRejectsMalformedSymbol(t *testing.T) {
+	p := NewOKXProvider(testConfig())
+	if _, err := p.Watch(context.Background(), []string{"BTCUSDT"}); err == nil {
+		t.Error("OKX Watch should reject a symbol with no dash separator")
+	}
+}
+
+func TestKrakenWatchRejectsMalformedSymbol(t *testing.T) {
+	p := NewKrakenProvider(testConfig())
+	// Kraken expects a slash separator (e.g. "XBT/USD"); a dash is wrong.
+	if _, err := p.Watch(context.Background(), []string{"XBT-USD"}); err == nil {
+		t.Error("Kraken Watch should reject a dash-separated symbol")
+	}
+}
+
+func TestKrakenWatchAcceptsLowercaseSymbol(t *testing.T) {
+	p := NewKrakenProvider(testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := p.Watch(ctx, []string{"xbt/usd"}); err != nil {
+		t.Errorf("Kraken Watch should accept a valid lower-case symbol, got %v", err)
+	}
+}
+
 func TestBinanceStreamURL(t *testing.T) {
 	p := NewBinanceProvider(testConfig())
 	p.wsBase = "wss://example.test"

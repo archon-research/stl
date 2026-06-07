@@ -45,7 +45,7 @@ type PriceLevel struct {
 // Storage and performance:
 //
 // Bids and asks are stored as maps keyed by the exact price string, so delta
-// application — the high-frequency hot path — is O(1) per level, and a delete
+// application (the high-frequency hot path) is O(1) per level, and a delete
 // matches its insert exactly (an exchange formats a given price consistently
 // within one stream). Values are the exchange's size strings, kept verbatim.
 //
@@ -93,8 +93,8 @@ func (ob *Orderbook) side(s Side) map[string]string {
 }
 
 // ApplyLevel upserts a price level in O(1), keyed and valued by the exact
-// exchange strings. A size of zero (the exchange convention for "level removed")
-// — or any non-positive/non-finite size — deletes the level. Price validation is
+// exchange strings. A size of zero (the exchange convention for "level removed"),
+// or any non-positive/non-finite size, deletes the level. Price validation is
 // the adapter's responsibility (see parseLevel); this only decides set vs delete.
 func (ob *Orderbook) ApplyLevel(s Side, price, size string) {
 	m := ob.side(s)

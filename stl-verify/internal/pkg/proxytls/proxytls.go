@@ -8,7 +8,7 @@
 // the SSL_CERT_FILE environment variable.
 //
 // In production (where SSL_CERT_FILE is unset) Config returns nil and callers
-// fall back to Go's default system certificate pool — no behaviour change.
+// fall back to Go's default system certificate pool, with no behaviour change.
 package proxytls
 
 import (

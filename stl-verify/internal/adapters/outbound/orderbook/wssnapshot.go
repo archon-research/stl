@@ -49,6 +49,8 @@ func (bs *bookSet) get(symbol string) *entity.Orderbook {
 type wsSnapshotExchange interface {
 	// name is the exchange identifier (e.g. "coinbase").
 	name() string
+	// normalizeSymbol canonicalises and validates one symbol, erroring on a bad format.
+	normalizeSymbol(symbol string) (string, error)
 	// endpoint returns the WebSocket URL for a symbol group.
 	endpoint(group []string) string
 	// subscribeMessages returns the frames to send after connecting.
@@ -106,6 +108,10 @@ func (p *wsSnapshotProvider) Name() string { return p.exchange.name() }
 // across the fewest connections the exchange allows.
 func (p *wsSnapshotProvider) Watch(ctx context.Context, symbols []string) (<-chan entity.OrderbookUpdate, error) {
 	if err := validateSymbols(symbols); err != nil {
+		return nil, err
+	}
+	symbols, err := normalizeSymbols(symbols, p.exchange.normalizeSymbol)
+	if err != nil {
 		return nil, err
 	}
 	groups := chunkSymbols(symbols, p.maxSymbols)

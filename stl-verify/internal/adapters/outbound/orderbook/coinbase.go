@@ -37,7 +37,8 @@ type CoinbaseProvider struct {
 	*wsSnapshotProvider
 }
 
-// NewCoinbaseProvider creates a Coinbase orderbook provider.
+// NewCoinbaseProvider creates a Coinbase orderbook provider. Symbols are
+// dash-separated pairs (e.g. "BTC-USD"); Watch upper-cases and validates them.
 func NewCoinbaseProvider(cfg Config) *CoinbaseProvider {
 	cfg = cfg.withDefaults()
 	ex := &coinbaseExchange{
@@ -56,6 +57,10 @@ type coinbaseExchange struct {
 
 func (e *coinbaseExchange) name() string             { return exchangeCoinbase }
 func (e *coinbaseExchange) endpoint([]string) string { return e.wsBase }
+
+func (e *coinbaseExchange) normalizeSymbol(s string) (string, error) {
+	return normalizeSeparatedPair(s, "-")
+}
 func (e *coinbaseExchange) newHandler() frameHandler { return newCoinbaseHandler(e.logger) }
 
 func (e *coinbaseExchange) subscribeMessages(group []string) ([]any, error) {

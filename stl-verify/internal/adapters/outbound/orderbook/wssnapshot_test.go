@@ -3,6 +3,7 @@ package orderbook
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,12 @@ type fakeExchange struct{ url string }
 
 func (e *fakeExchange) name() string             { return "fake" }
 func (e *fakeExchange) endpoint([]string) string { return e.url }
+
+// normalizeSymbol is permissive: it only upper-cases, so the engine test's "X"
+// symbol still passes.
+func (e *fakeExchange) normalizeSymbol(s string) (string, error) {
+	return strings.ToUpper(s), nil
+}
 func (e *fakeExchange) subscribeMessages(group []string) ([]any, error) {
 	return []any{map[string]any{"sub": group}}, nil
 }

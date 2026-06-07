@@ -45,7 +45,10 @@ type KrakenProvider struct {
 	*wsSnapshotProvider
 }
 
-// NewKrakenProvider creates a Kraken orderbook provider.
+// NewKrakenProvider creates a Kraken orderbook provider. Symbols are
+// slash-separated pairs using Kraken's asset names (e.g. "XBT/USD", not
+// "BTC/USD"); Watch upper-cases and validates the structure but does not rewrite
+// asset names.
 func NewKrakenProvider(cfg Config) *KrakenProvider {
 	ex := &krakenExchange{wsBase: krakenWSBase}
 	return &KrakenProvider{
@@ -59,6 +62,10 @@ type krakenExchange struct {
 
 func (e *krakenExchange) name() string             { return exchangeKraken }
 func (e *krakenExchange) endpoint([]string) string { return e.wsBase }
+
+func (e *krakenExchange) normalizeSymbol(s string) (string, error) {
+	return normalizeSeparatedPair(s, "/")
+}
 func (e *krakenExchange) newHandler() frameHandler {
 	return &krakenHandler{books: newBookSet(exchangeKraken)}
 }

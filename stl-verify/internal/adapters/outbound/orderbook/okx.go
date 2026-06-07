@@ -32,7 +32,8 @@ type OKXProvider struct {
 	*wsSnapshotProvider
 }
 
-// NewOKXProvider creates an OKX orderbook provider.
+// NewOKXProvider creates an OKX orderbook provider. Symbols are dash-separated
+// instrument ids (e.g. "BTC-USDT"); Watch upper-cases and validates them.
 func NewOKXProvider(cfg Config) *OKXProvider {
 	ex := &okxExchange{wsBase: okxWSBase}
 	return &OKXProvider{
@@ -46,6 +47,10 @@ type okxExchange struct {
 
 func (e *okxExchange) name() string             { return exchangeOKX }
 func (e *okxExchange) endpoint([]string) string { return e.wsBase }
+
+func (e *okxExchange) normalizeSymbol(s string) (string, error) {
+	return normalizeSeparatedPair(s, "-")
+}
 func (e *okxExchange) newHandler() frameHandler {
 	return &okxHandler{books: newBookSet(exchangeOKX), lastSeq: make(map[string]int64)}
 }

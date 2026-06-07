@@ -32,6 +32,65 @@ func TestValidateSymbols(t *testing.T) {
 	}
 }
 
+func TestNormalizeSeparatedPair(t *testing.T) {
+	tests := []struct {
+		name    string
+		symbol  string
+		sep     string
+		want    string
+		wantErr bool
+	}{
+		{name: "valid upper-cased", symbol: "btc-usd", sep: "-", want: "BTC-USD"},
+		{name: "already upper", symbol: "BTC-USD", sep: "-", want: "BTC-USD"},
+		{name: "slash separator", symbol: "xbt/usd", sep: "/", want: "XBT/USD"},
+		{name: "empty", symbol: "", sep: "-", wantErr: true},
+		{name: "missing separator", symbol: "BTCUSD", sep: "-", wantErr: true},
+		{name: "extra separator", symbol: "BTC-USD-X", sep: "-", wantErr: true},
+		{name: "empty left part", symbol: "-USD", sep: "-", wantErr: true},
+		{name: "empty right part", symbol: "BTC-", sep: "-", wantErr: true},
+		{name: "wrong separator", symbol: "BTC/USD", sep: "-", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeSeparatedPair(tt.symbol, tt.sep)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("normalizeSeparatedPair(%q, %q) err = %v, wantErr %v", tt.symbol, tt.sep, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("normalizeSeparatedPair(%q, %q) = %q, want %q", tt.symbol, tt.sep, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeConcatSymbol(t *testing.T) {
+	tests := []struct {
+		name    string
+		symbol  string
+		want    string
+		wantErr bool
+	}{
+		{name: "valid lower-cased", symbol: "btcusdt", want: "BTCUSDT"},
+		{name: "already upper", symbol: "BTCUSDT", want: "BTCUSDT"},
+		{name: "alphanumeric", symbol: "1inchusdt", want: "1INCHUSDT"},
+		{name: "empty", symbol: "", wantErr: true},
+		{name: "dash separator rejected", symbol: "BTC-USDT", wantErr: true},
+		{name: "slash separator rejected", symbol: "BTC/USDT", wantErr: true},
+		{name: "whitespace rejected", symbol: "BTC USDT", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeConcatSymbol(tt.symbol)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("normalizeConcatSymbol(%q) err = %v, wantErr %v", tt.symbol, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("normalizeConcatSymbol(%q) = %q, want %q", tt.symbol, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestChunkSymbols(t *testing.T) {
 	tests := []struct {
 		name    string

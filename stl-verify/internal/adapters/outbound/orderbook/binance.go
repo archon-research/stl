@@ -63,7 +63,9 @@ type BinanceProvider struct {
 	maxStreams int
 }
 
-// NewBinanceProvider creates a Binance orderbook provider.
+// NewBinanceProvider creates a Binance orderbook provider. Symbols are
+// concatenated alphanumeric pairs with no separator (e.g. "BTCUSDT"); Watch
+// upper-cases and validates them.
 func NewBinanceProvider(cfg Config) *BinanceProvider {
 	cfg = cfg.withDefaults()
 	logger := cfg.Logger.With("component", "binance-orderbook")
@@ -93,9 +95,14 @@ func NewBinanceProvider(cfg Config) *BinanceProvider {
 func (p *BinanceProvider) Name() string { return exchangeBinance }
 
 // Watch subscribes to the given Binance symbols (e.g. "BTCUSDT") and streams
-// aggregated books. Symbols are split across the fewest connections allowed.
+// aggregated books. Symbols are normalised (upper-cased and validated) then split
+// across the fewest connections allowed.
 func (p *BinanceProvider) Watch(ctx context.Context, symbols []string) (<-chan entity.OrderbookUpdate, error) {
 	if err := validateSymbols(symbols); err != nil {
+		return nil, err
+	}
+	symbols, err := normalizeSymbols(symbols, normalizeConcatSymbol)
+	if err != nil {
 		return nil, err
 	}
 	groups := chunkSymbols(symbols, p.maxStreams)
