@@ -141,13 +141,33 @@ func normalizeSymbols(symbols []string, normalize func(string) (string, error)) 
 	return out, nil
 }
 
-// normalizeSeparatedPair upper-cases symbol and requires exactly two non-empty
-// parts split on sep (e.g. "btc-usd" -> "BTC-USD"); it errors otherwise.
+// isAlphanumeric reports whether s is non-empty and contains only ASCII letters
+// or digits (after upper-casing, only A-Z and 0-9). Whitespace and punctuation
+// are rejected so a malformed symbol cannot slip through as a subscribe payload
+// or book key the venue never echoes back.
+func isAlphanumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		isDigit := r >= '0' && r <= '9'
+		isLetter := r >= 'A' && r <= 'Z'
+		if !isDigit && !isLetter {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeSeparatedPair upper-cases symbol and requires exactly two
+// alphanumeric parts split on sep (e.g. "btc-usd" -> "BTC-USD"). Parts with
+// whitespace or punctuation are rejected rather than silently trimmed, since a
+// padded symbol would produce a subscribe payload the venue never echoes back.
 func normalizeSeparatedPair(symbol, sep string) (string, error) {
 	up := strings.ToUpper(symbol)
 	parts := strings.Split(up, sep)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("expected two non-empty parts separated by %q, got %q", sep, symbol)
+	if len(parts) != 2 || !isAlphanumeric(parts[0]) || !isAlphanumeric(parts[1]) {
+		return "", fmt.Errorf("expected two alphanumeric parts separated by %q, got %q", sep, symbol)
 	}
 	return up, nil
 }
@@ -155,16 +175,9 @@ func normalizeSeparatedPair(symbol, sep string) (string, error) {
 // normalizeConcatSymbol upper-cases symbol and requires it be non-empty and
 // alphanumeric with no separator (e.g. Binance "btcusdt" -> "BTCUSDT").
 func normalizeConcatSymbol(symbol string) (string, error) {
-	if symbol == "" {
-		return "", errors.New("symbol is empty")
-	}
 	up := strings.ToUpper(symbol)
-	for _, r := range up {
-		isDigit := r >= '0' && r <= '9'
-		isLetter := r >= 'A' && r <= 'Z'
-		if !isDigit && !isLetter {
-			return "", fmt.Errorf("expected alphanumeric symbol with no separator, got %q", symbol)
-		}
+	if !isAlphanumeric(up) {
+		return "", fmt.Errorf("expected alphanumeric symbol with no separator, got %q", symbol)
 	}
 	return up, nil
 }

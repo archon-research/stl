@@ -43,12 +43,19 @@ func TestNormalizeSeparatedPair(t *testing.T) {
 		{name: "valid upper-cased", symbol: "btc-usd", sep: "-", want: "BTC-USD"},
 		{name: "already upper", symbol: "BTC-USD", sep: "-", want: "BTC-USD"},
 		{name: "slash separator", symbol: "xbt/usd", sep: "/", want: "XBT/USD"},
+		{name: "alphanumeric with digits", symbol: "1inch-usd", sep: "-", want: "1INCH-USD"},
 		{name: "empty", symbol: "", sep: "-", wantErr: true},
 		{name: "missing separator", symbol: "BTCUSD", sep: "-", wantErr: true},
 		{name: "extra separator", symbol: "BTC-USD-X", sep: "-", wantErr: true},
 		{name: "empty left part", symbol: "-USD", sep: "-", wantErr: true},
 		{name: "empty right part", symbol: "BTC-", sep: "-", wantErr: true},
 		{name: "wrong separator", symbol: "BTC/USD", sep: "-", wantErr: true},
+		{name: "leading whitespace rejected", symbol: " btc-usd", sep: "-", wantErr: true},
+		{name: "trailing whitespace rejected", symbol: "btc-usd ", sep: "-", wantErr: true},
+		{name: "whitespace around separator rejected", symbol: " btc - usd ", sep: "-", wantErr: true},
+		{name: "internal space in part rejected", symbol: "bt c-usd", sep: "-", wantErr: true},
+		{name: "punctuation in part rejected", symbol: "btc!-usd", sep: "-", wantErr: true},
+		{name: "tab whitespace rejected", symbol: "btc\t-usd", sep: "-", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

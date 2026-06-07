@@ -142,13 +142,13 @@ func (p *wsSnapshotProvider) runConnection(ctx context.Context, group []string, 
 			return fmt.Errorf("send subscribe: %w", err)
 		}
 	}
-	ready() // connected and subscribed: reset reconnect backoff
 
 	if pinger, ok := p.exchange.(appPinger); ok {
 		p.startAppPing(ctx, ws, pinger)
 	}
 
 	handler := p.exchange.newHandler()
+	synced := false
 	for {
 		raw, err := ws.Next(ctx)
 		if err != nil {
@@ -163,6 +163,14 @@ func (p *wsSnapshotProvider) runConnection(ctx context.Context, group []string, 
 		}
 		for _, s := range signals {
 			emit(ctx, out, s.book, s.isSnapshot, s.t)
+		}
+		// Reset the reconnect backoff only after the first book is produced, not
+		// on dial/subscribe: a connect-succeeds-but-sync-fails loop (bad symbol,
+		// region block, immediate error frame) must back off rather than hammer
+		// reconnect at the initial interval.
+		if !synced && len(signals) > 0 {
+			synced = true
+			ready()
 		}
 	}
 }

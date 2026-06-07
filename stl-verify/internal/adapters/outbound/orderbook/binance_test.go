@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,6 +352,120 @@ func TestBinanceWatchEndToEnd(t *testing.T) {
 	}
 	if sz, ok := sizeAt(asks, "121"); !ok || sz != "2" {
 		t.Errorf("ask 121 = %q (ok=%v), want 2", sz, ok)
+	}
+}
+
+// TestBinanceReadyNotCalledOnSnapshotError covers Issue 2 for Binance: a
+// connection that dials and subscribes but whose REST snapshot fetch fails must
+// NOT reset the reconnect backoff, so a connect-succeeds-but-sync-fails loop
+// backs off instead of hammering at the initial interval.
+func TestBinanceReadyNotCalledOnSnapshotError(t *testing.T) {
+	// REST server returns a snapshot with no lastUpdateId, which fetchSnapshot
+	// rejects, making the snapshot fetch fatal.
+	restURL := newBinanceRESTServer(t, binanceSnapshot{})
+	wsSrv := newWSTestServer(t, func(conn *websocket.Conn) { keepOpen(conn) })
+
+	p := NewBinanceProvider(testConfig())
+	p.restBase = restURL
+	p.wsBase = wsSrv.url
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var readyCalls atomic.Int32
+	out := make(chan entity.OrderbookUpdate, 4)
+	done := make(chan error, 1)
+	go func() {
+		done <- p.connectAndSync(ctx, []string{"BTCUSDT"}, out, func() { readyCalls.Add(1) })
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a fatal snapshot error, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("connectAndSync did not return after the snapshot fetch failed")
+	}
+	if got := readyCalls.Load(); got != 0 {
+		t.Errorf("ready called %d times, want 0 (snapshot never applied)", got)
+	}
+}
+
+// TestBinanceReadyCalledOnFirstSnapshot covers the surrounding correct behaviour
+// for Issue 2: once the REST snapshot is applied and the first book is emitted,
+// ready fires exactly once to reset the backoff.
+func TestBinanceReadyCalledOnFirstSnapshot(t *testing.T) {
+	restURL := newBinanceRESTServer(t, binanceSnapshot{
+		LastUpdateID: 100,
+		Bids:         [][]string{{"99", "5"}},
+		Asks:         [][]string{{"120", "7"}},
+	})
+	wsSrv := newWSTestServer(t, func(conn *websocket.Conn) { keepOpen(conn) })
+
+	p := NewBinanceProvider(testConfig())
+	p.restBase = restURL
+	p.wsBase = wsSrv.url
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var readyCalls atomic.Int32
+	out := make(chan entity.OrderbookUpdate, 4)
+	go func() {
+		_ = p.connectAndSync(ctx, []string{"BTCUSDT"}, out, func() { readyCalls.Add(1) })
+	}()
+
+	// The first emitted update is the snapshot; ready must fire by then.
+	upd := receiveWithin(t, out, 2*time.Second)
+	if !upd.IsSnapshot {
+		t.Fatalf("first update should be a snapshot, got %+v", upd)
+	}
+	// Allow connectAndSync to run a moment longer to confirm ready stays at 1.
+	cancel()
+	if got := readyCalls.Load(); got != 1 {
+		t.Errorf("ready called %d times, want exactly 1 (on first applied snapshot)", got)
+	}
+}
+
+// TestBinanceReadyNotCalledWhenFirstSnapshotResyncs covers the Issue 2 edge
+// case: if the very first snapshot's buffered-diff replay hits a sequence gap,
+// the symbol is left un-synced and re-fetches. ready must NOT fire yet, since no
+// usable book was produced.
+func TestBinanceReadyNotCalledWhenFirstSnapshotResyncs(t *testing.T) {
+	p := NewBinanceProvider(testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan entity.OrderbookUpdate, 4)
+	snapCh := make(chan binanceSnapshotResult, 4)
+
+	st := &binanceState{book: entity.NewOrderbook(exchangeBinance, "BTCUSDT")}
+	states := map[string]*binanceState{"BTCUSDT": st}
+	// A buffered diff that skips ahead of lastUpdateId+1 forces a resync.
+	st.buffer = []binanceDepthDiff{bDiff("BTCUSDT", 200, 205, [][]string{{"99", "1"}}, nil)}
+
+	res := binanceSnapshotResult{symbol: "BTCUSDT", snap: binanceSnapshot{
+		LastUpdateID: 100,
+		Bids:         [][]string{{"99", "5"}},
+		Asks:         [][]string{{"120", "7"}},
+	}}
+	if err := p.applySnapshot(ctx, states, res, out, snapCh); err != nil {
+		t.Fatalf("applySnapshot: %v", err)
+	}
+	// The gap leaves the symbol un-synced (it re-fetches), so connectAndSync's
+	// ready guard (which checks st.synced) would not fire.
+	if st.synced {
+		t.Error("a first-snapshot replay gap must leave the symbol un-synced")
+	}
+	if len(out) != 0 {
+		t.Error("no book should be emitted when the first snapshot replay gaps")
+	}
+
+	// Drain the re-fetch so its goroutine exits cleanly.
+	select {
+	case <-snapCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a re-fetched snapshot result")
 	}
 }
 

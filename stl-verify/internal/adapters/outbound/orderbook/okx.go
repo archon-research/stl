@@ -115,11 +115,15 @@ func (h *okxHandler) handle(raw []byte) ([]emitSignal, error) {
 	book := h.books.get(instID)
 	signals := make([]emitSignal, 0, len(f.Data))
 
+	// A snapshot frame replaces the whole book once, regardless of how many data
+	// objects it carries; resetting per object would discard all but the last.
+	isSnapshot := f.Action == "snapshot"
+	if isSnapshot {
+		book.Reset()
+	}
+
 	for _, d := range f.Data {
-		isSnapshot := f.Action == "snapshot"
-		if isSnapshot {
-			book.Reset()
-		} else {
+		if !isSnapshot {
 			last, ok := h.lastSeq[instID]
 			if !ok {
 				// An update before any snapshot would be applied to an empty book,
@@ -128,7 +132,13 @@ func (h *okxHandler) handle(raw []byte) ([]emitSignal, error) {
 			}
 			if d.PrevSeqID != last {
 				if d.SeqID == d.PrevSeqID {
-					continue // documented no-change push (seqId == prevSeqId); nothing to apply
+					// Documented no-change push (seqId == prevSeqId). It carries no
+					// levels, but its seqId still advances the stream, so record it
+					// before skipping; otherwise the next update's prevSeqId chains
+					// off a seqId we never stored and trips a spurious gap.
+					h.lastSeq[instID] = d.SeqID
+					book.LastUpdateID = d.SeqID
+					continue
 				}
 				return nil, fmt.Errorf("%w: okx %s prevSeqId %d != last %d", errSequenceGap, instID, d.PrevSeqID, last)
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,6 +100,83 @@ func TestWSSnapshotProviderStreamsAndCloses(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("channel not closed after cancellation")
 		}
+	}
+}
+
+// readyRecorder counts ready() invocations from any goroutine. ready resets the
+// reconnect backoff, so it must only fire once a book has actually synced.
+type readyRecorder struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (r *readyRecorder) ready() {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+}
+
+func (r *readyRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+// TestWSSnapshotReadyNotCalledWithoutBook covers Issue 2 for the WS-snapshot
+// engine: a connection that subscribes successfully but only ever receives an
+// error frame (and never a book) must NOT reset the reconnect backoff.
+func TestWSSnapshotReadyNotCalledWithoutBook(t *testing.T) {
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		// Subscribe succeeds, then the venue sends a frame the handler rejects;
+		// no book is ever produced.
+		sendText(t, conn, `not-json`)
+		keepOpen(conn)
+	})
+
+	p := newWSSnapshotProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rec := &readyRecorder{}
+	out := make(chan entity.OrderbookUpdate, 4)
+	done := make(chan error, 1)
+	go func() { done <- p.runConnection(ctx, []string{"X"}, out, rec.ready) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runConnection did not return after the handler error")
+	}
+	if rec.count() != 0 {
+		t.Errorf("ready called %d times, want 0 (no book was ever synced)", rec.count())
+	}
+}
+
+// TestWSSnapshotReadyCalledOnceOnFirstBook covers the surrounding correct
+// behaviour for Issue 2: ready fires exactly once, when the first book is
+// emitted, and not again for subsequent updates on the same connection.
+func TestWSSnapshotReadyCalledOnceOnFirstBook(t *testing.T) {
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		sendText(t, conn, `{"symbol":"X","snapshot":true,"price":100,"size":1}`)
+		sendText(t, conn, `{"symbol":"X","snapshot":false,"price":101,"size":2}`)
+		keepOpen(conn)
+	})
+
+	p := newWSSnapshotProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rec := &readyRecorder{}
+	out := make(chan entity.OrderbookUpdate, 4)
+	go func() { _ = p.runConnection(ctx, []string{"X"}, out, rec.ready) }()
+
+	// Wait for both updates so we know the connection went past the first book.
+	receiveWithin(t, out, 2*time.Second)
+	receiveWithin(t, out, 2*time.Second)
+	cancel()
+
+	if got := rec.count(); got != 1 {
+		t.Errorf("ready called %d times, want exactly 1 (on first book only)", got)
 	}
 }
 

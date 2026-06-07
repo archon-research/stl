@@ -162,7 +162,6 @@ func (p *BinanceProvider) connectAndSync(ctx context.Context, group []string, ou
 	defer ws.Close()
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	ready() // connection established: reset reconnect backoff
 
 	states := make(map[string]*binanceState, len(group))
 	snapCh := make(chan binanceSnapshotResult, len(group)+1)
@@ -191,13 +190,24 @@ func (p *BinanceProvider) connectAndSync(ctx context.Context, group []string, ou
 		}
 	}()
 
+	synced := false
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case res := <-snapCh:
+			st := states[strings.ToUpper(res.symbol)]
 			if err := p.applySnapshot(connCtx, states, res, out, snapCh); err != nil {
 				return err
+			}
+			// Reset the reconnect backoff only after the first book is actually
+			// synced, not on dial: a connect-succeeds-but-sync-fails loop must
+			// back off rather than hammer reconnect at the initial interval. A
+			// snapshot that immediately hits a sequence gap leaves the symbol
+			// un-synced (it re-fetches), so it does not count as a first book.
+			if !synced && st != nil && st.synced {
+				synced = true
+				ready()
 			}
 		case frame := <-frameCh:
 			if frame.err != nil {
