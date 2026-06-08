@@ -97,9 +97,7 @@ func (m *Multicaller) buildRecord(call outbound.Call, result outbound.Result, bl
 }
 
 func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallRecord) {
-	m.cfg.Wait.Add(1)
-	go func() {
-		defer m.cfg.Wait.Done()
+	m.cfg.Wait.Go(func() {
 		archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
 		defer cancel()
 		if err := m.archiver.Archive(archiveCtx, record); err != nil {
@@ -111,5 +109,5 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallR
 				"selector", record.Selector,
 			)
 		}
-	}()
+	})
 }
