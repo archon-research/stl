@@ -60,7 +60,7 @@ func TestArchiveKeyAndBucket(t *testing.T) {
 	if fw.bucket != "raw-sc-calls-prod" {
 		t.Fatalf("bucket = %q", fw.bucket)
 	}
-	wantKey := "raw-sc-calls/chain_id=1/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_"
+	wantKey := "raw-sc-calls/chain_id=1/block=21500000-21500999/21500042_0_oracle-price_"
 	if !bytes.HasPrefix([]byte(fw.key), []byte(wantKey)) {
 		t.Fatalf("key = %q, want prefix %q", fw.key, wantKey)
 	}
