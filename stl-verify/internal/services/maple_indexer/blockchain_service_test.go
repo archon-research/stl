@@ -13,10 +13,18 @@ import (
 
 // mustNewBlockchainService builds a BlockchainService for tests, failing fast if
 // construction (ABI loading, validation) errors so downstream assertions never
-// run against a nil service.
+// run against a nil service. chunkSize 0 exercises the <=0 fallback to the
+// default multicall chunk size.
 func mustNewBlockchainService(t *testing.T, mc outbound.Multicaller) *BlockchainService {
 	t.Helper()
-	bs, err := NewBlockchainService(mc, nil)
+	return mustNewBlockchainServiceChunk(t, mc, 0)
+}
+
+// mustNewBlockchainServiceChunk builds a BlockchainService with an explicit
+// multicall chunk size for chunking-specific tests.
+func mustNewBlockchainServiceChunk(t *testing.T, mc outbound.Multicaller, chunkSize int) *BlockchainService {
+	t.Helper()
+	bs, err := NewBlockchainService(mc, nil, chunkSize)
 	if err != nil {
 		t.Fatalf("NewBlockchainService failed: %v", err)
 	}
@@ -24,13 +32,13 @@ func mustNewBlockchainService(t *testing.T, mc outbound.Multicaller) *Blockchain
 }
 
 func TestNewBlockchainService_RejectsNilMulticaller(t *testing.T) {
-	if _, err := NewBlockchainService(nil, nil); err == nil {
+	if _, err := NewBlockchainService(nil, nil, DefaultMulticallChunkSize); err == nil {
 		t.Fatal("expected error for nil multicaller")
 	}
 }
 
 func TestNewBlockchainService_PrePacksNoArgViews(t *testing.T) {
-	bs, err := NewBlockchainService(&multicallStub{}, nil)
+	bs, err := NewBlockchainService(&multicallStub{}, nil, DefaultMulticallChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +70,7 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 			encodeUint256(big.NewInt(1_111_111)),         // convertToAssets(1e6)
 		},
 	}
-	bs, err := NewBlockchainService(mc, nil)
+	bs, err := NewBlockchainService(mc, nil, DefaultMulticallChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,5 +305,221 @@ func TestFetchUserPositions_PassesBlockNumberThrough(t *testing.T) {
 		if b.Cmp(block) != 0 {
 			t.Fatalf("call %d block=%s, want %s", i, b, block)
 		}
+	}
+}
+
+// makeAddrs builds n distinct, deterministic addresses by encoding the index
+// into the trailing bytes — enough to key a position map without collisions.
+func makeAddrs(n int) []common.Address {
+	addrs := make([]common.Address, n)
+	for i := range addrs {
+		var a common.Address
+		a[18] = byte(i >> 8)
+		a[19] = byte(i)
+		addrs[i] = a
+	}
+	return addrs
+}
+
+// TestFetchUserPositions_ChunksBothPasses proves the balanceOf and
+// convertToAssets passes are each split into ceil(n/chunkSize) multicalls and
+// that the stitched result map is complete and correctly ordered.
+func TestFetchUserPositions_ChunksBothPasses(t *testing.T) {
+	const chunkSize = 100
+	const n = 250
+	users := makeAddrs(n)
+
+	responses := make([][]byte, 0, 2*n)
+	// balanceOf pass: balance = i+1 (all non-zero).
+	for i := range n {
+		responses = append(responses, encodeUint256(big.NewInt(int64(i+1))))
+	}
+	// convertToAssets pass: assets = (i+1)*2.
+	for i := range n {
+		responses = append(responses, encodeUint256(big.NewInt(int64((i+1)*2))))
+	}
+
+	mc := &multicallStub{Responses: responses}
+	bs := mustNewBlockchainServiceChunk(t, mc, chunkSize)
+
+	out, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), users, big.NewInt(18_500_000))
+	if err != nil {
+		t.Fatalf("FetchUserPositions: %v", err)
+	}
+	if len(out) != n {
+		t.Fatalf("got %d positions, want %d", len(out), n)
+	}
+	// ceil(250/100) = 3 balanceOf batches + 3 convertToAssets batches = 6.
+	if len(mc.Calls) != 6 {
+		t.Fatalf("got %d multicall batches, want 6", len(mc.Calls))
+	}
+	// Each chunk except the last is full size; the last is the remainder.
+	wantSizes := []int{100, 100, 50, 100, 100, 50}
+	for i, calls := range mc.Calls {
+		if len(calls) != wantSizes[i] {
+			t.Fatalf("batch %d size=%d, want %d", i, len(calls), wantSizes[i])
+		}
+	}
+	for i, u := range users {
+		pos, ok := out[u]
+		if !ok {
+			t.Fatalf("user %d (%s) missing from result", i, u.Hex())
+		}
+		if pos.Shares.Cmp(big.NewInt(int64(i+1))) != 0 {
+			t.Fatalf("user %d shares=%s, want %d", i, pos.Shares, i+1)
+		}
+		if pos.Assets.Cmp(big.NewInt(int64((i+1)*2))) != 0 {
+			t.Fatalf("user %d assets=%s, want %d", i, pos.Assets, (i+1)*2)
+		}
+	}
+}
+
+// TestFetchUserPositions_ZeroBalanceShortCircuitAcrossChunks confirms zero-share
+// users are resolved locally (Assets=0, no convertToAssets call) even when the
+// non-zero accounts span a chunk boundary.
+func TestFetchUserPositions_ZeroBalanceShortCircuitAcrossChunks(t *testing.T) {
+	const chunkSize = 2
+	users := makeAddrs(5)
+	// balances: non-zero at indices 0, 2, 4 → 3 convertToAssets calls spanning
+	// two asset chunks (2 + 1).
+	balances := []int64{1, 0, 2, 0, 3}
+
+	responses := make([][]byte, 0, len(balances)+3)
+	for _, b := range balances {
+		responses = append(responses, encodeUint256(big.NewInt(b)))
+	}
+	// convertToAssets for the 3 non-zero balances, in order: assets = shares*10.
+	for _, b := range balances {
+		if b != 0 {
+			responses = append(responses, encodeUint256(big.NewInt(b*10)))
+		}
+	}
+
+	mc := &multicallStub{Responses: responses}
+	bs := mustNewBlockchainServiceChunk(t, mc, chunkSize)
+
+	out, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), users, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("FetchUserPositions: %v", err)
+	}
+	if len(out) != 5 {
+		t.Fatalf("got %d positions, want 5", len(out))
+	}
+	// balanceOf: ceil(5/2)=3 batches. convertToAssets: ceil(3/2)=2 batches.
+	if len(mc.Calls) != 5 {
+		t.Fatalf("got %d multicall batches, want 5", len(mc.Calls))
+	}
+	for i, b := range balances {
+		pos := out[users[i]]
+		if pos == nil {
+			t.Fatalf("user %d missing", i)
+		}
+		if pos.Shares.Cmp(big.NewInt(b)) != 0 {
+			t.Fatalf("user %d shares=%s, want %d", i, pos.Shares, b)
+		}
+		wantAssets := int64(0)
+		if b != 0 {
+			wantAssets = b * 10
+		}
+		if pos.Assets.Cmp(big.NewInt(wantAssets)) != 0 {
+			t.Fatalf("user %d assets=%s, want %d", i, pos.Assets, wantAssets)
+		}
+	}
+}
+
+// TestFetchUserPositions_FailsHardOnChunkError confirms a mid-pass chunk failure
+// aborts the whole call with no partial map.
+func TestFetchUserPositions_FailsHardOnChunkError(t *testing.T) {
+	const chunkSize = 2
+	users := makeAddrs(5)
+	responses := make([][]byte, 0, 5)
+	for i := range 5 {
+		responses = append(responses, encodeUint256(big.NewInt(int64(i+1))))
+	}
+	// Fail on the 2nd balanceOf chunk.
+	mc := &multicallStub{Responses: responses, FailAtCall: 2}
+	bs := mustNewBlockchainServiceChunk(t, mc, chunkSize)
+
+	out, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), users, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected error on chunk failure")
+	}
+	if out != nil {
+		t.Fatalf("expected nil map on failure, got %d entries", len(out))
+	}
+}
+
+// TestConfigApplyDefaults_ChunkSize covers both branches of the chunk-size
+// default: a non-positive value falls back to the default, a positive value is
+// left untouched.
+func TestConfigApplyDefaults_ChunkSize(t *testing.T) {
+	var zero Config
+	zero.ApplyDefaults()
+	if zero.MulticallChunkSize != DefaultMulticallChunkSize {
+		t.Fatalf("zero chunk size = %d, want default %d", zero.MulticallChunkSize, DefaultMulticallChunkSize)
+	}
+
+	custom := Config{MulticallChunkSize: 42}
+	custom.ApplyDefaults()
+	if custom.MulticallChunkSize != 42 {
+		t.Fatalf("custom chunk size = %d, want 42 (left untouched)", custom.MulticallChunkSize)
+	}
+}
+
+// shortChunkMulticaller returns one fewer result than requested on every
+// Execute, exercising the per-chunk length guard in executeChunked — a mismatch
+// the call-site aggregate check could miss if a later chunk over-returned.
+type shortChunkMulticaller struct{}
+
+func (s *shortChunkMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	out := make([]outbound.Result, 0, len(calls))
+	for i := 1; i < len(calls); i++ {
+		out = append(out, outbound.Result{Success: true, ReturnData: encodeUint256(big.NewInt(1))})
+	}
+	return out, nil
+}
+
+func (s *shortChunkMulticaller) Address() common.Address { return common.Address{} }
+
+// TestFetchUserPositions_FailsOnChunkLengthMismatch confirms a chunk returning
+// the wrong number of results aborts the call rather than silently shifting
+// later users' positions.
+func TestFetchUserPositions_FailsOnChunkLengthMismatch(t *testing.T) {
+	bs := mustNewBlockchainServiceChunk(t, &shortChunkMulticaller{}, 2)
+	out, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), makeAddrs(5), big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected error when a chunk returns a mismatched result count")
+	}
+	if out != nil {
+		t.Fatalf("expected nil map on failure, got %d entries", len(out))
+	}
+}
+
+// TestNewBlockchainService_ChunkSizeFallback proves a non-positive chunk size
+// falls back to the default (100) rather than producing zero-size chunks.
+func TestNewBlockchainService_ChunkSizeFallback(t *testing.T) {
+	if got := ConfigDefaults().MulticallChunkSize; got != DefaultMulticallChunkSize {
+		t.Fatalf("ConfigDefaults().MulticallChunkSize=%d, want %d", got, DefaultMulticallChunkSize)
+	}
+
+	const n = 150
+	users := makeAddrs(n)
+	responses := make([][]byte, 0, 2*n)
+	for i := range n {
+		responses = append(responses, encodeUint256(big.NewInt(int64(i+1))))
+	}
+	for i := range n {
+		responses = append(responses, encodeUint256(big.NewInt(int64(i+1))))
+	}
+
+	mc := &multicallStub{Responses: responses}
+	bs := mustNewBlockchainServiceChunk(t, mc, 0) // 0 → fall back to 100
+
+	if _, err := bs.FetchUserPositions(context.Background(), common.HexToAddress(syrupUSDCAddr), users, big.NewInt(1)); err != nil {
+		t.Fatalf("FetchUserPositions: %v", err)
+	}
+	// ceil(150/100)=2 balanceOf batches + 2 convertToAssets batches = 4.
+	if len(mc.Calls) != 4 {
+		t.Fatalf("got %d multicall batches, want 4 (chunk size fell back to 100)", len(mc.Calls))
 	}
 }

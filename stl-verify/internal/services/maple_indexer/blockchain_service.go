@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -55,6 +56,12 @@ type BlockchainService struct {
 	viewABI     *abi.ABI
 	telemetry   *Telemetry
 
+	// chunkSize bounds the per-multicall call count in FetchUserPositions so a
+	// high-churn block can't produce one oversized aggregate that reverts
+	// wholesale. Always > 0 (NewBlockchainService clamps a non-positive arg to
+	// DefaultMulticallChunkSize).
+	chunkSize int
+
 	// Pre-packed call data for the no-argument vault-level views, so we
 	// don't re-pack on every block. Vault-level views are call-data-free
 	// (no per-vault arg), so packing once is correct.
@@ -63,10 +70,15 @@ type BlockchainService struct {
 }
 
 // NewBlockchainService loads the Syrup views ABI and pre-packs the
-// no-argument view calls.
-func NewBlockchainService(mc outbound.Multicaller, telemetry *Telemetry) (*BlockchainService, error) {
+// no-argument view calls. A non-positive chunkSize falls back to
+// DefaultMulticallChunkSize so callers can't accidentally request zero-size
+// chunks.
+func NewBlockchainService(mc outbound.Multicaller, telemetry *Telemetry, chunkSize int) (*BlockchainService, error) {
 	if mc == nil {
 		return nil, fmt.Errorf("multicaller is nil")
+	}
+	if chunkSize <= 0 {
+		chunkSize = DefaultMulticallChunkSize
 	}
 	a, err := abis.GetSyrupVaultViewsABI()
 	if err != nil {
@@ -91,6 +103,7 @@ func NewBlockchainService(mc outbound.Multicaller, telemetry *Telemetry) (*Block
 		multicaller:     mc,
 		viewABI:         a,
 		telemetry:       telemetry,
+		chunkSize:       chunkSize,
 		totalAssetsData: ta,
 		totalSupplyData: ts,
 	}, nil
@@ -190,7 +203,7 @@ func (s *BlockchainService) FetchUserPositions(
 		balanceCalls[i] = outbound.Call{Target: vault, CallData: data}
 	}
 	balanceStart := time.Now()
-	balanceResults, err := s.multicaller.Execute(ctx, balanceCalls, blockNumber)
+	balanceResults, err := s.executeChunked(ctx, balanceCalls, blockNumber)
 	s.telemetry.RecordRPCCall(ctx, "balanceOf", time.Since(balanceStart), err)
 	if err != nil {
 		return nil, fmt.Errorf("multicall balanceOf for vault %s: %w", vault.Hex(), err)
@@ -232,7 +245,7 @@ func (s *BlockchainService) FetchUserPositions(
 		return out, nil
 	}
 	assetStart := time.Now()
-	assetResults, err := s.multicaller.Execute(ctx, assetCalls, blockNumber)
+	assetResults, err := s.executeChunked(ctx, assetCalls, blockNumber)
 	s.telemetry.RecordRPCCall(ctx, "convertToAssets", time.Since(assetStart), err)
 	if err != nil {
 		return nil, fmt.Errorf("multicall convertToAssets for vault %s: %w", vault.Hex(), err)
@@ -249,6 +262,35 @@ func (s *BlockchainService) FetchUserPositions(
 		out[u] = &UserPosition{Shares: nonZeroBalances[i], Assets: assets}
 	}
 	return out, nil
+}
+
+// executeChunked runs one multicall per fixed-size chunk of calls and stitches
+// the per-chunk results back into a single slice, preserving call order.
+// Chunking caps the size of any single aggregate3 so a high-churn block can't
+// build one oversized multicall that exceeds the node's eth_call gas cap or the
+// RPC provider's compute limit and reverts wholesale.
+//
+// Fails hard: any chunk error aborts the whole batch with a wrapped error and
+// no partial results. The caller redelivers and reprocesses the block; writes
+// are idempotent, so a retry is safe.
+func (s *BlockchainService) executeChunked(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	results := make([]outbound.Result, 0, len(calls))
+	for chunk := range slices.Chunk(calls, s.chunkSize) {
+		chunkResults, err := s.multicaller.Execute(ctx, chunk, blockNumber)
+		if err != nil {
+			return nil, fmt.Errorf("multicall chunk of %d calls: %w", len(chunk), err)
+		}
+		// Assert each chunk's length here, where the boundary is known. The
+		// call-site aggregate check only validates the stitched total — two
+		// chunks with compensating over/under counts would net to the right
+		// total yet shift every later result by a position, silently writing
+		// one user's balance under another's address.
+		if len(chunkResults) != len(chunk) {
+			return nil, fmt.Errorf("multicall chunk returned %d results, expected %d", len(chunkResults), len(chunk))
+		}
+		results = append(results, chunkResults...)
+	}
+	return results, nil
 }
 
 // decodeUint256 unpacks an ABI-encoded uint256 return value from a multicall result.

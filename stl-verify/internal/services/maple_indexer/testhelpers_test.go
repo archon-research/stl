@@ -2,6 +2,7 @@ package maple_indexer
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"math/big"
 
@@ -75,6 +76,10 @@ type multicallStub struct {
 	Calls [][]outbound.Call
 	// BlockNumbers captures the block argument passed on each Execute.
 	BlockNumbers []*big.Int
+	// FailAtCall, when > 0, makes the Nth Execute (1-indexed, counting all
+	// chunks across every pass) return an error — used to exercise mid-pass
+	// chunk failure. Earlier chunks still record and succeed.
+	FailAtCall int
 }
 
 func (m *multicallStub) Execute(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
@@ -83,6 +88,10 @@ func (m *multicallStub) Execute(_ context.Context, calls []outbound.Call, blockN
 	}
 	m.Calls = append(m.Calls, calls)
 	m.BlockNumbers = append(m.BlockNumbers, blockNumber)
+
+	if m.FailAtCall > 0 && len(m.Calls) == m.FailAtCall {
+		return nil, fmt.Errorf("multicall chunk %d failed", m.FailAtCall)
+	}
 
 	out := make([]outbound.Result, len(calls))
 	for i := range calls {

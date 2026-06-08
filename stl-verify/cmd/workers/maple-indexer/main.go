@@ -53,16 +53,17 @@ func main() {
 }
 
 type cliConfig struct {
-	queueURL          string
-	redisAddr         string
-	dbURL             string
-	alchemyURL        string
-	s3Bucket          string
-	deployEnv         string
-	maxMessages       int
-	waitTime          int
-	visibilityTimeout int
-	chainID           int64
+	queueURL           string
+	redisAddr          string
+	dbURL              string
+	alchemyURL         string
+	s3Bucket           string
+	deployEnv          string
+	maxMessages        int
+	waitTime           int
+	visibilityTimeout  int
+	chainID            int64
+	multicallChunkSize int
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -135,6 +136,12 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 	cfg.chainID = chainID
+
+	chunkSize, err := env.GetInt("MULTICALL_CHUNK_SIZE", maple_indexer.DefaultMulticallChunkSize)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing MULTICALL_CHUNK_SIZE: %w", err)
+	}
+	cfg.multicallChunkSize = chunkSize
 
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
 	if cfg.s3Bucket == "" {
@@ -283,7 +290,8 @@ func run(ctx context.Context, args []string) error {
 			Logger:      logger,
 			ChainID:     cfg.chainID,
 		},
-		Telemetry: mapleTelemetry,
+		Telemetry:          mapleTelemetry,
+		MulticallChunkSize: cfg.multicallChunkSize,
 	}
 
 	service, err := maple_indexer.NewService(

@@ -69,7 +69,7 @@ func NewService(
 		return nil, fmt.Errorf("validating dependencies: %w", err)
 	}
 
-	config.SQSConsumerConfig.ApplyDefaults()
+	config.ApplyDefaults()
 	if err := config.SQSConsumerConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
@@ -86,7 +86,7 @@ func NewService(
 		return nil, fmt.Errorf("creating event extractor: %w", err)
 	}
 
-	bs, err := NewBlockchainService(multicaller, config.Telemetry)
+	bs, err := NewBlockchainService(multicaller, config.Telemetry, config.MulticallChunkSize)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockchain service: %w", err)
 	}
