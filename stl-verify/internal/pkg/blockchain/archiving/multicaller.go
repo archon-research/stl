@@ -90,9 +90,9 @@ func (m *Multicaller) buildRecord(call outbound.Call, result outbound.Result, bl
 		Timestamp:       m.cfg.Clock().UTC(),
 		ContractAddress: call.Target.Hex(),
 		Selector:        rawsckey.Selector(call.CallData),
-		CallData:        call.CallData,
+		CallData:        append([]byte(nil), call.CallData...),
 		Success:         result.Success,
-		Response:        result.ReturnData,
+		Response:        append([]byte(nil), result.ReturnData...),
 	}
 }
 
