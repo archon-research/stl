@@ -118,6 +118,98 @@ func TestConnWriteJSONReachesServer(t *testing.T) {
 	}
 }
 
+func TestConnWriteTextReachesServer(t *testing.T) {
+	received := make(chan struct {
+		mt   int
+		data string
+	}, 1)
+	url := newTestServer(t, func(conn *websocket.Conn) {
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		received <- struct {
+			mt   int
+			data string
+		}{mt, string(data)}
+		keepOpen(conn)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, url, testConfig())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteText([]byte("ping-payload")); err != nil {
+		t.Fatalf("WriteText: %v", err)
+	}
+	select {
+	case got := <-received:
+		if got.mt != websocket.TextMessage {
+			t.Errorf("server received message type %d, want TextMessage", got.mt)
+		}
+		if got.data != "ping-payload" {
+			t.Errorf("server received %q", got.data)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not receive the text frame")
+	}
+}
+
+// TestConnWriteJSONMarshalError exercises the error path where the value cannot
+// be marshalled to JSON: WriteJSON must surface the error rather than send a
+// malformed frame.
+func TestConnWriteJSONMarshalError(t *testing.T) {
+	url := newTestServer(t, keepOpen)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, url, testConfig())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Channels are not JSON-marshalable.
+	if err := conn.WriteJSON(make(chan int)); err == nil {
+		t.Fatal("WriteJSON should return an error for an unmarshalable value")
+	}
+}
+
+// TestConnWriteFailsAfterConnectionDrops covers the error path where the server
+// drops the connection: once Next has surfaced the terminal error (so teardown
+// has run), subsequent writes must fail rather than appear to succeed.
+func TestConnWriteFailsAfterConnectionDrops(t *testing.T) {
+	url := newTestServer(t, func(*websocket.Conn) {
+		// Return immediately to drop the connection.
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := Dial(ctx, url, testConfig())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Observing the terminal error guarantees the connection has been torn down.
+	if _, err := conn.Next(ctx); err == nil {
+		t.Fatal("Next should return an error after the server drops the connection")
+	}
+
+	if err := conn.WriteJSON(map[string]any{"op": "subscribe"}); err == nil {
+		t.Error("WriteJSON should fail after the connection drops")
+	}
+	if err := conn.WriteText([]byte("hello")); err == nil {
+		t.Error("WriteText should fail after the connection drops")
+	}
+	if err := conn.WriteBinary([]byte{0x01}); err == nil {
+		t.Error("WriteBinary should fail after the connection drops")
+	}
+}
+
 func TestConnBinaryFrameRoundTrip(t *testing.T) {
 	received := make(chan []byte, 1)
 	url := newTestServer(t, func(conn *websocket.Conn) {
