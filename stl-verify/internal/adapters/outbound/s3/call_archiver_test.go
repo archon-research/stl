@@ -108,6 +108,9 @@ func TestArchivePayloadRoundTrip(t *testing.T) {
 	if line.Timestamp != "20260608T103045Z" {
 		t.Fatalf("timestamp = %q", line.Timestamp)
 	}
+	if line.Selector != "0xfeaf968c" {
+		t.Fatalf("selector = %q", line.Selector)
+	}
 }
 
 func TestArchivePropagatesWriterError(t *testing.T) {
