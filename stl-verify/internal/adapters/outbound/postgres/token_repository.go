@@ -145,13 +145,16 @@ func (r *TokenRepository) ListTokensPendingSymbol(ctx context.Context, chainID i
 }
 
 // ResolveTokenSymbol sets a resolved symbol and clears the pending flag.
+// It only updates tokens that are actually pending (symbol_pending = true) to
+// prevent clobbering a symbol that has already been resolved.
 func (r *TokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE token
 		    SET symbol = $3,
 		        metadata = (COALESCE(metadata, '{}'::jsonb) - 'symbol_pending') - 'symbol_anchor_block',
 		        updated_at = NOW()
-		  WHERE chain_id = $1 AND address = $2`,
+		  WHERE chain_id = $1 AND address = $2
+		    AND (metadata->>'symbol_pending') = 'true'`,
 		chainID, address.Bytes(), symbol)
 	if err != nil {
 		return fmt.Errorf("resolving token symbol: %w", err)

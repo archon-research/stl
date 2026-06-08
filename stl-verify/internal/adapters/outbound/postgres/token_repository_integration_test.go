@@ -590,3 +590,51 @@ func TestSymbolReconciliation_ResolveNonexistentReturnsError(t *testing.T) {
 		t.Error("expected error from MarkTokenSymbolUnresolved on nonexistent address, got nil")
 	}
 }
+
+// TestSymbolReconciliation_ResolveDoesNotClobberNonPending verifies that
+// ResolveTokenSymbol does not overwrite a token whose symbol is already resolved
+// (i.e. symbol_pending is absent/false). The call must return a non-nil error and
+// leave the existing symbol unchanged.
+func TestSymbolReconciliation_ResolveDoesNotClobberNonPending(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+	chainID := int64(1)
+	anchorBlock := int64(999)
+
+	// Insert a token that already has a resolved symbol (no pending flag).
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "frxUSD", 18, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Attempting to resolve a non-pending token must return an error.
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, "EVIL"); err == nil {
+		t.Error("expected error from ResolveTokenSymbol on non-pending token, got nil")
+	}
+
+	// The symbol must remain unchanged.
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "frxUSD" {
+		t.Errorf("symbol = %q after clobber attempt, want frxUSD", symbol)
+	}
+}

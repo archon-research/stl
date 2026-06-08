@@ -3861,6 +3861,78 @@ func TestReconcilePendingSymbols_BackstopIncrementsCounter(t *testing.T) {
 	}
 }
 
+// TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending verifies that when a
+// vault is discovered via the V2 AccrueInterest path and the asset token's
+// symbol() reverts (SymbolResolved=false) while decimals() succeeds,
+// MarkTokenSymbolPending is called exactly once for the asset token address
+// with anchor == the processed block number.
+//
+// This mirrors TestCreateMarket_SymbolRevert_FlagsCollateralPending but for
+// the vault discovery path (discoverAndRegisterVault).
+func TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending(t *testing.T) {
+	const blockNumber = int64(20000005)
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9898989898989898989898989898989898989898")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.vaultDetailResults("Asset Revert Vault", "aRV", 18, false), nil
+		case 2:
+			// Distinguish vault-state (target == unknownVault) from token-metadata (target == testLoanToken).
+			if calls[0].Target == unknownVault {
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			// getTokenMetadata for the asset: symbol() reverts, decimals() succeeds.
+			return []outbound.Result{
+				{Success: false, ReturnData: nil},           // symbol() reverts
+				{Success: true, ReturnData: h.packUint8(6)}, // decimals() OK
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		return 77, nil
+	}
+
+	// Capture MarkTokenSymbolPending calls.
+	var pendingCalls []struct {
+		address     common.Address
+		anchorBlock int64
+	}
+	h.tokenRepo.MarkTokenSymbolPendingFn = func(_ context.Context, _ pgx.Tx, _ int64, address common.Address, anchorBlock int64) error {
+		pendingCalls = append(pendingCalls, struct {
+			address     common.Address
+			anchorBlock int64
+		}{address, anchorBlock})
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, blockNumber, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	// MarkTokenSymbolPending must be called exactly once — for the asset token.
+	if len(pendingCalls) != 1 {
+		t.Fatalf("MarkTokenSymbolPending called %d times, want 1 (asset token only)", len(pendingCalls))
+	}
+	if pendingCalls[0].address != testLoanToken {
+		t.Errorf("MarkTokenSymbolPending called for %s, want asset token %s",
+			pendingCalls[0].address.Hex(), testLoanToken.Hex())
+	}
+	if pendingCalls[0].anchorBlock != blockNumber {
+		t.Errorf("MarkTokenSymbolPending anchorBlock = %d, want %d", pendingCalls[0].anchorBlock, blockNumber)
+	}
+}
+
 // Suppress unused import warnings.
 var (
 	_ = testutil.DiscardLogger

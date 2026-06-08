@@ -39,6 +39,11 @@ var (
 	BuildTime string
 )
 
+const (
+	defaultSymbolSweepIntervalBlocks = 10
+	defaultSymbolBackstopBlocks      = 1000
+)
+
 func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
@@ -139,7 +144,7 @@ func parseConfig(args []string) (cliConfig, error) {
 	}
 	cfg.chainID = chainID
 
-	cfg.symbolSweepIntervalBlocks = 10
+	cfg.symbolSweepIntervalBlocks = defaultSymbolSweepIntervalBlocks
 	if v := env.Get("MORPHO_SYMBOL_SWEEP_INTERVAL_BLOCKS", ""); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -147,7 +152,7 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.symbolSweepIntervalBlocks = n
 	}
-	cfg.symbolBackstopBlocks = 1000
+	cfg.symbolBackstopBlocks = defaultSymbolBackstopBlocks
 	if v := env.Get("MORPHO_SYMBOL_BACKSTOP_BLOCKS", ""); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {

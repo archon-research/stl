@@ -198,16 +198,21 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 	return nil
 }
 
+// symbolReconcileBatchSize is the maximum number of pending-symbol tokens fetched
+// per sweep. If the adapter returns exactly this many, a truncation warning is
+// emitted and the remainder are deferred to the next sweep.
+const symbolReconcileBatchSize = 500
+
 // reconcilePendingSymbols runs, every N processed blocks, a best-effort pass that
 // re-reads pending token symbols at the block just processed. Resolved symbols are
 // persisted; tokens past their anchor+K backstop are dropped and counted. All
 // errors are logged and swallowed: this must never fail block processing.
 func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNumber int64) {
-	if !s.blockchainSvc.ShouldSweep(blockNumber) {
+	if !s.blockchainSvc.shouldSweep(blockNumber) {
 		return
 	}
 
-	pending, err := s.tokenRepo.ListTokensPendingSymbol(ctx, chainID, 0)
+	pending, err := s.tokenRepo.ListTokensPendingSymbol(ctx, chainID, symbolReconcileBatchSize)
 	if err != nil {
 		s.logger.Warn("symbol reconciliation: listing pending tokens failed", "error", err, "block", blockNumber)
 		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
@@ -215,6 +220,10 @@ func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNum
 	}
 	if len(pending) == 0 {
 		return
+	}
+	if len(pending) == symbolReconcileBatchSize {
+		s.logger.Warn("symbol reconciliation: pending batch hit the limit; remaining tokens deferred to a later sweep — consider raising the limit",
+			"limit", symbolReconcileBatchSize, "block", blockNumber)
 	}
 
 	var toResolve []common.Address
@@ -237,7 +246,7 @@ func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNum
 		return
 	}
 
-	resolved, err := s.blockchainSvc.ResolveSymbolsAt(ctx, toResolve, blockNumber)
+	resolved, err := s.blockchainSvc.resolveSymbolsAt(ctx, toResolve, blockNumber)
 	if err != nil {
 		s.logger.Warn("symbol reconciliation: resolving symbols failed", "error", err, "block", blockNumber)
 		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
@@ -731,10 +740,8 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 		if err != nil {
 			return fmt.Errorf("getting asset token: %w", err)
 		}
-		if !assetMetadata.SymbolResolved {
-			if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, metadata.Asset, blockNumber); err != nil {
-				return fmt.Errorf("flagging vault asset token symbol pending: %w", err)
-			}
+		if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, metadata.Asset, assetMetadata, blockNumber); err != nil {
+			return err
 		}
 
 		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
@@ -920,20 +927,16 @@ func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, 
 		if err != nil {
 			return fmt.Errorf("getting loan token: %w", err)
 		}
-		if !loanMetadata.SymbolResolved {
-			if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, mp.LoanToken, blockNumber); err != nil {
-				return fmt.Errorf("flagging loan token symbol pending: %w", err)
-			}
+		if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, mp.LoanToken, loanMetadata, blockNumber); err != nil {
+			return err
 		}
 
 		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting collateral token: %w", err)
 		}
-		if !collMetadata.SymbolResolved {
-			if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, mp.CollateralToken, blockNumber); err != nil {
-				return fmt.Errorf("flagging collateral token symbol pending: %w", err)
-			}
+		if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, mp.CollateralToken, collMetadata, blockNumber); err != nil {
+			return err
 		}
 
 		market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(e.MarketID()), loanTokenID, collTokenID, mp.Oracle, mp.Irm, mp.LLTV, blockNumber)
@@ -1211,20 +1214,16 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 	if err != nil {
 		return 0, fmt.Errorf("getting loan token: %w", err)
 	}
-	if !loanMd.SymbolResolved {
-		if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, params.LoanToken, blockNumber); err != nil {
-			return 0, fmt.Errorf("flagging loan token symbol pending: %w", err)
-		}
+	if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, params.LoanToken, loanMd, blockNumber); err != nil {
+		return 0, err
 	}
 
 	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("getting collateral token: %w", err)
 	}
-	if !collMd.SymbolResolved {
-		if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, params.CollateralToken, blockNumber); err != nil {
-			return 0, fmt.Errorf("flagging collateral token symbol pending: %w", err)
-		}
+	if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, params.CollateralToken, collMd, blockNumber); err != nil {
+		return 0, err
 	}
 
 	market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(marketID), loanTokenID, collTokenID, params.Oracle, params.Irm, params.LLTV, blockNumber)
@@ -1366,6 +1365,19 @@ func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, 
 
 		return s.eventRepo.SaveEvent(ctx, tx, protocolEvent)
 	})
+}
+
+// flagSymbolPendingIfUnresolved marks a token for later symbol reconciliation
+// when its on-chain symbol() could not be resolved at this block. No-op when the
+// symbol resolved. Runs in the caller's transaction.
+func (s *Service) flagSymbolPendingIfUnresolved(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, md TokenMetadata, blockNumber int64) error {
+	if md.SymbolResolved {
+		return nil
+	}
+	if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, address, blockNumber); err != nil {
+		return fmt.Errorf("flagging token %s symbol pending: %w", address.Hex(), err)
+	}
+	return nil
 }
 
 func validateDependencies(

@@ -1563,11 +1563,11 @@ func TestGetTokenMetadata_SymbolUndecodable_IsTolerated(t *testing.T) {
 func TestReconcileConfig_ShouldSweepAndBackstop(t *testing.T) {
 	bc := &blockchainService{reconcile: ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}}
 
-	if bc.ShouldSweep(100) != true {
-		t.Error("ShouldSweep(100) with N=10 want true")
+	if bc.shouldSweep(100) != true {
+		t.Error("shouldSweep(100) with N=10 want true")
 	}
-	if bc.ShouldSweep(105) != false {
-		t.Error("ShouldSweep(105) with N=10 want false")
+	if bc.shouldSweep(105) != false {
+		t.Error("shouldSweep(105) with N=10 want false")
 	}
 	if bc.backstopExceeded(25252154, 25252165) {
 		t.Error("anchor+K not reached, want not exceeded")
@@ -1580,8 +1580,8 @@ func TestReconcileConfig_ShouldSweepAndBackstop(t *testing.T) {
 	}
 
 	off := &blockchainService{reconcile: ReconcileConfig{SweepIntervalBlocks: 0}}
-	if off.ShouldSweep(100) {
-		t.Error("ShouldSweep with N=0 want false (disabled)")
+	if off.shouldSweep(100) {
+		t.Error("shouldSweep with N=0 want false (disabled)")
 	}
 }
 
@@ -1603,7 +1603,7 @@ func TestResolveSymbolsAt(t *testing.T) {
 		}, nil
 	}
 
-	got, err := h.svc.blockchainSvc.ResolveSymbolsAt(context.Background(), []common.Address{resolvable, stillReverting}, 25252165)
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{resolvable, stillReverting}, 25252165)
 	if err != nil {
 		t.Fatalf("ResolveSymbolsAt: %v", err)
 	}
@@ -1617,7 +1617,7 @@ func TestResolveSymbolsAt(t *testing.T) {
 
 func TestResolveSymbolsAt_Empty(t *testing.T) {
 	h := newTestHarness(t)
-	got, err := h.svc.blockchainSvc.ResolveSymbolsAt(context.Background(), nil, 100)
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), nil, 100)
 	if err != nil {
 		t.Fatalf("ResolveSymbolsAt(nil): %v", err)
 	}
@@ -1639,7 +1639,7 @@ func TestResolveSymbolsAt_UsesRequestedBlock(t *testing.T) {
 		}, nil
 	}
 
-	_, err := h.svc.blockchainSvc.ResolveSymbolsAt(context.Background(), []common.Address{token}, wantBlock)
+	_, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{token}, wantBlock)
 	if err != nil {
 		t.Fatalf("ResolveSymbolsAt: %v", err)
 	}
@@ -1661,7 +1661,7 @@ func TestResolveSymbolsAt_UpdatesCacheEntry(t *testing.T) {
 		}, nil
 	}
 
-	got, err := h.svc.blockchainSvc.ResolveSymbolsAt(context.Background(), []common.Address{addr}, 25252165)
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{addr}, 25252165)
 	if err != nil {
 		t.Fatalf("ResolveSymbolsAt: %v", err)
 	}

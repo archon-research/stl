@@ -870,12 +870,12 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	return mdA, mdB, nil
 }
 
-// ResolveSymbolsAt re-reads symbol() for the given tokens at blockNumber (the
+// resolveSymbolsAt re-reads symbol() for the given tokens at blockNumber (the
 // block currently being processed, never head). It returns only the tokens
 // whose symbol() succeeded and decoded; tokens still reverting are omitted so
 // the caller leaves them pending. The in-process metadata cache is refreshed for
 // resolved tokens that are already cached.
-func (s *blockchainService) ResolveSymbolsAt(ctx context.Context, tokens []common.Address, blockNumber int64) (map[common.Address]string, error) {
+func (s *blockchainService) resolveSymbolsAt(ctx context.Context, tokens []common.Address, blockNumber int64) (map[common.Address]string, error) {
 	resolved := make(map[common.Address]string, len(tokens))
 	if len(tokens) == 0 {
 		return resolved, nil
@@ -916,8 +916,8 @@ func (s *blockchainService) ResolveSymbolsAt(ctx context.Context, tokens []commo
 	return resolved, nil
 }
 
-// ShouldSweep reports whether a reconciliation sweep should run at this block.
-func (s *blockchainService) ShouldSweep(blockNumber int64) bool {
+// shouldSweep reports whether a reconciliation sweep should run at this block.
+func (s *blockchainService) shouldSweep(blockNumber int64) bool {
 	return s.reconcile.SweepIntervalBlocks > 0 && blockNumber%s.reconcile.SweepIntervalBlocks == 0
 }
 
