@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math/big"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -59,6 +60,18 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 	mcAddr := m.inner.Address().Hex()
 	detached := context.WithoutCancel(ctx)
 
+	if len(results) != len(calls) {
+		// The inner multicaller returned a different number of results than
+		// calls; the trailing calls below are silently not archived. For an
+		// archival feature this is a completeness anomaly worth surfacing.
+		m.cfg.Logger.Warn("multicaller result count does not match call count; some calls will not be archived",
+			"source", m.cfg.Source,
+			"block", blockNumber,
+			"calls", len(calls),
+			"results", len(results),
+		)
+	}
+
 	for i := range calls {
 		if i >= len(results) {
 			break
@@ -98,10 +111,27 @@ func (m *Multicaller) buildRecord(call outbound.Call, result outbound.Result, bl
 
 func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallRecord) {
 	m.cfg.Wait.Go(func() {
+		// Archiving is fire-and-forget: a panic here must never escape and crash
+		// the worker, since archiving must not affect the hot path.
+		defer func() {
+			if r := recover(); r != nil {
+				m.cfg.Logger.Error("panic while archiving SC call",
+					"panic", r,
+					"source", record.Source,
+					"block", record.BlockNumber,
+					"contract", record.ContractAddress,
+					"selector", record.Selector,
+					"stack", string(debug.Stack()),
+				)
+			}
+		}()
+
 		archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
 		defer cancel()
 		if err := m.archiver.Archive(archiveCtx, record); err != nil {
-			m.cfg.Logger.Warn("archiving SC call failed",
+			// A failed write is a permanent, unretried loss of an archived call,
+			// so surface it at error level rather than burying it in warnings.
+			m.cfg.Logger.Error("archiving SC call failed",
 				"error", err,
 				"source", record.Source,
 				"block", record.BlockNumber,
