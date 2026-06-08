@@ -1,17 +1,48 @@
 package wsclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// fakeConn is a wsConn whose calls can be made to fail on demand, so the
+// error paths that a real server cannot deterministically trigger (ping
+// failure, dropped subsequent errors) can be exercised. ReadMessage blocks
+// until Close, so the read pump does not race the path under test.
+type fakeConn struct {
+	readGate        chan struct{}
+	closeOnce       sync.Once
+	writeControlErr error
+}
+
+func newFakeConn() *fakeConn { return &fakeConn{readGate: make(chan struct{})} }
+
+func (f *fakeConn) ReadMessage() (int, []byte, error) {
+	<-f.readGate
+	return 0, nil, errors.New("read after close")
+}
+func (f *fakeConn) SetReadDeadline(time.Time) error   { return nil }
+func (f *fakeConn) SetPongHandler(func(string) error) {}
+func (f *fakeConn) SetWriteDeadline(time.Time) error  { return nil }
+func (f *fakeConn) WriteMessage(int, []byte) error    { return nil }
+func (f *fakeConn) WriteJSON(any) error               { return nil }
+func (f *fakeConn) WriteControl(int, []byte, time.Time) error {
+	return f.writeControlErr
+}
+func (f *fakeConn) Close() error {
+	f.closeOnce.Do(func() { close(f.readGate) })
+	return nil
+}
 
 func testConfig() Config {
 	return Config{
@@ -473,6 +504,75 @@ func TestConnSendsKeepalivePing(t *testing.T) {
 	case <-pinged:
 	case <-time.After(2 * time.Second):
 		t.Fatal("server never received a keepalive ping")
+	}
+}
+
+// TestConnPingFailureSurfacesError covers the pingLoop error path: when a
+// keepalive ping write fails, the connection is torn down and Next surfaces the
+// wrapped ping error.
+func TestConnPingFailureSurfacesError(t *testing.T) {
+	fake := newFakeConn()
+	fake.writeControlErr = errors.New("boom")
+
+	cfg := testConfig()
+	cfg.PingInterval = 5 * time.Millisecond
+
+	conn, err := newConn(fake, cfg)
+	if err != nil {
+		t.Fatalf("newConn: %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = conn.Next(ctx)
+	if err == nil {
+		t.Fatal("Next should surface the ping failure")
+	}
+	if !strings.Contains(err.Error(), "ping:") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %v, want it to wrap the ping failure", err)
+	}
+	if errors.Is(err, ErrClosed) {
+		t.Error("ping failure should surface the real error, not ErrClosed")
+	}
+}
+
+// TestReportErrorKeepsFirstAndLogsRest covers reportError's CompareAndSwap-fails
+// branch: the first error is retained as the terminal cause and subsequent
+// errors are logged at debug rather than masking it.
+func TestReportErrorKeepsFirstAndLogsRest(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	c := &Conn{
+		conn:   newFakeConn(),
+		cfg:    testConfig(),
+		logger: logger,
+		msgs:   make(chan Frame, 1),
+		done:   make(chan struct{}),
+	}
+
+	first := errors.New("first error")
+	second := errors.New("second error")
+	c.reportError(first)
+	c.reportError(second)
+
+	if errp := c.termErr.Load(); errp == nil || *errp != first {
+		t.Fatalf("termErr = %v, want %v", errp, first)
+	}
+
+	logs := buf.String()
+	if !strings.Contains(logs, "dropping subsequent websocket error") {
+		t.Errorf("expected debug log for the dropped error, got: %s", logs)
+	}
+	if !strings.Contains(logs, "second error") {
+		t.Errorf("expected the dropped error to be logged, got: %s", logs)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := c.Next(ctx); err != first {
+		t.Errorf("Next = %v, want the first error", err)
 	}
 }
 

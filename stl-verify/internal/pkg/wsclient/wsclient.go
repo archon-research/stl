@@ -67,10 +67,23 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// wsConn is the subset of *websocket.Conn that Conn depends on. It exists so the
+// underlying socket can be faked in tests (e.g. to force write/ping failures).
+type wsConn interface {
+	ReadMessage() (messageType int, p []byte, err error)
+	SetReadDeadline(t time.Time) error
+	SetPongHandler(h func(appData string) error)
+	SetWriteDeadline(t time.Time) error
+	WriteMessage(messageType int, data []byte) error
+	WriteControl(messageType int, data []byte, deadline time.Time) error
+	WriteJSON(v any) error
+	Close() error
+}
+
 // Conn is a managed WebSocket connection. Writes are safe to call concurrently;
 // Next must be called from a single goroutine.
 type Conn struct {
-	conn   *websocket.Conn
+	conn   wsConn
 	cfg    Config
 	logger *slog.Logger
 
@@ -81,6 +94,10 @@ type Conn struct {
 	// is the single source of truth for why the connection ended: Next reads it
 	// on the done signal and returns it in place of ErrClosed.
 	termErr atomic.Pointer[error]
+
+	// closing is set by Close before teardown so the read/ping error that results
+	// from closing the socket ourselves is not mistaken for a terminal failure.
+	closing atomic.Bool
 
 	writeMu   sync.Mutex
 	closeOnce sync.Once
@@ -104,20 +121,30 @@ func Dial(ctx context.Context, url string, cfg Config) (*Conn, error) {
 		return nil, fmt.Errorf("dial %s: %w", url, err)
 	}
 
+	return newConn(conn, cfg)
+}
+
+// newConn wires up the read/ping pumps and deadlines around an established
+// connection. Dial uses it after dialing; tests use it to inject a fake socket.
+// cfg is assumed to already carry defaults (Dial applies them); it is re-applied
+// here so direct callers get sane values too.
+func newConn(raw wsConn, cfg Config) (*Conn, error) {
+	cfg = cfg.withDefaults()
+
 	c := &Conn{
-		conn:   conn,
+		conn:   raw,
 		cfg:    cfg,
 		logger: cfg.Logger,
 		msgs:   make(chan Frame, cfg.InboundBuffer),
 		done:   make(chan struct{}),
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(cfg.ReadTimeout)); err != nil {
-		closeErr := conn.Close()
+	if err := raw.SetReadDeadline(time.Now().Add(cfg.ReadTimeout)); err != nil {
+		closeErr := raw.Close()
 		return nil, errors.Join(fmt.Errorf("set read deadline: %w", err), closeErr)
 	}
-	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(cfg.ReadTimeout))
+	raw.SetPongHandler(func(string) error {
+		return raw.SetReadDeadline(time.Now().Add(cfg.ReadTimeout))
 	})
 
 	go c.readPump()
@@ -169,6 +196,12 @@ func (c *Conn) writeControl(messageType int, data []byte) error {
 }
 
 func (c *Conn) reportError(err error) {
+	// A read/ping error observed after the caller invoked Close is just the
+	// consequence of us closing the socket; leave termErr nil so Next reports the
+	// intentional shutdown as ErrClosed.
+	if c.closing.Load() {
+		return
+	}
 	// Record the first error as the terminal cause, then tear down. Subsequent
 	// errors are follow-on symptoms of the same teardown; keep the root cause and
 	// log the rest at debug so they are not silently masked in diagnostics.
@@ -236,7 +269,9 @@ func (c *Conn) writeMessage(messageType int, data []byte) error {
 	return c.conn.WriteMessage(messageType, data)
 }
 
-// Close tears down the connection and stops internal goroutines.
+// Close tears down the connection and stops internal goroutines. After Close,
+// Next returns ErrClosed.
 func (c *Conn) Close() {
+	c.closing.Store(true)
 	c.shutdown()
 }
