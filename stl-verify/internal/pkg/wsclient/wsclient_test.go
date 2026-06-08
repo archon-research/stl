@@ -632,8 +632,8 @@ func TestReportErrorKeepsFirstAndLogsRest(t *testing.T) {
 // to (1/256)^10 ≈ 10^-24.
 // TestConnNoDataLossAndOrderPreservedAfterDrop verifies two properties after a
 // connection drop when c.msgs and c.done are both ready:
-//   1. No data loss: every buffered frame is delivered before the error.
-//   2. No reordering: frames arrive in the exact order they were buffered.
+//  1. No data loss: every buffered frame is delivered before the error.
+//  2. No reordering: frames arrive in the exact order they were buffered.
 //
 // Ordering follows from c.msgs being a FIFO channel. Data loss is the property
 // the fix addresses: without it the flat select can fire the done case while
@@ -641,7 +641,7 @@ func TestReportErrorKeepsFirstAndLogsRest(t *testing.T) {
 func TestConnNoDataLossAndOrderPreservedAfterDrop(t *testing.T) {
 	const msgCount = 8
 
-	for iter := 0; iter < 1000; iter++ {
+	for iter := range 1000 {
 		c := &Conn{
 			conn:   newFakeConn(),
 			cfg:    testConfig(),
@@ -649,7 +649,7 @@ func TestConnNoDataLossAndOrderPreservedAfterDrop(t *testing.T) {
 			msgs:   make(chan Frame, msgCount),
 			done:   make(chan struct{}),
 		}
-		for i := 0; i < msgCount; i++ {
+		for i := range msgCount {
 			c.msgs <- Frame{Type: websocket.TextMessage, Data: []byte{byte(i)}}
 		}
 		dropErr := errors.New("connection reset by peer")
@@ -657,7 +657,7 @@ func TestConnNoDataLossAndOrderPreservedAfterDrop(t *testing.T) {
 		close(c.done)
 
 		ctx := context.Background()
-		for want := 0; want < msgCount; want++ {
+		for want := range msgCount {
 			frame, err := c.Next(ctx)
 			if err != nil {
 				t.Fatalf("iter %d: message %d: got error %v — data loss", iter, want, err)
@@ -682,7 +682,7 @@ func TestConnNoDataLossAndOrderPreservedAfterDrop(t *testing.T) {
 func TestConnDrainsBufferedMessagesBeforeError_Synthetic(t *testing.T) {
 	const msgCount = 8
 
-	for iter := 0; iter < 1000; iter++ {
+	for iter := range 1000 {
 		c := &Conn{
 			conn:   newFakeConn(),
 			cfg:    testConfig(),
@@ -690,7 +690,7 @@ func TestConnDrainsBufferedMessagesBeforeError_Synthetic(t *testing.T) {
 			msgs:   make(chan Frame, msgCount),
 			done:   make(chan struct{}),
 		}
-		for i := 0; i < msgCount; i++ {
+		for range msgCount {
 			c.msgs <- Frame{Type: websocket.TextMessage, Data: []byte("msg")}
 		}
 		dropErr := errors.New("connection reset by peer")
@@ -717,9 +717,9 @@ func TestConnDrainsBufferedMessagesBeforeError_Synthetic(t *testing.T) {
 func TestConnDrainsBufferedMessagesBeforeError(t *testing.T) {
 	const msgCount = 8 // matches testConfig InboundBuffer so all frames fit
 
-	for iter := 0; iter < 10; iter++ {
+	for iter := range 10 {
 		url := newTestServer(t, func(conn *websocket.Conn) {
-			for i := 0; i < msgCount; i++ {
+			for range msgCount {
 				if err := conn.WriteMessage(websocket.TextMessage, []byte("msg")); err != nil {
 					return
 				}
