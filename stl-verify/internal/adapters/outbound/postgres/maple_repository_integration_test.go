@@ -147,6 +147,10 @@ func TestMapleRepository_GetAllVaults(t *testing.T) {
 	if v.ChainID != 1 {
 		t.Fatalf("ChainID mis-set: %d", v.ChainID)
 	}
+	// Decimals is joined from the underlying token row (USDC = 6).
+	if v.Decimals != 6 {
+		t.Fatalf("Decimals mis-set: got %d, want 6", v.Decimals)
+	}
 }
 
 func TestMapleRepository_SaveVaultState_Insert(t *testing.T) {

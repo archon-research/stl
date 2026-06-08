@@ -41,11 +41,17 @@ func NewMapleRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildre
 
 // GetAllVaults retrieves all known Syrup vaults for a chain, keyed by contract address.
 func (r *MapleRepository) GetAllVaults(ctx context.Context, chainID int64) (map[common.Address]*entity.MapleVault, error) {
+	// Join the underlying asset's token row for its decimals. An ERC-4626
+	// vault inherits its share decimals from the underlying asset, so
+	// token.decimals (keyed by asset_token_id) is the persisted source of
+	// truth for the share unit — kept here rather than duplicated onto
+	// maple_vault so the two can never drift.
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, protocol_id, address, name, symbol, asset_token_id,
-		        pool_address, vault_version, created_at_block
-		   FROM maple_vault
-		  WHERE chain_id = $1`, chainID)
+		`SELECT mv.id, mv.protocol_id, mv.address, mv.name, mv.symbol, mv.asset_token_id,
+		        mv.pool_address, mv.vault_version, mv.created_at_block, t.decimals
+		   FROM maple_vault mv
+		   JOIN token t ON t.id = mv.asset_token_id
+		  WHERE mv.chain_id = $1`, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("querying maple vaults: %w", err)
 	}
@@ -54,13 +60,14 @@ func (r *MapleRepository) GetAllVaults(ctx context.Context, chainID int64) (map[
 	vaults := make(map[common.Address]*entity.MapleVault)
 	for rows.Next() {
 		var (
-			v      entity.MapleVault
-			name   *string
-			symbol *string
+			v        entity.MapleVault
+			name     *string
+			symbol   *string
+			decimals *int16 // token.decimals is a nullable SMALLINT
 		)
 		if err := rows.Scan(
 			&v.ID, &v.ProtocolID, &v.Address, &name, &symbol,
-			&v.AssetTokenID, &v.PoolAddress, &v.VaultVersion, &v.CreatedAtBlock,
+			&v.AssetTokenID, &v.PoolAddress, &v.VaultVersion, &v.CreatedAtBlock, &decimals,
 		); err != nil {
 			return nil, fmt.Errorf("scanning maple vault: %w", err)
 		}
@@ -70,7 +77,24 @@ func (r *MapleRepository) GetAllVaults(ctx context.Context, chainID int64) (map[
 		if symbol != nil {
 			v.Symbol = *symbol
 		}
+		if decimals == nil {
+			return nil, fmt.Errorf("maple vault %s: underlying token (id=%d) has NULL decimals",
+				common.BytesToAddress(v.Address).Hex(), v.AssetTokenID)
+		}
+		if *decimals <= 0 || *decimals > 255 {
+			return nil, fmt.Errorf("maple vault %s: underlying token (id=%d) has out-of-range decimals %d",
+				common.BytesToAddress(v.Address).Hex(), v.AssetTokenID, *decimals)
+		}
+		v.Decimals = uint8(*decimals)
 		v.ChainID = chainID
+		// Enforce the domain invariant on the load path too — GetAllVaults
+		// constructs the entity by field assignment rather than via
+		// NewMapleVault, so without this a malformed row (e.g. an absurd
+		// decimals from a bad seed) would bypass entity.Validate entirely.
+		if err := v.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid maple vault %s loaded from DB: %w",
+				common.BytesToAddress(v.Address).Hex(), err)
+		}
 		vaults[common.BytesToAddress(v.Address)] = &v
 	}
 	if err := rows.Err(); err != nil {

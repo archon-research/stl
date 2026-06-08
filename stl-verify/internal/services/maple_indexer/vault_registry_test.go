@@ -19,12 +19,18 @@ func quietLogger() *slog.Logger {
 
 func newMapleVault(t *testing.T, addr common.Address) *entity.MapleVault {
 	t.Helper()
+	return newMapleVaultWithDecimals(t, addr, 6)
+}
+
+func newMapleVaultWithDecimals(t *testing.T, addr common.Address, decimals uint8) *entity.MapleVault {
+	t.Helper()
 	v, err := entity.NewMapleVault(
 		1, 7, 9,
 		addr.Bytes(),
 		"Syrup USDC", "SyrupUSDC",
 		bytes.Repeat([]byte{0xcd}, 20),
 		1, 20231245,
+		decimals,
 	)
 	if err != nil {
 		t.Fatalf("NewMapleVault: %v", err)

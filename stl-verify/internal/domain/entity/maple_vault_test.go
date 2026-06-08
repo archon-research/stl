@@ -8,7 +8,7 @@ import (
 func TestNewMapleVault_Valid(t *testing.T) {
 	addr := bytes.Repeat([]byte{0xab}, 20)
 	pool := bytes.Repeat([]byte{0xcd}, 20)
-	v, err := NewMapleVault(1, 7, 9, addr, "Syrup USDC", "syrupUSDC", pool, 1, 20231245)
+	v, err := NewMapleVault(1, 7, 9, addr, "Syrup USDC", "syrupUSDC", pool, 1, 20231245, 6)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -20,6 +20,9 @@ func TestNewMapleVault_Valid(t *testing.T) {
 	}
 	if v.CreatedAtBlock != 20231245 {
 		t.Fatalf("createdAtBlock mis-set: %d", v.CreatedAtBlock)
+	}
+	if v.Decimals != 6 {
+		t.Fatalf("decimals mis-set: %d", v.Decimals)
 	}
 }
 
@@ -33,6 +36,7 @@ type mapleVaultArgs struct {
 	poolAddress                       []byte
 	vaultVersion                      int16
 	createdAtBlock                    int64
+	decimals                          uint8
 }
 
 func validMapleVaultArgs() mapleVaultArgs {
@@ -46,6 +50,7 @@ func validMapleVaultArgs() mapleVaultArgs {
 		poolAddress:    bytes.Repeat([]byte{0xcd}, 20),
 		vaultVersion:   1,
 		createdAtBlock: 20231245,
+		decimals:       6,
 	}
 }
 
@@ -61,13 +66,15 @@ func TestNewMapleVault_Rejects(t *testing.T) {
 		{"zero asset token id", func(a *mapleVaultArgs) { a.assetTokenID = 0 }},
 		{"zero vault version", func(a *mapleVaultArgs) { a.vaultVersion = 0 }},
 		{"negative created at block", func(a *mapleVaultArgs) { a.createdAtBlock = -1 }},
+		{"zero decimals", func(a *mapleVaultArgs) { a.decimals = 0 }},
+		{"decimals above max", func(a *mapleVaultArgs) { a.decimals = maxTokenDecimals + 1 }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			a := validMapleVaultArgs()
 			tc.corrupt(&a)
 			if _, err := NewMapleVault(a.chainID, a.protocolID, a.assetTokenID, a.address,
-				a.name, a.symbol, a.poolAddress, a.vaultVersion, a.createdAtBlock); err == nil {
+				a.name, a.symbol, a.poolAddress, a.vaultVersion, a.createdAtBlock, a.decimals); err == nil {
 				t.Fatalf("expected error on %s", tc.name)
 			}
 		})

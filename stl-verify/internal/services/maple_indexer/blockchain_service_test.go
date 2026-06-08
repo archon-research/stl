@@ -67,7 +67,7 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	vault := common.HexToAddress(syrupUSDCAddr)
-	state, err := bs.FetchVaultState(context.Background(), vault, big.NewInt(18_500_000))
+	state, err := bs.FetchVaultState(context.Background(), vault, 6, big.NewInt(18_500_000))
 	if err != nil {
 		t.Fatalf("FetchVaultState: %v", err)
 	}
@@ -95,11 +95,86 @@ func TestFetchVaultState_DecodesAllFields(t *testing.T) {
 	}
 }
 
+// TestFetchVaultState_PacksShareUnitFromDecimals proves the convertToAssets
+// argument scales with the vault's decimals: a 6-decimal vault asks for
+// convertToAssets(1e6), an 18-decimal vault for convertToAssets(1e18). A bug
+// here would mis-scale the share price by 10^(18-6) for a BSC-style vault.
+func TestFetchVaultState_PacksShareUnitFromDecimals(t *testing.T) {
+	cases := []struct {
+		name     string
+		decimals uint8
+		want     *big.Int
+	}{
+		{"six decimals", 6, big.NewInt(1_000_000)},
+		{"eighteen decimals", 18, new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &multicallStub{
+				Responses: [][]byte{
+					encodeUint256(big.NewInt(1)), // totalAssets
+					encodeUint256(big.NewInt(1)), // totalSupply
+					encodeUint256(big.NewInt(1)), // convertToAssets
+				},
+			}
+			bs := mustNewBlockchainService(t, mc)
+			vault := common.HexToAddress(syrupUSDCAddr)
+			if _, err := bs.FetchVaultState(context.Background(), vault, tc.decimals, big.NewInt(1)); err != nil {
+				t.Fatalf("FetchVaultState: %v", err)
+			}
+			// The convertToAssets call is the 3rd in the batch.
+			convData := mc.Calls[0][2].CallData
+			args, err := bs.viewABI.Methods["convertToAssets"].Inputs.Unpack(convData[4:])
+			if err != nil {
+				t.Fatalf("unpacking convertToAssets input: %v", err)
+			}
+			got, ok := args[0].(*big.Int)
+			if !ok {
+				t.Fatalf("convertToAssets arg type %T", args[0])
+			}
+			if got.Cmp(tc.want) != 0 {
+				t.Fatalf("share unit = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFetchVaultState_RejectsZeroDecimals confirms we never fall back to a
+// default share unit: a zero decimals is a hard error, not a silent 1e6.
+func TestFetchVaultState_RejectsZeroDecimals(t *testing.T) {
+	bs := mustNewBlockchainService(t, &multicallStub{})
+	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), 0, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected error for zero decimals")
+	}
+	if len(bs.multicaller.(*multicallStub).Calls) != 0 {
+		t.Fatal("multicaller invoked despite zero decimals — should fail before any RPC")
+	}
+}
+
+// shortResultMulticaller returns no results regardless of how many calls were
+// requested, exercising the result-count-mismatch guard.
+type shortResultMulticaller struct{}
+
+func (s *shortResultMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return nil, nil
+}
+
+func (s *shortResultMulticaller) Address() common.Address { return common.Address{} }
+
+func TestFetchVaultState_FailsOnResultCountMismatch(t *testing.T) {
+	bs := mustNewBlockchainService(t, &shortResultMulticaller{})
+	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), 6, big.NewInt(1))
+	if err == nil {
+		t.Fatal("expected error when multicall returns fewer results than calls")
+	}
+}
+
 func TestFetchVaultState_PropagatesMulticallError(t *testing.T) {
 	wantErr := errors.New("network down")
 	mc := &multicallStub{Err: wantErr}
 	bs := mustNewBlockchainService(t, mc)
-	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), big.NewInt(1))
+	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), 6, big.NewInt(1))
 	if err == nil || !errors.Is(err, wantErr) {
 		t.Fatalf("expected wrapped multicall error, got %v", err)
 	}
@@ -109,7 +184,7 @@ func TestFetchVaultState_FailsOnRevertedCall(t *testing.T) {
 	bs := mustNewBlockchainService(t, &multicallStub{})
 	mc := &reverteringMulticaller{}
 	bs.multicaller = mc
-	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), big.NewInt(1))
+	_, err := bs.FetchVaultState(context.Background(), common.HexToAddress(syrupUSDCAddr), 6, big.NewInt(1))
 	if err == nil {
 		t.Fatal("expected error on reverted multicall result")
 	}

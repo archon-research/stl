@@ -285,7 +285,7 @@ func (s *Service) indexVault(
 		return fmt.Errorf("vault %s not in registry (registry reload race?)", vaultAddr.Hex())
 	}
 
-	stateRaw, err := s.blockchainSvc.FetchVaultState(ctx, vaultAddr, blockNumber)
+	stateRaw, err := s.blockchainSvc.FetchVaultState(ctx, vaultAddr, vault.Decimals, blockNumber)
 	if err != nil {
 		return fmt.Errorf("fetching vault state: %w", err)
 	}
