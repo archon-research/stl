@@ -6,17 +6,30 @@
 # downstream queue. If it stalls, the whole pipeline stalls.
 #
 # Metric source: OTel SDK in the watcher service. Series carry:
-#   - service_name="stl-watcher"           (OTel service.name)
+#   - service_name=~".*watcher"            (OTel service.name) (see note below)
 #   - k8s_namespace_name="vector"          (k8sattributes processor)
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
-#   - chain                                (per-chain label, set by app code)
 #   - rpc_method                           (e.g. eth_getBlockByNumber)
+#
+# NB: there is NO `chain` label on alchemy_client_requests_total today.
+# Per-chain attribution comes from `service_name`. Alerts here `sum by (service_name, cluster)` and the
+# annotation templates reference `{{ $labels.service_name }}`.
 #
 # `cluster` is propagated from the source metric (preserved through `sum by`)
 # so the Alertmanager Slack template's `Cluster:` header is populated.
 # `namespace` is set as a static rule label since every rule here filters to
 # `k8s_namespace_name="vector"`. The mimir-rules-sync lint forbids `cluster`
 # and `env` as static rule labels (FORBIDDEN_LABELS) but allows `namespace`.
+#
+# service_name matcher: widened from the hardcoded `"stl-watcher"` to the
+# regex `~".*watcher"` to follow up on PR #369, which gave each per-chain
+# watcher a distinct OTel service.name (e.g. "stl-watcher",
+# "arbitrum-watcher", "base-watcher", "optimism-watcher", "avalanche-watcher",
+# "unichain-watcher"). The old equality matcher silently broke for every
+# L2 chain
+# The regex still scopes to the `vector` namespace, so non-watcher
+# services that happen to end in "watcher" elsewhere cannot pollute the
+# series.
 # =============================================================================
 groups:
   - name: vector-watcher
@@ -36,10 +49,10 @@ groups:
         # If we're not seeing eth_getBlockByNumber for a full minute, the
         # watcher is stuck — no benign reason to wait longer.
         expr: |
-          sum by (chain, cluster) (
+          sum by (service_name, cluster) (
             rate(alchemy_client_requests_total{
               k8s_namespace_name="vector",
-              service_name="stl-watcher",
+              service_name=~".*watcher",
               rpc_method="eth_getBlockByNumber"
             }[1m])
           ) == 0
@@ -50,10 +63,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher not polling blocks on {{ $labels.chain }}"
+          summary: "Vector watcher not polling blocks on {{ $labels.service_name }}"
           description: |
-            `stl-watcher` on chain `{{ $labels.chain }}` has not issued a
-            single `eth_getBlockByNumber` call to Alchemy for >1m. The chain
+            Watcher `{{ $labels.service_name }}` has not issued a single
+            `eth_getBlockByNumber` call to Alchemy for >1m. The chain
             ingestion pipeline is stalled at the head — every downstream
             indexer will go idle shortly.
 
@@ -66,18 +79,18 @@ groups:
         # retry logic should absorb it.
         expr: |
           (
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
-                service_name="stl-watcher",
+                service_name=~".*watcher",
                 status="error"
               }[5m])
             )
             /
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
-                service_name="stl-watcher"
+                service_name=~".*watcher"
               }[5m])
             )
           ) > 0.5
@@ -88,10 +101,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy error rate >50% on {{ $labels.chain }}"
+          summary: "Vector watcher Alchemy error rate >50% on {{ $labels.service_name }}"
           description: |
-            `stl-watcher` on chain `{{ $labels.chain }}` is seeing >50% of
-            Alchemy RPC calls fail for >10m. Likely an upstream outage, an
+            Watcher `{{ $labels.service_name }}` is seeing >50% of Alchemy
+            RPC calls fail for >10m. Likely an upstream outage, an
             auth/quota issue, or a misconfigured endpoint.
 
             Verify the Alchemy status page and the `ALCHEMY_API_KEY` secret
@@ -113,10 +126,10 @@ groups:
         expr: |
           histogram_quantile(
             0.99,
-            sum by (chain, cluster, le) (
+            sum by (service_name, cluster, le) (
               rate(alchemy_client_request_duration_seconds_bucket{
                 k8s_namespace_name="vector",
-                service_name="stl-watcher"
+                service_name=~".*watcher"
               }[10m])
             )
           ) > 5
@@ -127,10 +140,10 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy p99 latency >5s on {{ $labels.chain }}"
+          summary: "Vector watcher Alchemy p99 latency >5s on {{ $labels.service_name }}"
           description: |
-            p99 Alchemy RPC latency for `stl-watcher` on chain
-            `{{ $labels.chain }}` is `{{ $value | printf "%.2fs" }}`
+            p99 Alchemy RPC latency for watcher
+            `{{ $labels.service_name }}` is `{{ $value | printf "%.2fs" }}`
             sustained over 15m. Pipeline is degraded; expect block lag.
 
       - alert: VectorWatcherAlchemyRetriesHigh
@@ -141,17 +154,17 @@ groups:
         # existing `alchemy_client_requests_total`.
         expr: |
           (
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_retries_total{
                 k8s_namespace_name="vector",
-                service_name="stl-watcher"
+                service_name=~".*watcher"
               }[10m])
             )
             /
-            sum by (chain, cluster) (
+            sum by (service_name, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
-                service_name="stl-watcher"
+                service_name=~".*watcher"
               }[10m])
             )
           ) > 0.2
@@ -162,9 +175,174 @@ groups:
           component: watcher
           namespace: vector
         annotations:
-          summary: "Vector watcher Alchemy retry ratio >20% on {{ $labels.chain }}"
+          summary: "Vector watcher Alchemy retry ratio >20% on {{ $labels.service_name }}"
           description: |
-            `stl-watcher` on chain `{{ $labels.chain }}` is retrying
+            Watcher `{{ $labels.service_name }}` is retrying
             `{{ $value | humanizePercentage }}` of Alchemy calls over 15m.
             Upstream is flaky; if this escalates we'll see
             VectorWatcherAlchemyErrorsHigh.
+
+      # ---------------------------------------------------------------------
+      # VEC-277: backfill silent-failure surface (2026-06-02 arbitrum incident)
+      # ---------------------------------------------------------------------
+      # The 2026-06-02 arbitrum incident sat invisible for ~13 days because
+      # the backfill loop's `totalMissing` signal stayed locked at ~584 with
+      # no surfaced anomaly: gap-fill cycles "succeeded" yet never produced
+      # canonical rows.
+      # The two rules below cover (A) the symptom — a growing backfill
+      # backlog — and (B) the bug class itself, via the new
+      # `backfill_gap_fill_no_canonical_total` counter wired in the same PR.
+
+      # TODO(VEC-277-followup): re-add a real `VectorWatcherBackfillBacklogGrowing`
+      # rule once a dedicated backlog-size metric exists (planned
+      # `vector_backfill_gaps_open` gauge — emit from FindGaps's
+      # `totalMissing`). The previous placeholder version of this rule fired
+      # off the same `backfill_gap_fill_no_canonical_total` counter that
+      # drives `VectorWatcherSilentBackfillNoCanonical` below, just at a
+      # longer window (30m vs 10m), producing duplicate critical pages for
+      # one signal. Until the gauge exists the silent-failure rule covers
+      # the bug class on its own. PR #373 review (item 7).
+
+      - alert: VectorWatcherSilentBackfillNoCanonical
+        # Premise: the new counter wired in the Piece 2 change should be
+        # exactly zero in steady state. Any nonzero increase over 10m means a
+        # per-block gap-fill cycle reported success without producing a
+        # canonical (non-orphaned) row in `block_states`: the silent-failure
+        # shape that caused the arbitrum backfill loop to lock at ~584 missing
+        # blocks for ~13 days. increase()>0 with a short dwell latches even a
+        # single isolated occurrence, which rate()>0 with for:10m can miss when
+        # the lone positive window lines up with the dwell boundary. This is the
+        # highest-confidence leading indicator we have for that bug class.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(backfill_gap_fill_no_canonical_total{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }[10m])
+          ) > 0
+        for: 1m
+        labels:
+          team: vector
+          severity: critical
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher backfill produced no canonical row on {{ $labels.service_name }}"
+          description: |
+            `backfill_gap_fill_no_canonical_total` is non-zero for chain
+            `{{ $labels.service_name }}` over the last 10m. A per-block gap-fill
+            cycle finished without producing a non-orphaned row in
+            `block_states`. This is the exact silent-failure shape that
+            caused the 2026-06-02 arbitrum backfill incident (loop locked
+            at ~584 missing blocks for ~13 days).
+
+            Pull the matching ERROR log
+            (`backfill completed but no canonical row produced`) for the
+            block number and hash. Then consult
+            `docs/incidents/2026-06-02-arbitrum-backfill-loop.md` for the
+            recovery playbook.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatchersilentbackfillnocanonical
+
+      - alert: VectorWatcherBackfillWatermarkLagHigh
+        # The backfill watermark should track close to the chain head. In the
+        # 2026-06-02 arbitrum incident the watermark sat pinned for ~13 days
+        # while head advanced, growing the lag without bound — and nothing
+        # watched it. `backfill_watermark_lag` (head - watermark) is the direct
+        # symptom gauge. Steady state is near zero; normal post-restart catch-up
+        # drains within minutes, so a sustained large lag is anomalous.
+        expr: |
+          max by (service_name, cluster) (
+            backfill_watermark_lag{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }
+          ) > 1000
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher backfill watermark lag high on {{ $labels.service_name }}"
+          description: |
+            `backfill_watermark_lag` (highest known block minus the backfill
+            watermark) on `{{ $labels.service_name }}` has been >1000 for 30m.
+            The backfill is not draining toward head. Either a gap is stuck
+            (the VEC-277 orphan-only failure mode) or upstream RPC is degraded
+            beyond the catch-up rate.
+
+            Check the watcher logs and
+            `docs/incidents/2026-06-02-arbitrum-backfill-loop.md`.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcherbackfillwatermarklaghigh
+
+      - alert: VectorWatcherOutOfOrderBlocksHigh
+        # Leading indicator: blocks delivered with number <= head (out-of-order
+        # / late upstream delivery). Near zero in steady state; a sustained
+        # rate means upstream (Alchemy) is delivering headers out of order,
+        # which under load is what misclassified as reorgs and over-orphaned
+        # canonical blocks in the 2026-06-02 incident. Warning severity — it
+        # front-runs the backfill symptom above.
+        expr: |
+          sum by (service_name, cluster) (
+            rate(live_block_out_of_order_total{
+              k8s_namespace_name="vector",
+              service_name=~".*watcher"
+            }[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher receiving out-of-order blocks on {{ $labels.service_name }}"
+          description: |
+            `live_block_out_of_order_total` on `{{ $labels.service_name }}` is
+            sustained above 0.1/s over 15m — upstream is delivering headers
+            out of order (the VEC-277 trigger). Correlate with the Alchemy
+            429/error rate; if it escalates, expect reorg churn and backfill
+            lag to follow.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderblockshigh
+
+      - alert: VectorWatcherOutOfOrderReorgClassification
+        # The dangerous subset of out-of-order delivery: a low/late block routed
+        # to reorg handling (outcome="reorg") rather than classified as a clean
+        # gap fill. This is the exact path that over-orphaned canonical blocks in
+        # the 2026-06-02 incident. Scoped to an explicit allow-list of the
+        # single-sequencer rollup watchers, where a real reorg is essentially
+        # impossible, so any occurrence is the over-orphaning trigger firing.
+        # Ethereum (the bare `watcher`) reorgs normally (depth 1, a few times a
+        # day) and is deliberately not listed. ADD new single-sequencer chains to
+        # this list when onboarding them. Scoping by service_name is interim; the
+        # proper fix is a chain-behavior label (reorgs_expected) so alerts stop
+        # hardcoding chain names: see VEC-295. increase()>0 with a short dwell
+        # catches even a single burst, which the broader sustained-rate
+        # VectorWatcherOutOfOrderBlocksHigh rule can miss.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(live_block_out_of_order_total{
+              k8s_namespace_name="vector",
+              service_name=~"(arbitrum|optimism|base|unichain|avalanche)-watcher",
+              outcome="reorg"
+            }[10m])
+          ) > 0
+        for: 1m
+        labels:
+          team: vector
+          severity: warning
+          component: watcher
+          namespace: vector
+        annotations:
+          summary: "Vector watcher routed an out-of-order block to reorg handling on {{ $labels.service_name }}"
+          description: |
+            `live_block_out_of_order_total{outcome="reorg"}` on
+            `{{ $labels.service_name }}` is nonzero over the last 10m: a header
+            arrived at or below the canonical head and did not link cleanly onto
+            our chain, so it was routed to reorg handling. On a single-sequencer
+            chain this should essentially never happen; it is the over-orphaning
+            trigger from the 2026-06-02 incident. Correlate with the Alchemy
+            429/error rate and check `backfill_watermark_lag` and
+            `backfill_gap_fill_no_canonical_total` for orphan churn.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheroutoforderreorgclassification

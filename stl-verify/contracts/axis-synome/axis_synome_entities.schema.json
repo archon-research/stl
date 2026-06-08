@@ -1,0 +1,213 @@
+{
+  "$defs": {
+    "AlmProxiesModule": {
+      "additionalProperties": false,
+      "properties": {
+        "AlmProxy": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/$defs/StlProxyConfig"
+            },
+            "type": "object"
+          },
+          "title": "Almproxy",
+          "type": "object"
+        }
+      },
+      "required": [
+        "AlmProxy"
+      ],
+      "title": "AlmProxiesModule",
+      "type": "object"
+    },
+    "AscModule": {
+      "additionalProperties": false,
+      "properties": {
+        "entities": {
+          "$ref": "#/$defs/EntitiesModule"
+        }
+      },
+      "required": [
+        "entities"
+      ],
+      "title": "AscModule",
+      "type": "object"
+    },
+    "AssetsByPrimeModule": {
+      "additionalProperties": false,
+      "properties": {
+        "ASSETS_BY_PRIME": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/$defs/StlTokenEntry"
+            },
+            "type": "array"
+          },
+          "title": "Assets By Prime",
+          "type": "object"
+        }
+      },
+      "required": [
+        "ASSETS_BY_PRIME"
+      ],
+      "title": "AssetsByPrimeModule",
+      "type": "object"
+    },
+    "AxisSynomeModule": {
+      "additionalProperties": false,
+      "properties": {
+        "spec": {
+          "$ref": "#/$defs/SpecModule"
+        }
+      },
+      "required": [
+        "spec"
+      ],
+      "title": "AxisSynomeModule",
+      "type": "object"
+    },
+    "EntitiesModule": {
+      "additionalProperties": false,
+      "properties": {
+        "assets_by_prime": {
+          "$ref": "#/$defs/AssetsByPrimeModule"
+        },
+        "alm_proxies": {
+          "$ref": "#/$defs/AlmProxiesModule"
+        }
+      },
+      "required": [
+        "assets_by_prime",
+        "alm_proxies"
+      ],
+      "title": "EntitiesModule",
+      "type": "object"
+    },
+    "SpecModule": {
+      "additionalProperties": false,
+      "properties": {
+        "asc": {
+          "$ref": "#/$defs/AscModule"
+        }
+      },
+      "required": [
+        "asc"
+      ],
+      "title": "SpecModule",
+      "type": "object"
+    },
+    "StlProxyConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "star": {
+          "title": "Star",
+          "type": "string"
+        },
+        "chain": {
+          "title": "Chain",
+          "type": "string"
+        },
+        "address": {
+          "title": "Address",
+          "type": "string"
+        }
+      },
+      "required": [
+        "star",
+        "chain",
+        "address"
+      ],
+      "title": "StlProxyConfig",
+      "type": "object"
+    },
+    "StlTokenEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_address": {
+          "title": "Contract Address",
+          "type": "string"
+        },
+        "wallet_address": {
+          "title": "Wallet Address",
+          "type": "string"
+        },
+        "asset_address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Address"
+        },
+        "star": {
+          "title": "Star",
+          "type": "string"
+        },
+        "chain": {
+          "title": "Chain",
+          "type": "string"
+        },
+        "protocol": {
+          "title": "Protocol",
+          "type": "string"
+        },
+        "allocation_type": {
+          "title": "Allocation Type",
+          "type": "string"
+        },
+        "token_type": {
+          "title": "Token Type",
+          "type": "string"
+        },
+        "created_at_block": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At Block"
+        }
+      },
+      "required": [
+        "contract_address",
+        "wallet_address",
+        "star",
+        "chain",
+        "protocol",
+        "allocation_type",
+        "token_type"
+      ],
+      "title": "StlTokenEntry",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "axis_synome_git_commit": {
+      "title": "Axis Synome Git Commit",
+      "type": "string"
+    },
+    "axis_synome": {
+      "$ref": "#/$defs/AxisSynomeModule"
+    }
+  },
+  "required": [
+    "version",
+    "axis_synome_git_commit",
+    "axis_synome"
+  ],
+  "title": "AxisSynomeContract",
+  "type": "object"
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -29,24 +30,33 @@ type Telemetry struct {
 	blockDuration   metric.Float64Histogram
 	receiptDuration metric.Float64Histogram
 	rpcDuration     metric.Float64Histogram
+
+	// chainAttr is the constant per-chain attribute attached to every metric.
+	// One indexer process serves one chain, so the value is fixed at
+	// construction. It surfaces as the `chain` Prometheus label that the Vector
+	// indexer alerts group by; without it those alerts render an empty chain.
+	chainAttr attribute.KeyValue
 }
 
 // NewTelemetry creates a new Telemetry instance using the global providers.
-func NewTelemetry() (*Telemetry, error) {
+// chain is the chain name (e.g. "arbitrum") attached as the `chain` label.
+func NewTelemetry(chain string) (*Telemetry, error) {
 	return NewTelemetryWithProviders(
 		otel.GetTracerProvider(),
 		otel.GetMeterProvider(),
+		chain,
 	)
 }
 
 // NewTelemetryWithProviders creates a new Telemetry instance with custom providers.
-func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider) (*Telemetry, error) {
+func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider, chain string) (*Telemetry, error) {
 	tracer := tp.Tracer(instrumentationName)
 	meter := mp.Meter(instrumentationName)
 
 	t := &Telemetry{
-		tracer: tracer,
-		meter:  meter,
+		tracer:    tracer,
+		meter:     meter,
+		chainAttr: attribute.String("chain", chain),
 	}
 
 	var err error
@@ -87,6 +97,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"morpho.block.duration_seconds",
 		metric.WithDescription("Duration of block processing in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockDuration histogram: %w", err)
@@ -96,6 +107,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"morpho.receipt.duration_seconds",
 		metric.WithDescription("Duration of receipt processing in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating receiptDuration histogram: %w", err)
@@ -105,6 +117,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"morpho.rpc.duration_seconds",
 		metric.WithDescription("Duration of RPC calls in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
@@ -123,7 +136,7 @@ func (t *Telemetry) RecordBlockProcessed(ctx context.Context, duration time.Dura
 	if err != nil {
 		status = "error"
 	}
-	attrs := metric.WithAttributes(attribute.String("status", status))
+	attrs := metric.WithAttributes(t.chainAttr, attribute.String("status", status))
 
 	t.blocksProcessed.Add(ctx, 1, attrs)
 	t.blockDuration.Record(ctx, duration.Seconds(), attrs)
@@ -135,6 +148,7 @@ func (t *Telemetry) RecordEventProcessed(ctx context.Context, eventType string) 
 		return
 	}
 	t.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
 		attribute.String("event.type", eventType),
 	))
 }
@@ -146,6 +160,7 @@ func (t *Telemetry) RecordRPCCall(ctx context.Context, method string, duration t
 	}
 
 	attrs := []attribute.KeyValue{
+		t.chainAttr,
 		attribute.String("rpc.method", method),
 	}
 
@@ -165,6 +180,7 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 		return
 	}
 	t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
 		attribute.String("operation", operation),
 	))
 }

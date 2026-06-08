@@ -5,7 +5,69 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+func TestResolveServiceName(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "defaults when nothing set",
+			env:  map[string]string{},
+			want: "stl-watcher",
+		},
+		{
+			name: "SERVICE_NAME wins",
+			env:  map[string]string{"SERVICE_NAME": "arbitrum-watcher"},
+			want: "arbitrum-watcher",
+		},
+		{
+			name: "OTEL_SERVICE_NAME used when SERVICE_NAME unset",
+			env:  map[string]string{"OTEL_SERVICE_NAME": "base-watcher"},
+			want: "base-watcher",
+		},
+		{
+			name: "SERVICE_NAME takes precedence over OTEL_SERVICE_NAME",
+			env: map[string]string{
+				"SERVICE_NAME":      "optimism-watcher",
+				"OTEL_SERVICE_NAME": "ignored",
+			},
+			want: "optimism-watcher",
+		},
+		{
+			name: "empty SERVICE_NAME falls through to OTEL_SERVICE_NAME",
+			env: map[string]string{
+				"SERVICE_NAME":      "",
+				"OTEL_SERVICE_NAME": "unichain-watcher",
+			},
+			want: "unichain-watcher",
+		},
+		{
+			name: "whitespace-only SERVICE_NAME falls through to default",
+			env:  map[string]string{"SERVICE_NAME": "   "},
+			want: "stl-watcher",
+		},
+		{
+			name: "leading/trailing whitespace is trimmed",
+			env:  map[string]string{"SERVICE_NAME": "  avalanche-watcher  "},
+			want: "avalanche-watcher",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(key string) string { return tc.env[key] }
+			got := resolveServiceName(getenv)
+			if got != tc.want {
+				t.Errorf("resolveServiceName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestLoadBackfillConfig(t *testing.T) {
 	logger := slog.Default()
@@ -107,7 +169,7 @@ func TestLoadBackfillConfig(t *testing.T) {
 				t.Setenv("BACKFILL_RETRY_MIN_AGE", tc.retryMinAgeEnv)
 			}
 
-			cfg, err := loadBackfillConfig(42161, false, false, logger)
+			cfg, err := loadBackfillConfig(42161, false, false, logger, nil)
 			if tc.wantErrSubstring != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil (cfg=%+v)", tc.wantErrSubstring, cfg)
@@ -133,5 +195,30 @@ func TestLoadBackfillConfig(t *testing.T) {
 				t.Errorf("ChainID = %d, want 42161", cfg.ChainID)
 			}
 		})
+	}
+}
+
+// TestLoadBackfillConfig_WiresMetricsRecorder is the regression guard for the
+// VEC-277 blocker: the BackfillRecorder must be
+// threaded into BackfillConfig.Metrics so the post-cycle invariant counter
+// (`backfill_gap_fill_no_canonical_total`) is actually emitted.
+func TestLoadBackfillConfig_WiresMetricsRecorder(t *testing.T) {
+	logger := slog.Default()
+
+	recorder, err := shared.NewServiceTelemetry()
+	if err != nil {
+		t.Fatalf("NewServiceTelemetry: %v", err)
+	}
+
+	cfg, err := loadBackfillConfig(42161, false, false, logger, recorder)
+	if err != nil {
+		t.Fatalf("loadBackfillConfig: %v", err)
+	}
+	if cfg.Metrics == nil {
+		t.Fatal("BackfillConfig.Metrics is nil — recorder was not threaded through")
+	}
+	// The concrete type passed in should round-trip unchanged.
+	if cfg.Metrics != recorder {
+		t.Fatalf("BackfillConfig.Metrics != recorder (got %T, want *shared.ServiceTelemetry)", cfg.Metrics)
 	}
 }

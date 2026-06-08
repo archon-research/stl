@@ -20,6 +20,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -255,7 +256,11 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	morphoTelemetry, err := morpho_indexer.NewTelemetry()
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name for metrics: %w", err)
+	}
+	morphoTelemetry, err := morpho_indexer.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating morpho telemetry: %w", err)
 	}

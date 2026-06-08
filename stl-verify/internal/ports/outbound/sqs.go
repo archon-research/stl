@@ -22,6 +22,15 @@ type SQSMessage struct {
 	ApproximateReceiveCount int
 }
 
+// DeadLetterPublisher sends failed message bodies to a dead-letter queue so
+// that permanent failures are preserved for audit/redrive instead of blocking
+// the main queue.
+type DeadLetterPublisher interface {
+	// Publish sends a failed message body to the dead-letter (FIFO) queue.
+	// groupID is the FIFO MessageGroupId.
+	Publish(ctx context.Context, body string, groupID string) error
+}
+
 // SQSConsumer defines the interface for consuming messages from an SQS queue.
 type SQSConsumer interface {
 	// ReceiveMessages fetches up to maxMessages from the queue.

@@ -20,9 +20,12 @@ jobs:
   # Fork-PR guard: secrets aren't passed to fork PRs, but we also refuse to
   # run the job at all so it can't accidentally hit AWS even if the secret
   # check is ever moved around.
+  # Dependabot guard: Dependabot runs lack the credentials this job needs, so
+  # skip it for Dependabot PRs. A skipped job reports success, so it doesn't
+  # block merge. The rules still sync on the subsequent push to main.
   staging:
     name: staging
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'push' || (github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,7 +52,7 @@ jobs:
           aws-region: eu-west-1
 
       - name: Fetch Grafana Cloud Mimir token (staging)
-        uses: aws-actions/aws-secretsmanager-get-secrets@5e19ff380d035695bdd56bbad320ca535c9063f2  # v2.0.10
+        uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53  # v2.0.10
         with:
           secret-ids: |
             GC,archonstaging-mimir-rules-token-vector
@@ -101,7 +104,7 @@ jobs:
           aws-region: eu-west-1
 
       - name: Fetch Grafana Cloud Mimir token (prod)
-        uses: aws-actions/aws-secretsmanager-get-secrets@5e19ff380d035695bdd56bbad320ca535c9063f2  # v2.0.10
+        uses: aws-actions/aws-secretsmanager-get-secrets@2cb1a461cbd4865ac4299648312e4704c646cd53  # v2.0.10
         with:
           secret-ids: |
             GC,archonprod-mimir-rules-token-vector

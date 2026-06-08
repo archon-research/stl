@@ -1,3 +1,5 @@
+import { Slider } from '@archon-research/design-system';
+
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
@@ -15,33 +17,7 @@ type PercentageSliderProps = {
   disabled?: boolean;
 };
 
-function getTickValues(min: number, max: number, step: number): number[] {
-  const values: number[] = [];
-  for (let value = min; value <= max; value += step) {
-    values.push(Number(value.toFixed(2)));
-  }
-  return values;
-}
-
-function getOffset(value: number, min: number, max: number): string {
-  return `${((value - min) / (max - min)) * 100}%`;
-}
-
-function getEdgeAlignedTransform(
-  value: number,
-  firstValue: number,
-  lastValue: number,
-): string {
-  if (value === firstValue) {
-    return 'translateX(0)';
-  }
-
-  if (value === lastValue) {
-    return 'translateX(-100%)';
-  }
-
-  return 'translateX(-50%)';
-}
+type SliderValueChangeDetails = { value: number[] };
 
 export function PercentageSlider({
   id,
@@ -54,12 +30,22 @@ export function PercentageSlider({
   tickLabels = [0, 0.25, 0.5, 0.75, 1],
   disabled = false,
 }: PercentageSliderProps) {
-  const tickValues = getTickValues(min, max, step);
   const displayValue = formatRatioPercent(value, 0);
 
   return (
-    <label htmlFor={id} className={css({ display: 'grid', gap: '2' })}>
-      <span
+    <Slider.Root
+      id={id}
+      min={min}
+      max={max}
+      step={step}
+      value={[value]}
+      disabled={disabled}
+      onValueChange={(details: SliderValueChangeDetails) =>
+        onChange(details.value[0] ?? min)
+      }
+      className={css({ display: 'grid', gap: '2' })}
+    >
+      <Slider.Label
         className={css({
           fontSize: 'sm',
           fontWeight: 'semibold',
@@ -67,7 +53,7 @@ export function PercentageSlider({
         })}
       >
         {label}
-      </span>
+      </Slider.Label>
       <div
         className={flex({
           align: 'flex-start',
@@ -84,82 +70,63 @@ export function PercentageSlider({
             gap: '2',
           })}
         >
-          <input
-            id={id}
-            type="range"
-            aria-label={label}
-            min={min}
-            max={max}
-            step={step}
-            value={value}
-            onChange={(event) => onChange(Number(event.target.value))}
-            disabled={disabled}
+          <Slider.Control
             className={css({
               width: '100%',
-              accentColor: 'interactive.accent',
-              cursor: disabled ? 'not-allowed' : 'pointer',
-              opacity: disabled ? 0.5 : 1,
-            })}
-          />
-          <div
-            aria-hidden="true"
-            className={css({
               position: 'relative',
-              height: '10',
+              py: '1',
             })}
           >
-            {tickValues.map((tickValue, index) => (
-              <span
-                key={tickValue}
-                style={{
-                  left: getOffset(tickValue, min, max),
-                  transform: getEdgeAlignedTransform(
-                    tickValue,
-                    tickValues[0],
-                    tickValues[tickValues.length - 1],
-                  ),
-                }}
+            <Slider.Track
+              className={css({
+                height: '1.5',
+                borderRadius: 'full',
+                bg: 'surface.subtle',
+              })}
+            >
+              <Slider.Range
                 className={css({
-                  position: 'absolute',
-                  top: 0,
-                  width: '1px',
-                  height: index % 2 === 1 ? '2.5' : '1.5',
-                  bg: 'border.default',
-                  opacity: tickValue === value ? 1 : 0.7,
+                  height: 'full',
+                  borderRadius: 'full',
+                  bg: 'interactive.accent',
                 })}
               />
-            ))}
-          </div>
-          <div
-            aria-hidden="true"
+            </Slider.Track>
+            <Slider.Thumb
+              index={0}
+              className={css({
+                width: '4',
+                height: '4',
+                borderRadius: 'full',
+                bg: 'surface.default',
+                borderWidth: '2px',
+                borderStyle: 'solid',
+                borderColor: 'interactive.accent',
+                boxShadow: '0 1px 4px rgba(0, 0, 0, 0.2)',
+              })}
+            />
+          </Slider.Control>
+          <Slider.HiddenInput />
+          <Slider.MarkerGroup
             className={css({
               position: 'relative',
               height: '6',
             })}
           >
             {tickLabels.map((tickLabel) => (
-              <span
+              <Slider.Marker
                 key={tickLabel}
-                style={{
-                  left: getOffset(tickLabel, min, max),
-                  transform: getEdgeAlignedTransform(
-                    tickLabel,
-                    tickLabels[0],
-                    tickLabels[tickLabels.length - 1],
-                  ),
-                }}
+                value={tickLabel}
                 className={css({
-                  position: 'absolute',
-                  top: 0,
                   fontSize: 'xs',
                   color: 'text.muted',
                   whiteSpace: 'nowrap',
                 })}
               >
                 {formatRatioPercent(tickLabel, 0)}
-              </span>
+              </Slider.Marker>
             ))}
-          </div>
+          </Slider.MarkerGroup>
         </div>
         <span
           className={css({
@@ -171,6 +138,6 @@ export function PercentageSlider({
           {displayValue}
         </span>
       </div>
-    </label>
+    </Slider.Root>
   );
 }
