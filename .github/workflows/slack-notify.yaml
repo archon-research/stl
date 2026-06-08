@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: archon-research/github-actions
-          ref: 165a6c55b855e880753370d6b6fad05be64ee768  # main (slack-notify #9)
+          ref: edcebe4624cc065fba9d01b1d85db0efb65c1897  # github-actions PR #22 merge SHA
           ssh-key: ${{ secrets.gh-actions-deploy-key }}
           path: .github-actions
           persist-credentials: false
