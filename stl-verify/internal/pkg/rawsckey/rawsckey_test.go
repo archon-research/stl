@@ -24,8 +24,8 @@ func TestHashInputDeterministic(t *testing.T) {
 
 func TestBuild(t *testing.T) {
 	callData := []byte{0xfe, 0xaf, 0x96, 0x8c, 0xaa, 0xbb}
-	got := Build(21500042, 0, "oracle-price", callData)
-	want := "raw-sc-calls/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_" + HashInput(callData) + ".jsonl.zst"
+	got := Build(1, 21500042, 0, "oracle-price", callData)
+	want := "raw-sc-calls/chain_id=1/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_" + HashInput(callData) + ".jsonl.zst"
 	if got != want {
 		t.Fatalf("Build = %q, want %q", got, want)
 	}

@@ -67,7 +67,7 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 		t.Fatalf("Archive: %v", err)
 	}
 
-	key := rawsckey.Build(rec.BlockNumber, rec.BlockVersion, rec.Source, rec.CallData)
+	key := rawsckey.Build(rec.ChainID, rec.BlockNumber, rec.BlockVersion, rec.Source, rec.CallData)
 	rc, err := reader.StreamFile(ctx, bucket, key)
 	if err != nil {
 		t.Fatalf("StreamFile %s: %v", key, err)
