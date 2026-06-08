@@ -42,9 +42,15 @@ COPY . .
 # they only invalidate the build step below.
 ARG CMD_PATH
 ARG BIN
-ARG GIT_COMMIT
-ARG GIT_BRANCH
-ARG BUILD_TIME
+# Versioning args DO default (unlike CMD_PATH/BIN above): a missing target arg
+# must fail the build loudly, but a missing version stamp must NOT. buildregistry
+# fatals at startup when buildinfo.GitCommit is empty ("git hash not available"),
+# so the `make docker-build-* LOCAL=1` path — which doesn't pass GIT_COMMIT —
+# would otherwise produce images that crashloop. Default to "unknown" (matching
+# the per-service DEX worker Dockerfiles); prod buildx still injects the real SHA.
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_TIME=unknown
 
 # Build the binary for the target architecture (ARM64 for Graviton). The
 # --mount cache persists Go's compiled-package cache (GOCACHE) on the builder

@@ -37,6 +37,13 @@ CREATE TABLE IF NOT EXISTS uniswap_v3_pool (
 CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pool_chain_address
     ON uniswap_v3_pool (chain_id, address);
 
+-- Index the token FK columns (PG does not auto-index them). This is a small,
+-- static registry table so the perf need is modest, but the indexes keep
+-- parent-token deletes/updates cheap and match the token-FK indexing pattern
+-- used by the Morpho market registry.
+CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pool_token0 ON uniswap_v3_pool (token0_id);
+CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pool_token1 ON uniswap_v3_pool (token1_id);
+
 -- ===========================================================================
 -- Registry: NonfungiblePositionManager NFT positions targeting our pools.
 -- One row per (chain, nfpm, token_id). Static after mint except owner, which

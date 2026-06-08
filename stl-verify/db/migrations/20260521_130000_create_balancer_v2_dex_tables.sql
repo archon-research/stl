@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS balancer_pool_token (
     UNIQUE (balancer_pool_id, token_id)
 );
 
+-- token_id is the second column of the PK and UNIQUE constraints, so neither
+-- supports lookups/joins keyed on token_id alone. Index it explicitly: workers
+-- join balancer_pool_token on token_id, and a parent token delete/update would
+-- otherwise seq-scan + take a heavier lock (PG does not auto-index FK columns).
+CREATE INDEX IF NOT EXISTS idx_balancer_pool_token_token_id
+    ON balancer_pool_token (token_id);
+
 -- ===========================================================================
 -- Hypertable: pool state. Written via event-triggered multicall on Vault and
 -- pool contract events. `balances` is indexed by balancer_pool_token.token_index.
