@@ -27,6 +27,7 @@ import (
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -225,6 +226,18 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
 	}
 
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	var archiveWrap archivingwire.Wrap
+	if archivingwire.Enabled() {
+		wrap, drain, werr := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+		if werr != nil {
+			return fmt.Errorf("wiring SC call archiver: %w", werr)
+		}
+		archiveWrap = wrap
+		defer drain()
+		logger.Info("raw SC call archiving enabled", "bucket", env.Get(archivingwire.EnvBucket, ""))
+	}
+
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return fmt.Errorf("creating repository: %w", err)
@@ -239,10 +252,20 @@ func run(ctx context.Context, args []string) error {
 		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
+			var mc outbound.Multicaller
+			var err error
 			if oracleType == entity.OracleTypeChronicle {
-				return multicall.NewDirectCaller(ethClient.Client())
+				mc, err = multicall.NewDirectCaller(ethClient.Client())
+			} else {
+				mc, err = multicall.NewClient(ethClient, blockchain.Multicall3)
 			}
-			return multicall.NewClient(ethClient, blockchain.Multicall3)
+			if err != nil {
+				return nil, err
+			}
+			if archiveWrap != nil {
+				mc = archiveWrap(mc)
+			}
+			return mc, nil
 		},
 	)
 	if err != nil {
