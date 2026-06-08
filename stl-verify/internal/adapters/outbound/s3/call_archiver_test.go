@@ -52,15 +52,15 @@ func sampleRecord() outbound.CallRecord {
 
 func TestArchiveKeyAndBucket(t *testing.T) {
 	fw := &fakeWriter{}
-	a := NewCallArchiver(fw, "raw-sc-calls-prod-ethereum", nil)
+	a := NewCallArchiver(fw, "raw-sc-calls-prod", nil)
 
 	if err := a.Archive(context.Background(), sampleRecord()); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
-	if fw.bucket != "raw-sc-calls-prod-ethereum" {
+	if fw.bucket != "raw-sc-calls-prod" {
 		t.Fatalf("bucket = %q", fw.bucket)
 	}
-	wantKey := "raw-sc-calls/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_"
+	wantKey := "raw-sc-calls/chain_id=1/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_"
 	if !bytes.HasPrefix([]byte(fw.key), []byte(wantKey)) {
 		t.Fatalf("key = %q, want prefix %q", fw.key, wantKey)
 	}

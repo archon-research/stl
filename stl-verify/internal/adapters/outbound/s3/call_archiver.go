@@ -52,7 +52,7 @@ type archiveLine struct {
 
 // Archive implements outbound.CallArchiver.
 func (a *CallArchiver) Archive(ctx context.Context, record outbound.CallRecord) error {
-	key := rawsckey.Build(record.BlockNumber, record.BlockVersion, record.Source, record.CallData)
+	key := rawsckey.Build(record.ChainID, record.BlockNumber, record.BlockVersion, record.Source, record.CallData)
 
 	payload, err := a.encode(record)
 	if err != nil {

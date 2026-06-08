@@ -1,11 +1,12 @@
 // Package rawsckey builds S3 keys for archived raw smart contract calls.
 //
-// Key format: raw-sc-calls/block={partition}/bv={blockVersion}/{blockNumber}_{source}_{selector}_{inputHash}.jsonl.zst
+// Key format: raw-sc-calls/chain_id={chainID}/block={partition}/bv={blockVersion}/{blockNumber}_{source}_{selector}_{inputHash}.jsonl.zst
 //
-// Example: raw-sc-calls/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_a3f2c1d4e5b6f7c8.jsonl.zst
+// Example: raw-sc-calls/chain_id=1/block=21500000-21500999/bv=0/21500042_oracle-price_0xfeaf968c_a3f2c1d4e5b6f7c8.jsonl.zst
 //
-// The key is fully derivable from (blockNumber, blockVersion, callData): given
-// those three inputs a replay can compute the exact object and fetch the stored
+// All chains share one bucket; chain_id is the top-level partition. The key is
+// fully derivable from (chainID, blockNumber, blockVersion, callData): given
+// those inputs a replay can compute the exact object and fetch the stored
 // response without listing.
 package rawsckey
 
@@ -37,10 +38,11 @@ func HashInput(callData []byte) string {
 }
 
 // Build constructs the full S3 key for a single archived call.
-func Build(blockNumber int64, blockVersion int, source string, callData []byte) string {
+func Build(chainID, blockNumber int64, blockVersion int, source string, callData []byte) string {
 	return fmt.Sprintf(
-		"%s/block=%s/bv=%d/%d_%s_%s_%s.jsonl.zst",
+		"%s/chain_id=%d/block=%s/bv=%d/%d_%s_%s_%s.jsonl.zst",
 		prefix,
+		chainID,
 		partition.GetPartition(blockNumber),
 		blockVersion,
 		blockNumber,
