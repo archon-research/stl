@@ -272,3 +272,321 @@ func TestGetOrCreateToken_ConcurrentRaceReturnsSameID(t *testing.T) {
 		}
 	}
 }
+
+// TestSymbolReconciliation_MarkAndList verifies that a token inserted with an empty
+// symbol can be flagged as pending and then returned by ListTokensPendingSymbol.
+func TestSymbolReconciliation_MarkAndList(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	chainID := int64(1)
+	anchorBlock := int64(12345678)
+
+	// Insert token with empty symbol.
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+
+	// Mark symbol pending inside the same tx.
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// ListTokensPendingSymbol must return the token with correct anchor block.
+	pending, err := repo.ListTokensPendingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensPendingSymbol: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending token, got %d", len(pending))
+	}
+	if pending[0].Address != addr {
+		t.Errorf("address = %s, want %s", pending[0].Address.Hex(), addr.Hex())
+	}
+	if pending[0].AnchorBlock != anchorBlock {
+		t.Errorf("anchor block = %d, want %d", pending[0].AnchorBlock, anchorBlock)
+	}
+}
+
+// TestSymbolReconciliation_ResolveRemovesFromPendingAndSetsSymbol verifies that after
+// calling ResolveTokenSymbol the token is no longer listed as pending and its symbol
+// column is updated.
+func TestSymbolReconciliation_ResolveRemovesFromPendingAndSetsSymbol(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	chainID := int64(1)
+	anchorBlock := int64(12345678)
+
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Resolve the symbol.
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, "frxUSD"); err != nil {
+		t.Fatalf("ResolveTokenSymbol: %v", err)
+	}
+
+	// Must no longer be in the pending list.
+	pending, err := repo.ListTokensPendingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensPendingSymbol: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending tokens after resolve, got %d", len(pending))
+	}
+
+	// Symbol column must be updated.
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "frxUSD" {
+		t.Errorf("symbol = %q, want frxUSD", symbol)
+	}
+}
+
+// TestSymbolReconciliation_MarkPendingIsNoOpWhenSymbolPresent verifies that
+// MarkTokenSymbolPending is a no-op when the token already has a non-empty symbol.
+func TestSymbolReconciliation_MarkPendingIsNoOpWhenSymbolPresent(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	chainID := int64(1)
+	anchorBlock := int64(12345678)
+
+	// Insert token WITH a non-empty symbol.
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "frxUSD", 18, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	// Attempt to mark symbol pending — must be a no-op because symbol is non-empty.
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Must not appear in the pending list.
+	pending, err := repo.ListTokensPendingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensPendingSymbol: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending tokens when symbol is non-empty, got %d", len(pending))
+	}
+}
+
+// TestSymbolReconciliation_MarkPendingHandlesNullMetadata verifies that
+// MarkTokenSymbolPending correctly sets the pending flag even when the token row
+// was inserted with a NULL metadata column (as legacy seed-migration rows have).
+// Without COALESCE, `NULL || jsonb_build_object(...)` evaluates to NULL and the
+// flag is silently lost, causing ListTokensPendingSymbol to return no rows.
+func TestSymbolReconciliation_MarkPendingHandlesNullMetadata(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
+	chainID := int64(1)
+	anchorBlock := int64(100)
+
+	// Insert a token row with metadata explicitly NULL (simulating legacy seed rows
+	// that pre-date the '{}' default).
+	_, err = tokenPool.Exec(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, updated_at)
+		 VALUES ($1, $2, '', 18, $3, NOW())`,
+		chainID, addr.Bytes(), anchorBlock)
+	if err != nil {
+		t.Fatalf("insert null-metadata token: %v", err)
+	}
+
+	// Confirm metadata is actually NULL before the fix is exercised.
+	var metadataIsNull bool
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT metadata IS NULL FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&metadataIsNull); err != nil {
+		t.Fatalf("query metadata null check: %v", err)
+	}
+	if !metadataIsNull {
+		t.Fatal("precondition failed: expected metadata to be NULL after direct insert")
+	}
+
+	// Mark symbol pending -- this is the operation that silently breaks without COALESCE.
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// The token must now appear in the pending list with the correct anchor block.
+	pending, err := repo.ListTokensPendingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensPendingSymbol: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending token (null-metadata path), got %d", len(pending))
+	}
+	if pending[0].Address != addr {
+		t.Errorf("address = %s, want %s", pending[0].Address.Hex(), addr.Hex())
+	}
+	if pending[0].AnchorBlock != anchorBlock {
+		t.Errorf("anchor block = %d, want %d", pending[0].AnchorBlock, anchorBlock)
+	}
+}
+
+// TestSymbolReconciliation_MarkUnresolvedClearsPending verifies that
+// MarkTokenSymbolUnresolved clears the pending flag (no longer listed) and leaves
+// the symbol empty.
+func TestSymbolReconciliation_MarkUnresolvedClearsPending(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	chainID := int64(1)
+	anchorBlock := int64(12345678)
+
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, anchorBlock); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Mark as unresolved.
+	if err := repo.MarkTokenSymbolUnresolved(ctx, chainID, addr); err != nil {
+		t.Fatalf("MarkTokenSymbolUnresolved: %v", err)
+	}
+
+	// Must no longer appear in the pending list.
+	pending, err := repo.ListTokensPendingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensPendingSymbol: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending tokens after unresolved, got %d", len(pending))
+	}
+
+	// Symbol must still be empty.
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "" {
+		t.Errorf("symbol = %q, want empty string after unresolved", symbol)
+	}
+
+	// symbol_anchor_block must also be absent from metadata.
+	var anchorBlockPresent bool
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT metadata ? 'symbol_anchor_block' FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&anchorBlockPresent); err != nil {
+		t.Fatalf("query symbol_anchor_block presence: %v", err)
+	}
+	if anchorBlockPresent {
+		t.Error("expected symbol_anchor_block to be absent from metadata after MarkTokenSymbolUnresolved")
+	}
+}
+
+// TestSymbolReconciliation_ResolveNonexistentReturnsError verifies that
+// ResolveTokenSymbol and MarkTokenSymbolUnresolved return an error (RowsAffected 0)
+// when called for an address that has never been inserted.
+func TestSymbolReconciliation_ResolveNonexistentReturnsError(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	ghost := common.HexToAddress("0xDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF")
+	chainID := int64(1)
+
+	// ResolveTokenSymbol on a nonexistent address must return an error.
+	if err := repo.ResolveTokenSymbol(ctx, chainID, ghost, "X"); err == nil {
+		t.Error("expected error from ResolveTokenSymbol on nonexistent address, got nil")
+	}
+
+	// MarkTokenSymbolUnresolved on a nonexistent address must return an error.
+	if err := repo.MarkTokenSymbolUnresolved(ctx, chainID, ghost); err == nil {
+		t.Error("expected error from MarkTokenSymbolUnresolved on nonexistent address, got nil")
+	}
+}

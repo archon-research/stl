@@ -54,16 +54,18 @@ func main() {
 }
 
 type cliConfig struct {
-	queueURL          string
-	redisAddr         string
-	dbURL             string
-	alchemyURL        string
-	s3Bucket          string
-	deployEnv         string
-	maxMessages       int
-	waitTime          int
-	visibilityTimeout int
-	chainID           int64
+	queueURL                  string
+	redisAddr                 string
+	dbURL                     string
+	alchemyURL                string
+	s3Bucket                  string
+	deployEnv                 string
+	maxMessages               int
+	waitTime                  int
+	visibilityTimeout         int
+	chainID                   int64
+	symbolSweepIntervalBlocks int64
+	symbolBackstopBlocks      int64
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -136,6 +138,30 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 	cfg.chainID = chainID
+
+	cfg.symbolSweepIntervalBlocks = 10
+	if v := env.Get("MORPHO_SYMBOL_SWEEP_INTERVAL_BLOCKS", ""); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing MORPHO_SYMBOL_SWEEP_INTERVAL_BLOCKS %q: %w", v, err)
+		}
+		cfg.symbolSweepIntervalBlocks = n
+	}
+	cfg.symbolBackstopBlocks = 1000
+	if v := env.Get("MORPHO_SYMBOL_BACKSTOP_BLOCKS", ""); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing MORPHO_SYMBOL_BACKSTOP_BLOCKS %q: %w", v, err)
+		}
+		cfg.symbolBackstopBlocks = n
+	}
+
+	if cfg.symbolSweepIntervalBlocks < 0 {
+		return cliConfig{}, fmt.Errorf("MORPHO_SYMBOL_SWEEP_INTERVAL_BLOCKS must be >= 0, got %d", cfg.symbolSweepIntervalBlocks)
+	}
+	if cfg.symbolBackstopBlocks < 0 {
+		return cliConfig{}, fmt.Errorf("MORPHO_SYMBOL_BACKSTOP_BLOCKS must be >= 0, got %d", cfg.symbolBackstopBlocks)
+	}
 
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
 	if cfg.s3Bucket == "" {
@@ -305,7 +331,9 @@ func run(ctx context.Context, args []string) error {
 			Logger:      logger,
 			ChainID:     cfg.chainID,
 		},
-		Telemetry: morphoTelemetry,
+		Telemetry:                 morphoTelemetry,
+		SymbolSweepIntervalBlocks: cfg.symbolSweepIntervalBlocks,
+		SymbolBackstopBlocks:      cfg.symbolBackstopBlocks,
 	}
 
 	service, err := morpho_indexer.NewService(
