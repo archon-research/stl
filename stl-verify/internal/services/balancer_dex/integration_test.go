@@ -243,3 +243,62 @@ func TestIntegration_SwapWritesAllRows(t *testing.T) {
 func loadVaultABI() (*abi.ABI, error) {
 	return abis.GetBalancerV2VaultEventsABI()
 }
+
+// TestIntegration_BalancerPoolCurrentTrigger verifies the balancer_pool_current
+// projection maintained by trigger_refresh_balancer_pool_current. The trigger
+// restates this table's upsert column-by-column by hand, so the test reads the
+// companion back and checks balances/amp_factor/bpt_rate, alongside the
+// version-guard ordering (older arrival is a no-op, newer wins).
+func TestIntegration_BalancerPoolCurrentTrigger(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "integration-test-balancer-pool-current")
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	var poolID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM balancer_pool ORDER BY id LIMIT 1`).Scan(&poolID); err != nil {
+		t.Fatalf("look up seeded balancer_pool.id: %v", err)
+	}
+
+	insertState := func(bn int64, ts time.Time, ampFactor, bptRate int64) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO balancer_pool_state
+				(balancer_pool_id, block_number, block_version, timestamp, source,
+				 balances, amp_factor, bpt_rate, build_id)
+			VALUES ($1, $2, 0, $3, 'event', '{1,2}', $4, $5, 1)
+			ON CONFLICT (balancer_pool_id, block_number, block_version, processing_version, timestamp)
+				DO NOTHING`,
+			poolID, bn, ts, ampFactor, bptRate); err != nil {
+			t.Fatalf("insert state (bn=%d): %v", bn, err)
+		}
+	}
+	assertCurrent := func(stage string, wantBN, wantAmp, wantBpt int64, wantBalances string) {
+		t.Helper()
+		var bn, amp, bpt int64
+		var balancesText string
+		if err := pool.QueryRow(ctx, `
+			SELECT block_number, amp_factor::bigint, bpt_rate::bigint, balances::text
+			FROM balancer_pool_current WHERE balancer_pool_id = $1`, poolID,
+		).Scan(&bn, &amp, &bpt, &balancesText); err != nil {
+			t.Fatalf("%s: read balancer_pool_current: %v", stage, err)
+		}
+		if bn != wantBN || amp != wantAmp || bpt != wantBpt || balancesText != wantBalances {
+			t.Errorf("%s: current = (bn=%d amp=%d bpt=%d balances=%s), want (bn=%d amp=%d bpt=%d balances=%s)",
+				stage, bn, amp, bpt, balancesText, wantBN, wantAmp, wantBpt, wantBalances)
+		}
+	}
+
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	tEarlier := time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	insertState(100, t0, 700, 1000)
+	assertCurrent("first insert", 100, 700, 1000, "{1,2}")
+
+	insertState(99, tEarlier, 699, 999) // older, out of order
+	assertCurrent("older block (no-op)", 100, 700, 1000, "{1,2}")
+
+	insertState(101, t1, 710, 1010) // newer
+	assertCurrent("newer block", 101, 710, 1010, "{1,2}")
+}

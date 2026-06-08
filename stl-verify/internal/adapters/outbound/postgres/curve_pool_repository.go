@@ -226,6 +226,10 @@ func (r *CurvePoolRepository) SetCurveGaugeKilled(ctx context.Context, tx pgx.Tx
 
 // SaveCurvePoolState writes one row to curve_pool_state. See the
 // per-INSERT comment below for the trigger / ON CONFLICT contract.
+//
+// The curve_pool_current head row is maintained entirely by
+// trigger_refresh_curve_pool_current on this INSERT; never write that table
+// from Go (a second writer would race the trigger).
 func (r *CurvePoolRepository) SaveCurvePoolState(ctx context.Context, tx pgx.Tx, state *entity.CurvePoolState) error {
 	balances, err := bigIntsToNumericArray(state.Balances)
 	if err != nil {

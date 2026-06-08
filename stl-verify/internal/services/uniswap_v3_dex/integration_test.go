@@ -256,3 +256,63 @@ func buildSwapLog(t *testing.T, poolAddr common.Address) shared.Log {
 func loadV3PoolEventsABI() (*abi.ABI, error) {
 	return abis.GetUniswapV3PoolEventsABI()
 }
+
+// TestIntegration_UniswapV3PoolCurrentTrigger verifies the
+// uniswap_v3_pool_current projection maintained by
+// trigger_refresh_uniswap_v3_pool_current. The trigger restates this table's
+// upsert column-by-column by hand, so the test reads the companion back and
+// checks the sqrt_price/tick/liquidity columns most prone to a transposition,
+// alongside the version-guard ordering (older arrival is a no-op, newer wins).
+func TestIntegration_UniswapV3PoolCurrentTrigger(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "integration-test-uniswap-pool-current")
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	var poolID int64
+	if err := pool.QueryRow(ctx, `SELECT id FROM uniswap_v3_pool ORDER BY id LIMIT 1`).Scan(&poolID); err != nil {
+		t.Fatalf("look up seeded uniswap_v3_pool.id: %v", err)
+	}
+
+	insertState := func(bn int64, ts time.Time, sqrtPrice, liquidity int64, tick int32) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO uniswap_v3_pool_state
+				(uniswap_v3_pool_id, block_number, block_version, timestamp, source,
+				 sqrt_price_x96, tick, liquidity, build_id)
+			VALUES ($1, $2, 0, $3, 'event', $4, $5, $6, 1)
+			ON CONFLICT (uniswap_v3_pool_id, block_number, block_version, processing_version, timestamp)
+				DO NOTHING`,
+			poolID, bn, ts, sqrtPrice, tick, liquidity); err != nil {
+			t.Fatalf("insert state (bn=%d): %v", bn, err)
+		}
+	}
+	assertCurrent := func(stage string, wantBN, wantSqrt, wantLiq int64, wantTick int32) {
+		t.Helper()
+		var bn, sqrt, liq int64
+		var tick int32
+		if err := pool.QueryRow(ctx, `
+			SELECT block_number, sqrt_price_x96::bigint, tick, liquidity::bigint
+			FROM uniswap_v3_pool_current WHERE uniswap_v3_pool_id = $1`, poolID,
+		).Scan(&bn, &sqrt, &tick, &liq); err != nil {
+			t.Fatalf("%s: read uniswap_v3_pool_current: %v", stage, err)
+		}
+		if bn != wantBN || sqrt != wantSqrt || tick != wantTick || liq != wantLiq {
+			t.Errorf("%s: current = (bn=%d sqrt=%d tick=%d liq=%d), want (bn=%d sqrt=%d tick=%d liq=%d)",
+				stage, bn, sqrt, tick, liq, wantBN, wantSqrt, wantTick, wantLiq)
+		}
+	}
+
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	tEarlier := time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	insertState(100, t0, 1000, 2000, 5)
+	assertCurrent("first insert", 100, 1000, 2000, 5)
+
+	insertState(99, tEarlier, 999, 1999, 4) // older, out of order
+	assertCurrent("older block (no-op)", 100, 1000, 2000, 5)
+
+	insertState(101, t1, 1010, 2020, 6) // newer
+	assertCurrent("newer block", 101, 1010, 2020, 6)
+}

@@ -208,6 +208,10 @@ func (r *BalancerPoolRepository) UpsertBalancerPoolToken(ctx context.Context, tx
 // INSERT trigger fills processing_version; no ON CONFLICT clause — replay
 // safety is the trigger's job and a duplicate (same build, same key) will
 // collide on the PK, which the caller treats as already-written.
+//
+// The balancer_pool_current head row is maintained entirely by
+// trigger_refresh_balancer_pool_current on this INSERT; never write that table
+// from Go (a second writer would race the trigger).
 func (r *BalancerPoolRepository) SaveBalancerPoolState(ctx context.Context, tx pgx.Tx, state *entity.BalancerPoolState) error {
 	balances := bigIntsToNullableElementNumericArray(state.Balances)
 	ampFactor := bigIntToNullableNumeric(state.AmpFactor)

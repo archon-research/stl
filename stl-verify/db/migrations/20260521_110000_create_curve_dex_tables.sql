@@ -198,6 +198,13 @@ CREATE TABLE IF NOT EXISTS curve_pool_current (
 -- out-of-order arrival, SQS replays, and reorgs (a higher block_version for the
 -- same block wins), and keeps the result identical to the equivalent
 -- ORDER BY ... DESC LIMIT 1 over the hypertable.
+--
+-- timestamp is a defensive final tiebreaker. Block timestamp is derived from
+-- block_number and this design writes no periodic 'snapshot' rows, so
+-- (block_number, block_version, processing_version) is already unique per pool
+-- and the leg never changes behaviour today. If a 'snapshot' row with a
+-- read-time timestamp is ever added at the same (block, version), the latest
+-- timestamp then wins deterministically instead of first-writer-wins.
 CREATE OR REPLACE FUNCTION refresh_curve_pool_current()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -224,8 +231,8 @@ BEGIN
         processing_version = EXCLUDED.processing_version,
         build_id           = EXCLUDED.build_id,
         updated_at         = NOW()
-    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version)
-        > (c.block_number, c.block_version, c.processing_version);
+    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.timestamp)
+        > (c.block_number, c.block_version, c.processing_version, c.timestamp);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;

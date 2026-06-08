@@ -26,8 +26,8 @@ import (
 // the seed in db/migrations/20260521_100000_create_dex_prereqs.sql.
 var UniswapV3ProtocolAddress = common.HexToAddress("0x1F98431c8aD98523631AE4a59f267346ea31F984")
 
-// DefaultNFPMAddress is the canonical mainnet NonfungiblePositionManager.
-// Used as the default when CHAIN_ID=1 and no NFPM_ADDRESS override is set.
+// DefaultNFPMAddress is the canonical mainnet NonfungiblePositionManager,
+// used directly as the NFPM address for chain_id 1.
 var DefaultNFPMAddress = common.HexToAddress("0xC36442b4a4522E871399CD717aBDD847Ab11FE88")
 
 // uniswapV3ProtocolDeployBlock is the block at which the UniswapV3 factory

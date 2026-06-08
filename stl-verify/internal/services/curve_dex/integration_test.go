@@ -474,3 +474,169 @@ func TestIntegration_ProcessingVersionRetryAndReprocessing(t *testing.T) {
 		t.Errorf("MAX(processing_version) = %d, want 1 (the build-B reprocessing)", maxV)
 	}
 }
+
+// TestIntegration_CurvePoolCurrentTrigger verifies the curve_pool_current
+// last-point projection maintained by trigger_refresh_curve_pool_current. The
+// companion row must always equal the head the canonical "latest" query
+// (ORDER BY block_number DESC, block_version DESC, processing_version DESC)
+// would return, and must be immune to out-of-order arrival / replays.
+//
+// Raw INSERTs are used (rather than the service) so build_id can be set
+// explicitly, which is what drives the BEFORE INSERT trigger to allocate a new
+// processing_version — letting us exercise that leg of the version guard
+// deterministically.
+func TestIntegration_CurvePoolCurrentTrigger(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "integration-test-curve-pool-current")
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	var poolID int64
+	stETHClassic := common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM curve_pool WHERE chain_id = 1 AND address = $1`,
+		stETHClassic.Bytes(),
+	).Scan(&poolID); err != nil {
+		t.Fatalf("looking up stETH-classic curve_pool.id: %v", err)
+	}
+
+	// insertState writes one curve_pool_state row. processing_version is left to
+	// the BEFORE INSERT trigger; build_id is explicit so we can force a fresh
+	// processing_version for an otherwise-identical natural key.
+	insertState := func(bn int64, bv, buildID int32, ts time.Time, virtualPrice int64) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO curve_pool_state
+				(curve_pool_id, block_number, block_version, timestamp, source,
+				 balances, virtual_price, build_id)
+			VALUES ($1, $2, $3, $4, 'event', '{1,2}', $5, $6)
+			ON CONFLICT (curve_pool_id, block_number, block_version, processing_version, timestamp)
+				DO NOTHING`,
+			poolID, bn, bv, ts, virtualPrice, buildID); err != nil {
+			t.Fatalf("insert state (bn=%d bv=%d build=%d): %v", bn, bv, buildID, err)
+		}
+	}
+
+	// assertCurrent reads curve_pool_current and checks it matches the expected head.
+	assertCurrent := func(stage string, wantBN int64, wantBV, wantPV int32, wantVP int64) {
+		t.Helper()
+		var bn, vp int64
+		var bv, pv int32
+		if err := pool.QueryRow(ctx, `
+			SELECT block_number, block_version, processing_version, virtual_price::bigint
+			FROM curve_pool_current WHERE curve_pool_id = $1`, poolID,
+		).Scan(&bn, &bv, &pv, &vp); err != nil {
+			t.Fatalf("%s: read curve_pool_current: %v", stage, err)
+		}
+		if bn != wantBN || bv != wantBV || pv != wantPV || vp != wantVP {
+			t.Errorf("%s: current = (bn=%d bv=%d pv=%d vp=%d), want (bn=%d bv=%d pv=%d vp=%d)",
+				stage, bn, bv, pv, vp, wantBN, wantBV, wantPV, wantVP)
+		}
+	}
+
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	t1 := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	tEarlier := time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	// 1. First insert seeds the companion row.
+	insertState(100, 0, 1, t0, 1000)
+	assertCurrent("first insert", 100, 0, 0, 1000)
+
+	// 2. An older block arriving out of order must NOT regress the head.
+	insertState(99, 0, 1, tEarlier, 999)
+	assertCurrent("older block (out of order)", 100, 0, 0, 1000)
+
+	// 3. A newer block advances the head.
+	insertState(101, 0, 1, t1, 1010)
+	assertCurrent("newer block", 101, 0, 0, 1010)
+
+	// 4. A reorg of the same block (higher block_version) wins.
+	insertState(101, 1, 1, t1, 1011)
+	assertCurrent("reorg block_version bump", 101, 1, 0, 1011)
+
+	// 5. Reprocessing the same (block, block_version) under a new build_id
+	//    allocates processing_version = 1, which wins on the third tuple leg.
+	insertState(101, 1, 2, t1, 1012)
+	assertCurrent("processing_version bump", 101, 1, 1, 1012)
+
+	// Round-trip a representative column from each "section" of the row to catch
+	// a wrong-column mapping in the trigger's upsert (which assertCurrent's
+	// virtual_price-only check would miss): the array column (balances), the
+	// text column (source), build_id, and that an unset nullable column
+	// (price_oracle) propagates as NULL rather than empty array.
+	var source, balancesText string
+	var buildID int32
+	var priceOracleNull bool
+	if err := pool.QueryRow(ctx, `
+		SELECT source, build_id, price_oracle IS NULL, balances::text
+		FROM curve_pool_current WHERE curve_pool_id = $1`, poolID,
+	).Scan(&source, &buildID, &priceOracleNull, &balancesText); err != nil {
+		t.Fatalf("read companion columns: %v", err)
+	}
+	if source != "event" {
+		t.Errorf("source = %q, want event", source)
+	}
+	if buildID != 2 {
+		t.Errorf("build_id = %d, want 2 (last winning insert)", buildID)
+	}
+	if balancesText != "{1,2}" {
+		t.Errorf("balances = %s, want {1,2}", balancesText)
+	}
+	if !priceOracleNull {
+		t.Error("price_oracle should round-trip as NULL (never set), got non-NULL")
+	}
+}
+
+// TestIntegration_PoolCurrentMirrorsState guards the hand-maintained coupling
+// between each *_pool_state hypertable and its *_pool_current companion. The
+// companion table + its refresh trigger restate the full column list, with no
+// compile-time link, so a future migration that adds a column to a state table
+// without also adding it to the companion would silently drop that column from
+// the projected head. This test makes that failure loud: every data column in
+// the state table (except created_at, which the companion replaces with
+// updated_at) must exist in the companion with the same type.
+func TestIntegration_PoolCurrentMirrorsState(t *testing.T) {
+	t.Setenv("BUILD_GIT_HASH", "integration-test-pool-current-schema")
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	pairs := []struct{ state, current string }{
+		{"curve_pool_state", "curve_pool_current"},
+		{"uniswap_v3_pool_state", "uniswap_v3_pool_current"},
+		{"balancer_pool_state", "balancer_pool_current"},
+	}
+	for _, p := range pairs {
+		rows, err := pool.Query(ctx, `
+			SELECT s.column_name, s.data_type
+			FROM information_schema.columns s
+			WHERE s.table_schema = current_schema()
+			  AND s.table_name = $1
+			  AND s.column_name <> 'created_at'
+			  AND NOT EXISTS (
+			      SELECT 1 FROM information_schema.columns c
+			      WHERE c.table_schema = s.table_schema
+			        AND c.table_name = $2
+			        AND c.column_name = s.column_name
+			        AND c.data_type = s.data_type)
+			ORDER BY s.column_name`, p.state, p.current)
+		if err != nil {
+			t.Fatalf("%s drift query: %v", p.state, err)
+		}
+		var missing []string
+		for rows.Next() {
+			var name, typ string
+			if err := rows.Scan(&name, &typ); err != nil {
+				rows.Close()
+				t.Fatalf("scan: %v", err)
+			}
+			missing = append(missing, name+" ("+typ+")")
+		}
+		rows.Close()
+		if len(missing) > 0 {
+			t.Errorf("%s has columns missing or type-mismatched in %s: %v\n"+
+				"add them to the companion table and its refresh trigger in a new migration",
+				p.state, p.current, missing)
+		}
+	}
+}

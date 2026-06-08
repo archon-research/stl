@@ -233,6 +233,10 @@ func (r *UniswapV3PoolRepository) SetUniswapV3PositionBurned(ctx context.Context
 // build_id) reuses the existing version; different build_id bumps to MAX+1.
 // ON CONFLICT DO NOTHING on the PK is the second half: same-build retries
 // swallow silently, cross-build reprocessing lands at a fresh version slot.
+//
+// The uniswap_v3_pool_current head row is maintained entirely by
+// trigger_refresh_uniswap_v3_pool_current on this INSERT; never write that
+// table from Go (a second writer would race the trigger).
 func (r *UniswapV3PoolRepository) SaveUniswapV3PoolState(ctx context.Context, tx pgx.Tx, state *entity.UniswapV3PoolState) error {
 	sqrtPriceX96, err := bigIntToNumericRequired(state.SqrtPriceX96, "sqrt_price_x96")
 	if err != nil {
