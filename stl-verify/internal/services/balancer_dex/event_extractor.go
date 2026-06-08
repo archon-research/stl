@@ -2,6 +2,7 @@ package balancer_dex
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -583,6 +584,11 @@ func parseLogIndex(s string) (int32, error) {
 	v, ok := new(big.Int).SetString(s, 0)
 	if !ok {
 		return 0, fmt.Errorf("parsing log index %q", s)
+	}
+	// Bound-check before narrowing: a negative or oversized value would wrap
+	// silently and write an incorrect log index (part of the row primary key).
+	if v.Sign() < 0 || !v.IsInt64() || v.Int64() > math.MaxInt32 {
+		return 0, fmt.Errorf("log index %q out of int32 range", s)
 	}
 	return int32(v.Int64()), nil
 }

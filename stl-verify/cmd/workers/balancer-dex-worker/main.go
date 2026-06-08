@@ -38,7 +38,7 @@ func main() {
 func run(ctx context.Context, args []string) error {
 	cfg, err := dexbootstrap.ParseConfig("balancer-dex-worker", args)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing balancer-dex-worker config: %w", err)
 	}
 
 	deps, err := dexbootstrap.Bootstrap(ctx, cfg, dexbootstrap.BootstrapOptions{
@@ -47,7 +47,7 @@ func run(ctx context.Context, args []string) error {
 		BuildTime:    BuildTime,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("bootstrapping balancer-dex-worker: %w", err)
 	}
 	defer deps.Close()
 

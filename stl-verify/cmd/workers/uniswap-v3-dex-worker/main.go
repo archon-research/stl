@@ -55,12 +55,12 @@ func resolveNFPMAddress() (common.Address, error) {
 func run(ctx context.Context, args []string) error {
 	cfg, err := dexbootstrap.ParseConfig("uniswap-v3-dex-worker", args)
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing uniswap-v3-dex-worker config: %w", err)
 	}
 
 	nfpmAddress, err := resolveNFPMAddress()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolving NFPM address: %w", err)
 	}
 
 	deps, err := dexbootstrap.Bootstrap(ctx, cfg, dexbootstrap.BootstrapOptions{
@@ -69,7 +69,7 @@ func run(ctx context.Context, args []string) error {
 		BuildTime:    BuildTime,
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("bootstrapping uniswap-v3-dex-worker: %w", err)
 	}
 	defer deps.Close()
 

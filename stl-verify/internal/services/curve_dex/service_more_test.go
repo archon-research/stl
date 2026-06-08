@@ -970,6 +970,79 @@ func TestProcessReceipt_V1GaugeWithoutIsKilled_DegradesGracefully(t *testing.T) 
 	}
 }
 
+// PR #345: the registry is_killed flag must self-heal from the on-chain
+// is_killed() read on an ordinary gauge event, even when no discrete
+// Kill/Unkill controller event is seen — closing the "gauge-emitted kill is
+// dropped" gap. A gauge Deposit whose on-chain is_killed()=true must flip the
+// flag via SetCurveGaugeKilled.
+func TestProcessReceipt_GaugeStateReconcilesIsKilled(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolV1()
+	h.svc.registry.addPool(pool)
+	gauge := makeGauge(pool.ID, testGaugeAddr) // makeGauge sets IsKilled=false baseline
+	h.svc.registry.addGauge(gauge)
+
+	h.curveRepo.SaveCurveGaugeStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.CurveGaugeState) error { return nil }
+	var killedTo *bool
+	var killedAddr common.Address
+	h.curveRepo.SetCurveGaugeKilledFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, isKilled bool) error {
+		v := isKilled
+		killedTo = &v
+		killedAddr = addr
+		return nil
+	}
+	// readGaugeState layout (5 calls) with is_killed=true at slot 3.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 5 {
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packUint256(big.NewInt(1e15))},
+				{Success: true, ReturnData: h.packUint256(big.NewInt(500))},
+				{Success: true, ReturnData: h.packUint256(big.NewInt(300))},
+				{Success: true, ReturnData: h.packBool(true)}, // is_killed = true
+				{Success: true, ReturnData: h.packUint256(big.NewInt(0))},
+			}, nil
+		}
+		return nil, fmt.Errorf("unexpected multicall layout: %d calls", len(calls))
+	}
+
+	log := h.makeGaugeDepositLog(gauge.Address, testUser, big.NewInt(1))
+	if err := h.runProcess(t, 320, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if killedTo == nil || !*killedTo {
+		t.Fatal("SetCurveGaugeKilled(true) not called — is_killed did not self-heal from the on-chain read")
+	}
+	if killedAddr != gauge.Address {
+		t.Errorf("SetCurveGaugeKilled addr = %s, want %s", killedAddr.Hex(), gauge.Address.Hex())
+	}
+}
+
+// An active gauge (is_killed=false, matching the baseline) must NOT write the
+// flag on every event — the reconcile is gated on the loaded baseline.
+func TestProcessReceipt_GaugeStateActive_NoKilledWrite(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolV1()
+	h.svc.registry.addPool(pool)
+	gauge := makeGauge(pool.ID, testGaugeAddr)
+	h.svc.registry.addGauge(gauge)
+
+	h.curveRepo.SaveCurveGaugeStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.CurveGaugeState) error { return nil }
+	called := false
+	h.curveRepo.SetCurveGaugeKilledFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ bool) error {
+		called = true
+		return nil
+	}
+	h.multicaller.ExecuteFn = gaugeWithStateMulticaller(h) // is_killed=false
+
+	log := h.makeGaugeDepositLog(gauge.Address, testUser, big.NewInt(1))
+	if err := h.runProcess(t, 321, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if called {
+		t.Error("SetCurveGaugeKilled should not be called for an active gauge matching the baseline")
+	}
+}
+
 func TestProcessReceipt_GaugeControllerKilled_FlipsFlag(t *testing.T) {
 	h := newHarness(t)
 	gauge := makeGauge(1, testGaugeAddr)
@@ -1245,6 +1318,62 @@ func TestProcessReceipt_LPTransferBurn_OnlyFromSide(t *testing.T) {
 	}
 	if positions[0].Delta.Sign() >= 0 {
 		t.Errorf("burn delta should be negative, got %s", positions[0].Delta)
+	}
+}
+
+// PR #345: a self-transfer (from == to) must collapse to ONE net-zero LP
+// position row, not two rows with the same primary key (the second of which
+// ON CONFLICT would silently drop, leaving a misleading non-zero delta).
+func TestProcessReceipt_LPTransferSelf_CollapsesToOneNetZeroRow(t *testing.T) {
+	h := newHarness(t)
+	pool := makePoolV1()
+	h.svc.registry.addPool(pool)
+
+	user := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	ev := h.lpEventsABI.Events["Transfer"]
+	data, err := ev.Inputs.NonIndexed().Pack(big.NewInt(55))
+	if err != nil {
+		t.Fatalf("pack transfer: %v", err)
+	}
+	log := shared.Log{
+		Address: testLPTokenAddr.Hex(),
+		Topics: []string{
+			ev.ID.Hex(),
+			common.BytesToHash(user.Bytes()).Hex(),
+			common.BytesToHash(user.Bytes()).Hex(), // from == to
+		},
+		Data:            "0x" + common.Bytes2Hex(data),
+		TransactionHash: testTxHash,
+		LogIndex:        "0x0",
+	}
+	// Self-transfer must read the holder's balance exactly once.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 1 {
+			return nil, fmt.Errorf("self-transfer should issue 1 balanceOf call, got %d", len(calls))
+		}
+		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(999))}}, nil
+	}
+
+	var positions []*entity.CurveUserLpPosition
+	h.curveRepo.SaveCurveUserLpPositionFn = func(_ context.Context, _ pgx.Tx, p *entity.CurveUserLpPosition) error {
+		positions = append(positions, p)
+		return nil
+	}
+
+	if err := h.runProcess(t, 802, 0, shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("self-transfer should produce exactly 1 LP position row, got %d", len(positions))
+	}
+	if positions[0].UserAddress != user {
+		t.Errorf("position user = %s, want %s", positions[0].UserAddress.Hex(), user.Hex())
+	}
+	if positions[0].Delta.Sign() != 0 {
+		t.Errorf("self-transfer delta must be 0 (net-zero), got %s", positions[0].Delta)
+	}
+	if positions[0].LpBalance == nil || positions[0].LpBalance.Int64() != 999 {
+		t.Errorf("self-transfer balance = %v, want 999", positions[0].LpBalance)
 	}
 }
 

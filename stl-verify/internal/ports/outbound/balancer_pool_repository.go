@@ -30,9 +30,13 @@ type BalancerPoolRepository interface {
 	ListEnabledBalancerPools(ctx context.Context, chainID int64) ([]*entity.BalancerPool, error)
 
 	// ListBalancerPoolTokens returns the join-table rows for a pool in
-	// token_index order. Used at worker startup to materialise the per-pool
-	// token-slot lookup needed to project Vault events onto typed columns.
-	ListBalancerPoolTokens(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, error)
+	// token_index order, plus the parallel slice of token contract addresses
+	// (resolved from the token table). Used at worker startup to materialise
+	// the per-pool token-slot lookup AND the address→index map needed to
+	// project Vault Swap events onto typed columns; without the addresses the
+	// address→index map is empty after a restart and every Swap on a known
+	// pool fails to resolve its tokenIn/tokenOut until the next getPoolTokens.
+	ListBalancerPoolTokens(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, []common.Address, error)
 
 	// UpsertBalancerPoolToken inserts or updates a balancer_pool_token row.
 	// Conflict key is (balancer_pool_id, token_index); ON CONFLICT refreshes

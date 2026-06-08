@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -105,79 +106,82 @@ func TestProcessMessages_DoesNotDeleteOnHandlerError(t *testing.T) {
 	}
 }
 
-// On a handler error, the SQS ApproximateReceiveCount must be surfaced in the
-// log so a poison-pill stuck near the DLQ threshold is visible in metrics.
-func TestProcessMessages_LogsApproximateReceiveCountOnError(t *testing.T) {
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
-	msg := makeMsg("1", "h1", event)
-	msg.ApproximateReceiveCount = 7
-	consumer := &mockConsumer{
-		batches: [][]outbound.SQSMessage{{msg}},
+// ApproximateReceiveCount logging behaviour matrix. Surfacing the receive
+// count lets an operator spot a poison-pill near the DLQ threshold (review-11
+// DLQ visibility): the error path logs it at ERROR; a redelivered message
+// (count > 1) that still succeeds surfaces a WARN so a flaky "fails twice then
+// succeeds" message leaves a trace; a first delivery (count == 1) stays silent
+// so the signal isn't drowned out.
+func TestProcessMessages_ReceiveCountLogging(t *testing.T) {
+	cases := []struct {
+		name           string
+		receiveCount   int
+		handlerErr     bool
+		logLevel       slog.Level
+		wantErr        bool
+		wantCountField bool   // approximateReceiveCount present in the log
+		wantLevelSub   string // substring to require (e.g. `"level":"WARN"`); "" to skip
+	}{
+		{
+			name:           "error path surfaces count at ERROR",
+			receiveCount:   7,
+			handlerErr:     true,
+			logLevel:       slog.LevelError,
+			wantErr:        true,
+			wantCountField: true,
+		},
+		{
+			name:           "redelivered success surfaces WARN",
+			receiveCount:   5, // about to DLQ on the typical maxReceives=5 config
+			handlerErr:     false,
+			logLevel:       slog.LevelWarn,
+			wantErr:        false,
+			wantCountField: true,
+			wantLevelSub:   `"level":"WARN"`,
+		},
+		{
+			name:           "first delivery stays silent",
+			receiveCount:   1,
+			handlerErr:     false,
+			logLevel:       slog.LevelWarn,
+			wantErr:        false,
+			wantCountField: false,
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+			msg := makeMsg("1", "h1", event)
+			msg.ApproximateReceiveCount = tc.receiveCount
+			consumer := &mockConsumer{batches: [][]outbound.SQSMessage{{msg}}}
 
-	var buf bytes.Buffer
-	cfg := testConfig(consumer)
-	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError}))
+			var buf bytes.Buffer
+			cfg := testConfig(consumer)
+			cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: tc.logLevel}))
 
-	handler := func(_ context.Context, _ outbound.BlockEvent) error {
-		return errors.New("simulated handler failure")
-	}
-	if err := ProcessMessages(context.Background(), cfg, handler); err == nil {
-		t.Fatal("expected handler error")
-	}
-	if !strings.Contains(buf.String(), `"approximateReceiveCount":7`) {
-		t.Errorf("error log missing approximateReceiveCount field; got %q", buf.String())
-	}
-}
+			handler := func(_ context.Context, _ outbound.BlockEvent) error {
+				if tc.handlerErr {
+					return errors.New("simulated handler failure")
+				}
+				return nil
+			}
+			err := ProcessMessages(context.Background(), cfg, handler)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected handler error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ProcessMessages: %v", err)
+			}
 
-// Review-11 DLQ visibility: a message that's been redelivered several times
-// — eventually succeeding or not — should surface a WARN log up front so an
-// operator can see the redelivery pattern before the message hits the DLQ.
-// Pre-fix only the error path logged ApproximateReceiveCount; a flaky
-// "fails twice then succeeds" message left no trace.
-func TestProcessMessages_WarnsOnHighReceiveCount_EvenOnSuccess(t *testing.T) {
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
-	msg := makeMsg("1", "h1", event)
-	msg.ApproximateReceiveCount = 5 // about to DLQ on the typical maxReceives=5 config
-	consumer := &mockConsumer{
-		batches: [][]outbound.SQSMessage{{msg}},
-	}
-
-	var buf bytes.Buffer
-	cfg := testConfig(consumer)
-	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
-	handler := func(_ context.Context, _ outbound.BlockEvent) error { return nil } // success
-	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
-		t.Fatalf("ProcessMessages: %v", err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, `"approximateReceiveCount":5`) {
-		t.Errorf("expected warn log to surface high receive count; got %q", out)
-	}
-	if !strings.Contains(out, `"level":"WARN"`) {
-		t.Errorf("expected the redelivery surface to be WARN-level; got %q", out)
-	}
-}
-
-// First-delivery messages must NOT produce the redelivery warning — that
-// would drown out the legitimate signal and break dashboards.
-func TestProcessMessages_NoWarnOnFirstDelivery(t *testing.T) {
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
-	msg := makeMsg("1", "h1", event)
-	msg.ApproximateReceiveCount = 1 // first delivery
-	consumer := &mockConsumer{
-		batches: [][]outbound.SQSMessage{{msg}},
-	}
-	var buf bytes.Buffer
-	cfg := testConfig(consumer)
-	cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	handler := func(_ context.Context, _ outbound.BlockEvent) error { return nil }
-	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
-		t.Fatalf("ProcessMessages: %v", err)
-	}
-	if strings.Contains(buf.String(), "approximateReceiveCount") {
-		t.Errorf("first-delivery message should not trigger redelivery warn; log = %q", buf.String())
+			out := buf.String()
+			hasCount := strings.Contains(out, `"approximateReceiveCount":`+strconv.Itoa(tc.receiveCount))
+			if hasCount != tc.wantCountField {
+				t.Errorf("approximateReceiveCount present = %v, want %v; log = %q", hasCount, tc.wantCountField, out)
+			}
+			if tc.wantLevelSub != "" && !strings.Contains(out, tc.wantLevelSub) {
+				t.Errorf("log missing %q; got %q", tc.wantLevelSub, out)
+			}
+		})
 	}
 }
 

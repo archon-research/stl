@@ -96,7 +96,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	awsCfg, err := loadAWSConfig(ctx)
 	if err != nil {
 		d.Close()
-		return nil, err
+		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
 
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
@@ -110,7 +110,11 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		return nil, fmt.Errorf("creating SQS consumer: %w", err)
 	}
 	d.SQSConsumer = sqsConsumer
-	d.cleanups = append(d.cleanups, func() { sqsConsumer.Close() })
+	d.cleanups = append(d.cleanups, func() {
+		if err := sqsConsumer.Close(); err != nil {
+			logger.Warn("closing SQS consumer", "error", err)
+		}
+	})
 
 	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
 		Addr:      cfg.RedisAddr,

@@ -50,7 +50,8 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	if err := fs.Parse(args); err != nil {
-		return Config{}, err
+		// %w preserves flag.ErrHelp so callers can still distinguish -help.
+		return Config{}, fmt.Errorf("parsing %s flags: %w", flagSetName, err)
 	}
 
 	cfg := Config{
@@ -103,6 +104,17 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 			return Config{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
 		}
 		cfg.VisibilityTimeout = v
+	}
+
+	// Range-validate the SQS timings (from flag OR env). AWS rejects these at
+	// call time, but a bad value should fail fast at boot with a clear message
+	// rather than surfacing as opaque ReceiveMessage errors on the hot path.
+	// WaitTimeSeconds: 0–20 (long-poll max). VisibilityTimeout: 0–43200 (12h).
+	if cfg.WaitTime < 0 || cfg.WaitTime > 20 {
+		return Config{}, fmt.Errorf("SQS wait time %d out of range [0,20]", cfg.WaitTime)
+	}
+	if cfg.VisibilityTimeout < 0 || cfg.VisibilityTimeout > 43200 {
+		return Config{}, fmt.Errorf("SQS visibility timeout %d out of range [0,43200]", cfg.VisibilityTimeout)
 	}
 
 	chainIDStr := env.Get("CHAIN_ID", "")

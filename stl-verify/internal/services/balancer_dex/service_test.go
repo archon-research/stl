@@ -29,7 +29,7 @@ import (
 type MockBalancerPoolRepository struct {
 	GetBalancerPoolFn                func(ctx context.Context, chainID int64, address common.Address) (*entity.BalancerPool, error)
 	ListEnabledBalancerPoolsFn       func(ctx context.Context, chainID int64) ([]*entity.BalancerPool, error)
-	ListBalancerPoolTokensFn         func(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, error)
+	ListBalancerPoolTokensFn         func(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, []common.Address, error)
 	UpsertBalancerPoolTokenFn        func(ctx context.Context, tx pgx.Tx, t *entity.BalancerPoolToken) error
 	SaveBalancerPoolStateFn          func(ctx context.Context, tx pgx.Tx, state *entity.BalancerPoolState) error
 	SaveBalancerPoolSwapFn           func(ctx context.Context, tx pgx.Tx, swap *entity.BalancerPoolSwap) error
@@ -50,11 +50,11 @@ func (m *MockBalancerPoolRepository) ListEnabledBalancerPools(ctx context.Contex
 	}
 	return nil, nil
 }
-func (m *MockBalancerPoolRepository) ListBalancerPoolTokens(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, error) {
+func (m *MockBalancerPoolRepository) ListBalancerPoolTokens(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, []common.Address, error) {
 	if m.ListBalancerPoolTokensFn != nil {
 		return m.ListBalancerPoolTokensFn(ctx, balancerPoolID)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 func (m *MockBalancerPoolRepository) UpsertBalancerPoolToken(ctx context.Context, tx pgx.Tx, t *entity.BalancerPoolToken) error {
 	if m.UpsertBalancerPoolTokenFn != nil {
@@ -467,15 +467,15 @@ func TestNewService_RejectsZeroChainID(t *testing.T) {
 func TestStartLoadsPoolsAndTokens(t *testing.T) {
 	h := newHarness(t)
 	pool := makePool()
-	slots, _ := makePoolTokens()
+	slots, addrs := makePoolTokens()
 	h.balancerRepo.ListEnabledBalancerPoolsFn = func(ctx context.Context, chainID int64) ([]*entity.BalancerPool, error) {
 		return []*entity.BalancerPool{pool}, nil
 	}
-	h.balancerRepo.ListBalancerPoolTokensFn = func(ctx context.Context, poolID int64) ([]*entity.BalancerPoolToken, error) {
+	h.balancerRepo.ListBalancerPoolTokensFn = func(ctx context.Context, poolID int64) ([]*entity.BalancerPoolToken, []common.Address, error) {
 		if poolID == pool.ID {
-			return slots, nil
+			return slots, addrs, nil
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	if err := h.svc.Start(context.Background()); err != nil {
@@ -491,6 +491,19 @@ func TestStartLoadsPoolsAndTokens(t *testing.T) {
 	}
 	if h.svc.registry.poolByPoolID(pool.PoolID) == nil {
 		t.Error("pool not registered by poolId")
+	}
+	// Regression (PR #345): loadRegistry must hydrate the address→index map
+	// from persisted slots, not pass nil. Without it, a Swap on a known pool
+	// fails to resolve tokenIn/tokenOut after a restart until the next
+	// getPoolTokens. wstETH(idx0) ⇆ WETH(idx2) must resolve from the DB load
+	// alone.
+	rp := h.svc.registry.poolByPoolID(pool.PoolID)
+	inIdx, outIdx, err := rp.tokenIndices(wstETHAddr, wethAddr)
+	if err != nil {
+		t.Fatalf("tokenIndices after loadRegistry: %v (addrToIx not hydrated from DB)", err)
+	}
+	if inIdx != 0 || outIdx != 2 {
+		t.Errorf("tokenIndices = (%d,%d), want (0,2)", inIdx, outIdx)
 	}
 }
 
@@ -960,6 +973,53 @@ func TestReadPoolState_DecodeErrorOnMandatoryField_PropagatesError(t *testing.T)
 			err := h.deliver([]shared.TransactionReceipt{receipt}, 100, 0)
 			if err == nil {
 				t.Fatalf("expected deliver to fail because %s decode failed with Success=true", tc.wantField)
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("error %q must reference field %q so on-call can tell which slot broke", err, tc.wantField)
+			}
+		})
+	}
+}
+
+// S1b (PR #345): a REVERTED mandatory slot (Success=false) must also propagate
+// an error, not silently write a state row with that column NULL. totalSupply /
+// getScalingFactors / getSwapFeePercentage are plain view methods that cannot
+// legitimately revert on a healthy Balancer V2 pool — a revert means a
+// malformed pool, wrong block, or ABI/contract drift. getActualSupply (slot 3)
+// is intentionally excluded: it legitimately reverts on paused / pre-init
+// composable pools, so Success=false there stays tolerated.
+func TestReadPoolState_RevertOnMandatoryField_PropagatesError(t *testing.T) {
+	cases := []struct {
+		name      string
+		slot      int
+		wantField string
+	}{
+		{"totalSupply", 4, "totalSupply"},
+		{"getScalingFactors", 5, "getScalingFactors"},
+		{"getSwapFeePercentage", 6, "getSwapFeePercentage"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.registerPool()
+
+			h.balancerRepo.SaveBalancerPoolSwapFn = func(_ context.Context, _ pgx.Tx, _ *entity.BalancerPoolSwap) error { return nil }
+			h.balancerRepo.SaveBalancerPoolStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.BalancerPoolState) error { return nil }
+			h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error { return nil }
+
+			// Reverted mandatory slot: Success=false, no ReturnData.
+			results := h.poolStateResults()
+			results[tc.slot] = outbound.Result{Success: false}
+
+			h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				return results, nil
+			}
+
+			log := h.makeVaultSwapLog(testPoolID, wstETHAddr, wethAddr, big.NewInt(100), big.NewInt(99), "0x1")
+			receipt := shared.TransactionReceipt{TransactionHash: testTxHash, Logs: []shared.Log{log}}
+			err := h.deliver([]shared.TransactionReceipt{receipt}, 100, 0)
+			if err == nil {
+				t.Fatalf("expected deliver to fail because mandatory %s reverted (Success=false)", tc.wantField)
 			}
 			if !strings.Contains(err.Error(), tc.wantField) {
 				t.Errorf("error %q must reference field %q so on-call can tell which slot broke", err, tc.wantField)

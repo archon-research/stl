@@ -300,36 +300,42 @@ func (b *blockchainService) readPoolState(ctx context.Context, pool *entity.Bala
 		out.ActualSupply = v
 	}
 
-	// 4: totalSupply. Mandatory on every Balancer V2 pool type — decode
-	// failure on Success=true means our ABI no longer matches the on-chain
-	// contract. Fail-fast rather than write a stale-looking row.
-	if results[4].Success {
-		v, err := unpackUint(b.poolRead, "totalSupply", results[4])
-		if err != nil {
-			return nil, fmt.Errorf("decoding totalSupply for pool %s: %w", pool.Address.Hex(), err)
-		}
-		out.TotalSupply = v
+	// 4: totalSupply. Mandatory on every Balancer V2 pool type. These plain
+	// view methods cannot legitimately revert on a healthy pool, so a
+	// Success=false (revert) is as much an error as an undecodable payload:
+	// either way, failing here and letting SQS retry beats persisting a row
+	// with a NULL in a mandatory column (a stale snapshot downstream consumers
+	// can't distinguish from real data).
+	if !results[4].Success {
+		return nil, fmt.Errorf("totalSupply reverted for pool %s at block %d", pool.Address.Hex(), blockNumber)
 	}
+	totalSupply, err := unpackUint(b.poolRead, "totalSupply", results[4])
+	if err != nil {
+		return nil, fmt.Errorf("decoding totalSupply for pool %s: %w", pool.Address.Hex(), err)
+	}
+	out.TotalSupply = totalSupply
 
 	// 5: getScalingFactors. Mandatory: every Balancer V2 pool exposes a
 	// scaling-factor vector that downstream price math depends on.
-	if results[5].Success {
-		sf, err := unpackUintSlice(b.poolRead, "getScalingFactors", results[5])
-		if err != nil {
-			return nil, fmt.Errorf("decoding getScalingFactors for pool %s: %w", pool.Address.Hex(), err)
-		}
-		out.ScalingFactors = sf
+	if !results[5].Success {
+		return nil, fmt.Errorf("getScalingFactors reverted for pool %s at block %d", pool.Address.Hex(), blockNumber)
 	}
+	scalingFactors, err := unpackUintSlice(b.poolRead, "getScalingFactors", results[5])
+	if err != nil {
+		return nil, fmt.Errorf("decoding getScalingFactors for pool %s: %w", pool.Address.Hex(), err)
+	}
+	out.ScalingFactors = scalingFactors
 
 	// 6: getSwapFeePercentage. Mandatory: required for every fee/yield
 	// calculation downstream; a silent NULL would skew accounting.
-	if results[6].Success {
-		v, err := unpackUint(b.poolRead, "getSwapFeePercentage", results[6])
-		if err != nil {
-			return nil, fmt.Errorf("decoding getSwapFeePercentage for pool %s: %w", pool.Address.Hex(), err)
-		}
-		out.SwapFee = v
+	if !results[6].Success {
+		return nil, fmt.Errorf("getSwapFeePercentage reverted for pool %s at block %d", pool.Address.Hex(), blockNumber)
 	}
+	swapFee, err := unpackUint(b.poolRead, "getSwapFeePercentage", results[6])
+	if err != nil {
+		return nil, fmt.Errorf("decoding getSwapFeePercentage for pool %s: %w", pool.Address.Hex(), err)
+	}
+	out.SwapFee = swapFee
 
 	// 7: getPausedState.
 	if results[7].Success {

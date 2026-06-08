@@ -232,21 +232,27 @@ func (s *Service) bootstrapGaugeFromMetaRegistry(ctx context.Context, pool *enti
 		// Expected: pool has no gauge registered. Skip without writing a row.
 		return nil
 	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		gauge := &entity.CurveGauge{
-			CurvePoolID: pool.ID,
-			ChainID:     pool.ChainID,
-			Address:     gaugeAddr,
-			Enabled:     true,
-		}
+	gauge := &entity.CurveGauge{
+		CurvePoolID: pool.ID,
+		ChainID:     pool.ChainID,
+		Address:     gaugeAddr,
+		Enabled:     true,
+	}
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		id, err := s.curveRepo.UpsertCurveGauge(ctx, tx, gauge)
 		if err != nil {
 			return fmt.Errorf("upserting bootstrap gauge %s: %w", gaugeAddr.Hex(), err)
 		}
 		gauge.ID = id
-		s.registry.addGauge(gauge)
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	// Register in-memory ONLY after the commit succeeds. Doing it inside the
+	// tx callback (the prior bug) leaves the registry ahead of the DB if the
+	// commit fails, so a later event would skip the (now-absent) gauge row.
+	s.registry.addGauge(gauge)
+	return nil
 }
 
 // processBlockEvent is the per-message handler. Each receipt's logs are filtered
@@ -439,11 +445,16 @@ func (s *Service) handleLPTokenTransfer(ctx context.Context, log shared.Log, poo
 	}
 
 	zero := common.Address{}
+	// A self-transfer (from == to) nets to zero for that holder. Left
+	// un-collapsed it reads the same balance twice and writes two rows with the
+	// same primary key — the second silently dropped by ON CONFLICT, leaving a
+	// misleading non-zero delta. Collapse to a single net-zero row.
+	selfTransfer := t.From != zero && t.From == t.To
 	users := make([]common.Address, 0, 2)
 	if t.From != zero {
 		users = append(users, t.From)
 	}
-	if t.To != zero {
+	if t.To != zero && !selfTransfer {
 		users = append(users, t.To)
 	}
 	balances, err := s.blockchain.readLPBalances(ctx, effectiveLPToken(pool), users, blockNumber)
@@ -462,6 +473,24 @@ func (s *Service) handleLPTokenTransfer(ctx context.Context, log shared.Log, poo
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveProtocolEvent(ctx, tx, decoded, decoded.Address, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
+		}
+		if selfTransfer {
+			// One net-zero row: the holder's balance is unchanged.
+			pos := &entity.CurveUserLpPosition{
+				CurvePoolID:  pool.ID,
+				UserAddress:  t.From,
+				BlockNumber:  blockNumber,
+				BlockVersion: int32(blockVersion),
+				Timestamp:    blockTimestamp,
+				TxHash:       decoded.TxHash,
+				LogIndex:     decoded.LogIdx,
+				LpBalance:    balanceFor(t.From),
+				Delta:        big.NewInt(0),
+			}
+			if err := s.curveRepo.SaveCurveUserLpPosition(ctx, tx, pos); err != nil {
+				return fmt.Errorf("saving lp position (self-transfer) for pool %s: %w", pool.Label, err)
+			}
+			return nil
 		}
 		if t.From != zero {
 			pos := &entity.CurveUserLpPosition{
@@ -565,9 +594,12 @@ func (s *Service) handleGaugeControllerLog(ctx context.Context, log shared.Log, 
 	case EventNewGauge:
 		return s.discoverNewGauge(ctx, decoded, chainID, blockNumber, blockVersion, blockTimestamp)
 	case EventKillGauge, EventKilled, EventUnkillGauge, EventUnkilled:
-		// Kill / Unkill toggles is_killed. Both controller-emitted variants
-		// (KillGauge / UnkillGauge) and gauge-emitted variants (Killed /
-		// Unkilled) flow through this branch.
+		// Kill / Unkill toggles is_killed. All four signatures are declared on
+		// the GaugeController ABI and only reach here via the controller-address
+		// branch in processReceipt. Kill state that doesn't surface as one of
+		// these events (e.g. a gauge-contract set_killed with no/!controller
+		// event) is reconciled separately in saveGaugeState from the on-chain
+		// is_killed() read, so the flag stays correct regardless.
 		isKilled := decoded.Name == EventKillGauge || decoded.Name == EventKilled
 		return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 			if err := s.saveProtocolEvent(ctx, tx, decoded, CurveGaugeControllerAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
@@ -623,7 +655,7 @@ func (s *Service) discoverNewGauge(ctx context.Context, decoded *DecodedEvent, c
 		HasNoCRV:        false,
 		Enabled:         true,
 	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveProtocolEvent(ctx, tx, decoded, CurveGaugeControllerAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
 		}
@@ -632,9 +664,13 @@ func (s *Service) discoverNewGauge(ctx context.Context, decoded *DecodedEvent, c
 			return fmt.Errorf("upserting gauge for pool %s: %w", pool.Label, err)
 		}
 		gauge.ID = id
-		s.registry.addGauge(gauge)
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	// Register in-memory only after commit — see bootstrapGaugeFromMetaRegistry.
+	s.registry.addGauge(gauge)
+	return nil
 }
 
 // resolveProtocolID returns the cached Curve protocol_id, populating it via

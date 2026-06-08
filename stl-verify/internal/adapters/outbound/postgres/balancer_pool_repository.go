@@ -127,42 +127,51 @@ func scanBalancerPool(row scanRow) (*entity.BalancerPool, error) {
 
 // ListBalancerPoolTokens returns the join-table rows for a pool in
 // token_index order.
-func (r *BalancerPoolRepository) ListBalancerPoolTokens(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, error) {
+func (r *BalancerPoolRepository) ListBalancerPoolTokens(ctx context.Context, balancerPoolID int64) ([]*entity.BalancerPoolToken, []common.Address, error) {
+	// JOIN token so the address→index map can be rebuilt at startup. The slot
+	// rows only carry token_id; the contract address (needed to resolve Swap
+	// tokenIn/tokenOut) lives in the token table.
 	rows, err := r.pool.Query(ctx, `
-		SELECT balancer_pool_id, token_index, token_id, is_phantom, rate_provider,
-		       created_at, updated_at
-		FROM balancer_pool_token
-		WHERE balancer_pool_id = $1
-		ORDER BY token_index`,
+		SELECT bpt.balancer_pool_id, bpt.token_index, bpt.token_id, bpt.is_phantom,
+		       bpt.rate_provider, bpt.created_at, bpt.updated_at, t.address
+		FROM balancer_pool_token bpt
+		JOIN token t ON t.id = bpt.token_id
+		WHERE bpt.balancer_pool_id = $1
+		ORDER BY bpt.token_index`,
 		balancerPoolID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("listing balancer pool tokens: %w", err)
+		return nil, nil, fmt.Errorf("listing balancer pool tokens: %w", err)
 	}
 	defer rows.Close()
 
-	var out []*entity.BalancerPoolToken
+	var (
+		out   []*entity.BalancerPoolToken
+		addrs []common.Address
+	)
 	for rows.Next() {
 		var (
 			t                entity.BalancerPoolToken
 			rateProviderBlob []byte // pgx scans SQL NULL into a nil []byte.
+			addrBlob         []byte
 		)
 		if err := rows.Scan(
 			&t.BalancerPoolID, &t.TokenIndex, &t.TokenID, &t.IsPhantom, &rateProviderBlob,
-			&t.CreatedAt, &t.UpdatedAt,
+			&t.CreatedAt, &t.UpdatedAt, &addrBlob,
 		); err != nil {
-			return nil, fmt.Errorf("scanning balancer pool token: %w", err)
+			return nil, nil, fmt.Errorf("scanning balancer pool token: %w", err)
 		}
 		if rateProviderBlob != nil {
 			a := common.BytesToAddress(rateProviderBlob)
 			t.RateProvider = &a
 		}
 		out = append(out, &t)
+		addrs = append(addrs, common.BytesToAddress(addrBlob))
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating balancer pool tokens: %w", err)
+		return nil, nil, fmt.Errorf("iterating balancer pool tokens: %w", err)
 	}
-	return out, nil
+	return out, addrs, nil
 }
 
 // UpsertBalancerPoolToken inserts or updates a balancer_pool_token row by

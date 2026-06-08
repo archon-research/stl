@@ -81,6 +81,12 @@ func (b *blockchainService) readPoolState(ctx context.Context, pool *entity.Curv
 	if n < 2 {
 		return nil, fmt.Errorf("pool %s has %d coins, need at least 2", pool.Address.Hex(), n)
 	}
+	// CoinDecimals is indexed up to n below (get_dy dx scaling). A malformed
+	// curve_pool seed row with fewer decimals than NCoins would panic the
+	// worker mid-multicall; reject it up front instead.
+	if len(pool.CoinDecimals) < n {
+		return nil, fmt.Errorf("pool %s has NCoins=%d but only %d coin decimals", pool.Address.Hex(), n, len(pool.CoinDecimals))
+	}
 
 	var calls []outbound.Call
 

@@ -178,11 +178,14 @@ func (s *Service) loadRegistry(ctx context.Context) error {
 		return fmt.Errorf("listing balancer pools: %w", err)
 	}
 	for _, p := range pools {
-		tokens, err := s.balancerRepo.ListBalancerPoolTokens(ctx, p.ID)
+		tokens, addrs, err := s.balancerRepo.ListBalancerPoolTokens(ctx, p.ID)
 		if err != nil {
 			return fmt.Errorf("listing pool tokens for %d: %w", p.ID, err)
 		}
-		s.registry.addPool(p, tokens, nil)
+		// Pass addrs so the address→index map is hydrated from the DB. Passing
+		// nil here (the prior bug) left addrToIx empty on restart, breaking
+		// Swap tokenIn/tokenOut resolution until the next getPoolTokens.
+		s.registry.addPool(p, tokens, addrs)
 	}
 	return nil
 }
@@ -304,13 +307,16 @@ func (s *Service) handleVaultLog(ctx context.Context, log shared.Log, name Balan
 		return fmt.Errorf("reading pool state for %s at block %d: %w", pool.entity.Label, blockNumber, err)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var tokenUpdate *entity.BalancerPoolToken
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveProtocolEvent(ctx, tx, decoded, BalancerVaultAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
 		}
-		if err := s.saveBalancerPoolEventProjection(ctx, tx, decoded, pool, blockNumber, blockVersion, blockTimestamp); err != nil {
+		tu, err := s.saveBalancerPoolEventProjection(ctx, tx, decoded, pool, blockNumber, blockVersion, blockTimestamp)
+		if err != nil {
 			return err
 		}
+		tokenUpdate = tu
 		if !statesWritten[pool.entity.ID] {
 			if err := s.savePoolState(ctx, tx, pool, state, blockNumber, blockVersion, blockTimestamp); err != nil {
 				return err
@@ -318,7 +324,15 @@ func (s *Service) handleVaultLog(ctx context.Context, log shared.Log, name Balan
 			statesWritten[pool.entity.ID] = true
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	// Apply the registry mutation only after the tx commits (see
+	// saveBalancerPoolEventProjection).
+	if tokenUpdate != nil {
+		pool.replaceToken(tokenUpdate)
+	}
+	return nil
 }
 
 // handlePoolLog processes a pool-contract emitted event: BPT Transfer or
@@ -353,13 +367,16 @@ func (s *Service) handlePoolLog(ctx context.Context, log shared.Log, pool *regis
 		return fmt.Errorf("reading pool state for %s at block %d: %w", pool.entity.Label, blockNumber, err)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var tokenUpdate *entity.BalancerPoolToken
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		if err := s.saveProtocolEvent(ctx, tx, decoded, pool.entity.Address, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return err
 		}
-		if err := s.saveBalancerPoolEventProjection(ctx, tx, decoded, pool, blockNumber, blockVersion, blockTimestamp); err != nil {
+		tu, err := s.saveBalancerPoolEventProjection(ctx, tx, decoded, pool, blockNumber, blockVersion, blockTimestamp)
+		if err != nil {
 			return err
 		}
+		tokenUpdate = tu
 		if !statesWritten[pool.entity.ID] {
 			if err := s.savePoolState(ctx, tx, pool, state, blockNumber, blockVersion, blockTimestamp); err != nil {
 				return err
@@ -367,7 +384,13 @@ func (s *Service) handlePoolLog(ctx context.Context, log shared.Log, pool *regis
 			statesWritten[pool.entity.ID] = true
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	if tokenUpdate != nil {
+		pool.replaceToken(tokenUpdate)
+	}
+	return nil
 }
 
 // handleBPTTransfer writes the protocol_event audit row plus one

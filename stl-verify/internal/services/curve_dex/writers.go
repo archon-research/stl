@@ -202,6 +202,22 @@ func (s *Service) saveGaugeState(ctx context.Context, tx pgx.Tx, gauge *entity.C
 	if err := s.curveRepo.SaveCurveGaugeState(ctx, tx, state); err != nil {
 		return nil, fmt.Errorf("saving gauge state for %s: %w", gauge.Address.Hex(), err)
 	}
+
+	// Reconcile the registry curve_gauge.is_killed flag from the freshly-read
+	// on-chain value. The discrete GaugeController Kill/Unkill events also flip
+	// it (handleGaugeControllerLog), but reconciling here makes the flag
+	// self-correct even if such an event is missed or emitted somewhere we
+	// don't route — closing the "is_killed never flips" gap raised in review
+	// without depending on the kill event's emit location. Gate on the loaded
+	// baseline (read-only, no in-memory mutation → no rollback desync): an
+	// active gauge (is_killed=false) never writes; a killed gauge re-syncs
+	// idempotently and emits ~nothing anyway. gs.IsKilled is nil on pre-V2
+	// gauges (is_killed() unsupported), so this is skipped there.
+	if gs.IsKilled != nil && *gs.IsKilled != gauge.IsKilled {
+		if err := s.curveRepo.SetCurveGaugeKilled(ctx, tx, chainID, gauge.Address, *gs.IsKilled); err != nil {
+			return nil, fmt.Errorf("reconciling is_killed for gauge %s: %w", gauge.Address.Hex(), err)
+		}
+	}
 	return newlyRegistered, nil
 }
 

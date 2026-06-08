@@ -19,12 +19,18 @@ import (
 //	PoolBalanceChanged              → balancer_pool_liquidity_event
 //	AmpUpdate* / TokenRate* / etc.  → balancer_pool_parameter_event
 //	PoolBalanceManaged              → no typed projection (protocol_event only)
-func (s *Service) saveBalancerPoolEventProjection(ctx context.Context, tx pgx.Tx, decoded *decodedEvent, pool *registeredPool, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+//
+// Returns a non-nil *BalancerPoolToken when the caller must refresh the
+// in-memory registry slot (TokenRateProviderSet). The caller MUST apply it via
+// pool.replaceToken ONLY after the surrounding transaction commits — mutating
+// the registry inside the tx callback (the prior bug) desyncs the cache from
+// the DB if the commit later rolls back.
+func (s *Service) saveBalancerPoolEventProjection(ctx context.Context, tx pgx.Tx, decoded *decodedEvent, pool *registeredPool, blockNumber int64, blockVersion int, blockTimestamp time.Time) (*entity.BalancerPoolToken, error) {
 	switch {
 	case decoded.Swap != nil:
 		inIdx, outIdx, err := pool.tokenIndices(decoded.Swap.TokenIn, decoded.Swap.TokenOut)
 		if err != nil {
-			return fmt.Errorf("resolving swap token indices for %s: %w", pool.entity.Label, err)
+			return nil, fmt.Errorf("resolving swap token indices for %s: %w", pool.entity.Label, err)
 		}
 		swap := &entity.BalancerPoolSwap{
 			BalancerPoolID: pool.entity.ID,
@@ -39,9 +45,9 @@ func (s *Service) saveBalancerPoolEventProjection(ctx context.Context, tx pgx.Tx
 			AmountOut:      decoded.Swap.AmountOut,
 		}
 		if err := s.balancerRepo.SaveBalancerPoolSwap(ctx, tx, swap); err != nil {
-			return fmt.Errorf("saving swap for %s: %w", pool.entity.Label, err)
+			return nil, fmt.Errorf("saving swap for %s: %w", pool.entity.Label, err)
 		}
-		return nil
+		return nil, nil
 
 	case decoded.Liquidity != nil:
 		l := decoded.Liquidity
@@ -63,9 +69,9 @@ func (s *Service) saveBalancerPoolEventProjection(ctx context.Context, tx pgx.Tx
 			ProtocolFeeAmounts: fees,
 		}
 		if err := s.balancerRepo.SaveBalancerPoolLiquidityEvent(ctx, tx, evt); err != nil {
-			return fmt.Errorf("saving liquidity event for %s: %w", pool.entity.Label, err)
+			return nil, fmt.Errorf("saving liquidity event for %s: %w", pool.entity.Label, err)
 		}
-		return nil
+		return nil, nil
 
 	case decoded.Parameter != nil:
 		p := decoded.Parameter
@@ -73,7 +79,7 @@ func (s *Service) saveBalancerPoolEventProjection(ctx context.Context, tx pgx.Tx
 		if p.Extra != nil {
 			b, err := json.Marshal(p.Extra)
 			if err != nil {
-				return fmt.Errorf("marshalling parameter extra: %w", err)
+				return nil, fmt.Errorf("marshalling parameter extra: %w", err)
 			}
 			extra = b
 		}
@@ -106,23 +112,25 @@ func (s *Service) saveBalancerPoolEventProjection(ctx context.Context, tx pgx.Tx
 			}
 		}
 		if err := s.balancerRepo.SaveBalancerPoolParameterEvent(ctx, tx, evt); err != nil {
-			return fmt.Errorf("saving parameter %s for %s: %w", p.Kind, pool.entity.Label, err)
+			return nil, fmt.Errorf("saving parameter %s for %s: %w", p.Kind, pool.entity.Label, err)
 		}
 		// TokenRateProviderSet refreshes the persistent join-table row so the
-		// registry stays in sync with the latest provider address.
+		// registry stays in sync with the latest provider address. Persist
+		// inside the tx, but hand the updated slot back to the caller to apply
+		// to the in-memory registry AFTER commit.
 		if p.Kind == entity.BalancerParameterEventTokenRateProviderSet && p.TokenIndex != nil && p.RateProvider != nil {
 			if existing, ok := pool.tokenAt(int(*p.TokenIndex)); ok {
 				updated := *existing
 				updated.RateProvider = p.RateProvider
 				if err := s.balancerRepo.UpsertBalancerPoolToken(ctx, tx, &updated); err != nil {
-					return fmt.Errorf("updating rate_provider for %s slot %d: %w", pool.entity.Label, *p.TokenIndex, err)
+					return nil, fmt.Errorf("updating rate_provider for %s slot %d: %w", pool.entity.Label, *p.TokenIndex, err)
 				}
-				pool.replaceToken(&updated)
+				return &updated, nil
 			}
 		}
-		return nil
+		return nil, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // savePoolState writes one balancer_pool_state row.
