@@ -52,7 +52,13 @@ func LoadDefaultProxies() ([]ProxyConfig, error) {
 		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
 	}
 
-	almProxyByStar := contract.GetAlmProxies()
+	return proxiesFromAlmProxy(contract.GetAlmProxies())
+}
+
+// proxiesFromAlmProxy flattens the contract's star -> chain -> [proxy] map into a
+// sorted []ProxyConfig, rejecting duplicate (chain, address) pairs and an empty
+// result.
+func proxiesFromAlmProxy(almProxyByStar map[string]map[string][]axis_synome_contract.ProxyConfig) ([]ProxyConfig, error) {
 	proxies := make([]ProxyConfig, 0)
 	proxyByAddress := make(map[proxyConfigKey]ProxyConfig)
 
