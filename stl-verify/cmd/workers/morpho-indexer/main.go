@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -235,6 +236,22 @@ func run(ctx context.Context, args []string) error {
 	buildReg, err := buildregistry.New(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
+	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	var archiveWrap archivingwire.Wrap
+	if archivingwire.Enabled() {
+		wrap, drain, werr := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "morpho")
+		if werr != nil {
+			return fmt.Errorf("wiring SC call archiver: %w", werr)
+		}
+		archiveWrap = wrap
+		defer drain()
+		logger.Info("raw SC call archiving enabled", "bucket", env.Get(archivingwire.EnvBucket, ""))
+	}
+
+	if archiveWrap != nil {
+		mc = archiveWrap(mc)
 	}
 
 	logger.Info("starting morpho indexer",

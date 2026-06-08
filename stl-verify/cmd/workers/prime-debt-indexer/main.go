@@ -22,6 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -184,6 +185,17 @@ func run(ctx context.Context, args []string) error {
 	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
+	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	if archivingwire.Enabled() {
+		wrap, drain, werr := archivingwire.NewS3WrapFromEnv(ctx, logger, chainID, int64(buildReg.BuildID()), "prime-debt")
+		if werr != nil {
+			return fmt.Errorf("wiring SC call archiver: %w", werr)
+		}
+		mc = wrap(mc)
+		defer drain()
+		logger.Info("raw SC call archiving enabled", "bucket", env.Get(archivingwire.EnvBucket, ""))
 	}
 
 	// Vat caller (backed by multicall)
