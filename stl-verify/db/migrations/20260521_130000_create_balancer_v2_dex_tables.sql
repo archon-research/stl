@@ -148,6 +148,86 @@ EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for balancer_pool_state';
 END $$;
 
+-- ---------------------------------------------------------------------------
+-- Current-state companion table (last-point optimization).
+--
+-- "Latest state for pool X" is the dominant read, and it carries no natural
+-- time bound, so against the hypertable it degrades into a last-point scan
+-- across every chunk (one index probe per chunk, growing forever). This plain
+-- (non-hypertable) table holds exactly one row per pool — the current state —
+-- so that read becomes an O(1) primary-key lookup independent of history.
+--
+-- The hypertable remains the append-only source of truth; this table is a
+-- mutable projection of its head. It is maintained by the AFTER INSERT trigger
+-- below, NOT written directly. An upsert (ON CONFLICT DO UPDATE) is only legal
+-- here because this is a regular table — TimescaleDB forbids cross-chunk
+-- upserts on the hypertable itself.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS balancer_pool_current (
+    balancer_pool_id   BIGINT       PRIMARY KEY REFERENCES balancer_pool (id),
+    block_number       BIGINT       NOT NULL,
+    block_version      INT          NOT NULL,
+    timestamp          TIMESTAMPTZ  NOT NULL,
+    source             TEXT         NOT NULL,
+    balances           NUMERIC[]    NOT NULL,
+    amp_factor         NUMERIC,
+    bpt_rate           NUMERIC,
+    actual_supply      NUMERIC,
+    total_supply       NUMERIC,
+    token_rates        NUMERIC[],
+    scaling_factors    NUMERIC[],
+    last_change_block  BIGINT,
+    processing_version INT          NOT NULL,
+    build_id           INT          NOT NULL,
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Projects each newly inserted hypertable row onto balancer_pool_current, but
+-- only when it is strictly newer than the stored head. "Newer" is the same
+-- total order idx_bps_current sorts by: (block_number, block_version,
+-- processing_version) descending. The guard makes the projection correct under
+-- out-of-order arrival, SQS replays, and reorgs, and keeps the result identical
+-- to the equivalent ORDER BY ... DESC LIMIT 1 over the hypertable.
+CREATE OR REPLACE FUNCTION refresh_balancer_pool_current()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO balancer_pool_current AS c (
+        balancer_pool_id, block_number, block_version, timestamp, source,
+        balances, amp_factor, bpt_rate, actual_supply, total_supply,
+        token_rates, scaling_factors, last_change_block,
+        processing_version, build_id, updated_at)
+    VALUES (
+        NEW.balancer_pool_id, NEW.block_number, NEW.block_version, NEW.timestamp, NEW.source,
+        NEW.balances, NEW.amp_factor, NEW.bpt_rate, NEW.actual_supply, NEW.total_supply,
+        NEW.token_rates, NEW.scaling_factors, NEW.last_change_block,
+        NEW.processing_version, NEW.build_id, NOW())
+    ON CONFLICT (balancer_pool_id) DO UPDATE SET
+        block_number       = EXCLUDED.block_number,
+        block_version      = EXCLUDED.block_version,
+        timestamp          = EXCLUDED.timestamp,
+        source             = EXCLUDED.source,
+        balances           = EXCLUDED.balances,
+        amp_factor         = EXCLUDED.amp_factor,
+        bpt_rate           = EXCLUDED.bpt_rate,
+        actual_supply      = EXCLUDED.actual_supply,
+        total_supply       = EXCLUDED.total_supply,
+        token_rates        = EXCLUDED.token_rates,
+        scaling_factors    = EXCLUDED.scaling_factors,
+        last_change_block  = EXCLUDED.last_change_block,
+        processing_version = EXCLUDED.processing_version,
+        build_id           = EXCLUDED.build_id,
+        updated_at         = NOW()
+    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version)
+        > (c.block_number, c.block_version, c.processing_version);
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_refresh_balancer_pool_current
+    AFTER INSERT ON balancer_pool_state
+    FOR EACH ROW
+EXECUTE FUNCTION refresh_balancer_pool_current();
+
 -- ===========================================================================
 -- Hypertable: per-Swap fact rows (Vault Swap events). token_in_idx / token_out_idx
 -- reference balancer_pool_token.token_index.

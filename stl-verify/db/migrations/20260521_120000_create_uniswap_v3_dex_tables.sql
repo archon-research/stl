@@ -164,6 +164,96 @@ EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for uniswap_v3_pool_state';
 END $$;
 
+-- ---------------------------------------------------------------------------
+-- Current-state companion table (last-point optimization).
+--
+-- "Latest state for pool X" is the dominant read, and it carries no natural
+-- time bound, so against the hypertable it degrades into a last-point scan
+-- across every chunk (one index probe per chunk, growing forever). This plain
+-- (non-hypertable) table holds exactly one row per pool — the current state —
+-- so that read becomes an O(1) primary-key lookup independent of history.
+--
+-- The hypertable remains the append-only source of truth; this table is a
+-- mutable projection of its head. It is maintained by the AFTER INSERT trigger
+-- below, NOT written directly. An upsert (ON CONFLICT DO UPDATE) is only legal
+-- here because this is a regular table — TimescaleDB forbids cross-chunk
+-- upserts on the hypertable itself.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS uniswap_v3_pool_current (
+    uniswap_v3_pool_id                 BIGINT       PRIMARY KEY REFERENCES uniswap_v3_pool (id),
+    block_number                       BIGINT       NOT NULL,
+    block_version                      INT          NOT NULL,
+    timestamp                          TIMESTAMPTZ  NOT NULL,
+    source                             TEXT         NOT NULL,
+    sqrt_price_x96                     NUMERIC      NOT NULL,
+    tick                               INT          NOT NULL,
+    liquidity                          NUMERIC      NOT NULL,
+    observation_index                  INT,
+    observation_cardinality            INT,
+    observation_cardinality_next       INT,
+    fee_protocol                       INT,
+    unlocked                           BOOLEAN,
+    tick_cumulative                    NUMERIC,
+    secs_per_liquidity_cumulative_x128 NUMERIC,
+    balance0                           NUMERIC,
+    balance1                           NUMERIC,
+    processing_version                 INT          NOT NULL,
+    build_id                           INT          NOT NULL,
+    updated_at                         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Projects each newly inserted hypertable row onto uniswap_v3_pool_current, but
+-- only when it is strictly newer than the stored head. "Newer" is the same
+-- total order idx_u3s_current sorts by: (block_number, block_version,
+-- processing_version) descending. The guard makes the projection correct under
+-- out-of-order arrival, SQS replays, and reorgs, and keeps the result identical
+-- to the equivalent ORDER BY ... DESC LIMIT 1 over the hypertable.
+CREATE OR REPLACE FUNCTION refresh_uniswap_v3_pool_current()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO uniswap_v3_pool_current AS c (
+        uniswap_v3_pool_id, block_number, block_version, timestamp, source,
+        sqrt_price_x96, tick, liquidity, observation_index, observation_cardinality,
+        observation_cardinality_next, fee_protocol, unlocked, tick_cumulative,
+        secs_per_liquidity_cumulative_x128, balance0, balance1,
+        processing_version, build_id, updated_at)
+    VALUES (
+        NEW.uniswap_v3_pool_id, NEW.block_number, NEW.block_version, NEW.timestamp, NEW.source,
+        NEW.sqrt_price_x96, NEW.tick, NEW.liquidity, NEW.observation_index, NEW.observation_cardinality,
+        NEW.observation_cardinality_next, NEW.fee_protocol, NEW.unlocked, NEW.tick_cumulative,
+        NEW.secs_per_liquidity_cumulative_x128, NEW.balance0, NEW.balance1,
+        NEW.processing_version, NEW.build_id, NOW())
+    ON CONFLICT (uniswap_v3_pool_id) DO UPDATE SET
+        block_number                       = EXCLUDED.block_number,
+        block_version                      = EXCLUDED.block_version,
+        timestamp                          = EXCLUDED.timestamp,
+        source                             = EXCLUDED.source,
+        sqrt_price_x96                     = EXCLUDED.sqrt_price_x96,
+        tick                               = EXCLUDED.tick,
+        liquidity                          = EXCLUDED.liquidity,
+        observation_index                  = EXCLUDED.observation_index,
+        observation_cardinality            = EXCLUDED.observation_cardinality,
+        observation_cardinality_next       = EXCLUDED.observation_cardinality_next,
+        fee_protocol                       = EXCLUDED.fee_protocol,
+        unlocked                           = EXCLUDED.unlocked,
+        tick_cumulative                    = EXCLUDED.tick_cumulative,
+        secs_per_liquidity_cumulative_x128 = EXCLUDED.secs_per_liquidity_cumulative_x128,
+        balance0                           = EXCLUDED.balance0,
+        balance1                           = EXCLUDED.balance1,
+        processing_version                 = EXCLUDED.processing_version,
+        build_id                           = EXCLUDED.build_id,
+        updated_at                         = NOW()
+    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version)
+        > (c.block_number, c.block_version, c.processing_version);
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_refresh_uniswap_v3_pool_current
+    AFTER INSERT ON uniswap_v3_pool_state
+    FOR EACH ROW
+EXECUTE FUNCTION refresh_uniswap_v3_pool_current();
+
 -- ===========================================================================
 -- Hypertable: per-Swap fact rows. amount0/amount1 are signed deltas from the
 -- pool's perspective.

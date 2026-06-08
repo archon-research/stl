@@ -157,6 +157,84 @@ EXCEPTION WHEN undefined_function THEN
     RAISE NOTICE 'add_tiering_policy not available, skipping tiering for curve_pool_state';
 END $$;
 
+-- ---------------------------------------------------------------------------
+-- Current-state companion table (last-point optimization).
+--
+-- "Latest state for pool X" is the dominant read, and it carries no natural
+-- time bound, so against the hypertable it degrades into a last-point scan
+-- across every chunk (one index probe per chunk, growing forever). This plain
+-- (non-hypertable) table holds exactly one row per pool — the current state —
+-- so that read becomes an O(1) primary-key lookup independent of history.
+--
+-- The hypertable remains the append-only source of truth; this table is a
+-- mutable projection of its head, mirroring the registry/history split already
+-- used by curve_pool + curve_pool_state. It is maintained by the AFTER INSERT
+-- trigger below, NOT written directly. Note: an upsert (ON CONFLICT DO UPDATE)
+-- is only legal here because this is a regular table — TimescaleDB forbids
+-- cross-chunk upserts on the hypertable itself.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS curve_pool_current (
+    curve_pool_id      BIGINT       PRIMARY KEY REFERENCES curve_pool (id),
+    block_number       BIGINT       NOT NULL,
+    block_version      INT          NOT NULL,
+    timestamp          TIMESTAMPTZ  NOT NULL,
+    source             TEXT         NOT NULL,
+    balances           NUMERIC[]    NOT NULL,
+    total_supply       NUMERIC,
+    virtual_price      NUMERIC,
+    a_factor           NUMERIC,
+    fee                NUMERIC,
+    price_oracle       NUMERIC[],
+    last_price         NUMERIC[],
+    processing_version INT          NOT NULL,
+    build_id           INT          NOT NULL,
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+-- Projects each newly inserted hypertable row onto curve_pool_current, but only
+-- when it is strictly newer than the stored head. "Newer" is the same total
+-- order idx_cps_current sorts by: (block_number, block_version,
+-- processing_version) descending. The guard makes the projection correct under
+-- out-of-order arrival, SQS replays, and reorgs (a higher block_version for the
+-- same block wins), and keeps the result identical to the equivalent
+-- ORDER BY ... DESC LIMIT 1 over the hypertable.
+CREATE OR REPLACE FUNCTION refresh_curve_pool_current()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO curve_pool_current AS c (
+        curve_pool_id, block_number, block_version, timestamp, source,
+        balances, total_supply, virtual_price, a_factor, fee,
+        price_oracle, last_price, processing_version, build_id, updated_at)
+    VALUES (
+        NEW.curve_pool_id, NEW.block_number, NEW.block_version, NEW.timestamp, NEW.source,
+        NEW.balances, NEW.total_supply, NEW.virtual_price, NEW.a_factor, NEW.fee,
+        NEW.price_oracle, NEW.last_price, NEW.processing_version, NEW.build_id, NOW())
+    ON CONFLICT (curve_pool_id) DO UPDATE SET
+        block_number       = EXCLUDED.block_number,
+        block_version      = EXCLUDED.block_version,
+        timestamp          = EXCLUDED.timestamp,
+        source             = EXCLUDED.source,
+        balances           = EXCLUDED.balances,
+        total_supply       = EXCLUDED.total_supply,
+        virtual_price      = EXCLUDED.virtual_price,
+        a_factor           = EXCLUDED.a_factor,
+        fee                = EXCLUDED.fee,
+        price_oracle       = EXCLUDED.price_oracle,
+        last_price         = EXCLUDED.last_price,
+        processing_version = EXCLUDED.processing_version,
+        build_id           = EXCLUDED.build_id,
+        updated_at         = NOW()
+    WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version)
+        > (c.block_number, c.block_version, c.processing_version);
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_refresh_curve_pool_current
+    AFTER INSERT ON curve_pool_state
+    FOR EACH ROW
+EXECUTE FUNCTION refresh_curve_pool_current();
+
 -- ===========================================================================
 -- Hypertable: per-Swap fact rows (TokenExchange events).
 -- ===========================================================================

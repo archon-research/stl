@@ -8,12 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/archon-research/stl/stl-verify/cmd/workers/internal/dexbootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswap_v3_dex"
@@ -38,29 +35,10 @@ func main() {
 	}
 }
 
-// resolveNFPMAddress reads NFPM_ADDRESS or falls back to the canonical
-// mainnet address baked into uniswap_v3_dex.DefaultNFPMAddress. Pulled out
-// from run() because it's the only worker-specific env read.
-func resolveNFPMAddress() (common.Address, error) {
-	nfpmStr := env.Get("NFPM_ADDRESS", "")
-	if nfpmStr == "" {
-		return uniswap_v3_dex.DefaultNFPMAddress, nil
-	}
-	if !common.IsHexAddress(nfpmStr) {
-		return common.Address{}, fmt.Errorf("NFPM_ADDRESS %q is not a valid hex address", nfpmStr)
-	}
-	return common.HexToAddress(nfpmStr), nil
-}
-
 func run(ctx context.Context, args []string) error {
 	cfg, err := dexbootstrap.ParseConfig("uniswap-v3-dex-worker", args)
 	if err != nil {
 		return fmt.Errorf("parsing uniswap-v3-dex-worker config: %w", err)
-	}
-
-	nfpmAddress, err := resolveNFPMAddress()
-	if err != nil {
-		return fmt.Errorf("resolving NFPM address: %w", err)
 	}
 
 	deps, err := dexbootstrap.Bootstrap(ctx, cfg, dexbootstrap.BootstrapOptions{
@@ -85,7 +63,7 @@ func run(ctx context.Context, args []string) error {
 				Logger:      deps.Logger,
 				ChainID:     cfg.ChainID,
 			},
-			NFPMAddress: nfpmAddress,
+			NFPMAddress: uniswap_v3_dex.DefaultNFPMAddress,
 			Telemetry:   deps.DexTelemetry,
 		},
 		deps.SQSConsumer,
@@ -102,6 +80,6 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	deps.Logger.Info("uniswap v3 dex worker started, waiting for messages...",
-		"nfpm", nfpmAddress.Hex())
+		"nfpm", uniswap_v3_dex.DefaultNFPMAddress.Hex())
 	return lifecycle.Run(ctx, deps.Logger, service)
 }
