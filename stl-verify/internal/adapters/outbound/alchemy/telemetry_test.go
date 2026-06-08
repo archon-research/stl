@@ -50,7 +50,7 @@ func TestRequestDurationHistogram_UsesSecondsBuckets(t *testing.T) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp)
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}

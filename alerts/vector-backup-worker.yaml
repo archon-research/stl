@@ -27,11 +27,13 @@ groups:
 
       - alert: VectorBackupWorkerStalled
         # Backup worker not processing blocks while the watcher IS producing.
-        # The `and on(chain)` guard prevents firing when the watcher itself
-        # is down (that's VectorWatcherNoBlocks's job).
+        # The `and on (chain, cluster)` guard prevents firing when the watcher
+        # itself is down (that's VectorWatcherNoBlocks's job); both sides carry
+        # a `chain` label, so the join is per-chain.
         #
-        # Assumes the backup worker emits its own `blocks_processed_total`
-        # counter tagged with service_name="stl-backup-worker".
+        # Watcher matcher is `~"(^|.*-)watcher"` (not `="stl-watcher"`): PR #369
+        # split the watcher into per-chain service.names ("watcher",
+        # "arbitrum-watcher", ...)
         expr: |
           (
             sum by (chain, cluster) (
@@ -45,7 +47,7 @@ groups:
             sum by (chain, cluster) (
               rate(alchemy_client_requests_total{
                 k8s_namespace_name="vector",
-                service_name="stl-watcher",
+                service_name=~"(^|.*-)watcher",
                 rpc_method="eth_getBlockByNumber"
               }[5m])
             ) > 0
@@ -59,7 +61,7 @@ groups:
         annotations:
           summary: "Vector backup-worker stalled on {{ $labels.chain }} (watcher still producing)"
           description: |
-            `stl-backup-worker` on chain `{{ $labels.chain }}` has not
+            `raw-data-backup` on chain `{{ $labels.chain }}` has not
             processed a block for >15m while the watcher is still polling
             Alchemy. SQS depth is likely growing — raw block archive will
             fall behind.
@@ -98,7 +100,7 @@ groups:
         annotations:
           summary: "Vector backup-worker p99 processing latency >30s on {{ $labels.chain }}"
           description: |
-            p99 SQS→S3 processing for `stl-backup-worker` on chain
+            p99 SQS→S3 processing for `raw-data-backup` on chain
             `{{ $labels.chain }}` is `{{ $value | printf "%.1fs" }}` over
             15m. Approaching the SQS visibility timeout — messages may
             start getting redelivered and the queue depth will grow.

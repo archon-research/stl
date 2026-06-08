@@ -25,7 +25,7 @@ func TestNewMetrics_ProcessingDurationUsesSecondsBuckets(t *testing.T) {
 	otel.SetMeterProvider(mp)
 	t.Cleanup(func() { otel.SetMeterProvider(prev) })
 
-	m, err := NewMetrics("test")
+	m, err := NewMetrics("test", "mainnet")
 	if err != nil {
 		t.Fatalf("NewMetrics() error: %v", err)
 	}

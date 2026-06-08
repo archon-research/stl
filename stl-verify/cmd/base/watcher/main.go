@@ -27,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
@@ -177,8 +178,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create OpenTelemetry instrumentation for Alchemy client
-	alchemyTelemetry, err := alchemy.NewTelemetry()
+	// Create OpenTelemetry instrumentation for Alchemy client. The chain name
+	// becomes the `chain` metric label; an unknown CHAIN_ID is a misconfiguration
+	// that would silently emit an empty chain, so fail hard like the parse above.
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		logger.Error("resolving chain name for metrics", "error", err)
+		os.Exit(1)
+	}
+	alchemyTelemetry, err := alchemy.NewTelemetry(chainName)
 	if err != nil {
 		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
 	}
