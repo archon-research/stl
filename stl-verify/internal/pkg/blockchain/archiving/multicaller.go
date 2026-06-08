@@ -25,7 +25,7 @@ type Config struct {
 }
 
 // Multicaller decorates an inner outbound.Multicaller, archiving every
-// successful call in the background (fire-and-forget).
+// call (success or failure) in the background (fire-and-forget).
 type Multicaller struct {
 	inner    outbound.Multicaller
 	archiver outbound.CallArchiver
