@@ -47,10 +47,12 @@ func TestBalanceOfSource_Supports(t *testing.T) {
 		{"securitize", "", true},
 		{"superstate", "", true},
 		{"proxy", "", true},
+		{"centrifuge", "centrifuge", true},
 		{"erc4626", "", false},
 		{"curve", "", false},
 		{"uni_v3_pool", "", false},
 		{"anchorage", "", false},
+		{"centrifuge_feeder", "centrifuge", false},
 	}
 
 	for _, tt := range tests {

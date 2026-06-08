@@ -79,9 +79,11 @@ func DefaultSkipSources(logger *slog.Logger) []PositionSource {
 
 // DefaultStubSources returns placeholders for types not yet implemented.
 func DefaultStubSources(logger *slog.Logger) []PositionSource {
+	// "centrifuge" is intentionally absent: Centrifuge tranche tokens are plain
+	// ERC20s and are handled by BalanceOfSource. centrifuge_feeder is a different
+	// mechanism and remains a stub until implemented.
 	return []PositionSource{
 		NewStubSource("psm3", "psm3", logger),
-		NewStubSource("centrifuge", "centrifuge", logger),
 		NewStubSource("centrifuge-feeder", "centrifuge_feeder", logger),
 		NewStubSource("galaxy-clo", "galaxy_clo", logger),
 	}
