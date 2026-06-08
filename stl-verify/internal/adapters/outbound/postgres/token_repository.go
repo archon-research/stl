@@ -97,9 +97,17 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 // no-op when the token already has a non-empty symbol, so a redrive or a later
 // sighting cannot clobber a resolved symbol.
 func (r *TokenRepository) MarkTokenSymbolPending(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, anchorBlock int64) error {
+	// Preserve the EARLIEST anchor block via LEAST: a still-unresolved token may
+	// be re-flagged in later blocks (e.g. used as collateral in another new
+	// market). Overwriting the anchor would push the backstop horizon
+	// (anchor + K) forward on every sighting so it could never be reached, leaving
+	// the token pending forever. Mirrors the created_at_block LEAST convention.
 	_, err := tx.Exec(ctx,
 		`UPDATE token
-		    SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('symbol_pending', true, 'symbol_anchor_block', $3::bigint)
+		    SET metadata = COALESCE(metadata, '{}'::jsonb)
+		        || jsonb_build_object('symbol_pending', true)
+		        || jsonb_build_object('symbol_anchor_block',
+		               LEAST(COALESCE((metadata ->> 'symbol_anchor_block')::bigint, $3::bigint), $3::bigint))
 		  WHERE chain_id = $1 AND address = $2 AND COALESCE(symbol, '') = ''`,
 		chainID, address.Bytes(), anchorBlock)
 	if err != nil {

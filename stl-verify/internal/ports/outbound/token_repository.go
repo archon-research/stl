@@ -35,9 +35,14 @@ type TokenRepository interface {
 	// MarkTokenSymbolPending flags a token (within the caller's tx) as needing
 	// later symbol reconciliation, recording the anchor block. It is a no-op if
 	// the token already has a non-empty symbol, so it never clobbers a resolved one.
+	// Re-flagging a still-pending token preserves the EARLIEST anchor block, so the
+	// reconciliation backstop horizon does not move forward on repeat sightings.
 	MarkTokenSymbolPending(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, anchorBlock int64) error
 
-	// ListTokensPendingSymbol returns tokens flagged for symbol reconciliation.
+	// ListTokensPendingSymbol returns the tokens flagged for symbol reconciliation
+	// on the given chain, capped at limit rows. A non-positive limit applies the
+	// implementation's default cap (callers normally pass a positive batch size);
+	// implementations must not treat limit <= 0 as "return zero rows".
 	ListTokensPendingSymbol(ctx context.Context, chainID int64, limit int) ([]PendingTokenSymbol, error)
 
 	// ResolveTokenSymbol sets a resolved symbol and clears the pending flag.

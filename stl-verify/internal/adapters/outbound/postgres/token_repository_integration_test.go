@@ -323,6 +323,58 @@ func TestSymbolReconciliation_MarkAndList(t *testing.T) {
 	}
 }
 
+// TestSymbolReconciliation_MarkPendingPreservesEarliestAnchor verifies that
+// re-flagging a still-unresolved token in a later block keeps the EARLIEST anchor
+// block, so the reconciliation backstop horizon (anchor + K) cannot be pushed
+// forward indefinitely.
+func TestSymbolReconciliation_MarkPendingPreservesEarliestAnchor(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	chainID := int64(1)
+	const earliest = int64(100)
+	const later = int64(200)
+
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, earliest); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	// First sighting at the earliest block.
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, earliest); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending(earliest): %v", err)
+	}
+	// Re-flag at a later block while the symbol is still unresolved.
+	if err := repo.MarkTokenSymbolPending(ctx, tx, chainID, addr, later); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("MarkTokenSymbolPending(later): %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	pending, err := repo.ListTokensPendingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensPendingSymbol: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending token, got %d", len(pending))
+	}
+	if pending[0].AnchorBlock != earliest {
+		t.Errorf("anchor block = %d, want %d (earliest preserved, not moved to %d)", pending[0].AnchorBlock, earliest, later)
+	}
+}
+
 // TestSymbolReconciliation_ResolveRemovesFromPendingAndSetsSymbol verifies that after
 // calling ResolveTokenSymbol the token is no longer listed as pending and its symbol
 // column is updated.
