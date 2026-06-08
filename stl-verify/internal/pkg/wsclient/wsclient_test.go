@@ -581,6 +581,146 @@ func TestReportErrorKeepsFirstAndLogsRest(t *testing.T) {
 	}
 }
 
+// TestConnDrainsBufferedMessagesBeforeError verifies that every frame received
+// before a connection drop is delivered by Next before the terminal error.
+//
+// The bug: Next uses a flat 3-way select. Once the read pump closes done and
+// c.msgs still holds buffered frames, both cases are ready simultaneously and
+// Go picks randomly. The sleep below forces that window. With 8 frames and an
+// independent coin-flip per call, the probability of all 8 surviving is
+// (1/2)^8 ≈ 0.4%, so the test is essentially certain to fail without the fix
+// even in a single iteration; 10 iterations reduce the false-pass probability
+// to (1/256)^10 ≈ 10^-24.
+// TestConnNoDataLossAndOrderPreservedAfterDrop verifies two properties after a
+// connection drop when c.msgs and c.done are both ready:
+//   1. No data loss: every buffered frame is delivered before the error.
+//   2. No reordering: frames arrive in the exact order they were buffered.
+//
+// Ordering follows from c.msgs being a FIFO channel. Data loss is the property
+// the fix addresses: without it the flat select can fire the done case while
+// msgs is non-empty, returning the error and orphaning the remaining frames.
+func TestConnNoDataLossAndOrderPreservedAfterDrop(t *testing.T) {
+	const msgCount = 8
+
+	for iter := 0; iter < 1000; iter++ {
+		c := &Conn{
+			conn:   newFakeConn(),
+			cfg:    testConfig(),
+			logger: slog.Default(),
+			msgs:   make(chan Frame, msgCount),
+			done:   make(chan struct{}),
+		}
+		for i := 0; i < msgCount; i++ {
+			c.msgs <- Frame{Type: websocket.TextMessage, Data: []byte{byte(i)}}
+		}
+		dropErr := errors.New("connection reset by peer")
+		c.termErr.Store(&dropErr)
+		close(c.done)
+
+		ctx := context.Background()
+		for want := 0; want < msgCount; want++ {
+			frame, err := c.Next(ctx)
+			if err != nil {
+				t.Fatalf("iter %d: message %d: got error %v — data loss", iter, want, err)
+			}
+			if got := int(frame.Data[0]); got != want {
+				t.Fatalf("iter %d: message %d: got %d — out of order", iter, want, got)
+			}
+		}
+		if _, err := c.Next(ctx); err == nil {
+			t.Fatalf("iter %d: expected terminal error after all messages drained", iter)
+		}
+	}
+}
+
+// TestConnDrainsBufferedMessagesBeforeError_Synthetic is the deterministic
+// companion to the server-based test below. It constructs a Conn directly,
+// pre-fills c.msgs with msgCount frames, then closes c.done before the first
+// Next call so both are unconditionally ready. There is no timing dependency:
+// every single Next call races the two ready cases. Over 1000 iterations the
+// probability of never dropping a message under the current flat select is
+// ((1/2)^8)^1000 ≈ 10^-2408 — statistical impossibility.
+func TestConnDrainsBufferedMessagesBeforeError_Synthetic(t *testing.T) {
+	const msgCount = 8
+
+	for iter := 0; iter < 1000; iter++ {
+		c := &Conn{
+			conn:   newFakeConn(),
+			cfg:    testConfig(),
+			logger: slog.Default(),
+			msgs:   make(chan Frame, msgCount),
+			done:   make(chan struct{}),
+		}
+		for i := 0; i < msgCount; i++ {
+			c.msgs <- Frame{Type: websocket.TextMessage, Data: []byte("msg")}
+		}
+		dropErr := errors.New("connection reset by peer")
+		c.termErr.Store(&dropErr)
+		close(c.done) // simulate connection drop with msgs already buffered
+
+		received := 0
+		ctx := context.Background()
+		for {
+			if _, err := c.Next(ctx); err != nil {
+				break
+			}
+			received++
+		}
+		if received != msgCount {
+			t.Fatalf("iter %d: received %d/%d — %d buffered messages were dropped by the select race",
+				iter, received, msgCount, msgCount-received)
+		}
+	}
+}
+
+// TestConnDrainsBufferedMessagesBeforeError is the network-based counterpart:
+// it uses a real server to confirm the same race exists end-to-end.
+func TestConnDrainsBufferedMessagesBeforeError(t *testing.T) {
+	const msgCount = 8 // matches testConfig InboundBuffer so all frames fit
+
+	for iter := 0; iter < 10; iter++ {
+		url := newTestServer(t, func(conn *websocket.Conn) {
+			for i := 0; i < msgCount; i++ {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte("msg")); err != nil {
+					return
+				}
+			}
+			// Return immediately: the deferred Close drops the connection,
+			// leaving all msgCount frames in c.msgs. The read pump will set
+			// termErr and close done. After the sleep both are ready at once.
+		})
+
+		cfg := testConfig()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+		conn, err := Dial(ctx, url, cfg)
+		if err != nil {
+			cancel()
+			t.Fatalf("iter %d: Dial: %v", iter, err)
+		}
+
+		// Force the race window: wait until the read pump has seen the close
+		// error, stored termErr, and closed done. At this point c.msgs holds
+		// msgCount frames AND c.done is closed — both select cases are ready.
+		time.Sleep(200 * time.Millisecond)
+
+		received := 0
+		for {
+			if _, err := conn.Next(ctx); err != nil {
+				break
+			}
+			received++
+		}
+		conn.Close()
+		cancel()
+
+		if received != msgCount {
+			t.Fatalf("iter %d: received %d/%d buffered messages before the terminal error — %d were dropped by the select race",
+				iter, received, msgCount, msgCount-received)
+		}
+	}
+}
+
 func TestConnCloseIsIdempotent(t *testing.T) {
 	url := newTestServer(t, keepOpen)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
