@@ -335,9 +335,7 @@ func TestConnNextReturnsPromptlyAfterError(t *testing.T) {
 	}
 
 	// A subsequent Next must return promptly (the connection is dead), not block
-	// until the context deadline. The select between errc and done is random when
-	// both are ready, so tolerate either the original error or ErrClosed; the key
-	// assertion is that it does not block until ctx times out.
+	// until the context deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -362,11 +360,18 @@ func TestConnWriteFailsAfterClose(t *testing.T) {
 	}
 	conn.Close()
 
-	if err := conn.WriteJSON(map[string]any{"op": "subscribe"}); err == nil {
-		t.Error("WriteJSON should fail after the connection is closed")
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{"WriteJSON", func() error { return conn.WriteJSON(map[string]any{"op": "subscribe"}) }},
+		{"WriteText", func() error { return conn.WriteText([]byte("hello")) }},
+		{"WriteBinary", func() error { return conn.WriteBinary([]byte{0x01}) }},
 	}
-	if err := conn.WriteText([]byte("hello")); err == nil {
-		t.Error("WriteText should fail after the connection is closed")
+	for _, tt := range tests {
+		if err := tt.fn(); err == nil {
+			t.Errorf("%s should fail after the connection is closed", tt.name)
+		}
 	}
 }
 
@@ -379,7 +384,7 @@ func TestConnWriteFailsAfterClose(t *testing.T) {
 // frames, so msgs stays empty and only the terminal-error path can fire. Run
 // many iterations to defeat any select randomness between competing signals.
 func TestConnNextSurfacesRealErrorNotErrClosed(t *testing.T) {
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		url := newTestServer(t, func(*websocket.Conn) {
 			// Return immediately: the deferred Close drops the TCP connection
 			// abnormally (no close handshake) without sending any frame.

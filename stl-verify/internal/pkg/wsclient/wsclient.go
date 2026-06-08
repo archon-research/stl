@@ -222,21 +222,35 @@ func (c *Conn) shutdown() {
 	})
 }
 
+// terminalError reports why the connection ended: the recorded terminal error,
+// or ErrClosed if it was shut down by a call to Close.
+func (c *Conn) terminalError() error {
+	if errp := c.termErr.Load(); errp != nil {
+		return *errp
+	}
+	return ErrClosed
+}
+
 // Next returns the next inbound frame, or an error if ctx was cancelled or the
 // connection ended. When the connection ended, it returns the terminal error
 // that tore it down, or ErrClosed if it was shut down by a call to Close. Next
 // must be called from a single goroutine.
 func (c *Conn) Next(ctx context.Context) (Frame, error) {
+	// Deliver any already-buffered frame before reporting termination, so frames
+	// received just before the connection closed are not dropped.
+	select {
+	case msg := <-c.msgs:
+		return msg, nil
+	default:
+	}
+
 	select {
 	case <-ctx.Done():
 		return Frame{}, ctx.Err()
 	case msg := <-c.msgs:
 		return msg, nil
 	case <-c.done:
-		if errp := c.termErr.Load(); errp != nil {
-			return Frame{}, *errp
-		}
-		return Frame{}, ErrClosed
+		return Frame{}, c.terminalError()
 	}
 }
 
@@ -247,7 +261,10 @@ func (c *Conn) WriteJSON(v any) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
-	return c.conn.WriteJSON(v)
+	if err := c.conn.WriteJSON(v); err != nil {
+		return fmt.Errorf("write json frame: %w", err)
+	}
+	return nil
 }
 
 // WriteText sends a raw text frame.
@@ -266,7 +283,10 @@ func (c *Conn) writeMessage(messageType int, data []byte) error {
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
-	return c.conn.WriteMessage(messageType, data)
+	if err := c.conn.WriteMessage(messageType, data); err != nil {
+		return fmt.Errorf("write websocket frame: %w", err)
+	}
+	return nil
 }
 
 // Close tears down the connection and stops internal goroutines. After Close,
