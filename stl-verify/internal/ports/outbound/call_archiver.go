@@ -26,7 +26,7 @@ type CallRecord struct {
 // CallArchiver persists a single raw smart contract call.
 type CallArchiver interface {
 	// Archive writes one call record to durable storage. Implementations must
-	// be idempotent: archiving the same (block, blockVersion, callData) twice
-	// is a no-op.
+	// be idempotent: archiving the same
+	// (chainID, blockNumber, blockVersion, source, callData) twice is a no-op.
 	Archive(ctx context.Context, record CallRecord) error
 }

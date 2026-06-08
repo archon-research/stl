@@ -32,6 +32,10 @@ var (
 const (
 	testBucket    = "stl-sentineltest-ethereum-raw"
 	testDeployEnv = "test"
+	// archiveBucket receives raw SC call archives when ARCHIVE_SC_CALLS=true.
+	archiveBucket = "stl-raw-sc-calls-test"
+	// archivePrefix is the chain_id partition rawsckey.Build writes under for chainID=1.
+	archivePrefix = "raw-sc-calls/chain_id=1/"
 )
 
 func TestMain(m *testing.M) {
@@ -156,6 +160,108 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	// Verify DeleteMessage was called
 	if deletes := sqsState.Deletes(); deletes < 1 {
 		t.Errorf("expected at least 1 DeleteMessage call, got %d", deletes)
+	}
+}
+
+// TestRunIntegration_ArchivesRawCalls drives run() with ARCHIVE_SC_CALLS=true
+// and asserts that processing a block writes raw SC call archives to S3. This
+// covers the otherwise-untested enabled wiring branch in run() plus the
+// WithBlockVersion plumbing in the service.
+func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
+	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	bgCtx := context.Background()
+
+	if _, err := pool.Exec(bgCtx, `UPDATE oracle SET enabled = false WHERE name != 'sparklend'`); err != nil {
+		t.Fatalf("disable non-sparklend oracles: %v", err)
+	}
+
+	var tokenCount int
+	if err := pool.QueryRow(bgCtx,
+		`SELECT COUNT(*) FROM oracle_asset oa
+		 JOIN oracle os ON os.id = oa.oracle_id
+		 WHERE os.name = 'sparklend' AND oa.enabled = true`).Scan(&tokenCount); err != nil {
+		t.Fatalf("count tokens: %v", err)
+	}
+	if tokenCount == 0 {
+		t.Fatal("no seeded oracle assets found")
+	}
+
+	rpcServer := testutil.StartMockEthRPC(t, tokenCount)
+	defer rpcServer.Close()
+
+	sqsServer, sqsState := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
+	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
+	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
+		t.Fatalf("create block S3 bucket: %v", err)
+	}
+	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
+		t.Fatalf("create archive S3 bucket: %v", err)
+	}
+	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
+
+	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
+
+	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
+	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
+	// Enable archiving for this run.
+	t.Setenv("ARCHIVE_SC_CALLS", "true")
+	t.Setenv("RAW_SC_BUCKET", archiveBucket)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(ctx, []string{
+			"-queue", "http://localhost/test-queue",
+			"-db", dbURL,
+			"-redis", sharedRedisAddr,
+		})
+	}()
+
+	select {
+	case <-sqsState.FirstCallReceived:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for service to start")
+	}
+
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
+		var count int
+		pool.QueryRow(bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&count)
+		return count >= tokenCount
+	}, "prices to be stored in DB")
+
+	// Archives are fire-and-forget; poll the archive bucket until at least one
+	// object lands under the chain_id partition.
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
+		out, err := s3Client.ListObjectsV2(bgCtx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(archiveBucket),
+			Prefix: aws.String(archivePrefix),
+		})
+		return err == nil && len(out.Contents) > 0
+	}, "raw SC call archives to be written to S3")
+
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run() did not return after context cancellation")
 	}
 }
 

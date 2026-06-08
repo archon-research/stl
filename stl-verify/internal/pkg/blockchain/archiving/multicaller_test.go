@@ -34,6 +34,16 @@ func (r *recordingArchiver) Archive(_ context.Context, rec outbound.CallRecord) 
 	return nil
 }
 
+// errArchiver returns err from Archive; panicArchiver panics. Both exercise the
+// fire-and-forget guarantee that archiving never affects the caller.
+type errArchiver struct{ err error }
+
+func (a errArchiver) Archive(context.Context, outbound.CallRecord) error { return a.err }
+
+type panicArchiver struct{}
+
+func (panicArchiver) Archive(context.Context, outbound.CallRecord) error { panic("archiver boom") }
+
 func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, wg *sync.WaitGroup) *Multicaller {
 	return NewMulticaller(inner, arch, Config{
 		Source:  "oracle-price",
@@ -88,6 +98,38 @@ func TestExecuteArchivesEachCall(t *testing.T) {
 			t.Fatalf("source = %q", r.Source)
 		}
 	}
+}
+
+func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
+	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
+	var wg sync.WaitGroup
+	d := newTestDecorator(inner, errArchiver{err: errors.New("s3 down")}, &wg)
+
+	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("Execute returned err despite fire-and-forget archiving: %v", err)
+	}
+	if len(res) != 1 || !res[0].Success {
+		t.Fatalf("results not forwarded: %+v", res)
+	}
+	d.Close() // must drain cleanly even though every Archive failed
+}
+
+func TestExecuteSurvivesArchivePanic(t *testing.T) {
+	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
+	var wg sync.WaitGroup
+	d := newTestDecorator(inner, panicArchiver{}, &wg)
+
+	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(res) != 1 {
+		t.Fatalf("results not forwarded: %+v", res)
+	}
+	// Close must return: a panic in the archive goroutine must be recovered,
+	// not propagated (which would crash the process).
+	d.Close()
 }
 
 func TestExecuteDoesNotArchiveOnInnerError(t *testing.T) {
