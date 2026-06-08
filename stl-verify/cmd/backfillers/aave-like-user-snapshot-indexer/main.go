@@ -27,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -288,6 +289,17 @@ func run(args []string) error {
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
+	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	if archivingwire.Enabled() {
+		wrap, drain, werr := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "aave-like-snapshot")
+		if werr != nil {
+			return fmt.Errorf("wiring SC call archiver: %w", werr)
+		}
+		mc = wrap(mc)
+		defer drain()
+		logger.Info("raw SC call archiving enabled", "bucket", env.Get(archivingwire.EnvBucket, ""))
 	}
 
 	erc20ABI, err := abis.GetERC20ABI()
