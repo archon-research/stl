@@ -1,9 +1,21 @@
 {
   "$defs": {
+    "AllocationType": {
+      "description": "STL ``allocation_type`` classification emitted in the exported contract.\n\nA closed set of the values the legacy allocation tracker used; the enum\nvalues are exactly those strings so the export remains byte-for-byte\ncompatible.",
+      "enum": [
+        "allocation",
+        "pol",
+        "asset",
+        "psm3",
+        "risk_capital"
+      ],
+      "title": "AllocationType",
+      "type": "string"
+    },
     "AlmProxiesContainer": {
       "additionalProperties": false,
       "properties": {
-        "proxies": {
+        "AlmProxy": {
           "additionalProperties": {
             "additionalProperties": {
               "items": {
@@ -13,12 +25,12 @@
             },
             "type": "object"
           },
-          "title": "Proxies",
+          "title": "Almproxy",
           "type": "object"
         }
       },
       "required": [
-        "proxies"
+        "AlmProxy"
       ],
       "title": "AlmProxiesContainer",
       "type": "object"
@@ -39,19 +51,19 @@
     "AssetsByPrimeContainer": {
       "additionalProperties": false,
       "properties": {
-        "entries": {
+        "ASSETS_BY_PRIME": {
           "additionalProperties": {
             "items": {
               "$ref": "#/$defs/TokenEntryModel"
             },
             "type": "array"
           },
-          "title": "Entries",
+          "title": "Assets By Prime",
           "type": "object"
         }
       },
       "required": [
-        "entries"
+        "ASSETS_BY_PRIME"
       ],
       "title": "AssetsByPrimeContainer",
       "type": "object"
@@ -164,12 +176,10 @@
           "type": "string"
         },
         "allocation_type": {
-          "title": "Allocation Type",
-          "type": "string"
+          "$ref": "#/$defs/AllocationType"
         },
         "token_type": {
-          "title": "Token Type",
-          "type": "string"
+          "$ref": "#/$defs/TokenType"
         }
       },
       "required": [
@@ -184,6 +194,25 @@
       ],
       "title": "TokenEntryModel",
       "type": "object"
+    },
+    "TokenType": {
+      "description": "STL ``token_type`` classification emitted in the exported contract.\n\nA closed set of the values the legacy allocation tracker used; the enum\nvalues are exactly those strings so the export remains byte-for-byte\ncompatible.",
+      "enum": [
+        "atoken",
+        "erc4626",
+        "erc20",
+        "curve",
+        "uni_v3_pool",
+        "uni_v3_lp",
+        "centrifuge",
+        "centrifuge_feeder",
+        "anchorage",
+        "superstate",
+        "psm3",
+        "proxy"
+      ],
+      "title": "TokenType",
+      "type": "string"
     }
   },
   "additionalProperties": false,

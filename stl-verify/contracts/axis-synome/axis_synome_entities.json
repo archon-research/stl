@@ -1,6 +1,6 @@
 {
-  "version": "0.1.0.dev68",
-  "axis_synome_git_commit": "8abd0b32bb39d5df8664dcee575974a20d7b042d",
+  "version": "0.1.0.dev73",
+  "axis_synome_git_commit": "337323854a7705ad90c0f3d630cc2809830b196b",
   "axis_synome": {
     "spec": {
       "asc": {
@@ -251,7 +251,7 @@
                 {
                   "contract_address": "0x6b405dca74897c9442d369dcf6c0ec230f7e1c7c",
                   "wallet_address": "0x94b398acb2fce988871218221ea6a4a2b26cccbc",
-                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                  "asset_address": "0x754704bc059f8c67012fed69bc8a327a5aafb603",
                   "star": "grove",
                   "chain": "monad",
                   "protocol": "uniswap",
@@ -411,9 +411,9 @@
                   "token_type": "erc4626"
                 },
                 {
-                  "contract_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+                  "contract_address": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab",
                   "wallet_address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca",
-                  "asset_address": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab",
+                  "asset_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
                   "star": "spark",
                   "chain": "base",
                   "protocol": "aave",
@@ -959,16 +959,6 @@
                   "protocol": "sky",
                   "allocation_type": "risk_capital",
                   "token_type": "erc20"
-                },
-                {
-                  "contract_address": "0x4e65fe4dba92790696d040ac24aa414708f5c0ab",
-                  "wallet_address": "0x2917956eff0b5eaf030abdb4ef4296df775009ca",
-                  "asset_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-                  "star": "spark",
-                  "chain": "base",
-                  "protocol": "aave",
-                  "allocation_type": "allocation",
-                  "token_type": "atoken"
                 },
                 {
                   "contract_address": "0x5875eee11cf8398102fdad704c9e96607675467a",
