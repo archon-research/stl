@@ -37,6 +37,10 @@ asyncio_mode = "auto"
 include = ["app", "tests", "scripts"]
 exclude = [".venv", "**/__pycache__", "app/static"]
 
+[tool.uv]
+# Guard against supply chain attacks from fresh dependencies
+exclude-newer = "7 days"
+
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
