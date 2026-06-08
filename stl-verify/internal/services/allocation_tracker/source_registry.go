@@ -14,14 +14,14 @@ type SourceRegistry struct {
 	sources []PositionSource
 	logger  *slog.Logger
 
-	mu              sync.Mutex
-	seenUnsupported map[string]struct{}
+	mu            sync.Mutex
+	seenUntracked map[string]struct{}
 }
 
 func NewSourceRegistry(logger *slog.Logger) *SourceRegistry {
 	return &SourceRegistry{
-		logger:          logger.With("component", "source-registry"),
-		seenUnsupported: make(map[string]struct{}),
+		logger:        logger.With("component", "source-registry"),
+		seenUntracked: make(map[string]struct{}),
 	}
 }
 
@@ -39,24 +39,36 @@ func (r *SourceRegistry) Route(entry *TokenEntry) PositionSource {
 	return nil
 }
 
-// warnUnsupportedOnce logs an unsupported (untracked) entry at Warn, but only
-// once per distinct (token type, protocol). A configured entry with no matching
-// source means its positions silently stop being tracked; this surfaces the gap
-// without flooding the logs on every sweep.
+// warnUnsupportedOnce warns that an entry has no matching source at all, so its
+// positions are silently not tracked.
 func (r *SourceRegistry) warnUnsupportedOnce(entry *TokenEntry) {
+	r.warnUntrackedOnce(entry, "unsupported entry skipped; position not tracked")
+}
+
+// warnStubbedOnce warns that an entry matched a not-yet-implemented stub source.
+// The stub returns no balances, so these positions are silently not tracked even
+// though they route to a "supported" source — surface it like a true gap.
+func (r *SourceRegistry) warnStubbedOnce(entry *TokenEntry) {
+	r.warnUntrackedOnce(entry, "entry matched a not-yet-implemented stub source; position not tracked")
+}
+
+// warnUntrackedOnce logs an untracked entry at Warn, but only once per distinct
+// (token type, protocol), so a steady-state gap stays visible without flooding
+// the logs on every sweep.
+func (r *SourceRegistry) warnUntrackedOnce(entry *TokenEntry, msg string) {
 	key := entry.TokenType + "|" + entry.Protocol
 
 	r.mu.Lock()
-	_, seen := r.seenUnsupported[key]
+	_, seen := r.seenUntracked[key]
 	if !seen {
-		r.seenUnsupported[key] = struct{}{}
+		r.seenUntracked[key] = struct{}{}
 	}
 	r.mu.Unlock()
 
 	if seen {
 		return
 	}
-	r.logger.Warn("unsupported entry skipped; position not tracked",
+	r.logger.Warn(msg,
 		"type", entry.TokenType,
 		"protocol", entry.Protocol,
 		"exampleContract", entry.ContractAddress.Hex())
@@ -71,6 +83,11 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 		if source == nil {
 			r.warnUnsupportedOnce(entry)
 			continue
+		}
+		if _, ok := source.(placeholderSource); ok {
+			// Matched a stub that records nothing — flag it so these positions
+			// aren't silently dropped, then still let the (no-op) stub run.
+			r.warnStubbedOnce(entry)
 		}
 		grouped[source] = append(grouped[source], entry)
 	}
