@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curve-dex-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curve-dex-worker
+  template:
+    metadata:
+      labels:
+        app: curve-dex-worker
+    spec:
+      containers:
+        - name: curve-dex-worker
+          image: localhost/stl-curve-dex-worker:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-curve-dex.fifo

@@ -85,3 +85,25 @@ pre-commit:
       run: |
         GOBIN=$(go env GOPATH)/bin
         $GOBIN/goimports -l -w {staged_files}
+
+    # Catch stray worker / indexer / watcher binaries at the stl-verify/
+    # root. Per CLAUDE.md "output to stl/dist" — the canonical build target
+    # is `make build-go` / `make build-go-one CMD=cmd/<path>` which puts
+    # output in stl-verify/dist/. A bare `go build ./cmd/workers/<name>/...`
+    # from this directory drops the binary here at the root, which is
+    # gitignored but still wasteful (~30-50MB each) and easy to miss.
+    # Failing the hook nudges the workflow toward dist/.
+    #
+    # Dockerfile.* names are explicitly excluded: Dockerfile.curve-dex-worker
+    # matches the *-worker glob but is the legitimate Docker build context.
+    no-stray-binaries:
+      run: |
+        stray=$(find . -maxdepth 1 -type f \
+          \( -name '*-worker' -o -name '*-indexer' -o -name 'watcher' \) \
+          ! -name 'Dockerfile.*' 2>/dev/null)
+        if [ -n "$stray" ]; then
+          echo "stray binaries at stl-verify/ root — use 'make build-go-one CMD=...' to build into dist/ instead:"
+          echo "$stray" | sed 's/^/  - /'
+          echo "remove with: rm$(echo "$stray" | tr '\n' ' ')"
+          exit 1
+        fi

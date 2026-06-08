@@ -107,8 +107,11 @@ func (c *DirectCaller) Address() common.Address {
 }
 
 func toBlockNumArg(number *big.Int) (string, error) {
+	// nil → "latest" per the Multicaller port contract. Use this for one-shot
+	// startup reads against immutable view methods; event handlers should
+	// pass a concrete block.
 	if number == nil {
-		return "", fmt.Errorf("block number is required")
+		return "latest", nil
 	}
 	if number.Sign() < 0 {
 		return "", fmt.Errorf("negative block number: %s", number)

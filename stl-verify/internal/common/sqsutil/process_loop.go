@@ -88,6 +88,22 @@ func ProcessMessages(
 			continue
 		}
 
+		// Surface redelivery up front, regardless of whether this attempt
+		// succeeds. A "fails twice then succeeds" message is otherwise
+		// invisible — the success path silently deletes the message and
+		// the prior failures have already rotated out of pod logs. Logging
+		// here exposes flaky-but-recovering patterns and approach-to-DLQ
+		// thresholds at the same time. Threshold of 2 means "anything
+		// past the first delivery" which is the actionable signal; tune
+		// upward if log volume becomes a problem.
+		if msg.ApproximateReceiveCount >= 2 {
+			cfg.Logger.Warn("message redelivered",
+				"messageID", msg.MessageID,
+				"approximateReceiveCount", msg.ApproximateReceiveCount,
+				"block", event.BlockNumber,
+				"chain", event.ChainID)
+		}
+
 		if event.ChainID != cfg.ChainID {
 			cfg.Logger.Error("chain ID mismatch, deleting message",
 				"messageID", msg.MessageID,
@@ -105,8 +121,14 @@ func ProcessMessages(
 		}
 
 		if err := handler(ctx, event); err != nil {
+			// Surface the SQS delivery counter on the error log so a
+			// stuck poison-pill is visible in metrics before the
+			// message reaches the DLQ. ApproximateReceiveCount=1 is
+			// normal (first delivery); >1 means at least one prior
+			// attempt failed or timed out.
 			cfg.Logger.Error("failed to process message",
 				"messageID", msg.MessageID,
+				"approximateReceiveCount", msg.ApproximateReceiveCount,
 				"error", err)
 			errs = append(errs, err)
 			continue

@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uniswap-v3-dex-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: uniswap-v3-dex-worker
+  template:
+    metadata:
+      labels:
+        app: uniswap-v3-dex-worker
+    spec:
+      containers:
+        - name: uniswap-v3-dex-worker
+          image: localhost/stl-uniswap-v3-dex-worker:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-uniswap-v3-dex.fifo

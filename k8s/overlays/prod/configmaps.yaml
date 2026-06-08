@@ -276,3 +276,37 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: curve-dex-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniswap-v3-dex-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  NFPM_ADDRESS: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: balancer-dex-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "1"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"

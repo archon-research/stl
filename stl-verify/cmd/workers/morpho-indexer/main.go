@@ -25,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -130,12 +131,11 @@ func parseConfig(args []string) (cliConfig, error) {
 		cfg.visibilityTimeout = v
 	}
 
-	chainIDStr := env.Get("CHAIN_ID", "1")
-	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	chainIDInt, err := chainutil.RequireChainID()
 	if err != nil {
-		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+		return cliConfig{}, fmt.Errorf("invalid CHAIN_ID: %w", err)
 	}
-	cfg.chainID = chainID
+	cfg.chainID = int64(chainIDInt)
 
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
 	if cfg.s3Bucket == "" {

@@ -28,6 +28,9 @@ resources:
   - ../../base/watcher-data-validator
   - ../../base/migrate
   - ../../base/python-api
+  - ../../base/curve-dex-worker
+  - ../../base/uniswap-v3-dex-worker
+  - ../../base/balancer-dex-worker
   - external-secrets.yaml
   - configmaps.yaml
 
@@ -50,6 +53,15 @@ images:
   - name: morpho-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
     newTag: "092e44053c8575ffd11a4586e2356ef25858cf40"
+  - name: curve-dex-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-curve-dex-worker
+    newTag: "f3cdb695e030d1c801f1f0209279db460c491653"
+  - name: uniswap-v3-dex-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-uniswap-v3-dex-worker
+    newTag: "f3cdb695e030d1c801f1f0209279db460c491653"
+  - name: balancer-dex-worker
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-balancer-dex-worker
+    newTag: "f3cdb695e030d1c801f1f0209279db460c491653"
   - name: allocation-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
     newTag: "092e44053c8575ffd11a4586e2356ef25858cf40"

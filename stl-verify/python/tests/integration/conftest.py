@@ -182,17 +182,24 @@ async def insert_receipt_token(
 ) -> int:
     """Insert a receipt_token row (upserting on chain_id + address) and return its ID.
 
-    Picks an arbitrary protocol and token from the given ``chain_id`` to
-    satisfy the foreign-key constraints.
+    Picks a lending protocol and an arbitrary token from the given ``chain_id``
+    to satisfy the foreign-key constraints. The protocol pick is restricted to
+    ``protocol_type = 'lending'`` and ordered deterministically: receipt tokens
+    only exist for lending protocols, and crypto-lending risk models
+    (gap_sweep) are only applicable to supported lending protocols. A bare
+    ``LIMIT 1`` would non-deterministically pick any protocol on the chain —
+    including non-lending ones (e.g. the DEX protocol rows seeded for the
+    Curve/Uniswap/Balancer indexers) — yielding a receipt token that no
+    crypto-lending model recognizes.
     """
     conn = await asyncpg.connect(db_url)
     try:
         protocol_id = await conn.fetchval(
-            "SELECT id FROM protocol WHERE chain_id = $1 LIMIT 1",
+            "SELECT id FROM protocol WHERE chain_id = $1 AND protocol_type = 'lending' ORDER BY id LIMIT 1",
             chain_id,
         )
         if protocol_id is None:
-            raise RuntimeError(f"no protocol seed found for chain_id={chain_id}")
+            raise RuntimeError(f"no lending protocol seed found for chain_id={chain_id}")
         token_id = await conn.fetchval(
             "SELECT id FROM token WHERE chain_id = $1 LIMIT 1",
             chain_id,

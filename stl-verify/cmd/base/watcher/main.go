@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/trace"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +28,7 @@ import (
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
@@ -140,11 +140,12 @@ func main() {
 		logger.Error("ALCHEMY_API_KEY environment variable is required")
 		os.Exit(1)
 	}
-	chainID, err := strconv.ParseInt(requireEnv("CHAIN_ID"), 10, 64)
+	chainIDInt, err := chainutil.RequireChainID()
 	if err != nil {
-		logger.Error("CHAIN_ID must be a valid integer", "error", err)
+		logger.Error("invalid CHAIN_ID", "error", err)
 		os.Exit(1)
 	}
+	chainID := int64(chainIDInt)
 
 	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
 

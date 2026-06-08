@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: balancer-dex-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: balancer-dex-worker
+  template:
+    metadata:
+      labels:
+        app: balancer-dex-worker
+    spec:
+      containers:
+        - name: balancer-dex-worker
+          image: localhost/stl-balancer-dex-worker:local
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: stl-config
+            - secretRef:
+                name: stl-secrets
+          env:
+            - name: AWS_SQS_QUEUE_URL
+              value: http://localstack:4566/000000000000/stl-ethereum-balancer-dex.fifo

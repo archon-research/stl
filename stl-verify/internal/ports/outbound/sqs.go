@@ -12,6 +12,14 @@ type SQSMessage struct {
 
 	// Body is the raw message body (JSON).
 	Body string
+
+	// ApproximateReceiveCount is the SQS system attribute counting how many
+	// times this message has been delivered. 1 on first delivery; >1 means
+	// the previous handler returned an error or didn't DeleteMessage in
+	// time. Logged on handler error so a stuck poison-pill is visible in
+	// metrics before it reaches the DLQ. Zero if the consumer couldn't read
+	// the attribute (e.g. older SDK or unsupported queue type).
+	ApproximateReceiveCount int
 }
 
 // DeadLetterPublisher sends failed message bodies to a dead-letter queue so

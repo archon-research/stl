@@ -211,7 +211,7 @@ func TestParseConfig(t *testing.T) {
 				"ALCHEMY_API_KEY": "test-key",
 				"CHAIN_ID":        "not-a-number",
 			},
-			wantError: "parsing CHAIN_ID",
+			wantError: "CHAIN_ID must be a valid integer",
 		},
 		{
 			name: "SQS_WAIT_TIME env override",
@@ -349,6 +349,15 @@ func TestParseConfig(t *testing.T) {
 
 			for k, v := range tt.envVars {
 				t.Setenv(k, v)
+			}
+			// CHAIN_ID is now required (no silent default to mainnet via
+			// chainutil.RequireChainID). Subtests that don't care about
+			// chain-ID handling get a sensible default so the parse can
+			// reach the field they DO care about (timings, flag parsing,
+			// etc). Subtests that explicitly set CHAIN_ID (valid or
+			// invalid) keep that value.
+			if _, has := tt.envVars["CHAIN_ID"]; !has {
+				t.Setenv("CHAIN_ID", "1")
 			}
 
 			cfg, err := parseConfig(tt.args)

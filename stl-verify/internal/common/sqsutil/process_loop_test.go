@@ -1,10 +1,13 @@
 package sqsutil
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -100,6 +103,85 @@ func TestProcessMessages_DoesNotDeleteOnHandlerError(t *testing.T) {
 	}
 	if len(consumer.deletedHandles) != 0 {
 		t.Errorf("expected no deletes on handler error, got %v", consumer.deletedHandles)
+	}
+}
+
+// ApproximateReceiveCount logging behaviour matrix. Surfacing the receive
+// count lets an operator spot a poison-pill near the DLQ threshold (review-11
+// DLQ visibility): the error path logs it at ERROR; a redelivered message
+// (count > 1) that still succeeds surfaces a WARN so a flaky "fails twice then
+// succeeds" message leaves a trace; a first delivery (count == 1) stays silent
+// so the signal isn't drowned out.
+func TestProcessMessages_ReceiveCountLogging(t *testing.T) {
+	cases := []struct {
+		name           string
+		receiveCount   int
+		handlerErr     bool
+		logLevel       slog.Level
+		wantErr        bool
+		wantCountField bool   // approximateReceiveCount present in the log
+		wantLevelSub   string // substring to require (e.g. `"level":"WARN"`); "" to skip
+	}{
+		{
+			name:           "error path surfaces count at ERROR",
+			receiveCount:   7,
+			handlerErr:     true,
+			logLevel:       slog.LevelError,
+			wantErr:        true,
+			wantCountField: true,
+		},
+		{
+			name:           "redelivered success surfaces WARN",
+			receiveCount:   5, // about to DLQ on the typical maxReceives=5 config
+			handlerErr:     false,
+			logLevel:       slog.LevelWarn,
+			wantErr:        false,
+			wantCountField: true,
+			wantLevelSub:   `"level":"WARN"`,
+		},
+		{
+			name:           "first delivery stays silent",
+			receiveCount:   1,
+			handlerErr:     false,
+			logLevel:       slog.LevelWarn,
+			wantErr:        false,
+			wantCountField: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+			msg := makeMsg("1", "h1", event)
+			msg.ApproximateReceiveCount = tc.receiveCount
+			consumer := &mockConsumer{batches: [][]outbound.SQSMessage{{msg}}}
+
+			var buf bytes.Buffer
+			cfg := testConfig(consumer)
+			cfg.Logger = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: tc.logLevel}))
+
+			handler := func(_ context.Context, _ outbound.BlockEvent) error {
+				if tc.handlerErr {
+					return errors.New("simulated handler failure")
+				}
+				return nil
+			}
+			err := ProcessMessages(context.Background(), cfg, handler)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected handler error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ProcessMessages: %v", err)
+			}
+
+			out := buf.String()
+			hasCount := strings.Contains(out, `"approximateReceiveCount":`+strconv.Itoa(tc.receiveCount))
+			if hasCount != tc.wantCountField {
+				t.Errorf("approximateReceiveCount present = %v, want %v; log = %q", hasCount, tc.wantCountField, out)
+			}
+			if tc.wantLevelSub != "" && !strings.Contains(out, tc.wantLevelSub) {
+				t.Errorf("log missing %q; got %q", tc.wantLevelSub, out)
+			}
+		})
 	}
 }
 

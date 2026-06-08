@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curve-dex-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curve-dex-worker
+  template:
+    metadata:
+      labels:
+        app: curve-dex-worker
+    spec:
+      serviceAccountName: curve-dex-worker
+      containers:
+        - name: curve-dex-worker
+          image: curve-dex-worker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: curve-dex-worker-config
+            - secretRef:
+                name: curve-dex-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f curve-dex-worker"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -2,6 +2,7 @@ package multicall
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -113,9 +114,12 @@ func TestToBlockNumArg(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "nil returns error",
-			number:  nil,
-			wantErr: true,
+			// Per the Multicaller port contract, nil means "latest" (matches
+			// go-ethereum's CallContract convention). Used by one-shot startup
+			// reads against immutable view methods.
+			name:   "nil returns \"latest\"",
+			number: nil,
+			want:   "latest",
 		},
 		{
 			name:   "zero",
@@ -330,21 +334,34 @@ func TestDirectCaller_Execute(t *testing.T) {
 		}
 	})
 
-	t.Run("nil block number returns error", func(t *testing.T) {
+	t.Run("nil block number sends \"latest\"", func(t *testing.T) {
+		// Per the Multicaller port contract, blockNumber == nil means
+		// "latest" (matches go-ethereum's CallContract convention). The
+		// DirectCaller must pass the literal string "latest" through to the
+		// underlying eth_call, not error out.
+		var sawBlockArg string
 		srv := startBatchRPCServer(t, func(req rpcutil.Request) (json.RawMessage, *rpcError) {
-			t.Fatal("no RPC call expected for nil block number")
-			return nil, nil
+			var params []any
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				t.Fatalf("unmarshal params: %v", err)
+			}
+			if len(params) >= 2 {
+				if s, ok := params[1].(string); ok {
+					sawBlockArg = s
+				}
+			}
+			out, _ := json.Marshal("0x" + hex.EncodeToString(common.LeftPadBytes([]byte{1}, 32)))
+			return out, nil
 		})
 		defer srv.Close()
 
 		dc := newTestDirectCaller(t, srv.URL)
 		calls := []outbound.Call{{Target: target, AllowFailure: true, CallData: callData}}
-		_, err := dc.Execute(context.Background(), calls, nil)
-		if err == nil {
-			t.Fatal("expected error for nil block number")
+		if _, err := dc.Execute(context.Background(), calls, nil); err != nil {
+			t.Fatalf("expected success for nil block number (=\"latest\"), got %v", err)
 		}
-		if !strings.Contains(err.Error(), "block number is required") {
-			t.Errorf("error %q does not contain 'block number is required'", err)
+		if sawBlockArg != "latest" {
+			t.Errorf("block arg = %q, want %q", sawBlockArg, "latest")
 		}
 	})
 }
