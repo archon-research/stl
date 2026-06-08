@@ -8,7 +8,7 @@ From `stl-verify/ts/ui`:
 - Production preview: `npm run build` then `npm run preview`.
 - Type check: `npm run type:check`. Lint and format: `npm run lint`, `npm run format:check`.
 
-Token codegen (`panda codegen`) runs automatically via the `pre*` scripts. If styles look stale, re-run `npm run codegen:styles`.
+If styles look stale, re-run `npm run prepare`.
 
 ## Screens and high-signal states
 There is one primary screen (the allocation dashboard, `src/App.tsx`), composed of:
