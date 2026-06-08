@@ -19,6 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -178,6 +179,7 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 }
 
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 

@@ -22,6 +22,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -186,6 +187,7 @@ func (s *VaultDebtService) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
 ) error {
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep < s.config.SweepEveryNBlocks {
 		return nil
