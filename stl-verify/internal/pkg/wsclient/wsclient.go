@@ -222,36 +222,36 @@ func (c *Conn) shutdown() {
 	})
 }
 
-// terminalError reports why the connection ended: the recorded terminal error,
-// or ErrClosed if it was shut down by a call to Close.
-func (c *Conn) terminalError() error {
-	if errp := c.termErr.Load(); errp != nil {
-		return *errp
-	}
-	return ErrClosed
-}
-
 // Next returns the next inbound frame, or an error if ctx was cancelled or the
 // connection ended. When the connection ended, it returns the terminal error
 // that tore it down, or ErrClosed if it was shut down by a call to Close. Next
 // must be called from a single goroutine.
 func (c *Conn) Next(ctx context.Context) (Frame, error) {
-	// Deliver any already-buffered frame before reporting termination, so frames
-	// received just before the connection closed are not dropped.
-	select {
-	case msg := <-c.msgs:
-		return msg, nil
-	default:
-	}
-
 	select {
 	case <-ctx.Done():
 		return Frame{}, ctx.Err()
 	case msg := <-c.msgs:
 		return msg, nil
 	case <-c.done:
-		return Frame{}, c.terminalError()
+		return c.terminalResult()
 	}
+}
+
+// terminalResult produces Next's return value once c.done is observed closed.
+// After an unexpected drop (termErr set) it first drains any buffered frame so
+// callers still receive every message that arrived before the drop; repeated
+// calls drain the rest before the error is finally returned. A caller-initiated
+// Close (termErr nil) returns ErrClosed immediately.
+func (c *Conn) terminalResult() (Frame, error) {
+	if errp := c.termErr.Load(); errp != nil {
+		select {
+		case msg := <-c.msgs:
+			return msg, nil
+		default:
+		}
+		return Frame{}, *errp
+	}
+	return Frame{}, ErrClosed
 }
 
 // WriteJSON marshals and sends v as a single text frame.

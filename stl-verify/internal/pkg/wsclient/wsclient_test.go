@@ -463,6 +463,45 @@ func TestConnNextReturnsErrorOnReadDeadline(t *testing.T) {
 	}
 }
 
+// TestConnDeliversBufferedFramesBeforeDropError ensures that frames received
+// just before the connection drops are all delivered before Next surfaces the
+// terminal error, rather than being discarded when done is observed.
+func TestConnDeliversBufferedFramesBeforeDropError(t *testing.T) {
+	want := []string{`{"n":1}`, `{"n":2}`, `{"n":3}`}
+	url := newTestServer(t, func(conn *websocket.Conn) {
+		for _, frame := range want {
+			sendText(t, conn, frame)
+		}
+		// Return to drop the connection right after sending.
+	})
+
+	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	conn, err := Dial(dialCtx, url, testConfig())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+
+	// Let every frame buffer and the drop register before reading.
+	time.Sleep(50 * time.Millisecond)
+
+	for _, w := range want {
+		got, err := conn.Next(dialCtx)
+		if err != nil {
+			t.Fatalf("Next: got error %v before draining buffered frames", err)
+		}
+		if string(got.Data) != w {
+			t.Errorf("frame = %s, want %s", got.Data, w)
+		}
+	}
+	if _, err := conn.Next(dialCtx); err == nil {
+		t.Fatal("Next should return the terminal error after draining frames")
+	} else if errors.Is(err, ErrClosed) {
+		t.Errorf("drop should surface the real error, got ErrClosed")
+	}
+}
+
 func TestConnNextRespectsContext(t *testing.T) {
 	url := newTestServer(t, keepOpen)
 
