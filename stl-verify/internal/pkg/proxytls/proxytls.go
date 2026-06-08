@@ -19,7 +19,9 @@ import (
 )
 
 // Config returns a *tls.Config that trusts the CA in SSL_CERT_FILE in addition
-// to the system pool, or nil when SSL_CERT_FILE is unset or unreadable.
+// to the system pool, or nil when SSL_CERT_FILE is unset or unreadable. A file
+// that parses to no certificates logs a warning and falls back to the system
+// pool (non-nil config, no extra CA).
 func Config() *tls.Config {
 	certFile := os.Getenv("SSL_CERT_FILE")
 	if certFile == "" {
