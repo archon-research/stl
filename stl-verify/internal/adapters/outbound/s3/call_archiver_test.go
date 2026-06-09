@@ -25,10 +25,14 @@ func (f *fakeWriter) WriteFileIfNotExists(_ context.Context, bucket, key string,
 	if f.returnErr != nil {
 		return false, f.returnErr
 	}
-	b, _ := io.ReadAll(content)
+	b, err := io.ReadAll(content)
+	if err != nil {
+		return false, err
+	}
 	f.bucket, f.key, f.body, f.compress = bucket, key, b, compressGzip
 	f.written = true
 	return true, nil
+}
 }
 
 func (f *fakeWriter) FileExists(_ context.Context, _, _ string) (bool, error) { return false, nil }
