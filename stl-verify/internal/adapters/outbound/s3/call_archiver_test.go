@@ -18,6 +18,7 @@ type fakeWriter struct {
 	body      []byte
 	compress  bool
 	written   bool
+	readErr   error // set if reading the content reader failed
 	returnErr error
 }
 
@@ -27,12 +28,12 @@ func (f *fakeWriter) WriteFileIfNotExists(_ context.Context, bucket, key string,
 	}
 	b, err := io.ReadAll(content)
 	if err != nil {
+		f.readErr = err
 		return false, err
 	}
 	f.bucket, f.key, f.body, f.compress = bucket, key, b, compressGzip
 	f.written = true
 	return true, nil
-}
 }
 
 func (f *fakeWriter) FileExists(_ context.Context, _, _ string) (bool, error) { return false, nil }
@@ -78,6 +79,9 @@ func TestArchivePayloadRoundTrip(t *testing.T) {
 	a := NewCallArchiver(fw, "bucket", nil)
 	if err := a.Archive(context.Background(), sampleRecord()); err != nil {
 		t.Fatalf("Archive: %v", err)
+	}
+	if fw.readErr != nil {
+		t.Fatalf("writer failed to read payload: %v", fw.readErr)
 	}
 
 	dec, _ := zstd.NewReader(nil)
