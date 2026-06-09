@@ -115,7 +115,7 @@ func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 	if err != nil {
 		return nil, err
 	}
-	groups := chunkSymbols(symbols, p.maxSymbols)
+	groups := chunkSymbols(dedupSymbols(symbols), p.maxSymbols)
 	out := runConnections(ctx, groups, p.cfg.OutputBuffer, func(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate) {
 		reconnectLoop(ctx, p.cfg, p.logger, func(ctx context.Context, ready func()) error {
 			return p.runConnection(ctx, group, out, ready)
@@ -155,7 +155,7 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 	}
 
 	handler := p.exchange.newHandler(group)
-	em := newEmitter(out)
+	em := newEmitter(out, p.logger)
 	// Reset the reconnect backoff only once every symbol in the group has produced
 	// its initial snapshot. Resetting on the first symbol would let one healthy
 	// symbol mask another that never syncs (e.g. a bad symbol that errors after a

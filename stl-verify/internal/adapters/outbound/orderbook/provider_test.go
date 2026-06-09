@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,7 +198,7 @@ func TestApplyDeltaLevels(t *testing.T) {
 
 func TestEmitterDeliversCloneAndDropsWhenFull(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate, 1)
-	em := newEmitter(out)
+	em := newEmitter(out, testLogger())
 
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
@@ -229,7 +230,7 @@ func TestEmitterDeliversCloneAndDropsWhenFull(t *testing.T) {
 // loop, which then stops draining the socket and never reconnects.
 func TestEmitterDoesNotBlockOnFullBuffer(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate) // no reader, no capacity
-	em := newEmitter(out)
+	em := newEmitter(out, testLogger())
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
 
@@ -250,7 +251,7 @@ func TestEmitterDoesNotBlockOnFullBuffer(t *testing.T) {
 // so the consumer still learns of the (re)sync.
 func TestEmitterDefersDroppedSnapshot(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate, 1)
-	em := newEmitter(out)
+	em := newEmitter(out, testLogger())
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
 
@@ -266,6 +267,31 @@ func TestEmitterDefersDroppedSnapshot(t *testing.T) {
 	}
 	if got := <-out; !got.IsSnapshot {
 		t.Error("dropped snapshot's discontinuity must be deferred onto the next delivered update")
+	}
+}
+
+// TestEmitterLogsDroppedUpdates: dropping updates is deliberate best-effort, but
+// it must not be silent. The first drop warns immediately; further drops inside
+// the rate-limit window are counted, not logged, so a stalled consumer cannot
+// turn the log into the next bottleneck.
+func TestEmitterLogsDroppedUpdates(t *testing.T) {
+	logger, sb := captureLogger()
+	out := make(chan entity.OrderbookUpdate, 1)
+	em := newEmitter(out, logger)
+	book := entity.NewOrderbook("test", "X")
+	book.ApplyLevel(entity.Bid, "100", "1")
+
+	if !em.emit(book, false, time.Unix(1, 0)) {
+		t.Fatal("first update should be delivered into the empty buffer")
+	}
+	if strings.Contains(sb.String(), "dropped") {
+		t.Fatal("no drop yet, nothing should be logged")
+	}
+	// Buffer full: both of these drop, but only the first logs within the window.
+	em.emit(book, false, time.Unix(2, 0))
+	em.emit(book, false, time.Unix(3, 0))
+	if n := strings.Count(sb.String(), "orderbook updates dropped"); n != 1 {
+		t.Errorf("drop warning logged %d times, want exactly 1 (rate-limited)", n)
 	}
 }
 

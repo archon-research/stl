@@ -140,6 +140,21 @@ func normalizeSymbols(symbols []string, normalize func(string) (string, error)) 
 	return out, nil
 }
 
+// dedupSymbols drops duplicate symbols, preserving first-seen order. Symbols are
+// deduped after normalization so two spellings of one symbol ("btc-usd",
+// "BTC-USD") cannot subscribe twice on the same connection.
+func dedupSymbols(symbols []string) []string {
+	seen := make(map[string]bool, len(symbols))
+	out := make([]string, 0, len(symbols))
+	for _, s := range symbols {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // isAlphanumeric reports whether s is non-empty and contains only ASCII letters
 // or digits (after upper-casing, only A-Z and 0-9). Whitespace and punctuation
 // are rejected so a malformed symbol cannot slip through as a subscribe payload
@@ -258,11 +273,19 @@ func reconnectLoop(
 // onto the next delivered update for that symbol.
 type emitter struct {
 	out      chan<- entity.OrderbookUpdate
+	logger   *slog.Logger
 	deferred map[string]bool // symbol -> a snapshot was dropped; re-flag next delivery
+
+	dropped     int // drops since the last drop warning
+	lastDropLog time.Time
 }
 
-func newEmitter(out chan<- entity.OrderbookUpdate) *emitter {
-	return &emitter{out: out, deferred: make(map[string]bool)}
+// dropLogInterval rate-limits the dropped-updates warning so a stalled consumer
+// is visible without the log itself becoming the next bottleneck.
+const dropLogInterval = time.Minute
+
+func newEmitter(out chan<- entity.OrderbookUpdate, logger *slog.Logger) *emitter {
+	return &emitter{out: out, logger: logger, deferred: make(map[string]bool)}
 }
 
 // emit sends book without blocking and reports whether it was delivered. The
@@ -272,21 +295,31 @@ func (e *emitter) emit(book *entity.Orderbook, isSnapshot bool, t time.Time) boo
 	snapshot := isSnapshot || e.deferred[book.Symbol]
 	// Skip building the clone when the buffer is already full.
 	if c := cap(e.out); c > 0 && len(e.out) >= c {
-		if snapshot {
-			e.deferred[book.Symbol] = true
-		}
-		return false
+		return e.drop(book.Symbol, snapshot)
 	}
 	select {
 	case e.out <- entity.NewOrderbookUpdate(book, snapshot, t, time.Now()):
 		delete(e.deferred, book.Symbol)
 		return true
 	default:
-		if snapshot {
-			e.deferred[book.Symbol] = true
-		}
-		return false
+		return e.drop(book.Symbol, snapshot)
 	}
+}
+
+// drop records an undelivered update. The first drop warns immediately; later
+// drops are counted and surfaced at most once per dropLogInterval.
+func (e *emitter) drop(symbol string, snapshot bool) bool {
+	if snapshot {
+		e.deferred[symbol] = true
+	}
+	e.dropped++
+	if now := time.Now(); now.Sub(e.lastDropLog) >= dropLogInterval {
+		e.logger.Warn("orderbook updates dropped, consumer not keeping up",
+			"dropped", e.dropped, "symbol", symbol)
+		e.dropped = 0
+		e.lastDropLog = now
+	}
+	return false
 }
 
 // parseLevel validates an exchange [price, size] pair and returns the original

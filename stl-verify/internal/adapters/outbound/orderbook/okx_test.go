@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 )
 
 func newOKXHandler() *okxHandler {
-	return &okxHandler{books: newBookSet(exchangeOKX), lastSeq: make(map[string]int64)}
+	return &okxHandler{books: newBookSet(exchangeOKX), lastSeq: make(map[string]int64), logger: testLogger()}
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
@@ -236,6 +237,30 @@ func TestOKXHandlerMultiObjectSnapshot(t *testing.T) {
 	}
 }
 
+// TestOKXHandlerSubscriptionErrorKeepsConnection covers the poisoned-group bug:
+// an error event (e.g. one nonexistent instId among 29 subscribed) is scoped to
+// the offending arg; OKX keeps the connection and the other subscriptions alive.
+// Treating it as connection-fatal would reconnect with the same subscribe payload
+// and permanently cycle every healthy symbol in the group. The handler must
+// surface it in the log and carry on.
+func TestOKXHandlerSubscriptionErrorKeepsConnection(t *testing.T) {
+	logger, sb := captureLogger()
+	h := newOKXHandler()
+	h.logger = logger
+	frame := `{"event":"error","code":"60018","msg":"channel:books,instId:NOPE-USDT doesn't exist"}`
+	sigs, err := h.handle([]byte(frame))
+	if err != nil {
+		t.Fatalf("subscription error must not kill the connection, got %v", err)
+	}
+	if sigs != nil {
+		t.Errorf("error event must emit no book change, got %+v", sigs)
+	}
+	// Swallowing the error silently is not acceptable; it must be loud in the log.
+	if got := sb.String(); !strings.Contains(got, "ERROR") || !strings.Contains(got, "60018") {
+		t.Errorf("subscription error must be logged at error level with the venue code, got %q", got)
+	}
+}
+
 func TestOKXHandlerControlFrames(t *testing.T) {
 	h := newOKXHandler()
 	if sigs, err := h.handle([]byte("pong")); err != nil || sigs != nil {
@@ -243,9 +268,6 @@ func TestOKXHandlerControlFrames(t *testing.T) {
 	}
 	if sigs, err := h.handle([]byte(`{"event":"subscribe","arg":{"channel":"books","instId":"BTC-USDT"}}`)); err != nil || sigs != nil {
 		t.Errorf("subscribe ack: sigs=%v err=%v", sigs, err)
-	}
-	if _, err := h.handle([]byte(`{"event":"error","code":"60012","msg":"bad request"}`)); err == nil {
-		t.Error("error event should return an error")
 	}
 }
 

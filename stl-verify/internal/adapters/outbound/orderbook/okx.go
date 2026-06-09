@@ -3,6 +3,7 @@ package orderbook
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -35,11 +36,17 @@ const (
 //
 // Docs: https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel
 func NewOKXProvider(cfg Config) outbound.OrderbookProvider {
-	return newFeedProvider(cfg, &okxExchange{wsBase: okxWSBase}, okxMaxSymbols)
+	cfg = cfg.withDefaults()
+	ex := &okxExchange{
+		wsBase: okxWSBase,
+		logger: cfg.Logger.With("component", exchangeOKX+"-orderbook"),
+	}
+	return newFeedProvider(cfg, ex, okxMaxSymbols)
 }
 
 type okxExchange struct {
 	wsBase string
+	logger *slog.Logger
 }
 
 // Compile-time check that okxExchange supplies an application-level keepalive.
@@ -52,7 +59,12 @@ func (e *okxExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "-")
 }
 func (e *okxExchange) newHandler(group []string) frameHandler {
-	return &okxHandler{books: newBookSet(exchangeOKX), lastSeq: make(map[string]int64), allowed: symbolSet(group)}
+	return &okxHandler{
+		books:   newBookSet(exchangeOKX),
+		lastSeq: make(map[string]int64),
+		allowed: symbolSet(group),
+		logger:  e.logger,
+	}
 }
 
 // appPing satisfies appPinger: OKX disconnects idle connections after 30s and
@@ -91,6 +103,7 @@ type okxHandler struct {
 	books   *bookSet
 	lastSeq map[string]int64 // instId -> last applied seqId
 	allowed map[string]bool  // subscribed instIds; nil allows all (tests)
+	logger  *slog.Logger
 }
 
 func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
@@ -103,7 +116,16 @@ func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
 		return nil, fmt.Errorf("decode okx frame: %w", err)
 	}
 	if f.Event == "error" {
-		return nil, fmt.Errorf("okx error %s: %s", f.Code, f.Msg)
+		// Error events answer our own requests (we only send subscribes and pings);
+		// OKX scopes a subscription error to the offending arg and keeps the
+		// connection and the other subscriptions alive. Treating it as
+		// connection-fatal would reconnect with the same subscribe payload and
+		// permanently cycle every healthy symbol in the group, so log loudly and
+		// carry on instead. A rejected symbol simply never syncs: it keeps the
+		// reconnect backoff unreset and emits nothing, both visible alongside this
+		// log line.
+		h.logger.Error("okx subscription error", "code", f.Code, "msg", f.Msg)
+		return nil, nil
 	}
 	if f.Event != "" {
 		return nil, nil // subscribe ack / other control frame

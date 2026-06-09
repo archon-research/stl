@@ -20,6 +20,9 @@ import (
 type fakeExchange struct {
 	url    string
 	subErr error // when set, subscribeMessages fails with it
+
+	mu     sync.Mutex
+	groups [][]string // symbol groups passed to subscribeMessages
 }
 
 func (e *fakeExchange) name() string             { return "fake" }
@@ -31,10 +34,22 @@ func (e *fakeExchange) normalizeSymbol(s string) (string, error) {
 	return strings.ToUpper(s), nil
 }
 func (e *fakeExchange) subscribeMessages(group []string) ([]any, error) {
+	e.mu.Lock()
+	e.groups = append(e.groups, group)
+	e.mu.Unlock()
 	if e.subErr != nil {
 		return nil, e.subErr
 	}
 	return []any{map[string]any{"sub": group}}, nil
+}
+
+// subscribedGroups returns a copy of the symbol groups subscribed so far.
+func (e *fakeExchange) subscribedGroups() [][]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([][]string, len(e.groups))
+	copy(out, e.groups)
+	return out
 }
 func (e *fakeExchange) newHandler([]string) frameHandler {
 	return &fakeHandler{books: newBookSet("fake")}
@@ -232,6 +247,34 @@ func TestFeedProviderReadyCalledOnceAfterFullGroupSnapshot(t *testing.T) {
 	cancel()
 	if got := rec.count(); got != 1 {
 		t.Errorf("ready called %d times, want exactly 1 (after the full group synced)", got)
+	}
+}
+
+// TestWatchDedupsNormalizedSymbols: two spellings of one symbol must subscribe
+// once, not twice on the same connection (the venue's reaction to a duplicate
+// subscription is undefined, and a doubled book stream is never wanted).
+func TestWatchDedupsNormalizedSymbols(t *testing.T) {
+	srv := newWSTestServer(t, keepOpen)
+	ex := &fakeExchange{url: srv.url}
+	p := newFeedProvider(testConfig(), ex, 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := p.Watch(ctx, []string{"btc-usd", "BTC-USD"}); err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for len(ex.subscribedGroups()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("no subscribe observed")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	groups := ex.subscribedGroups()
+	if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0] != "BTC-USD" {
+		t.Fatalf("subscribed groups = %v, want one group with the single deduped symbol BTC-USD", groups)
 	}
 }
 
