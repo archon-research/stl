@@ -302,7 +302,7 @@ func (s *Service) indexVault(
 	// Sort users so per-block multicall input is deterministic — handy when
 	// diffing test output. Unlike the vault sort, this ordering also matters
 	// for correctness: all user rows for a vault are written in one tx (see
-	// WithTransaction below), so a stable user_id lock-acquisition order keeps
+	// WithTransaction below), so a stable per-user lock-acquisition order keeps
 	// concurrent indexer instances from deadlocking. See ADR-0002 §3.
 	slices.SortFunc(userAddrs, func(a, b common.Address) int {
 		return bytes.Compare(a.Bytes(), b.Bytes())

@@ -59,8 +59,11 @@ BEGIN
     FROM receipt_token rt
     JOIN protocol p ON p.id = rt.protocol_id
     WHERE p.chain_id = 1 AND p.name = 'maple-syrup-v1';
-    ASSERT cnt = 2,
-        format('expected 2 maple-syrup-v1 receipt_token rows, found %s', cnt);
+    -- RAISE EXCEPTION (not ASSERT): ASSERT is gated on plpgsql.check_asserts and
+    -- can be silently disabled, defeating a fail-hard prerequisite check.
+    IF cnt <> 2 THEN
+        RAISE EXCEPTION 'expected 2 maple-syrup-v1 receipt_token rows, found %', cnt;
+    END IF;
 END $$;
 
 -- ============================================================================
