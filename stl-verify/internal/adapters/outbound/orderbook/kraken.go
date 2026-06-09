@@ -59,7 +59,12 @@ func (e *krakenExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "/")
 }
 func (e *krakenExchange) newHandler(group []string, logger *slog.Logger) frameHandler {
-	return &krakenHandler{books: newBookSet(exchangeKraken), allowed: symbolSet(group), logger: logger}
+	return &krakenHandler{
+		books:   newBookSet(exchangeKraken),
+		allowed: symbolSet(group),
+		synced:  make(map[string]bool),
+		logger:  logger,
+	}
 }
 
 // appPing satisfies appPinger with Kraken's JSON ping event.
@@ -78,6 +83,7 @@ func (e *krakenExchange) subscribeMessages(group []string) []any {
 type krakenHandler struct {
 	books   *bookSet
 	allowed map[string]bool // subscribed pairs; frames for any other pair are rejected
+	synced  map[string]bool // pair -> a snapshot has been applied
 	logger  *slog.Logger
 }
 
@@ -190,8 +196,22 @@ func (h *krakenHandler) handleBook(raw []byte) ([]bookChange, error) {
 		}
 	}
 
+	if isSnapshot {
+		h.synced[pair] = true
+	} else if applied && !h.synced[pair] {
+		// An update before any snapshot would be applied to an empty book and
+		// emitted as a partial (wrong) book. Kraken v1 has no sequence numbers and
+		// the checksum is absent on some frames, so force a re-sync instead.
+		return nil, fmt.Errorf("%w: kraken %s update before snapshot", errSequenceGap, pair)
+	}
+
 	if !applied {
-		return nil, nil
+		if checksum == "" {
+			return nil, nil
+		}
+		// A checksum-only frame changes nothing but still asserts the book's
+		// integrity; verify it so a drifted book is caught even in a quiet market.
+		return nil, finalizeKrakenBook(book, checksum)
 	}
 
 	if err := finalizeKrakenBook(book, checksum); err != nil {

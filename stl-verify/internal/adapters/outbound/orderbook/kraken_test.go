@@ -126,6 +126,18 @@ func TestKrakenHandlerSubscriptionErrorKeepsConnection(t *testing.T) {
 	}
 }
 
+// TestKrakenHandlerUpdateBeforeSnapshotIsRejected: an update with no prior
+// snapshot would be applied to an empty book and emitted as a partial (wrong)
+// book. Kraken v1 has no sequence numbers and the checksum is absent on some
+// frames, so this must force a re-sync, exactly like the OKX/Coinbase guards.
+func TestKrakenHandlerUpdateBeforeSnapshotIsRejected(t *testing.T) {
+	h := newTestKrakenHandler()
+	update := `[0,{"b":[["100.0","1.0","t"]]},"book-500","XBT/USD"]`
+	if _, err := h.handle([]byte(update)); !errors.Is(err, errSequenceGap) {
+		t.Fatalf("err = %v, want errSequenceGap", err)
+	}
+}
+
 func TestKrakenHandlerMalformedDataIsFatal(t *testing.T) {
 	h := newTestKrakenHandler()
 	// A non-object where a data object is expected must error (forcing reconnect),
@@ -292,20 +304,33 @@ func TestKrakenTrimUsesExactDecimalOrdering(t *testing.T) {
 	}
 }
 
-func TestKrakenHandlerChecksumOnlyFrameEmitsNothing(t *testing.T) {
+// TestKrakenHandlerChecksumOnlyFrame: a frame carrying only a checksum (no
+// level changes) emits nothing, but the checksum is still verified; in a quiet
+// market it is the only signal that the local book has drifted.
+func TestKrakenHandlerChecksumOnlyFrame(t *testing.T) {
+	expect := entity.NewOrderbook(exchangeKraken, "XBT/USD")
+	expect.ApplyLevel(entity.Ask, "101.0", "2.0")
+	expect.ApplyLevel(entity.Bid, "100.0", "1.0")
+	c := strconv.FormatUint(uint64(krakenChecksum(expect)), 10)
+
 	h := newTestKrakenHandler()
 	snapshot := `[0,{"as":[["101.0","2.0"]],"bs":[["100.0","1.0"]]},"book-500","XBT/USD"]`
 	if _, err := h.handle([]byte(snapshot)); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	// A frame carrying only a checksum (no level changes) applies nothing, so it
-	// emits no change (and is not re-verified against the unchanged book).
-	sigs, err := h.handle([]byte(`[0,{"c":"123"},"book-500","XBT/USD"]`))
+
+	// Matching checksum: no change to emit, no error.
+	sigs, err := h.handle([]byte(`[0,{"c":"` + c + `"},"book-500","XBT/USD"]`))
 	if err != nil {
-		t.Fatalf("checksum-only frame: %v", err)
+		t.Fatalf("checksum-only frame with matching checksum: %v", err)
 	}
 	if sigs != nil {
 		t.Errorf("checksum-only frame should emit nothing, got %+v", sigs)
+	}
+
+	// Mismatching checksum: the book has drifted, force a re-sync.
+	if _, err := h.handle([]byte(`[0,{"c":"123"},"book-500","XBT/USD"]`)); !errors.Is(err, errSequenceGap) {
+		t.Fatalf("err = %v, want errSequenceGap for a drifted checksum-only frame", err)
 	}
 }
 
