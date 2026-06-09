@@ -22,33 +22,33 @@
   "dependencies": {
     "@archon-research/http-client-core": "0.5.0",
     "@archon-research/http-client-react": "0.5.0",
-    "@tanstack/react-query": "^5.99.2",
-    "@tanstack/react-table": "^8.20.0",
-    "lucide-react": "^1.14.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-markdown": "^10.1.0",
-    "viem": "^2.23.2",
-    "zod": "^4.3.6"
+    "@tanstack/react-query": "5.100.14",
+    "@tanstack/react-table": "8.21.3",
+    "lucide-react": "1.17.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "10.1.0",
+    "viem": "2.52.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@archon-research/design-system": "0.5.0",
     "@archon-research/oxfmt-config": "0.5.0",
     "@archon-research/oxlint-config": "0.5.0",
     "@archon-research/tsconfig": "0.5.0",
-    "@pandacss/dev": "^1.9.1",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "@typescript/native-preview": "7.0.0-dev.20260504.1",
-    "@vitejs/plugin-react": "^4.3.0",
-    "openapi-typescript": "^7.6.1",
-    "postcss": "^8.5.6",
-    "vite": "^5.2.0"
+    "@pandacss/dev": "1.11.1",
+    "@types/react": "19.2.16",
+    "@types/react-dom": "19.2.3",
+    "@typescript/native-preview": "7.0.0-dev.20260601.1",
+    "@vitejs/plugin-react": "6.0.2",
+    "openapi-typescript": "7.13.0",
+    "postcss": "8.5.15",
+    "vite": "8.0.16"
   },
   "optionalDependencies": {
-    "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260504.1",
-    "@typescript/native-preview-linux-x64": "7.0.0-dev.20260504.1",
-    "lightningcss-darwin-arm64": "1.31.1",
-    "lightningcss-linux-x64-gnu": "1.31.1"
+    "@typescript/native-preview-darwin-arm64": "7.0.0-dev.20260601.1",
+    "@typescript/native-preview-linux-x64": "7.0.0-dev.20260601.1",
+    "lightningcss-darwin-arm64": "1.32.0",
+    "lightningcss-linux-x64-gnu": "1.32.0"
   }
 }
