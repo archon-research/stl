@@ -34,7 +34,6 @@ import (
 
 var (
 	GitCommit string
-	GitBranch string
 	BuildTime string
 )
 
@@ -259,7 +258,11 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("initializing telemetry: %w", err)
 	}
-	defer shutdownOTEL(context.Background())
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdownOTEL(shutdownCtx)
+	}()
 
 	// Service telemetry
 	mapleTelemetry, err := maple_indexer.NewTelemetry()
