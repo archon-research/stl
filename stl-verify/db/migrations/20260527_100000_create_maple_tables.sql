@@ -46,6 +46,23 @@ WHERE p.chain_id = 1 AND p.name = 'maple-syrup-v1'
       )
 ON CONFLICT (chain_id, receipt_token_address) DO NOTHING;
 
+-- Fail hard if either receipt_token arm did not land. Both depend on token rows
+-- seeded by earlier migrations (syrupUSDC above; syrupUSDT/USDC/USDT by
+-- 20260305_100000 / 20260204_110000); if any prerequisite row is missing the
+-- JOIN above silently produces fewer rows. Assert both arms exist rather than
+-- start the indexer against an incomplete receipt_token mapping.
+DO $$
+DECLARE
+    cnt INT;
+BEGIN
+    SELECT COUNT(*) INTO cnt
+    FROM receipt_token rt
+    JOIN protocol p ON p.id = rt.protocol_id
+    WHERE p.chain_id = 1 AND p.name = 'maple-syrup-v1';
+    ASSERT cnt = 2,
+        format('expected 2 maple-syrup-v1 receipt_token rows, found %s', cnt);
+END $$;
+
 -- ============================================================================
 -- maple_vault: registry of Syrup ERC-4626 vaults
 -- ============================================================================
