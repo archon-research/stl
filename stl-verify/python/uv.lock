@@ -13,6 +13,13 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
+
+[options.exclude-newer-package]
+axis-synome = "2100-01-01T23:00:00Z"
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -95,15 +102,15 @@ wheels = [
 
 [[package]]
 name = "axis-synome"
-version = "0.1.0.dev73"
+version = "0.1.0.dev76"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-hash", extra = ["pycryptodome"] },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/11/34/7ac00a58e4cd27795e9ca336d349d00139d5c9551ca13e7e702837937aea/axis_synome-0.1.0.dev73.tar.gz", hash = "sha256:0fdc0e50f0cc64ea67bef7f82ff6a35693a2925e340a4afe03d0aa7bea76577c", size = 292456, upload-time = "2026-06-08T11:03:41.455Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/b8/b1eb3d78973fb1dfa88ad3ce1b7cdaf3cbe7ca9d7818a81f0f831f0c7ebf/axis_synome-0.1.0.dev76.tar.gz", hash = "sha256:2b9d001199860e8a04996a15e2d9735491271798a5fe8659850098e19e050697", size = 293958, upload-time = "2026-06-09T13:10:01.914Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/16/06/b8cc76b3b1b759678b39a3eaa5924c9782dc4f8f169e46a6ffa3d889598c/axis_synome-0.1.0.dev73-py3-none-any.whl", hash = "sha256:394ffdef5018d70a556366025c514a876b483c582607577c2842caf06798d2e5", size = 209298, upload-time = "2026-06-08T11:03:40.188Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/7a/882dccad6ea8f3e61a84ddf8164518c753e919223b65a4dec3d3aea0c07b/axis_synome-0.1.0.dev76-py3-none-any.whl", hash = "sha256:dd10b40fb66c84ca58c5fe5702323459f74daa6bc64038643a17b11bc3eff49a", size = 210300, upload-time = "2026-06-09T13:10:00.287Z" },
 ]
 
 [[package]]
@@ -1155,7 +1162,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg" },
-    { name = "axis-synome", specifier = "==0.1.0.dev73" },
+    { name = "axis-synome", specifier = "==0.1.0.dev76" },
     { name = "fastapi" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'dev'" },

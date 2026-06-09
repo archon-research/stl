@@ -1,6 +1,6 @@
 {
-  "version": "0.1.0.dev73",
-  "axis_synome_git_commit": "b7e18f9a5274e80cacaaa6eeeae2e33601c81091",
+  "version": "0.1.0.dev76",
+  "axis_synome_git_commit": "ca107ea4e264f295fbfff57213b46747cfd5b1ef",
   "axis_synome": {
     "spec": {
       "asc": {
@@ -9,7 +9,7 @@
             "ASSETS_BY_PRIME": {
               "grove": [
                 {
-                  "contract_address": "0x1121f4e21ed8b9bc1bb9a2952cdd8639ac897784",
+                  "contract_address": "0x58f93d6b1ef2f44ec379cb975657c132cbed3b6b",
                   "wallet_address": "0x7107dd8f56642327945294a18a4280c78e153644",
                   "asset_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
                   "star": "grove",
@@ -19,7 +19,7 @@
                   "token_type": "centrifuge"
                 },
                 {
-                  "contract_address": "0xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a",
+                  "contract_address": "0xa5d465251fbcc907f5dd6bb2145488dfc6a2627b",
                   "wallet_address": "0x7107dd8f56642327945294a18a4280c78e153644",
                   "asset_address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
                   "star": "grove",
@@ -109,7 +109,7 @@
                   "token_type": "erc20"
                 },
                 {
-                  "contract_address": "0x4880799ee5200fc58da299e965df644fbf46780b",
+                  "contract_address": "0x5a0f93d040de44e78f251b03c43be9cf317dcf64",
                   "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
                   "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
                   "star": "grove",
@@ -119,7 +119,7 @@
                   "token_type": "centrifuge"
                 },
                 {
-                  "contract_address": "0xfe6920eb6c421f1179ca8c8d4170530cdbdfd77a",
+                  "contract_address": "0x8c213ee79581ff4984583c6a801e5263418c4b86",
                   "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
                   "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
                   "star": "grove",
@@ -259,16 +259,6 @@
                   "token_type": "uni_v3_pool"
                 },
                 {
-                  "contract_address": "0x5a0f93d040de44e78f251b03c43be9cf317dcf64",
-                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
-                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                  "star": "grove",
-                  "chain": "mainnet",
-                  "protocol": "janus-henderson",
-                  "allocation_type": "allocation",
-                  "token_type": "erc20"
-                },
-                {
                   "contract_address": "0xe79c1c7e24755574438a26d5e062ad2626c04662",
                   "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
                   "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -289,16 +279,6 @@
                   "token_type": "uni_v3_pool"
                 },
                 {
-                  "contract_address": "0x58f93d6b1ef2f44ec379cb975657c132cbed3b6b",
-                  "wallet_address": "0x7107dd8f56642327945294a18a4280c78e153644",
-                  "asset_address": null,
-                  "star": "grove",
-                  "chain": "avalanche-c",
-                  "protocol": "janus-henderson",
-                  "allocation_type": "allocation",
-                  "token_type": "erc20"
-                },
-                {
                   "contract_address": "0xa5d465251fbcc907f5dd6bb2145488dfc6a2627b",
                   "wallet_address": "0x1db91ad50446a671e2231f77e00948e68876f812",
                   "asset_address": "0x222365ef19f7947e5484218551b56bb3965aa7af",
@@ -316,16 +296,6 @@
                   "chain": "plume",
                   "protocol": "",
                   "allocation_type": "asset",
-                  "token_type": "erc20"
-                },
-                {
-                  "contract_address": "0x8c213ee79581ff4984583c6a801e5263418c4b86",
-                  "wallet_address": "0x491edfb0b8b608044e227225c715981a30f3a44e",
-                  "asset_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-                  "star": "grove",
-                  "chain": "mainnet",
-                  "protocol": "janus-henderson",
-                  "allocation_type": "allocation",
                   "token_type": "erc20"
                 },
                 {
