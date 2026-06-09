@@ -20,7 +20,8 @@ type Config struct {
 	InitialBackoff time.Duration
 	// MaxBackoff caps the exponential reconnect backoff.
 	MaxBackoff time.Duration
-	// BackoffFactor multiplies the backoff after each failed attempt.
+	// BackoffFactor multiplies the backoff after each failed attempt. It must be
+	// greater than 1; values at or below 1 fall back to the default.
 	BackoffFactor float64
 
 	// OutputBuffer is the per-Watch channel buffer. Because each update carries

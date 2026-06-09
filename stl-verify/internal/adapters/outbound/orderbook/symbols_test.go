@@ -87,8 +87,4 @@ func TestSymbolAllowed(t *testing.T) {
 	if symbolAllowed(allowed, "SOL-USD") {
 		t.Error("unsubscribed symbol should not be allowed")
 	}
-	// A nil set (handlers built directly in tests) allows everything.
-	if !symbolAllowed(nil, "ANYTHING") {
-		t.Error("nil allow-set should allow everything")
-	}
 }

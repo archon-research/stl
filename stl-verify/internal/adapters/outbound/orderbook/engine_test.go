@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
@@ -26,8 +27,8 @@ type fakeExchange struct {
 	groups [][]string // symbol groups passed to subscribeMessages
 }
 
-func (e *fakeExchange) name() string             { return "fake" }
-func (e *fakeExchange) endpoint([]string) string { return e.url }
+func (e *fakeExchange) name() string     { return "fake" }
+func (e *fakeExchange) endpoint() string { return e.url }
 
 // normalizeSymbol is permissive: it only upper-cases, so the engine test's "X"
 // symbol still passes.
@@ -53,7 +54,7 @@ func (e *fakeExchange) subscribedGroups() [][]string {
 	return out
 }
 
-func (e *fakeExchange) newHandler([]string) frameHandler {
+func (e *fakeExchange) newHandler([]string, *slog.Logger) frameHandler {
 	return &fakeHandler{books: newBookSet("fake")}
 }
 

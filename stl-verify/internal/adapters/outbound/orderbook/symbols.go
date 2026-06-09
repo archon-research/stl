@@ -88,9 +88,7 @@ func symbolSet(symbols []string) map[string]bool {
 	return m
 }
 
-// symbolAllowed reports whether sym is one of the subscribed symbols. A nil set
-// (handlers constructed directly in tests) allows everything, so the guard is
-// active only once the engine populates it from the subscription group.
+// symbolAllowed reports whether sym is one of the subscribed symbols.
 func symbolAllowed(allowed map[string]bool, sym string) bool {
-	return allowed == nil || allowed[strings.ToUpper(sym)]
+	return allowed[strings.ToUpper(sym)]
 }

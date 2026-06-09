@@ -60,8 +60,8 @@ func TestApplyDeltaLevels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyDeltaLevels err = %v", err)
 	}
-	if ob.Depth(entity.Bid) != 2 {
-		t.Errorf("Depth(Bid) = %d, want 2", ob.Depth(entity.Bid))
+	if len(ob.Bids()) != 2 {
+		t.Errorf("bid depth = %d, want 2", len(ob.Bids()))
 	}
 	if sz, ok := sizeAt(ob.Bids(), "100"); !ok || sz != "7" {
 		t.Errorf("size at 100 = %q (ok=%v), want 7", sz, ok)

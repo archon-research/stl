@@ -15,6 +15,9 @@ type OrderbookProvider interface {
 
 	// Watch streams an independent, fully aggregated book per symbol until ctx is
 	// cancelled (then the channel closes). It errors only on synchronous problems
-	// (e.g. no symbols); connection failures are handled by reconnection.
+	// (e.g. no symbols, or a malformed one); connection failures are handled by
+	// reconnection. A symbol the venue rejects at subscribe time (e.g. an unknown
+	// pair) is NOT surfaced as an error: the provider logs it at error level and
+	// that symbol simply never produces updates.
 	Watch(ctx context.Context, symbols []string) (<-chan entity.OrderbookUpdate, error)
 }

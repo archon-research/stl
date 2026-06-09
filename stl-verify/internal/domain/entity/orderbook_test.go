@@ -27,19 +27,18 @@ func TestOrderbookApplyLevel(t *testing.T) {
 		{name: "insert bid", side: Bid, price: "100", size: "2", wantDepth: 1, wantSize: "2"},
 		{name: "insert ask", side: Ask, price: "101", size: "3", wantDepth: 1, wantSize: "3"},
 		{name: "zero size removes", side: Bid, price: "100", size: "0", wantDepth: 0, wantSize: ""},
-		{name: "negative size removes", side: Bid, price: "100", size: "-1", wantDepth: 0, wantSize: ""},
-		{name: "non-finite size removes", side: Bid, price: "100", size: "NaN", wantDepth: 0, wantSize: ""},
+		{name: "padded zero size removes", side: Bid, price: "100", size: "0.00000000", wantDepth: 0, wantSize: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ob := NewOrderbook("test", "BTCUSDT")
 			ob.ApplyLevel(tt.side, tt.price, tt.size)
-			if got := ob.Depth(tt.side); got != tt.wantDepth {
-				t.Errorf("Depth = %d, want %d", got, tt.wantDepth)
-			}
 			levels := ob.Bids()
 			if tt.side == Ask {
 				levels = ob.Asks()
+			}
+			if len(levels) != tt.wantDepth {
+				t.Errorf("depth = %d, want %d", len(levels), tt.wantDepth)
 			}
 			got, _ := sizeAt(levels, tt.price)
 			if got != tt.wantSize {
@@ -56,8 +55,8 @@ func TestOrderbookApplyLevelIsAbsolute(t *testing.T) {
 	if sz, ok := sizeAt(ob.Bids(), "100"); !ok || sz != "9" {
 		t.Fatalf("size at 100 = %q ok=%v, want 9", sz, ok)
 	}
-	if ob.Depth(Bid) != 1 {
-		t.Errorf("Depth(Bid) = %d, want 1", ob.Depth(Bid))
+	if len(ob.Bids()) != 1 {
+		t.Errorf("bid depth = %d, want 1", len(ob.Bids()))
 	}
 }
 
@@ -66,7 +65,7 @@ func TestOrderbookReset(t *testing.T) {
 	ob.ApplyLevel(Bid, "100", "1")
 	ob.ApplyLevel(Ask, "101", "1")
 	ob.Reset()
-	if ob.Depth(Bid) != 0 || ob.Depth(Ask) != 0 {
+	if len(ob.Bids()) != 0 || len(ob.Asks()) != 0 {
 		t.Error("Reset should clear both sides")
 	}
 }
@@ -84,7 +83,7 @@ func TestOrderbookPreservesExactStrings(t *testing.T) {
 }
 
 func TestOrderbookCloneIsIndependent(t *testing.T) {
-	ob := NewOrderbook("binance", "BTCUSDT")
+	ob := NewOrderbook("test", "BTCUSDT")
 	ob.ApplyLevel(Bid, "100", "1")
 	ob.ApplyLevel(Ask, "101", "1")
 
@@ -96,22 +95,22 @@ func TestOrderbookCloneIsIndependent(t *testing.T) {
 	if sz, ok := sizeAt(clone.Bids(), "100"); !ok || sz != "1" {
 		t.Errorf("clone size at 100 = %q ok=%v, want 1 (clone must not see later mutation)", sz, ok)
 	}
-	if clone.Depth(Bid) != 1 {
-		t.Errorf("clone Depth(Bid) = %d, want 1", clone.Depth(Bid))
+	if len(clone.Bids()) != 1 {
+		t.Errorf("clone bid depth = %d, want 1", len(clone.Bids()))
 	}
-	if clone.Exchange != "binance" || clone.Symbol != "BTCUSDT" {
-		t.Errorf("clone metadata = %s/%s, want binance/BTCUSDT", clone.Exchange, clone.Symbol)
+	if clone.Exchange != "test" || clone.Symbol != "BTCUSDT" {
+		t.Errorf("clone metadata = %s/%s, want test/BTCUSDT", clone.Exchange, clone.Symbol)
 	}
 }
 
 func TestNewOrderbookUpdate(t *testing.T) {
-	ob := NewOrderbook("binance", "BTCUSDT")
+	ob := NewOrderbook("test", "BTCUSDT")
 	ob.ApplyLevel(Bid, "100", "1")
 	eventTime := time.Unix(1700000000, 0)
 	ingestedAt := time.Unix(1700000005, 0)
 
 	upd := NewOrderbookUpdate(ob, true, eventTime, ingestedAt)
-	if upd.Book.Exchange != "binance" || upd.Book.Symbol != "BTCUSDT" {
+	if upd.Book.Exchange != "test" || upd.Book.Symbol != "BTCUSDT" {
 		t.Errorf("update book metadata = %s/%s", upd.Book.Exchange, upd.Book.Symbol)
 	}
 	if !upd.IsSnapshot || upd.Time == nil || !upd.Time.Equal(eventTime) || !upd.IngestedAt.Equal(ingestedAt) {

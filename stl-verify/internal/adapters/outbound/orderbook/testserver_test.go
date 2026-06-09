@@ -58,8 +58,7 @@ func testConfig() Config {
 // is handed to onConn, which owns the connection for its lifetime (the socket is
 // closed when onConn returns).
 type wsTestServer struct {
-	server *httptest.Server
-	url    string // ws:// URL
+	url string // ws:// URL
 }
 
 func newWSTestServer(t *testing.T, onConn func(conn *websocket.Conn)) *wsTestServer {
@@ -74,7 +73,7 @@ func newWSTestServer(t *testing.T, onConn func(conn *websocket.Conn)) *wsTestSer
 		onConn(conn)
 	}))
 	t.Cleanup(srv.Close)
-	return &wsTestServer{server: srv, url: "ws" + strings.TrimPrefix(srv.URL, "http")}
+	return &wsTestServer{url: "ws" + strings.TrimPrefix(srv.URL, "http")}
 }
 
 // keepOpen blocks reading from conn until the client disconnects, so the server

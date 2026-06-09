@@ -69,13 +69,13 @@ func (ob *Orderbook) side(s Side) map[string]string {
 }
 
 // ApplyLevel upserts a price level in O(1), keyed and valued by the exact
-// exchange strings. A canonical-zero size (the exchange convention for "level
-// removed") deletes the level, as does any non-canonical size, so malformed text
-// can never be stored. Validation that should fail the frame and force a resync
-// lives in the adapter (parseLevel); this method only decides set vs delete.
+// exchange strings. A zero size (the exchange convention for "level removed")
+// deletes the level. Input validation lives in the adapter (parseLevel), which
+// fails the frame and forces a resync on malformed text; this method only
+// decides set vs delete.
 func (ob *Orderbook) ApplyLevel(s Side, price, size string) {
 	m := ob.side(s)
-	if !IsCanonicalDecimal(size) || IsZeroDecimal(size) {
+	if IsZeroDecimal(size) {
 		delete(m, price)
 		return
 	}
@@ -98,9 +98,6 @@ func levels(m map[string]string) []PriceLevel {
 	}
 	return out
 }
-
-// Depth returns the number of distinct price levels on a side.
-func (ob *Orderbook) Depth(s Side) int { return len(ob.side(s)) }
 
 // Clone returns an independent deep copy of the book.
 func (ob *Orderbook) Clone() *Orderbook {

@@ -65,15 +65,15 @@ type exchangeFeed interface {
 	name() string
 	// normalizeSymbol canonicalises and validates one symbol, erroring on a bad format.
 	normalizeSymbol(symbol string) (string, error)
-	// endpoint returns the WebSocket URL for a symbol group.
-	endpoint(group []string) string
+	// endpoint returns the WebSocket URL.
+	endpoint() string
 	// subscribeMessages returns the frames to send after connecting.
 	subscribeMessages(group []string) ([]any, error)
 	// newHandler creates a fresh frame handler for one connection, scoped to the
 	// symbols in group (so it can reject book data for anything unsubscribed).
 	// Because each connection (and reconnection) gets its own handler, handlers
 	// may hold mutable per-connection sync state without locking.
-	newHandler(group []string) frameHandler
+	newHandler(group []string, logger *slog.Logger) frameHandler
 }
 
 // frameHandler maintains one connection's books and synchronisation state. Its
@@ -82,10 +82,25 @@ type frameHandler interface {
 	// handle parses one inbound frame, applies it to the handler's books, and
 	// returns the books that should be emitted. A single frame may legitimately
 	// fan out to multiple bookChanges (e.g. one frame carrying events for several
-	// symbols), so the result is a slice. Returning errSequenceGap (or any error)
-	// causes the engine to drop the connection and reconnect.
+	// symbols), so the result is a slice. Each returned book's Symbol must
+	// upper-case to a member of the subscription group: the engine matches it
+	// against the group to decide when the connection is fully synced. Returning
+	// errSequenceGap (or any error) causes the engine to drop the connection and
+	// reconnect.
 	handle(raw []byte) ([]bookChange, error)
 }
+
+// errSequenceGap signals that a handler detected a break in an exchange's
+// update stream (e.g. a sequence gap) and must re-synchronise from a fresh
+// snapshot. The engine treats it, like any handler error, as connection-fatal
+// and reconnects.
+var errSequenceGap = errors.New("orderbook update sequence gap")
+
+// errUnexpectedSymbol is returned by a handler when the venue pushes book data
+// for a symbol we never subscribed to. The engine treats it like any handler
+// error: drop the connection and reconnect (which re-sends only our
+// subscriptions), rather than emit a book we cannot account for.
+var errUnexpectedSymbol = errors.New("orderbook update for unsubscribed symbol")
 
 // appPinger is an optional interface for exchanges that require an
 // application-level keepalive (e.g. OKX's "ping" text frame) in addition to
@@ -142,7 +157,7 @@ func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 // starts an application-level keepalive, then applies frames until the
 // connection drops or ctx is cancelled.
 func (p *feedProvider) runConnection(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate, ready func()) error {
-	ws, err := wsclient.Dial(ctx, p.exchange.endpoint(group), p.cfg.Config)
+	ws, err := wsclient.Dial(ctx, p.exchange.endpoint(), p.cfg.Config)
 	if err != nil {
 		return err
 	}
@@ -168,7 +183,7 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 		p.startAppPing(connCtx, ws, pinger)
 	}
 
-	handler := p.exchange.newHandler(group)
+	handler := p.exchange.newHandler(group, p.logger)
 	em := newEmitter(out, p.logger)
 	// Reset the reconnect backoff only once every symbol in the group has produced
 	// its initial snapshot. Resetting on the first symbol would let one healthy

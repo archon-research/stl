@@ -1,23 +1,10 @@
 package orderbook
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
-
-// errSequenceGap signals that an adapter detected a break in an exchange's
-// update stream (e.g. a sequence gap) and must re-synchronise from a fresh
-// snapshot. The feed engine treats it, like any handler error, as
-// connection-fatal and reconnects.
-var errSequenceGap = errors.New("orderbook update sequence gap")
-
-// errUnexpectedSymbol is returned by a handler when the venue pushes book data
-// for a symbol we never subscribed to. The engine treats it like any handler
-// error: drop the connection and reconnect (which re-sends only our
-// subscriptions), rather than emit a book we cannot account for.
-var errUnexpectedSymbol = errors.New("orderbook update for unsubscribed symbol")
 
 // parseLevel validates an exchange [price, size] pair and returns the original
 // decimal strings unchanged. Both must be canonical fixed-point decimals

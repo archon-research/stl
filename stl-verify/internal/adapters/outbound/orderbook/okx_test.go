@@ -10,7 +10,12 @@ import (
 )
 
 func newOKXHandler() *okxHandler {
-	return &okxHandler{books: newBookSet(exchangeOKX), lastSeq: make(map[string]int64), logger: testLogger()}
+	return &okxHandler{
+		books:   newBookSet(exchangeOKX),
+		lastSeq: make(map[string]int64),
+		allowed: symbolSet([]string{"BTC-USDT"}),
+		logger:  testLogger(),
+	}
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
@@ -265,7 +270,7 @@ func TestOKXHandlerControlFrames(t *testing.T) {
 
 func TestOKXHandlerRejectsUnsubscribedSymbol(t *testing.T) {
 	// Build through the exchange so newHandler's symbolSet seeding is covered too.
-	h := (&okxExchange{wsBase: okxWSBase}).newHandler([]string{"BTC-USDT"})
+	h := (&okxExchange{}).newHandler([]string{"BTC-USDT"}, testLogger())
 	// A snapshot for an instId we never subscribed to must be rejected.
 	frame := `{"arg":{"channel":"books","instId":"ETH-USDT"},"action":"snapshot","data":[
 		{"asks":[["101","3"]],"bids":[["100","2"]],"ts":"1","seqId":10,"prevSeqId":-1}]}`
@@ -299,7 +304,7 @@ func TestOKXHandlerIgnoresDatalessFrame(t *testing.T) {
 }
 
 func TestOKXSubscribeMessageAndPing(t *testing.T) {
-	e := &okxExchange{wsBase: okxWSBase}
+	e := &okxExchange{}
 	msgs, err := e.subscribeMessages([]string{"BTC-USDT", "ETH-USDT"})
 	if err != nil || len(msgs) != 1 {
 		t.Fatalf("subscribeMessages = %v err %v", msgs, err)

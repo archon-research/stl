@@ -37,34 +37,26 @@ const (
 //
 // Docs: https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel
 func NewOKXProvider(cfg Config) outbound.OrderbookProvider {
-	cfg = cfg.withDefaults()
-	ex := &okxExchange{
-		wsBase: okxWSBase,
-		logger: cfg.Logger.With("component", exchangeOKX+"-orderbook"),
-	}
-	return newFeedProvider(cfg, ex, okxMaxSymbols)
+	return newFeedProvider(cfg, &okxExchange{}, okxMaxSymbols)
 }
 
-type okxExchange struct {
-	wsBase string
-	logger *slog.Logger
-}
+type okxExchange struct{}
 
 // Compile-time check that okxExchange supplies an application-level keepalive.
 var _ appPinger = (*okxExchange)(nil)
 
-func (e *okxExchange) name() string             { return exchangeOKX }
-func (e *okxExchange) endpoint([]string) string { return e.wsBase }
+func (e *okxExchange) name() string     { return exchangeOKX }
+func (e *okxExchange) endpoint() string { return okxWSBase }
 
 func (e *okxExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "-")
 }
-func (e *okxExchange) newHandler(group []string) frameHandler {
+func (e *okxExchange) newHandler(group []string, logger *slog.Logger) frameHandler {
 	return &okxHandler{
 		books:   newBookSet(exchangeOKX),
 		lastSeq: make(map[string]int64),
 		allowed: symbolSet(group),
-		logger:  e.logger,
+		logger:  logger,
 	}
 }
 
