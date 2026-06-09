@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newOKXHandler() *okxHandler {
@@ -28,9 +29,6 @@ func TestOKXHandlerSnapshotThenUpdate(t *testing.T) {
 	}
 	if sz, ok := sizeAt(sigs[0].book.Bids(), "100"); !ok || sz != "2" {
 		t.Errorf("bid 100 = %q (ok=%v), want 2", sz, ok)
-	}
-	if sigs[0].book.LastUpdateID != 10 {
-		t.Errorf("LastUpdateID = %d, want 10", sigs[0].book.LastUpdateID)
 	}
 
 	// Contiguous update: prevSeqId must equal the last applied seqId.
@@ -100,9 +98,6 @@ func TestOKXHandlerPeriodicResnapshot(t *testing.T) {
 	if sz, ok := sizeAt(book.Asks(), "201"); !ok || sz != "4" {
 		t.Errorf("ask 201 after re-snapshot = %q (ok=%v), want 4", sz, ok)
 	}
-	if book.LastUpdateID != 20 {
-		t.Errorf("LastUpdateID = %d, want 20", book.LastUpdateID)
-	}
 
 	// 4. A follow-up update (seqId 21, prevSeqId 20) applies cleanly: continuity
 	// continues from the re-snapshot's sequence.
@@ -118,9 +113,6 @@ func TestOKXHandlerPeriodicResnapshot(t *testing.T) {
 	book = sigs[0].book
 	if sz, ok := sizeAt(book.Bids(), "199"); !ok || sz != "6" {
 		t.Errorf("bid 199 after follow-up = %q (ok=%v), want 6", sz, ok)
-	}
-	if book.LastUpdateID != 21 {
-		t.Errorf("LastUpdateID = %d, want 21", book.LastUpdateID)
 	}
 }
 
@@ -179,8 +171,11 @@ func TestOKXHandlerNoUpdateSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update after no-update should not gap: %v", err)
 	}
-	if len(sigs) != 1 || sigs[0].book.LastUpdateID != 11 {
-		t.Fatalf("expected one signal at seqId 11, got %+v", sigs)
+	if len(sigs) != 1 {
+		t.Fatalf("expected one signal for the chained update, got %+v", sigs)
+	}
+	if sz, ok := sizeAt(sigs[0].book.Bids(), "99"); !ok || sz != "7" {
+		t.Errorf("bid 99 = %q (ok=%v), want 7", sz, ok)
 	}
 }
 
@@ -231,9 +226,6 @@ func TestOKXHandlerMultiObjectSnapshot(t *testing.T) {
 	}
 	if sz, ok := sizeAt(book.Asks(), "103"); !ok || sz != "5" {
 		t.Errorf("ask 103 from second object = %q (ok=%v), want 5", sz, ok)
-	}
-	if book.LastUpdateID != 11 {
-		t.Errorf("LastUpdateID = %d, want 11 (last object)", book.LastUpdateID)
 	}
 }
 
@@ -353,5 +345,21 @@ func TestOKXProviderNameAndValidation(t *testing.T) {
 	}
 	if _, err := p.Watch(context.Background(), nil); err == nil {
 		t.Error("Watch with no symbols should error")
+	}
+	if _, err := p.Watch(context.Background(), []string{""}); err == nil {
+		t.Error("Watch with an empty symbol should error")
+	}
+}
+
+func TestParseUnixMillisOrZero(t *testing.T) {
+	if got := parseUnixMillisOrZero("1700000000000"); !got.Equal(time.UnixMilli(1700000000000)) {
+		t.Errorf("parseUnixMillisOrZero = %v", got)
+	}
+	if got := parseUnixMillisOrZero("1700000000000"); got.Location() != time.UTC {
+		t.Errorf("parseUnixMillisOrZero location = %v, want UTC", got.Location())
+	}
+	// Malformed input returns the zero Time, never the local clock.
+	if got := parseUnixMillisOrZero("nope"); !got.IsZero() {
+		t.Errorf("parseUnixMillisOrZero(bad) = %v, want zero", got)
 	}
 }

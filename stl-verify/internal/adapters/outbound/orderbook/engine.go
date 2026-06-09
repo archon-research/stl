@@ -1,10 +1,24 @@
+// Package orderbook implements outbound.OrderbookProvider for centralised
+// exchanges.
+//
+// Each adapter maintains a full local book per symbol: it seeds an L2 book from a
+// snapshot, then keeps it current by applying the exchange's WebSocket delta
+// stream, emitting a fully aggregated book on every change. Symbols are
+// multiplexed over the minimum number of WebSocket connections the exchange
+// supports, and connections reconnect automatically with exponential backoff.
+//
+// The package deliberately contains no persistence: it produces a stream of
+// entity.OrderbookUpdate values and leaves storage (e.g. the 1s JSONB dump to
+// TimescaleDB) to the service layer.
 package orderbook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -13,9 +27,9 @@ import (
 )
 
 // Shared engine for exchanges that deliver the initial snapshot in-band over the
-// WebSocket (Coinbase, OKX, Kraken). Connection lifecycle, subscribe, keepalive,
-// emission and reconnection are identical; only the wire format differs, supplied
-// per exchange via exchangeFeed.
+// WebSocket. Connection lifecycle, subscribe, keepalive, emission and
+// reconnection are identical; only the wire format differs, supplied per
+// exchange via exchangeFeed.
 
 // bookChange marks a book that changed while handling one inbound frame.
 type bookChange struct {
@@ -47,7 +61,7 @@ func (bs *bookSet) getOrCreate(symbol string) *entity.Orderbook {
 // exchangeFeed describes a snapshot-over-WebSocket exchange: static
 // metadata plus a factory for per-connection frame handlers.
 type exchangeFeed interface {
-	// name is the exchange identifier (e.g. "coinbase").
+	// name is the exchange identifier (e.g. "okx").
 	name() string
 	// normalizeSymbol canonicalises and validates one symbol, erroring on a bad format.
 	normalizeSymbol(symbol string) (string, error)
@@ -74,8 +88,8 @@ type frameHandler interface {
 }
 
 // appPinger is an optional interface for exchanges that require an
-// application-level keepalive (e.g. OKX's "ping" text frame, Kraken's
-// {"event":"ping"}) in addition to protocol-level pings.
+// application-level keepalive (e.g. OKX's "ping" text frame) in addition to
+// protocol-level pings.
 type appPinger interface {
 	// appPing returns the raw text frame to send and the interval between sends.
 	appPing() (frame []byte, interval time.Duration)
@@ -108,8 +122,8 @@ func (p *feedProvider) Name() string { return p.exchange.name() }
 // Watch subscribes to symbols and streams aggregated books, splitting symbols
 // across the fewest connections the exchange allows.
 func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan entity.OrderbookUpdate, error) {
-	if err := validateSymbols(symbols); err != nil {
-		return nil, err
+	if len(symbols) == 0 {
+		return nil, errors.New("at least one symbol is required")
 	}
 	symbols, err := normalizeSymbols(symbols, p.exchange.normalizeSymbol)
 	if err != nil {
@@ -128,7 +142,7 @@ func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 // starts an application-level keepalive, then applies frames until the
 // connection drops or ctx is cancelled.
 func (p *feedProvider) runConnection(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate, ready func()) error {
-	ws, err := wsclient.Dial(ctx, p.exchange.endpoint(group), p.cfg.ws())
+	ws, err := wsclient.Dial(ctx, p.exchange.endpoint(group), p.cfg.Config)
 	if err != nil {
 		return err
 	}
@@ -203,9 +217,10 @@ func (p *feedProvider) startAppPing(ctx context.Context, ws *wsclient.Conn, ping
 				return
 			case <-ticker.C:
 				if err := ws.WriteText(frame); err != nil {
-					// The app ping is the primary keepalive for OKX/Kraken; if it can't
-					// be sent, close so we reconnect promptly instead of idling to the
-					// read timeout. Warn, since it explains the reconnect an operator sees.
+					// The app ping is the primary keepalive for the venues that require
+					// it; if it can't be sent, close so we reconnect promptly instead of
+					// idling to the read timeout. Warn, since it explains the reconnect
+					// an operator sees.
 					p.logger.Warn("app ping failed, closing connection", "error", err)
 					ws.Close()
 					return
@@ -213,4 +228,124 @@ func (p *feedProvider) startAppPing(ctx context.Context, ws *wsclient.Conn, ping
 			}
 		}
 	}()
+}
+
+// runConnections starts one goroutine per symbol group running connect, and
+// returns the shared output channel. The channel is closed once ctx is
+// cancelled and every connection goroutine has returned.
+func runConnections(
+	ctx context.Context,
+	groups [][]string,
+	buffer int,
+	connect func(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate),
+) <-chan entity.OrderbookUpdate {
+	out := make(chan entity.OrderbookUpdate, buffer)
+
+	var wg sync.WaitGroup
+	for _, g := range groups {
+		wg.Add(1)
+		go func(group []string) {
+			defer wg.Done()
+			connect(ctx, group, out)
+		}(g)
+	}
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+// reconnectLoop runs connect repeatedly until ctx is cancelled, backing off
+// exponentially between attempts. connect is passed a ready callback it should
+// invoke once the connection is fully established and synchronised; calling it
+// resets the backoff so a long-lived connection that later drops reconnects
+// promptly.
+func reconnectLoop(
+	ctx context.Context,
+	cfg Config,
+	logger *slog.Logger,
+	connect func(ctx context.Context, ready func()) error,
+) {
+	backoff := cfg.InitialBackoff
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		err := connect(ctx, func() { backoff = cfg.InitialBackoff })
+
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			logger.Warn("orderbook connection lost, reconnecting", "error", err, "backoff", backoff)
+		} else {
+			logger.Info("orderbook connection closed, reconnecting", "backoff", backoff)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(time.Duration(float64(backoff)*cfg.BackoffFactor), cfg.MaxBackoff)
+	}
+}
+
+// emitter delivers full-book updates to one connection's output channel. It never
+// blocks: a blocking send would park the read loop, stop the socket draining, and
+// wedge the connection with no reconnect. Updates are dropped when the consumer is
+// behind, which is safe because every update carries the whole book. A dropped
+// snapshot's discontinuity is not lost, though: its IsSnapshot flag is carried
+// onto the next delivered update for that symbol.
+type emitter struct {
+	out      chan<- entity.OrderbookUpdate
+	logger   *slog.Logger
+	deferred map[string]bool // symbol -> a snapshot was dropped; re-flag next delivery
+
+	dropped     int // drops since the last drop warning
+	lastDropLog time.Time
+}
+
+// dropLogInterval rate-limits the dropped-updates warning so a stalled consumer
+// is visible without the log itself becoming the next bottleneck.
+const dropLogInterval = time.Minute
+
+func newEmitter(out chan<- entity.OrderbookUpdate, logger *slog.Logger) *emitter {
+	return &emitter{out: out, logger: logger, deferred: make(map[string]bool)}
+}
+
+// emit sends book without blocking and reports whether it was delivered. The
+// update is flagged a snapshot when isSnapshot is set or a snapshot was dropped
+// earlier for this symbol.
+func (e *emitter) emit(book *entity.Orderbook, isSnapshot bool, t time.Time) bool {
+	snapshot := isSnapshot || e.deferred[book.Symbol]
+	// Skip building the clone when the buffer is already full.
+	if c := cap(e.out); c > 0 && len(e.out) >= c {
+		return e.drop(book.Symbol, snapshot)
+	}
+	select {
+	case e.out <- entity.NewOrderbookUpdate(book, snapshot, t, time.Now()):
+		delete(e.deferred, book.Symbol)
+		return true
+	default:
+		return e.drop(book.Symbol, snapshot)
+	}
+}
+
+// drop records an undelivered update. The first drop warns immediately; later
+// drops are counted and surfaced at most once per dropLogInterval.
+func (e *emitter) drop(symbol string, snapshot bool) bool {
+	if snapshot {
+		e.deferred[symbol] = true
+	}
+	e.dropped++
+	if now := time.Now(); now.Sub(e.lastDropLog) >= dropLogInterval {
+		e.logger.Warn("orderbook updates dropped, consumer not keeping up",
+			"dropped", e.dropped, "symbol", symbol)
+		e.dropped = 0
+		e.lastDropLog = now
+	}
+	return false
 }

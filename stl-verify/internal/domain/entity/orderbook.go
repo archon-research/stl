@@ -15,18 +15,6 @@ const (
 	Ask
 )
 
-// String returns the lower-case side name ("bid"/"ask").
-func (s Side) String() string {
-	switch s {
-	case Bid:
-		return "bid"
-	case Ask:
-		return "ask"
-	default:
-		return "unknown"
-	}
-}
-
 // PriceLevel is a single aggregated L2 level: the total resting size at a price.
 //
 // Price and Size are the exact decimal strings the exchange published. They are
@@ -52,12 +40,6 @@ type Orderbook struct {
 	Exchange string
 	Symbol   string
 
-	// LastUpdateID is the exchange sequence number of the most recently applied
-	// update. Its exact meaning is exchange-specific (e.g. OKX's seqId); adapters
-	// use it to detect gaps between consecutive deltas. Zero means no update has
-	// been applied yet.
-	LastUpdateID int64
-
 	bids map[string]string // price -> size, exact exchange text
 	asks map[string]string
 }
@@ -72,12 +54,11 @@ func NewOrderbook(exchange, symbol string) *Orderbook {
 	}
 }
 
-// Reset clears every level and the sequence number. Adapters call it before
-// applying a fresh snapshot when re-synchronising after a gap or reconnect.
+// Reset clears every level. Adapters call it before applying a fresh snapshot
+// when re-synchronising after a gap or reconnect.
 func (ob *Orderbook) Reset() {
 	clear(ob.bids)
 	clear(ob.asks)
-	ob.LastUpdateID = 0
 }
 
 func (ob *Orderbook) side(s Side) map[string]string {
@@ -99,14 +80,6 @@ func (ob *Orderbook) ApplyLevel(s Side, price, size string) {
 		return
 	}
 	m[price] = size
-}
-
-// ReplaceSide overwrites an entire side from snapshot levels.
-func (ob *Orderbook) ReplaceSide(s Side, levels []PriceLevel) {
-	clear(ob.side(s))
-	for _, lvl := range levels {
-		ob.ApplyLevel(s, lvl.Price, lvl.Size)
-	}
 }
 
 // Bids returns the buy levels. Asks returns the sell levels. Both are returned
@@ -132,11 +105,10 @@ func (ob *Orderbook) Depth(s Side) int { return len(ob.side(s)) }
 // Clone returns an independent deep copy of the book.
 func (ob *Orderbook) Clone() *Orderbook {
 	cp := &Orderbook{
-		Exchange:     ob.Exchange,
-		Symbol:       ob.Symbol,
-		LastUpdateID: ob.LastUpdateID,
-		bids:         make(map[string]string, len(ob.bids)),
-		asks:         make(map[string]string, len(ob.asks)),
+		Exchange: ob.Exchange,
+		Symbol:   ob.Symbol,
+		bids:     make(map[string]string, len(ob.bids)),
+		asks:     make(map[string]string, len(ob.asks)),
 	}
 	maps.Copy(cp.bids, ob.bids)
 	maps.Copy(cp.asks, ob.asks)
@@ -149,9 +121,7 @@ func (ob *Orderbook) Clone() *Orderbook {
 // (not an incremental delta), a consumer that falls behind may safely skip
 // intermediate updates and still hold a correct book.
 type OrderbookUpdate struct {
-	Exchange string
-	Symbol   string
-	Book     *Orderbook
+	Book *Orderbook
 	// Time is the venue event time (when the exchange produced the update), in
 	// UTC, or nil when the feed carries no event time or the timestamp was
 	// absent/unparseable. A nil Time is never fabricated from the local clock;
@@ -170,8 +140,6 @@ type OrderbookUpdate struct {
 // Both timestamps are normalised to UTC.
 func NewOrderbookUpdate(book *Orderbook, isSnapshot bool, eventTime, ingestedAt time.Time) OrderbookUpdate {
 	upd := OrderbookUpdate{
-		Exchange:   book.Exchange,
-		Symbol:     book.Symbol,
 		Book:       book.Clone(),
 		IngestedAt: ingestedAt.UTC(),
 		IsSnapshot: isSnapshot,

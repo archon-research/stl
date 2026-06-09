@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -51,6 +52,7 @@ func (e *fakeExchange) subscribedGroups() [][]string {
 	copy(out, e.groups)
 	return out
 }
+
 func (e *fakeExchange) newHandler([]string) frameHandler {
 	return &fakeHandler{books: newBookSet("fake")}
 }
@@ -148,9 +150,9 @@ func (r *readyRecorder) count() int {
 	return r.calls
 }
 
-// TestFeedProviderReadyNotCalledWithoutBook covers Issue 2 for the feed
-// engine: a connection that subscribes successfully but only ever receives an
-// error frame (and never a book) must NOT reset the reconnect backoff.
+// TestFeedProviderReadyNotCalledWithoutBook: a connection that subscribes
+// successfully but never produces a book (here the venue sends only a frame the
+// handler rejects) must NOT reset the reconnect backoff.
 func TestFeedProviderReadyNotCalledWithoutBook(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
 		// Subscribe succeeds, then the venue sends a frame the handler rejects;
@@ -177,9 +179,9 @@ func TestFeedProviderReadyNotCalledWithoutBook(t *testing.T) {
 	}
 }
 
-// TestFeedProviderReadyCalledOnceOnFirstBook covers the surrounding correct
-// behaviour for Issue 2: ready fires exactly once, when the first book is
-// emitted, and not again for subsequent updates on the same connection.
+// TestFeedProviderReadyCalledOnceOnFirstBook: the backoff reset fires exactly
+// once, when the connection's books first sync, and not again for subsequent
+// updates on the same connection.
 func TestFeedProviderReadyCalledOnceOnFirstBook(t *testing.T) {
 	srv := newWSTestServer(t, func(conn *websocket.Conn) {
 		sendText(t, conn, `{"symbol":"X","snapshot":true,"price":100,"size":1}`)
@@ -303,7 +305,7 @@ func TestStartAppPingTearsDownOnWriteFailure(t *testing.T) {
 	p := newFeedProvider(cfg, ex, 10)
 
 	srv := newWSTestServer(t, keepOpen)
-	ws, err := wsclient.Dial(context.Background(), srv.url, p.cfg.ws())
+	ws, err := wsclient.Dial(context.Background(), srv.url, p.cfg.Config)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -382,5 +384,158 @@ func TestRunConnectionReturnsSubscribeError(t *testing.T) {
 	err := p.runConnection(context.Background(), []string{"X"}, out, func() {})
 	if err == nil || !strings.Contains(err.Error(), "build subscribe message") {
 		t.Fatalf("err = %v, want a 'build subscribe message' error", err)
+	}
+}
+
+func TestEmitterDeliversCloneAndDropsWhenFull(t *testing.T) {
+	out := make(chan entity.OrderbookUpdate, 1)
+	em := newEmitter(out, testLogger())
+
+	book := entity.NewOrderbook("test", "X")
+	book.ApplyLevel(entity.Bid, "100", "1")
+	if !em.emit(book, true, time.Unix(1, 0)) {
+		t.Fatal("snapshot should be delivered when the buffer has room")
+	}
+
+	// Buffer is now full; this emit must be dropped without blocking.
+	book.ApplyLevel(entity.Bid, "100", "9")
+	if em.emit(book, false, time.Unix(2, 0)) {
+		t.Fatal("delta should be dropped when the buffer is full")
+	}
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 buffered update (second dropped), got %d", len(out))
+	}
+	upd := <-out
+	if !upd.IsSnapshot {
+		t.Error("expected the first (snapshot) update to survive")
+	}
+	if sz, ok := sizeAt(upd.Book.Bids(), "100"); !ok || sz != "1" {
+		t.Errorf("emitted book size at 100 = %q (ok=%v), want 1 (must be a clone taken at emit time)", sz, ok)
+	}
+}
+
+// TestEmitterDoesNotBlockOnFullBuffer is the regression test for the
+// connection-wedge bug: a snapshot that cannot be delivered (consumer stalled,
+// buffer full) must NOT block the caller. A blocking snapshot send parks the read
+// loop, which then stops draining the socket and never reconnects.
+func TestEmitterDoesNotBlockOnFullBuffer(t *testing.T) {
+	out := make(chan entity.OrderbookUpdate) // no reader, no capacity
+	em := newEmitter(out, testLogger())
+	book := entity.NewOrderbook("test", "X")
+	book.ApplyLevel(entity.Bid, "100", "1")
+
+	done := make(chan struct{})
+	go func() {
+		em.emit(book, true, time.Unix(1, 0)) // snapshot would block under the old design
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("emit blocked on a snapshot into a full buffer; a stalled consumer would wedge the connection")
+	}
+}
+
+// TestEmitterDefersDroppedSnapshot: a snapshot dropped because the buffer was full
+// must carry its discontinuity flag onto the next delivered update for the symbol,
+// so the consumer still learns of the (re)sync.
+func TestEmitterDefersDroppedSnapshot(t *testing.T) {
+	out := make(chan entity.OrderbookUpdate, 1)
+	em := newEmitter(out, testLogger())
+	book := entity.NewOrderbook("test", "X")
+	book.ApplyLevel(entity.Bid, "100", "1")
+
+	if !em.emit(book, false, time.Unix(1, 0)) {
+		t.Fatal("first update should be delivered into the empty buffer")
+	}
+	if em.emit(book, true, time.Unix(2, 0)) {
+		t.Fatal("snapshot should drop when the buffer is full")
+	}
+	<-out // drain the first update so the buffer has room again
+	if !em.emit(book, false, time.Unix(3, 0)) {
+		t.Fatal("delta should be delivered once the buffer drains")
+	}
+	if got := <-out; !got.IsSnapshot {
+		t.Error("dropped snapshot's discontinuity must be deferred onto the next delivered update")
+	}
+}
+
+// TestEmitterLogsDroppedUpdates: dropping updates is deliberate best-effort, but
+// it must not be silent. The first drop warns immediately; further drops inside
+// the rate-limit window are counted, not logged, so a stalled consumer cannot
+// turn the log into the next bottleneck.
+func TestEmitterLogsDroppedUpdates(t *testing.T) {
+	logger, sb := captureLogger()
+	out := make(chan entity.OrderbookUpdate, 1)
+	em := newEmitter(out, logger)
+	book := entity.NewOrderbook("test", "X")
+	book.ApplyLevel(entity.Bid, "100", "1")
+
+	if !em.emit(book, false, time.Unix(1, 0)) {
+		t.Fatal("first update should be delivered into the empty buffer")
+	}
+	if strings.Contains(sb.String(), "dropped") {
+		t.Fatal("no drop yet, nothing should be logged")
+	}
+	// Buffer full: both of these drop, but only the first logs within the window.
+	em.emit(book, false, time.Unix(2, 0))
+	em.emit(book, false, time.Unix(3, 0))
+	if n := strings.Count(sb.String(), "orderbook updates dropped"); n != 1 {
+		t.Errorf("drop warning logged %d times, want exactly 1 (rate-limited)", n)
+	}
+}
+
+func TestReconnectLoopRetriesAndStops(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := testConfig()
+	cfg.InitialBackoff = time.Millisecond
+	cfg.MaxBackoff = 2 * time.Millisecond
+
+	var calls atomic.Int32
+	loopDone := make(chan struct{})
+	go func() {
+		reconnectLoop(ctx, cfg, cfg.Logger, func(ctx context.Context, ready func()) error {
+			ready()
+			if calls.Add(1) >= 3 {
+				cancel()
+			}
+			return errors.New("boom")
+		})
+		close(loopDone)
+	}()
+
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnectLoop did not stop after context cancellation")
+	}
+	if got := calls.Load(); got < 3 {
+		t.Errorf("connect called %d times, want >= 3", got)
+	}
+}
+
+func TestRunConnectionsClosesChannelWhenAllReturn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	groups := [][]string{{"a"}, {"b"}}
+
+	var wg sync.WaitGroup
+	wg.Add(len(groups))
+	out := runConnections(ctx, groups, 4, func(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate) {
+		defer wg.Done()
+		<-ctx.Done() // run until cancelled
+	})
+
+	cancel()
+	wg.Wait()
+
+	// The aggregator goroutine should close out after both connections return.
+	select {
+	case _, ok := <-out:
+		if ok {
+			t.Error("expected closed channel, got a value")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("output channel was not closed after all connections returned")
 	}
 }

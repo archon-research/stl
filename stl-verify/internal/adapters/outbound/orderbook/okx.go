@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -139,17 +140,16 @@ func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
 		return nil, fmt.Errorf("%w: okx %s", errUnexpectedSymbol, instID)
 	}
 	book := h.books.getOrCreate(instID)
-	changes := make([]bookChange, 0, len(f.Data))
 
-	// A snapshot frame rebuilds the whole book and emits exactly one aggregated
-	// snapshot: reset once, apply every data object, then emit at the end so a
-	// multi-object frame never surfaces a partial book.
+	// A snapshot frame rebuilds the whole book: reset once, then apply every data
+	// object.
 	isSnapshot := f.Action == "snapshot"
 	if isSnapshot {
 		book.Reset()
 	}
-	var snapshotTS time.Time
 
+	applied := isSnapshot
+	var eventTime time.Time
 	for _, d := range f.Data {
 		if !isSnapshot {
 			last, ok := h.lastSeq[instID]
@@ -160,7 +160,7 @@ func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
 			}
 			// OKX no-update message: empty book with seqId == prevSeqId == the last
 			// applied seqId (it repeats the current sequence, it does not advance).
-			// It changes nothing, so emit nothing and leave the sequence untouched.
+			// It changes nothing, so apply nothing and leave the sequence untouched.
 			if len(d.Bids) == 0 && len(d.Asks) == 0 && d.SeqID == d.PrevSeqID && d.SeqID == last {
 				continue
 			}
@@ -180,16 +180,27 @@ func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
 			return nil, fmt.Errorf("okx %s asks: %w", instID, err)
 		}
 		h.lastSeq[instID] = d.SeqID
-		book.LastUpdateID = d.SeqID
-		ts := parseUnixMillisOrZero(d.TS)
-		if isSnapshot {
-			snapshotTS = ts
-			continue
+		applied = true
+		if ts := parseUnixMillisOrZero(d.TS); ts.After(eventTime) {
+			eventTime = ts
 		}
-		changes = append(changes, bookChange{book: book, isSnapshot: false, t: ts})
 	}
-	if isSnapshot {
-		return []bookChange{{book: book, isSnapshot: true, t: snapshotTS}}, nil
+	if !applied {
+		return nil, nil
 	}
-	return changes, nil
+	// One change per frame: every emitted update carries the complete book, so
+	// emitting per data object would just send identical copies of the final state.
+	return []bookChange{{book: book, isSnapshot: isSnapshot, t: eventTime}}, nil
+}
+
+// parseUnixMillisOrZero parses OKX's Unix-millisecond ts string, returning the
+// zero Time when it is empty or unparseable. The zero Time signals "no usable
+// venue event time"; it is never substituted with the local clock (the local
+// clock is recorded separately as OrderbookUpdate.IngestedAt).
+func parseUnixMillisOrZero(s string) time.Time {
+	ms, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms).UTC()
 }
