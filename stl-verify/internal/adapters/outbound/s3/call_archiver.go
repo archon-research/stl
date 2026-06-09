@@ -17,7 +17,15 @@ const archiveTimestampFormat = "20060102T150405Z"
 
 // zstdEncoder is shared across all Archive calls. (*zstd.Encoder).EncodeAll is
 // safe for concurrent use, so a single encoder avoids a per-call allocation.
-var zstdEncoder, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+var zstdEncoder *zstd.Encoder
+
+func init() {
+	var err error
+	zstdEncoder, err = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		panic(fmt.Sprintf("init zstd encoder: %v", err))
+	}
+}
 
 // CallArchiver writes raw SC call records to S3 as zstd-compressed JSONL.
 type CallArchiver struct {
