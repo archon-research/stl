@@ -8,6 +8,12 @@ import (
 // CallRecord is a single raw smart contract call captured for archival.
 // CallData and Response are the raw ABI-encoded bytes exactly as exchanged
 // with the node; no decoding is performed.
+//
+// Ownership: the record owns its CallData and Response slices. The caller must
+// pass slices the record can retain unshared and must not mutate them after
+// constructing the record (the archiving decorator copies the underlying call
+// and result bytes at capture, so they are safe to use asynchronously).
+// Implementations therefore need not defensively copy these fields.
 type CallRecord struct {
 	ChainID         int64
 	BlockNumber     int64
