@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -59,9 +60,43 @@ func TestMain(m *testing.M) {
 // Integration tests for run()
 // ---------------------------------------------------------------------------
 
-func TestRunIntegration_HappyPath(t *testing.T) {
+// integrationEnv holds the running service and its dependencies for a single
+// run() integration test. Built by setupIntegrationTest.
+type integrationEnv struct {
+	pool       *pgxpool.Pool
+	s3Client   *s3.Client
+	sqsState   *testutil.MockSQSServer
+	tokenCount int
+	bgCtx      context.Context
+	cancel     context.CancelFunc
+	errCh      chan error
+}
+
+// setupConfig is configured via setupOption.
+type setupConfig struct {
+	archiving bool
+}
+
+type setupOption func(*setupConfig)
+
+// withArchiving enables ARCHIVE_SC_CALLS for the run and provisions the archive
+// bucket.
+func withArchiving() setupOption { return func(c *setupConfig) { c.archiving = true } }
+
+// setupIntegrationTest provisions the DB schema, mock RPC/SQS servers, seeded
+// S3 block, and environment, then starts run() and blocks until the service is
+// polling SQS. It registers all teardown via t.Cleanup; callers drive shutdown
+// with (*integrationEnv).waitForShutdown.
+func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
+	t.Helper()
+
+	var cfg setupConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
-	defer cleanup()
+	t.Cleanup(cleanup)
 
 	bgCtx := context.Background()
 
@@ -82,16 +117,21 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	}
 
 	rpcServer := testutil.StartMockEthRPC(t, tokenCount)
-	defer rpcServer.Close()
+	t.Cleanup(rpcServer.Close)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
-	defer sqsServer.Close()
+	t.Cleanup(sqsServer.Close)
 
 	// Pre-seed S3 with the block JSON for block 18000000 so resolveBlockTimestamp
 	// can recover a timestamp via the cache→S3 fallback path.
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
 	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
 		t.Fatalf("create S3 bucket: %v", err)
+	}
+	if cfg.archiving {
+		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
+			t.Fatalf("create archive S3 bucket: %v", err)
+		}
 	}
 	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
 
@@ -109,10 +149,14 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("S3_BUCKET", testBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
+	if cfg.archiving {
+		t.Setenv("ARCHIVE_SC_CALLS", "true")
+		t.Setenv("RAW_SC_BUCKET", archiveBucket)
+	}
 
 	// Use a cancellable context instead of SIGINT for clean test shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -130,35 +174,56 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 		t.Fatal("timed out waiting for service to start")
 	}
 
-	// Wait for the block event to be processed (prices stored in DB)
+	return &integrationEnv{
+		pool:       pool,
+		s3Client:   s3Client,
+		sqsState:   sqsState,
+		tokenCount: tokenCount,
+		bgCtx:      bgCtx,
+		cancel:     cancel,
+		errCh:      errCh,
+	}
+}
+
+// waitForPrices blocks until at least tokenCount prices are stored.
+func (e *integrationEnv) waitForPrices(t *testing.T) {
+	t.Helper()
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		var count int
-		pool.QueryRow(bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&count)
-		return count >= tokenCount
+		e.pool.QueryRow(e.bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&count)
+		return count >= e.tokenCount
 	}, "prices to be stored in DB")
+}
 
-	// Cancel the context to trigger graceful shutdown.
-	cancel()
-
-	// Wait for run() to return
+// waitForShutdown cancels run()'s context and asserts it returns cleanly.
+func (e *integrationEnv) waitForShutdown(t *testing.T) {
+	t.Helper()
+	e.cancel()
 	select {
-	case err := <-errCh:
+	case err := <-e.errCh:
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run() did not return after context cancellation")
 	}
+}
+
+func TestRunIntegration_HappyPath(t *testing.T) {
+	env := setupIntegrationTest(t)
+
+	env.waitForPrices(t)
+	env.waitForShutdown(t)
 
 	// Verify prices
 	var priceCount int
-	pool.QueryRow(bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&priceCount)
-	if priceCount < tokenCount {
-		t.Errorf("expected at least %d prices, got %d", tokenCount, priceCount)
+	env.pool.QueryRow(env.bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&priceCount)
+	if priceCount < env.tokenCount {
+		t.Errorf("expected at least %d prices, got %d", env.tokenCount, priceCount)
 	}
 
 	// Verify DeleteMessage was called
-	if deletes := sqsState.Deletes(); deletes < 1 {
+	if deletes := env.sqsState.Deletes(); deletes < 1 {
 		t.Errorf("expected at least 1 DeleteMessage call, got %d", deletes)
 	}
 }
@@ -168,101 +233,21 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 // covers the otherwise-untested enabled wiring branch in run() plus the
 // WithBlockVersion plumbing in the service.
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
-	defer cleanup()
+	env := setupIntegrationTest(t, withArchiving())
 
-	bgCtx := context.Background()
-
-	if _, err := pool.Exec(bgCtx, `UPDATE oracle SET enabled = false WHERE name != 'sparklend'`); err != nil {
-		t.Fatalf("disable non-sparklend oracles: %v", err)
-	}
-
-	var tokenCount int
-	if err := pool.QueryRow(bgCtx,
-		`SELECT COUNT(*) FROM oracle_asset oa
-		 JOIN oracle os ON os.id = oa.oracle_id
-		 WHERE os.name = 'sparklend' AND oa.enabled = true`).Scan(&tokenCount); err != nil {
-		t.Fatalf("count tokens: %v", err)
-	}
-	if tokenCount == 0 {
-		t.Fatal("no seeded oracle assets found")
-	}
-
-	rpcServer := testutil.StartMockEthRPC(t, tokenCount)
-	defer rpcServer.Close()
-
-	sqsServer, sqsState := testutil.StartMockSQS(t)
-	defer sqsServer.Close()
-
-	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create block S3 bucket: %v", err)
-	}
-	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
-		t.Fatalf("create archive S3 bucket: %v", err)
-	}
-	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
-
-	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
-
-	t.Setenv("BUILD_GIT_HASH", "test")
-	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
-	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
-	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
-	t.Setenv("AWS_REGION", "us-east-1")
-	t.Setenv("AWS_ACCESS_KEY_ID", "test")
-	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
-	t.Setenv("DEPLOY_ENV", testDeployEnv)
-	// Enable archiving for this run.
-	t.Setenv("ARCHIVE_SC_CALLS", "true")
-	t.Setenv("RAW_SC_BUCKET", archiveBucket)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- run(ctx, []string{
-			"-queue", "http://localhost/test-queue",
-			"-db", dbURL,
-			"-redis", sharedRedisAddr,
-		})
-	}()
-
-	select {
-	case <-sqsState.FirstCallReceived:
-	case <-time.After(30 * time.Second):
-		t.Fatal("timed out waiting for service to start")
-	}
-
-	testutil.WaitForCondition(t, 30*time.Second, func() bool {
-		var count int
-		pool.QueryRow(bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&count)
-		return count >= tokenCount
-	}, "prices to be stored in DB")
+	env.waitForPrices(t)
 
 	// Archives are fire-and-forget; poll the archive bucket until at least one
 	// object lands under the chain_id partition.
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
-		out, err := s3Client.ListObjectsV2(bgCtx, &s3.ListObjectsV2Input{
+		out, err := env.s3Client.ListObjectsV2(env.bgCtx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(archiveBucket),
 			Prefix: aws.String(archivePrefix),
 		})
 		return err == nil && len(out.Contents) > 0
 	}, "raw SC call archives to be written to S3")
 
-	cancel()
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("run() returned error: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("run() did not return after context cancellation")
-	}
+	env.waitForShutdown(t)
 }
 
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {
