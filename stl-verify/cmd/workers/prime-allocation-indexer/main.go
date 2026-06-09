@@ -240,15 +240,12 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	if archivingwire.Enabled() {
-		wrap, drain, werr := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
-		if werr != nil {
-			return fmt.Errorf("wiring SC call archiver: %w", werr)
-		}
-		mc = wrap(mc)
-		defer drain()
-		logger.Info("raw SC call archiving enabled", "bucket", env.Get(archivingwire.EnvBucket, ""))
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	if err != nil {
+		return err
 	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
