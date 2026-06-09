@@ -131,7 +131,8 @@ Lean towards returning errors instead of continuing, unless there is an extremel
     Always think hard and carefully about how the wrong data could be written to the database.
     Always think hard and carefully about schema design.
     For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
-    NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
+    NEVER modify a *merged* migration in `stl-verify/db/migrations/` — once deployed it is applied on staging/prod and the migrator's checksum will reject edits. Create a new migration for fixes or additions to merged work.
+    Within an *unmerged* branch/PR, append further DB changes to that branch's own (not-yet-merged) migration instead of adding a second file — the engineer can drop/recreate the local dev DB and re-apply the extended migration. One migration per branch/PR.
 
 ## Do NOT
 

@@ -139,6 +139,25 @@ data:
       --attributes RawMessageDelivery=true \
       --region $REGION
 
+    # Maple indexer is Ethereum-only
+    echo "Creating Ethereum maple indexing queues..."
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-maple-indexing-dlq.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sqs create-queue \
+      --queue-name stl-ethereum-maple-indexing.fifo \
+      --attributes FifoQueue=true,ContentBasedDeduplication=true \
+      --region $REGION
+
+    $AWS sns subscribe \
+      --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-ethereum-blocks.fifo" \
+      --protocol sqs \
+      --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-maple-indexing.fifo" \
+      --attributes RawMessageDelivery=true \
+      --region $REGION
+
     # Prime debt indexer is Ethereum-only
     echo "Creating Ethereum prime-debt queues..."
     $AWS sqs create-queue \

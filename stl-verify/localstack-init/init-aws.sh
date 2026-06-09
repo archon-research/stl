@@ -100,7 +100,7 @@ create_chain_resources "ethereum"
 create_chain_resources "avalanche"
 
 # Ethereum-only consumers
-for queue in oracle-price morpho-indexing; do
+for queue in oracle-price morpho-indexing maple-indexing; do
   create_consumer_queue "ethereum" "$queue"
 done
 

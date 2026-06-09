@@ -188,13 +188,13 @@ async def insert_receipt_token(
     conn = await asyncpg.connect(db_url)
     try:
         protocol_id = await conn.fetchval(
-            "SELECT id FROM protocol WHERE chain_id = $1 LIMIT 1",
+            "SELECT id FROM protocol WHERE chain_id = $1 ORDER BY id LIMIT 1",
             chain_id,
         )
         if protocol_id is None:
             raise RuntimeError(f"no protocol seed found for chain_id={chain_id}")
         token_id = await conn.fetchval(
-            "SELECT id FROM token WHERE chain_id = $1 LIMIT 1",
+            "SELECT id FROM token WHERE chain_id = $1 ORDER BY id LIMIT 1",
             chain_id,
         )
         if token_id is None:
