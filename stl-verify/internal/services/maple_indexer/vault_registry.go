@@ -56,14 +56,6 @@ func (r *VaultRegistry) LoadFromDB(ctx context.Context, repo outbound.MapleRepos
 	return nil
 }
 
-// IsKnownVault returns true if the address is registered as a Syrup vault.
-func (r *VaultRegistry) IsKnownVault(address common.Address) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	_, ok := r.vaults[address]
-	return ok
-}
-
 // GetVault returns the vault entity for the given address, or nil if unknown.
 func (r *VaultRegistry) GetVault(address common.Address) *entity.MapleVault {
 	r.mu.RLock()

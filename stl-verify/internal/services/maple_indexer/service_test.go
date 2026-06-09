@@ -244,6 +244,21 @@ func TestService_Start_FailsOnEmptyRegistry(t *testing.T) {
 // fetchAndProcessReceipts — golden path + edge cases
 // -----------------------------------------------------------------------------
 
+func TestService_ProcessBlock_ForeignChainID_Errors(t *testing.T) {
+	h := newHarness(t) // registry + config are chain 1
+	event := makeBlockEvent(18_500_000)
+	event.ChainID = 137 // misrouted: Polygon event on a mainnet indexer
+
+	err := h.svc.processBlockEvent(context.Background(), event)
+	if err == nil || !strings.Contains(err.Error(), "unexpected block event chain_id") {
+		t.Fatalf("expected chain mismatch error, got %v", err)
+	}
+	// The guard must reject before any cache read or DB write.
+	if len(h.mapleRepo.stateRows) != 0 || len(h.mapleRepo.posRows) != 0 {
+		t.Fatal("no rows should be written for a foreign-chain event")
+	}
+}
+
 func TestService_ProcessBlock_MalformedReceiptsJSON_Errors(t *testing.T) {
 	h := newHarness(t)
 	event := makeBlockEvent(18_500_000)

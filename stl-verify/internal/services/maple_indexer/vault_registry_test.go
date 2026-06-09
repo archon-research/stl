@@ -48,22 +48,16 @@ func TestVaultRegistry_LoadFromDB_PopulatesMap(t *testing.T) {
 	if r.Count() != 1 {
 		t.Fatalf("Count=%d, want 1", r.Count())
 	}
-	if !r.IsKnownVault(addr) {
-		t.Fatal("vault should be known")
-	}
 	if got := r.GetVault(addr); got == nil || got.ID != v.ID {
 		t.Fatalf("GetVault returned wrong vault: %+v", got)
 	}
 }
 
-func TestVaultRegistry_IsKnownVault_FalseForUnknown(t *testing.T) {
+func TestVaultRegistry_GetVault_NilForUnknown(t *testing.T) {
 	repo := newRepoStub(map[common.Address]*entity.MapleVault{}, nil)
 	r := NewVaultRegistry(quietLogger())
 	if err := r.LoadFromDB(context.Background(), repo, 1); err != nil {
 		t.Fatal(err)
-	}
-	if r.IsKnownVault(common.HexToAddress(otherAddr)) {
-		t.Fatal("unknown address must not be reported as known")
 	}
 	if got := r.GetVault(common.HexToAddress(otherAddr)); got != nil {
 		t.Fatalf("GetVault for unknown address should be nil, got %+v", got)

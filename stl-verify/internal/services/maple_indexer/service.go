@@ -212,9 +212,10 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	blockNumber := big.NewInt(event.BlockNumber)
 
-	// Deterministic per-vault ordering so concurrent indexer instances
-	// (e.g. blue/green deploy overlap) acquire DB locks in the same order
-	// and don't deadlock on multi-vault blocks.
+	// Deterministic per-vault ordering for stable, reproducible output. Each
+	// vault is indexed in its own transaction (see indexVault), so no single tx
+	// ever holds locks spanning two vaults — this sort is for determinism, not
+	// deadlock avoidance.
 	vaultAddrs := make([]common.Address, 0, len(touched))
 	for v := range touched {
 		vaultAddrs = append(vaultAddrs, v)
@@ -239,7 +240,11 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 // position refresh; an empty user set means the vault emitted a relevant
 // event with no user-addressable side effect (e.g. a malformed log).
 func (s *Service) touchedVaults(receipts []shared.TransactionReceipt) map[common.Address]map[common.Address]struct{} {
-	allLogs := make([]shared.Log, 0)
+	totalLogs := 0
+	for _, r := range receipts {
+		totalLogs += len(r.Logs)
+	}
+	allLogs := make([]shared.Log, 0, totalLogs)
 	for _, r := range receipts {
 		allLogs = append(allLogs, r.Logs...)
 	}
@@ -278,11 +283,11 @@ func (s *Service) indexVault(
 
 	vault := s.registry.GetVault(vaultAddr)
 	if vault == nil {
-		// touchedVaults only emits addresses that are in the registry, so
-		// reaching this branch means a concurrent reload removed the vault.
-		// Surface as an error so the SQS message redelivers and is reprocessed
-		// against the now-current registry.
-		return fmt.Errorf("vault %s not in registry (registry reload race?)", vaultAddr.Hex())
+		// touchedVaults only emits addresses drawn from the registry, and the
+		// registry is loaded once at startup and never mutated, so this branch
+		// is unreachable in practice. Keep it as a defensive nil guard: surface
+		// an error so the SQS message redelivers rather than nil-deref below.
+		return fmt.Errorf("vault %s not in registry", vaultAddr.Hex())
 	}
 
 	stateRaw, err := s.blockchainSvc.FetchVaultState(ctx, vaultAddr, vault.Decimals, blockNumber)
@@ -295,9 +300,10 @@ func (s *Service) indexVault(
 		userAddrs = append(userAddrs, u)
 	}
 	// Sort users so per-block multicall input is deterministic — handy when
-	// diffing test output and also gives concurrent indexer instances a
-	// stable user_id lock-acquisition order under the same defensive
-	// rationale as the vault sort above. See ADR-0002 §3.
+	// diffing test output. Unlike the vault sort, this ordering also matters
+	// for correctness: all user rows for a vault are written in one tx (see
+	// WithTransaction below), so a stable user_id lock-acquisition order keeps
+	// concurrent indexer instances from deadlocking. See ADR-0002 §3.
 	slices.SortFunc(userAddrs, func(a, b common.Address) int {
 		return bytes.Compare(a.Bytes(), b.Bytes())
 	})

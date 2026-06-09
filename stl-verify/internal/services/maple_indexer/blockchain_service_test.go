@@ -1,6 +1,7 @@
 package maple_indexer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math/big"
@@ -45,21 +46,9 @@ func TestNewBlockchainService_PrePacksNoArgViews(t *testing.T) {
 	if len(bs.totalAssetsData) == 0 || len(bs.totalSupplyData) == 0 {
 		t.Fatal("pre-packed call data is empty")
 	}
-	if bytesEqual(bs.totalAssetsData, bs.totalSupplyData) {
+	if bytes.Equal(bs.totalAssetsData, bs.totalSupplyData) {
 		t.Fatal("totalAssets == totalSupply selector")
 	}
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestFetchVaultState_DecodesAllFields(t *testing.T) {

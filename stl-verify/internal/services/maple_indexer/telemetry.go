@@ -21,16 +21,19 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed  metric.Int64Counter
-	vaultStateWrites metric.Int64Counter
-	positionWrites   metric.Int64Counter
-	rpcCallsTotal    metric.Int64Counter
-	errorsTotal      metric.Int64Counter
+	blocksProcessed  metric.Int64Counter // blocks (= SQS messages) processed, labelled success/error
+	vaultStateWrites metric.Int64Counter // maple_vault_state rows written
+	positionWrites   metric.Int64Counter // maple_vault_position rows written
+	rpcCallsTotal    metric.Int64Counter // RPC calls made, labelled by method + success/error
+	errorsTotal      metric.Int64Counter // errors, labelled by operation
 
 	// Histograms
-	blockDuration   metric.Float64Histogram
-	receiptDuration metric.Float64Histogram
-	rpcDuration     metric.Float64Histogram
+	// blockDuration is the end-to-end latency of processing one block event:
+	// one SQS message = one block, so this is the per-event processing time
+	// (cache fetch → vault state/position writes). Use it for "how long to
+	// process 1 event".
+	blockDuration metric.Float64Histogram
+	rpcDuration   metric.Float64Histogram // per-RPC-call latency, labelled by method
 }
 
 // NewTelemetry creates a new Telemetry instance using the global providers.
@@ -97,16 +100,6 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockDuration histogram: %w", err)
-	}
-
-	t.receiptDuration, err = meter.Float64Histogram(
-		"maple.receipt.duration_seconds",
-		metric.WithDescription("Duration of receipt processing in seconds"),
-		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating receiptDuration histogram: %w", err)
 	}
 
 	t.rpcDuration, err = meter.Float64Histogram(

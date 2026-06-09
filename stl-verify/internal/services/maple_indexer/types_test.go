@@ -66,7 +66,7 @@ func TestNewTelemetry_CreatesAllInstruments(t *testing.T) {
 		tel.positionWrites == nil || tel.rpcCallsTotal == nil || tel.errorsTotal == nil {
 		t.Fatal("counters not initialised")
 	}
-	if tel.blockDuration == nil || tel.receiptDuration == nil || tel.rpcDuration == nil {
+	if tel.blockDuration == nil || tel.rpcDuration == nil {
 		t.Fatal("histograms not initialised")
 	}
 }
