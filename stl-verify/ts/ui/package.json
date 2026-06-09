@@ -9,19 +9,14 @@
     "#styled-system/*": "./styled-system/*"
   },
   "scripts": {
-    "codegen:styles": "panda codegen",
-    "prepare": "npm run codegen:styles",
-    "predev": "npm run codegen:styles",
+    "prepare": "panda codegen",
     "dev": "vite",
-    "prebuild": "npm run codegen:styles",
     "build": "vite build",
-    "pretype:check": "npm run codegen:styles",
     "type:check": "tsgo -b",
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "preview": "vite preview",
     "generate:openapi-types": "openapi-typescript ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts",
-    "prelint": "npm run codegen:styles",
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
   "dependencies": {
