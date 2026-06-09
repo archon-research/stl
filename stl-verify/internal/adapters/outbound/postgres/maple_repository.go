@@ -48,7 +48,7 @@ func (r *MapleRepository) GetAllVaults(ctx context.Context, chainID int64) (map[
 	// maple_vault so the two can never drift.
 	rows, err := r.pool.Query(ctx,
 		`SELECT mv.id, mv.protocol_id, mv.address, mv.name, mv.symbol, mv.asset_token_id,
-		        mv.pool_address, mv.vault_version, mv.created_at_block, t.decimals
+		        mv.vault_version, mv.created_at_block, t.decimals
 		   FROM maple_vault mv
 		   JOIN token t ON t.id = mv.asset_token_id
 		  WHERE mv.chain_id = $1`, chainID)
@@ -67,7 +67,7 @@ func (r *MapleRepository) GetAllVaults(ctx context.Context, chainID int64) (map[
 		)
 		if err := rows.Scan(
 			&v.ID, &v.ProtocolID, &v.Address, &name, &symbol,
-			&v.AssetTokenID, &v.PoolAddress, &v.VaultVersion, &v.CreatedAtBlock, &decimals,
+			&v.AssetTokenID, &v.VaultVersion, &v.CreatedAtBlock, &decimals,
 		); err != nil {
 			return nil, fmt.Errorf("scanning maple vault: %w", err)
 		}

@@ -14,15 +14,7 @@ INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, 
 VALUES
     -- SyrupUSDC vault contract address used as the Syrup-v1 protocol address.
     (1, '\x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b'::bytea,
-        'maple-syrup-v1', 'lending', 0, NOW(), '{}'::jsonb),
-    -- PoolV2 SyrupUSDC address as the Pool-V2 protocol address.
-    (1, '\x80226fc0Ee2b096224EeAc085Bb9a8cba1146f7D'::bytea,
-        'maple-pool-v2', 'lending', 0, NOW(), '{}'::jsonb),
-    -- OTL / FTL placeholder protocol rows (loan-type-level, not per-loan-contract).
-    (1, '\x0000000000000000000000000000000000000001'::bytea,
-        'maple-otl', 'lending', 0, NOW(), '{}'::jsonb),
-    (1, '\x0000000000000000000000000000000000000002'::bytea,
-        'maple-ftl', 'lending', 0, NOW(), '{}'::jsonb)
+        'maple-syrup-v1', 'lending', 0, NOW(), '{}'::jsonb)
 ON CONFLICT (chain_id, address) DO NOTHING;
 
 -- ============================================================================
@@ -66,7 +58,6 @@ CREATE TABLE IF NOT EXISTS maple_vault
     name                 VARCHAR(255),
     symbol               VARCHAR(50),
     asset_token_id       BIGINT      NOT NULL REFERENCES token (id),
-    pool_address         BYTEA       NOT NULL,
     vault_version        SMALLINT    NOT NULL DEFAULT 1,
     created_at_block     BIGINT      NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -83,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_maple_vault_protocol_id ON maple_vault (protocol_
 -- via etherscan during smoke test; if values shift, update seed via a follow-on
 -- migration (NEVER modify this file once merged).
 INSERT INTO maple_vault (chain_id, protocol_id, address, name, symbol,
-                         asset_token_id, pool_address, vault_version, created_at_block)
+                         asset_token_id, vault_version, created_at_block)
 SELECT 1,
        (SELECT id FROM protocol WHERE chain_id = 1 AND name = 'maple-syrup-v1'),
        '\x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b'::bytea,
@@ -91,7 +82,6 @@ SELECT 1,
        (SELECT id FROM token
         WHERE chain_id = 1
           AND address = '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea),
-       '\x80226fc0Ee2b096224EeAc085Bb9a8cba1146f7D'::bytea,
        1, 20231245
 WHERE NOT EXISTS (
     SELECT 1 FROM maple_vault
@@ -99,7 +89,7 @@ WHERE NOT EXISTS (
       AND address = '\x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b'::bytea);
 
 INSERT INTO maple_vault (chain_id, protocol_id, address, name, symbol,
-                         asset_token_id, pool_address, vault_version, created_at_block)
+                         asset_token_id, vault_version, created_at_block)
 SELECT 1,
        (SELECT id FROM protocol WHERE chain_id = 1 AND name = 'maple-syrup-v1'),
        '\x356b8d89C1E1239cbBb9DE4815c39a1474d5Ba7D'::bytea,
@@ -107,9 +97,6 @@ SELECT 1,
        (SELECT id FROM token
         WHERE chain_id = 1
           AND address = '\xdAC17F958D2ee523a2206206994597C13D831ec7'::bytea),
-       -- Pool address for SyrupUSDT — confirm during smoke test; placeholder
-       -- zero address until then. Follow-on migration updates it (NEVER edit this file).
-       '\x0000000000000000000000000000000000000000'::bytea,
        1, 21063245
 WHERE NOT EXISTS (
     SELECT 1 FROM maple_vault

@@ -106,9 +106,9 @@ func (f *mapleTestFixture) createTestFixtures(t *testing.T, ctx context.Context)
 
 	err = f.pool.QueryRow(ctx,
 		`INSERT INTO maple_vault (chain_id, protocol_id, address, name, symbol,
-		                          asset_token_id, pool_address, vault_version, created_at_block)
+		                          asset_token_id, vault_version, created_at_block)
 		 VALUES (1, $1, $2, 'Syrup USDC', 'syrupUSDC',
-		         $3, '\x80226fc0ee2b096224eeac085bb9a8cba1146f7d'::bytea, 1, 20231245)
+		         $3, 1, 20231245)
 		 RETURNING id`,
 		f.protocolID, f.vaultAddress.Bytes(), f.assetTokenID,
 	).Scan(&f.vaultID)

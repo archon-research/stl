@@ -7,8 +7,7 @@ import (
 
 func TestNewMapleVault_Valid(t *testing.T) {
 	addr := bytes.Repeat([]byte{0xab}, 20)
-	pool := bytes.Repeat([]byte{0xcd}, 20)
-	v, err := NewMapleVault(1, 7, 9, addr, "Syrup USDC", "syrupUSDC", pool, 1, 20231245, 6)
+	v, err := NewMapleVault(1, 7, 9, addr, "Syrup USDC", "syrupUSDC", 1, 20231245, 6)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -33,7 +32,6 @@ type mapleVaultArgs struct {
 	chainID, protocolID, assetTokenID int64
 	address                           []byte
 	name, symbol                      string
-	poolAddress                       []byte
 	vaultVersion                      int16
 	createdAtBlock                    int64
 	decimals                          uint8
@@ -47,7 +45,6 @@ func validMapleVaultArgs() mapleVaultArgs {
 		address:        bytes.Repeat([]byte{0xab}, 20),
 		name:           "Syrup USDC",
 		symbol:         "syrupUSDC",
-		poolAddress:    bytes.Repeat([]byte{0xcd}, 20),
 		vaultVersion:   1,
 		createdAtBlock: 20231245,
 		decimals:       6,
@@ -60,7 +57,6 @@ func TestNewMapleVault_Rejects(t *testing.T) {
 		corrupt func(*mapleVaultArgs)
 	}{
 		{"bad vault address", func(a *mapleVaultArgs) { a.address = []byte{0x01} }},
-		{"bad pool address", func(a *mapleVaultArgs) { a.poolAddress = []byte{0x01} }},
 		{"zero chain id", func(a *mapleVaultArgs) { a.chainID = 0 }},
 		{"zero protocol id", func(a *mapleVaultArgs) { a.protocolID = 0 }},
 		{"zero asset token id", func(a *mapleVaultArgs) { a.assetTokenID = 0 }},
@@ -74,7 +70,7 @@ func TestNewMapleVault_Rejects(t *testing.T) {
 			a := validMapleVaultArgs()
 			tc.corrupt(&a)
 			if _, err := NewMapleVault(a.chainID, a.protocolID, a.assetTokenID, a.address,
-				a.name, a.symbol, a.poolAddress, a.vaultVersion, a.createdAtBlock, a.decimals); err == nil {
+				a.name, a.symbol, a.vaultVersion, a.createdAtBlock, a.decimals); err == nil {
 				t.Fatalf("expected error on %s", tc.name)
 			}
 		})

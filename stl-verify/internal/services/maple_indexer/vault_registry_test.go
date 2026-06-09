@@ -1,7 +1,6 @@
 package maple_indexer
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -28,7 +27,6 @@ func newMapleVaultWithDecimals(t *testing.T, addr common.Address, decimals uint8
 		1, 7, 9,
 		addr.Bytes(),
 		"Syrup USDC", "SyrupUSDC",
-		bytes.Repeat([]byte{0xcd}, 20),
 		1, 20231245,
 		decimals,
 	)

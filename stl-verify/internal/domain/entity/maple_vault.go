@@ -17,7 +17,6 @@ type MapleVault struct {
 	Address        []byte
 	Name           string
 	Symbol         string
-	PoolAddress    []byte
 	VaultVersion   int16
 	CreatedAtBlock int64
 	// Decimals is the vault's share decimals, which an ERC-4626 vault
@@ -32,7 +31,6 @@ func NewMapleVault(
 	chainID, protocolID, assetTokenID int64,
 	address []byte,
 	name, symbol string,
-	poolAddress []byte,
 	vaultVersion int16,
 	createdAtBlock int64,
 	decimals uint8,
@@ -44,7 +42,6 @@ func NewMapleVault(
 		Address:        address,
 		Name:           name,
 		Symbol:         symbol,
-		PoolAddress:    poolAddress,
 		VaultVersion:   vaultVersion,
 		CreatedAtBlock: createdAtBlock,
 		Decimals:       decimals,
@@ -68,9 +65,6 @@ func (v *MapleVault) Validate() error {
 	}
 	if len(v.Address) != 20 {
 		return fmt.Errorf("address must be 20 bytes, got %d", len(v.Address))
-	}
-	if len(v.PoolAddress) != 20 {
-		return fmt.Errorf("poolAddress must be 20 bytes, got %d", len(v.PoolAddress))
 	}
 	if v.VaultVersion <= 0 {
 		return fmt.Errorf("vaultVersion must be positive, got %d", v.VaultVersion)
