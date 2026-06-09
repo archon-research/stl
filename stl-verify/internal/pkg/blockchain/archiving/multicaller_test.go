@@ -53,53 +53,185 @@ func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, wg
 	})
 }
 
-func TestExecuteForwardsResultsAndError(t *testing.T) {
-	wantErr := errors.New("boom")
-	inner := &stubInner{results: []outbound.Result{{Success: true}}, err: wantErr}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, &recordingArchiver{}, &wg)
-
-	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(10))
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("err = %v, want %v", err, wantErr)
+// TestExecuteBoundedBySemaphore verifies that a shared semaphore caps in-flight
+// archive writes: every call is still archived, and all tokens are released
+// once the writes drain (no leak that would wedge later calls).
+func TestExecuteBoundedBySemaphore(t *testing.T) {
+	const numCalls = 5
+	results := make([]outbound.Result, numCalls)
+	calls := make([]outbound.Call, numCalls)
+	for i := range calls {
+		results[i] = outbound.Result{Success: true, ReturnData: []byte{byte(i)}}
+		calls[i] = outbound.Call{Target: common.HexToAddress("0x01"), CallData: []byte{byte(i)}}
 	}
-	if len(res) != 1 || !res[0].Success {
-		t.Fatalf("results not forwarded: %+v", res)
-	}
-}
 
-func TestExecuteArchivesEachCall(t *testing.T) {
-	inner := &stubInner{results: []outbound.Result{
-		{Success: true, ReturnData: []byte{0xaa}},
-		{Success: false, ReturnData: []byte{0xbb}},
-	}}
 	arch := &recordingArchiver{}
+	sem := make(chan struct{}, 2) // cap below numCalls so the bound is exercised
 	var wg sync.WaitGroup
-	d := newTestDecorator(inner, arch, &wg)
+	d := NewMulticaller(&stubInner{results: results}, arch, Config{
+		Source: "oracle-price", ChainID: 1, BuildID: 47, Wait: &wg, Sem: sem,
+	})
 
-	ctx := WithBlockVersion(context.Background(), 2)
-	calls := []outbound.Call{
-		{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
-		{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
-	}
-	if _, err := d.Execute(ctx, calls, big.NewInt(21500042)); err != nil {
+	if _, err := d.Execute(context.Background(), calls, big.NewInt(1)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	d.Close() // drain background goroutines
+	d.Close()
 
-	if len(arch.records) != 2 {
-		t.Fatalf("archived %d records, want 2", len(arch.records))
+	if len(arch.records) != numCalls {
+		t.Fatalf("archived %d records, want %d", len(arch.records), numCalls)
 	}
-	for _, r := range arch.records {
-		if r.BlockNumber != 21500042 || r.BlockVersion != 2 || r.ChainID != 1 || r.BuildID != 47 {
-			t.Fatalf("record metadata wrong: %+v", r)
-		}
-		if r.Source != "oracle-price" {
-			t.Fatalf("source = %q", r.Source)
-		}
+	if len(sem) != 0 {
+		t.Fatalf("semaphore not fully released: %d tokens held", len(sem))
 	}
 }
 
+// TestExecute covers the parametric forwarding/archiving behaviour against a
+// recording archiver. The non-parametric guarantees (survives a failing or
+// panicking archiver) are exercised by the focused tests below.
+func TestExecute(t *testing.T) {
+	errBoom := errors.New("boom")
+	errRPCDown := errors.New("rpc down")
+
+	tests := []struct {
+		name         string
+		innerResults []outbound.Result
+		innerErr     error
+		blockVersion int // stamped on ctx via WithBlockVersion
+		calls        []outbound.Call
+		blockNumber  *big.Int
+		wantErr      error
+		wantResults  int
+		wantArchived int
+		// extra runs case-specific assertions after the goroutines are drained.
+		extra func(t *testing.T, res []outbound.Result, calls []outbound.Call, rec *recordingArchiver)
+	}{
+		{
+			name:         "forwards results and inner error without archiving",
+			innerResults: []outbound.Result{{Success: true}},
+			innerErr:     errBoom,
+			calls:        []outbound.Call{{CallData: []byte{0x01}}},
+			blockNumber:  big.NewInt(10),
+			wantErr:      errBoom,
+			wantResults:  1,
+			wantArchived: 0,
+			extra: func(t *testing.T, res []outbound.Result, _ []outbound.Call, _ *recordingArchiver) {
+				if !res[0].Success {
+					t.Fatalf("results not forwarded: %+v", res)
+				}
+			},
+		},
+		{
+			name: "archives each call with stamped metadata",
+			innerResults: []outbound.Result{
+				{Success: true, ReturnData: []byte{0xaa}},
+				{Success: false, ReturnData: []byte{0xbb}},
+			},
+			blockVersion: 2,
+			calls: []outbound.Call{
+				{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
+				{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
+			},
+			blockNumber:  big.NewInt(21500042),
+			wantResults:  2,
+			wantArchived: 2,
+			extra: func(t *testing.T, _ []outbound.Result, _ []outbound.Call, rec *recordingArchiver) {
+				for _, r := range rec.records {
+					if r.BlockNumber != 21500042 || r.BlockVersion != 2 || r.ChainID != 1 || r.BuildID != 47 {
+						t.Fatalf("record metadata wrong: %+v", r)
+					}
+					if r.Source != "oracle-price" {
+						t.Fatalf("source = %q", r.Source)
+					}
+				}
+			},
+		},
+		{
+			name:         "does not archive when inner errors",
+			innerErr:     errRPCDown,
+			calls:        []outbound.Call{{CallData: []byte{0x01}}},
+			blockNumber:  big.NewInt(1),
+			wantErr:      errRPCDown,
+			wantResults:  0,
+			wantArchived: 0,
+		},
+		{
+			name:         "nil block number archives as block 0",
+			innerResults: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}},
+			calls:        []outbound.Call{{CallData: []byte{0x01}}},
+			blockNumber:  nil,
+			wantResults:  1,
+			wantArchived: 1,
+			extra: func(t *testing.T, _ []outbound.Result, _ []outbound.Call, rec *recordingArchiver) {
+				if rec.records[0].BlockNumber != 0 {
+					t.Fatalf("nil blockNumber should yield BlockNumber 0, got %d", rec.records[0].BlockNumber)
+				}
+			},
+		},
+		{
+			name:         "truncates to result count when fewer results than calls",
+			innerResults: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}},
+			calls: []outbound.Call{
+				{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
+				{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
+			},
+			blockNumber:  big.NewInt(1),
+			wantResults:  1,
+			wantArchived: 1,
+		},
+		{
+			name:         "defensively copies call data",
+			innerResults: []outbound.Result{{Success: true, ReturnData: []byte{0xaa, 0xbb}}},
+			calls:        []outbound.Call{{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}}},
+			blockNumber:  big.NewInt(1),
+			wantResults:  1,
+			wantArchived: 1,
+			extra: func(t *testing.T, _ []outbound.Result, calls []outbound.Call, rec *recordingArchiver) {
+				// Mutate the caller's slice after Execute returned and the
+				// goroutines drained; the archived record must be unaffected
+				// because buildRecord copies the bytes at capture.
+				calls[0].CallData[0] = 0x00
+				got := rec.records[0].CallData
+				if len(got) != 4 || got[0] != 0xfe {
+					t.Fatalf("archived CallData was not defensively copied: % x", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recordingArchiver{}
+			var wg sync.WaitGroup
+			d := newTestDecorator(&stubInner{results: tt.innerResults, err: tt.innerErr}, rec, &wg)
+
+			ctx := WithBlockVersion(context.Background(), tt.blockVersion)
+			res, err := d.Execute(ctx, tt.calls, tt.blockNumber)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if len(res) != tt.wantResults {
+				t.Fatalf("results = %d, want %d", len(res), tt.wantResults)
+			}
+
+			d.Close() // drain background goroutines (must not hang or panic)
+
+			if len(rec.records) != tt.wantArchived {
+				t.Fatalf("archived %d records, want %d", len(rec.records), tt.wantArchived)
+			}
+			if tt.extra != nil {
+				tt.extra(t, res, tt.calls, rec)
+			}
+		})
+	}
+}
+
+// TestExecuteSucceedsWhenArchiveErrors asserts the fire-and-forget guarantee:
+// a failing archiver never affects the results or error the caller sees, and
+// Close still drains cleanly.
 func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
 	var wg sync.WaitGroup
@@ -115,6 +247,8 @@ func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 	d.Close() // must drain cleanly even though every Archive failed
 }
 
+// TestExecuteSurvivesArchivePanic asserts a panic in the archive goroutine is
+// recovered rather than propagated (which would crash the process).
 func TestExecuteSurvivesArchivePanic(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
 	var wg sync.WaitGroup
@@ -127,86 +261,5 @@ func TestExecuteSurvivesArchivePanic(t *testing.T) {
 	if len(res) != 1 {
 		t.Fatalf("results not forwarded: %+v", res)
 	}
-	// Close must return: a panic in the archive goroutine must be recovered,
-	// not propagated (which would crash the process).
-	d.Close()
-}
-
-func TestExecuteDoesNotArchiveOnInnerError(t *testing.T) {
-	inner := &stubInner{err: errors.New("rpc down")}
-	arch := &recordingArchiver{}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, arch, &wg)
-
-	_, _ = d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
-	d.Close()
-	if len(arch.records) != 0 {
-		t.Fatalf("archived %d records on error, want 0", len(arch.records))
-	}
-}
-
-func TestExecuteHandlesNilBlockNumber(t *testing.T) {
-	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	arch := &recordingArchiver{}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, arch, &wg)
-
-	if _, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, nil); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	d.Close()
-
-	if len(arch.records) != 1 {
-		t.Fatalf("archived %d records, want 1", len(arch.records))
-	}
-	if arch.records[0].BlockNumber != 0 {
-		t.Fatalf("nil blockNumber should yield BlockNumber 0, got %d", arch.records[0].BlockNumber)
-	}
-}
-
-func TestExecuteTruncatesWhenFewerResultsThanCalls(t *testing.T) {
-	// Inner returns only one result for two calls; only the first is archived.
-	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	arch := &recordingArchiver{}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, arch, &wg)
-
-	calls := []outbound.Call{
-		{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
-		{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
-	}
-	if _, err := d.Execute(context.Background(), calls, big.NewInt(1)); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	d.Close()
-
-	if len(arch.records) != 1 {
-		t.Fatalf("archived %d records, want 1 (truncated to results length)", len(arch.records))
-	}
-}
-
-func TestExecuteDefensivelyCopiesCallData(t *testing.T) {
-	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa, 0xbb}}}}
-	arch := &recordingArchiver{}
-	var wg sync.WaitGroup
-	d := newTestDecorator(inner, arch, &wg)
-
-	callData := []byte{0xfe, 0xaf, 0x96, 0x8c}
-	calls := []outbound.Call{{Target: common.HexToAddress("0x01"), CallData: callData}}
-	if _, err := d.Execute(context.Background(), calls, big.NewInt(1)); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	d.Close()
-
-	// Mutate the caller's slice after Execute returned. The archived record must
-	// be unaffected because buildRecord copies the bytes.
-	callData[0] = 0x00
-
-	if len(arch.records) != 1 {
-		t.Fatalf("archived %d records, want 1", len(arch.records))
-	}
-	got := arch.records[0].CallData
-	if len(got) != 4 || got[0] != 0xfe {
-		t.Fatalf("archived CallData was not defensively copied: % x", got)
-	}
+	d.Close() // must return: the archive-goroutine panic must be recovered
 }
