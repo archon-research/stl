@@ -227,16 +227,11 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	var archiveWrap archivingwire.Wrap
-	if archivingwire.Enabled() {
-		wrap, drain, werr := archivingwire.NewS3WrapFromEnv(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
-		if werr != nil {
-			return fmt.Errorf("wiring SC call archiver: %w", werr)
-		}
-		archiveWrap = wrap
-		defer drain()
-		logger.Info("raw SC call archiving enabled", "bucket", env.Get(archivingwire.EnvBucket, ""))
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	if err != nil {
+		return err
 	}
+	defer archiveDrain()
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
@@ -262,10 +257,7 @@ func run(ctx context.Context, args []string) error {
 			if err != nil {
 				return nil, err
 			}
-			if archiveWrap != nil {
-				mc = archiveWrap(mc)
-			}
-			return mc, nil
+			return archiveWrap(mc), nil
 		},
 	)
 	if err != nil {
