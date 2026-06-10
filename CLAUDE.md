@@ -103,7 +103,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 ## Code Conventions
 
 - **Keep an eye out for deduplicate possibilities**: Try to consolidate lots of duplicated code. Create shareable libraries instead of duplicating code everywhere.
-- **Interfaces**: Use `-er` suffix (Reader, Publisher)
+- **Interfaces**: Behavior interfaces use the `-er` suffix (Reader, Publisher, BlockSubscriber). Ports follow the established noun patterns instead: persistence ports are `XxxRepository`, external-system ports are `XxxClient`/`XxxCache`/`XxxProvider`. Do not rename Repository/Client ports to `-er` forms.
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
 - **Errors**:
