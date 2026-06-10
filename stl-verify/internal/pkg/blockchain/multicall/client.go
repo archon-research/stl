@@ -18,6 +18,15 @@ type Client struct {
 	ethClient *ethclient.Client
 	address   common.Address
 	abi       *abi.ABI
+	telemetry *Telemetry // optional; nil disables recording
+}
+
+// Option configures a Client at construction, letting callers add optional behaviour such as telemetry without changing NewClient's signature.
+type Option func(*Client)
+
+// WithTelemetry attaches metrics recording to the client.
+func WithTelemetry(t *Telemetry) Option {
+	return func(c *Client) { c.telemetry = t }
 }
 
 // NewClient creates a new Multicall3 client.
@@ -30,17 +39,29 @@ type Client struct {
 // "execution reverted" as the contract does not exist at those blocks.
 //
 // Address: 0xcA11bde05977b3631167028862bE2a173976CA11 (same on all chains)
-func NewClient(ethClient *ethclient.Client, multicall3Address common.Address) (outbound.Multicaller, error) {
+func NewClient(ethClient *ethclient.Client, multicall3Address common.Address, opts ...Option) (outbound.Multicaller, error) {
 	multicallABI, err := abis.GetMulticall3ABI()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load multicall3 ABI: %w", err)
 	}
 
-	return &Client{
+	c := &Client{
 		ethClient: ethClient,
 		address:   multicall3Address,
 		abi:       multicallABI,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c, nil
+}
+
+// recordBatch records the batch size when telemetry is attached. nil telemetry
+// is a no-op so non-instrumented callers pay nothing.
+func (c *Client) recordBatch(ctx context.Context, size int) {
+	if c.telemetry != nil {
+		c.telemetry.RecordBatch(ctx, size)
+	}
 }
 
 func (c *Client) Address() common.Address {
@@ -57,6 +78,8 @@ func (c *Client) Execute(ctx context.Context, calls []outbound.Call, blockNumber
 	if len(calls) == 0 {
 		return []outbound.Result{}, nil
 	}
+
+	c.recordBatch(ctx, len(calls))
 
 	data, err := c.abi.Pack("aggregate3", calls)
 	if err != nil {
