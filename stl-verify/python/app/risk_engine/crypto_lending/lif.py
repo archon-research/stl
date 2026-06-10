@@ -5,7 +5,12 @@ Spec: https://docs.morpho.org/learn/concepts/liquidation/
 
 from decimal import Decimal
 
-from axis_synome.spec.crypto_lending.formulas.lif import lif as compute_lif_float
+# TODO(TEN-224): drop the fallback once the published axis-synome wheel
+# carries the spec.draft layout.
+try:
+    from axis_synome.spec.draft.crypto_lending.formulas.lif import lif as compute_lif_float
+except ImportError:
+    from axis_synome.spec.crypto_lending.formulas.lif import lif as compute_lif_float
 
 
 def compute_lif(lltv: Decimal) -> Decimal:
