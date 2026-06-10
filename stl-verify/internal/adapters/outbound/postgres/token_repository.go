@@ -3,6 +3,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -119,4 +120,55 @@ func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chain
 
 	r.logger.Debug("token upserted", "address", address.Hex(), "id", tokenID, "symbol", symbol, "decimals", decimals)
 	return tokenID, nil
+}
+
+// LookupTokenID returns the token ID for a given chain + address.
+// Returns outbound.ErrTokenNotFound if no matching token exists.
+func (r *TokenRepository) LookupTokenID(ctx context.Context, chainID int64, address common.Address) (int64, error) {
+	var id int64
+	err := r.pool.QueryRow(ctx,
+		`SELECT id FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, address.Bytes(),
+	).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, outbound.ErrTokenNotFound
+		}
+		return 0, fmt.Errorf("lookup token %s on chain %d: %w", address.Hex(), chainID, err)
+	}
+	return id, nil
+}
+
+// LookupTokenPrices returns the latest USD price for each token ID from onchain_token_price.
+// Tokens without a price entry are omitted from the result.
+func (r *TokenRepository) LookupTokenPrices(ctx context.Context, tokenIDs []int64) (map[int64]string, error) {
+	if len(tokenIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT ON (token_id) token_id, price_usd
+		FROM onchain_token_price
+		WHERE token_id = ANY($1)
+		ORDER BY token_id, timestamp DESC, block_number DESC
+	`, tokenIDs)
+	if err != nil {
+		return nil, fmt.Errorf("query token prices: %w", err)
+	}
+	defer rows.Close()
+
+	prices := make(map[int64]string, len(tokenIDs))
+	for rows.Next() {
+		var tokenID int64
+		var priceUSD string
+		if err := rows.Scan(&tokenID, &priceUSD); err != nil {
+			return nil, fmt.Errorf("scan token price: %w", err)
+		}
+		prices[tokenID] = priceUSD
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate token prices: %w", err)
+	}
+
+	return prices, nil
 }
