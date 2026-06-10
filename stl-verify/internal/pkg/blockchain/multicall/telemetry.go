@@ -1,10 +1,10 @@
 // telemetry.go provides OpenTelemetry instrumentation for the multicall client.
 //
-//	multicall.batch.size: histogram of calls per Execute(). _count is the number
-//	of multicalls (= batched S3 PUTs/sec when archiving batches per Execute),
-//	_sum is the number of individual SC calls (= current per-call S3 PUTs/sec),
-//	and the bucket distribution gives the worst-case burst a single Execute can
-//	produce.
+// multicall.batch.size: histogram of calls per Execute(). _count is the number
+// of multicalls (= batched S3 PUTs/sec when archiving batches per Execute),
+// _sum is the number of individual SC calls (= current per-call S3 PUTs/sec),
+// and the bucket distribution gives the worst-case burst a single Execute can
+// produce.
 package multicall
 
 import (
