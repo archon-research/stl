@@ -10,24 +10,9 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
-
-func newTestTelemetry(t *testing.T) *Telemetry {
-	t.Helper()
-	tp := sdktrace.NewTracerProvider()
-	mp := sdkmetric.NewMeterProvider()
-	t.Cleanup(func() {
-		_ = tp.Shutdown(context.Background())
-		_ = mp.Shutdown(context.Background())
-	})
-
-	tel, err := NewTelemetryWithProviders(tp, mp)
-	if err != nil {
-		t.Fatalf("NewTelemetryWithProviders: %v", err)
-	}
-	return tel
-}
 
 func TestNewTelemetry(t *testing.T) {
 	tel, err := NewTelemetry()
@@ -39,23 +24,89 @@ func TestNewTelemetry(t *testing.T) {
 	}
 }
 
-func TestTelemetry_RecordsDoNotPanic(t *testing.T) {
-	tel := newTestTelemetry(t)
-	ctx := context.Background()
+func TestTelemetry_RecordsMetrics(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		_ = mp.Shutdown(context.Background())
+	})
 
-	ctx, cycleSpan := tel.StartCycleSpan(ctx, time.Now())
-	phaseCtx, phaseSpan := tel.StartPhaseSpan(ctx, "pools")
+	tel, err := NewTelemetryWithProviders(tp, mp)
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders: %v", err)
+	}
+
+	ctx := context.Background()
+	cycleCtx, cycleSpan := tel.StartCycleSpan(ctx, time.Now())
+	phaseCtx, phaseSpan := tel.StartPhaseSpan(cycleCtx, "pools")
 
 	tel.RecordPhase(phaseCtx, "pools", 250*time.Millisecond, nil)
 	tel.RecordPhase(phaseCtx, "loans", time.Second, errors.New("boom"))
 	tel.RecordRowsWritten(phaseCtx, "maple_pool_state", 21)
-	tel.RecordCycle(ctx, nil)
-	tel.RecordCycle(ctx, errors.New("boom"))
+	tel.RecordCycle(cycleCtx, nil)
+	tel.RecordCycle(cycleCtx, errors.New("boom"))
 
 	SetSpanError(phaseSpan, errors.New("boom"), "phase failed")
 	SetSpanError(cycleSpan, nil, "ignored for nil error")
 	phaseSpan.End()
 	cycleSpan.End()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+
+	// Index data points by instrument name + status/table/phase attributes.
+	sums := map[string]int64{}
+	histograms := map[string]uint64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch data := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				for _, dp := range data.DataPoints {
+					key := m.Name
+					if v, ok := dp.Attributes.Value("status"); ok {
+						key += "|status=" + v.AsString()
+					}
+					if v, ok := dp.Attributes.Value("table"); ok {
+						key += "|table=" + v.AsString()
+					}
+					if v, ok := dp.Attributes.Value("phase"); ok {
+						key += "|phase=" + v.AsString()
+					}
+					sums[key] = dp.Value
+				}
+			case metricdata.Histogram[float64]:
+				for _, dp := range data.DataPoints {
+					key := m.Name
+					if v, ok := dp.Attributes.Value("phase"); ok {
+						key += "|phase=" + v.AsString()
+					}
+					histograms[key] = dp.Count
+				}
+			}
+		}
+	}
+
+	wantSums := map[string]int64{
+		"maple.sync.cycles.total|status=success":             1,
+		"maple.sync.cycles.total|status=error":               1,
+		"maple.sync.phases.total|status=success|phase=pools": 1,
+		"maple.sync.phases.total|status=error|phase=loans":   1,
+		"maple.sync.rows.written|table=maple_pool_state":     21,
+	}
+	for key, want := range wantSums {
+		if got := sums[key]; got != want {
+			t.Errorf("sum %q = %d, want %d (all sums: %v)", key, got, want, sums)
+		}
+	}
+	for _, phase := range []string{"pools", "loans"} {
+		if got := histograms["maple.sync.phase.duration_seconds|phase="+phase]; got != 1 {
+			t.Errorf("duration histogram for %s count = %d, want 1", phase, got)
+		}
+	}
 }
 
 func TestTelemetry_NilReceiverSafe(t *testing.T) {

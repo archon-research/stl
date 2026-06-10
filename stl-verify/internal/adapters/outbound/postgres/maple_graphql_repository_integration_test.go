@@ -294,7 +294,7 @@ func TestMaplePoolStates_RoundTrip(t *testing.T) {
 	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
 	state, err := entity.NewMaplePoolState(poolID, mapleSyncedAt(),
-		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), 0.6,
+		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600),
 		big.NewInt(123), nil)
 	if err != nil {
 		t.Fatalf("NewMaplePoolState: %v", err)

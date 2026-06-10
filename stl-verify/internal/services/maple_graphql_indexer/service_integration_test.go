@@ -203,6 +203,31 @@ func TestSyncIntegration_FullCycle(t *testing.T) {
 		t.Errorf("null acm_ratio rows = %d, want 1", nullACMCount)
 	}
 
+	// State and collateral rows pair with the RIGHT loan: join back through
+	// loan_address rather than trusting counts.
+	var principal string
+	if err := pool.QueryRow(ctx, `
+		SELECT s.principal_owed::text
+		FROM maple_loan_state s JOIN maple_loan l ON l.id = s.maple_loan_id
+		WHERE l.loan_address = decode($1, 'hex')`,
+		strings.TrimPrefix(itLoanInternal, "0x")).Scan(&principal); err != nil {
+		t.Fatalf("joining loan state: %v", err)
+	}
+	if principal != "10000000000000" {
+		t.Errorf("internal loan principal = %s, want 10000000000000", principal)
+	}
+	var collateralAsset string
+	if err := pool.QueryRow(ctx, `
+		SELECT c.asset_symbol
+		FROM maple_loan_collateral c JOIN maple_loan l ON l.id = c.maple_loan_id
+		WHERE l.loan_address = decode($1, 'hex')`,
+		strings.TrimPrefix(itLoanExternal, "0x")).Scan(&collateralAsset); err != nil {
+		t.Fatalf("joining collateral: %v", err)
+	}
+	if collateralAsset != "SOL" {
+		t.Errorf("external loan collateral = %s, want SOL", collateralAsset)
+	}
+
 	// Every snapshot row of the cycle shares one synced_at.
 	var distinctSyncedAt int
 	if err := pool.QueryRow(ctx, `

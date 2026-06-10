@@ -119,17 +119,47 @@ func TestMaplePoolState_Validate(t *testing.T) {
 func TestNewMaplePoolState_Constructor(t *testing.T) {
 	v := validMaplePoolState()
 
-	got, err := NewMaplePoolState(v.MaplePoolID, v.SyncedAt, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.Utilization, v.MonthlyAPY, v.SpotAPY)
+	got, err := NewMaplePoolState(v.MaplePoolID, v.SyncedAt, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.TVL.Cmp(v.TVL) != 0 || got.Utilization != v.Utilization {
+	if got.TVL.Cmp(v.TVL) != 0 {
 		t.Errorf("fields not set: %+v", got)
 	}
+	// Utilization derives from principalOut / (liquidAssets + principalOut):
+	// 600 / (400 + 600) = 0.6.
+	if got.Utilization != 0.6 {
+		t.Errorf("Utilization = %f, want 0.6", got.Utilization)
+	}
 
-	if _, err := NewMaplePoolState(0, v.SyncedAt, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.Utilization, v.MonthlyAPY, v.SpotAPY); err == nil {
+	if _, err := NewMaplePoolState(0, v.SyncedAt, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
 	} else if !strings.Contains(err.Error(), "NewMaplePoolState") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())
+	}
+}
+
+func TestComputeUtilization(t *testing.T) {
+	tests := []struct {
+		name         string
+		principalOut *big.Int
+		liquidAssets *big.Int
+		want         float64
+	}{
+		{name: "normal", principalOut: big.NewInt(600), liquidAssets: big.NewInt(400), want: 0.6},
+		{name: "empty pool", principalOut: big.NewInt(0), liquidAssets: big.NewInt(0), want: 0},
+		{name: "fully utilized", principalOut: big.NewInt(100), liquidAssets: big.NewInt(0), want: 1},
+		{name: "fully liquid", principalOut: big.NewInt(0), liquidAssets: big.NewInt(100), want: 0},
+		{name: "nil principal", principalOut: nil, liquidAssets: big.NewInt(100), want: 0},
+		{name: "nil liquid assets", principalOut: big.NewInt(100), liquidAssets: nil, want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeUtilization(tt.principalOut, tt.liquidAssets)
+			if got != tt.want {
+				t.Errorf("computeUtilization = %f, want %f", got, tt.want)
+			}
+		})
 	}
 }

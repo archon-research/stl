@@ -534,6 +534,28 @@ func TestNewClient_Defaults(t *testing.T) {
 	}
 }
 
+func TestGetPools_SkipCapFailsHard(t *testing.T) {
+	// A server that always returns full pages (e.g. ignoring skip) must hit
+	// the skip cap and fail, not return a truncated set or loop forever.
+	fullPage := make([]string, poolBatchSize)
+	for i := range fullPage {
+		fullPage[i] = poolJSON(fmt.Sprintf("0x%040x", i+1))
+	}
+	body := fmt.Sprintf(`{"data": {"poolV2S": [%s]}}`, strings.Join(fullPage, ","))
+
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, body)
+	}})
+
+	_, err := client.GetPools(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("error = %q, want skip-cap refusal", err.Error())
+	}
+}
+
 func TestGetPools_ContextCancelled(t *testing.T) {
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, `{"data": {"poolV2S": []}}`)

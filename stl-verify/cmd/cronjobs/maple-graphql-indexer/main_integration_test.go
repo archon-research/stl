@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -25,20 +28,71 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// mapleFixtureServer serves one pool, one loan, one strategy, and globals in
+// live-API shapes, so the wired runner can complete a full sync cycle.
+func mapleFixtureServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	const (
+		pool     = "0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"
+		usdc     = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+		loan     = "0x0009bff1fcb8c767e5894164124d3e42aaca0542"
+		borrower = "0xfba4bc924ba50c3b3dd0c1aa6d2f499b4fa55c81"
+		strategy = "0x859c9980931fa0a63765fd8ef2e29918af5b038c"
+	)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		query := string(body)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(query, "poolV2S"):
+			_, _ = w.Write([]byte(`{"data": {"poolV2S": [{"id": "` + pool + `", "name": "Syrup USDC", "monthlyApy": "0", "spotApy": "0", "assets": "400", "collateralValue": "500", "principalOut": "600", "tvl": "1000", "asset": {"id": "` + usdc + `", "symbol": "USDC", "decimals": 6}, "syrupRouter": null}]}}`))
+		case strings.Contains(query, "openTermLoans"):
+			_, _ = w.Write([]byte(`{"data": {"openTermLoans": [{"id": "` + loan + `", "borrower": {"id": "` + borrower + `"}, "state": "Active", "principalOwed": "100", "acmRatio": "1000000", "collateral": null, "loanMeta": null, "fundingPool": {"id": "` + pool + `", "name": "Syrup USDC", "asset": {"id": "` + usdc + `", "symbol": "USDC", "decimals": 6}}}]}}`))
+		case strings.Contains(query, "skyStrategies"):
+			_, _ = w.Write([]byte(`{"data": {"skyStrategies": [{"id": "` + strategy + `", "state": "Active", "currentlyDeployed": "0", "depositedAssets": "1", "withdrawnAssets": "0", "strategyFeeRate": null, "totalFeesCollected": null, "version": 100, "pool": {"id": "` + pool + `", "name": "Syrup USDC"}}]}}`))
+		case strings.Contains(query, "syrupGlobals"):
+			_, _ = w.Write([]byte(`{"data": {"syrupGlobals": {"apy": "1", "collateralApy": "2", "poolApy": "3", "dripsYieldBoost": "0", "tvl": "4"}}}`))
+		default:
+			t.Errorf("unexpected query: %s", query)
+		}
+	}))
+}
+
 func TestSetupRunner_WiresService(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 
+	server := mapleFixtureServer(t)
+	defer server.Close()
+
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("BUILD_GIT_HASH", "test-hash")
+	t.Setenv("MAPLE_GRAPHQL_ENDPOINT", server.URL)
 
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
 	}
-	if runner == nil {
-		t.Fatal("runner is nil")
+
+	// Invoke the runner end to end: this proves the endpoint env var,
+	// buildID, repository, and tx manager are all actually wired.
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("runner.Run: %v", err)
+	}
+
+	for _, table := range []string{"maple_pool", "maple_pool_state", "maple_loan", "maple_loan_state",
+		"maple_sky_strategy", "maple_sky_strategy_state", "maple_syrup_global_state"} {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatalf("counting %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("%s rows = %d, want 1", table, count)
+		}
 	}
 }
 

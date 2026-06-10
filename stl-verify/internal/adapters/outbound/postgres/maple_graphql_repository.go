@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/hex"
@@ -166,15 +167,16 @@ func (r *MapleGraphQLRepository) SavePoolStates(ctx context.Context, tx pgx.Tx, 
 		return nil
 	}
 
-	// Sort by natural key for stable advisory-lock acquisition order.
-	slices.SortFunc(states, func(a, b *entity.MaplePoolState) int {
+	// Sort a copy by natural key for stable advisory-lock acquisition order
+	// (the caller's slice is not mutated).
+	sorted := sortedCopy(states, func(a, b *entity.MaplePoolState) int {
 		return cmp.Or(
 			cmp.Compare(a.MaplePoolID, b.MaplePoolID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
 
-	for chunk := range slices.Chunk(states, r.batchSize) {
+	for chunk := range slices.Chunk(sorted, r.batchSize) {
 		if err := r.savePoolStateBatch(ctx, tx, chunk); err != nil {
 			return err
 		}
@@ -282,14 +284,14 @@ func (r *MapleGraphQLRepository) SaveLoanStates(ctx context.Context, tx pgx.Tx, 
 		return nil
 	}
 
-	slices.SortFunc(states, func(a, b *entity.MapleLoanState) int {
+	sorted := sortedCopy(states, func(a, b *entity.MapleLoanState) int {
 		return cmp.Or(
 			cmp.Compare(a.MapleLoanID, b.MapleLoanID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
 
-	for chunk := range slices.Chunk(states, r.batchSize) {
+	for chunk := range slices.Chunk(sorted, r.batchSize) {
 		if err := r.saveLoanStateBatch(ctx, tx, chunk); err != nil {
 			return err
 		}
@@ -327,14 +329,14 @@ func (r *MapleGraphQLRepository) SaveLoanCollaterals(ctx context.Context, tx pgx
 		return nil
 	}
 
-	slices.SortFunc(collaterals, func(a, b *entity.MapleLoanCollateral) int {
+	sorted := sortedCopy(collaterals, func(a, b *entity.MapleLoanCollateral) int {
 		return cmp.Or(
 			cmp.Compare(a.MapleLoanID, b.MapleLoanID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
 
-	for chunk := range slices.Chunk(collaterals, r.batchSize) {
+	for chunk := range slices.Chunk(sorted, r.batchSize) {
 		if err := r.saveLoanCollateralBatch(ctx, tx, chunk); err != nil {
 			return err
 		}
@@ -416,14 +418,14 @@ func (r *MapleGraphQLRepository) SaveSkyStrategyStates(ctx context.Context, tx p
 		return nil
 	}
 
-	slices.SortFunc(states, func(a, b *entity.MapleSkyStrategyState) int {
+	sorted := sortedCopy(states, func(a, b *entity.MapleSkyStrategyState) int {
 		return cmp.Or(
 			cmp.Compare(a.MapleSkyStrategyID, b.MapleSkyStrategyID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
 
-	for chunk := range slices.Chunk(states, r.batchSize) {
+	for chunk := range slices.Chunk(sorted, r.batchSize) {
 		if err := r.saveSkyStrategyStateBatch(ctx, tx, chunk); err != nil {
 			return err
 		}
@@ -527,13 +529,19 @@ func nullIfEmpty(s string) *string {
 	return &s
 }
 
-// sortedByBytesKey returns a copy of items sorted by a bytes key, for stable
-// row-lock acquisition order across concurrent writers (ADR-0002).
-func sortedByBytesKey[T any](items []T, key func(T) []byte) []T {
+// sortedCopy returns a sorted copy of items, leaving the caller's slice
+// untouched. Sorting before insert gives concurrent writers a stable
+// row/advisory-lock acquisition order (ADR-0002).
+func sortedCopy[T any](items []T, cmpFn func(a, b T) int) []T {
 	sorted := make([]T, len(items))
 	copy(sorted, items)
-	slices.SortFunc(sorted, func(a, b T) int { return strings.Compare(string(key(a)), string(key(b))) })
+	slices.SortFunc(sorted, cmpFn)
 	return sorted
+}
+
+// sortedByBytesKey returns a copy of items sorted by a bytes key.
+func sortedByBytesKey[T any](items []T, key func(T) []byte) []T {
+	return sortedCopy(items, func(a, b T) int { return bytes.Compare(key(a), key(b)) })
 }
 
 // writeValuesPlaceholders appends "($n, $n+1, ...)" for row i with the given

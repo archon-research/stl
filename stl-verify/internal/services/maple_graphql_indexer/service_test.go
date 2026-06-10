@@ -362,15 +362,38 @@ func TestSync_HappyPath(t *testing.T) {
 	if len(repo.savedCollats) != 2 {
 		t.Errorf("collaterals = %d, want 2 (nil collateral skipped)", len(repo.savedCollats))
 	}
-	// Nil acmRatio flows through.
-	nilACMSeen := false
+	// Each state/collateral row must pair with the id mapped from ITS loan
+	// address (mock assigns 20, 21, 22 in fixture order), not just have the
+	// right counts.
+	wantPrincipalByLoanID := map[int64]int64{20: 100, 21: 200, 22: 300}
 	for _, s := range repo.savedLoanStates {
-		if s.AcmRatio == nil {
-			nilACMSeen = true
+		want, ok := wantPrincipalByLoanID[s.MapleLoanID]
+		if !ok {
+			t.Errorf("unexpected loan id %d", s.MapleLoanID)
+			continue
+		}
+		if s.PrincipalOwed.Int64() != want {
+			t.Errorf("loan %d principal = %s, want %d", s.MapleLoanID, s.PrincipalOwed, want)
+		}
+		// Only the uncollateralized loan (0x21 -> id 21) has nil AcmRatio.
+		if (s.AcmRatio == nil) != (s.MapleLoanID == 21) {
+			t.Errorf("loan %d AcmRatio nil-ness wrong: %v", s.MapleLoanID, s.AcmRatio)
 		}
 	}
-	if !nilACMSeen {
-		t.Error("expected one loan state with nil AcmRatio")
+	wantCollateralByLoanID := map[int64]string{20: "BTC", 22: "SOL"}
+	for _, c := range repo.savedCollats {
+		if want := wantCollateralByLoanID[c.MapleLoanID]; c.AssetSymbol != want {
+			t.Errorf("collateral for loan %d = %q, want %q", c.MapleLoanID, c.AssetSymbol, want)
+		}
+	}
+	// Pool states pair with their pool ids (10, 11 in fixture order).
+	if repo.savedPoolStates[0].MaplePoolID != 10 || repo.savedPoolStates[0].TVL.Int64() != 1000 {
+		t.Errorf("pool state 0 = id %d tvl %s, want id 10 tvl 1000",
+			repo.savedPoolStates[0].MaplePoolID, repo.savedPoolStates[0].TVL)
+	}
+	if repo.savedPoolStates[1].MaplePoolID != 11 || repo.savedPoolStates[1].TVL.Int64() != 0 {
+		t.Errorf("pool state 1 = id %d tvl %s, want id 11 tvl 0",
+			repo.savedPoolStates[1].MaplePoolID, repo.savedPoolStates[1].TVL)
 	}
 
 	// Borrower resolution: one call, two distinct borrowers (0xa0 deduped).
@@ -837,30 +860,121 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 	}
 }
 
-func TestSync_ProtocolLookupFailsInLoansPhase(t *testing.T) {
+func TestSync_ZeroPoolsIsAnError(t *testing.T) {
+	// {"data": null} decodes into an empty pool slice; a green run writing
+	// zero rows forever must not happen.
 	client := happyClient()
+	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) { return nil, nil }
 	repo := newMockRepo()
-	calls := 0
-	repo.GetMapleProtocolIDFn = func(context.Context, int64) (int64, error) {
-		calls++
-		if calls > 1 {
-			return 0, errors.New("protocol lookup flaked")
-		}
-		return 7, nil
-	}
 	service := newTestService(t, client, repo)
 
 	err := service.Sync(context.Background())
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "protocol lookup flaked") {
+	if !strings.Contains(err.Error(), "0 pools") {
 		t.Errorf("error = %q", err.Error())
 	}
-	// Pools succeeded before the flake; strategies and globals still run.
-	if len(repo.savedPoolStates) != 2 || len(repo.savedStrategies) != 1 || len(repo.savedGlobals) != 1 {
-		t.Errorf("pools=%d strategies=%d globals=%d",
-			len(repo.savedPoolStates), len(repo.savedStrategies), len(repo.savedGlobals))
+	// Loans/strategies skipped, globals independent.
+	if client.activeLoansCalled || client.strategiesCalled {
+		t.Error("dependent phases must be skipped on empty pools")
+	}
+	if len(repo.savedGlobals) != 1 {
+		t.Errorf("global states = %d, want 1", len(repo.savedGlobals))
+	}
+}
+
+func TestSync_DuplicateIDsFail(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(c *mockClient)
+	}{
+		{
+			name: "duplicate pool",
+			mutate: func(c *mockClient) {
+				c.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+					pools := fixturePools()
+					pools[1].Address = pools[0].Address
+					return pools, nil
+				}
+			},
+		},
+		{
+			name: "duplicate loan",
+			mutate: func(c *mockClient) {
+				c.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
+					loans := fixtureLoans()
+					loans[2].LoanID = loans[0].LoanID
+					return loans, nil
+				}
+			},
+		},
+		{
+			name: "duplicate strategy",
+			mutate: func(c *mockClient) {
+				c.GetSkyStrategiesFn = func(context.Context) ([]outbound.MapleSkyStrategy, error) {
+					strategies := append(fixtureStrategies(), fixtureStrategies()...)
+					return strategies, nil
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := happyClient()
+			tt.mutate(client)
+			repo := newMockRepo()
+			service := newTestService(t, client, repo)
+
+			err := service.Sync(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "duplicate") {
+				t.Errorf("error = %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestSync_DecimalsOverflowFails(t *testing.T) {
+	// An API bug returning decimals > MaxInt16 must not silently wrap into a
+	// plausible small value.
+	client := happyClient()
+	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+		pools := fixturePools()
+		pools[0].AssetDecimals = 65542
+		return pools, nil
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "out of int16 range") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestSync_CollateralDecimalsOverflowFails(t *testing.T) {
+	client := happyClient()
+	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
+		loans := fixtureLoans()
+		loans[0].Collateral.Decimals = 1 << 20
+		return loans, nil
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "out of int16 range") {
+		t.Errorf("error = %q", err.Error())
 	}
 }
 
@@ -986,24 +1100,35 @@ func TestSync_InvalidGlobalsFailsPhase(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func TestComputeUtilization(t *testing.T) {
+func TestToInt16(t *testing.T) {
 	tests := []struct {
-		name         string
-		principalOut int64
-		liquidAssets int64
-		want         float64
+		name    string
+		in      int
+		want    int16
+		wantErr bool
 	}{
-		{name: "normal", principalOut: 600, liquidAssets: 400, want: 0.6},
-		{name: "empty pool", principalOut: 0, liquidAssets: 0, want: 0},
-		{name: "fully utilized", principalOut: 100, liquidAssets: 0, want: 1},
-		{name: "fully liquid", principalOut: 0, liquidAssets: 100, want: 0},
+		{name: "zero", in: 0, want: 0},
+		{name: "typical decimals", in: 18, want: 18},
+		{name: "max int16", in: 32767, want: 32767},
+		{name: "overflow", in: 32768, wantErr: true},
+		{name: "wraps to plausible value", in: 65542, wantErr: true},
+		{name: "negative", in: -1, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeUtilization(big.NewInt(tt.principalOut), big.NewInt(tt.liquidAssets))
+			got, err := toInt16(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if got != tt.want {
-				t.Errorf("computeUtilization = %f, want %f", got, tt.want)
+				t.Errorf("toInt16(%d) = %d, want %d", tt.in, got, tt.want)
 			}
 		})
 	}

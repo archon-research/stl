@@ -10,8 +10,9 @@ import (
 )
 
 // MapleGraphQLRepository defines the persistence interface for Maple GraphQL
-// indexer data. All methods run within an external transaction so the service
-// controls snapshot atomicity per sync phase.
+// indexer data. All write methods run within an external transaction so the
+// service controls snapshot atomicity per sync phase; GetMapleProtocolID is a
+// standalone registry read.
 //
 // Registry upserts (pools, loans, strategies, borrower users) return
 // lowercase-hex-address -> database-id maps and resolve ids even when the row

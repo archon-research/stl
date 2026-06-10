@@ -42,11 +42,11 @@ const (
 	// poolBatchSize and strategyBatchSize cover small collections (~21 pools,
 	// ~4 strategies today); loanBatchSize covers ~61 active loans with ample
 	// headroom. The-Graph-style APIs commonly cap skip at 5000, so pagination
-	// past that logs a warning.
+	// reaching that is a hard error (see fetchAll).
 	poolBatchSize     = 100
 	strategyBatchSize = 100
 	loanBatchSize     = 1000
-	skipWarnThreshold = 5000
+	skipCap           = 5000
 )
 
 // Config holds configuration for the Maple GraphQL client.
@@ -290,7 +290,7 @@ type syrupGlobalsWire struct {
 
 // GetPools fetches all PoolV2 lending pools, paginating transparently.
 func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
-	wires, err := fetchAll(c, poolBatchSize, func(first, skip int) ([]poolWire, error) {
+	wires, err := fetchAll(poolBatchSize, func(first, skip int) ([]poolWire, error) {
 		var resp struct {
 			Data struct {
 				PoolV2S []poolWire `json:"poolV2S"`
@@ -319,7 +319,7 @@ func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
 // GetActiveLoans fetches all Open Term Loans with state Active, paginating
 // transparently.
 func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan, error) {
-	wires, err := fetchAll(c, loanBatchSize, func(first, skip int) ([]loanWire, error) {
+	wires, err := fetchAll(loanBatchSize, func(first, skip int) ([]loanWire, error) {
 		var resp struct {
 			Data struct {
 				OpenTermLoans []loanWire `json:"openTermLoans"`
@@ -347,7 +347,7 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 
 // GetSkyStrategies fetches all Sky strategies, paginating transparently.
 func (c *Client) GetSkyStrategies(ctx context.Context) ([]outbound.MapleSkyStrategy, error) {
-	wires, err := fetchAll(c, strategyBatchSize, func(first, skip int) ([]skyStrategyWire, error) {
+	wires, err := fetchAll(strategyBatchSize, func(first, skip int) ([]skyStrategyWire, error) {
 		var resp struct {
 			Data struct {
 				SkyStrategies []skyStrategyWire `json:"skyStrategies"`
@@ -647,13 +647,14 @@ func pageVariables(first, skip int) map[string]any {
 }
 
 // fetchAll paginates skip += batchSize until a page returns fewer than
-// batchSize rows.
-func fetchAll[T any](c *Client, batchSize int, page func(first, skip int) ([]T, error)) ([]T, error) {
+// batchSize rows. Paginating past skipCap fails hard: The-Graph-style APIs
+// commonly cap skip at 5000, so continuing would either persist a silently
+// truncated snapshot or, if the API ignores skip, loop forever.
+func fetchAll[T any](batchSize int, page func(first, skip int) ([]T, error)) ([]T, error) {
 	var all []T
 	for skip := 0; ; skip += batchSize {
-		if skip >= skipWarnThreshold {
-			c.logger.Warn("pagination skip is past the typical API cap; results may be truncated",
-				"skip", skip, "cap", skipWarnThreshold)
+		if skip >= skipCap {
+			return nil, fmt.Errorf("pagination reached skip=%d (cap %d); refusing to return a possibly truncated result set", skip, skipCap)
 		}
 		items, err := page(batchSize, skip)
 		if err != nil {
