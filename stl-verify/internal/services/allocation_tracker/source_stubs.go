@@ -38,6 +38,13 @@ func (s *SkipSource) FetchBalances(ctx context.Context, entries []*TokenEntry, b
 	return NewFetchResult(), nil
 }
 
+// placeholderSource marks a PositionSource that matches entries but records no
+// balances yet (StubSource). The registry uses it to surface silently-untracked
+// positions, distinct from a SkipSource whose work is intentionally done elsewhere.
+type placeholderSource interface {
+	isPlaceholder()
+}
+
 // StubSource is a placeholder for types not yet implemented.
 type StubSource struct {
 	name      string
@@ -48,6 +55,9 @@ type StubSource struct {
 func NewStubSource(name, tokenType string, logger *slog.Logger) *StubSource {
 	return &StubSource{name: name, tokenType: tokenType, logger: logger}
 }
+
+// isPlaceholder marks StubSource as a no-op placeholder (see placeholderSource).
+func (s *StubSource) isPlaceholder() {}
 
 func (s *StubSource) Name() string { return s.name }
 
@@ -69,9 +79,11 @@ func DefaultSkipSources(logger *slog.Logger) []PositionSource {
 
 // DefaultStubSources returns placeholders for types not yet implemented.
 func DefaultStubSources(logger *slog.Logger) []PositionSource {
+	// "centrifuge" is intentionally absent: Centrifuge tranche tokens are plain
+	// ERC20s and are handled by BalanceOfSource. centrifuge_feeder is a different
+	// mechanism and remains a stub until implemented.
 	return []PositionSource{
 		NewStubSource("psm3", "psm3", logger),
-		NewStubSource("centrifuge", "centrifuge", logger),
 		NewStubSource("centrifuge-feeder", "centrifuge_feeder", logger),
 		NewStubSource("galaxy-clo", "galaxy_clo", logger),
 	}
