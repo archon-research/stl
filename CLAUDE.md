@@ -119,6 +119,7 @@ Lean towards returning errors instead of continuing, unless there is an extremel
     For main.go files, only create integration tests.
     For services, create both unit and integration tests.
     Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
+    **No test-order dependencies in integration tests sharing a schema**: never rely on migration-seeded rows or on rows another test created — sibling tests TRUNCATE/DELETE shared tables (e.g. `TRUNCATE protocol CASCADE`), so seed everything your test needs yourself via idempotent upserts. Verify by running the whole test file/package, not just your tests filtered with `-run` (a filtered run hides the wipe that breaks you).
 - **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**:
