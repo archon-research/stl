@@ -12,7 +12,9 @@ try:
         lif as compute_lif_float,
     )
 except ImportError:
-    from axis_synome.spec.crypto_lending.formulas.lif import lif as compute_lif_float
+    from axis_synome.spec.crypto_lending.formulas.lif import (  # ty: ignore[unresolved-import]
+        lif as compute_lif_float,
+    )
 
 
 def compute_lif(lltv: Decimal) -> Decimal:

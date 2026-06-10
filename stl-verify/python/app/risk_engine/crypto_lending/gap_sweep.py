@@ -8,7 +8,7 @@ try:
         loss_given_default,
     )
 except ImportError:
-    from axis_synome.spec.risk_capital.formulas.required_risk_capital import (
+    from axis_synome.spec.risk_capital.formulas.required_risk_capital import (  # ty: ignore[unresolved-import]
         loss_given_default,
     )
 
