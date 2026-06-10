@@ -43,7 +43,7 @@ type MapleActiveLoan struct {
 	State         string
 	PrincipalOwed *big.Int
 	AcmRatio      *big.Int             // nil when the API reports none (uncollateralized loans)
-	Collateral    *MapleLoanCollateral // nil when the API returns null
+	Collateral    *MapleLoanCollateral // nil when the API returns null, or a collateral with null amounts (see MapleLoanCollateral)
 	LoanMeta      *MapleLoanMeta       // nil for external loans
 	PoolAddress   common.Address
 }

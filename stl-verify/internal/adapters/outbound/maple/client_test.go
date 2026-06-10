@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,13 @@ func (h graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
+	return newTestClientWithLogger(t, handler, nil)
+}
+
+// newTestClientWithLogger wires a logger so tests can assert emitted records
+// (e.g. the null-downgrade warns).
+func newTestClientWithLogger(t *testing.T, handler http.Handler, logger *slog.Logger) *Client {
+	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
@@ -61,11 +69,34 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 		InitialBackoff:    time.Millisecond,
 		MaxBackoff:        5 * time.Millisecond,
 		RequestsPerSecond: 10000,
+		Logger:            logger,
 	})
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
 	return client
+}
+
+// recordingHandler captures slog records for assertions. Tests using it run
+// requests sequentially, so it needs no locking.
+type recordingHandler struct{ records []slog.Record }
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) countWarn(substr string) int {
+	n := 0
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
+			n++
+		}
+	}
+	return n
 }
 
 func writeJSON(w http.ResponseWriter, body string) {
@@ -275,8 +306,9 @@ func TestGetActiveLoans_NullCollateralMetaAndAcmRatio(t *testing.T) {
 
 func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 	// tvl and collateralValue are nullable in the API schema; both surface
-	// as nil rather than failing the call.
-	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+	// as nil (with a warn) rather than failing the call.
+	handler := &recordingHandler{}
+	client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
 			"id": %q, "name": "Bootstrapping Pool",
 			"monthlyApy": null, "spotApy": null,
@@ -284,11 +316,17 @@ func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 			"asset": {"id": %q, "symbol": "USDC", "decimals": 6},
 			"syrupRouter": null
 		}]}}`, poolAddr, usdcAddr))
-	}})
+	}}, slog.New(handler))
 
 	pools, err := client.GetPools(context.Background())
 	if err != nil {
 		t.Fatalf("GetPools: %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("len(pools) = %d, want 1", len(pools))
+	}
+	if got := handler.countWarn("storing as NULL"); got != 1 {
+		t.Errorf("null-metric warn fired %d times, want exactly 1", got)
 	}
 	if pools[0].TVL != nil {
 		t.Errorf("TVL = %v, want nil", pools[0].TVL)
@@ -314,7 +352,8 @@ func TestGetActiveLoans_NullCollateralAmountsTreatedAsAbsent(t *testing.T) {
 		{name: "both null", amount: "null", usd: "null"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+			handler := &recordingHandler{}
+			client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 				writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
 					"id": %q, "borrower": {"id": %q}, "state": "Active",
 					"principalOwed": "7000000", "acmRatio": "1445731",
@@ -326,7 +365,7 @@ func TestGetActiveLoans_NullCollateralAmountsTreatedAsAbsent(t *testing.T) {
 					"loanMeta": null,
 					"fundingPool": {"id": %q}
 				}]}}`, loanAddr, borrowerAddr, tc.amount, tc.usd, poolAddr))
-			}})
+			}}, slog.New(handler))
 
 			loans, err := client.GetActiveLoans(context.Background())
 			if err != nil {
@@ -340,6 +379,9 @@ func TestGetActiveLoans_NullCollateralAmountsTreatedAsAbsent(t *testing.T) {
 			}
 			if loans[0].PrincipalOwed.Cmp(big.NewInt(7000000)) != 0 {
 				t.Errorf("PrincipalOwed = %s, want 7000000", loans[0].PrincipalOwed)
+			}
+			if got := handler.countWarn("treating as absent"); got != 1 {
+				t.Errorf("collateral-skip warn fired %d times, want exactly 1", got)
 			}
 		})
 	}

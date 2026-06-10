@@ -314,6 +314,13 @@ func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
 		if err != nil {
 			return nil, err
 		}
+		if pool.TVL == nil || pool.CollateralUSD == nil {
+			c.logger.Warn("pool has null tvl or collateralValue; storing as NULL",
+				"pool", w.ID,
+				"tvlNull", pool.TVL == nil,
+				"collateralValueNull", pool.CollateralUSD == nil,
+			)
+		}
 		pools = append(pools, pool)
 	}
 	return pools, nil
@@ -347,6 +354,8 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 			c.logger.Warn("collateral has null assetAmount or assetValueUsd; treating as absent",
 				"loan", w.ID,
 				"collateralState", deref(w.Collateral.State),
+				"assetAmountNull", w.Collateral.AssetAmount == nil,
+				"assetValueUsdNull", w.Collateral.AssetValueUSD == nil,
 			)
 		}
 		loans = append(loans, loan)

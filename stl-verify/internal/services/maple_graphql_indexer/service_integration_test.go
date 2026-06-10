@@ -32,7 +32,8 @@ const (
 
 // newMapleAPIFixture serves realistic GraphQL responses mirroring live API
 // shapes (string integers, JSON-number liquidationLevel/version, null
-// acmRatio on the bare loan, loanMeta with null fields).
+// acmRatio on the bare loan, loanMeta with null fields, null tvl and
+// collateralValue on the plain pool).
 func newMapleAPIFixture(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -42,7 +43,7 @@ func newMapleAPIFixture(t *testing.T) *httptest.Server {
 		 "asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6},
 		 "syrupRouter": {"id": "0x1234567890123456789012345678901234567890"}},
 		{"id": "` + itPoolPlain + `", "name": "High Yield Secured Lending", "monthlyApy": null, "spotApy": null,
-		 "assets": "0", "collateralValue": "0", "principalOut": "0", "tvl": "0",
+		 "assets": "0", "collateralValue": null, "principalOut": "0", "tvl": null,
 		 "asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6},
 		 "syrupRouter": null}
 	]`
@@ -201,6 +202,18 @@ func TestSyncIntegration_FullCycle(t *testing.T) {
 	}
 	if nullACMCount != 1 {
 		t.Errorf("null acm_ratio rows = %d, want 1", nullACMCount)
+	}
+
+	// The plain pool's schema-nullable tvl/collateralValue persisted as NULL
+	// end-to-end (client -> service -> repo).
+	var nullTVLCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_pool_state WHERE tvl IS NULL AND collateral_value_usd IS NULL`,
+	).Scan(&nullTVLCount); err != nil {
+		t.Fatalf("counting null tvl pool states: %v", err)
+	}
+	if nullTVLCount != 1 {
+		t.Errorf("null tvl/collateral_value_usd pool state rows = %d, want 1", nullTVLCount)
 	}
 
 	// State and collateral rows pair with the RIGHT loan: join back through
