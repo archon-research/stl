@@ -8,7 +8,9 @@ from decimal import Decimal
 # TODO(TEN-224): drop the fallback once the published axis-synome wheel
 # carries the spec.draft layout.
 try:
-    from axis_synome.spec.draft.crypto_lending.formulas.lif import lif as compute_lif_float
+    from axis_synome.spec.draft.crypto_lending.formulas.lif import (  # ty: ignore[unresolved-import]
+        lif as compute_lif_float,
+    )
 except ImportError:
     from axis_synome.spec.crypto_lending.formulas.lif import lif as compute_lif_float
 

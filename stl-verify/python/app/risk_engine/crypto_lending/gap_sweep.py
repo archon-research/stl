@@ -4,7 +4,7 @@ from decimal import Decimal
 # TODO(TEN-224): drop the fallback once the published axis-synome wheel
 # carries the spec.draft layout.
 try:
-    from axis_synome.spec.draft.risk_capital.formulas.required_risk_capital import (
+    from axis_synome.spec.draft.risk_capital.formulas.required_risk_capital import (  # ty: ignore[unresolved-import]
         loss_given_default,
     )
 except ImportError:
