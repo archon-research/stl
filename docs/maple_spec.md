@@ -1,8 +1,10 @@
 # Maple Finance Protocol Specification
 
-**Version:** 1.0  
-**Last Updated:** January 2026  
+**Version:** 1.1
+**Last Updated:** June 2026
 **Purpose:** Technical reference for understanding Maple Finance protocol mechanics and data retrieval
+
+> **Note:** GraphQL introspection on the Maple API is disabled (Apollo `INTROSPECTION_DISABLED`), so queries can only be validated by executing them. Response shapes have been observed to drift over time; re-verify queries against the live API before relying on this document.
 
 ---
 
@@ -35,9 +37,12 @@ Maple Finance is a **digital asset lending platform** that provides institutiona
 - **Fixed Term Loans (FTL)**: Traditional loans with specific maturity dates
 - **Native Loans**: Non-Ethereum assets (SOL, BTC) held in custody
 
+> **Note:** FTLs are not exposed via the v2 GraphQL API: there is no `fixedTermLoans` root query, and the legacy generic `loans` query returns no active entries. `openTermLoans` is the only loan query with live data.
+
 #### Layer 2: Syrup Vaults (ERC-4626)
 - **SyrupUSDC**: USDC-denominated vault
 - **SyrupUSDT**: USDT-denominated vault
+- **SyrupUSDG**: USDG-denominated vault (returned by the GraphQL API as `syrupUSDG`)
 
 **Flow:**
 ```
@@ -59,6 +64,9 @@ Users → Deposit to Syrup Vault → Vault lends to pools → Pools fund institu
 **SyrupUSDT:**
 - Ethereum: `0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d`
 - Plasma: `0xC4374775489CB9C56003BF2C9b12495fC64F0771`
+
+**SyrupUSDG:**
+- Ethereum: `0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a` (GraphQL `poolV2` ID; deployments on other chains, if any, are TBD)
 
 Each chain deployment is independent but unified through CCIP cross-chain bridging.
 
@@ -318,7 +326,7 @@ Individual loans include both:
 1. **External loans** - Loans made to external parties with traditional collateral backing
 2. **Internal loans** - Loans made internally to Maple for strategies and positions (identified by `loanMeta.type` = `"amm"` or `"strategy"`)
 
-On Maple's frontend, they explicitly report collateral backing for **external parties' collateral only**. If following this methodology, internal Maple loan collateral should be filtered out. 
+On Maple's frontend, they explicitly report collateral backing for **external parties' collateral only**. If following this methodology, internal Maple loan collateral should be filtered out.
 
 **Note:** More research is needed to determine whether the backing for Syrup pools is truly isolated from the collateral backing for internal loans. Additionally, internal Maple strategies called **`skyStrategies`** may also need to be fetched if it is determined they are backing the pools (see [Sky Strategies section](#sky-strategies) below).
 
@@ -367,9 +375,9 @@ query GetAllActiveLoans($block: Block_height!, $first: Int!, $skip: Int!) {
 - `id`: Loan contract address
 - `borrower.id`: Borrower's address
 - `principalOwed`: Outstanding principal (integer string, 6 decimals for USDC/USDT)
-- `acmRatio`: Asset Coverage Margin ratio (6 decimals, e.g., `1445731` = 144.57%)
+- `acmRatio`: Asset Coverage Margin ratio (6 decimals, e.g., `1445731` = 144.57%). **Nullable**: active uncollateralized loans return `acmRatio: null` (and `collateral: null`). Consumers must not assume a value on active loans.
 - `collateral.assetValueUsd`: **Asset price per unit in USD** (integer, 8 decimals) - multiply by `assetAmount` to get total value
-- `loanMeta`: Metadata about internal Maple positions (see warning below)
+- `loanMeta`: Loan metadata (see warning below). Present on most loans, internal and external alike; its presence does **not** indicate an internal position.
 
 **Usage:**
 
@@ -382,7 +390,11 @@ This query supports pagination (required for >1000 loans) and returns all active
 
 **⚠️ IMPORTANT: `loanMeta` and Internal Maple Positions**
 
-When `loanMeta` is **not null** and `loanMeta.type` is either `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
+The **only** reliable signal that a loan is an internal Maple position is `loanMeta.type` being `"amm"` or `"strategy"`. Do **not** treat the mere presence of `loanMeta` as an internal-loan indicator: most active loans (internal and external) carry a non-null `loanMeta`, and every field inside it (including `type`) is nullable. External loans commonly have `loanMeta` present with `type: null`.
+
+Observed `loanMeta.type` values on active loans include `null`, `"amm"`, `"strategy"`, `"tBills"`, and `"intercompany"`. The semantics of `"tBills"` and `"intercompany"` are undocumented and need confirmation from Maple; new values may appear over time.
+
+When `loanMeta.type` is `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
 
 **For these loans:**
 - ❌ The `collateral` field **may not accurately represent** the actual backing
@@ -518,7 +530,7 @@ query GlobalSyrupStats {
 ```graphql
 query UserTransactions($userAddress: String!) {
   txes(
-    where: { 
+    where: {
       poolV2_: { syrupRouter_not: null },
       account: $userAddress     # MUST be lowercase (e.g., "0x123abc" not "0x123ABC")
     }
@@ -622,6 +634,8 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 - APY values: 30 decimals
 - Collateral ratios: 6 decimals
 - Interest rates: 6 decimals
+- **Exceptions (JSON numbers, not strings):** `collateral.liquidationLevel` (e.g. `900000`) and `skyStrategy.version` (e.g. `100`) arrive as JSON numbers. Decoders that strictly expect string-encoded integers will fail on these two fields.
+- Introspection is disabled (`INTROSPECTION_DISABLED`); validate queries by executing them
 
 **Pagination:**
 
@@ -629,12 +643,12 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 query {
   poolV2S(
     first: 100,              # Limit
-    skip: 0,                 # Offset
-    orderBy: tvl,
-    orderDirection: desc
+    skip: 0                  # Offset
   ) { ... }
 }
 ```
+
+**Note:** `orderBy: tvl` is rejected (`Value "tvl" does not exist in "PoolV2_orderBy" enum`); plain `first`/`skip` works. Skip-based pagination has no stable order, so callers needing a complete set should fetch all pages within one cycle and treat duplicates across pages as an error.
 
 ### Cross-Chain Considerations
 
@@ -683,7 +697,7 @@ query {
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** January 2026
+**Document Version:** 1.1
+**Last Updated:** June 2026
 
 **Contributors:** Technical specification based on Maple Finance protocol documentation, GraphQL API schema, and smart contract interfaces.
