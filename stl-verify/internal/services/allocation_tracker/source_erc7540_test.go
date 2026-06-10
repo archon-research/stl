@@ -55,9 +55,9 @@ func TestERC7540Source_Supports(t *testing.T) {
 		protocol  string
 		want      bool
 	}{
-		{"erc7540 token type", "erc7540", "centrifuge", true},
-		{"erc7540 with other protocol", "erc7540", "grove", true},
-		{"centrifuge token type", "centrifuge", "centrifuge", false},
+		{"centrifuge token type", "centrifuge", "centrifuge", true},
+		{"centrifuge with other protocol", "centrifuge", "grove", true},
+		{"centrifuge feeder token type", "centrifuge_feeder", "centrifuge", false},
 		{"plain erc20 token type", "erc20", "centrifuge", false},
 		{"erc4626 token type", "erc4626", "sky", false},
 	}
@@ -112,7 +112,7 @@ func TestERC7540Source_FetchBalances_ResolvesShareAndStoresBalance(t *testing.T)
 		Star:            "grove",
 		Chain:           "mainnet",
 		Protocol:        "centrifuge",
-		TokenType:       "erc7540",
+		TokenType:       "centrifuge",
 	}}
 
 	results, err := src.FetchBalances(context.Background(), entries, 24584100)
@@ -155,7 +155,7 @@ func TestERC7540Source_FetchBalances_ZeroBalance(t *testing.T) {
 	entries := []*TokenEntry{{
 		ContractAddress: vault,
 		WalletAddress:   common.HexToAddress("0xbbbb"),
-		TokenType:       "erc7540",
+		TokenType:       "centrifuge",
 	}}
 
 	results, err := src.FetchBalances(context.Background(), entries, 100)
@@ -197,8 +197,8 @@ func TestERC7540Source_FetchBalances_SharedVaultResolvedOnce(t *testing.T) {
 	}
 
 	entries := []*TokenEntry{
-		{ContractAddress: vault, WalletAddress: walletA, TokenType: "erc7540"},
-		{ContractAddress: vault, WalletAddress: walletB, TokenType: "erc7540"},
+		{ContractAddress: vault, WalletAddress: walletA, TokenType: "centrifuge"},
+		{ContractAddress: vault, WalletAddress: walletB, TokenType: "centrifuge"},
 	}
 
 	results, err := src.FetchBalances(context.Background(), entries, 100)
@@ -231,8 +231,8 @@ func TestERC7540Source_FetchBalances_DuplicateShareForWalletFails(t *testing.T) 
 	}
 
 	entries := []*TokenEntry{
-		{ContractAddress: vaultA, WalletAddress: wallet, TokenType: "erc7540"},
-		{ContractAddress: vaultB, WalletAddress: wallet, TokenType: "erc7540"},
+		{ContractAddress: vaultA, WalletAddress: wallet, TokenType: "centrifuge"},
+		{ContractAddress: vaultB, WalletAddress: wallet, TokenType: "centrifuge"},
 	}
 
 	results, err := src.FetchBalances(context.Background(), entries, 100)
@@ -275,8 +275,8 @@ func TestERC7540Source_FetchBalances_SameShareDifferentWalletsSucceeds(t *testin
 	}
 
 	entries := []*TokenEntry{
-		{ContractAddress: vaultA, WalletAddress: walletA, TokenType: "erc7540"},
-		{ContractAddress: vaultB, WalletAddress: walletB, TokenType: "erc7540"},
+		{ContractAddress: vaultA, WalletAddress: walletA, TokenType: "centrifuge"},
+		{ContractAddress: vaultB, WalletAddress: walletB, TokenType: "centrifuge"},
 	}
 
 	results, err := src.FetchBalances(context.Background(), entries, 100)
@@ -418,7 +418,7 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 			entries := []*TokenEntry{{
 				ContractAddress: common.HexToAddress("0xaaaa"),
 				WalletAddress:   common.HexToAddress("0xbbbb"),
-				TokenType:       "erc7540",
+				TokenType:       "centrifuge",
 			}}
 
 			results, err := src.FetchBalances(context.Background(), entries, 100)
@@ -454,7 +454,7 @@ func TestERC7540Source_FetchBalances_ZeroBlockPassesNilBlock(t *testing.T) {
 	entries := []*TokenEntry{{
 		ContractAddress: common.HexToAddress("0xaaaa"),
 		WalletAddress:   common.HexToAddress("0xbbbb"),
-		TokenType:       "erc7540",
+		TokenType:       "centrifuge",
 	}}
 
 	results, err := src.FetchBalances(context.Background(), entries, 0)

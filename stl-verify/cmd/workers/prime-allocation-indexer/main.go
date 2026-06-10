@@ -246,12 +246,6 @@ func run(ctx context.Context, args []string) error {
 	}
 	registry.Register(erc4626)
 
-	erc7540, err := at.NewERC7540Source(mc, logger)
-	if err != nil {
-		return fmt.Errorf("erc7540 source: %w", err)
-	}
-	registry.Register(erc7540)
-
 	curveABI, err := abis.GetCurvePoolABI()
 	if err != nil {
 		return fmt.Errorf("curve abi: %w", err)

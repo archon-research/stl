@@ -58,8 +58,13 @@ func NewERC7540Source(multicaller outbound.Multicaller, logger *slog.Logger) (*E
 
 func (s *ERC7540Source) Name() string { return "erc7540" }
 
+// Supports claims token_type=centrifuge: those entries point at ERC-7540
+// vaults. NOTE: BalanceOfSource currently also claims this type — this source
+// stays unregistered until the axis-synome data moves the centrifuge entries
+// from share-token to vault addresses; the registration and the BalanceOfSource
+// removal must land together with that bump (VEC-337 part 2).
 func (s *ERC7540Source) Supports(tokenType string, protocol string) bool {
-	return tokenType == "erc7540"
+	return tokenType == "centrifuge"
 }
 
 func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
