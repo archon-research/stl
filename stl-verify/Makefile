@@ -626,6 +626,7 @@ dev-env:
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/offchain-price-indexer/.env; \
 	printf '%s\n' \
@@ -634,6 +635,7 @@ dev-env:
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/watcher-data-validator/.env; \
 	printf '%s\n' \
@@ -644,6 +646,7 @@ dev-env:
 		"ANCHORAGE_API_URL=" \
 		"ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" \
 		"ANCHORAGE_PRIME=" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/anchorage-indexer/.env
 	@printf '%s\n' \
@@ -652,6 +655,7 @@ dev-env:
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"MAPLE_SYNC_INTERVAL=10m" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
 	@echo "Environment files generated (.env.secrets updated)."
