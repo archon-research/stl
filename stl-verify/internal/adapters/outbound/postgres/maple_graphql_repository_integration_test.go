@@ -1,0 +1,610 @@
+//go:build integration
+
+package postgres
+
+import (
+	"context"
+	"math/big"
+	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
+)
+
+const mapleSchemaName = "test_maple_graphql"
+
+var maplePool *pgxpool.Pool
+
+func init() {
+	registerTestFileSetup(mapleSchemaName, func() {
+		maplePool = testutil.SetupSchemaForMain(sharedDSN, mapleSchemaName)
+	}, func() {
+		testutil.CleanupSchemaForMain(sharedDSN, maplePool, mapleSchemaName)
+	})
+}
+
+// truncateMaple clears maple-related tables for test isolation. The protocol
+// table keeps the migration-seeded maple row.
+func truncateMaple(t *testing.T, ctx context.Context) {
+	t.Helper()
+	tables := []string{
+		`maple_loan_collateral`,
+		`maple_loan_state`,
+		`maple_pool_state`,
+		`maple_sky_strategy_state`,
+		`maple_syrup_global_state`,
+		`maple_loan`,
+		`maple_sky_strategy`,
+		`maple_pool`,
+	}
+	for _, table := range tables {
+		if _, err := maplePool.Exec(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatalf("failed to truncate %s: %v", table, err)
+		}
+	}
+	if _, err := maplePool.Exec(ctx, `DELETE FROM "user"`); err != nil {
+		t.Fatalf("failed to truncate user: %v", err)
+	}
+}
+
+func newMapleRepo(t *testing.T, buildID buildregistry.BuildID) *MapleGraphQLRepository {
+	t.Helper()
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, buildID, 0)
+	if err != nil {
+		t.Fatalf("NewMapleGraphQLRepository: %v", err)
+	}
+	return repo
+}
+
+// inMapleTx runs fn inside a committed transaction.
+func inMapleTx(t *testing.T, ctx context.Context, fn func(tx pgx.Tx) error) {
+	t.Helper()
+	tx, err := maplePool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("tx fn: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+func mapleAddr(b byte) []byte {
+	a := make([]byte, 20)
+	for i := range a {
+		a[i] = b
+	}
+	return a
+}
+
+func mapleSyncedAt() time.Time {
+	return time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+}
+
+// mapleProtocolID resolves the migration-seeded maple protocol row.
+func mapleProtocolID(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository) int64 {
+	t.Helper()
+	id, err := repo.GetMapleProtocolID(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetMapleProtocolID: %v", err)
+	}
+	return id
+}
+
+func upsertTestPool(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, addrByte byte) int64 {
+	t.Helper()
+	protocolID := mapleProtocolID(t, ctx, repo)
+	pool, err := entity.NewMaplePool(1, protocolID, mapleAddr(addrByte), "Test Pool", mapleAddr(0xee), "USDC", 6, true)
+	if err != nil {
+		t.Fatalf("NewMaplePool: %v", err)
+	}
+
+	var ids map[string]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		ids, err = repo.UpsertPools(ctx, tx, []*entity.MaplePool{pool})
+		return err
+	})
+	id, ok := ids[addressKey(pool.Address)]
+	if !ok {
+		t.Fatalf("pool id missing from map: %v", ids)
+	}
+	return id
+}
+
+func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, poolID int64, addrByte byte, meta *entity.MapleLoanMeta) int64 {
+	t.Helper()
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	var loanID int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{common.BytesToAddress(mapleAddr(0xab))})
+		if err != nil {
+			return err
+		}
+		loan, err := entity.NewMapleLoan(1, protocolID, mapleAddr(addrByte), poolID, users[common.BytesToAddress(mapleAddr(0xab))], meta)
+		if err != nil {
+			return err
+		}
+		ids, err := repo.UpsertLoans(ctx, tx, []*entity.MapleLoan{loan})
+		if err != nil {
+			return err
+		}
+		loanID = ids[addressKey(loan.LoanAddress)]
+		return nil
+	})
+	if loanID == 0 {
+		t.Fatal("loan id not resolved")
+	}
+	return loanID
+}
+
+func TestMapleGetMapleProtocolID(t *testing.T) {
+	ctx := context.Background()
+	repo := newMapleRepo(t, 0)
+
+	id, err := repo.GetMapleProtocolID(ctx, 1)
+	if err != nil {
+		t.Fatalf("GetMapleProtocolID: %v", err)
+	}
+	if id <= 0 {
+		t.Errorf("id = %d, want positive", id)
+	}
+
+	if _, err := repo.GetMapleProtocolID(ctx, 999); err == nil {
+		t.Error("expected error for unknown chain, got nil")
+	}
+}
+
+func TestMapleGetOrCreateBorrowerUsers(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+
+	borrowerA := common.BytesToAddress(mapleAddr(0x01))
+	borrowerB := common.BytesToAddress(mapleAddr(0x02))
+
+	var first map[common.Address]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		// Duplicate input must be deduplicated.
+		first, err = repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{borrowerA, borrowerB, borrowerA})
+		return err
+	})
+	if len(first) != 2 {
+		t.Fatalf("len(first) = %d, want 2", len(first))
+	}
+
+	// New borrower users must have NULL first_seen_block.
+	var fsb *int64
+	if err := maplePool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE chain_id = 1 AND address = $1`,
+		borrowerA.Bytes()).Scan(&fsb); err != nil {
+		t.Fatalf("querying user: %v", err)
+	}
+	if fsb != nil {
+		t.Errorf("first_seen_block = %v, want NULL", *fsb)
+	}
+
+	// Re-upserting returns the same ids.
+	var second map[common.Address]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		second, err = repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{borrowerA, borrowerB})
+		return err
+	})
+	if second[borrowerA] != first[borrowerA] || second[borrowerB] != first[borrowerB] {
+		t.Errorf("ids changed across upserts: %v vs %v", first, second)
+	}
+
+	// An existing user created by an on-chain indexer keeps its
+	// first_seen_block (the shared GetOrCreateUser LEAST() merge would have
+	// clobbered it to 0).
+	existing := common.BytesToAddress(mapleAddr(0x03))
+	var existingID int64
+	if err := maplePool.QueryRow(ctx,
+		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+		 VALUES (1, $1, 12345, NOW(), NOW(), '{}'::jsonb) RETURNING id`,
+		existing.Bytes()).Scan(&existingID); err != nil {
+		t.Fatalf("seeding existing user: %v", err)
+	}
+
+	var third map[common.Address]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		third, err = repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{existing})
+		return err
+	})
+	if third[existing] != existingID {
+		t.Errorf("existing user id = %d, want %d", third[existing], existingID)
+	}
+	var preserved int64
+	if err := maplePool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE id = $1`, existingID).Scan(&preserved); err != nil {
+		t.Fatalf("querying preserved user: %v", err)
+	}
+	if preserved != 12345 {
+		t.Errorf("first_seen_block = %d, want 12345 (must not be clobbered)", preserved)
+	}
+}
+
+func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	poolA, err := entity.NewMaplePool(1, protocolID, mapleAddr(0x10), "Pool A", mapleAddr(0xee), "USDC", 6, false)
+	if err != nil {
+		t.Fatalf("NewMaplePool: %v", err)
+	}
+	poolB, err := entity.NewMaplePool(1, protocolID, mapleAddr(0x11), "Pool B", mapleAddr(0xef), "USDT", 6, true)
+	if err != nil {
+		t.Fatalf("NewMaplePool: %v", err)
+	}
+
+	var ids map[string]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		ids, err = repo.UpsertPools(ctx, tx, []*entity.MaplePool{poolA, poolB})
+		return err
+	})
+	if len(ids) != 2 {
+		t.Fatalf("len(ids) = %d, want 2", len(ids))
+	}
+
+	// Re-upsert with changed name/is_syrup refreshes and keeps the same id.
+	poolA.Name = "Pool A renamed"
+	poolA.IsSyrup = true
+	var again map[string]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		again, err = repo.UpsertPools(ctx, tx, []*entity.MaplePool{poolA})
+		return err
+	})
+	if again[addressKey(poolA.Address)] != ids[addressKey(poolA.Address)] {
+		t.Errorf("pool id changed on re-upsert")
+	}
+
+	var name string
+	var isSyrup bool
+	if err := maplePool.QueryRow(ctx,
+		`SELECT name, is_syrup FROM maple_pool WHERE chain_id = 1 AND address = $1`,
+		poolA.Address).Scan(&name, &isSyrup); err != nil {
+		t.Fatalf("querying pool: %v", err)
+	}
+	if name != "Pool A renamed" || !isSyrup {
+		t.Errorf("name/is_syrup = %q/%v, want refreshed values", name, isSyrup)
+	}
+}
+
+func TestMaplePoolStates_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x20)
+
+	state, err := entity.NewMaplePoolState(poolID, mapleSyncedAt(),
+		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), 0.6,
+		big.NewInt(123), nil)
+	if err != nil {
+		t.Fatalf("NewMaplePoolState: %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*entity.MaplePoolState{state})
+	})
+
+	var tvl, utilization string
+	var spotAPY *string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT tvl::text, utilization::text, spot_apy::text FROM maple_pool_state WHERE maple_pool_id = $1`,
+		poolID).Scan(&tvl, &utilization, &spotAPY); err != nil {
+		t.Fatalf("querying pool state: %v", err)
+	}
+	if tvl != "1000" {
+		t.Errorf("tvl = %s, want 1000", tvl)
+	}
+	if utilization != "0.6" {
+		t.Errorf("utilization = %s, want 0.6", utilization)
+	}
+	if spotAPY != nil {
+		t.Errorf("spot_apy = %v, want NULL", *spotAPY)
+	}
+}
+
+func TestMapleLoans_FullRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x21)
+
+	internalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x30, &entity.MapleLoanMeta{Type: "amm", Dex: "Uniswap"})
+	externalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x31, nil)
+
+	// is_internal generated column follows loan_meta_type.
+	var isInternal bool
+	if err := maplePool.QueryRow(ctx,
+		`SELECT is_internal FROM maple_loan WHERE id = $1`, internalLoanID).Scan(&isInternal); err != nil {
+		t.Fatalf("querying loan: %v", err)
+	}
+	if !isInternal {
+		t.Error("internal loan is_internal = false, want true")
+	}
+	if err := maplePool.QueryRow(ctx,
+		`SELECT is_internal FROM maple_loan WHERE id = $1`, externalLoanID).Scan(&isInternal); err != nil {
+		t.Fatalf("querying loan: %v", err)
+	}
+	if isInternal {
+		t.Error("external loan is_internal = true, want false")
+	}
+
+	// States: one with acmRatio, one with NULL acmRatio (live API shape for
+	// uncollateralized loans). Collateral row only for the first.
+	withACM, err := entity.NewMapleLoanState(internalLoanID, mapleSyncedAt(), "Active", big.NewInt(100), big.NewInt(1445731))
+	if err != nil {
+		t.Fatalf("NewMapleLoanState: %v", err)
+	}
+	withoutACM, err := entity.NewMapleLoanState(externalLoanID, mapleSyncedAt(), "Active", big.NewInt(200), nil)
+	if err != nil {
+		t.Fatalf("NewMapleLoanState: %v", err)
+	}
+	collateral, err := entity.NewMapleLoanCollateral(internalLoanID, mapleSyncedAt(), "BTC",
+		big.NewInt(21510), 8, big.NewInt(6357500000), "Deposited", "ANCHORAGE", big.NewInt(1020000))
+	if err != nil {
+		t.Fatalf("NewMapleLoanCollateral: %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		if err := repo.SaveLoanStates(ctx, tx, []*entity.MapleLoanState{withACM, withoutACM}); err != nil {
+			return err
+		}
+		return repo.SaveLoanCollaterals(ctx, tx, []*entity.MapleLoanCollateral{collateral})
+	})
+
+	var acm *string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT acm_ratio::text FROM maple_loan_state WHERE maple_loan_id = $1`, externalLoanID).Scan(&acm); err != nil {
+		t.Fatalf("querying loan state: %v", err)
+	}
+	if acm != nil {
+		t.Errorf("acm_ratio = %v, want NULL", *acm)
+	}
+
+	var collateralCount int
+	if err := maplePool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_loan_collateral`).Scan(&collateralCount); err != nil {
+		t.Fatalf("counting collaterals: %v", err)
+	}
+	if collateralCount != 1 {
+		t.Errorf("collateral count = %d, want 1 (no row for nil collateral)", collateralCount)
+	}
+
+	var custodian string
+	var liquidationLevel string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT custodian, liquidation_level::text FROM maple_loan_collateral WHERE maple_loan_id = $1`,
+		internalLoanID).Scan(&custodian, &liquidationLevel); err != nil {
+		t.Fatalf("querying collateral: %v", err)
+	}
+	if custodian != "ANCHORAGE" || liquidationLevel != "1020000" {
+		t.Errorf("custodian/liquidation = %s/%s", custodian, liquidationLevel)
+	}
+}
+
+func TestMapleUpsertLoans_RefreshesMeta(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x22)
+
+	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x32, nil)
+
+	// Same loan reappears with meta — columns refresh, id stable.
+	sameID := upsertTestLoan(t, ctx, repo, poolID, 0x32, &entity.MapleLoanMeta{Type: "strategy", Location: "base"})
+	if sameID != loanID {
+		t.Fatalf("loan id changed on re-upsert: %d vs %d", sameID, loanID)
+	}
+
+	var metaType, location *string
+	var isInternal bool
+	if err := maplePool.QueryRow(ctx,
+		`SELECT loan_meta_type, loan_meta_location, is_internal FROM maple_loan WHERE id = $1`,
+		loanID).Scan(&metaType, &location, &isInternal); err != nil {
+		t.Fatalf("querying loan: %v", err)
+	}
+	if metaType == nil || *metaType != "strategy" || location == nil || *location != "base" {
+		t.Errorf("meta not refreshed: type=%v location=%v", metaType, location)
+	}
+	if !isInternal {
+		t.Error("is_internal = false, want true after meta refresh")
+	}
+}
+
+func TestMapleStates_IdempotencyAndReprocessing(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repoBuild0 := newMapleRepo(t, 0)
+	repoBuild9 := newMapleRepo(t, 9)
+	poolID := upsertTestPool(t, ctx, repoBuild0, 0x23)
+	loanID := upsertTestLoan(t, ctx, repoBuild0, poolID, 0x33, nil)
+
+	newState := func(principal int64) *entity.MapleLoanState {
+		s, err := entity.NewMapleLoanState(loanID, mapleSyncedAt(), "Active", big.NewInt(principal), big.NewInt(1))
+		if err != nil {
+			t.Fatalf("NewMapleLoanState: %v", err)
+		}
+		return s
+	}
+
+	// Same build twice: trigger reuses the version, conflict dedupes.
+	for range 2 {
+		inMapleTx(t, ctx, func(tx pgx.Tx) error {
+			return repoBuild0.SaveLoanStates(ctx, tx, []*entity.MapleLoanState{newState(100)})
+		})
+	}
+	var count int
+	if err := maplePool.QueryRow(ctx, `SELECT COUNT(*) FROM maple_loan_state`).Scan(&count); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count after same-build retry = %d, want 1", count)
+	}
+
+	// Different build: trigger assigns processing_version 1.
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repoBuild9.SaveLoanStates(ctx, tx, []*entity.MapleLoanState{newState(200)})
+	})
+
+	rows, err := maplePool.Query(ctx,
+		`SELECT processing_version, build_id, principal_owed::text FROM maple_loan_state ORDER BY processing_version`)
+	if err != nil {
+		t.Fatalf("querying versions: %v", err)
+	}
+	defer rows.Close()
+
+	type versionRow struct {
+		version   int
+		buildID   int
+		principal string
+	}
+	var got []versionRow
+	for rows.Next() {
+		var vr versionRow
+		if err := rows.Scan(&vr.version, &vr.buildID, &vr.principal); err != nil {
+			t.Fatalf("scanning: %v", err)
+		}
+		got = append(got, vr)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating: %v", err)
+	}
+	want := []versionRow{{0, 0, "100"}, {1, 9, "200"}}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x24)
+
+	strategy, err := entity.NewMapleSkyStrategy(1, mapleAddr(0x40), poolID, 100)
+	if err != nil {
+		t.Fatalf("NewMapleSkyStrategy: %v", err)
+	}
+
+	var ids map[string]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		ids, err = repo.UpsertSkyStrategies(ctx, tx, []*entity.MapleSkyStrategy{strategy})
+		return err
+	})
+	strategyID := ids[addressKey(strategy.StrategyAddress)]
+	if strategyID == 0 {
+		t.Fatal("strategy id not resolved")
+	}
+
+	// Version refresh keeps the id.
+	strategy.Version = 200
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		ids, err = repo.UpsertSkyStrategies(ctx, tx, []*entity.MapleSkyStrategy{strategy})
+		return err
+	})
+	if ids[addressKey(strategy.StrategyAddress)] != strategyID {
+		t.Error("strategy id changed on re-upsert")
+	}
+	var version int
+	if err := maplePool.QueryRow(ctx,
+		`SELECT version FROM maple_sky_strategy WHERE id = $1`, strategyID).Scan(&version); err != nil {
+		t.Fatalf("querying strategy: %v", err)
+	}
+	if version != 200 {
+		t.Errorf("version = %d, want 200", version)
+	}
+
+	state, err := entity.NewMapleSkyStrategyState(strategyID, mapleSyncedAt(), "Active",
+		big.NewInt(0), big.NewInt(100), big.NewInt(50), nil, nil)
+	if err != nil {
+		t.Fatalf("NewMapleSkyStrategyState: %v", err)
+	}
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SaveSkyStrategyStates(ctx, tx, []*entity.MapleSkyStrategyState{state})
+	})
+
+	var deposited string
+	var feeRate *string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT deposited_assets::text, strategy_fee_rate::text FROM maple_sky_strategy_state WHERE maple_sky_strategy_id = $1`,
+		strategyID).Scan(&deposited, &feeRate); err != nil {
+		t.Fatalf("querying strategy state: %v", err)
+	}
+	if deposited != "100" || feeRate != nil {
+		t.Errorf("deposited/feeRate = %s/%v", deposited, feeRate)
+	}
+}
+
+func TestMapleSyrupGlobalState_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+
+	apy, _ := new(big.Int).SetString("46314953537216910976747498327", 10)
+	state, err := entity.NewMapleSyrupGlobalState(1, mapleSyncedAt(),
+		big.NewInt(3563135115920200), apy, big.NewInt(1), big.NewInt(2), nil)
+	if err != nil {
+		t.Fatalf("NewMapleSyrupGlobalState: %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SaveSyrupGlobalState(ctx, tx, state)
+	})
+
+	var gotAPY string
+	var drips *string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT apy::text, drips_yield_boost::text FROM maple_syrup_global_state WHERE chain_id = 1`).Scan(&gotAPY, &drips); err != nil {
+		t.Fatalf("querying syrup global state: %v", err)
+	}
+	if gotAPY != apy.String() {
+		t.Errorf("apy = %s, want %s (30-decimal value must round-trip exactly)", gotAPY, apy)
+	}
+	if drips != nil {
+		t.Errorf("drips_yield_boost = %v, want NULL", *drips)
+	}
+
+	// Nil state is a hard error.
+	inMapleTxExpectErr(t, ctx, func(tx pgx.Tx) error {
+		return repo.SaveSyrupGlobalState(ctx, tx, nil)
+	})
+}
+
+// inMapleTxExpectErr runs fn inside a transaction and requires it to fail.
+func inMapleTxExpectErr(t *testing.T, ctx context.Context, fn func(tx pgx.Tx) error) {
+	t.Helper()
+	tx, err := maplePool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(tx); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
