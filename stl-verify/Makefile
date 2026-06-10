@@ -646,6 +646,14 @@ dev-env:
 		"ANCHORAGE_PRIME=" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/anchorage-indexer/.env
+	@printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"MAPLE_SYNC_INTERVAL=10m" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/maple-graphql-indexer/.env
 	@echo "Environment files generated (.env.secrets updated)."
 
 # Cold start — rebuilds all images from scratch

@@ -145,6 +145,16 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: maple-graphql-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  MAPLE_SYNC_INTERVAL: "10m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: watcher-data-validator
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
