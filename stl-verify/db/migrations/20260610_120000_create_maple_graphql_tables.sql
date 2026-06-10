@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS maple_loan_state
     synced_at          TIMESTAMPTZ NOT NULL,
     state              VARCHAR(32) NOT NULL, -- 'Active' (only Active queried for MVP)
     principal_owed     NUMERIC     NOT NULL,
-    acm_ratio          NUMERIC     NOT NULL, -- 6 decimals
+    acm_ratio          NUMERIC,              -- 6 decimals; NULL when the API reports none (uncollateralized loans)
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (maple_loan_id, synced_at, processing_version)

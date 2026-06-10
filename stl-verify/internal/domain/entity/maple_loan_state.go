@@ -8,13 +8,14 @@ import (
 
 // MapleLoanState is a snapshot of an active Open Term Loan at a sync cycle.
 // PrincipalOwed is a raw integer in pool-asset decimals (6 for USDC/USDT);
-// AcmRatio has 6 decimals (1445731 = 144.57%).
+// AcmRatio has 6 decimals (1445731 = 144.57%) and is nil when the API
+// reports none (observed on active uncollateralized loans).
 type MapleLoanState struct {
 	MapleLoanID   int64
 	SyncedAt      time.Time
 	State         string // 'Active' (only Active is queried for MVP)
 	PrincipalOwed *big.Int
-	AcmRatio      *big.Int
+	AcmRatio      *big.Int // nil when absent upstream
 }
 
 // NewMapleLoanState creates a new MapleLoanState entity with validation.
@@ -49,10 +50,7 @@ func (s *MapleLoanState) Validate() error {
 	if s.PrincipalOwed.Sign() < 0 {
 		return fmt.Errorf("principalOwed must be non-negative, got %s", s.PrincipalOwed)
 	}
-	if s.AcmRatio == nil {
-		return fmt.Errorf("acmRatio must not be nil")
-	}
-	if s.AcmRatio.Sign() < 0 {
+	if s.AcmRatio != nil && s.AcmRatio.Sign() < 0 {
 		return fmt.Errorf("acmRatio must be non-negative, got %s", s.AcmRatio)
 	}
 	return nil

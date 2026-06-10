@@ -25,6 +25,7 @@ func TestMapleLoanState_Validate(t *testing.T) {
 	}{
 		{name: "valid state"},
 		{name: "zero principal ok", mutate: func(s *MapleLoanState) { s.PrincipalOwed = big.NewInt(0) }},
+		{name: "nil acm ratio ok", mutate: func(s *MapleLoanState) { s.AcmRatio = nil }},
 		{
 			name:    "zero loan ID",
 			mutate:  func(s *MapleLoanState) { s.MapleLoanID = 0 },
@@ -49,11 +50,6 @@ func TestMapleLoanState_Validate(t *testing.T) {
 			name:    "negative principal owed",
 			mutate:  func(s *MapleLoanState) { s.PrincipalOwed = big.NewInt(-1) },
 			wantErr: "principalOwed must be non-negative",
-		},
-		{
-			name:    "nil acm ratio",
-			mutate:  func(s *MapleLoanState) { s.AcmRatio = nil },
-			wantErr: "acmRatio must not be nil",
 		},
 		{
 			name:    "negative acm ratio",

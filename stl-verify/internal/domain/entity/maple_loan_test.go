@@ -65,9 +65,10 @@ func TestMapleLoan_Validate(t *testing.T) {
 			wantErr: "borrowerUserID must be positive",
 		},
 		{
-			name:    "loan meta with empty type",
-			mutate:  func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{Dex: "Uniswap"} },
-			wantErr: "loanMeta.type must not be empty",
+			// Live API observation: 27 of 61 active loans carry loanMeta
+			// with a null type — must be accepted, not rejected.
+			name:   "loan meta with empty type ok",
+			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{Dex: "Uniswap"} },
 		},
 	}
 
@@ -103,7 +104,8 @@ func TestMapleLoan_IsInternal(t *testing.T) {
 		{name: "nil meta is external", meta: nil, want: false},
 		{name: "amm is internal", meta: &MapleLoanMeta{Type: "amm"}, want: true},
 		{name: "strategy is internal", meta: &MapleLoanMeta{Type: "strategy"}, want: true},
-		{name: "other type is external", meta: &MapleLoanMeta{Type: "custody"}, want: false},
+		{name: "tBills type is external", meta: &MapleLoanMeta{Type: "tBills"}, want: false},
+		{name: "empty type is external", meta: &MapleLoanMeta{}, want: false},
 	}
 
 	for _, tt := range tests {

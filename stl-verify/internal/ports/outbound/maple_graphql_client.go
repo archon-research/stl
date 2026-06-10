@@ -7,8 +7,10 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// MapleLoanMeta distinguishes internal vs external loans.
-// Internal loans have Type = "amm" or "strategy"; external loans have nil LoanMeta.
+// MapleLoanMeta carries Maple's loan metadata. Loans with Type = "amm" or
+// "strategy" are internal Maple positions. Live data also shows metadata with
+// a null Type and other types ("tBills", "intercompany"); every field may be
+// empty, and LoanMeta itself is nil when the API returns null.
 type MapleLoanMeta struct {
 	Type          string
 	AssetSymbol   string
@@ -36,7 +38,7 @@ type MapleActiveLoan struct {
 	Borrower          common.Address
 	State             string
 	PrincipalOwed     *big.Int
-	AcmRatio          *big.Int
+	AcmRatio          *big.Int             // nil when the API reports none (uncollateralized loans)
 	Collateral        *MapleLoanCollateral // nil when the API returns null
 	LoanMeta          *MapleLoanMeta       // nil for external loans
 	PoolAddress       common.Address

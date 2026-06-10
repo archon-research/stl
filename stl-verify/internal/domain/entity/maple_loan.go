@@ -8,11 +8,13 @@ const (
 	MapleLoanMetaTypeStrategy = "strategy"
 )
 
-// MapleLoanMeta describes an internal Maple position (DeFi strategy or AMM
-// position). It is nil for external borrower loans. WalletAddress may be a
-// non-EVM address (Base/Solana custody wallets), so it is kept as a string.
+// MapleLoanMeta carries Maple's loan metadata. The loan is an internal Maple
+// position when Type is 'amm' or 'strategy'; live data also shows metadata
+// with a null Type and other types ('tBills', 'intercompany'), all persisted
+// raw. WalletAddress may be a non-EVM address (Base/Solana custody wallets),
+// so it is kept as a string. Every field may be empty.
 type MapleLoanMeta struct {
-	Type          string // 'amm' | 'strategy'
+	Type          string // '' | 'amm' | 'strategy' | 'tBills' | 'intercompany' | ...
 	AssetSymbol   string
 	Dex           string
 	WalletAddress string
@@ -69,9 +71,6 @@ func (l *MapleLoan) Validate() error {
 	}
 	if l.BorrowerUserID <= 0 {
 		return fmt.Errorf("borrowerUserID must be positive, got %d", l.BorrowerUserID)
-	}
-	if l.LoanMeta != nil && l.LoanMeta.Type == "" {
-		return fmt.Errorf("loanMeta.type must not be empty when loanMeta is present")
 	}
 	return nil
 }
