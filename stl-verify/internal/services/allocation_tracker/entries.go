@@ -82,6 +82,14 @@ func LoadDefaultTokenEntries() ([]*TokenEntry, error) {
 		return entries[i].TokenType < entries[j].TokenType
 	})
 
+	chainCounts := make(map[string]int)
+	for _, e := range entries {
+		chainCounts[e.Chain]++
+	}
+	if err := validateChainVocabulary("token entries", chainCounts); err != nil {
+		return nil, err
+	}
+
 	return entries, nil
 }
 

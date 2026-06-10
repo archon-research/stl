@@ -52,7 +52,20 @@ func LoadDefaultProxies() ([]ProxyConfig, error) {
 		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
 	}
 
-	return proxiesFromAlmProxy(contract.GetAlmProxies())
+	proxies, err := proxiesFromAlmProxy(contract.GetAlmProxies())
+	if err != nil {
+		return nil, err
+	}
+
+	chainCounts := make(map[string]int)
+	for _, p := range proxies {
+		chainCounts[p.Chain]++
+	}
+	if err := validateChainVocabulary("proxies", chainCounts); err != nil {
+		return nil, err
+	}
+
+	return proxies, nil
 }
 
 // proxiesFromAlmProxy flattens the contract's star -> chain -> [proxy] map into a

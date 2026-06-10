@@ -77,7 +77,7 @@ type TokenEntry struct {
 	TokenType       string  `json:"token_type"`
 	// created_at_block is intentionally absent: it is on-chain observed data,
 	// not Atlas-sourced, so the axis-synome contract does not carry it. The
-	// allocation tracker owns it via knownCreatedAtBlocks (see entries.go).
+	// allocation tracker owns it via knownCreatedAtBlocks (see created_at_blocks.go).
 }
 
 // GetAlmProxies returns the ALM proxy configurations keyed by star and then

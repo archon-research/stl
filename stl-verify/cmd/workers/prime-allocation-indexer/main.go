@@ -226,40 +226,12 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
-	atokenReadABI, err := abis.GetATokenReadABI()
+
+	// Build source registry. Assembly lives in the allocation_tracker package so the
+	// routing guardrail test and the worker share one definition (see registry_build.go).
+	registry, err := at.BuildSourceRegistry(mc, logger)
 	if err != nil {
-		return fmt.Errorf("atoken read abi: %w", err)
-	}
-
-	// Build source registry
-	registry := at.NewSourceRegistry(logger)
-
-	for _, s := range at.DefaultSkipSources(logger) {
-		registry.Register(s)
-	}
-
-	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, atokenReadABI, logger))
-
-	erc4626, err := at.NewERC4626Source(mc, logger)
-	if err != nil {
-		return fmt.Errorf("erc4626 source: %w", err)
-	}
-	registry.Register(erc4626)
-
-	curveABI, err := abis.GetCurvePoolABI()
-	if err != nil {
-		return fmt.Errorf("curve abi: %w", err)
-	}
-	registry.Register(at.NewCurveSource(mc, curveABI, logger))
-
-	uniV3, err := at.NewUniV3Source(mc, logger)
-	if err != nil {
-		return fmt.Errorf("univ3 source: %w", err)
-	}
-	registry.Register(uniV3)
-
-	for _, s := range at.DefaultStubSources(logger) {
-		registry.Register(s)
+		return fmt.Errorf("build source registry: %w", err)
 	}
 
 	defaultEntries, err := at.LoadDefaultTokenEntries()
