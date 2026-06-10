@@ -22,6 +22,7 @@ import (
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -234,25 +235,16 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("build source registry: %w", err)
 	}
 
-	defaultEntries, err := at.LoadDefaultTokenEntries()
+	// Load the contract once and derive both entries and proxies for this chain from
+	// the same read.
+	contract, err := axis_synome_contract.LoadDefaultContract()
 	if err != nil {
-		return fmt.Errorf("load default token entries: %w", err)
+		return fmt.Errorf("load axis-synome contract: %w", err)
 	}
 
-	// Token entries filtered by chain
-	entries := at.EntriesForChainID(defaultEntries, cfg.chainID)
-	if len(entries) == 0 {
-		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
-	}
-
-	defaultProxies, err := at.LoadDefaultProxies()
+	entries, proxies, err := at.EntriesAndProxiesForChainID(contract, cfg.chainID)
 	if err != nil {
-		return fmt.Errorf("load default proxies: %w", err)
-	}
-
-	proxies := at.ProxiesForChainID(defaultProxies, cfg.chainID)
-	if len(proxies) == 0 {
-		return fmt.Errorf("no proxies for chain ID %d", cfg.chainID)
+		return err
 	}
 
 	// Database

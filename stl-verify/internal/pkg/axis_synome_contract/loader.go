@@ -13,15 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-const (
-	DefaultContractPath = "contracts/axis-synome/axis_synome_entities.json"
-	DefaultSchemaPath   = "contracts/axis-synome/axis_synome_entities.schema.json"
-)
-
-type Bundle struct {
-	Contract Contract
-	Schema   map[string]any
-}
+const DefaultContractPath = "contracts/axis-synome/axis_synome_entities.json"
 
 type Contract struct {
 	Version             string          `json:"version"`
@@ -92,20 +84,6 @@ func (c *Contract) GetAssetsByPrime() map[string][]TokenEntry {
 	return c.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime
 }
 
-func LoadDefault() (*Bundle, error) {
-	contract, err := LoadDefaultContract()
-	if err != nil {
-		return nil, fmt.Errorf("load default contract: %w", err)
-	}
-
-	schema, err := LoadDefaultSchema()
-	if err != nil {
-		return nil, fmt.Errorf("load default schema: %w", err)
-	}
-
-	return &Bundle{Contract: *contract, Schema: schema}, nil
-}
-
 func LoadDefaultContract() (*Contract, error) {
 	contractPath, err := resolveDefaultPath(DefaultContractPath)
 	if err != nil {
@@ -113,29 +91,6 @@ func LoadDefaultContract() (*Contract, error) {
 	}
 
 	return LoadContract(contractPath)
-}
-
-func LoadDefaultSchema() (map[string]any, error) {
-	schemaPath, err := resolveDefaultPath(DefaultSchemaPath)
-	if err != nil {
-		return nil, err
-	}
-
-	return LoadSchema(schemaPath)
-}
-
-func Load(contractPath string, schemaPath string) (*Bundle, error) {
-	contract, err := LoadContract(contractPath)
-	if err != nil {
-		return nil, err
-	}
-
-	schema, err := LoadSchema(schemaPath)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Bundle{Contract: *contract, Schema: schema}, nil
 }
 
 func LoadContract(path string) (*Contract, error) {
@@ -199,20 +154,6 @@ func validateEthereumAddress(value string, field string, context string) error {
 		return fmt.Errorf("invalid ethereum address for %s in %s: %q", field, context, value)
 	}
 	return nil
-}
-
-func LoadSchema(path string) (map[string]any, error) {
-	bytesData, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading axis-synome schema file %q: %w", path, err)
-	}
-
-	var schema map[string]any
-	if err := unmarshalStrict(bytesData, &schema); err != nil {
-		return nil, fmt.Errorf("decoding axis-synome schema file %q: %w", path, err)
-	}
-
-	return schema, nil
 }
 
 func unmarshalStrict(data []byte, target any) error {

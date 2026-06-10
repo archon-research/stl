@@ -51,14 +51,14 @@ func TestBuildEntryLookup_DuplicateOverwrites(t *testing.T) {
 }
 
 func TestDefaultTokenEntries_NotEmpty(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	if len(entries) == 0 {
 		t.Fatal("DefaultTokenEntries should not be empty")
 	}
 }
 
 func TestDefaultTokenEntries_AllHaveRequiredFields(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	zero := common.Address{}
 
 	for i, e := range entries {
@@ -81,7 +81,7 @@ func TestDefaultTokenEntries_AllHaveRequiredFields(t *testing.T) {
 }
 
 func TestDefaultTokenEntries_NoDuplicateKeys(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	seen := make(map[struct {
 		Chain string
 		EntryKey
@@ -170,7 +170,7 @@ func TestContractTokenEntryToAllocationEntry_NormalizesProtocol(t *testing.T) {
 
 func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 	validStars := map[string]bool{"spark": true, "grove": true}
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	for _, e := range entries {
 		if !validStars[e.Star] {
 			t.Errorf("entry %s has invalid star %q", e.ContractAddress.Hex(), e.Star)
@@ -179,7 +179,7 @@ func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 }
 
 func TestEntriesForChain(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	eth := EntriesForChain(entries, "mainnet")
 	if len(eth) == 0 {
 		t.Fatal("expected mainnet entries")
@@ -192,7 +192,7 @@ func TestEntriesForChain(t *testing.T) {
 }
 
 func TestEntriesForChain_UnknownChain(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	result := EntriesForChain(entries, "nonexistent")
 	if len(result) != 0 {
 		t.Errorf("expected 0 entries for unknown chain, got %d", len(result))

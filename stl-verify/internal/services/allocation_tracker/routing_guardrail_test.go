@@ -10,6 +10,32 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// knownEmittedProtocols is the protocol vocabulary the converter is expected to emit
+// (after legacyAllocationTrackerProtocol mapping) and persist to the DB. A label that
+// passes through legacyAllocationTrackerProtocol unaliased forks that vocabulary, so
+// TestEmittedProtocolsAreKnown fails when a regeneration introduces a new one — prompting
+// a decision: alias it in legacyProtocolAliases or add it here.
+var knownEmittedProtocols = map[string]bool{
+	"":     true, // idle assets / protocol-owned liquidity carry no protocol upstream
+	"aave": true, "agora": true, "anchorage": true, "arkis": true, "blackrock": true,
+	"centrifuge": true, "curve": true, "ethena": true, "fluid": true, "galaxy": true,
+	"maple": true, "morpho": true, "paypal": true, "psm3": true, "ripple": true,
+	"securitize": true, "sky": true, "spark": true, "sparklend": true, "steakhouse": true,
+	"superstate": true, "uniswap": true,
+}
+
+// TestEmittedProtocolsAreKnown closes SF7: an unknown protocol label otherwise passes
+// through to the DB silently, forking the protocol vocabulary on the next new long-form
+// label.
+func TestEmittedProtocolsAreKnown(t *testing.T) {
+	for _, e := range defaultEntries(t) {
+		if !knownEmittedProtocols[e.Protocol] {
+			t.Errorf("contract entry emits unknown protocol %q (chain=%s contract=%s); alias it in legacyProtocolAliases or add it to knownEmittedProtocols",
+				e.Protocol, e.Chain, e.ContractAddress.Hex())
+		}
+	}
+}
+
 // stubRoutedAllowlist is the set of token_types that are allowed to route to a
 // not-yet-implemented StubSource (i.e. are knowingly untracked). Anything else that
 // routes to a stub is a silently-dropped position and fails the guardrail below.
@@ -27,10 +53,7 @@ var stubRoutedAllowlist = map[string]bool{
 //
 // Route/Supports need no live multicaller, so the registry is built with a nil one.
 func TestEveryContractEntryRoutes(t *testing.T) {
-	entries, err := LoadDefaultTokenEntries()
-	if err != nil {
-		t.Fatalf("load default token entries: %v", err)
-	}
+	entries := defaultEntries(t)
 	if len(entries) == 0 {
 		t.Fatal("no token entries loaded from the committed contract")
 	}
@@ -62,13 +85,8 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 // ProxiesForChainID would silently drop the position. The explicit chainIsKnown loop
 // documents the same invariant against the shared allowlist.
 func TestEveryContractChainIsConfigurableOrAcknowledged(t *testing.T) {
-	entries, err := LoadDefaultTokenEntries()
-	if err != nil {
-		t.Fatalf("load default token entries (chain-vocabulary validation): %v", err)
-	}
-	if _, err := LoadDefaultProxies(); err != nil {
-		t.Fatalf("load default proxies (chain-vocabulary validation): %v", err)
-	}
+	entries := defaultEntries(t) // also runs the token-entry chain-vocabulary validation
+	_ = defaultProxies(t)        // also runs the proxy chain-vocabulary validation
 
 	seen := make(map[string]bool)
 	for _, e := range entries {

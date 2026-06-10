@@ -27,21 +27,12 @@ var legacyProtocolAliases = map[string]string{
 	"steakhouse-pyusd-morpho-vault":               "steakhouse",
 }
 
-func DefaultTokenEntries() []*TokenEntry {
-	entries, err := LoadDefaultTokenEntries()
-	if err != nil {
-		panic(fmt.Sprintf("load allocation tracker default token entries: %v", err))
-	}
-
-	return entries
-}
-
-func LoadDefaultTokenEntries() ([]*TokenEntry, error) {
-	contract, err := axis_synome_contract.LoadDefaultContract()
-	if err != nil {
-		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
-	}
-
+// TokenEntriesFromContract converts the contract's assets-by-prime into allocation
+// TokenEntries. It is pure (no I/O): callers load the contract once and pass it here, so
+// entries and proxies come from a single read. It cross-checks each entry's star against
+// its ASSETS_BY_PRIME key and validates the chain vocabulary, so a mis-keyed entry or an
+// unrecognised chain fails loudly rather than being silently mis-attributed or dropped.
+func TokenEntriesFromContract(contract *axis_synome_contract.Contract) ([]*TokenEntry, error) {
 	entriesByStar := contract.GetAssetsByPrime()
 	starKeys := make([]string, 0, len(entriesByStar))
 	for star := range entriesByStar {
@@ -56,7 +47,14 @@ func LoadDefaultTokenEntries() ([]*TokenEntry, error) {
 	for _, star := range starKeys {
 		sourceEntries := entriesByStar[star]
 		for i := range sourceEntries {
-			entries = append(entries, contractTokenEntryToAllocationEntry(star, &sourceEntries[i]))
+			src := &sourceEntries[i]
+			if src.Star != "" && src.Star != star {
+				return nil, fmt.Errorf(
+					"token entry star %q does not match its ASSETS_BY_PRIME key %q (chain=%s contract=%s)",
+					src.Star, star, src.Chain, src.ContractAddress,
+				)
+			}
+			entries = append(entries, contractTokenEntryToAllocationEntry(star, src))
 		}
 	}
 
@@ -178,4 +176,31 @@ func ProxiesForChainID(proxies []ProxyConfig, chainID int64) []ProxyConfig {
 		}
 	}
 	return result
+}
+
+// EntriesAndProxiesForChainID derives the token entries and proxies for a single chain
+// from the contract: it converts (validating star/chain vocabulary), filters to chainID,
+// and fails with a clear error when the chain has no tracked entries or no proxies. The
+// worker calls this once per startup; keeping it here (rather than inline in main) makes
+// the empty-set error paths unit-testable without standing up the full worker.
+func EntriesAndProxiesForChainID(contract *axis_synome_contract.Contract, chainID int64) ([]*TokenEntry, []ProxyConfig, error) {
+	allEntries, err := TokenEntriesFromContract(contract)
+	if err != nil {
+		return nil, nil, fmt.Errorf("token entries from contract: %w", err)
+	}
+	entries := EntriesForChainID(allEntries, chainID)
+	if len(entries) == 0 {
+		return nil, nil, fmt.Errorf("no token entries for chain ID %d", chainID)
+	}
+
+	allProxies, err := ProxiesFromContract(contract)
+	if err != nil {
+		return nil, nil, fmt.Errorf("proxies from contract: %w", err)
+	}
+	proxies := ProxiesForChainID(allProxies, chainID)
+	if len(proxies) == 0 {
+		return nil, nil, fmt.Errorf("no proxies for chain ID %d", chainID)
+	}
+
+	return entries, proxies, nil
 }

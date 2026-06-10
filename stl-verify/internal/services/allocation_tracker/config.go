@@ -37,21 +37,10 @@ func ConfigDefaults() Config {
 	}
 }
 
-func DefaultProxies() []ProxyConfig {
-	proxies, err := LoadDefaultProxies()
-	if err != nil {
-		panic(fmt.Sprintf("load allocation tracker default proxies: %v", err))
-	}
-
-	return proxies
-}
-
-func LoadDefaultProxies() ([]ProxyConfig, error) {
-	contract, err := axis_synome_contract.LoadDefaultContract()
-	if err != nil {
-		return nil, fmt.Errorf("load default axis-synome contract: %w", err)
-	}
-
+// ProxiesFromContract flattens the contract's ALM proxy map into []ProxyConfig. It is
+// pure (no I/O): callers load the contract once and pass it here. It validates the chain
+// vocabulary so an unrecognised chain fails loudly instead of being silently dropped.
+func ProxiesFromContract(contract *axis_synome_contract.Contract) ([]ProxyConfig, error) {
 	proxies, err := proxiesFromAlmProxy(contract.GetAlmProxies())
 	if err != nil {
 		return nil, err
@@ -78,6 +67,12 @@ func proxiesFromAlmProxy(almProxyByStar map[string]map[string][]axis_synome_cont
 	for star, byChain := range almProxyByStar {
 		for chain, chainProxies := range byChain {
 			for _, proxy := range chainProxies {
+				if proxy.Star != "" && proxy.Star != star {
+					return nil, fmt.Errorf("proxy star %q does not match its AlmProxy key %q (chain=%s address=%s)", proxy.Star, star, chain, proxy.Address)
+				}
+				if proxy.Chain != "" && proxy.Chain != chain {
+					return nil, fmt.Errorf("proxy chain %q does not match its AlmProxy key %q (star=%s address=%s)", proxy.Chain, chain, star, proxy.Address)
+				}
 				proxyConfig := ProxyConfig{
 					Star:    star,
 					Chain:   chain,

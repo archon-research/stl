@@ -9,10 +9,7 @@ import "testing"
 // block; and since the token upsert is LEAST(existing, new), a too-low value never
 // self-corrects. So also sanity-check the block numbers are positive.
 func TestKnownCreatedAtBlocks_KeysMatchContractEntries(t *testing.T) {
-	entries, err := LoadDefaultTokenEntries()
-	if err != nil {
-		t.Fatalf("load default token entries: %v", err)
-	}
+	entries := defaultEntries(t)
 
 	valid := make(map[createdAtBlockKey]bool, len(entries))
 	for _, e := range entries {
