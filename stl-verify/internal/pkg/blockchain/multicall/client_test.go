@@ -64,6 +64,6 @@ func TestExecuteRecordsBatchSizeThroughExecute(t *testing.T) {
 }
 
 func TestRecordBatchNilTelemetryIsNoOp(t *testing.T) {
-	c := &Client{} // no telemetry
+	c := &Client{}                         // no telemetry
 	c.recordBatch(context.Background(), 5) // must not panic
 }
