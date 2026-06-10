@@ -44,32 +44,20 @@ func (s *MapleSyrupGlobalState) Validate() error {
 	if s.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")
 	}
-	if s.TVL == nil {
-		return fmt.Errorf("tvl must not be nil")
+	if err := requireNonNegBigInt("tvl", s.TVL); err != nil {
+		return err
 	}
-	if s.TVL.Sign() < 0 {
-		return fmt.Errorf("tvl must be non-negative, got %s", s.TVL)
+	if err := requireNonNegBigInt("apy", s.APY); err != nil {
+		return err
 	}
-	if s.APY == nil {
-		return fmt.Errorf("apy must not be nil")
+	if err := requireNonNegBigInt("collateralAPY", s.CollateralAPY); err != nil {
+		return err
 	}
-	if s.APY.Sign() < 0 {
-		return fmt.Errorf("apy must be non-negative, got %s", s.APY)
+	if err := requireNonNegBigInt("poolAPY", s.PoolAPY); err != nil {
+		return err
 	}
-	if s.CollateralAPY == nil {
-		return fmt.Errorf("collateralAPY must not be nil")
-	}
-	if s.CollateralAPY.Sign() < 0 {
-		return fmt.Errorf("collateralAPY must be non-negative, got %s", s.CollateralAPY)
-	}
-	if s.PoolAPY == nil {
-		return fmt.Errorf("poolAPY must not be nil")
-	}
-	if s.PoolAPY.Sign() < 0 {
-		return fmt.Errorf("poolAPY must be non-negative, got %s", s.PoolAPY)
-	}
-	if s.DripsYieldBoost != nil && s.DripsYieldBoost.Sign() < 0 {
-		return fmt.Errorf("dripsYieldBoost must be non-negative, got %s", s.DripsYieldBoost)
+	if err := requireNonNegBigIntIfSet("dripsYieldBoost", s.DripsYieldBoost); err != nil {
+		return err
 	}
 	return nil
 }

@@ -53,23 +53,17 @@ func (c *MapleLoanCollateral) Validate() error {
 	if c.AssetSymbol == "" {
 		return fmt.Errorf("assetSymbol must not be empty")
 	}
-	if c.AssetAmount == nil {
-		return fmt.Errorf("assetAmount must not be nil")
-	}
-	if c.AssetAmount.Sign() < 0 {
-		return fmt.Errorf("assetAmount must be non-negative, got %s", c.AssetAmount)
+	if err := requireNonNegBigInt("assetAmount", c.AssetAmount); err != nil {
+		return err
 	}
 	if c.AssetDecimals < 0 {
 		return fmt.Errorf("assetDecimals must be non-negative, got %d", c.AssetDecimals)
 	}
-	if c.AssetValueUSD == nil {
-		return fmt.Errorf("assetValueUSD must not be nil")
+	if err := requireNonNegBigInt("assetValueUSD", c.AssetValueUSD); err != nil {
+		return err
 	}
-	if c.AssetValueUSD.Sign() < 0 {
-		return fmt.Errorf("assetValueUSD must be non-negative, got %s", c.AssetValueUSD)
-	}
-	if c.LiquidationLevel != nil && c.LiquidationLevel.Sign() < 0 {
-		return fmt.Errorf("liquidationLevel must be non-negative, got %s", c.LiquidationLevel)
+	if err := requireNonNegBigIntIfSet("liquidationLevel", c.LiquidationLevel); err != nil {
+		return err
 	}
 	return nil
 }

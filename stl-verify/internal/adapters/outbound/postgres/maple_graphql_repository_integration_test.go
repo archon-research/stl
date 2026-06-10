@@ -322,6 +322,43 @@ func TestMaplePoolStates_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestMaplePoolStates_MultiChunkBatch(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+
+	// batchSize 2 with 5 states exercises the chunked-insert path (3 chunks,
+	// the last one partial) that the default batch size of 1000 never hits.
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, 0, 2)
+	if err != nil {
+		t.Fatalf("NewMapleGraphQLRepository: %v", err)
+	}
+	poolID := upsertTestPool(t, ctx, repo, 0x22)
+
+	const stateCount = 5
+	states := make([]*entity.MaplePoolState, 0, stateCount)
+	for i := range stateCount {
+		state, err := entity.NewMaplePoolState(poolID, mapleSyncedAt().Add(time.Duration(i)*time.Minute),
+			big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+		if err != nil {
+			t.Fatalf("NewMaplePoolState: %v", err)
+		}
+		states = append(states, state)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, states)
+	})
+
+	var count int
+	if err := maplePool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_pool_state WHERE maple_pool_id = $1`, poolID).Scan(&count); err != nil {
+		t.Fatalf("counting pool states: %v", err)
+	}
+	if count != stateCount {
+		t.Errorf("pool state rows = %d, want %d", count, stateCount)
+	}
+}
+
 func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)

@@ -32,19 +32,17 @@ type MapleLoanCollateral struct {
 }
 
 // MapleActiveLoan is one active Open Term Loan as reported by the Maple
-// GraphQL API, flattened with its funding pool reference.
+// GraphQL API. The funding pool is referenced by address only; pool details
+// come from GetPools in the same cycle.
 type MapleActiveLoan struct {
-	LoanID            common.Address
-	Borrower          common.Address
-	State             string
-	PrincipalOwed     *big.Int
-	AcmRatio          *big.Int             // nil when the API reports none (uncollateralized loans)
-	Collateral        *MapleLoanCollateral // nil when the API returns null
-	LoanMeta          *MapleLoanMeta       // nil for external loans
-	PoolAddress       common.Address
-	PoolName          string
-	PoolAssetSymbol   string
-	PoolAssetDecimals int
+	LoanID        common.Address
+	Borrower      common.Address
+	State         string
+	PrincipalOwed *big.Int
+	AcmRatio      *big.Int             // nil when the API reports none (uncollateralized loans)
+	Collateral    *MapleLoanCollateral // nil when the API returns null
+	LoanMeta      *MapleLoanMeta       // nil for external loans
+	PoolAddress   common.Address
 }
 
 // MaplePool is one PoolV2 lending pool with its current lending metrics.

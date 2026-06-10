@@ -8,6 +8,10 @@ const (
 	MapleLoanMetaTypeStrategy = "strategy"
 )
 
+// MapleLoanTypeOTL is the loan_type discriminator for Open Term Loans, the
+// only Maple loan type indexed today.
+const MapleLoanTypeOTL = "OTL"
+
 // MapleLoanMeta carries Maple's loan metadata. The loan is an internal Maple
 // position when Type is 'amm' or 'strategy'; live data also shows metadata
 // with a null Type and other types ('tBills', 'intercompany'), all persisted
@@ -29,7 +33,7 @@ type MapleLoan struct {
 	ChainID        int64
 	ProtocolID     int64
 	LoanAddress    []byte // 20 bytes, openTermLoan.id
-	LoanType       string // 'OTL'
+	LoanType       string // MapleLoanTypeOTL
 	MaplePoolID    int64
 	BorrowerUserID int64
 	LoanMeta       *MapleLoanMeta // nil for external loans
@@ -41,7 +45,7 @@ func NewMapleLoan(chainID, protocolID int64, loanAddress []byte, maplePoolID, bo
 		ChainID:        chainID,
 		ProtocolID:     protocolID,
 		LoanAddress:    loanAddress,
-		LoanType:       "OTL",
+		LoanType:       MapleLoanTypeOTL,
 		MaplePoolID:    maplePoolID,
 		BorrowerUserID: borrowerUserID,
 		LoanMeta:       loanMeta,

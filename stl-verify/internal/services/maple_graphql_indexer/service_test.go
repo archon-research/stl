@@ -208,13 +208,13 @@ func fixtureLoans() []outbound.MapleActiveLoan {
 				Decimals: 8, State: "Deposited", Custodian: "ANCHORAGE", LiquidationLevel: big.NewInt(1020000),
 			},
 			LoanMeta:    &outbound.MapleLoanMeta{Type: "amm", DexName: "Uniswap"},
-			PoolAddress: addr(0x10), PoolName: "Syrup USDC", PoolAssetSymbol: "USDC", PoolAssetDecimals: 6,
+			PoolAddress: addr(0x10),
 		},
 		{
 			// Uncollateralized loan: nil collateral, nil meta, nil acmRatio.
 			LoanID: addr(0x21), Borrower: addr(0xa1), State: "Active",
 			PrincipalOwed: big.NewInt(200), AcmRatio: nil,
-			PoolAddress: addr(0x10), PoolName: "Syrup USDC", PoolAssetSymbol: "USDC", PoolAssetDecimals: 6,
+			PoolAddress: addr(0x10),
 		},
 		{
 			// Same borrower as the first loan — must be deduplicated.
@@ -223,7 +223,7 @@ func fixtureLoans() []outbound.MapleActiveLoan {
 			Collateral: &outbound.MapleLoanCollateral{
 				Asset: "SOL", AssetAmount: big.NewInt(9), AssetValueUSD: big.NewInt(100), Decimals: 9,
 			},
-			PoolAddress: addr(0x11), PoolName: "Empty Pool", PoolAssetSymbol: "USDT", PoolAssetDecimals: 6,
+			PoolAddress: addr(0x11),
 		},
 	}
 }

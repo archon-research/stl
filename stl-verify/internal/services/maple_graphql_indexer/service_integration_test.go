@@ -54,17 +54,17 @@ func newMapleAPIFixture(t *testing.T) *httptest.Server {
 		                "decimals": 6, "state": "Deposited", "custodian": null, "liquidationLevel": 900000},
 		 "loanMeta": {"type": "amm", "assetSymbol": null, "dexName": "Uniswap", "location": null,
 		              "walletAddress": "0x2570fAF7C8A0da87d3F123B35cC722EC3fCC3e08", "walletType": "EVM"},
-		 "fundingPool": {"id": "` + itPoolSyrup + `", "name": "Syrup USDC", "asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6}}},
+		 "fundingPool": {"id": "` + itPoolSyrup + `"}},
 		{"id": "` + itLoanExternal + `", "borrower": {"id": "` + itBorrowerB + `"}, "state": "Active",
 		 "principalOwed": "7000000", "acmRatio": "1953569",
 		 "collateral": {"asset": "SOL", "assetAmount": "215100000", "assetValueUsd": "6357500000",
 		                "decimals": 9, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
 		 "loanMeta": null,
-		 "fundingPool": {"id": "` + itPoolPlain + `", "name": "High Yield Secured Lending", "asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6}}},
+		 "fundingPool": {"id": "` + itPoolPlain + `"}},
 		{"id": "` + itLoanBare + `", "borrower": {"id": "` + itBorrowerA + `"}, "state": "Active",
 		 "principalOwed": "5932464850000", "acmRatio": null,
 		 "collateral": null, "loanMeta": null,
-		 "fundingPool": {"id": "` + itPoolPlain + `", "name": "High Yield Secured Lending", "asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6}}}
+		 "fundingPool": {"id": "` + itPoolPlain + `"}}
 	]`
 
 	strategiesJSON := `[

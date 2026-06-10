@@ -44,14 +44,11 @@ func (s *MapleLoanState) Validate() error {
 	if s.State == "" {
 		return fmt.Errorf("state must not be empty")
 	}
-	if s.PrincipalOwed == nil {
-		return fmt.Errorf("principalOwed must not be nil")
+	if err := requireNonNegBigInt("principalOwed", s.PrincipalOwed); err != nil {
+		return err
 	}
-	if s.PrincipalOwed.Sign() < 0 {
-		return fmt.Errorf("principalOwed must be non-negative, got %s", s.PrincipalOwed)
-	}
-	if s.AcmRatio != nil && s.AcmRatio.Sign() < 0 {
-		return fmt.Errorf("acmRatio must be non-negative, got %s", s.AcmRatio)
+	if err := requireNonNegBigIntIfSet("acmRatio", s.AcmRatio); err != nil {
+		return err
 	}
 	return nil
 }

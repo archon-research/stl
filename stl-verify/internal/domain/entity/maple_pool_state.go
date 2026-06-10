@@ -69,38 +69,26 @@ func (s *MaplePoolState) Validate() error {
 	if s.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")
 	}
-	if s.TVL == nil {
-		return fmt.Errorf("tvl must not be nil")
+	if err := requireNonNegBigInt("tvl", s.TVL); err != nil {
+		return err
 	}
-	if s.TVL.Sign() < 0 {
-		return fmt.Errorf("tvl must be non-negative, got %s", s.TVL)
+	if err := requireNonNegBigInt("liquidAssets", s.LiquidAssets); err != nil {
+		return err
 	}
-	if s.LiquidAssets == nil {
-		return fmt.Errorf("liquidAssets must not be nil")
+	if err := requireNonNegBigInt("collateralValueUSD", s.CollateralValueUSD); err != nil {
+		return err
 	}
-	if s.LiquidAssets.Sign() < 0 {
-		return fmt.Errorf("liquidAssets must be non-negative, got %s", s.LiquidAssets)
-	}
-	if s.CollateralValueUSD == nil {
-		return fmt.Errorf("collateralValueUSD must not be nil")
-	}
-	if s.CollateralValueUSD.Sign() < 0 {
-		return fmt.Errorf("collateralValueUSD must be non-negative, got %s", s.CollateralValueUSD)
-	}
-	if s.PrincipalOut == nil {
-		return fmt.Errorf("principalOut must not be nil")
-	}
-	if s.PrincipalOut.Sign() < 0 {
-		return fmt.Errorf("principalOut must be non-negative, got %s", s.PrincipalOut)
+	if err := requireNonNegBigInt("principalOut", s.PrincipalOut); err != nil {
+		return err
 	}
 	if s.Utilization < 0 || s.Utilization > 1 {
 		return fmt.Errorf("utilization must be in [0, 1], got %f", s.Utilization)
 	}
-	if s.MonthlyAPY != nil && s.MonthlyAPY.Sign() < 0 {
-		return fmt.Errorf("monthlyAPY must be non-negative, got %s", s.MonthlyAPY)
+	if err := requireNonNegBigIntIfSet("monthlyAPY", s.MonthlyAPY); err != nil {
+		return err
 	}
-	if s.SpotAPY != nil && s.SpotAPY.Sign() < 0 {
-		return fmt.Errorf("spotAPY must be non-negative, got %s", s.SpotAPY)
+	if err := requireNonNegBigIntIfSet("spotAPY", s.SpotAPY); err != nil {
+		return err
 	}
 	return nil
 }

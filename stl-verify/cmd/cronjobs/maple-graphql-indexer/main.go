@@ -84,7 +84,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 	}
 
 	service, err := maple_graphql_indexer.NewService(maple_graphql_indexer.ServiceConfig{
-		ChainID: chainID,
+		ChainID: int64(chainID),
 		Logger:  deps.Logger,
 	}, client, repo, txManager, telemetry)
 	if err != nil {

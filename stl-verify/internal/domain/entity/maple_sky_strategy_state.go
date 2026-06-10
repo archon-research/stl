@@ -48,29 +48,20 @@ func (s *MapleSkyStrategyState) Validate() error {
 	if s.State == "" {
 		return fmt.Errorf("state must not be empty")
 	}
-	if s.CurrentlyDeployed == nil {
-		return fmt.Errorf("currentlyDeployed must not be nil")
+	if err := requireNonNegBigInt("currentlyDeployed", s.CurrentlyDeployed); err != nil {
+		return err
 	}
-	if s.CurrentlyDeployed.Sign() < 0 {
-		return fmt.Errorf("currentlyDeployed must be non-negative, got %s", s.CurrentlyDeployed)
+	if err := requireNonNegBigInt("depositedAssets", s.DepositedAssets); err != nil {
+		return err
 	}
-	if s.DepositedAssets == nil {
-		return fmt.Errorf("depositedAssets must not be nil")
+	if err := requireNonNegBigInt("withdrawnAssets", s.WithdrawnAssets); err != nil {
+		return err
 	}
-	if s.DepositedAssets.Sign() < 0 {
-		return fmt.Errorf("depositedAssets must be non-negative, got %s", s.DepositedAssets)
+	if err := requireNonNegBigIntIfSet("strategyFeeRate", s.StrategyFeeRate); err != nil {
+		return err
 	}
-	if s.WithdrawnAssets == nil {
-		return fmt.Errorf("withdrawnAssets must not be nil")
-	}
-	if s.WithdrawnAssets.Sign() < 0 {
-		return fmt.Errorf("withdrawnAssets must be non-negative, got %s", s.WithdrawnAssets)
-	}
-	if s.StrategyFeeRate != nil && s.StrategyFeeRate.Sign() < 0 {
-		return fmt.Errorf("strategyFeeRate must be non-negative, got %s", s.StrategyFeeRate)
-	}
-	if s.TotalFeesCollected != nil && s.TotalFeesCollected.Sign() < 0 {
-		return fmt.Errorf("totalFeesCollected must be non-negative, got %s", s.TotalFeesCollected)
+	if err := requireNonNegBigIntIfSet("totalFeesCollected", s.TotalFeesCollected); err != nil {
+		return err
 	}
 	return nil
 }

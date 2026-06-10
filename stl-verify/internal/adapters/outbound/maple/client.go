@@ -178,7 +178,7 @@ const activeLoansQuery = `query GetActiveLoans($first: Int!, $skip: Int!) {
       walletAddress
       walletType
     }
-    fundingPool { id name asset { id symbol decimals } }
+    fundingPool { id }
   }
 }`
 
@@ -255,9 +255,7 @@ type loanWire struct {
 	Collateral    *collateralWire `json:"collateral"`
 	LoanMeta      *loanMetaWire   `json:"loanMeta"`
 	FundingPool   struct {
-		ID    string    `json:"id"`
-		Name  string    `json:"name"`
-		Asset assetWire `json:"asset"`
+		ID string `json:"id"`
 	} `json:"fundingPool"`
 }
 
@@ -484,17 +482,14 @@ func parseLoan(w loanWire) (outbound.MapleActiveLoan, error) {
 	}
 
 	return outbound.MapleActiveLoan{
-		LoanID:            loanID,
-		Borrower:          borrower,
-		State:             w.State,
-		PrincipalOwed:     principalOwed,
-		AcmRatio:          acmRatio,
-		Collateral:        collateral,
-		LoanMeta:          loanMeta,
-		PoolAddress:       poolAddress,
-		PoolName:          w.FundingPool.Name,
-		PoolAssetSymbol:   w.FundingPool.Asset.Symbol,
-		PoolAssetDecimals: w.FundingPool.Asset.Decimals,
+		LoanID:        loanID,
+		Borrower:      borrower,
+		State:         w.State,
+		PrincipalOwed: principalOwed,
+		AcmRatio:      acmRatio,
+		Collateral:    collateral,
+		LoanMeta:      loanMeta,
+		PoolAddress:   poolAddress,
 	}, nil
 }
 
@@ -726,10 +721,10 @@ func (c *Client) doSingleRequest(ctx context.Context, body []byte, result any) e
 	}()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return fmt.Errorf("rate limited (HTTP 429)")
+		return fmt.Errorf("rate limited (HTTP 429): %s", readBodySnippet(resp.Body))
 	}
 	if resp.StatusCode >= 500 {
-		return fmt.Errorf("server error (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("server error (HTTP %d): %s", resp.StatusCode, readBodySnippet(resp.Body))
 	}
 
 	respBody, err := io.ReadAll(resp.Body)
@@ -765,4 +760,23 @@ func (c *Client) doSingleRequest(ctx context.Context, body []byte, result any) e
 		return httpclient.WrapNonRetryable(fmt.Errorf("decoding response: %w", err))
 	}
 	return nil
+}
+
+// maxErrorBodyBytes bounds how much of an error response body is included in
+// error messages.
+const maxErrorBodyBytes = 2048
+
+// readBodySnippet reads a bounded snippet of an error response body for
+// inclusion in the error message, so retry-exhausted 429/5xx failures carry
+// the upstream diagnostic.
+func readBodySnippet(r io.Reader) string {
+	b, err := io.ReadAll(io.LimitReader(r, maxErrorBodyBytes))
+	if err != nil {
+		return fmt.Sprintf("<reading body: %v>", err)
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "<empty body>"
+	}
+	return s
 }

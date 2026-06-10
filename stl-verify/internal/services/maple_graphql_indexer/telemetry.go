@@ -69,7 +69,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 
 	t.rowsWritten, err = t.meter.Int64Counter(
 		"maple.sync.rows.written",
-		metric.WithDescription("Total number of snapshot rows written per table"),
+		metric.WithDescription("Total number of snapshot rows attempted per table (ON CONFLICT dedup on same-build retries may insert fewer)"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating rowsWritten counter: %w", err)
@@ -126,7 +126,9 @@ func (t *Telemetry) RecordPhase(ctx context.Context, phase string, duration time
 	t.phaseDuration.Record(ctx, duration.Seconds(), attrs)
 }
 
-// RecordRowsWritten records the number of snapshot rows written to a table.
+// RecordRowsWritten records the number of snapshot rows attempted for a
+// table. ON CONFLICT DO NOTHING may insert fewer when a same-build retry
+// re-sends rows that already exist.
 func (t *Telemetry) RecordRowsWritten(ctx context.Context, table string, count int) {
 	if t == nil {
 		return

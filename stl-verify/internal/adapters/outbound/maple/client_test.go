@@ -204,8 +204,8 @@ func TestGetActiveLoans_HappyPath(t *testing.T) {
 				"type": "amm", "assetSymbol": null, "dexName": "Uniswap",
 				"location": null, "walletAddress": "solana-wallet-xyz", "walletType": "SOL"
 			},
-			"fundingPool": {"id": %q, "name": "Syrup USDC", "asset": {"id": %q, "symbol": "USDC", "decimals": 6}}
-		}]}}`, loanAddr, borrowerAddr, poolAddr, usdcAddr))
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
 	}})
 
 	loans, err := client.GetActiveLoans(context.Background())
@@ -241,8 +241,8 @@ func TestGetActiveLoans_HappyPath(t *testing.T) {
 	if l.LoanMeta.WalletAddress != "solana-wallet-xyz" {
 		t.Errorf("WalletAddress = %q, want non-EVM string preserved", l.LoanMeta.WalletAddress)
 	}
-	if l.PoolName != "Syrup USDC" || l.PoolAssetSymbol != "USDC" || l.PoolAssetDecimals != 6 {
-		t.Errorf("pool ref = %s/%s/%d", l.PoolName, l.PoolAssetSymbol, l.PoolAssetDecimals)
+	if strings.ToLower(l.PoolAddress.Hex()) != poolAddr {
+		t.Errorf("PoolAddress = %s, want %s", l.PoolAddress.Hex(), poolAddr)
 	}
 }
 
@@ -254,8 +254,8 @@ func TestGetActiveLoans_NullCollateralMetaAndAcmRatio(t *testing.T) {
 			"id": %q, "borrower": {"id": %q}, "state": "Active",
 			"principalOwed": "7000000", "acmRatio": null,
 			"collateral": null, "loanMeta": null,
-			"fundingPool": {"id": %q, "name": "Pool", "asset": {"id": %q, "symbol": "USDC", "decimals": 6}}
-		}]}}`, loanAddr, borrowerAddr, poolAddr, usdcAddr))
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
 	}})
 
 	loans, err := client.GetActiveLoans(context.Background())
@@ -279,8 +279,8 @@ func TestGetActiveLoans_MalformedBigIntNamesLoanID(t *testing.T) {
 			"id": %q, "borrower": {"id": %q}, "state": "Active",
 			"principalOwed": "not-a-number", "acmRatio": "1",
 			"collateral": null, "loanMeta": null,
-			"fundingPool": {"id": %q, "name": "Pool", "asset": {"id": %q, "symbol": "USDC", "decimals": 6}}
-		}]}}`, loanAddr, borrowerAddr, poolAddr, usdcAddr))
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
 	}})
 
 	_, err := client.GetActiveLoans(context.Background())
@@ -301,8 +301,8 @@ func TestGetActiveLoans_InvalidBorrowerAddress(t *testing.T) {
 			"id": %q, "borrower": {"id": "garbage"}, "state": "Active",
 			"principalOwed": "1", "acmRatio": "1",
 			"collateral": null, "loanMeta": null,
-			"fundingPool": {"id": %q, "name": "Pool", "asset": {"id": %q, "symbol": "USDC", "decimals": 6}}
-		}]}}`, loanAddr, poolAddr, usdcAddr))
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, poolAddr))
 	}})
 
 	_, err := client.GetActiveLoans(context.Background())
@@ -311,6 +311,62 @@ func TestGetActiveLoans_InvalidBorrowerAddress(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid address") {
 		t.Errorf("error %q should mention invalid address", err.Error())
+	}
+}
+
+func TestGetPools_MalformedValueNamesPoolID(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
+			"id": %q, "name": "Pool",
+			"monthlyApy": "0", "spotApy": "0",
+			"assets": "1", "collateralValue": "2", "principalOut": "3", "tvl": "not-a-number",
+			"asset": {"id": %q, "symbol": "USDC", "decimals": 6},
+			"syrupRouter": null
+		}]}}`, poolAddr, usdcAddr))
+	}})
+
+	_, err := client.GetPools(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), poolAddr) || !strings.Contains(err.Error(), "tvl") {
+		t.Errorf("error %q should name the pool id and the field", err.Error())
+	}
+}
+
+func TestGetSkyStrategies_MalformedValueNamesStrategyID(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"skyStrategies": [{
+			"id": %q, "state": "Active",
+			"currentlyDeployed": "0", "depositedAssets": "not-a-number", "withdrawnAssets": "0",
+			"strategyFeeRate": null, "totalFeesCollected": null, "version": 100,
+			"pool": {"id": %q, "name": "Pool"}
+		}]}}`, strategyAddr, poolAddr))
+	}})
+
+	_, err := client.GetSkyStrategies(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), strategyAddr) || !strings.Contains(err.Error(), "depositedAssets") {
+		t.Errorf("error %q should name the strategy id and the field", err.Error())
+	}
+}
+
+func TestGetSyrupGlobals_MalformedValue(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, `{"data": {"syrupGlobals": {
+			"apy": "not-a-number", "collateralApy": "1", "poolApy": "2",
+			"dripsYieldBoost": null, "tvl": "3"
+		}}}`)
+	}})
+
+	_, err := client.GetSyrupGlobals(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "syrupGlobals") || !strings.Contains(err.Error(), "apy") {
+		t.Errorf("error %q should name syrupGlobals and the field", err.Error())
 	}
 }
 
@@ -440,6 +496,7 @@ func TestExecute_HTTP500RetryThenFail(t *testing.T) {
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("upstream exploded"))
 	}))
 
 	_, err := client.GetPools(context.Background())
@@ -448,6 +505,9 @@ func TestExecute_HTTP500RetryThenFail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "server error (HTTP 500)") {
 		t.Errorf("error = %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "upstream exploded") {
+		t.Errorf("error %q should include the response body snippet", err.Error())
 	}
 	// MaxRetries=2 -> initial attempt + 2 retries.
 	if calls.Load() != 3 {

@@ -92,6 +92,8 @@ func (r *MapleGraphQLRepository) GetOrCreateBorrowerUsers(ctx context.Context, t
 
 	batch := &pgx.Batch{}
 	for _, addr := range sorted {
+		// The no-op DO UPDATE (instead of DO NOTHING) makes RETURNING yield
+		// the existing row's id on conflict; DO NOTHING returns no row.
 		batch.Queue(
 			`INSERT INTO "user" (chain_id, address, created_at, updated_at, metadata)
 			 VALUES ($1, $2, NOW(), NOW(), '{}'::jsonb)
@@ -101,20 +103,8 @@ func (r *MapleGraphQLRepository) GetOrCreateBorrowerUsers(ctx context.Context, t
 		)
 	}
 
-	br := tx.SendBatch(ctx, batch)
-	result := make(map[common.Address]int64, len(sorted))
-	for _, addr := range sorted {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			_ = br.Close()
-			return nil, fmt.Errorf("upserting borrower user %s: %w", addr.Hex(), err)
-		}
-		result[addr] = id
-	}
-	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("closing borrower user batch: %w", err)
-	}
-	return result, nil
+	return collectBatchIDs(ctx, tx, batch, sorted, "borrower user",
+		func(addr common.Address) common.Address { return addr })
 }
 
 // UpsertPools upserts pool registry rows and returns lowercase hex
@@ -143,20 +133,8 @@ func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, poo
 		)
 	}
 
-	br := tx.SendBatch(ctx, batch)
-	result := make(map[string]int64, len(sorted))
-	for _, p := range sorted {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			_ = br.Close()
-			return nil, fmt.Errorf("upserting maple pool %s: %w", addressKey(p.Address), err)
-		}
-		result[addressKey(p.Address)] = id
-	}
-	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("closing maple pool batch: %w", err)
-	}
-	return result, nil
+	return collectBatchIDs(ctx, tx, batch, sorted, "maple pool",
+		func(p *entity.MaplePool) string { return addressKey(p.Address) })
 }
 
 // SavePoolStates inserts pool state snapshots. The BEFORE INSERT trigger
@@ -261,20 +239,8 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 		)
 	}
 
-	br := tx.SendBatch(ctx, batch)
-	result := make(map[string]int64, len(sorted))
-	for _, l := range sorted {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			_ = br.Close()
-			return nil, fmt.Errorf("upserting maple loan %s: %w", addressKey(l.LoanAddress), err)
-		}
-		result[addressKey(l.LoanAddress)] = id
-	}
-	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("closing maple loan batch: %w", err)
-	}
-	return result, nil
+	return collectBatchIDs(ctx, tx, batch, sorted, "maple loan",
+		func(l *entity.MapleLoan) string { return addressKey(l.LoanAddress) })
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
@@ -395,20 +361,8 @@ func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx
 		)
 	}
 
-	br := tx.SendBatch(ctx, batch)
-	result := make(map[string]int64, len(sorted))
-	for _, s := range sorted {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			_ = br.Close()
-			return nil, fmt.Errorf("upserting maple sky strategy %s: %w", addressKey(s.StrategyAddress), err)
-		}
-		result[addressKey(s.StrategyAddress)] = id
-	}
-	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("closing maple sky strategy batch: %w", err)
-	}
-	return result, nil
+	return collectBatchIDs(ctx, tx, batch, sorted, "maple sky strategy",
+		func(s *entity.MapleSkyStrategy) string { return addressKey(s.StrategyAddress) })
 }
 
 // SaveSkyStrategyStates inserts strategy state snapshots (same

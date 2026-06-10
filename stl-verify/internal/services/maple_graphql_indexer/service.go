@@ -28,7 +28,7 @@ type ServiceConfig struct {
 	// ChainID must be 1: the Maple GraphQL API is Ethereum-mainnet-scoped,
 	// and accepting any other value would mix mainnet data into another
 	// chain's rows.
-	ChainID int
+	ChainID int64
 
 	// Logger is the structured logger for the service.
 	Logger *slog.Logger
@@ -97,7 +97,7 @@ func (s *Service) Sync(ctx context.Context) error {
 	)
 	poolsErr := s.runPhase(ctx, "pools", func(ctx context.Context) error {
 		var err error
-		protocolID, err = s.repo.GetMapleProtocolID(ctx, int64(s.config.ChainID))
+		protocolID, err = s.repo.GetMapleProtocolID(ctx, s.config.ChainID)
 		if err != nil {
 			return fmt.Errorf("resolving maple protocol: %w", err)
 		}
@@ -182,7 +182,7 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 			return nil, fmt.Errorf("pool %s: asset decimals: %w", strings.ToLower(p.Address.Hex()), err)
 		}
 		poolEntity, err := entity.NewMaplePool(
-			int64(s.config.ChainID), protocolID, p.Address.Bytes(), p.Name,
+			s.config.ChainID, protocolID, p.Address.Bytes(), p.Name,
 			p.AssetAddress.Bytes(), p.AssetSymbol, assetDecimals, p.IsSyrup,
 		)
 		if err != nil {
@@ -289,7 +289,7 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 
 	collateralCount := 0
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		borrowerIDs, err := s.repo.GetOrCreateBorrowerUsers(ctx, tx, int64(s.config.ChainID), borrowers)
+		borrowerIDs, err := s.repo.GetOrCreateBorrowerUsers(ctx, tx, s.config.ChainID, borrowers)
 		if err != nil {
 			return fmt.Errorf("resolving borrowers: %w", err)
 		}
@@ -338,7 +338,7 @@ func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, poolIDs ma
 			return nil, fmt.Errorf("borrower %s missing from upsert result", strings.ToLower(l.Borrower.Hex()))
 		}
 		loanEntity, err := entity.NewMapleLoan(
-			int64(s.config.ChainID), protocolID, l.LoanID.Bytes(),
+			s.config.ChainID, protocolID, l.LoanID.Bytes(),
 			poolIDs[strings.ToLower(l.PoolAddress.Hex())], borrowerUserID, toEntityLoanMeta(l.LoanMeta),
 		)
 		if err != nil {
@@ -443,7 +443,7 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 		if !ok {
 			return fmt.Errorf("sky strategy %s references unknown pool %s", strings.ToLower(st.Address.Hex()), key)
 		}
-		strategyEntity, err := entity.NewMapleSkyStrategy(int64(s.config.ChainID), st.Address.Bytes(), poolID, st.Version)
+		strategyEntity, err := entity.NewMapleSkyStrategy(s.config.ChainID, st.Address.Bytes(), poolID, st.Version)
 		if err != nil {
 			return fmt.Errorf("sky strategy %s: %w", strings.ToLower(st.Address.Hex()), err)
 		}
@@ -500,7 +500,7 @@ func (s *Service) syncSyrupGlobals(ctx context.Context, syncedAt time.Time) erro
 	}
 
 	state, err := entity.NewMapleSyrupGlobalState(
-		int64(s.config.ChainID), syncedAt, globals.TVL, globals.APY,
+		s.config.ChainID, syncedAt, globals.TVL, globals.APY,
 		globals.CollateralAPY, globals.PoolAPY, globals.DripsYieldBoost,
 	)
 	if err != nil {
