@@ -14,9 +14,9 @@ import (
 type MaplePoolState struct {
 	MaplePoolID        int64
 	SyncedAt           time.Time
-	TVL                *big.Int
+	TVL                *big.Int // nil when the API reports null (schema-nullable)
 	LiquidAssets       *big.Int // poolV2.assets
-	CollateralValueUSD *big.Int
+	CollateralValueUSD *big.Int // nil when the API reports null (schema-nullable)
 	PrincipalOut       *big.Int
 	Utilization        float64
 	MonthlyAPY         *big.Int // 30 decimals, nil when absent
@@ -69,13 +69,13 @@ func (s *MaplePoolState) Validate() error {
 	if s.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")
 	}
-	if err := requireNonNegBigInt("tvl", s.TVL); err != nil {
+	if err := requireNonNegBigIntIfSet("tvl", s.TVL); err != nil {
 		return err
 	}
 	if err := requireNonNegBigInt("liquidAssets", s.LiquidAssets); err != nil {
 		return err
 	}
-	if err := requireNonNegBigInt("collateralValueUSD", s.CollateralValueUSD); err != nil {
+	if err := requireNonNegBigIntIfSet("collateralValueUSD", s.CollateralValueUSD); err != nil {
 		return err
 	}
 	if err := requireNonNegBigInt("principalOut", s.PrincipalOut); err != nil {

@@ -118,9 +118,9 @@ CREATE TABLE IF NOT EXISTS maple_pool_state
 (
     maple_pool_id        BIGINT      NOT NULL REFERENCES maple_pool (id),
     synced_at            TIMESTAMPTZ NOT NULL,
-    tvl                  NUMERIC     NOT NULL,
+    tvl                  NUMERIC,              -- nullable in the API schema
     liquid_assets        NUMERIC     NOT NULL, -- poolV2.assets
-    collateral_value_usd NUMERIC     NOT NULL,
+    collateral_value_usd NUMERIC,              -- nullable in the API schema
     principal_out        NUMERIC     NOT NULL,
     utilization          NUMERIC     NOT NULL, -- derived: principal_out / (liquid_assets + principal_out), 0 when empty
     monthly_apy          NUMERIC,              -- 30 decimals

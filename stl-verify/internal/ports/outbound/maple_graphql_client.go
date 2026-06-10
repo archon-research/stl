@@ -21,6 +21,9 @@ type MapleLoanMeta struct {
 }
 
 // MapleLoanCollateral is the single (nullable upstream) collateral of a loan.
+// AssetAmount and AssetValueUSD are always non-nil: the client treats an API
+// collateral whose amount or value is null as absent (Collateral = nil on the
+// loan) rather than producing a partial record.
 type MapleLoanCollateral struct {
 	Asset            string   // symbol, e.g. "BTC", "USDC", "SOL"
 	AssetAmount      *big.Int // native decimals
@@ -52,10 +55,10 @@ type MaplePool struct {
 	AssetAddress  common.Address
 	AssetSymbol   string
 	AssetDecimals int
-	IsSyrup       bool // syrupRouter != null
-	TVL           *big.Int
+	IsSyrup       bool     // syrupRouter != null
+	TVL           *big.Int // nil when the API reports null (schema-nullable)
 	LiquidAssets  *big.Int // poolV2.assets
-	CollateralUSD *big.Int
+	CollateralUSD *big.Int // nil when the API reports null (schema-nullable)
 	PrincipalOut  *big.Int
 	MonthlyAPY    *big.Int // 30 decimals
 	SpotAPY       *big.Int // 30 decimals
@@ -87,7 +90,9 @@ type MapleSyrupGlobals struct {
 // MapleGraphQLClient is the outbound port for the Maple GraphQL API
 // (https://api.maple.finance/v2/graphql). All methods query the latest state
 // (no block argument) and paginate transparently; implementations must fail
-// the whole call on any malformed row rather than skipping it.
+// the whole call on any malformed row rather than skipping it. API-sanctioned
+// nulls are not malformed: nullable pool metrics surface as nil, and a
+// collateral with a null amount or USD value surfaces as no collateral.
 type MapleGraphQLClient interface {
 	// GetPools fetches all PoolV2 lending pools.
 	GetPools(ctx context.Context) ([]MaplePool, error)

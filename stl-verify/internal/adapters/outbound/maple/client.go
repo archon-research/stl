@@ -7,6 +7,11 @@
 // returned as decimal strings (except collateral.liquidationLevel and
 // skyStrategy.version, which are JSON numbers) and parsed into big.Int;
 // any malformed value fails the whole call — rows are never skipped.
+//
+// Schema-nullable values are handled per field: pool tvl/collateralValue
+// parse to nil (persisted as SQL NULL downstream), and a collateral whose
+// assetAmount or assetValueUsd is null is treated as absent (logged; the
+// loan itself is kept).
 package maple
 
 import (
@@ -216,9 +221,9 @@ type poolWire struct {
 	MonthlyApy      *string   `json:"monthlyApy"`
 	SpotApy         *string   `json:"spotApy"`
 	Assets          string    `json:"assets"`
-	CollateralValue string    `json:"collateralValue"`
+	CollateralValue *string   `json:"collateralValue"` // nullable in schema
 	PrincipalOut    string    `json:"principalOut"`
-	TVL             string    `json:"tvl"`
+	TVL             *string   `json:"tvl"` // nullable in schema
 	Asset           assetWire `json:"asset"`
 	SyrupRouter     *struct {
 		ID string `json:"id"`
@@ -227,8 +232,8 @@ type poolWire struct {
 
 type collateralWire struct {
 	Asset            string       `json:"asset"`
-	AssetAmount      string       `json:"assetAmount"`
-	AssetValueUSD    string       `json:"assetValueUsd"`
+	AssetAmount      *string      `json:"assetAmount"`   // nullable in schema
+	AssetValueUSD    *string      `json:"assetValueUsd"` // nullable in schema
 	Decimals         int          `json:"decimals"`
 	State            *string      `json:"state"`
 	Custodian        *string      `json:"custodian"`
@@ -338,6 +343,12 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 		if err != nil {
 			return nil, err
 		}
+		if w.Collateral != nil && loan.Collateral == nil {
+			c.logger.Warn("collateral has null assetAmount or assetValueUsd; treating as absent",
+				"loan", w.ID,
+				"collateralState", deref(w.Collateral.State),
+			)
+		}
 		loans = append(loans, loan)
 	}
 	return loans, nil
@@ -402,7 +413,7 @@ func parsePool(w poolWire) (outbound.MaplePool, error) {
 		return outbound.MaplePool{}, err
 	}
 
-	tvl, err := parseBigInt(w.TVL, "tvl", w.ID)
+	tvl, err := parseOptionalBigInt(w.TVL, "tvl", w.ID)
 	if err != nil {
 		return outbound.MaplePool{}, err
 	}
@@ -410,7 +421,7 @@ func parsePool(w poolWire) (outbound.MaplePool, error) {
 	if err != nil {
 		return outbound.MaplePool{}, err
 	}
-	collateralUSD, err := parseBigInt(w.CollateralValue, "collateralValue", w.ID)
+	collateralUSD, err := parseOptionalBigInt(w.CollateralValue, "collateralValue", w.ID)
 	if err != nil {
 		return outbound.MaplePool{}, err
 	}
@@ -498,11 +509,18 @@ func parseCollateral(w *collateralWire, loanID string) (*outbound.MapleLoanColla
 		return nil, nil
 	}
 
-	amount, err := parseBigInt(w.AssetAmount, "collateral.assetAmount", loanID)
+	// assetAmount and assetValueUsd are nullable in the schema (plausibly
+	// during DepositPending). A collateral missing either value cannot be
+	// stored or priced, so it is treated as absent; the caller logs the skip.
+	if w.AssetAmount == nil || w.AssetValueUSD == nil {
+		return nil, nil
+	}
+
+	amount, err := parseBigInt(*w.AssetAmount, "collateral.assetAmount", loanID)
 	if err != nil {
 		return nil, err
 	}
-	valueUSD, err := parseBigInt(w.AssetValueUSD, "collateral.assetValueUsd", loanID)
+	valueUSD, err := parseBigInt(*w.AssetValueUSD, "collateral.assetValueUsd", loanID)
 	if err != nil {
 		return nil, err
 	}

@@ -169,17 +169,9 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
-		tvl, err := bigIntToNumeric(s.TVL)
-		if err != nil {
-			return fmt.Errorf("converting tvl for pool %d: %w", s.MaplePoolID, err)
-		}
 		liquidAssets, err := bigIntToNumeric(s.LiquidAssets)
 		if err != nil {
 			return fmt.Errorf("converting liquid_assets for pool %d: %w", s.MaplePoolID, err)
-		}
-		collateralValueUSD, err := bigIntToNumeric(s.CollateralValueUSD)
-		if err != nil {
-			return fmt.Errorf("converting collateral_value_usd for pool %d: %w", s.MaplePoolID, err)
 		}
 		principalOut, err := bigIntToNumeric(s.PrincipalOut)
 		if err != nil {
@@ -187,8 +179,9 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, s.MaplePoolID, s.SyncedAt, tvl, liquidAssets, collateralValueUSD,
-			principalOut, s.Utilization, optionalNumeric(s.MonthlyAPY), optionalNumeric(s.SpotAPY), int(r.buildID))
+		args = append(args, s.MaplePoolID, s.SyncedAt, optionalNumeric(s.TVL), liquidAssets,
+			optionalNumeric(s.CollateralValueUSD), principalOut, s.Utilization,
+			optionalNumeric(s.MonthlyAPY), optionalNumeric(s.SpotAPY), int(r.buildID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_pool_id, synced_at, processing_version) DO NOTHING`)
 

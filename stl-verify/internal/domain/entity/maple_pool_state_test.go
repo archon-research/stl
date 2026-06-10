@@ -41,11 +41,7 @@ func TestMaplePoolState_Validate(t *testing.T) {
 			mutate:  func(s *MaplePoolState) { s.SyncedAt = time.Time{} },
 			wantErr: "syncedAt must not be zero",
 		},
-		{
-			name:    "nil tvl",
-			mutate:  func(s *MaplePoolState) { s.TVL = nil },
-			wantErr: "tvl must not be nil",
-		},
+		{name: "nil tvl ok (schema-nullable)", mutate: func(s *MaplePoolState) { s.TVL = nil }},
 		{
 			name:    "negative tvl",
 			mutate:  func(s *MaplePoolState) { s.TVL = big.NewInt(-1) },
@@ -61,11 +57,7 @@ func TestMaplePoolState_Validate(t *testing.T) {
 			mutate:  func(s *MaplePoolState) { s.LiquidAssets = big.NewInt(-5) },
 			wantErr: "liquidAssets must be non-negative",
 		},
-		{
-			name:    "nil collateral value",
-			mutate:  func(s *MaplePoolState) { s.CollateralValueUSD = nil },
-			wantErr: "collateralValueUSD must not be nil",
-		},
+		{name: "nil collateral value ok (schema-nullable)", mutate: func(s *MaplePoolState) { s.CollateralValueUSD = nil }},
 		{
 			name:    "negative collateral value",
 			mutate:  func(s *MaplePoolState) { s.CollateralValueUSD = big.NewInt(-5) },

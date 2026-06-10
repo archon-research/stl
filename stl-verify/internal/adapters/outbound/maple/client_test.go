@@ -273,6 +273,115 @@ func TestGetActiveLoans_NullCollateralMetaAndAcmRatio(t *testing.T) {
 	}
 }
 
+func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
+	// tvl and collateralValue are nullable in the API schema; both surface
+	// as nil rather than failing the call.
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
+			"id": %q, "name": "Bootstrapping Pool",
+			"monthlyApy": null, "spotApy": null,
+			"assets": "1", "collateralValue": null, "principalOut": "3", "tvl": null,
+			"asset": {"id": %q, "symbol": "USDC", "decimals": 6},
+			"syrupRouter": null
+		}]}}`, poolAddr, usdcAddr))
+	}})
+
+	pools, err := client.GetPools(context.Background())
+	if err != nil {
+		t.Fatalf("GetPools: %v", err)
+	}
+	if pools[0].TVL != nil {
+		t.Errorf("TVL = %v, want nil", pools[0].TVL)
+	}
+	if pools[0].CollateralUSD != nil {
+		t.Errorf("CollateralUSD = %v, want nil", pools[0].CollateralUSD)
+	}
+	if pools[0].LiquidAssets.Cmp(big.NewInt(1)) != 0 || pools[0].PrincipalOut.Cmp(big.NewInt(3)) != 0 {
+		t.Errorf("LiquidAssets/PrincipalOut = %s/%s, want 1/3", pools[0].LiquidAssets, pools[0].PrincipalOut)
+	}
+}
+
+func TestGetActiveLoans_NullCollateralAmountsTreatedAsAbsent(t *testing.T) {
+	// assetAmount and assetValueUsd are nullable in the API schema (plausibly
+	// during DepositPending). A collateral missing either value is treated as
+	// absent; the loan itself is kept.
+	for _, tc := range []struct {
+		name        string
+		amount, usd string
+	}{
+		{name: "null assetAmount", amount: "null", usd: `"6357500000"`},
+		{name: "null assetValueUsd", amount: `"215100000"`, usd: "null"},
+		{name: "both null", amount: "null", usd: "null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "7000000", "acmRatio": "1445731",
+					"collateral": {
+						"asset": "SOL", "assetAmount": %s, "assetValueUsd": %s,
+						"decimals": 9, "state": "DepositPending", "custodian": "ANCHORAGE",
+						"liquidationLevel": 1020000
+					},
+					"loanMeta": null,
+					"fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, tc.amount, tc.usd, poolAddr))
+			}})
+
+			loans, err := client.GetActiveLoans(context.Background())
+			if err != nil {
+				t.Fatalf("GetActiveLoans: %v", err)
+			}
+			if len(loans) != 1 {
+				t.Fatalf("len(loans) = %d, want 1 (loan must be kept)", len(loans))
+			}
+			if loans[0].Collateral != nil {
+				t.Errorf("Collateral = %+v, want nil", loans[0].Collateral)
+			}
+			if loans[0].PrincipalOwed.Cmp(big.NewInt(7000000)) != 0 {
+				t.Errorf("PrincipalOwed = %s, want 7000000", loans[0].PrincipalOwed)
+			}
+		})
+	}
+}
+
+func TestGetActiveLoans_MalformedCollateralValuesNameLoanID(t *testing.T) {
+	// Non-null but malformed collateral values are still hard errors (only
+	// API-sanctioned nulls downgrade to an absent collateral).
+	for _, tc := range []struct {
+		name        string
+		amount, usd string
+		wantField   string
+	}{
+		{name: "malformed assetAmount", amount: `"not-a-number"`, usd: `"1"`, wantField: "collateral.assetAmount"},
+		{name: "malformed assetValueUsd", amount: `"1"`, usd: `"not-a-number"`, wantField: "collateral.assetValueUsd"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "7000000", "acmRatio": null,
+					"collateral": {
+						"asset": "SOL", "assetAmount": %s, "assetValueUsd": %s,
+						"decimals": 9, "state": "Deposited", "custodian": null,
+						"liquidationLevel": null
+					},
+					"loanMeta": null,
+					"fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, tc.amount, tc.usd, poolAddr))
+			}})
+
+			_, err := client.GetActiveLoans(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), loanAddr) || !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("error %q should name loan %s and field %s", err, loanAddr, tc.wantField)
+			}
+		})
+	}
+}
+
 func TestGetActiveLoans_MalformedBigIntNamesLoanID(t *testing.T) {
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{

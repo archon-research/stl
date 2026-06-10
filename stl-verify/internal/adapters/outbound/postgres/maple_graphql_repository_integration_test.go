@@ -322,6 +322,43 @@ func TestMaplePoolStates_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestMaplePoolStates_NullTVLAndCollateralValueRoundTrip(t *testing.T) {
+	// tvl and collateralValue are nullable in the Maple API schema; nil
+	// entity values persist as SQL NULL.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x21)
+
+	state, err := entity.NewMaplePoolState(poolID, mapleSyncedAt(),
+		nil, big.NewInt(400), nil, big.NewInt(600),
+		nil, nil)
+	if err != nil {
+		t.Fatalf("NewMaplePoolState: %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*entity.MaplePoolState{state})
+	})
+
+	var tvl, collateralValueUSD *string
+	var utilization string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT tvl::text, collateral_value_usd::text, utilization::text FROM maple_pool_state WHERE maple_pool_id = $1`,
+		poolID).Scan(&tvl, &collateralValueUSD, &utilization); err != nil {
+		t.Fatalf("querying pool state: %v", err)
+	}
+	if tvl != nil {
+		t.Errorf("tvl = %v, want NULL", *tvl)
+	}
+	if collateralValueUSD != nil {
+		t.Errorf("collateral_value_usd = %v, want NULL", *collateralValueUSD)
+	}
+	if utilization != "0.6" {
+		t.Errorf("utilization = %s, want 0.6", utilization)
+	}
+}
+
 func TestMaplePoolStates_MultiChunkBatch(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
