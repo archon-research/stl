@@ -201,6 +201,8 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 // UpsertLoans upserts loan registry rows and returns lowercase hex loan
 // address -> maple_loan.id. On conflict, refreshes the pool reference and the
 // loanMeta columns (a loan's metadata can change between snapshots).
+// borrower_user_id is deliberately not refreshed: a loan contract's borrower
+// is immutable, so the value from first insert stays authoritative.
 func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[string]int64, error) {
 	if len(loans) == 0 {
 		return make(map[string]int64), nil

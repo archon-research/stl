@@ -62,7 +62,9 @@ CREATE INDEX IF NOT EXISTS idx_maple_pool_is_syrup ON maple_pool (is_syrup) WHER
 
 -- ============================================================================
 -- maple_loan: registry of Open Term Loans (one row per loan contract).
--- loanMeta fields are non-null only for internal Maple positions.
+-- loanMeta is present on most loans (internal and external alike) and every
+-- field inside it is nullable; only loan_meta_type in ('amm', 'strategy')
+-- marks an internal Maple position (see is_internal).
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS maple_loan
 (
@@ -73,7 +75,7 @@ CREATE TABLE IF NOT EXISTS maple_loan
     loan_type                VARCHAR(16) NOT NULL DEFAULT 'OTL',
     maple_pool_id            BIGINT      NOT NULL REFERENCES maple_pool (id),
     borrower_user_id         BIGINT      NOT NULL REFERENCES "user" (id),
-    loan_meta_type           VARCHAR(32),             -- null | 'amm' | 'strategy'
+    loan_meta_type           VARCHAR(32),             -- null | 'amm' | 'strategy' | 'tBills' | 'intercompany' | ... (open set)
     loan_meta_asset_symbol   VARCHAR(50),
     loan_meta_dex            VARCHAR(64),
     loan_meta_wallet_address VARCHAR(255),            -- may be non-EVM (BASE/SOL custody wallets)
