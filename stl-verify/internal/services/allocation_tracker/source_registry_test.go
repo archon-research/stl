@@ -5,10 +5,33 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 )
+
+// recordingHandler captures slog records for assertions. Tests using it call the
+// registry sequentially, so it needs no locking.
+type recordingHandler struct{ records []slog.Record }
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingHandler) countWarn(substr string) int {
+	n := 0
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
+			n++
+		}
+	}
+	return n
+}
 
 // mockSource is a mock PositionSource for testing the registry.
 type mockSource struct {
@@ -209,5 +232,97 @@ func TestSourceRegistry_FetchAll_PartialFailure(t *testing.T) {
 	}
 	if results.Balances[key1].Balance.Cmp(big.NewInt(100)) != 0 {
 		t.Errorf("good source result should still be present")
+	}
+}
+
+func TestSourceRegistry_FetchAll_WarnsOnceForStubRouted(t *testing.T) {
+	h := &recordingHandler{}
+	logger := slog.New(h)
+	registry := NewSourceRegistry(logger)
+	stub := NewStubSource("psm3", "psm3", logger)
+	registry.Register(stub)
+
+	// Two psm3 entries (distinct contracts) fetched over two sweeps: the stub
+	// matches and records nothing, so the warning must fire exactly once.
+	entries := []*TokenEntry{
+		{ContractAddress: common.HexToAddress("0x1"), WalletAddress: common.HexToAddress("0xa"), TokenType: "psm3", Protocol: "psm3"},
+		{ContractAddress: common.HexToAddress("0x2"), WalletAddress: common.HexToAddress("0xb"), TokenType: "psm3", Protocol: "psm3"},
+	}
+	for i := range 2 {
+		if _, err := registry.FetchAll(context.Background(), entries, int64(i)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if got := h.countWarn("not-yet-implemented stub"); got != 1 {
+		t.Errorf("stub warning fired %d times, want exactly 1 (deduped per type/protocol)", got)
+	}
+}
+
+// placeholderMockSource is a mockSource that also satisfies placeholderSource, so
+// the registry treats it like a StubSource while still letting us observe calls.
+type placeholderMockSource struct{ mockSource }
+
+func (m *placeholderMockSource) isPlaceholder() {}
+
+func TestSourceRegistry_FetchAll_StubStillFetchedAfterWarn(t *testing.T) {
+	h := &recordingHandler{}
+	registry := NewSourceRegistry(slog.New(h))
+	stub := &placeholderMockSource{mockSource{name: "psm3", tokenTypes: map[string]bool{"psm3": true}}}
+	registry.Register(stub)
+
+	entries := []*TokenEntry{
+		{ContractAddress: common.HexToAddress("0x1"), WalletAddress: common.HexToAddress("0xa"), TokenType: "psm3", Protocol: "psm3"},
+	}
+	if _, err := registry.FetchAll(context.Background(), entries, 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := h.countWarn("not-yet-implemented stub"); got != 1 {
+		t.Errorf("stub warning fired %d times, want 1", got)
+	}
+	if stub.called != 1 {
+		t.Errorf("stub fetched %d times, want 1 (warned but still run)", stub.called)
+	}
+}
+
+func TestSourceRegistry_FetchAll_SkipSourceDoesNotWarn(t *testing.T) {
+	h := &recordingHandler{}
+	logger := slog.New(h)
+	registry := NewSourceRegistry(logger)
+	registry.Register(NewSkipSource("anchorage-skip", "anchorage", nil, logger))
+
+	entries := []*TokenEntry{
+		{ContractAddress: common.HexToAddress("0x1"), WalletAddress: common.HexToAddress("0xa"), TokenType: "anchorage", Protocol: "anchorage"},
+	}
+	if _, err := registry.FetchAll(context.Background(), entries, 0); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A SkipSource's work is intentionally done elsewhere, so it must not warn.
+	if got := h.countWarn("not-yet-implemented stub"); got != 0 {
+		t.Errorf("skip source emitted %d stub warnings, want 0", got)
+	}
+	if got := h.countWarn("unsupported entry skipped"); got != 0 {
+		t.Errorf("skip source emitted %d unsupported warnings, want 0", got)
+	}
+}
+
+func TestSourceRegistry_FetchAll_WarnsOnceForUnsupported(t *testing.T) {
+	h := &recordingHandler{}
+	registry := NewSourceRegistry(slog.New(h))
+
+	entries := []*TokenEntry{
+		{ContractAddress: common.HexToAddress("0x1"), WalletAddress: common.HexToAddress("0xa"), TokenType: "mystery", Protocol: "x"},
+		{ContractAddress: common.HexToAddress("0x2"), WalletAddress: common.HexToAddress("0xb"), TokenType: "mystery", Protocol: "x"},
+	}
+	for i := range 2 {
+		if _, err := registry.FetchAll(context.Background(), entries, int64(i)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if got := h.countWarn("unsupported entry skipped"); got != 1 {
+		t.Errorf("unsupported warning fired %d times, want exactly 1", got)
 	}
 }
