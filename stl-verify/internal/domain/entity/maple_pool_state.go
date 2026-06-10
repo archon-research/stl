@@ -96,5 +96,11 @@ func (s *MaplePoolState) Validate() error {
 	if s.Utilization < 0 || s.Utilization > 1 {
 		return fmt.Errorf("utilization must be in [0, 1], got %f", s.Utilization)
 	}
+	if s.MonthlyAPY != nil && s.MonthlyAPY.Sign() < 0 {
+		return fmt.Errorf("monthlyAPY must be non-negative, got %s", s.MonthlyAPY)
+	}
+	if s.SpotAPY != nil && s.SpotAPY.Sign() < 0 {
+		return fmt.Errorf("spotAPY must be non-negative, got %s", s.SpotAPY)
+	}
 	return nil
 }

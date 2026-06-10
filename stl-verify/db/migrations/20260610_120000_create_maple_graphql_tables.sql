@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS maple_sky_strategy
     UNIQUE (chain_id, strategy_address)
 );
 
+CREATE INDEX IF NOT EXISTS idx_maple_sky_strategy_pool ON maple_sky_strategy (maple_pool_id);
+
 -- ============================================================================
 -- Hypertables (all partitioned on synced_at, 1-day chunks).
 -- ============================================================================

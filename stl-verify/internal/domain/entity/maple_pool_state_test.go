@@ -91,6 +91,16 @@ func TestMaplePoolState_Validate(t *testing.T) {
 			mutate:  func(s *MaplePoolState) { s.Utilization = 1.1 },
 			wantErr: "utilization must be in [0, 1]",
 		},
+		{
+			name:    "negative monthly apy",
+			mutate:  func(s *MaplePoolState) { s.MonthlyAPY = big.NewInt(-1) },
+			wantErr: "monthlyAPY must be non-negative",
+		},
+		{
+			name:    "negative spot apy",
+			mutate:  func(s *MaplePoolState) { s.SpotAPY = big.NewInt(-1) },
+			wantErr: "spotAPY must be non-negative",
+		},
 	}
 
 	for _, tt := range tests {
