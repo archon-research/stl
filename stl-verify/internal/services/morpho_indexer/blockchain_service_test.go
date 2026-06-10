@@ -1634,6 +1634,47 @@ func TestResolveSymbolsAt_UpdatesCacheEntry(t *testing.T) {
 	}
 }
 
+func TestResolveSymbolsAt_ResultCountMismatchErrors(t *testing.T) {
+	h := newTestHarness(t)
+	tokens := []common.Address{
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+	}
+
+	// Multicall returns fewer results than calls — must surface as an error
+	// rather than silently dropping a token's slot.
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: true, ReturnData: h.packString("ONLY_ONE")}}, nil
+	}
+
+	if _, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), tokens, 100); err == nil {
+		t.Fatal("expected error on result-count mismatch")
+	}
+}
+
+func TestResolveSymbolsAt_UndecodableAndEmptySymbolsOmitted(t *testing.T) {
+	h := newTestHarness(t)
+	undecodable := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	emptyDecoded := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	// First result is a successful call with undecodable return data; second
+	// decodes to the empty string. Both must be omitted (stay pending), no error.
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}},
+			{Success: true, ReturnData: h.packString("")},
+		}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{undecodable, emptyDecoded}, 100)
+	if err != nil {
+		t.Fatalf("resolveSymbolsAt: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty map (undecodable and empty symbols stay pending)", got)
+	}
+}
+
 // TestGetTokenPairMetadata_BothZero — degenerate but should still not panic
 // or call the multicaller.
 func TestGetTokenPairMetadata_BothZero(t *testing.T) {

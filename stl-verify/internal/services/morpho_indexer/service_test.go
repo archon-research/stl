@@ -3440,6 +3440,40 @@ func TestReconcilePendingSymbols_ResolvesAtCurrentBlock(t *testing.T) {
 	}
 }
 
+// TestReconcilePendingSymbols_FullBatchStillSweeps covers the batch-full branch:
+// a full batch (potential truncation) warns but still resolves what it fetched.
+func TestReconcilePendingSymbols_FullBatchStillSweeps(t *testing.T) {
+	h := newTestHarness(t)
+
+	full := make([]common.Address, symbolSweepBatchSize)
+	for i := range full {
+		full[i] = common.BigToAddress(big.NewInt(int64(i + 1)))
+	}
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		return full, nil
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: false}
+		}
+		// Only the first token resolves; the rest still revert.
+		results[0] = outbound.Result{Success: true, ReturnData: h.packString("FIRST")}
+		return results, nil
+	}
+	var resolved []common.Address
+	h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, address common.Address, _ string) error {
+		resolved = append(resolved, address)
+		return nil
+	}
+
+	h.svc.reconcilePendingSymbols(context.Background(), 1, 100)
+
+	if len(resolved) != 1 || resolved[0] != full[0] {
+		t.Errorf("resolved = %v, want exactly the first token despite the full batch", resolved)
+	}
+}
+
 func TestReconcilePendingSymbols_NonSweepBlockIsNoop(t *testing.T) {
 	h := newTestHarness(t)
 	listed := false

@@ -116,12 +116,7 @@ func NewService(
 		return nil, fmt.Errorf("failed to create event extractor: %w", err)
 	}
 
-	blockchainSvc, err := newBlockchainService(
-		multicallClient,
-		erc20ABI,
-		config.Logger,
-		config.Telemetry,
-	)
+	blockchainSvc, err := newBlockchainService(multicallClient, erc20ABI, config.Logger, config.Telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create blockchain service: %w", err)
 	}
@@ -214,6 +209,11 @@ func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNum
 		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
 		return
 	}
+	// Surface the backlog size on every sweep (capped at the batch size): with no
+	// backstop, growth toward the batch limit is the signal that tokens are
+	// accumulating that never resolve, and oldest-first ordering would starve
+	// newer ones once the limit is hit.
+	s.telemetry.RecordSymbolsMissing(ctx, int64(len(missing)))
 	if len(missing) == 0 {
 		return
 	}

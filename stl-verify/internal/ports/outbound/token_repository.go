@@ -27,12 +27,13 @@ type TokenRepository interface {
 	GetOrCreateTokens(ctx context.Context, tx pgx.Tx, tokens []TokenInput) (map[common.Address]int64, error)
 
 	// ListTokensMissingSymbol returns addresses of tokens on the chain whose symbol
-	// is still empty (the zero-address sentinel is excluded), capped at limit rows.
-	// limit must be positive.
+	// is still missing — empty or NULL (the zero-address sentinel is excluded) —
+	// capped at limit rows. limit must be positive.
 	ListTokensMissingSymbol(ctx context.Context, chainID int64, limit int) ([]common.Address, error)
 
-	// ResolveTokenSymbol sets a token's symbol. It only fills an empty symbol —
-	// a token that already has one is left untouched and an error is returned, so
-	// a resolved symbol can never be clobbered.
+	// ResolveTokenSymbol sets a token's symbol. It only fills a missing (empty or
+	// NULL) symbol — a token that already has one is left untouched and an error
+	// is returned, so a resolved symbol can never be clobbered. The new symbol
+	// must be non-empty.
 	ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error
 }

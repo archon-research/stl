@@ -100,11 +100,14 @@ func (r *TokenRepository) ListTokensMissingSymbol(ctx context.Context, chainID i
 	if limit <= 0 {
 		return nil, fmt.Errorf("listing tokens missing symbol: limit must be positive, got %d", limit)
 	}
+	// COALESCE: token.symbol is nullable, and a NULL symbol is just as missing as
+	// an empty one. The expression must match the idx_token_missing_symbol
+	// partial-index predicate exactly for the planner to use it.
 	rows, err := r.pool.Query(ctx,
 		`SELECT address
 		   FROM token
 		  WHERE chain_id = $1
-		    AND symbol = ''
+		    AND COALESCE(symbol, '') = ''
 		    AND address <> $2
 		  ORDER BY created_at_block
 		  LIMIT $3`,
@@ -132,11 +135,16 @@ func (r *TokenRepository) ListTokensMissingSymbol(ctx context.Context, chainID i
 // a token that already has one is left untouched and an error is returned, so
 // a resolved symbol can never be clobbered.
 func (r *TokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error {
+	// An empty resolution would match the empty-symbol guard below, report
+	// success, and leave the row pending — reject it outright.
+	if symbol == "" {
+		return fmt.Errorf("resolving token symbol %s: symbol must not be empty", address.Hex())
+	}
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE token
 		    SET symbol = $3,
 		        updated_at = NOW()
-		  WHERE chain_id = $1 AND address = $2 AND symbol = ''`,
+		  WHERE chain_id = $1 AND address = $2 AND COALESCE(symbol, '') = ''`,
 		chainID, address.Bytes(), symbol)
 	if err != nil {
 		return fmt.Errorf("resolving token symbol: %w", err)
