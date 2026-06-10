@@ -123,21 +123,18 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**:
-    Compose large functions from smaller functions.
-    Large functions should read like prose, with each step delegated to a well-named helper function.
+    - Compose large functions from smaller functions.
+    - Large functions should read like prose, with each step delegated to a well-named helper function.
 - **Libraries**:
-    Use the standard library as much as possible.
-    Instead of duplicating code, create a function containing the shared functionality, and re-use it.
+    - Use the standard library as much as possible.
+    - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
 - **Database**:
-    Always think hard and carefully about how the wrong data could be written to the database.
-    Always think hard and carefully about schema design.
-    For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
-    NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
+    - Always think hard and carefully about how the wrong data could be written to the database.
+    - Always think hard and carefully about schema design.
+    - For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
+    - NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
 - **External API adapters**:
-    Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
-    `internal/pkg/httpclient` is GET-only; adapters needing POST reuse `internal/pkg/retry` + `httpclient.WrapNonRetryable` directly (see `internal/adapters/outbound/maple`).
-- **User upserts from blockless sources** (polled APIs with no block context): do NOT reuse `UserRepository.GetOrCreateUser` — its `LEAST(first_seen_block, …)` merge clobbers existing users' `first_seen_block` to 0. Insert NULL `first_seen_block` and leave it untouched on conflict (see `MapleGraphQLRepository.GetOrCreateBorrowerUsers`).
-- **cmd integration tests** that call `buildregistry.New` need `t.Setenv("BUILD_GIT_HASH", "test-hash")` — test binaries lack VCS build info.
+    - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
 
 ## Do NOT
 
