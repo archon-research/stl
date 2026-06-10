@@ -105,7 +105,9 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 		}
 		m.scheduleArchive(detached, m.buildRecord(calls[i], results[i], blockNumber, blockVersion, mcAddr))
 	}
-	return results, err
+	// err is provably nil here (the err != nil path returned above); archiving
+	// never affects the returned error.
+	return results, nil
 }
 
 // Address forwards to the inner multicaller.
