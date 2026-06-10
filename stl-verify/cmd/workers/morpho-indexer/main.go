@@ -218,8 +218,17 @@ func run(ctx context.Context, args []string) error {
 	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+
 	// Multicall3
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
@@ -256,10 +265,6 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	chainName, err := entity.ChainName(cfg.chainID)
-	if err != nil {
-		return fmt.Errorf("resolving chain name for metrics: %w", err)
-	}
 	morphoTelemetry, err := morpho_indexer.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating morpho telemetry: %w", err)

@@ -79,6 +79,8 @@ func (c *Client) Execute(ctx context.Context, calls []outbound.Call, blockNumber
 		return []outbound.Result{}, nil
 	}
 
+	// Records the attempted batch size (before Pack/CallContract can fail), so
+	// _count/_sum reflect attempted multicalls, not only successful ones.
 	c.recordBatch(ctx, len(calls))
 
 	data, err := c.abi.Pack("aggregate3", calls)
