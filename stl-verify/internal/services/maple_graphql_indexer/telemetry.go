@@ -1,0 +1,158 @@
+package maple_graphql_indexer
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+)
+
+const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/maple_graphql_indexer"
+
+// Telemetry provides OpenTelemetry metrics and tracing for the Maple GraphQL
+// indexer. All methods are nil-receiver-safe so the service can run without
+// telemetry wired (tests, local runs).
+type Telemetry struct {
+	tracer trace.Tracer
+	meter  metric.Meter
+
+	// Counters
+	cyclesTotal metric.Int64Counter
+	phasesTotal metric.Int64Counter
+	rowsWritten metric.Int64Counter
+
+	// Histograms
+	phaseDuration metric.Float64Histogram
+
+	// chainAttr is the constant per-chain attribute attached to every metric.
+	// The Maple GraphQL API is mainnet-scoped, so the value is fixed.
+	chainAttr attribute.KeyValue
+}
+
+// NewTelemetry creates a new Telemetry instance using the global providers.
+func NewTelemetry() (*Telemetry, error) {
+	return NewTelemetryWithProviders(otel.GetTracerProvider(), otel.GetMeterProvider())
+}
+
+// NewTelemetryWithProviders creates a new Telemetry instance with custom providers.
+func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider) (*Telemetry, error) {
+	t := &Telemetry{
+		tracer:    tp.Tracer(instrumentationName),
+		meter:     mp.Meter(instrumentationName),
+		chainAttr: attribute.String("chain", "ethereum"),
+	}
+
+	var err error
+
+	t.cyclesTotal, err = t.meter.Int64Counter(
+		"maple.sync.cycles.total",
+		metric.WithDescription("Total number of Maple GraphQL sync cycles"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating cyclesTotal counter: %w", err)
+	}
+
+	t.phasesTotal, err = t.meter.Int64Counter(
+		"maple.sync.phases.total",
+		metric.WithDescription("Total number of Maple GraphQL sync phases"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating phasesTotal counter: %w", err)
+	}
+
+	t.rowsWritten, err = t.meter.Int64Counter(
+		"maple.sync.rows.written",
+		metric.WithDescription("Total number of snapshot rows written per table"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating rowsWritten counter: %w", err)
+	}
+
+	t.phaseDuration, err = t.meter.Float64Histogram(
+		"maple.sync.phase.duration_seconds",
+		metric.WithDescription("Duration of Maple GraphQL sync phases in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating phaseDuration histogram: %w", err)
+	}
+
+	return t, nil
+}
+
+// StartCycleSpan starts the top-level span for one sync cycle.
+func (t *Telemetry) StartCycleSpan(ctx context.Context, syncedAt time.Time) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan()
+	}
+	return t.tracer.Start(ctx, "maple.sync",
+		trace.WithAttributes(attribute.String("synced_at", syncedAt.Format(time.RFC3339))),
+	)
+}
+
+// StartPhaseSpan starts a child span for one sync phase.
+func (t *Telemetry) StartPhaseSpan(ctx context.Context, phase string) (context.Context, trace.Span) {
+	if t == nil {
+		return ctx, noopSpan()
+	}
+	return t.tracer.Start(ctx, "maple.sync."+phase,
+		trace.WithAttributes(attribute.String("phase", phase)),
+	)
+}
+
+// RecordCycle records the outcome of one sync cycle.
+func (t *Telemetry) RecordCycle(ctx context.Context, err error) {
+	if t == nil {
+		return
+	}
+	t.cyclesTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr, statusAttr(err)))
+}
+
+// RecordPhase records the outcome and duration of one sync phase.
+func (t *Telemetry) RecordPhase(ctx context.Context, phase string, duration time.Duration, err error) {
+	if t == nil {
+		return
+	}
+	attrs := metric.WithAttributes(t.chainAttr, attribute.String("phase", phase), statusAttr(err))
+	t.phasesTotal.Add(ctx, 1, attrs)
+	t.phaseDuration.Record(ctx, duration.Seconds(), attrs)
+}
+
+// RecordRowsWritten records the number of snapshot rows written to a table.
+func (t *Telemetry) RecordRowsWritten(ctx context.Context, table string, count int) {
+	if t == nil {
+		return
+	}
+	t.rowsWritten.Add(ctx, int64(count), metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("table", table),
+	))
+}
+
+// SetSpanError records an error on a span and sets its status.
+func SetSpanError(span trace.Span, err error, description string) {
+	if err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, description)
+}
+
+func statusAttr(err error) attribute.KeyValue {
+	if err != nil {
+		return attribute.String("status", "error")
+	}
+	return attribute.String("status", "success")
+}
+
+func noopSpan() trace.Span {
+	return trace.SpanFromContext(context.Background())
+}
