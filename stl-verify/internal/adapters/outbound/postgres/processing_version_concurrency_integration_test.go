@@ -666,10 +666,17 @@ func truncateMapleForConcurrency(t *testing.T, ctx context.Context) {
 func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey {
 	t.Helper()
 
+	// Upsert rather than rely on the migration-seeded row: the morpho race
+	// tests in this file TRUNCATE protocol CASCADE, so the seed row may be
+	// gone by the time this test runs. Values mirror
+	// 20260610_120000_create_maple_graphql_tables.sql.
 	var protocolID int64
 	if err := concurrencyPool.QueryRow(ctx,
-		`SELECT id FROM protocol WHERE chain_id = 1 AND name = 'maple'`).Scan(&protocolID); err != nil {
-		t.Fatalf("resolve maple protocol (seeded by migration): %v", err)
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\x804a6F5F667170F545Bf14e5DDB48C70B788390C'::bytea, 'maple', 'lending', 11964925, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`).Scan(&protocolID); err != nil {
+		t.Fatalf("seed maple protocol: %v", err)
 	}
 
 	var userID int64
