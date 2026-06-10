@@ -43,6 +43,7 @@ func TestExecuteRecordsBatchSizeThroughExecute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rpc.DialHTTP: %v", err)
 	}
+	t.Cleanup(rpcClient.Close)
 	ethClient := ethclient.NewClient(rpcClient)
 
 	mc, err := NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"), WithTelemetry(tel))

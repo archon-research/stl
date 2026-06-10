@@ -224,6 +224,10 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
 	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
 	oracleTelemetry, err := oracle_price_worker.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
@@ -247,8 +251,7 @@ func run(ctx context.Context, args []string) error {
 				// Direct single eth_call path, not a multicall batch, so it intentionally carries no multicall.batch.size telemetry.
 				return multicall.NewDirectCaller(ethClient.Client())
 			}
-			mcClient, mcErr := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
-			return mcClient, mcErr
+			return mc, nil
 		},
 	)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
@@ -190,7 +191,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
 	}
-	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"), multicall.WithTelemetry(mcTel))
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}

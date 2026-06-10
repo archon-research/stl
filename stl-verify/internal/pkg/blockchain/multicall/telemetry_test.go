@@ -32,7 +32,7 @@ func histDataPoint(t *testing.T, reader sdkmetric.Reader, name string) metricdat
 		}
 	}
 	t.Fatalf("metric %q not found", name)
-	panic("unreachable")
+	return metricdata.HistogramDataPoint[int64]{} // unreachable; t.Fatalf calls runtime.Goexit
 }
 
 func TestRecordBatch_CountSumAndChain(t *testing.T) {
