@@ -1,0 +1,75 @@
+package entity
+
+import (
+	"fmt"
+	"math/big"
+	"time"
+)
+
+// MapleLoanCollateral is the collateral snapshot of an active loan at a sync
+// cycle. Loans with null API collateral simply have no row. AssetAmount is in
+// native asset decimals; AssetValueUSD is the per-unit USD price with
+// 8 decimals (total USD = amount * price / 10^decimals / 10^8). The asset may
+// be custodied off-chain (BTC, SOL), so it is identified by symbol only.
+type MapleLoanCollateral struct {
+	MapleLoanID      int64
+	SyncedAt         time.Time
+	AssetSymbol      string
+	AssetAmount      *big.Int
+	AssetDecimals    int16
+	AssetValueUSD    *big.Int
+	State            string   // 'Deposited' | 'DepositPending' | ... (may be empty)
+	Custodian        string   // e.g. 'FORDEFI', 'ANCHORAGE' (may be empty)
+	LiquidationLevel *big.Int // nil when absent
+}
+
+// NewMapleLoanCollateral creates a new MapleLoanCollateral entity with validation.
+func NewMapleLoanCollateral(mapleLoanID int64, syncedAt time.Time, assetSymbol string, assetAmount *big.Int, assetDecimals int16, assetValueUSD *big.Int, state, custodian string, liquidationLevel *big.Int) (*MapleLoanCollateral, error) {
+	c := &MapleLoanCollateral{
+		MapleLoanID:      mapleLoanID,
+		SyncedAt:         syncedAt,
+		AssetSymbol:      assetSymbol,
+		AssetAmount:      assetAmount,
+		AssetDecimals:    assetDecimals,
+		AssetValueUSD:    assetValueUSD,
+		State:            state,
+		Custodian:        custodian,
+		LiquidationLevel: liquidationLevel,
+	}
+	if err := c.Validate(); err != nil {
+		return nil, fmt.Errorf("NewMapleLoanCollateral: %w", err)
+	}
+	return c, nil
+}
+
+// Validate checks that all fields have valid values.
+func (c *MapleLoanCollateral) Validate() error {
+	if c.MapleLoanID <= 0 {
+		return fmt.Errorf("mapleLoanID must be positive, got %d", c.MapleLoanID)
+	}
+	if c.SyncedAt.IsZero() {
+		return fmt.Errorf("syncedAt must not be zero")
+	}
+	if c.AssetSymbol == "" {
+		return fmt.Errorf("assetSymbol must not be empty")
+	}
+	if c.AssetAmount == nil {
+		return fmt.Errorf("assetAmount must not be nil")
+	}
+	if c.AssetAmount.Sign() < 0 {
+		return fmt.Errorf("assetAmount must be non-negative, got %s", c.AssetAmount)
+	}
+	if c.AssetDecimals < 0 {
+		return fmt.Errorf("assetDecimals must be non-negative, got %d", c.AssetDecimals)
+	}
+	if c.AssetValueUSD == nil {
+		return fmt.Errorf("assetValueUSD must not be nil")
+	}
+	if c.AssetValueUSD.Sign() < 0 {
+		return fmt.Errorf("assetValueUSD must be non-negative, got %s", c.AssetValueUSD)
+	}
+	if c.LiquidationLevel != nil && c.LiquidationLevel.Sign() < 0 {
+		return fmt.Errorf("liquidationLevel must be non-negative, got %s", c.LiquidationLevel)
+	}
+	return nil
+}
