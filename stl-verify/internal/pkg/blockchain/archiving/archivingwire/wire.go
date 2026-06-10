@@ -11,6 +11,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -82,6 +83,11 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 		return nil, nil, fmt.Errorf("%s is required when %s=true", EnvBucket, EnvFlag)
 	}
 
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving chain name for archiving metrics: %w", err)
+	}
+
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading AWS config: %w", err)
@@ -105,6 +111,7 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 		return archiving.NewMulticaller(inner, archiver, archiving.Config{
 			Source:  source,
 			ChainID: chainID,
+			Chain:   chainName,
 			BuildID: buildID,
 			Wait:    &wg,
 			Sem:     sem,
