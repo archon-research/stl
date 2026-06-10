@@ -61,25 +61,14 @@ type VaultMetadata struct {
 	Version  entity.MorphoVaultVersion
 }
 
-// ReconcileConfig holds the symbol-reconciliation retry timing for the blockchain client.
-type ReconcileConfig struct {
-	// SweepIntervalBlocks (N): run a reconciliation sweep every N processed
-	// blocks. Zero disables reconciliation.
-	SweepIntervalBlocks int64
-	// BackstopBlocks (K): stop retrying a token once the processed block exceeds
-	// its anchor block + K. The token is then left with an empty symbol.
-	BackstopBlocks int64
-}
-
 // TokenMetadata holds token metadata from on-chain reads.
+// Symbol may be empty when symbol() reverted or could not be decoded at the
+// read block; an empty symbol on a non-error return means "not resolvable at
+// this block — the per-block sweep retries it later". Decimals is always
+// authoritative (a decimals() revert is a hard error).
 type TokenMetadata struct {
-	Symbol string
-	// SymbolResolved is false when symbol() reverted or could not be decoded at
-	// the read block. Decimals is always authoritative (a decimals() revert is a
-	// hard error). A false value means the symbol is a placeholder to reconcile
-	// later, never a final value.
-	SymbolResolved bool
-	Decimals       int
+	Symbol   string
+	Decimals int
 }
 
 // blockchainService handles all on-chain reads for Morpho protocol.
@@ -90,7 +79,6 @@ type blockchainService struct {
 	erc20ABI        *abi.ABI
 	vaultProber     *VaultProber
 	metadataCache   map[common.Address]TokenMetadata
-	reconcile       ReconcileConfig
 	telemetry       *Telemetry
 	logger          *slog.Logger
 }
@@ -98,7 +86,6 @@ type blockchainService struct {
 func newBlockchainService(
 	multicallClient outbound.Multicaller,
 	erc20ABI *abi.ABI,
-	reconcile ReconcileConfig,
 	logger *slog.Logger,
 	telemetry *Telemetry,
 ) (*blockchainService, error) {
@@ -124,7 +111,6 @@ func newBlockchainService(
 		erc20ABI:        erc20ABI,
 		vaultProber:     vaultProber,
 		metadataCache:   make(map[common.Address]TokenMetadata),
-		reconcile:       reconcile,
 		telemetry:       telemetry,
 		logger:          logger.With("component", "morpho-blockchain-service"),
 	}, nil
@@ -651,15 +637,14 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 // Short-circuiting at the metadata layer keeps the rest of the indexer from
 // having to special-case 0x0 downstream.
 //
-// SymbolResolved is true because the empty symbol is final, not pending: the
-// zero address is a known sentinel and must never be flagged for symbol
-// reconciliation (chasing symbol() at 0x0 would loop forever).
-var zeroAddressTokenMetadata = TokenMetadata{Symbol: "", Decimals: 0, SymbolResolved: true}
+// The empty symbol here is final: the zero address is a known sentinel that
+// is excluded from the per-block sweep by address, so it is never retried.
+var zeroAddressTokenMetadata = TokenMetadata{Symbol: "", Decimals: 0}
 
 // getTokenMetadata fetches token symbol and decimals via ERC20 calls.
 //
 // symbol() is best-effort: a reverted or undecodable symbol() yields
-// Symbol="" and SymbolResolved=false, which a later reconciler fills in.
+// Symbol="" with no error; the per-block sweep retries it later.
 // decimals() is mandatory: a reverted decimals() is a hard error because a
 // silent 0-decimals value would corrupt all downstream amount math.
 // A non-string symbol() (e.g. MKR-style bytes32) is handled by
@@ -708,8 +693,8 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 		return TokenMetadata{}, fmt.Errorf("getTokenMetadata(%s): expected 2 results, got %d", tokenAddress.Hex(), len(results))
 	}
 	// decimals() (index 1) must succeed — it drives all amount math. A reverted
-	// symbol() (index 0) is tolerated: unpackTokenMetadataResults yields an empty,
-	// unresolved symbol that the reconciler fills in later. Narrows VEC-188
+	// symbol() (index 0) is tolerated: unpackTokenMetadataResults yields an empty
+	// symbol that the per-block sweep fills in later. Narrows VEC-188
 	// Finding 3 to decimals only.
 	if !results[1].Success {
 		return TokenMetadata{}, fmt.Errorf("getTokenMetadata(%s): decimals() sub-call reverted", tokenAddress.Hex())
@@ -729,12 +714,11 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 // (results[decimals index].Success == true) before calling this helper.
 //
 // symbol() is best-effort: a reverted symbol() sub-call (Success: false) yields
-// Symbol="" and SymbolResolved=false, which the reconciler fills in later.
+// Symbol="" with no error; the per-block sweep retries it later.
 // symbol() supports both modern (`string`) and legacy (`bytes32`, e.g. MKR)
 // ABIs via erc20meta.DecodeStringOrBytes32; on total decode failure (when
 // symbol() succeeded but the return data is neither a valid ABI string nor
-// bytes32) the symbol is left empty with SymbolResolved=false — still
-// best-effort, no error returned.
+// bytes32) the symbol is left empty — still best-effort, no error returned.
 //
 // decimals() must decode cleanly — a failure here means the contract is not a
 // conformant ERC20 and we surface an error rather than persist 0.
@@ -744,7 +728,6 @@ func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsRes
 	if symbolResult.Success && len(symbolResult.ReturnData) > 0 {
 		if sym, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "symbol", symbolResult.ReturnData); err == nil {
 			md.Symbol = sym
-			md.SymbolResolved = true
 		}
 	}
 
@@ -847,7 +830,7 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("getTokenPairMetadata(%s,%s): expected 4 results, got %d", tokenA.Hex(), tokenB.Hex(), len(results))
 	}
 	// Only decimals() (indices 1 and 3) must succeed; reverted symbol() calls
-	// (indices 0/2) yield empty, unresolved symbols. See unpackTokenMetadataResults.
+	// (indices 0/2) yield empty symbols for later sweep retry. See unpackTokenMetadataResults.
 	if !results[1].Success {
 		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("getTokenPairMetadata(%s,%s): decimals() reverted for %s", tokenA.Hex(), tokenB.Hex(), tokenA.Hex())
 	}
@@ -909,22 +892,10 @@ func (s *blockchainService) resolveSymbolsAt(ctx context.Context, tokens []commo
 		resolved[tokens[i]] = sym
 		if cached, ok := s.metadataCache[tokens[i]]; ok {
 			cached.Symbol = sym
-			cached.SymbolResolved = true
 			s.metadataCache[tokens[i]] = cached
 		}
 	}
 	return resolved, nil
-}
-
-// shouldSweep reports whether a reconciliation sweep should run at this block.
-func (s *blockchainService) shouldSweep(blockNumber int64) bool {
-	return s.reconcile.SweepIntervalBlocks > 0 && blockNumber%s.reconcile.SweepIntervalBlocks == 0
-}
-
-// backstopExceeded reports whether currentBlock is more than BackstopBlocks past
-// the token's anchor block, at which point retrying is abandoned.
-func (s *blockchainService) backstopExceeded(anchorBlock, currentBlock int64) bool {
-	return currentBlock > anchorBlock+s.reconcile.BackstopBlocks
 }
 
 // bigIntFromAny converts an interface value (typically *big.Int) to *big.Int.

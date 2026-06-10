@@ -16,12 +16,6 @@ type TokenInput struct {
 	CreatedAtBlock int64
 }
 
-// PendingTokenSymbol is a token awaiting symbol reconciliation.
-type PendingTokenSymbol struct {
-	Address     common.Address
-	AnchorBlock int64
-}
-
 // TokenRepository defines the interface for token-related data persistence.
 // This aggregate includes base tokens and their derivatives (receipt/debt tokens).
 type TokenRepository interface {
@@ -32,23 +26,13 @@ type TokenRepository interface {
 	// GetOrCreateTokens bulk-upserts multiple tokens and returns a map of address to token ID.
 	GetOrCreateTokens(ctx context.Context, tx pgx.Tx, tokens []TokenInput) (map[common.Address]int64, error)
 
-	// MarkTokenSymbolPending flags a token (within the caller's tx) as needing
-	// later symbol reconciliation, recording the anchor block. It is a no-op if
-	// the token already has a non-empty symbol, so it never clobbers a resolved one.
-	// Re-flagging a still-pending token preserves the EARLIEST anchor block, so the
-	// reconciliation backstop horizon does not move forward on repeat sightings.
-	MarkTokenSymbolPending(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, anchorBlock int64) error
+	// ListTokensMissingSymbol returns addresses of tokens on the chain whose symbol
+	// is still empty (the zero-address sentinel is excluded), capped at limit rows.
+	// limit must be positive.
+	ListTokensMissingSymbol(ctx context.Context, chainID int64, limit int) ([]common.Address, error)
 
-	// ListTokensPendingSymbol returns the tokens flagged for symbol reconciliation
-	// on the given chain, capped at limit rows. A non-positive limit applies the
-	// implementation's default cap (callers normally pass a positive batch size);
-	// implementations must not treat limit <= 0 as "return zero rows".
-	ListTokensPendingSymbol(ctx context.Context, chainID int64, limit int) ([]PendingTokenSymbol, error)
-
-	// ResolveTokenSymbol sets a resolved symbol and clears the pending flag.
+	// ResolveTokenSymbol sets a token's symbol. It only fills an empty symbol —
+	// a token that already has one is left untouched and an error is returned, so
+	// a resolved symbol can never be clobbered.
 	ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error
-
-	// MarkTokenSymbolUnresolved clears the pending flag and records that the
-	// symbol could not be resolved within the backstop, leaving symbol empty.
-	MarkTokenSymbolUnresolved(ctx context.Context, chainID int64, address common.Address) error
 }

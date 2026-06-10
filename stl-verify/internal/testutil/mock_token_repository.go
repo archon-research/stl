@@ -10,12 +10,10 @@ import (
 
 // MockTokenRepository implements outbound.TokenRepository for testing.
 type MockTokenRepository struct {
-	GetOrCreateTokenFn          func(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
-	GetOrCreateTokensFn         func(ctx context.Context, tx pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error)
-	MarkTokenSymbolPendingFn    func(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, anchorBlock int64) error
-	ListTokensPendingSymbolFn   func(ctx context.Context, chainID int64, limit int) ([]outbound.PendingTokenSymbol, error)
-	ResolveTokenSymbolFn        func(ctx context.Context, chainID int64, address common.Address, symbol string) error
-	MarkTokenSymbolUnresolvedFn func(ctx context.Context, chainID int64, address common.Address) error
+	GetOrCreateTokenFn        func(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
+	GetOrCreateTokensFn       func(ctx context.Context, tx pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error)
+	ListTokensMissingSymbolFn func(ctx context.Context, chainID int64, limit int) ([]common.Address, error)
+	ResolveTokenSymbolFn      func(ctx context.Context, chainID int64, address common.Address, symbol string) error
 }
 
 func (m *MockTokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
@@ -44,16 +42,9 @@ func (m *MockTokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, 
 	return result, nil
 }
 
-func (m *MockTokenRepository) MarkTokenSymbolPending(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, anchorBlock int64) error {
-	if m.MarkTokenSymbolPendingFn != nil {
-		return m.MarkTokenSymbolPendingFn(ctx, tx, chainID, address, anchorBlock)
-	}
-	return nil
-}
-
-func (m *MockTokenRepository) ListTokensPendingSymbol(ctx context.Context, chainID int64, limit int) ([]outbound.PendingTokenSymbol, error) {
-	if m.ListTokensPendingSymbolFn != nil {
-		return m.ListTokensPendingSymbolFn(ctx, chainID, limit)
+func (m *MockTokenRepository) ListTokensMissingSymbol(ctx context.Context, chainID int64, limit int) ([]common.Address, error) {
+	if m.ListTokensMissingSymbolFn != nil {
+		return m.ListTokensMissingSymbolFn(ctx, chainID, limit)
 	}
 	return nil, nil
 }
@@ -61,13 +52,6 @@ func (m *MockTokenRepository) ListTokensPendingSymbol(ctx context.Context, chain
 func (m *MockTokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error {
 	if m.ResolveTokenSymbolFn != nil {
 		return m.ResolveTokenSymbolFn(ctx, chainID, address, symbol)
-	}
-	return nil
-}
-
-func (m *MockTokenRepository) MarkTokenSymbolUnresolved(ctx context.Context, chainID int64, address common.Address) error {
-	if m.MarkTokenSymbolUnresolvedFn != nil {
-		return m.MarkTokenSymbolUnresolvedFn(ctx, chainID, address)
 	}
 	return nil
 }

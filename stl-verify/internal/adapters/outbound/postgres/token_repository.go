@@ -93,100 +93,56 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 	return result, nil
 }
 
-// MarkTokenSymbolPending flags a token for later symbol reconciliation. It is a
-// no-op when the token already has a non-empty symbol, so a redrive or a later
-// sighting cannot clobber a resolved symbol.
-func (r *TokenRepository) MarkTokenSymbolPending(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, anchorBlock int64) error {
-	// Preserve the EARLIEST anchor block via LEAST: a still-unresolved token may
-	// be re-flagged in later blocks (e.g. used as collateral in another new
-	// market). Overwriting the anchor would push the backstop horizon
-	// (anchor + K) forward on every sighting so it could never be reached, leaving
-	// the token pending forever. Mirrors the created_at_block LEAST convention.
-	_, err := tx.Exec(ctx,
-		`UPDATE token
-		    SET metadata = COALESCE(metadata, '{}'::jsonb)
-		        || jsonb_build_object('symbol_pending', true)
-		        || jsonb_build_object('symbol_anchor_block',
-		               LEAST(COALESCE((metadata ->> 'symbol_anchor_block')::bigint, $3::bigint), $3::bigint))
-		  WHERE chain_id = $1 AND address = $2 AND COALESCE(symbol, '') = ''`,
-		chainID, address.Bytes(), anchorBlock)
-	if err != nil {
-		return fmt.Errorf("marking token symbol pending: %w", err)
-	}
-	return nil
-}
-
-// ListTokensPendingSymbol returns tokens flagged for symbol reconciliation.
-func (r *TokenRepository) ListTokensPendingSymbol(ctx context.Context, chainID int64, limit int) ([]outbound.PendingTokenSymbol, error) {
+// ListTokensMissingSymbol returns addresses of tokens with an empty symbol
+// (the zero-address sentinel is excluded), ordered by created_at_block, capped
+// at limit rows.
+func (r *TokenRepository) ListTokensMissingSymbol(ctx context.Context, chainID int64, limit int) ([]common.Address, error) {
 	if limit <= 0 {
-		limit = 500
+		return nil, fmt.Errorf("listing tokens missing symbol: limit must be positive, got %d", limit)
 	}
 	rows, err := r.pool.Query(ctx,
-		`SELECT address, COALESCE((metadata->>'symbol_anchor_block')::bigint, 0)
+		`SELECT address
 		   FROM token
 		  WHERE chain_id = $1
-		    AND (metadata->>'symbol_pending') = 'true'
+		    AND symbol = ''
+		    AND address <> $2
 		  ORDER BY created_at_block
-		  LIMIT $2`,
-		chainID, limit)
+		  LIMIT $3`,
+		chainID, common.Address{}.Bytes(), limit)
 	if err != nil {
-		return nil, fmt.Errorf("listing tokens pending symbol: %w", err)
+		return nil, fmt.Errorf("listing tokens missing symbol: %w", err)
 	}
 	defer rows.Close()
 
-	var out []outbound.PendingTokenSymbol
+	var out []common.Address
 	for rows.Next() {
 		var addrBytes []byte
-		var anchor int64
-		if err := rows.Scan(&addrBytes, &anchor); err != nil {
-			return nil, fmt.Errorf("scanning pending token: %w", err)
+		if err := rows.Scan(&addrBytes); err != nil {
+			return nil, fmt.Errorf("scanning missing-symbol token: %w", err)
 		}
-		out = append(out, outbound.PendingTokenSymbol{
-			Address:     common.BytesToAddress(addrBytes),
-			AnchorBlock: anchor,
-		})
+		out = append(out, common.BytesToAddress(addrBytes))
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating pending tokens: %w", err)
+		return nil, fmt.Errorf("iterating missing-symbol tokens: %w", err)
 	}
 	return out, nil
 }
 
-// ResolveTokenSymbol sets a resolved symbol and clears the pending flag.
-// It only updates tokens that are actually pending (symbol_pending = true) to
-// prevent clobbering a symbol that has already been resolved.
+// ResolveTokenSymbol sets a token's symbol. It only fills an empty symbol —
+// a token that already has one is left untouched and an error is returned, so
+// a resolved symbol can never be clobbered.
 func (r *TokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE token
 		    SET symbol = $3,
-		        metadata = (COALESCE(metadata, '{}'::jsonb) - 'symbol_pending') - 'symbol_anchor_block',
 		        updated_at = NOW()
-		  WHERE chain_id = $1 AND address = $2
-		    AND (metadata->>'symbol_pending') = 'true'`,
+		  WHERE chain_id = $1 AND address = $2 AND symbol = ''`,
 		chainID, address.Bytes(), symbol)
 	if err != nil {
 		return fmt.Errorf("resolving token symbol: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("resolving token symbol %s: no matching token row", address.Hex())
-	}
-	return nil
-}
-
-// MarkTokenSymbolUnresolved clears the pending flag and records that the symbol
-// could not be resolved within the backstop, leaving the empty symbol in place.
-func (r *TokenRepository) MarkTokenSymbolUnresolved(ctx context.Context, chainID int64, address common.Address) error {
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE token
-		    SET metadata = (COALESCE(metadata, '{}'::jsonb) - 'symbol_pending' - 'symbol_anchor_block') || jsonb_build_object('symbol_unresolved', true),
-		        updated_at = NOW()
-		  WHERE chain_id = $1 AND address = $2`,
-		chainID, address.Bytes())
-	if err != nil {
-		return fmt.Errorf("marking token symbol unresolved: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("marking token symbol unresolved %s: no matching token row", address.Hex())
+		return fmt.Errorf("resolving token symbol %s: no matching empty-symbol row", address.Hex())
 	}
 	return nil
 }

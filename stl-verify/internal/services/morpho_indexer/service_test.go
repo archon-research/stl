@@ -16,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel/metric/noop"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -3340,12 +3339,12 @@ func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenRepoError(t *testing.T) {
 	}
 }
 
-// TestCreateMarket_SymbolRevert_FlagsCollateralPending verifies that when a
+// TestCreateMarket_SymbolRevert_StoresEmptySymbol verifies that when a
 // CreateMarket event is processed and the collateral token's symbol() call
-// reverts (SymbolResolved=false), MarkTokenSymbolPending is called exactly once
-// for the collateral token address, and NOT for the loan token (whose symbol
-// resolved successfully). The anchor block must equal the processed block number.
-func TestCreateMarket_SymbolRevert_FlagsCollateralPending(t *testing.T) {
+// reverts, the collateral token is persisted with an empty symbol (which
+// acts as the pending marker for the sweep). The loan token (whose symbol
+// resolved) must be stored with its real symbol.
+func TestCreateMarket_SymbolRevert_StoresEmptySymbol(t *testing.T) {
 	const blockNumber = int64(20000001)
 	h := newTestHarness(t)
 
@@ -3354,7 +3353,6 @@ func TestCreateMarket_SymbolRevert_FlagsCollateralPending(t *testing.T) {
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 4:
-			// getTokenPairMetadata
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packString("LOAN")}, // loan symbol OK
 				{Success: true, ReturnData: h.packUint8(18)},      // loan decimals OK
@@ -3362,7 +3360,6 @@ func TestCreateMarket_SymbolRevert_FlagsCollateralPending(t *testing.T) {
 				{Success: true, ReturnData: h.packUint8(8)},       // coll decimals OK
 			}, nil
 		case 1:
-			// getMarketState
 			return []outbound.Result{h.defaultMarketStateResult()}, nil
 		default:
 			return nil, fmt.Errorf("unexpected %d calls", len(calls))
@@ -3376,17 +3373,15 @@ func TestCreateMarket_SymbolRevert_FlagsCollateralPending(t *testing.T) {
 		return nil
 	}
 
-	// Capture MarkTokenSymbolPending calls.
-	var pendingCalls []struct {
-		address     common.Address
-		anchorBlock int64
+	// Capture GetOrCreateToken calls to inspect what symbol was stored.
+	type tokenCall struct {
+		address common.Address
+		symbol  string
 	}
-	h.tokenRepo.MarkTokenSymbolPendingFn = func(_ context.Context, _ pgx.Tx, _ int64, address common.Address, anchorBlock int64) error {
-		pendingCalls = append(pendingCalls, struct {
-			address     common.Address
-			anchorBlock int64
-		}{address, anchorBlock})
-		return nil
+	var tokenCalls []tokenCall
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ int64) (int64, error) {
+		tokenCalls = append(tokenCalls, tokenCall{addr, sym})
+		return int64(len(tokenCalls)), nil
 	}
 
 	log := h.makeCreateMarketLog(testMarketID, testLoanToken, testCollToken, testOracle, testIrm, big.NewInt(800000000000000000))
@@ -3396,110 +3391,32 @@ func TestCreateMarket_SymbolRevert_FlagsCollateralPending(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	// MarkTokenSymbolPending must be called exactly once — for the collateral token only.
-	if len(pendingCalls) != 1 {
-		t.Fatalf("MarkTokenSymbolPending called %d times, want 1 (collateral only)", len(pendingCalls))
+	// Both tokens must have been persisted: loan with "LOAN", collateral with "".
+	if len(tokenCalls) != 2 {
+		t.Fatalf("GetOrCreateToken called %d times, want 2", len(tokenCalls))
 	}
-	if pendingCalls[0].address != testCollToken {
-		t.Errorf("MarkTokenSymbolPending called for %s, want collateral token %s",
-			pendingCalls[0].address.Hex(), testCollToken.Hex())
+	loanCall := tokenCalls[0]
+	collCall := tokenCalls[1]
+	if loanCall.address != testLoanToken {
+		t.Errorf("first token call addr = %s, want loan %s", loanCall.address.Hex(), testLoanToken.Hex())
 	}
-	if pendingCalls[0].anchorBlock != blockNumber {
-		t.Errorf("MarkTokenSymbolPending anchorBlock = %d, want %d", pendingCalls[0].anchorBlock, blockNumber)
+	if loanCall.symbol != "LOAN" {
+		t.Errorf("loan token symbol = %q, want LOAN", loanCall.symbol)
 	}
-}
-
-// TestEnsureMarket_SymbolRevert_FlagsCollateralPending verifies that when a
-// position event (Supply) triggers ensureMarket for a market NOT yet in the DB
-// and the collateral token symbol() reverts (SymbolResolved=false) while the
-// loan symbol and both decimals succeed, MarkTokenSymbolPending is called
-// exactly once for the collateral token address, and NOT for the loan token.
-// The anchor block must equal the processed block number.
-//
-// Call sequence for handlePositionEvent on a not-in-DB market:
-//  1. getMarketAndPositionState - 2-call multicall (market state + position state)
-//  2. ensureMarket -> getMarketParams - 1-call multicall
-//  3. ensureMarket -> getTokenPairMetadata - 4-call multicall
-//     [symbol(loan), decimals(loan), symbol(coll), decimals(coll)]
-//     Collateral symbol (3rd result) is set to {Success: false, ReturnData: nil}.
-func TestEnsureMarket_SymbolRevert_FlagsCollateralPending(t *testing.T) {
-	const blockNumber = int64(20000002)
-	h := newTestHarness(t)
-	// Market is NOT in DB — GetMarketByMarketIDFn is nil, so the default returns nil, nil.
-
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		switch len(calls) {
-		case 1:
-			// getMarketParams (idToMarketParams)
-			return []outbound.Result{
-				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, big.NewInt(800000000000000000))},
-			}, nil
-		case 2:
-			// getMarketAndPositionState (market state + position state)
-			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
-		case 4:
-			// getTokenPairMetadata: loan symbol OK, loan decimals OK, coll symbol REVERTS, coll decimals OK.
-			return []outbound.Result{
-				{Success: true, ReturnData: h.packString("LOAN")}, // loan symbol OK
-				{Success: true, ReturnData: h.packUint8(18)},      // loan decimals OK
-				{Success: false, ReturnData: nil},                 // coll symbol REVERTS
-				{Success: true, ReturnData: h.packUint8(8)},       // coll decimals OK
-			}, nil
-		default:
-			return nil, fmt.Errorf("unexpected %d calls", len(calls))
-		}
+	if collCall.address != testCollToken {
+		t.Errorf("second token call addr = %s, want coll %s", collCall.address.Hex(), testCollToken.Hex())
 	}
-
-	h.morphoRepo.GetOrCreateMarketFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarket) (int64, error) {
-		return 55, nil
-	}
-	h.morphoRepo.SaveMarketStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarketState) error {
-		return nil
-	}
-	h.morphoRepo.SaveMarketPositionFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarketPosition) error {
-		return nil
-	}
-
-	// Capture MarkTokenSymbolPending calls.
-	var pendingCalls []struct {
-		address     common.Address
-		anchorBlock int64
-	}
-	h.tokenRepo.MarkTokenSymbolPendingFn = func(_ context.Context, _ pgx.Tx, _ int64, address common.Address, anchorBlock int64) error {
-		pendingCalls = append(pendingCalls, struct {
-			address     common.Address
-			anchorBlock int64
-		}{address, anchorBlock})
-		return nil
-	}
-
-	log := h.makeSupplyLog(testMarketID, testCaller, testOnBehalf, big.NewInt(1000), big.NewInt(900))
-	receipt := makeReceipt(testTxHash, log)
-
-	if err := h.processBlock(t, 1, blockNumber, 0, []shared.TransactionReceipt{receipt}); err != nil {
-		t.Fatalf("processBlock: %v", err)
-	}
-
-	// MarkTokenSymbolPending must be called exactly once - for the collateral token only.
-	if len(pendingCalls) != 1 {
-		t.Fatalf("MarkTokenSymbolPending called %d times, want 1 (collateral only)", len(pendingCalls))
-	}
-	if pendingCalls[0].address != testCollToken {
-		t.Errorf("MarkTokenSymbolPending called for %s, want collateral token %s",
-			pendingCalls[0].address.Hex(), testCollToken.Hex())
-	}
-	if pendingCalls[0].anchorBlock != blockNumber {
-		t.Errorf("MarkTokenSymbolPending anchorBlock = %d, want %d", pendingCalls[0].anchorBlock, blockNumber)
+	if collCall.symbol != "" {
+		t.Errorf("collateral token symbol = %q, want empty (pending marker)", collCall.symbol)
 	}
 }
 
 func TestReconcilePendingSymbols_ResolvesAtCurrentBlock(t *testing.T) {
 	h := newTestHarness(t)
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
 
 	pending := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-		return []outbound.PendingTokenSymbol{{Address: pending, AnchorBlock: 25252154}}, nil
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		return []common.Address{pending}, nil
 	}
 	resolved := map[common.Address]string{}
 	h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, address common.Address, symbol string) error {
@@ -3512,7 +3429,7 @@ func TestReconcilePendingSymbols_ResolvesAtCurrentBlock(t *testing.T) {
 		return []outbound.Result{{Success: true, ReturnData: h.packString("stakedao-frxUsDOLA")}}, nil
 	}
 
-	// Block 25252160 is within backstop (anchor 25252154 + 1000) and a sweep block (multiple of 10).
+	// Block 25252160 is a sweep block (multiple of 10).
 	h.svc.reconcilePendingSymbols(context.Background(), 1, 25252160)
 
 	if resolved[pending] != "stakedao-frxUsDOLA" {
@@ -3523,127 +3440,26 @@ func TestReconcilePendingSymbols_ResolvesAtCurrentBlock(t *testing.T) {
 	}
 }
 
-func TestReconcilePendingSymbols_BackstopDropsAndCounts(t *testing.T) {
-	h := newTestHarness(t)
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
-
-	stuck := common.HexToAddress("0xDEAD00000000000000000000000000000000BEEF")
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-		return []outbound.PendingTokenSymbol{{Address: stuck, AnchorBlock: 100}}, nil
-	}
-	var unresolved []common.Address
-	h.tokenRepo.MarkTokenSymbolUnresolvedFn = func(_ context.Context, _ int64, address common.Address) error {
-		unresolved = append(unresolved, address)
-		return nil
-	}
-	resolveCalled := false
-	h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, _ common.Address, _ string) error {
-		resolveCalled = true
-		return nil
-	}
-
-	// Current block 100 + 1000 + 1 = past backstop. A sweep block (multiple of 10).
-	h.svc.reconcilePendingSymbols(context.Background(), 1, 1110)
-
-	if len(unresolved) != 1 || unresolved[0] != stuck {
-		t.Fatalf("unresolved = %v, want [%s]", unresolved, stuck.Hex())
-	}
-	if resolveCalled {
-		t.Error("ResolveTokenSymbol must not be called for a backstop-exceeded token")
-	}
-}
-
 func TestReconcilePendingSymbols_NonSweepBlockIsNoop(t *testing.T) {
 	h := newTestHarness(t)
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
 	listed := false
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
 		listed = true
 		return nil, nil
 	}
 	h.svc.reconcilePendingSymbols(context.Background(), 1, 25252161) // not a multiple of 10
 	if listed {
-		t.Error("non-sweep block must not query pending tokens")
+		t.Error("non-sweep block must not query missing-symbol tokens")
 	}
 }
 
 func TestReconcilePendingSymbols_ListErrorDoesNotPanicOrPropagate(t *testing.T) {
 	h := newTestHarness(t)
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
 		return nil, fmt.Errorf("db down")
 	}
 	// Best-effort: must not panic. It is a void method, so nothing to assert beyond no panic.
 	h.svc.reconcilePendingSymbols(context.Background(), 1, 100)
-}
-
-// TestReconcilePendingSymbols_MixedResolveAndBackstop verifies that a single
-// sweep correctly separates two pending tokens: one within the backstop window
-// (resolved via multicall) and one past the backstop (marked unresolved), with
-// no cross-contamination between the two paths.
-func TestReconcilePendingSymbols_MixedResolveAndBackstop(t *testing.T) {
-	h := newTestHarness(t)
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
-
-	// Current sweep block: 2000 (multiple of 10).
-	// within: anchor=1500 => 2000 <= 1500+1000=2500, still within backstop window.
-	// expired: anchor=900  => 2000 >  900+1000=1900, backstop exceeded.
-	withinAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	expiredAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
-
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-		return []outbound.PendingTokenSymbol{
-			{Address: withinAddr, AnchorBlock: 1500},
-			{Address: expiredAddr, AnchorBlock: 900},
-		}, nil
-	}
-
-	// ExecuteFn must be called with exactly ONE call targeting withinAddr.
-	var executeCalls []outbound.Call
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		executeCalls = append(executeCalls, calls...)
-		return []outbound.Result{{Success: true, ReturnData: h.packString("WITHIN")}}, nil
-	}
-
-	resolved := map[common.Address]string{}
-	h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, address common.Address, symbol string) error {
-		resolved[address] = symbol
-		return nil
-	}
-
-	var unresolved []common.Address
-	h.tokenRepo.MarkTokenSymbolUnresolvedFn = func(_ context.Context, _ int64, address common.Address) error {
-		unresolved = append(unresolved, address)
-		return nil
-	}
-
-	h.svc.reconcilePendingSymbols(context.Background(), 1, 2000)
-
-	// ExecuteFn must have been called with exactly one call for the within token.
-	if len(executeCalls) != 1 {
-		t.Fatalf("ExecuteFn received %d calls, want 1 (only withinAddr)", len(executeCalls))
-	}
-	if executeCalls[0].Target != withinAddr {
-		t.Errorf("ExecuteFn call target = %s, want %s", executeCalls[0].Target.Hex(), withinAddr.Hex())
-	}
-
-	// ResolveTokenSymbol must be called once for withinAddr with "WITHIN".
-	if resolved[withinAddr] != "WITHIN" {
-		t.Errorf("resolved[withinAddr] = %q, want WITHIN", resolved[withinAddr])
-	}
-	if _, ok := resolved[expiredAddr]; ok {
-		t.Errorf("ResolveTokenSymbol must not be called for expiredAddr, got symbol %q", resolved[expiredAddr])
-	}
-
-	// MarkTokenSymbolUnresolved must be called once for expiredAddr.
-	if len(unresolved) != 1 || unresolved[0] != expiredAddr {
-		t.Errorf("unresolved = %v, want [%s]", unresolved, expiredAddr.Hex())
-	}
-	for _, addr := range unresolved {
-		if addr == withinAddr {
-			t.Error("MarkTokenSymbolUnresolved must not be called for withinAddr")
-		}
-	}
 }
 
 // --- processBlockEvent / reconcilePendingSymbols integration ---
@@ -3655,11 +3471,9 @@ func TestReconcilePendingSymbols_MixedResolveAndBackstop(t *testing.T) {
 // repo.
 func TestProcessBlockEvent_FetchError_SkipsReconcile(t *testing.T) {
 	h := newTestHarness(t)
-	// Enable reconcile with sweep interval 10 and pick a sweep-eligible block.
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
 
 	listCalled := false
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
 		listCalled = true
 		return nil, nil
 	}
@@ -3673,86 +3487,53 @@ func TestProcessBlockEvent_FetchError_SkipsReconcile(t *testing.T) {
 		t.Fatal("expected error for cache miss, got nil")
 	}
 	if listCalled {
-		t.Error("ListTokensPendingSymbol must not be called when fetchAndProcessReceipts fails")
+		t.Error("ListTokensMissingSymbol must not be called when fetchAndProcessReceipts fails")
 	}
 }
 
 // TestProcessBlockEvent_Success_RunsReconcileOnSweepBlock asserts that on a
-// successful block that falls on a sweep-eligible block number (multiple of N),
-// reconcilePendingSymbols is called with the correct chainID. Empty receipts
-// are used so no Morpho-specific processing is needed.
+// successful block that falls on a sweep-eligible block number (multiple of
+// symbolSweepIntervalBlocks), reconcilePendingSymbols is called with the
+// correct chainID. Empty receipts are used so no Morpho-specific processing
+// is needed.
 func TestProcessBlockEvent_Success_RunsReconcileOnSweepBlock(t *testing.T) {
 	h := newTestHarness(t)
-	// Enable reconcile with sweep interval 10 and pick a sweep-eligible block.
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
 
 	var listCalledWithChainID int64
 	listCalled := false
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, chainID int64, _ int) ([]outbound.PendingTokenSymbol, error) {
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, chainID int64, _ int) ([]common.Address, error) {
 		listCalled = true
 		listCalledWithChainID = chainID
 		return nil, nil // empty list, nothing to reconcile
 	}
 
-	// Store empty receipts so fetchAndProcessReceipts succeeds.
+	// Block 20 is a multiple of symbolSweepIntervalBlocks (10).
 	if err := h.processBlock(t, 1, 20, 0, []shared.TransactionReceipt{}); err != nil {
 		t.Fatalf("processBlock: %v", err)
 	}
 
 	if !listCalled {
-		t.Error("ListTokensPendingSymbol must be called on a sweep-eligible block after successful processing")
+		t.Error("ListTokensMissingSymbol must be called on a sweep-eligible block after successful processing")
 	}
 	if listCalledWithChainID != 1 {
-		t.Errorf("ListTokensPendingSymbol called with chainID %d, want 1", listCalledWithChainID)
+		t.Errorf("ListTokensMissingSymbol called with chainID %d, want 1", listCalledWithChainID)
 	}
 }
 
-// TestReconcilePendingSymbols_SwallowedErrors covers the three best-effort
+// TestReconcilePendingSymbols_SwallowedErrors covers the two best-effort
 // error-swallow branches inside reconcilePendingSymbols. None of them must
 // panic or propagate an error (the method is void).
 func TestReconcilePendingSymbols_SwallowedErrors(t *testing.T) {
-	backstopAddr := common.HexToAddress("0xDEAD000000000000000000000000000000001111")
-	withinAddr1 := common.HexToAddress("0xAAAA000000000000000000000000000000001111")
-	withinAddr2 := common.HexToAddress("0xBBBB000000000000000000000000000000002222")
-
-	t.Run("MarkTokenSymbolUnresolved_error_does_not_propagate", func(t *testing.T) {
-		// (a) MarkTokenSymbolUnresolvedFn returns an error for a backstop-exceeded
-		// token. reconcilePendingSymbols must swallow it. ResolveTokenSymbol must
-		// NOT be called because the token is backstop-exceeded.
-		h := newTestHarness(t)
-		h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
-
-		h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-			// anchor=100, block=1110 => 1110 > 100+1000=1100, backstop exceeded
-			return []outbound.PendingTokenSymbol{{Address: backstopAddr, AnchorBlock: 100}}, nil
-		}
-		h.tokenRepo.MarkTokenSymbolUnresolvedFn = func(_ context.Context, _ int64, _ common.Address) error {
-			return errors.New("db write failed")
-		}
-		resolveCalled := false
-		h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, _ common.Address, _ string) error {
-			resolveCalled = true
-			return nil
-		}
-
-		// Must not panic; void method so nothing to assert beyond no-panic.
-		h.svc.reconcilePendingSymbols(context.Background(), 1, 1110)
-
-		if resolveCalled {
-			t.Error("ResolveTokenSymbol must not be called for a backstop-exceeded token")
-		}
-	})
+	addr1 := common.HexToAddress("0xAAAA000000000000000000000000000000001111")
+	addr2 := common.HexToAddress("0xBBBB000000000000000000000000000000002222")
 
 	t.Run("ResolveSymbolsAt_error_does_not_propagate", func(t *testing.T) {
-		// (b) ResolveSymbolsAt errors (multicaller returns error) for a
-		// within-backstop token. reconcilePendingSymbols must swallow it.
-		// ResolveTokenSymbolFn must NOT be called.
+		// ResolveSymbolsAt errors (multicaller returns error). reconcilePendingSymbols
+		// must swallow it. ResolveTokenSymbolFn must NOT be called.
 		h := newTestHarness(t)
-		h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
 
-		h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-			// anchor=1500, block=2000 => 2000 <= 1500+1000=2500, within backstop
-			return []outbound.PendingTokenSymbol{{Address: withinAddr1, AnchorBlock: 1500}}, nil
+		h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+			return []common.Address{addr1}, nil
 		}
 		h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 			return nil, errors.New("rpc timeout")
@@ -3771,17 +3552,13 @@ func TestReconcilePendingSymbols_SwallowedErrors(t *testing.T) {
 	})
 
 	t.Run("ResolveTokenSymbol_error_continues_to_next_token", func(t *testing.T) {
-		// (c) ResolveTokenSymbolFn returns an error for ONE of TWO resolved
-		// within-backstop tokens. The other token's persist must still be
-		// attempted (one failing persist must not drop the rest).
+		// ResolveTokenSymbolFn returns an error for ONE of TWO resolved tokens.
+		// The other token's persist must still be attempted — one failing persist
+		// must not drop the rest.
 		h := newTestHarness(t)
-		h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
 
-		h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-			return []outbound.PendingTokenSymbol{
-				{Address: withinAddr1, AnchorBlock: 1500},
-				{Address: withinAddr2, AnchorBlock: 1500},
-			}, nil
+		h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+			return []common.Address{addr1, addr2}, nil
 		}
 		// Both symbols resolve successfully via multicall.
 		h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -3811,65 +3588,11 @@ func TestReconcilePendingSymbols_SwallowedErrors(t *testing.T) {
 	})
 }
 
-// TestReconcilePendingSymbols_BackstopIncrementsCounter verifies that when a
-// token is dropped at the backstop, the morpho.token.symbol.unresolved.total
-// counter is incremented. A recording Telemetry with an in-memory reader is
-// wired into the Service so the Add call is exercised and the counter value
-// can be read back.
-func TestReconcilePendingSymbols_BackstopIncrementsCounter(t *testing.T) {
-	h := newTestHarness(t)
-	h.svc.blockchainSvc.reconcile = ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}
-
-	// Wire a real, recording Telemetry so RecordSymbolUnresolved fires.
-	tel, reader := newRecordingTelemetry(t)
-	h.svc.telemetry = tel
-
-	stuck := common.HexToAddress("0xDEAD00000000000000000000000000000000CAFE")
-	h.tokenRepo.ListTokensPendingSymbolFn = func(_ context.Context, _ int64, _ int) ([]outbound.PendingTokenSymbol, error) {
-		// anchor=100, block=1110 => 1110 > 100+1000=1100, backstop exceeded
-		return []outbound.PendingTokenSymbol{{Address: stuck, AnchorBlock: 100}}, nil
-	}
-	h.tokenRepo.MarkTokenSymbolUnresolvedFn = func(_ context.Context, _ int64, _ common.Address) error {
-		return nil
-	}
-
-	h.svc.reconcilePendingSymbols(context.Background(), 1, 1110)
-
-	// Collect metrics and assert the counter incremented by 1.
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-
-	var total int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "morpho.token.symbol.unresolved.total" {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("metric type = %T, want metricdata.Sum[int64]", m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				total += dp.Value
-			}
-		}
-	}
-	if total != 1 {
-		t.Errorf("morpho.token.symbol.unresolved.total = %d, want 1", total)
-	}
-}
-
-// TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending verifies that when a
+// TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol verifies that when a
 // vault is discovered via the V2 AccrueInterest path and the asset token's
-// symbol() reverts (SymbolResolved=false) while decimals() succeeds,
-// MarkTokenSymbolPending is called exactly once for the asset token address
-// with anchor == the processed block number.
-//
-// This mirrors TestCreateMarket_SymbolRevert_FlagsCollateralPending but for
-// the vault discovery path (discoverAndRegisterVault).
-func TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending(t *testing.T) {
+// symbol() reverts while decimals() succeeds, the asset token is persisted
+// with an empty symbol (the sweep picks it up later).
+func TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol(t *testing.T) {
 	const blockNumber = int64(20000005)
 	h := newTestHarness(t)
 	unknownVault := common.HexToAddress("0x9898989898989898989898989898989898989898")
@@ -3882,7 +3605,6 @@ func TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending(t *testing.T) {
 			}
 			return h.vaultDetailResults("Asset Revert Vault", "aRV", 18, false), nil
 		case 2:
-			// Distinguish vault-state (target == unknownVault) from token-metadata (target == testLoanToken).
 			if calls[0].Target == unknownVault {
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 			}
@@ -3900,17 +3622,15 @@ func TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending(t *testing.T) {
 		return 77, nil
 	}
 
-	// Capture MarkTokenSymbolPending calls.
-	var pendingCalls []struct {
-		address     common.Address
-		anchorBlock int64
+	// Capture GetOrCreateToken calls to assert the asset is stored with empty symbol.
+	type tokenCall struct {
+		address common.Address
+		symbol  string
 	}
-	h.tokenRepo.MarkTokenSymbolPendingFn = func(_ context.Context, _ pgx.Tx, _ int64, address common.Address, anchorBlock int64) error {
-		pendingCalls = append(pendingCalls, struct {
-			address     common.Address
-			anchorBlock int64
-		}{address, anchorBlock})
-		return nil
+	var tokenCalls []tokenCall
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ int64) (int64, error) {
+		tokenCalls = append(tokenCalls, tokenCall{addr, sym})
+		return int64(len(tokenCalls)), nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -3920,16 +3640,19 @@ func TestVaultDiscovery_AssetSymbolRevert_FlagsAssetPending(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	// MarkTokenSymbolPending must be called exactly once — for the asset token.
-	if len(pendingCalls) != 1 {
-		t.Fatalf("MarkTokenSymbolPending called %d times, want 1 (asset token only)", len(pendingCalls))
+	// Find the asset token call (testLoanToken) and assert it has an empty symbol.
+	var assetCall *tokenCall
+	for i := range tokenCalls {
+		if tokenCalls[i].address == testLoanToken {
+			assetCall = &tokenCalls[i]
+			break
+		}
 	}
-	if pendingCalls[0].address != testLoanToken {
-		t.Errorf("MarkTokenSymbolPending called for %s, want asset token %s",
-			pendingCalls[0].address.Hex(), testLoanToken.Hex())
+	if assetCall == nil {
+		t.Fatalf("GetOrCreateToken never called for asset token %s; calls: %v", testLoanToken.Hex(), tokenCalls)
 	}
-	if pendingCalls[0].anchorBlock != blockNumber {
-		t.Errorf("MarkTokenSymbolPending anchorBlock = %d, want %d", pendingCalls[0].anchorBlock, blockNumber)
+	if assetCall.symbol != "" {
+		t.Errorf("asset token symbol = %q, want empty (pending marker for sweep)", assetCall.symbol)
 	}
 }
 

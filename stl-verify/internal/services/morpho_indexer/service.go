@@ -45,11 +45,6 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 type Config struct {
 	shared.SQSConsumerConfig
 	Telemetry *Telemetry // optional, nil-safe
-
-	// SymbolSweepIntervalBlocks (N) and SymbolBackstopBlocks (K) drive the token
-	// symbol reconciliation on the blockchain client. Zero N disables it.
-	SymbolSweepIntervalBlocks int64
-	SymbolBackstopBlocks      int64
 }
 
 // ConfigDefaults returns default configuration values.
@@ -124,10 +119,6 @@ func NewService(
 	blockchainSvc, err := newBlockchainService(
 		multicallClient,
 		erc20ABI,
-		ReconcileConfig{
-			SweepIntervalBlocks: config.SymbolSweepIntervalBlocks,
-			BackstopBlocks:      config.SymbolBackstopBlocks,
-		},
 		config.Logger,
 		config.Telemetry,
 	)
@@ -198,55 +189,39 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 	return nil
 }
 
-// symbolReconcileBatchSize is the maximum number of pending-symbol tokens fetched
-// per sweep. If the adapter returns exactly this many, a truncation warning is
-// emitted and the remainder are deferred to the next sweep.
-const symbolReconcileBatchSize = 500
+// Sweep cadence and batch bound for symbol reconciliation. Hardcoded: the sweep
+// is one bounded multicall every symbolSweepIntervalBlocks blocks, so there is
+// nothing worth tuning per environment.
+const (
+	symbolSweepIntervalBlocks = 10
+	symbolSweepBatchSize      = 500
+)
 
-// reconcilePendingSymbols runs, every N processed blocks, a best-effort pass that
-// re-reads pending token symbols at the block just processed. Resolved symbols are
-// persisted; tokens past their anchor+K backstop are dropped and counted. All
-// errors are logged and swallowed: this must never fail block processing.
+// reconcilePendingSymbols runs, every symbolSweepIntervalBlocks processed blocks,
+// a best-effort pass that re-reads symbol() for tokens still missing one, at the
+// block just processed. An empty symbol column is itself the "pending" marker, so
+// there is no extra bookkeeping state; tokens whose symbol() never becomes
+// readable are simply retried each sweep (one bounded multicall). All errors are
+// logged and swallowed: the block is already indexed and must never be failed by
+// this pass.
 func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNumber int64) {
-	if !s.blockchainSvc.shouldSweep(blockNumber) {
+	if blockNumber%symbolSweepIntervalBlocks != 0 {
 		return
 	}
-
-	pending, err := s.tokenRepo.ListTokensPendingSymbol(ctx, chainID, symbolReconcileBatchSize)
+	missing, err := s.tokenRepo.ListTokensMissingSymbol(ctx, chainID, symbolSweepBatchSize)
 	if err != nil {
-		s.logger.Warn("symbol reconciliation: listing pending tokens failed", "error", err, "block", blockNumber)
+		s.logger.Warn("symbol reconciliation: listing tokens missing symbol failed", "error", err, "block", blockNumber)
 		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
 		return
 	}
-	if len(pending) == 0 {
+	if len(missing) == 0 {
 		return
 	}
-	if len(pending) == symbolReconcileBatchSize {
-		s.logger.Warn("symbol reconciliation: pending batch hit the limit; remaining tokens deferred to a later sweep — consider raising the limit",
-			"limit", symbolReconcileBatchSize, "block", blockNumber)
+	if len(missing) == symbolSweepBatchSize {
+		s.logger.Warn("symbol reconciliation: batch full; remaining tokens are picked up on later sweeps",
+			"batch", symbolSweepBatchSize, "block", blockNumber)
 	}
-
-	var toResolve []common.Address
-	for _, p := range pending {
-		if s.blockchainSvc.backstopExceeded(p.AnchorBlock, blockNumber) {
-			if err := s.tokenRepo.MarkTokenSymbolUnresolved(ctx, chainID, p.Address); err != nil {
-				s.logger.Warn("symbol reconciliation: marking unresolved failed", "error", err, "address", p.Address.Hex())
-				s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
-				continue
-			}
-			s.telemetry.RecordSymbolUnresolved(ctx, p.Address.Hex())
-			s.logger.Warn("symbol reconciliation: backstop exceeded, leaving symbol empty",
-				"address", p.Address.Hex(), "anchor", p.AnchorBlock, "block", blockNumber)
-			continue
-		}
-		toResolve = append(toResolve, p.Address)
-	}
-
-	if len(toResolve) == 0 {
-		return
-	}
-
-	resolved, err := s.blockchainSvc.resolveSymbolsAt(ctx, toResolve, blockNumber)
+	resolved, err := s.blockchainSvc.resolveSymbolsAt(ctx, missing, blockNumber)
 	if err != nil {
 		s.logger.Warn("symbol reconciliation: resolving symbols failed", "error", err, "block", blockNumber)
 		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
@@ -740,9 +715,6 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 		if err != nil {
 			return fmt.Errorf("getting asset token: %w", err)
 		}
-		if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, metadata.Asset, assetMetadata, blockNumber); err != nil {
-			return err
-		}
 
 		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, MorphoBlueAddress, "Morpho Blue", "lending", s.deployBlock)
 		if err != nil {
@@ -927,16 +899,10 @@ func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, 
 		if err != nil {
 			return fmt.Errorf("getting loan token: %w", err)
 		}
-		if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, mp.LoanToken, loanMetadata, blockNumber); err != nil {
-			return err
-		}
 
 		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting collateral token: %w", err)
-		}
-		if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, mp.CollateralToken, collMetadata, blockNumber); err != nil {
-			return err
 		}
 
 		market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(e.MarketID()), loanTokenID, collTokenID, mp.Oracle, mp.Irm, mp.LLTV, blockNumber)
@@ -1214,16 +1180,10 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 	if err != nil {
 		return 0, fmt.Errorf("getting loan token: %w", err)
 	}
-	if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, params.LoanToken, loanMd, blockNumber); err != nil {
-		return 0, err
-	}
 
 	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("getting collateral token: %w", err)
-	}
-	if err := s.flagSymbolPendingIfUnresolved(ctx, tx, chainID, params.CollateralToken, collMd, blockNumber); err != nil {
-		return 0, err
 	}
 
 	market, err := entity.NewMorphoMarket(chainID, protocolID, common.Hash(marketID), loanTokenID, collTokenID, params.Oracle, params.Irm, params.LLTV, blockNumber)
@@ -1365,19 +1325,6 @@ func (s *Service) saveProtocolEvent(ctx context.Context, event MorphoBlueEvent, 
 
 		return s.eventRepo.SaveEvent(ctx, tx, protocolEvent)
 	})
-}
-
-// flagSymbolPendingIfUnresolved marks a token for later symbol reconciliation
-// when its on-chain symbol() could not be resolved at this block. No-op when the
-// symbol resolved. Runs in the caller's transaction.
-func (s *Service) flagSymbolPendingIfUnresolved(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, md TokenMetadata, blockNumber int64) error {
-	if md.SymbolResolved {
-		return nil
-	}
-	if err := s.tokenRepo.MarkTokenSymbolPending(ctx, tx, chainID, address, blockNumber); err != nil {
-		return fmt.Errorf("flagging token %s symbol pending: %w", address.Hex(), err)
-	}
-	return nil
 }
 
 func validateDependencies(

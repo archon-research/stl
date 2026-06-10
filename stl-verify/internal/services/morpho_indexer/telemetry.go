@@ -21,11 +21,10 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed   metric.Int64Counter
-	eventsProcessed   metric.Int64Counter
-	rpcCallsTotal     metric.Int64Counter
-	errorsTotal       metric.Int64Counter
-	symbolsUnresolved metric.Int64Counter
+	blocksProcessed metric.Int64Counter
+	eventsProcessed metric.Int64Counter
+	rpcCallsTotal   metric.Int64Counter
+	errorsTotal     metric.Int64Counter
 
 	// Histograms
 	blockDuration   metric.Float64Histogram
@@ -94,14 +93,6 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 		return nil, fmt.Errorf("creating errorsTotal counter: %w", err)
 	}
 
-	t.symbolsUnresolved, err = meter.Int64Counter(
-		"morpho.token.symbol.unresolved.total",
-		metric.WithDescription("Total tokens whose symbol could not be resolved within the backstop"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating symbolsUnresolved counter: %w", err)
-	}
-
 	t.blockDuration, err = meter.Float64Histogram(
 		"morpho.block.duration_seconds",
 		metric.WithDescription("Duration of block processing in seconds"),
@@ -159,17 +150,6 @@ func (t *Telemetry) RecordEventProcessed(ctx context.Context, eventType string) 
 	t.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("event.type", eventType),
-	))
-}
-
-// RecordSymbolUnresolved records that a token's symbol hit the reconciliation backstop.
-func (t *Telemetry) RecordSymbolUnresolved(ctx context.Context, tokenAddress string) {
-	if t == nil {
-		return
-	}
-	t.symbolsUnresolved.Add(ctx, 1, metric.WithAttributes(
-		t.chainAttr,
-		attribute.String("token.address", tokenAddress),
 	))
 }
 

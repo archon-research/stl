@@ -541,17 +541,14 @@ func TestGetTokenMetadata_CacheMiss(t *testing.T) {
 	if md.Decimals != 6 {
 		t.Errorf("Decimals = %d, want 6", md.Decimals)
 	}
-	if !md.SymbolResolved {
-		t.Error("SymbolResolved must be true for a successfully fetched symbol")
-	}
 }
 
 func TestGetTokenMetadata_CacheHit(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xAAAA")
 
-	// Populate cache with a fully resolved entry.
-	h.svc.blockchainSvc.metadataCache[tokenAddr] = TokenMetadata{Symbol: "CACHED", Decimals: 18, SymbolResolved: true}
+	// Populate cache with a resolved entry.
+	h.svc.blockchainSvc.metadataCache[tokenAddr] = TokenMetadata{Symbol: "CACHED", Decimals: 18}
 
 	var multicallCalled bool
 	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -566,20 +563,17 @@ func TestGetTokenMetadata_CacheHit(t *testing.T) {
 	if md.Symbol != "CACHED" {
 		t.Errorf("Symbol = %s, want CACHED (from cache)", md.Symbol)
 	}
-	if !md.SymbolResolved {
-		t.Error("SymbolResolved must roundtrip through cache as true")
-	}
 	if multicallCalled {
 		t.Error("multicall should not be called for cached token")
 	}
 }
 
-// TestGetTokenMetadata_CachesWithUnresolvedSymbol verifies that a reverted
-// symbol() does not prevent caching: the token is persisted with Symbol="" and
-// SymbolResolved=false so future calls (within the same block-processing run)
-// are served from cache without re-fetching.
+// TestGetTokenMetadata_CachesWithEmptySymbol verifies that a reverted
+// symbol() does not prevent caching: the token is persisted with Symbol=""
+// so future calls (within the same block-processing run) are served from
+// cache without re-fetching.
 // A decimals() revert still returns an error and must NOT populate the cache.
-func TestGetTokenMetadata_CachesWithUnresolvedSymbol(t *testing.T) {
+func TestGetTokenMetadata_CachesWithEmptySymbol(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xCCCC")
 
@@ -594,8 +588,8 @@ func TestGetTokenMetadata_CachesWithUnresolvedSymbol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error when symbol() reverts, got %v", err)
 	}
-	if md.SymbolResolved {
-		t.Error("SymbolResolved must be false when symbol() reverted")
+	if md.Symbol != "" {
+		t.Errorf("Symbol must be empty when symbol() reverted, got %q", md.Symbol)
 	}
 	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; !ok {
 		t.Error("token must be cached even when symbol() is unresolved")
@@ -736,9 +730,6 @@ func TestGetTokenMetadata_CachesAndReturnsOnSuccess(t *testing.T) {
 	if md.Decimals != 6 {
 		t.Errorf("first call: Decimals = %d, want 6", md.Decimals)
 	}
-	if !md.SymbolResolved {
-		t.Error("first call: SymbolResolved must be true for a successfully fetched symbol")
-	}
 
 	md2, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
 	if err != nil {
@@ -746,9 +737,6 @@ func TestGetTokenMetadata_CachesAndReturnsOnSuccess(t *testing.T) {
 	}
 	if md2.Symbol != "USDC" || md2.Decimals != 6 {
 		t.Errorf("second call: got %+v, want USDC/6", md2)
-	}
-	if !md2.SymbolResolved {
-		t.Error("second call (cache hit): SymbolResolved must roundtrip as true")
 	}
 	if callCount != 1 {
 		t.Errorf("multicaller called %d times, want 1 (second call must hit cache)", callCount)
@@ -1397,9 +1385,6 @@ func TestGetTokenMetadata_ZeroAddressShortCircuits(t *testing.T) {
 	if md.Decimals != 0 {
 		t.Errorf("Decimals = %d, want 0", md.Decimals)
 	}
-	if !md.SymbolResolved {
-		t.Error("SymbolResolved must be true for the zero address sentinel (empty symbol is final, not pending)")
-	}
 }
 
 // TestGetTokenPairMetadata_ZeroCollateral covers the canonical idle-market
@@ -1489,11 +1474,11 @@ func TestGetTokenPairMetadata_SymbolRevertTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error when only symbol() reverts, got %v", err)
 	}
-	if mdA.Symbol != "TKA" || mdA.Decimals != 18 || !mdA.SymbolResolved {
-		t.Errorf("token A = %+v, want Symbol=TKA Decimals=18 SymbolResolved=true", mdA)
+	if mdA.Symbol != "TKA" || mdA.Decimals != 18 {
+		t.Errorf("token A = %+v, want Symbol=TKA Decimals=18", mdA)
 	}
-	if mdB.Symbol != "" || mdB.Decimals != 6 || mdB.SymbolResolved {
-		t.Errorf("token B = %+v, want Symbol='' Decimals=6 SymbolResolved=false", mdB)
+	if mdB.Symbol != "" || mdB.Decimals != 6 {
+		t.Errorf("token B = %+v, want Symbol='' Decimals=6", mdB)
 	}
 }
 
@@ -1533,15 +1518,15 @@ func TestGetTokenMetadata_SymbolRevertTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error when only symbol() reverts, got %v", err)
 	}
-	if md.Symbol != "" || md.Decimals != 8 || md.SymbolResolved {
-		t.Errorf("md = %+v, want Symbol='' Decimals=8 SymbolResolved=false", md)
+	if md.Symbol != "" || md.Decimals != 8 {
+		t.Errorf("md = %+v, want Symbol='' Decimals=8", md)
 	}
 }
 
 // TestGetTokenMetadata_SymbolUndecodable_IsTolerated verifies that when
 // symbol() SUCCEEDS but returns data that is neither a valid ABI string nor
-// a bytes32 (e.g. 3 bytes of garbage), the result has Symbol="" and
-// SymbolResolved=false with no error, while decimals is correctly decoded.
+// a bytes32 (e.g. 3 bytes of garbage), the result has Symbol="" (empty pending
+// marker) with no error, while decimals is correctly decoded.
 func TestGetTokenMetadata_SymbolUndecodable_IsTolerated(t *testing.T) {
 	token := common.HexToAddress("0xD4D4")
 	h := newTestHarness(t)
@@ -1555,33 +1540,8 @@ func TestGetTokenMetadata_SymbolUndecodable_IsTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for undecodable symbol, got %v", err)
 	}
-	if md.Symbol != "" || md.SymbolResolved || md.Decimals != 6 {
-		t.Errorf("md = %+v, want Symbol='' SymbolResolved=false Decimals=6", md)
-	}
-}
-
-func TestReconcileConfig_ShouldSweepAndBackstop(t *testing.T) {
-	bc := &blockchainService{reconcile: ReconcileConfig{SweepIntervalBlocks: 10, BackstopBlocks: 1000}}
-
-	if bc.shouldSweep(100) != true {
-		t.Error("shouldSweep(100) with N=10 want true")
-	}
-	if bc.shouldSweep(105) != false {
-		t.Error("shouldSweep(105) with N=10 want false")
-	}
-	if bc.backstopExceeded(25252154, 25252165) {
-		t.Error("anchor+K not reached, want not exceeded")
-	}
-	if bc.backstopExceeded(25252154, 25252154+1000) {
-		t.Error("exactly anchor+K, want NOT exceeded (boundary)")
-	}
-	if !bc.backstopExceeded(25252154, 25252154+1001) {
-		t.Error("past anchor+K, want exceeded")
-	}
-
-	off := &blockchainService{reconcile: ReconcileConfig{SweepIntervalBlocks: 0}}
-	if off.shouldSweep(100) {
-		t.Error("shouldSweep with N=0 want false (disabled)")
+	if md.Symbol != "" || md.Decimals != 6 {
+		t.Errorf("md = %+v, want Symbol='' Decimals=6", md)
 	}
 }
 
@@ -1652,7 +1612,7 @@ func TestResolveSymbolsAt_UpdatesCacheEntry(t *testing.T) {
 	h := newTestHarness(t)
 	addr := common.HexToAddress("0xCCDD")
 
-	// Pre-seed cache with unresolved entry.
+	// Pre-seed cache with empty-symbol entry.
 	h.svc.blockchainSvc.metadataCache[addr] = TokenMetadata{Symbol: "", Decimals: 18}
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -1669,8 +1629,8 @@ func TestResolveSymbolsAt_UpdatesCacheEntry(t *testing.T) {
 		t.Errorf("resolved symbol = %q, want OK", got[addr])
 	}
 	cached := h.svc.blockchainSvc.metadataCache[addr]
-	if cached.Symbol != "OK" || !cached.SymbolResolved || cached.Decimals != 18 {
-		t.Errorf("cache entry = %+v, want Symbol=OK SymbolResolved=true Decimals=18", cached)
+	if cached.Symbol != "OK" || cached.Decimals != 18 {
+		t.Errorf("cache entry = %+v, want Symbol=OK Decimals=18", cached)
 	}
 }
 
