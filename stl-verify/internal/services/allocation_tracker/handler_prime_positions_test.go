@@ -119,6 +119,73 @@ func TestHandleBatch_ERC20(t *testing.T) {
 	}
 }
 
+// TestHandleBatch_CreatedAtBlockFloor verifies that a nil/zero CreatedAtBlock
+// (the axis-synome export currently emits null) is floored to the observation
+// block rather than persisted as 0, while an explicit value is preserved.
+func TestHandleBatch_CreatedAtBlockFloor(t *testing.T) {
+	tokenNil := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	tokenSet := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	explicit := int64(42)
+
+	repo := &fakeAllocRepo{}
+	supplyRepo := &fakeSupplyRepo{}
+	handler := newTestHandler(repo, supplyRepo,
+		map[string]int64{"spark": 1},
+		map[common.Address]tokenMeta{
+			tokenNil: {symbol: "USDC", decimals: 6},
+			tokenSet: {symbol: "DAI", decimals: 18},
+		},
+	)
+
+	err := handler.HandleBatch(context.Background(), &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: tokenNil,
+					WalletAddress:   wallet,
+					Star:            "spark",
+					Chain:           "mainnet",
+					TokenType:       "erc20",
+					CreatedAtBlock:  nil,
+				},
+				Balance:     big.NewInt(1),
+				ChainID:     1,
+				BlockNumber: 100,
+				Direction:   DirectionSweep,
+			},
+			{
+				Entry: &TokenEntry{
+					ContractAddress: tokenSet,
+					WalletAddress:   wallet,
+					Star:            "spark",
+					Chain:           "mainnet",
+					TokenType:       "erc20",
+					CreatedAtBlock:  &explicit,
+				},
+				Balance:     big.NewInt(1),
+				ChainID:     1,
+				BlockNumber: 100,
+				Direction:   DirectionSweep,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := make(map[common.Address]int64)
+	for _, pos := range repo.saved {
+		got[pos.TokenAddress] = pos.CreatedAtBlock
+	}
+	if got[tokenNil] != 100 {
+		t.Errorf("nil CreatedAtBlock = %d, want floored to block 100", got[tokenNil])
+	}
+	if got[tokenSet] != explicit {
+		t.Errorf("explicit CreatedAtBlock = %d, want %d", got[tokenSet], explicit)
+	}
+}
+
 func TestHandleBatch_AtokenWithSupply(t *testing.T) {
 	atoken := common.HexToAddress("0xe7df13b8e3d6740fe17cbe928c7334243d86c92f")
 	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
