@@ -3,12 +3,16 @@ package archiving
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"math/big"
 	"sync"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 type stubInner struct {
@@ -262,4 +266,83 @@ func TestExecuteSurvivesArchivePanic(t *testing.T) {
 		t.Fatalf("results not forwarded: %+v", res)
 	}
 	d.Close() // must return: the archive-goroutine panic must be recovered
+}
+
+// TestExecuteRecordsArchiveWriteStatus verifies that archive.writes.total is
+// incremented once per archive attempt with the correct status, chain, and
+// source labels.
+func TestExecuteRecordsArchiveWriteStatus(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	tests := []struct {
+		name       string
+		archiveErr error
+		wantStatus string
+	}{
+		{"success", nil, "success"},
+		{"error", errors.New("s3 down"), "error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &stubInner{results: []outbound.Result{{Success: true}}}
+			arch := errArchiver{err: tc.archiveErr}
+			var wg sync.WaitGroup
+			m := NewMulticaller(inner, arch, Config{
+				Source:        "test-source",
+				ChainID:       1,
+				Chain:         "mainnet",
+				Wait:          &wg,
+				MeterProvider: mp,
+				Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+
+			_, err := m.Execute(context.Background(), []outbound.Call{{Target: common.Address{}, CallData: []byte{0x01, 0x02, 0x03, 0x04}}}, big.NewInt(100))
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			m.Close() // drain the fire-and-forget archive write
+
+			got := counterValueForStatus(t, reader, "archive.writes.total", tc.wantStatus)
+			if got != 1 {
+				t.Errorf("archive.writes.total{status=%q} = %d, want 1", tc.wantStatus, got)
+			}
+		})
+	}
+}
+
+// counterValueForStatus returns the int64 counter value whose data point carries
+// status=want, asserting chain and source labels are present.
+func counterValueForStatus(t *testing.T, reader sdkmetric.Reader, name, want string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				status, _ := dp.Attributes.Value("status")
+				if status.AsString() != want {
+					continue
+				}
+				if c, _ := dp.Attributes.Value("chain"); c.AsString() != "mainnet" {
+					t.Errorf("chain label = %q, want mainnet", c.AsString())
+				}
+				if s, _ := dp.Attributes.Value("source"); s.AsString() != "test-source" {
+					t.Errorf("source label = %q, want test-source", s.AsString())
+				}
+				return dp.Value
+			}
+		}
+	}
+	return 0
 }

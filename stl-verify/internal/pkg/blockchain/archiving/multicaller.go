@@ -11,6 +11,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rawsckey"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/ethereum/go-ethereum/common"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const archiveTimeout = 30 * time.Second
@@ -20,14 +23,19 @@ type Config struct {
 	Source  string
 	ChainID int64
 	BuildID int64
-	Wait    *sync.WaitGroup // shared across decorators; drained on shutdown
+	// Chain is the chain name (e.g. "mainnet") used as the `chain` metric label.
+	Chain string
+	Wait  *sync.WaitGroup // shared across decorators; drained on shutdown
 	// Sem bounds the number of in-flight archive writes across all decorators
 	// that share it. Acquired before each write is scheduled, so a large
 	// multicall cannot spawn an unbounded burst of goroutines and S3 PUTs; the
 	// caller blocks briefly when the bound is reached. nil means unbounded.
-	Sem    chan struct{}
-	Logger *slog.Logger
-	Clock  func() time.Time // injectable for tests; defaults to time.Now
+	Sem chan struct{}
+	// MeterProvider builds the archive.writes.total counter. nil uses the global
+	// provider; tests inject a manual reader.
+	MeterProvider metric.MeterProvider
+	Logger        *slog.Logger
+	Clock         func() time.Time // injectable for tests; defaults to time.Now
 }
 
 // Multicaller decorates an inner outbound.Multicaller, archiving every
@@ -36,6 +44,7 @@ type Multicaller struct {
 	inner    outbound.Multicaller
 	archiver outbound.CallArchiver
 	cfg      Config
+	writes   metric.Int64Counter
 }
 
 // NewMulticaller wraps inner so its calls are archived via arch.
@@ -49,7 +58,20 @@ func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg 
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	return &Multicaller{inner: inner, archiver: arch, cfg: cfg}
+	if cfg.MeterProvider == nil {
+		cfg.MeterProvider = otel.GetMeterProvider()
+	}
+	writes, err := cfg.MeterProvider.
+		Meter("github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving").
+		Int64Counter("archive.writes.total", metric.WithDescription("Raw SC call archive write attempts by status"))
+	if err != nil {
+		// Metrics must never break the archiving hot path, so a counter that
+		// fails to construct is logged and left nil (recordWrite no-ops on nil)
+		// rather than failing NewMulticaller. This intentionally differs from the
+		// fail-hard rule used for core dependencies.
+		cfg.Logger.Error("building archive.writes.total counter; archive metrics disabled", "error", err)
+	}
+	return &Multicaller{inner: inner, archiver: arch, cfg: cfg, writes: writes}
 }
 
 // Execute forwards to the inner multicaller, then archives each call/result
@@ -92,6 +114,25 @@ func (m *Multicaller) Address() common.Address { return m.inner.Address() }
 // Close blocks until all in-flight archive writes complete. Call during
 // graceful shutdown before the process exits.
 func (m *Multicaller) Close() { m.cfg.Wait.Wait() }
+
+// recordWrite increments archive.writes.total with the outcome status. A nil
+// counter (construction failed) is a no-op. It records against a background
+// context because the counter increment is independent of the archive
+// operation's timeout.
+func (m *Multicaller) recordWrite(err error) {
+	if m.writes == nil {
+		return
+	}
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	m.writes.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("chain", m.cfg.Chain),
+		attribute.String("source", m.cfg.Source),
+		attribute.String("status", status),
+	))
+}
 
 func (m *Multicaller) buildRecord(call outbound.Call, result outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallRecord {
 	var bn int64
@@ -142,7 +183,9 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallR
 
 		archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
 		defer cancel()
-		if err := m.archiver.Archive(archiveCtx, record); err != nil {
+		err := m.archiver.Archive(archiveCtx, record)
+		m.recordWrite(err)
+		if err != nil {
 			// A failed write is a permanent, unretried loss of an archived call,
 			// so surface it at error level rather than burying it in warnings.
 			m.cfg.Logger.Error("archiving SC call failed",
