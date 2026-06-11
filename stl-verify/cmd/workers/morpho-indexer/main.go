@@ -64,6 +64,7 @@ type cliConfig struct {
 	waitTime          int
 	visibilityTimeout int
 	chainID           int64
+	chainName         string
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -136,6 +137,10 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 	cfg.chainID = chainID
+	cfg.chainName, err = entity.ChainName(chainID)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("resolving chain name: %w", err)
+	}
 
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
 	if cfg.s3Bucket == "" {
@@ -250,11 +255,7 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	chainName, err := entity.ChainName(cfg.chainID)
-	if err != nil {
-		return fmt.Errorf("resolving chain name: %w", err)
-	}
-	mcTel, err := multicall.NewTelemetry(chainName)
+	mcTel, err := multicall.NewTelemetry(cfg.chainName)
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
 	}
@@ -262,7 +263,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
-	morphoTelemetry, err := morpho_indexer.NewTelemetry(chainName)
+	morphoTelemetry, err := morpho_indexer.NewTelemetry(cfg.chainName)
 	if err != nil {
 		return fmt.Errorf("creating morpho telemetry: %w", err)
 	}
