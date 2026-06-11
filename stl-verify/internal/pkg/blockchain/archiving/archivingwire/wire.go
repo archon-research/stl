@@ -25,12 +25,6 @@ const (
 	EnvBucket = "RAW_SC_BUCKET"
 	// EnvEndpoint optionally overrides the S3 endpoint (LocalStack).
 	EnvEndpoint = "AWS_S3_ENDPOINT"
-
-	// maxConcurrentArchives caps the number of in-flight archive writes across
-	// all decorators a worker builds. A single multicall can hold thousands of
-	// calls; without a bound each would spawn a goroutine and an S3 PUT at once,
-	// risking memory pressure and provider throttling.
-	maxConcurrentArchives = 64
 )
 
 // Wrap decorates a multicaller with archiving. Identity when archiving is off.
@@ -106,7 +100,6 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 	archiver := s3adapter.NewCallArchiver(writer, bucket, logger)
 
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, maxConcurrentArchives)
 	wrap := func(inner outbound.Multicaller) outbound.Multicaller {
 		return archiving.NewMulticaller(inner, archiver, archiving.Config{
 			Source:  source,
@@ -114,7 +107,6 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 			Chain:   chainName,
 			BuildID: buildID,
 			Wait:    &wg,
-			Sem:     sem,
 			Logger:  logger,
 		})
 	}
