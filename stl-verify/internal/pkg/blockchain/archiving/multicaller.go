@@ -26,11 +26,6 @@ type Config struct {
 	// Chain is the chain name (e.g. "mainnet") used as the `chain` metric label.
 	Chain string
 	Wait  *sync.WaitGroup // shared across decorators; drained on shutdown
-	// Sem bounds the number of in-flight archive writes across all decorators
-	// that share it. Acquired before each write is scheduled, so a large
-	// multicall cannot spawn an unbounded burst of goroutines and S3 PUTs; the
-	// caller blocks briefly when the bound is reached. nil means unbounded.
-	Sem chan struct{}
 	// MeterProvider builds the archive.writes.total counter. nil uses the global
 	// provider; tests inject a manual reader.
 	MeterProvider metric.MeterProvider
@@ -158,16 +153,7 @@ func (m *Multicaller) buildRecord(call outbound.Call, result outbound.Result, bl
 }
 
 func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallRecord) {
-	// Acquire a slot before launching the worker so a large multicall applies
-	// bounded backpressure here instead of spawning a goroutine per call. The
-	// worker releases its slot on completion. nil Sem means unbounded.
-	if m.cfg.Sem != nil {
-		m.cfg.Sem <- struct{}{}
-	}
 	m.cfg.Wait.Go(func() {
-		if m.cfg.Sem != nil {
-			defer func() { <-m.cfg.Sem }()
-		}
 		// Archiving is fire-and-forget: a panic here must never escape and crash
 		// the worker, since archiving must not affect the hot path.
 		defer func() {

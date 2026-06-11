@@ -57,38 +57,6 @@ func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, wg
 	})
 }
 
-// TestExecuteBoundedBySemaphore verifies that a shared semaphore caps in-flight
-// archive writes: every call is still archived, and all tokens are released
-// once the writes drain (no leak that would wedge later calls).
-func TestExecuteBoundedBySemaphore(t *testing.T) {
-	const numCalls = 5
-	results := make([]outbound.Result, numCalls)
-	calls := make([]outbound.Call, numCalls)
-	for i := range calls {
-		results[i] = outbound.Result{Success: true, ReturnData: []byte{byte(i)}}
-		calls[i] = outbound.Call{Target: common.HexToAddress("0x01"), CallData: []byte{byte(i)}}
-	}
-
-	arch := &recordingArchiver{}
-	sem := make(chan struct{}, 2) // cap below numCalls so the bound is exercised
-	var wg sync.WaitGroup
-	d := NewMulticaller(&stubInner{results: results}, arch, Config{
-		Source: "oracle-price", ChainID: 1, BuildID: 47, Wait: &wg, Sem: sem,
-	})
-
-	if _, err := d.Execute(context.Background(), calls, big.NewInt(1)); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	d.Close()
-
-	if len(arch.records) != numCalls {
-		t.Fatalf("archived %d records, want %d", len(arch.records), numCalls)
-	}
-	if len(sem) != 0 {
-		t.Fatalf("semaphore not fully released: %d tokens held", len(sem))
-	}
-}
-
 // TestExecute covers the parametric forwarding/archiving behaviour against a
 // recording archiver. The non-parametric guarantees (survives a failing or
 // panicking archiver) are exercised by the focused tests below.
