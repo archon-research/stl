@@ -21,6 +21,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -29,6 +30,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
@@ -218,7 +220,49 @@ func run(ctx context.Context, args []string) error {
 	defer rawClient.Close()
 	logger.Info("Ethereum node connected")
 
-	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
+	// Database
+	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer dbPool.Close()
+	if err := dbPool.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	logger.Info("PostgreSQL connected")
+
+	buildReg, err := buildregistry.New(ctx, dbPool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting allocation tracker",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", buildReg.GitHash())
+
+	// OpenTelemetry
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-allocation-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
@@ -246,28 +290,6 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	// Database
-	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer dbPool.Close()
-	if err := dbPool.Ping(ctx); err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
-	logger.Info("PostgreSQL connected")
-
-	buildReg, err := buildregistry.New(ctx, dbPool)
-	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
-	}
-
-	logger.Info("starting allocation tracker",
-		"queue", cfg.queueURL,
-		"redis", cfg.redisAddr,
-		"chainID", cfg.chainID,
-		"commit", buildReg.GitHash())
 
 	txm, err := postgres.NewTxManager(dbPool, logger)
 	if err != nil {

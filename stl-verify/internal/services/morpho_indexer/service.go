@@ -174,7 +174,67 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
-	return s.fetchAndProcessReceipts(ctx, event)
+	if err := s.fetchAndProcessReceipts(ctx, event); err != nil {
+		return err
+	}
+	// Best-effort symbol reconciliation. Never fails the block: the block is
+	// already fully indexed, and a sweep error just leaves tokens pending for the
+	// next sweep. Reads only at the block just processed.
+	s.reconcilePendingSymbols(ctx, event.ChainID, event.BlockNumber)
+	return nil
+}
+
+// Sweep cadence and batch bound for symbol reconciliation. Hardcoded: the sweep
+// is one bounded multicall every symbolSweepIntervalBlocks blocks, so there is
+// nothing worth tuning per environment.
+const (
+	symbolSweepIntervalBlocks = 10
+	symbolSweepBatchSize      = 500
+)
+
+// reconcilePendingSymbols runs, every symbolSweepIntervalBlocks processed blocks,
+// a best-effort pass that re-reads symbol() for tokens still missing one, at the
+// block just processed. An empty symbol column is itself the "pending" marker, so
+// there is no extra bookkeeping state; tokens whose symbol() never becomes
+// readable are simply retried each sweep (one bounded multicall). All errors are
+// logged and swallowed: the block is already indexed and must never be failed by
+// this pass.
+func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNumber int64) {
+	if blockNumber%symbolSweepIntervalBlocks != 0 {
+		return
+	}
+	missing, err := s.tokenRepo.ListTokensMissingSymbol(ctx, chainID, symbolSweepBatchSize)
+	if err != nil {
+		s.logger.Warn("symbol reconciliation: listing tokens missing symbol failed", "error", err, "block", blockNumber)
+		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
+		return
+	}
+	// Surface the backlog size on every sweep (capped at the batch size): with no
+	// backstop, growth toward the batch limit is the signal that tokens are
+	// accumulating that never resolve, and oldest-first ordering would starve
+	// newer ones once the limit is hit.
+	s.telemetry.RecordSymbolsMissing(ctx, int64(len(missing)))
+	if len(missing) == 0 {
+		return
+	}
+	if len(missing) == symbolSweepBatchSize {
+		s.logger.Warn("symbol reconciliation: batch full; remaining tokens are picked up on later sweeps",
+			"batch", symbolSweepBatchSize, "block", blockNumber)
+	}
+	resolved, err := s.blockchainSvc.resolveSymbolsAt(ctx, missing, blockNumber)
+	if err != nil {
+		s.logger.Warn("symbol reconciliation: resolving symbols failed", "error", err, "block", blockNumber)
+		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
+		return
+	}
+	for addr, sym := range resolved {
+		if err := s.tokenRepo.ResolveTokenSymbol(ctx, chainID, addr, sym); err != nil {
+			s.logger.Warn("symbol reconciliation: persisting resolved symbol failed", "error", err, "address", addr.Hex())
+			s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
+			continue
+		}
+		s.logger.Info("symbol reconciliation: resolved token symbol", "address", addr.Hex(), "symbol", sym, "block", blockNumber)
+	}
 }
 
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
