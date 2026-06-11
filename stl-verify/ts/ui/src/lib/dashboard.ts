@@ -494,7 +494,7 @@ export function getExplorerUrl(
   if (!base) {
     return null;
   }
-  return `${base}/${type}/${address}`;
+  return `${base.replace(/\/+$/, '')}/${type}/${address}`;
 }
 
 /**

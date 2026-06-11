@@ -60,7 +60,13 @@ function normalizeFilterValue(value: string): string | undefined {
 }
 
 function toDateTimeLocalValue(value: string | undefined): string {
-  return value ? value.slice(0, 16) : '';
+  if (!value) {
+    return '';
+  }
+
+  const date = new Date(value);
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return localDate.toISOString().slice(0, 16);
 }
 
 function fromDateTimeLocalValue(value: string): string | undefined {
@@ -72,6 +78,8 @@ function isSweepEvent(event: AllocationActivity): boolean {
 }
 
 function getRealTxHash(event: AllocationActivity): string | null {
+  // Defensive client-side guard for stale API responses already loaded before
+  // the backend nulls synthetic sweep tx_hash values.
   return isSweepEvent(event) ? null : (event.tx_hash ?? null);
 }
 
@@ -499,7 +507,9 @@ export function ActivityFeed({
           filters,
         });
       } finally {
-        setIsLoading(false);
+        if (!abortController.signal.aborted) {
+          setIsLoading(false);
+        }
       }
     }
 

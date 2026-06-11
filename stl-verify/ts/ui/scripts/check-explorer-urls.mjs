@@ -9,7 +9,7 @@ const explorerCases = [
   [1, 'https://etherscan.io'],
   [10, 'https://optimistic.etherscan.io'],
   [137, 'https://polygonscan.com'],
-  [324, 'https://explorer.zksync.io/'],
+  [324, 'https://explorer.zksync.io'],
   [130, 'https://uniscan.xyz'],
   [8453, 'https://basescan.org'],
   [42161, 'https://arbiscan.io'],
