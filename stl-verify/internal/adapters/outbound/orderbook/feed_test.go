@@ -17,7 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// fakeExchange is a minimal exchangeFeed for engine tests. Frames are
+// fakeExchange is a minimal exchangeFeed for feed tests. Frames are
 // {"symbol","snapshot","price","size"} JSON objects applied to the bid side.
 type fakeExchange struct {
 	url string
@@ -29,7 +29,7 @@ type fakeExchange struct {
 func (e *fakeExchange) name() string     { return "fake" }
 func (e *fakeExchange) endpoint() string { return e.url }
 
-// normalizeSymbol is permissive: it only upper-cases, so the engine test's "X"
+// normalizeSymbol is permissive: it only upper-cases, so the feed test's "X"
 // symbol still passes.
 func (e *fakeExchange) normalizeSymbol(s string) (string, error) {
 	return strings.ToUpper(s), nil
@@ -54,7 +54,7 @@ func (e *fakeExchange) newHandler([]string, *slog.Logger) frameHandler {
 	return &fakeHandler{books: newBookSet("fake")}
 }
 
-// appPing exercises the engine's application-level keepalive path. The server's
+// appPing exercises the feed's application-level keepalive path. The server's
 // keepOpen loop reads and discards these frames, so they never reach the handler.
 func (e *fakeExchange) appPing() ([]byte, time.Duration) {
 	return []byte(`{"event":"fakeping"}`), 5 * time.Millisecond

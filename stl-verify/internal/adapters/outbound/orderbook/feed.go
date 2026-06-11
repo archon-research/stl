@@ -8,8 +8,7 @@
 // supports, and connections reconnect automatically with exponential backoff.
 //
 // The package deliberately contains no persistence: it produces a stream of
-// entity.OrderbookUpdate values and leaves storage (e.g. the 1s JSONB dump to
-// TimescaleDB) to the service layer.
+// entity.OrderbookUpdate values and leaves storage to the service layer.
 package orderbook
 
 import (
@@ -26,10 +25,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Shared engine for exchanges that deliver the initial snapshot in-band over the
-// WebSocket. Connection lifecycle, subscribe, keepalive, emission and
-// reconnection are identical; only the wire format differs, supplied per
-// exchange via exchangeFeed.
+// Shared feed for exchanges that deliver the initial snapshot in-band over the
+// WebSocket: connection lifecycle, subscribe, keepalive, emission and
+// reconnection are identical, and only the wire format differs, supplied per
+// exchange via exchangeFeed. Venues whose snapshot arrives out-of-band (e.g. a
+// REST depth endpoint) do not fit exchangeFeed; they implement Watch directly
+// on the shared pieces (runConnections, reconnectLoop, emitter).
 
 // bookChange marks a book that changed while handling one inbound frame.
 type bookChange struct {
@@ -83,23 +84,20 @@ type frameHandler interface {
 	// returns the books that should be emitted. A single frame may legitimately
 	// fan out to multiple bookChanges (e.g. one frame carrying events for several
 	// symbols), so the result is a slice. Each returned book's Symbol must
-	// upper-case to a member of the subscription group: the engine matches it
+	// upper-case to a member of the subscription group: the feed matches it
 	// against the group to decide when the connection is fully synced. Returning
-	// errSequenceGap (or any error) causes the engine to drop the connection and
+	// errSequenceGap (or any error) causes the feed to drop the connection and
 	// reconnect.
 	handle(raw []byte) ([]bookChange, error)
 }
 
-// errSequenceGap signals that a handler detected a break in an exchange's
-// update stream (e.g. a sequence gap) and must re-synchronise from a fresh
-// snapshot. The engine treats it, like any handler error, as connection-fatal
-// and reconnects.
+// errSequenceGap signals a break in a venue's update stream that requires
+// re-synchronising from a fresh snapshot.
 var errSequenceGap = errors.New("orderbook update sequence gap")
 
-// errUnexpectedSymbol is returned by a handler when the venue pushes book data
-// for a symbol we never subscribed to. The engine treats it like any handler
-// error: drop the connection and reconnect (which re-sends only our
-// subscriptions), rather than emit a book we cannot account for.
+// errUnexpectedSymbol signals book data for a symbol we never subscribed to.
+// The reconnect it triggers re-sends only our subscriptions, so it self-heals
+// rather than emitting a book we cannot account for.
 var errUnexpectedSymbol = errors.New("orderbook update for unsubscribed symbol")
 
 // appPinger is an optional interface for exchanges that require an

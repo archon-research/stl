@@ -316,7 +316,7 @@ func TestOKXHandlerRejectsUnsubscribedSymbol(t *testing.T) {
 }
 
 func TestOKXHandlerRejectsMalformedLevel(t *testing.T) {
-	// A non-canonical price/size must fail the frame so the engine resyncs.
+	// A non-canonical price/size must fail the frame so the feed resyncs.
 	tests := []struct{ name, frame string }{
 		{"exponent price", `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[],"bids":[["1e5","1"]],"seqId":1,"prevSeqId":-1}]}`},
 		{"negative size", `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["101","-1"]],"bids":[],"seqId":1,"prevSeqId":-1}]}`},
@@ -334,7 +334,7 @@ func TestOKXHandlerRejectsMalformedLevel(t *testing.T) {
 func TestOKXHandlerMalformedFrame(t *testing.T) {
 	h := newOKXHandler()
 	if _, err := h.handle([]byte("{not json")); err == nil {
-		t.Fatal("malformed frame must error so the engine resyncs")
+		t.Fatal("malformed frame must error so the feed resyncs")
 	}
 }
 
