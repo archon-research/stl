@@ -20,7 +20,7 @@ func mustDefaultContract(t *testing.T) *axis_synome_contract.Contract {
 // the test on error. Replaces the former DefaultTokenEntries() panic wrapper.
 func defaultEntries(t *testing.T) []*TokenEntry {
 	t.Helper()
-	entries, err := TokenEntriesFromContract(mustDefaultContract(t))
+	entries, err := tokenEntriesFromContract(mustDefaultContract(t))
 	if err != nil {
 		t.Fatalf("token entries from contract: %v", err)
 	}
@@ -31,7 +31,7 @@ func defaultEntries(t *testing.T) []*TokenEntry {
 // test on error. Replaces the former DefaultProxies() panic wrapper.
 func defaultProxies(t *testing.T) []ProxyConfig {
 	t.Helper()
-	proxies, err := ProxiesFromContract(mustDefaultContract(t))
+	proxies, err := proxiesFromContract(mustDefaultContract(t))
 	if err != nil {
 		t.Fatalf("proxies from contract: %v", err)
 	}

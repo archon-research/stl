@@ -81,8 +81,8 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 // entries and proxies runs the load-boundary chain-vocabulary validation
 // (validateChainVocabulary), which fails if a regeneration introduces an entry on a
 // chain that is neither in entity.ChainIDToName (so a tracker can index it) nor in the
-// acknowledged not-yet-served allowlist — the gap where EntriesForChainID/
-// ProxiesForChainID would silently drop the position. The explicit chainIsKnown loop
+// acknowledged not-yet-served allowlist — the gap where entriesForChainID/
+// proxiesForChainID would silently drop the position. The explicit chainIsKnown loop
 // documents the same invariant against the shared allowlist.
 func TestEveryContractChainIsConfigurableOrAcknowledged(t *testing.T) {
 	entries := defaultEntries(t) // also runs the token-entry chain-vocabulary validation
