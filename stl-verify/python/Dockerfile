@@ -10,12 +10,11 @@ WORKDIR /ui
 COPY ts/package.json ts/package-lock.json ts/.npmrc ./
 COPY ts/ui/package.json ui/package.json
 
-# --ignore-scripts skips lifecycle hooks (notably the `prepare` → `panda codegen`
-# in @stl-verify/ui, which needs panda.config.ts that isn't copied yet).
-# `npm run build` below runs `prebuild` → codegen once the source is present.
-RUN npm ci --ignore-scripts
+RUN npm ci
 
 COPY ts/ui ui/
+
+RUN npm run prepare --workspace=@stl-verify/ui
 
 RUN npm run build --workspace=@stl-verify/ui
 

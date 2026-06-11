@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -48,13 +51,19 @@ type AssetsByPrimeModel struct {
 }
 
 type AlmProxiesModel struct {
-	AlmProxy map[string]map[string]ProxyConfig `json:"AlmProxy"`
+	// AlmProxy is keyed by star then chain, and holds a list of proxies: the
+	// canonical ALM proxy plus any additional SubProxy/treasury wallets that
+	// must be tracked separately for the same (star, chain).
+	AlmProxy map[string]map[string][]ProxyConfig `json:"AlmProxy"`
 }
 
 type ProxyConfig struct {
 	Star    string `json:"star"`
 	Chain   string `json:"chain"`
 	Address string `json:"address"`
+	// Role distinguishes the canonical ALM proxy ("alm") from additional
+	// SubProxy/treasury wallets ("subproxy") for the same (star, chain).
+	Role string `json:"role"`
 }
 
 type TokenEntry struct {
@@ -66,11 +75,53 @@ type TokenEntry struct {
 	Protocol        string  `json:"protocol"`
 	AllocationType  string  `json:"allocation_type"`
 	TokenType       string  `json:"token_type"`
-	CreatedAtBlock  *int64  `json:"created_at_block"`
+	// created_at_block is intentionally absent: it is on-chain observed data,
+	// not Atlas-sourced, so the axis-synome contract does not carry it. The
+	// allocation tracker owns it via knownCreatedAtBlocks (see entries.go).
+}
+
+// GetAlmProxies returns the ALM proxy configurations keyed by star and then
+// chain. Each (star, chain) maps to a list of proxies (canonical ALM proxy plus
+// any additional SubProxy/treasury wallets).
+func (c *Contract) GetAlmProxies() map[string]map[string][]ProxyConfig {
+	return c.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
+}
+
+// GetAssetsByPrime returns the token entries keyed by star.
+func (c *Contract) GetAssetsByPrime() map[string][]TokenEntry {
+	return c.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime
 }
 
 func LoadDefault() (*Bundle, error) {
-	return Load(DefaultContractPath, DefaultSchemaPath)
+	contract, err := LoadDefaultContract()
+	if err != nil {
+		return nil, fmt.Errorf("load default contract: %w", err)
+	}
+
+	schema, err := LoadDefaultSchema()
+	if err != nil {
+		return nil, fmt.Errorf("load default schema: %w", err)
+	}
+
+	return &Bundle{Contract: *contract, Schema: schema}, nil
+}
+
+func LoadDefaultContract() (*Contract, error) {
+	contractPath, err := resolveDefaultPath(DefaultContractPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return LoadContract(contractPath)
+}
+
+func LoadDefaultSchema() (map[string]any, error) {
+	schemaPath, err := resolveDefaultPath(DefaultSchemaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return LoadSchema(schemaPath)
 }
 
 func Load(contractPath string, schemaPath string) (*Bundle, error) {
@@ -112,16 +163,18 @@ func LoadContract(path string) (*Contract, error) {
 }
 
 func validateAddresses(contract *Contract) error {
-	for star, byChain := range contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy {
-		for chain, proxy := range byChain {
-			context := fmt.Sprintf("alm_proxy star=%s chain=%s", star, chain)
-			if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
-				return err
+	for star, byChain := range contract.GetAlmProxies() {
+		for chain, proxies := range byChain {
+			for i, proxy := range proxies {
+				context := fmt.Sprintf("alm_proxy star=%s chain=%s index=%d", star, chain, i)
+				if err := validateEthereumAddress(proxy.Address, "address", context); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
-	for star, entries := range contract.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime {
+	for star, entries := range contract.GetAssetsByPrime() {
 		for i, entry := range entries {
 			context := fmt.Sprintf("token_entry star=%s index=%d", star, i)
 			if err := validateEthereumAddress(entry.ContractAddress, "contract_address", context); err != nil {
@@ -176,4 +229,61 @@ func unmarshalStrict(data []byte, target any) error {
 	}
 
 	return nil
+}
+
+func resolveDefaultPath(relativePath string) (string, error) {
+	candidates, err := defaultPathCandidates(relativePath)
+	if err != nil {
+		return "", err
+	}
+
+	tried := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("stat axis-synome default path %q: %w", candidate, err)
+		}
+		tried = append(tried, candidate)
+	}
+
+	return "", fmt.Errorf("axis-synome default file %q not found; tried: %s", relativePath, strings.Join(tried, ", "))
+}
+
+func defaultPathCandidates(relativePath string) ([]string, error) {
+	candidates := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Clean(filepath.Join(cwd, relativePath)))
+	}
+
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		if len(candidates) > 0 {
+			return uniquePaths(candidates), nil
+		}
+		return nil, fmt.Errorf("resolve axis-synome default path: runtime caller unavailable")
+	}
+
+	candidates = append(candidates, filepath.Clean(filepath.Join(
+		filepath.Dir(currentFile),
+		"..",
+		"..",
+		"..",
+		relativePath,
+	)))
+
+	return uniquePaths(candidates), nil
+}
+
+func uniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique
 }
