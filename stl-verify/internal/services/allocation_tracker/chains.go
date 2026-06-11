@@ -9,7 +9,7 @@ import (
 
 // acknowledgedUnservedChains are chains intentionally present in the axis-synome
 // contract but not yet wired into entity.ChainIDToName, so no allocation tracker is
-// configured for them today (their entries are filtered out by EntriesForChainID for
+// configured for them today (their entries are filtered out by entriesForChainID for
 // every configured chain). They are allowed past load-time validation; a genuinely new
 // chain must be either enabled (added to ChainIDToName) or acknowledged here.
 //
@@ -38,7 +38,7 @@ func chainIsKnown(chain string) bool {
 }
 
 // validateChainVocabulary fails if any loaded position sits on an empty or unrecognised
-// chain. EntriesForChainID / ProxiesForChainID silently drop entries whose chain matches
+// chain. entriesForChainID / proxiesForChainID silently drop entries whose chain matches
 // no configured chainID, so this is the trust boundary that turns "silently untracked
 // forever" into a loud load-time failure. chainCounts maps chain -> number of positions.
 func validateChainVocabulary(what string, chainCounts map[string]int) error {

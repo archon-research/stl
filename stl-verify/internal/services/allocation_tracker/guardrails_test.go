@@ -116,4 +116,13 @@ func TestProxiesFromAlmProxy(t *testing.T) {
 			t.Fatalf("want empty error, got %v", err)
 		}
 	})
+
+	t.Run("rejects proxy whose star disagrees with its key", func(t *testing.T) {
+		in := map[string]map[string][]axis_synome_contract.ProxyConfig{
+			"spark": {"mainnet": {{Star: "grove", Address: "0x00000000000000000000000000000000000000aa", Role: "alm"}}},
+		}
+		if _, err := proxiesFromAlmProxy(in); err == nil || !strings.Contains(err.Error(), "does not match its AlmProxy key") {
+			t.Fatalf("want star-mismatch error, got %v", err)
+		}
+	})
 }
