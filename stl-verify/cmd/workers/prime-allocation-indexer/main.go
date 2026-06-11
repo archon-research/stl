@@ -288,7 +288,7 @@ func run(ctx context.Context, args []string) error {
 
 	entries, proxies, err := at.EntriesAndProxiesForChainID(contract, cfg.chainID)
 	if err != nil {
-		return err
+		return fmt.Errorf("derive entries/proxies for contract %s chain %d: %w", contract.Version, cfg.chainID, err)
 	}
 
 	txm, err := postgres.NewTxManager(dbPool, logger)
