@@ -27,12 +27,12 @@ var legacyProtocolAliases = map[string]string{
 	"steakhouse-pyusd-morpho-vault":               "steakhouse",
 }
 
-// TokenEntriesFromContract converts the contract's assets-by-prime into allocation
+// tokenEntriesFromContract converts the contract's assets-by-prime into allocation
 // TokenEntries. It is pure (no I/O): callers load the contract once and pass it here, so
 // entries and proxies come from a single read. It cross-checks each entry's star against
 // its ASSETS_BY_PRIME key and validates the chain vocabulary, so a mis-keyed entry or an
 // unrecognised chain fails loudly rather than being silently mis-attributed or dropped.
-func TokenEntriesFromContract(contract *axis_synome_contract.Contract) ([]*TokenEntry, error) {
+func tokenEntriesFromContract(contract *axis_synome_contract.Contract) ([]*TokenEntry, error) {
 	entriesByStar := contract.GetAssetsByPrime()
 	starKeys := make([]string, 0, len(entriesByStar))
 	for star := range entriesByStar {
@@ -146,7 +146,7 @@ func BuildEntryLookup(entries []*TokenEntry) map[EntryKey]*TokenEntry {
 	return m
 }
 
-func EntriesForChain(entries []*TokenEntry, chain string) []*TokenEntry {
+func entriesForChain(entries []*TokenEntry, chain string) []*TokenEntry {
 	var result []*TokenEntry
 	for _, e := range entries {
 		if e.Chain == chain {
@@ -156,15 +156,15 @@ func EntriesForChain(entries []*TokenEntry, chain string) []*TokenEntry {
 	return result
 }
 
-func EntriesForChainID(entries []*TokenEntry, chainID int64) []*TokenEntry {
+func entriesForChainID(entries []*TokenEntry, chainID int64) []*TokenEntry {
 	chain, ok := entity.ChainIDToName[chainID]
 	if !ok {
 		return nil
 	}
-	return EntriesForChain(entries, chain)
+	return entriesForChain(entries, chain)
 }
 
-func ProxiesForChainID(proxies []ProxyConfig, chainID int64) []ProxyConfig {
+func proxiesForChainID(proxies []ProxyConfig, chainID int64) []ProxyConfig {
 	chain, ok := entity.ChainIDToName[chainID]
 	if !ok {
 		return nil
@@ -184,20 +184,20 @@ func ProxiesForChainID(proxies []ProxyConfig, chainID int64) []ProxyConfig {
 // worker calls this once per startup; keeping it here (rather than inline in main) makes
 // the empty-set error paths unit-testable without standing up the full worker.
 func EntriesAndProxiesForChainID(contract *axis_synome_contract.Contract, chainID int64) ([]*TokenEntry, []ProxyConfig, error) {
-	allEntries, err := TokenEntriesFromContract(contract)
+	allEntries, err := tokenEntriesFromContract(contract)
 	if err != nil {
 		return nil, nil, fmt.Errorf("token entries from contract: %w", err)
 	}
-	entries := EntriesForChainID(allEntries, chainID)
+	entries := entriesForChainID(allEntries, chainID)
 	if len(entries) == 0 {
 		return nil, nil, fmt.Errorf("no token entries for chain ID %d", chainID)
 	}
 
-	allProxies, err := ProxiesFromContract(contract)
+	allProxies, err := proxiesFromContract(contract)
 	if err != nil {
 		return nil, nil, fmt.Errorf("proxies from contract: %w", err)
 	}
-	proxies := ProxiesForChainID(allProxies, chainID)
+	proxies := proxiesForChainID(allProxies, chainID)
 	if len(proxies) == 0 {
 		return nil, nil, fmt.Errorf("no proxies for chain ID %d", chainID)
 	}

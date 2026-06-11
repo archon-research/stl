@@ -180,20 +180,20 @@ func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 
 func TestEntriesForChain(t *testing.T) {
 	entries := defaultEntries(t)
-	eth := EntriesForChain(entries, "mainnet")
+	eth := entriesForChain(entries, "mainnet")
 	if len(eth) == 0 {
 		t.Fatal("expected mainnet entries")
 	}
 	for _, e := range eth {
 		if e.Chain != "mainnet" {
-			t.Errorf("EntriesForChain(mainnet) returned entry with chain %q", e.Chain)
+			t.Errorf("entriesForChain(mainnet) returned entry with chain %q", e.Chain)
 		}
 	}
 }
 
 func TestEntriesForChain_UnknownChain(t *testing.T) {
 	entries := defaultEntries(t)
-	result := EntriesForChain(entries, "nonexistent")
+	result := entriesForChain(entries, "nonexistent")
 	if len(result) != 0 {
 		t.Errorf("expected 0 entries for unknown chain, got %d", len(result))
 	}
