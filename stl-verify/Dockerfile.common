@@ -75,6 +75,13 @@ WORKDIR /app
 # Copy the service binary, keeping its per-service name (see BIN note above)
 ARG BIN
 COPY --from=builder /${BIN} /app/${BIN}
+
+# Ship the axis-synome contract data read at runtime by the allocation tracker
+# (resolved relative to WORKDIR /app). It is a few small JSON files and other
+# services simply ignore it; kept here because the per-service
+# Dockerfile.allocation-tracker was consolidated into this shared build.
+COPY --from=builder /app/contracts /app/contracts
+
 ENV APP_BIN=/app/${BIN}
 
 USER appuser
