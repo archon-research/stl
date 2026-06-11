@@ -20,6 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -121,19 +122,35 @@ async def _seed(async_url: str) -> None:
             )
             _ = receipt_token_token_id  # registered above; FK via receipt_token_address
 
+            # Seed a price for the underlying syrupUSDT via the Aave V3 oracle
+            # (bound to the 'Aave V3' protocol in migrations).  Without a price
+            # the USD-exposure queries return 0 regardless of the bug; with one,
+            # the pre-fix query multiplies the stale non-zero balance by the price
+            # and reports a non-zero total for a fully-swept prime.
+            await conn.execute(
+                text(
+                    "INSERT INTO onchain_token_price "
+                    "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                    "SELECT :tid, o.id, 2000, 0, NOW(), 2 "
+                    "FROM oracle o WHERE o.name = 'aave_v3' "
+                    "ON CONFLICT DO NOTHING"
+                ),
+                {"tid": syrup_token_id},
+            )
+
             # ---------------------------------------------------------------
             # Scenario 1: [in 100, out 100] — latest balance is 0
             # _CLOSED_PROXY holds aSyrupUSDT: earlier row balance=100 (block 1000),
             # latest row balance=0 (block 2000).  Must NOT appear in any query.
             # ---------------------------------------------------------------
-            for block, bal, tx in [(1000, 100, _TXA), (2000, 0, _TXB)]:
+            for block, bal, tx, direction in [(1000, 100, _TXA, "in"), (2000, 0, _TXB, "out")]:
                 await conn.execute(
                     text(
                         "INSERT INTO allocation_position "
                         "(chain_id, token_id, prime_id, proxy_address, balance, "
                         "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
                         "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), :bal, :bn, 0, "
-                        "decode(:tx, 'hex'), 0, :bal, 'in')"
+                        "decode(:tx, 'hex'), 0, :bal, :dir)"
                     ),
                     {
                         "tid": receipt_token_token_id,
@@ -142,17 +159,18 @@ async def _seed(async_url: str) -> None:
                         "bal": bal,
                         "bn": block,
                         "tx": tx,
+                        "dir": direction,
                     },
                 )
             # Also seed a direct USDS holding that was swept to zero
-            for block, bal, tx in [(1000, 75894, _TXC), (2000, 0, _TXD)]:
+            for block, bal, tx, direction in [(1000, 75894, _TXC, "in"), (2000, 0, _TXD, "out")]:
                 await conn.execute(
                     text(
                         "INSERT INTO allocation_position "
                         "(chain_id, token_id, prime_id, proxy_address, balance, "
                         "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
                         "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), :bal, :bn, 0, "
-                        "decode(:tx, 'hex'), 0, :bal, 'in')"
+                        "decode(:tx, 'hex'), 0, :bal, :dir)"
                     ),
                     {
                         "tid": usds_token_id,
@@ -161,6 +179,7 @@ async def _seed(async_url: str) -> None:
                         "bal": bal,
                         "bn": block,
                         "tx": tx,
+                        "dir": direction,
                     },
                 )
 
@@ -249,8 +268,8 @@ def client(async_db_url: str, tmp_path: Path):
         yield c
 
 
-@pytest.fixture()
-def repo(async_db_url: str):
+@pytest_asyncio.fixture()
+async def repo(async_db_url: str):
     """Bare PostgresAllocationRepository for direct method tests."""
     from sqlalchemy.ext.asyncio import create_async_engine as _cae
 
@@ -259,7 +278,10 @@ def repo(async_db_url: str):
     )
 
     engine = _cae(async_db_url)
-    return PostgresAllocationRepository(engine)
+    try:
+        yield PostgresAllocationRepository(engine)
+    finally:
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -325,13 +347,11 @@ def test_open_position_with_older_zero_rows_still_returned(client: TestClient) -
 async def test_get_total_usd_exposure_excludes_swept_positions(repo) -> None:
     """get_total_usd_exposure must return 0 when the only position is swept to 0.
 
-    We cannot seed onchain_token_price rows here (the price oracle join
-    means a zero-priced position contributes 0 anyway), but the key
-    regression is that a swept position does not cause the query to pull
-    a stale non-zero balance into the aggregate.  With no price rows the
-    result is 0 via COALESCE regardless; the absence of an exception
-    (which would occur if the old buggy query accidentally joined against
-    a stale non-zero row with no matching price) is itself the assertion.
+    A syrupUSDT price is seeded, so the pre-fix query (which walks back to
+    the last non-zero balance of 100) would report ``100 * 2 = 200`` for this
+    fully-swept prime.  Post-fix the swept latest row (balance=0) is filtered
+    before pricing, so the total is 0.  The seeded price is what makes this a
+    real regression test rather than a COALESCE-of-NULL no-op.
     """
     prime_id = EthAddress(f"0x{_CLOSED_PROXY_HEX}")
     result = await repo.get_total_usd_exposure(prime_id)
@@ -339,11 +359,12 @@ async def test_get_total_usd_exposure_excludes_swept_positions(repo) -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_total_usd_exposure_for_open_position_does_not_raise(repo) -> None:
-    """get_total_usd_exposure for a prime with an open position returns 0 when
-    no price data exists (no exception expected — COALESCE handles NULL sum).
+async def test_get_total_usd_exposure_for_open_position_is_priced(repo) -> None:
+    """An open position contributes its priced balance to the total.
+
+    _OPEN_PROXY holds aSyrupUSDT with latest balance=500; the seeded
+    syrupUSDT price is 2, so the total is ``500 * 2 = 1000``.
     """
     prime_id = EthAddress(f"0x{_OPEN_PROXY_HEX}")
     result = await repo.get_total_usd_exposure(prime_id)
-    # No price rows seeded => SUM is NULL => COALESCE returns 0
-    assert result == Decimal("0")
+    assert result == Decimal("1000"), f"Expected priced total of 1000 for open position, got {result}"
