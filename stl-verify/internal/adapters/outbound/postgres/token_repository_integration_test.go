@@ -497,7 +497,9 @@ func TestListTokensMissingSymbol_NullSymbolIsMissing(t *testing.T) {
 
 // TestResolveTokenSymbol_RejectsEmptySymbol verifies the contract guard: an
 // empty resolution would match the missing-symbol predicate, report success,
-// and leave the row pending, so it must be rejected outright.
+// and leave the row pending, so it must be rejected outright. A pending token
+// is seeded first so the failure can only come from the empty-symbol guard —
+// without it, the UPDATE would match the seeded row and report success.
 func TestResolveTokenSymbol_RejectsEmptySymbol(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
@@ -507,8 +509,32 @@ func TestResolveTokenSymbol_RejectsEmptySymbol(t *testing.T) {
 		t.Fatalf("NewTokenRepository: %v", err)
 	}
 
+	chainID := int64(1)
 	addr := common.HexToAddress("0xCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD")
-	if err := repo.ResolveTokenSymbol(ctx, 1, addr, ""); err == nil {
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, 100); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, ""); err == nil {
 		t.Fatal("expected error when resolving with an empty symbol")
+	}
+
+	// The seeded row must be untouched: still empty, still listed as missing.
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes()).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "" {
+		t.Errorf("symbol = %q, want empty (rejected resolve must not write)", symbol)
 	}
 }

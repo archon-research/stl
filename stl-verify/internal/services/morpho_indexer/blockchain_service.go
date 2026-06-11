@@ -695,7 +695,7 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 	// decimals() (index 1) must succeed — it drives all amount math. A reverted
 	// symbol() (index 0) is tolerated: unpackTokenMetadataResults yields an empty
 	// symbol that the per-block sweep fills in later. Narrows VEC-188
-	// Finding 3 to decimals only.
+	// "Finding 3" to decimals only.
 	if !results[1].Success {
 		return TokenMetadata{}, fmt.Errorf("getTokenMetadata(%s): decimals() sub-call reverted", tokenAddress.Hex())
 	}
