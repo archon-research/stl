@@ -361,34 +361,13 @@ func TestMaplePoolStates_NullTVLAndCollateralValueRoundTrip(t *testing.T) {
 	}
 }
 
-// mapleLogRecorder captures slog records so tests can assert on warnings.
-type mapleLogRecorder struct{ records []slog.Record }
-
-func (h *mapleLogRecorder) Enabled(context.Context, slog.Level) bool { return true }
-func (h *mapleLogRecorder) Handle(_ context.Context, r slog.Record) error {
-	h.records = append(h.records, r)
-	return nil
-}
-func (h *mapleLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *mapleLogRecorder) WithGroup(string) slog.Handler      { return h }
-
-func (h *mapleLogRecorder) countWarn(substr string) int {
-	n := 0
-	for _, r := range h.records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
-			n++
-		}
-	}
-	return n
-}
-
 func TestMaplePoolStates_DedupWarnsOnConflict(t *testing.T) {
 	// Re-inserting the same state at the same synced_at and build dedupes
 	// via the processing-version trigger + ON CONFLICT DO NOTHING (the
 	// Temporal-retry path) and must be surfaced by the RowsAffected warn.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
-	recorder := &mapleLogRecorder{}
+	recorder := &testutil.SlogRecorder{}
 	repo, err := NewMapleGraphQLRepository(maplePool, slog.New(recorder), 0, 0)
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
@@ -404,14 +383,14 @@ func TestMaplePoolStates_DedupWarnsOnConflict(t *testing.T) {
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		return repo.SavePoolStates(ctx, tx, []*entity.MaplePoolState{state})
 	})
-	if got := recorder.countWarn("deduplicated"); got != 0 {
+	if got := recorder.CountWarn("deduplicated"); got != 0 {
 		t.Fatalf("dedup warn fired %d times on first insert, want 0", got)
 	}
 
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		return repo.SavePoolStates(ctx, tx, []*entity.MaplePoolState{state})
 	})
-	if got := recorder.countWarn("deduplicated"); got != 1 {
+	if got := recorder.CountWarn("deduplicated"); got != 1 {
 		t.Errorf("dedup warn fired %d times after duplicate insert, want 1", got)
 	}
 

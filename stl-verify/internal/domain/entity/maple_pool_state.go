@@ -28,7 +28,7 @@ type MaplePoolState struct {
 func NewMaplePoolState(maplePoolID int64, syncedAt time.Time, tvl, liquidAssets, collateralValueUSD, principalOut, monthlyAPY, spotAPY *big.Int) (*MaplePoolState, error) {
 	s := &MaplePoolState{
 		MaplePoolID:        maplePoolID,
-		SyncedAt:           normalizeSyncedAt(syncedAt),
+		SyncedAt:           NormalizeSyncedAt(syncedAt),
 		TVL:                tvl,
 		LiquidAssets:       liquidAssets,
 		CollateralValueUSD: collateralValueUSD,

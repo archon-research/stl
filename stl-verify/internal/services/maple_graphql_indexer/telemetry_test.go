@@ -152,6 +152,17 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 		loans[2].Collateral.AssetAmount = nil
 		return loans, nil
 	}
+	client.GetSkyStrategiesFn = func(context.Context) ([]outbound.MapleSkyStrategy, error) {
+		strategies := fixtureStrategies()
+		strategies[0].StrategyFeeRate = nil
+		strategies[0].TotalFeesCollected = nil
+		return strategies, nil
+	}
+	client.GetSyrupGlobalsFn = func(context.Context) (*outbound.MapleSyrupGlobals, error) {
+		globals := fixtureGlobals()
+		globals.DripsYieldBoost = nil
+		return globals, nil
+	}
 
 	service, err := NewService(ServiceConfig{ChainID: 1}, client, newMockRepo(), &testutil.MockTxManager{}, tel)
 	if err != nil {
@@ -184,10 +195,17 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 		}
 	}
 	want := map[string]int64{
-		"pool_tvl":                   2,
-		"pool_collateral_value_usd":  1,
-		"collateral_asset_amount":    2,
-		"collateral_asset_value_usd": 1,
+		"pool_tvl":                      2,
+		"pool_collateral_value_usd":     1,
+		"pool_monthly_apy":              1, // fixture pool 2 has no APYs
+		"pool_spot_apy":                 1,
+		"collateral_asset_amount":       2,
+		"collateral_asset_value_usd":    1,
+		"loan_acm_ratio":                1, // fixture loan 2 is uncollateralized
+		"collateral_liquidation_level":  1, // fixture loan 3 collateral has none
+		"strategy_fee_rate":             1,
+		"strategy_total_fees_collected": 1,
+		"syrup_drips_yield_boost":       1,
 	}
 	for field, wantCount := range want {
 		if got[field] != wantCount {

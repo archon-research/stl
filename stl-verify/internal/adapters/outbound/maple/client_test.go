@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const (
@@ -75,28 +77,6 @@ func newTestClientWithLogger(t *testing.T, handler http.Handler, logger *slog.Lo
 		t.Fatalf("NewClient: %v", err)
 	}
 	return client
-}
-
-// recordingHandler captures slog records for assertions. Tests using it run
-// requests sequentially, so it needs no locking.
-type recordingHandler struct{ records []slog.Record }
-
-func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.records = append(h.records, r)
-	return nil
-}
-func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
-
-func (h *recordingHandler) countWarn(substr string) int {
-	n := 0
-	for _, r := range h.records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
-			n++
-		}
-	}
-	return n
 }
 
 func writeJSON(w http.ResponseWriter, body string) {
@@ -314,7 +294,7 @@ func TestGetActiveLoans_NullCollateralMetaAndAcmRatio(t *testing.T) {
 func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 	// tvl and collateralValue are nullable in the API schema; both surface
 	// as nil (with a warn) rather than failing the call.
-	handler := &recordingHandler{}
+	handler := &testutil.SlogRecorder{}
 	client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
 			"id": %q, "name": "Bootstrapping Pool",
@@ -332,7 +312,7 @@ func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 	if len(pools) != 1 {
 		t.Fatalf("len(pools) = %d, want 1", len(pools))
 	}
-	if got := handler.countWarn("storing as NULL"); got != 1 {
+	if got := handler.CountWarn("storing as NULL"); got != 1 {
 		t.Errorf("null-metric warn fired %d times, want exactly 1", got)
 	}
 	if pools[0].TVL != nil {
@@ -381,7 +361,7 @@ func TestTransportErrorsAreRetried(t *testing.T) {
 	endpoint := server.URL
 	server.Close() // every request now fails with connection refused
 
-	handler := &recordingHandler{}
+	handler := &testutil.SlogRecorder{}
 	client, err := NewClient(Config{
 		Endpoint:          endpoint,
 		Timeout:           time.Second,
@@ -402,7 +382,7 @@ func TestTransportErrorsAreRetried(t *testing.T) {
 	if !strings.Contains(err.Error(), "executing request") {
 		t.Errorf("error %q should come from the transport branch", err.Error())
 	}
-	if got := handler.countWarn("request failed, retrying"); got != 2 {
+	if got := handler.CountWarn("request failed, retrying"); got != 2 {
 		t.Errorf("retry warns = %d, want 2 (MaxRetries exhausted)", got)
 	}
 }
@@ -513,7 +493,7 @@ func TestGetActiveLoans_NullCollateralAmountsPersistedAsNull(t *testing.T) {
 		{name: "both null", amount: "null", usd: "null", wantAmount: nil, wantUSD: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := &recordingHandler{}
+			handler := &testutil.SlogRecorder{}
 			client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 				writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
 					"id": %q, "borrower": {"id": %q}, "state": "Active",
@@ -551,7 +531,7 @@ func TestGetActiveLoans_NullCollateralAmountsPersistedAsNull(t *testing.T) {
 			if loans[0].PrincipalOwed.Cmp(big.NewInt(7000000)) != 0 {
 				t.Errorf("PrincipalOwed = %s, want 7000000", loans[0].PrincipalOwed)
 			}
-			if got := handler.countWarn("storing as NULL"); got != 1 {
+			if got := handler.CountWarn("storing as NULL"); got != 1 {
 				t.Errorf("null-downgrade warn fired %d times, want exactly 1", got)
 			}
 		})

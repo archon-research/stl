@@ -100,7 +100,7 @@ func (s *Service) Sync(ctx context.Context) error {
 // dedupe them, so a retry caused by one failing phase does not multiply the
 // healthy phases' snapshots.
 func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
-	syncedAt = syncedAt.UTC().Truncate(time.Second)
+	syncedAt = entity.NormalizeSyncedAt(syncedAt)
 	ctx, span := s.telemetry.StartCycleSpan(ctx, syncedAt)
 	defer span.End()
 
@@ -197,6 +197,12 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 		}
 		if p.CollateralUSD == nil {
 			s.telemetry.RecordNullDowngrade(ctx, "pool_collateral_value_usd")
+		}
+		if p.MonthlyAPY == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "pool_monthly_apy")
+		}
+		if p.SpotAPY == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "pool_spot_apy")
 		}
 		assetDecimals, err := toInt16(p.AssetDecimals)
 		if err != nil {
@@ -308,12 +314,18 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 		if _, ok := poolIDs[l.PoolAddress]; !ok {
 			return fmt.Errorf("loan %s references unknown pool %s", lowerHex(l.LoanID), lowerHex(l.PoolAddress))
 		}
+		if l.AcmRatio == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "loan_acm_ratio")
+		}
 		if l.Collateral != nil {
 			if l.Collateral.AssetAmount == nil {
 				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_amount")
 			}
 			if l.Collateral.AssetValueUSD == nil {
 				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_value_usd")
+			}
+			if l.Collateral.LiquidationLevel == nil {
+				s.telemetry.RecordNullDowngrade(ctx, "collateral_liquidation_level")
 			}
 		}
 	}
@@ -470,6 +482,12 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 
 	strategyEntities := make([]*entity.MapleSkyStrategy, 0, len(strategies))
 	for _, st := range strategies {
+		if st.StrategyFeeRate == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "strategy_fee_rate")
+		}
+		if st.TotalFeesCollected == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "strategy_total_fees_collected")
+		}
 		poolID, ok := poolIDs[st.PoolAddress]
 		if !ok {
 			return fmt.Errorf("sky strategy %s references unknown pool %s", lowerHex(st.Address), lowerHex(st.PoolAddress))
@@ -527,6 +545,9 @@ func (s *Service) syncSyrupGlobals(ctx context.Context, syncedAt time.Time) erro
 	globals, err := s.client.GetSyrupGlobals(ctx)
 	if err != nil {
 		return fmt.Errorf("fetching syrup globals: %w", err)
+	}
+	if globals.DripsYieldBoost == nil {
+		s.telemetry.RecordNullDowngrade(ctx, "syrup_drips_yield_boost")
 	}
 
 	state, err := entity.NewMapleSyrupGlobalState(

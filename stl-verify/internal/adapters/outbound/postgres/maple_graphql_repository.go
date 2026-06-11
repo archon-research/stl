@@ -236,38 +236,23 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 		)
 	}
 
-	return collectLoanIDsVerifyingBorrower(ctx, tx, batch, sorted)
-}
-
-// collectLoanIDsVerifyingBorrower scans the loan upsert batch and enforces
-// borrower immutability: the upsert never refreshes borrower_user_id, so a
-// stored value differing from the API's resolved borrower means the "a loan
-// contract's borrower is immutable" assumption broke upstream — fail loudly
-// instead of silently keeping the stale association.
-func collectLoanIDsVerifyingBorrower(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, loans []*entity.MapleLoan) (result map[common.Address]int64, err error) {
-	br := tx.SendBatch(ctx, batch)
-	// A scan error takes precedence over the close error; the close error is
-	// only surfaced when everything else succeeded.
-	defer func() {
-		if closeErr := br.Close(); closeErr != nil && err == nil {
-			result = nil
-			err = fmt.Errorf("closing maple loan batch: %w", closeErr)
-		}
-	}()
-
-	result = make(map[common.Address]int64, len(loans))
-	for _, l := range loans {
-		addr := common.BytesToAddress(l.LoanAddress)
-		var id, storedBorrower int64
-		if err := br.QueryRow().Scan(&id, &storedBorrower); err != nil {
-			return nil, fmt.Errorf("upserting maple loan %s: %w", addr, err)
-		}
-		if storedBorrower != l.BorrowerUserID {
-			return nil, fmt.Errorf("maple loan %s borrower changed: stored user id %d, API resolved user id %d (loan borrowers are immutable; refusing the snapshot)", addr, storedBorrower, l.BorrowerUserID)
-		}
-		result[addr] = id
-	}
-	return result, nil
+	// The scan enforces borrower immutability: the upsert never refreshes
+	// borrower_user_id, so a stored value differing from the API's resolved
+	// borrower means the "a loan contract's borrower is immutable"
+	// assumption broke upstream — fail loudly instead of silently keeping
+	// the stale association.
+	return collectBatchRows(ctx, tx, batch, sorted, "maple loan",
+		func(row pgx.Row, l *entity.MapleLoan) (common.Address, int64, error) {
+			addr := common.BytesToAddress(l.LoanAddress)
+			var id, storedBorrower int64
+			if err := row.Scan(&id, &storedBorrower); err != nil {
+				return common.Address{}, 0, fmt.Errorf("upserting maple loan %s: %w", addr, err)
+			}
+			if storedBorrower != l.BorrowerUserID {
+				return common.Address{}, 0, fmt.Errorf("maple loan %s borrower changed: stored user id %d, API resolved user id %d (loan borrowers are immutable; refusing the snapshot)", addr, storedBorrower, l.BorrowerUserID)
+			}
+			return addr, id, nil
+		})
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
@@ -485,15 +470,26 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 // Helpers
 // ---------------------------------------------------------------------------
 
-// warnDedupedRows makes ON CONFLICT DO NOTHING dedup visible. A conflict is
-// expected when a Temporal activity retry re-runs an already-persisted phase
-// at the same synced_at and build (the trigger reuses the processing_version
-// and the insert dedupes); anything else — clock regression, a duplicate
+// warnDedupedRows makes ON CONFLICT DO NOTHING dedup visible. A full dedup
+// (zero rows inserted) is the signature of a Temporal activity retry
+// re-running an already-persisted phase at the same synced_at and build (the
+// trigger reuses the processing_version and the insert dedupes), so it logs
+// at warn. A partial dedup within a single batch is never a retry artifact —
+// some rows collided while siblings did not (clock regression, a duplicate
 // that slipped the service guards, a trigger bug assigning a colliding
-// version — is a hidden data bug this log surfaces.
+// version) — so it logs at error.
 func (r *MapleGraphQLRepository) warnDedupedRows(table string, tag pgconn.CommandTag, expected int) {
-	if inserted := tag.RowsAffected(); inserted != int64(expected) {
-		r.logger.Warn("state insert deduplicated by ON CONFLICT DO NOTHING",
+	inserted := tag.RowsAffected()
+	switch {
+	case inserted == int64(expected):
+	case inserted == 0:
+		r.logger.Warn("state insert fully deduplicated by ON CONFLICT DO NOTHING (expected on activity retries)",
+			"table", table,
+			"expected", expected,
+			"inserted", inserted,
+		)
+	default:
+		r.logger.Error("state insert PARTIALLY deduplicated by ON CONFLICT DO NOTHING (never a retry artifact; investigate)",
 			"table", table,
 			"expected", expected,
 			"inserted", inserted,

@@ -30,7 +30,7 @@ type MapleLoanCollateral struct {
 func NewMapleLoanCollateral(mapleLoanID int64, syncedAt time.Time, assetSymbol string, assetAmount *big.Int, assetDecimals int16, assetValueUSD *big.Int, state, custodian string, liquidationLevel *big.Int) (*MapleLoanCollateral, error) {
 	c := &MapleLoanCollateral{
 		MapleLoanID:      mapleLoanID,
-		SyncedAt:         normalizeSyncedAt(syncedAt),
+		SyncedAt:         NormalizeSyncedAt(syncedAt),
 		AssetSymbol:      assetSymbol,
 		AssetAmount:      assetAmount,
 		AssetDecimals:    assetDecimals,

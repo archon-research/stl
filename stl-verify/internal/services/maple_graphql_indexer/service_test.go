@@ -457,6 +457,31 @@ func TestSync_HappyPath(t *testing.T) {
 	}
 }
 
+func TestSyncAt_NormalizesTimestamp(t *testing.T) {
+	// SyncAt's contract: any zoned, sub-second timestamp is normalized to
+	// UTC second precision before it becomes the cycle's synced_at.
+	repo := newMockRepo()
+	service := newTestService(t, happyClient(), repo)
+
+	in := time.Date(2026, 6, 10, 12, 30, 45, 999999999, time.FixedZone("UTC+2", 2*3600))
+	want := time.Date(2026, 6, 10, 10, 30, 45, 0, time.UTC)
+
+	if err := service.SyncAt(context.Background(), in); err != nil {
+		t.Fatalf("SyncAt: %v", err)
+	}
+	if len(repo.savedPoolStates) == 0 {
+		t.Fatal("no pool states saved")
+	}
+	for _, s := range repo.savedPoolStates {
+		if !s.SyncedAt.Equal(want) {
+			t.Errorf("pool state syncedAt = %v, want %v", s.SyncedAt, want)
+		}
+	}
+	if !repo.savedGlobals[0].SyncedAt.Equal(want) {
+		t.Errorf("globals syncedAt = %v, want %v", repo.savedGlobals[0].SyncedAt, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Phase failure isolation
 // ---------------------------------------------------------------------------

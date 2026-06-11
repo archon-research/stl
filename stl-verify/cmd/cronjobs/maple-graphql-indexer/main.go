@@ -50,6 +50,11 @@ func main() {
 }
 
 func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
 		return nil, err
@@ -97,6 +102,9 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		if scheduledAt, ok := temporal.ScheduledAtFromContext(ctx); ok {
 			return service.SyncAt(ctx, scheduledAt)
 		}
+		// Expected only for in-flight workflows started by an old binary
+		// during rollout; if it persists, retry idempotency is silently lost.
+		logger.Warn("no schedule time in context; falling back to wall-clock synced_at (retries will not dedupe)")
 		return service.Sync(ctx)
 	}), nil
 }

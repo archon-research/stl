@@ -8,11 +8,12 @@
 // skyStrategy.version, which are JSON numbers) and parsed into big.Int;
 // any malformed value fails the whole call — rows are never skipped.
 //
-// Schema-nullable values are handled per field: pool tvl/collateralValue and
-// collateral assetAmount/assetValueUsd parse to nil (persisted as SQL NULL
-// downstream, logged here and counted by the service's null-downgrade
-// metric). Null top-level collections (data:null with no errors[]) are a
-// hard error — they are upstream breakage, not an empty result set.
+// Schema-nullable values parse to nil per field and are persisted as SQL
+// NULL downstream; the service counts every such null in its per-field
+// null-downgrade metric, and this client additionally warn-logs the
+// high-signal ones (pool tvl/collateralValue, collateral amounts). Null
+// top-level collections (data:null with no errors[]) are a hard error —
+// they are upstream breakage, not an empty result set.
 package maple
 
 import (

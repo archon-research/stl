@@ -33,6 +33,13 @@ func ScheduledAtFromContext(ctx context.Context) (time.Time, bool) {
 	return t, ok && !t.IsZero()
 }
 
+// ContextWithScheduledAt returns ctx carrying the schedule-stable timestamp
+// the activity normally stamps. Exported so composition-root tests can
+// exercise the same path their runner takes in production.
+func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.Context {
+	return context.WithValue(ctx, scheduledAtKey{}, scheduledAt)
+}
+
 // cronjobActivities wraps a Runner for Temporal activity execution.
 type cronjobActivities struct {
 	runner Runner
@@ -52,7 +59,7 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger := activity.GetLogger(ctx)
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
-	ctx = context.WithValue(ctx, scheduledAtKey{}, scheduledAt)
+	ctx = ContextWithScheduledAt(ctx, scheduledAt)
 	if err := a.runner.Run(ctx); err != nil {
 		return fmt.Errorf("running cronjob: %w", err)
 	}

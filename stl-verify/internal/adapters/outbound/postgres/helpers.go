@@ -53,7 +53,22 @@ func toNullableNumeric(raw *big.Int, decimals int) pgtype.Numeric {
 // collectBatchIDs sends a batch of single-row `RETURNING id` upserts and
 // collects the ids keyed per row. The batch must be queued in the same order
 // as rows. kind names the entity in error messages.
-func collectBatchIDs[T any, K comparable](ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows []T, kind string, key func(T) K) (result map[K]int64, err error) {
+func collectBatchIDs[T any, K comparable](ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows []T, kind string, key func(T) K) (map[K]int64, error) {
+	return collectBatchRows(ctx, tx, batch, rows, kind, func(row pgx.Row, item T) (K, int64, error) {
+		var id int64
+		if err := row.Scan(&id); err != nil {
+			var zero K
+			return zero, 0, fmt.Errorf("upserting %s %v: %w", kind, key(item), err)
+		}
+		return key(item), id, nil
+	})
+}
+
+// collectBatchRows sends a batch of single-row upserts and collects
+// (key, id) per row via scan, which may also reject a row with an error.
+// The batch must be queued in the same order as rows; kind names the entity
+// in error messages.
+func collectBatchRows[T any, K comparable](ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows []T, kind string, scan func(row pgx.Row, item T) (K, int64, error)) (result map[K]int64, err error) {
 	br := tx.SendBatch(ctx, batch)
 	// A scan error takes precedence over the close error; the close error is
 	// only surfaced when everything else succeeded.
@@ -65,12 +80,12 @@ func collectBatchIDs[T any, K comparable](ctx context.Context, tx pgx.Tx, batch 
 	}()
 
 	result = make(map[K]int64, len(rows))
-	for _, row := range rows {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			return nil, fmt.Errorf("upserting %s %v: %w", kind, key(row), err)
+	for _, item := range rows {
+		key, id, scanErr := scan(br.QueryRow(), item)
+		if scanErr != nil {
+			return nil, scanErr
 		}
-		result[key(row)] = id
+		result[key] = id
 	}
 	return result, nil
 }

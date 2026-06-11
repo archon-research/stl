@@ -22,7 +22,7 @@ type MapleLoanState struct {
 func NewMapleLoanState(mapleLoanID int64, syncedAt time.Time, state string, principalOwed, acmRatio *big.Int) (*MapleLoanState, error) {
 	s := &MapleLoanState{
 		MapleLoanID:   mapleLoanID,
-		SyncedAt:      normalizeSyncedAt(syncedAt),
+		SyncedAt:      NormalizeSyncedAt(syncedAt),
 		State:         state,
 		PrincipalOwed: principalOwed,
 		AcmRatio:      acmRatio,

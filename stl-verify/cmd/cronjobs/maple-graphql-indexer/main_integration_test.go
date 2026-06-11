@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -92,6 +93,61 @@ func TestSetupRunner_WiresService(t *testing.T) {
 		}
 		if count != 1 {
 			t.Errorf("%s rows = %d, want 1", table, count)
+		}
+	}
+}
+
+// TestSetupRunner_UsesScheduledAtFromContext pins the production path: under
+// Temporal the activity stamps the schedule time into the context, and the
+// runner must use it as synced_at so retries of the same run dedupe instead
+// of multiplying snapshots.
+func TestSetupRunner_UsesScheduledAtFromContext(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	server := mapleFixtureServer(t)
+	defer server.Close()
+
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("BUILD_GIT_HASH", "test-hash")
+	t.Setenv("MAPLE_GRAPHQL_ENDPOINT", server.URL)
+
+	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool})
+	if err != nil {
+		t.Fatalf("setupRunner: %v", err)
+	}
+
+	scheduledAt := time.Date(2026, 6, 11, 9, 0, 0, 0, time.UTC)
+	stampedCtx := temporal.ContextWithScheduledAt(ctx, scheduledAt)
+
+	// Two runs with the same schedule time simulate a Temporal activity
+	// retry: the second must dedupe via the processing-version trigger.
+	for range 2 {
+		if err := runner.Run(stampedCtx); err != nil {
+			t.Fatalf("runner.Run: %v", err)
+		}
+	}
+
+	var gotSyncedAt time.Time
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT MIN(synced_at), COUNT(*) FROM maple_pool_state`).Scan(&gotSyncedAt, &count); err != nil {
+		t.Fatalf("querying pool state: %v", err)
+	}
+	if !gotSyncedAt.Equal(scheduledAt) {
+		t.Errorf("synced_at = %v, want the context schedule time %v", gotSyncedAt, scheduledAt)
+	}
+	if count != 1 {
+		t.Errorf("pool state rows after retry = %d, want 1 (same scheduledAt must dedupe)", count)
+	}
+
+	for _, table := range []string{"maple_loan_state", "maple_sky_strategy_state", "maple_syrup_global_state"} {
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+			t.Fatalf("counting %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Errorf("%s rows after retry = %d, want 1", table, count)
 		}
 	}
 }
