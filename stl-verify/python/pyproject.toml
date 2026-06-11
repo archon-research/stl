@@ -11,7 +11,7 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "httpx>=0.28.1",
-    "axis-synome==0.1.dev188",
+    "axis-synome==0.1.0.dev76",
     "opentelemetry-sdk>=1.41.0,<2",
     "opentelemetry-instrumentation-fastapi>=0.62b0,<1",
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
@@ -38,8 +38,15 @@ include = ["app", "tests", "scripts"]
 exclude = [".venv", "**/__pycache__", "app/static"]
 
 [tool.uv]
-# Guard against supply chain attacks from fresh dependencies
+# Guard against supply chain attacks from fresh dependencies: ignore any release
+# uploaded within the last 7 days (rolling window).
 exclude-newer = "7 days"
+
+# First-party Archon packages are exempt from the freshness window so a freshly
+# published release can be consumed immediately. uv matches by exact package name
+# (no org/glob support), so list each first-party package here.
+[tool.uv.exclude-newer-package]
+axis-synome = "2100-01-01"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
