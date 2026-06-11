@@ -23,6 +23,17 @@ type TokenRepository interface {
 	// This method participates in an external transaction.
 	GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error)
 
-	// GetOrCreateTokens bulk-upserts multiple tokens and returns a map of address → token ID.
+	// GetOrCreateTokens bulk-upserts multiple tokens and returns a map of address to token ID.
 	GetOrCreateTokens(ctx context.Context, tx pgx.Tx, tokens []TokenInput) (map[common.Address]int64, error)
+
+	// ListTokensMissingSymbol returns addresses of tokens on the chain whose symbol
+	// is still missing — empty or NULL (the zero-address sentinel is excluded) —
+	// capped at limit rows. limit must be positive.
+	ListTokensMissingSymbol(ctx context.Context, chainID int64, limit int) ([]common.Address, error)
+
+	// ResolveTokenSymbol sets a token's symbol. It only fills a missing (empty or
+	// NULL) symbol — a token that already has one is left untouched and an error
+	// is returned, so a resolved symbol can never be clobbered. The new symbol
+	// must be non-empty.
+	ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error
 }
