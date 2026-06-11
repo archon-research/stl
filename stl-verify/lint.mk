@@ -7,7 +7,7 @@
 
 .PHONY: install-hooks format lint help
 
-LEFTHOOK_VERSION ?= v1.7.22
+LEFTHOOK_VERSION ?= v1.13.6
 LEFTHOOK := $(shell command -v lefthook 2>/dev/null || echo "$$(go env GOPATH)/bin/lefthook")
 
 # Install lefthook git hooks
