@@ -53,12 +53,12 @@ func (m *mockClient) GetSyrupGlobals(ctx context.Context) (*outbound.MapleSyrupG
 type mockRepo struct {
 	GetMapleProtocolIDFn       func(ctx context.Context, chainID int64) (int64, error)
 	GetOrCreateBorrowerUsersFn func(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error)
-	UpsertPoolsFn              func(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[string]int64, error)
+	UpsertPoolsFn              func(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error)
 	SavePoolStatesFn           func(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error
-	UpsertLoansFn              func(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[string]int64, error)
+	UpsertLoansFn              func(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error)
 	SaveLoanStatesFn           func(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error
 	SaveLoanCollateralsFn      func(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error
-	UpsertSkyStrategiesFn      func(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[string]int64, error)
+	UpsertSkyStrategiesFn      func(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error)
 	SaveSkyStrategyStatesFn    func(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error
 	SaveSyrupGlobalStateFn     func(ctx context.Context, tx pgx.Tx, state *entity.MapleSyrupGlobalState) error
 
@@ -84,10 +84,10 @@ func newMockRepo() *mockRepo {
 		}
 		return ids, nil
 	}
-	r.UpsertPoolsFn = func(_ context.Context, _ pgx.Tx, pools []*entity.MaplePool) (map[string]int64, error) {
-		ids := make(map[string]int64, len(pools))
+	r.UpsertPoolsFn = func(_ context.Context, _ pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error) {
+		ids := make(map[common.Address]int64, len(pools))
 		for i, p := range pools {
-			ids["0x"+common.Bytes2Hex(p.Address)] = int64(10 + i)
+			ids[common.BytesToAddress(p.Address)] = int64(10 + i)
 		}
 		return ids, nil
 	}
@@ -95,10 +95,10 @@ func newMockRepo() *mockRepo {
 		r.savedPoolStates = append(r.savedPoolStates, states...)
 		return nil
 	}
-	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*entity.MapleLoan) (map[string]int64, error) {
-		ids := make(map[string]int64, len(loans))
+	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
+		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
-			ids["0x"+common.Bytes2Hex(l.LoanAddress)] = int64(20 + i)
+			ids[common.BytesToAddress(l.LoanAddress)] = int64(20 + i)
 		}
 		return ids, nil
 	}
@@ -110,10 +110,10 @@ func newMockRepo() *mockRepo {
 		r.savedCollats = append(r.savedCollats, collaterals...)
 		return nil
 	}
-	r.UpsertSkyStrategiesFn = func(_ context.Context, _ pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[string]int64, error) {
-		ids := make(map[string]int64, len(strategies))
+	r.UpsertSkyStrategiesFn = func(_ context.Context, _ pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+		ids := make(map[common.Address]int64, len(strategies))
 		for i, s := range strategies {
-			ids["0x"+common.Bytes2Hex(s.StrategyAddress)] = int64(30 + i)
+			ids[common.BytesToAddress(s.StrategyAddress)] = int64(30 + i)
 		}
 		return ids, nil
 	}
@@ -136,7 +136,7 @@ func (m *mockRepo) GetOrCreateBorrowerUsers(ctx context.Context, tx pgx.Tx, chai
 	return m.GetOrCreateBorrowerUsersFn(ctx, tx, chainID, borrowers)
 }
 
-func (m *mockRepo) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[string]int64, error) {
+func (m *mockRepo) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error) {
 	return m.UpsertPoolsFn(ctx, tx, pools)
 }
 
@@ -144,7 +144,7 @@ func (m *mockRepo) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*enti
 	return m.SavePoolStatesFn(ctx, tx, states)
 }
 
-func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[string]int64, error) {
+func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
 	return m.UpsertLoansFn(ctx, tx, loans)
 }
 
@@ -156,7 +156,7 @@ func (m *mockRepo) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collatera
 	return m.SaveLoanCollateralsFn(ctx, tx, collaterals)
 }
 
-func (m *mockRepo) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[string]int64, error) {
+func (m *mockRepo) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
 	return m.UpsertSkyStrategiesFn(ctx, tx, strategies)
 }
 
@@ -654,8 +654,8 @@ func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*entity.MapleLoan) (map[string]int64, error) {
-		return map[string]int64{}, nil
+	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*entity.MapleLoan) (map[common.Address]int64, error) {
+		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
 
@@ -671,8 +671,8 @@ func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 func TestSync_PoolMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertPoolsFn = func(context.Context, pgx.Tx, []*entity.MaplePool) (map[string]int64, error) {
-		return map[string]int64{}, nil
+	repo.UpsertPoolsFn = func(context.Context, pgx.Tx, []*entity.MaplePool) (map[common.Address]int64, error) {
+		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
 
@@ -688,8 +688,8 @@ func TestSync_PoolMissingFromUpsertResult(t *testing.T) {
 func TestSync_StrategyMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategy) (map[string]int64, error) {
-		return map[string]int64{}, nil
+	repo.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
 
@@ -812,7 +812,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "pool upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertPoolsFn = func(context.Context, pgx.Tx, []*entity.MaplePool) (map[string]int64, error) {
+				r.UpsertPoolsFn = func(context.Context, pgx.Tx, []*entity.MaplePool) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},
@@ -828,7 +828,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "loan upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*entity.MapleLoan) (map[string]int64, error) {
+				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*entity.MapleLoan) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},
@@ -836,7 +836,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "strategy upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategy) (map[string]int64, error) {
+				r.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},

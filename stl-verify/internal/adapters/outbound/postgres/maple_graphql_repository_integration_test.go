@@ -4,7 +4,9 @@ package postgres
 
 import (
 	"context"
+	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,13 +110,13 @@ func upsertTestPool(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 		t.Fatalf("NewMaplePool: %v", err)
 	}
 
-	var ids map[string]int64
+	var ids map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
 		ids, err = repo.UpsertPools(ctx, tx, []*entity.MaplePool{pool})
 		return err
 	})
-	id, ok := ids[addressKey(pool.Address)]
+	id, ok := ids[common.BytesToAddress(pool.Address)]
 	if !ok {
 		t.Fatalf("pool id missing from map: %v", ids)
 	}
@@ -139,7 +141,7 @@ func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 		if err != nil {
 			return err
 		}
-		loanID = ids[addressKey(loan.LoanAddress)]
+		loanID = ids[common.BytesToAddress(loan.LoanAddress)]
 		return nil
 	})
 	if loanID == 0 {
@@ -252,7 +254,7 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 		t.Fatalf("NewMaplePool: %v", err)
 	}
 
-	var ids map[string]int64
+	var ids map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
 		ids, err = repo.UpsertPools(ctx, tx, []*entity.MaplePool{poolA, poolB})
@@ -265,13 +267,13 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 	// Re-upsert with changed name/is_syrup refreshes and keeps the same id.
 	poolA.Name = "Pool A renamed"
 	poolA.IsSyrup = true
-	var again map[string]int64
+	var again map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
 		again, err = repo.UpsertPools(ctx, tx, []*entity.MaplePool{poolA})
 		return err
 	})
-	if again[addressKey(poolA.Address)] != ids[addressKey(poolA.Address)] {
+	if again[common.BytesToAddress(poolA.Address)] != ids[common.BytesToAddress(poolA.Address)] {
 		t.Errorf("pool id changed on re-upsert")
 	}
 
@@ -356,6 +358,70 @@ func TestMaplePoolStates_NullTVLAndCollateralValueRoundTrip(t *testing.T) {
 	}
 	if utilization != "0.6" {
 		t.Errorf("utilization = %s, want 0.6", utilization)
+	}
+}
+
+// mapleLogRecorder captures slog records so tests can assert on warnings.
+type mapleLogRecorder struct{ records []slog.Record }
+
+func (h *mapleLogRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (h *mapleLogRecorder) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *mapleLogRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *mapleLogRecorder) WithGroup(string) slog.Handler      { return h }
+
+func (h *mapleLogRecorder) countWarn(substr string) int {
+	n := 0
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestMaplePoolStates_DedupWarnsOnConflict(t *testing.T) {
+	// Re-inserting the same state at the same synced_at and build dedupes
+	// via the processing-version trigger + ON CONFLICT DO NOTHING (the
+	// Temporal-retry path) and must be surfaced by the RowsAffected warn.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	recorder := &mapleLogRecorder{}
+	repo, err := NewMapleGraphQLRepository(maplePool, slog.New(recorder), 0, 0)
+	if err != nil {
+		t.Fatalf("NewMapleGraphQLRepository: %v", err)
+	}
+	poolID := upsertTestPool(t, ctx, repo, 0x23)
+
+	state, err := entity.NewMaplePoolState(poolID, mapleSyncedAt(),
+		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+	if err != nil {
+		t.Fatalf("NewMaplePoolState: %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*entity.MaplePoolState{state})
+	})
+	if got := recorder.countWarn("deduplicated"); got != 0 {
+		t.Fatalf("dedup warn fired %d times on first insert, want 0", got)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*entity.MaplePoolState{state})
+	})
+	if got := recorder.countWarn("deduplicated"); got != 1 {
+		t.Errorf("dedup warn fired %d times after duplicate insert, want 1", got)
+	}
+
+	var count int
+	if err := maplePool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_pool_state WHERE maple_pool_id = $1`, poolID).Scan(&count); err != nil {
+		t.Fatalf("counting pool states: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("pool state count = %d, want 1 (duplicate must dedup)", count)
 	}
 }
 
@@ -605,13 +671,13 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 		t.Fatalf("NewMapleSkyStrategy: %v", err)
 	}
 
-	var ids map[string]int64
+	var ids map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
 		ids, err = repo.UpsertSkyStrategies(ctx, tx, []*entity.MapleSkyStrategy{strategy})
 		return err
 	})
-	strategyID := ids[addressKey(strategy.StrategyAddress)]
+	strategyID := ids[common.BytesToAddress(strategy.StrategyAddress)]
 	if strategyID == 0 {
 		t.Fatal("strategy id not resolved")
 	}
@@ -623,7 +689,7 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 		ids, err = repo.UpsertSkyStrategies(ctx, tx, []*entity.MapleSkyStrategy{strategy})
 		return err
 	})
-	if ids[addressKey(strategy.StrategyAddress)] != strategyID {
+	if ids[common.BytesToAddress(strategy.StrategyAddress)] != strategyID {
 		t.Error("strategy id changed on re-upsert")
 	}
 	var version int

@@ -23,7 +23,7 @@ type MapleSkyStrategyState struct {
 func NewMapleSkyStrategyState(mapleSkyStrategyID int64, syncedAt time.Time, state string, currentlyDeployed, depositedAssets, withdrawnAssets, strategyFeeRate, totalFeesCollected *big.Int) (*MapleSkyStrategyState, error) {
 	s := &MapleSkyStrategyState{
 		MapleSkyStrategyID: mapleSkyStrategyID,
-		SyncedAt:           syncedAt,
+		SyncedAt:           normalizeSyncedAt(syncedAt),
 		State:              state,
 		CurrentlyDeployed:  currentlyDeployed,
 		DepositedAssets:    depositedAssets,

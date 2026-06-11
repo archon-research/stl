@@ -346,6 +346,41 @@ func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 	}
 }
 
+func TestTransportErrorsAreRetried(t *testing.T) {
+	// A plain connection failure (no HTTP response at all) is the most
+	// common production transient; it must stay retryable. A regression
+	// wrapping the httpClient.Do error in WrapNonRetryable would silently
+	// disable retries for network errors.
+	server := httptest.NewServer(http.NotFoundHandler())
+	endpoint := server.URL
+	server.Close() // every request now fails with connection refused
+
+	handler := &recordingHandler{}
+	client, err := NewClient(Config{
+		Endpoint:          endpoint,
+		Timeout:           time.Second,
+		MaxRetries:        2,
+		InitialBackoff:    time.Millisecond,
+		MaxBackoff:        5 * time.Millisecond,
+		RequestsPerSecond: 10000,
+		Logger:            slog.New(handler),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.GetPools(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "executing request") {
+		t.Errorf("error %q should come from the transport branch", err.Error())
+	}
+	if got := handler.countWarn("request failed, retrying"); got != 2 {
+		t.Errorf("retry warns = %d, want 2 (MaxRetries exhausted)", got)
+	}
+}
+
 func TestNullCollectionsFailHard(t *testing.T) {
 	// A null top-level collection (data:null or a null collection field with
 	// no errors[]) is upstream breakage and must fail the call. Decoding it
@@ -501,12 +536,15 @@ func TestGetActiveLoans_MalformedCollateralValuesNameLoanID(t *testing.T) {
 	// Non-null but malformed collateral values are still hard errors (only
 	// API-sanctioned nulls downgrade to an absent collateral).
 	for _, tc := range []struct {
-		name        string
-		amount, usd string
-		wantField   string
+		name             string
+		amount, usd, liq string
+		wantField        string
 	}{
-		{name: "malformed assetAmount", amount: `"not-a-number"`, usd: `"1"`, wantField: "collateral.assetAmount"},
-		{name: "malformed assetValueUsd", amount: `"1"`, usd: `"not-a-number"`, wantField: "collateral.assetValueUsd"},
+		{name: "malformed assetAmount", amount: `"not-a-number"`, usd: `"1"`, liq: "null", wantField: "collateral.assetAmount"},
+		{name: "malformed assetValueUsd", amount: `"1"`, usd: `"not-a-number"`, liq: "null", wantField: "collateral.assetValueUsd"},
+		// liquidationLevel is the one JSON-number field; a fractional value
+		// must fail the whole call per the package contract.
+		{name: "fractional liquidationLevel", amount: `"1"`, usd: `"1"`, liq: "1020000.5", wantField: "collateral.liquidationLevel"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
@@ -516,11 +554,11 @@ func TestGetActiveLoans_MalformedCollateralValuesNameLoanID(t *testing.T) {
 					"collateral": {
 						"asset": "SOL", "assetAmount": %s, "assetValueUsd": %s,
 						"decimals": 9, "state": "Deposited", "custodian": null,
-						"liquidationLevel": null
+						"liquidationLevel": %s
 					},
 					"loanMeta": null,
 					"fundingPool": {"id": %q}
-				}]}}`, loanAddr, borrowerAddr, tc.amount, tc.usd, poolAddr))
+				}]}}`, loanAddr, borrowerAddr, tc.amount, tc.usd, tc.liq, poolAddr))
 			}})
 
 			_, err := client.GetActiveLoans(context.Background())

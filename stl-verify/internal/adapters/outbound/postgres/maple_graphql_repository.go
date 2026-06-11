@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -107,12 +107,12 @@ func (r *MapleGraphQLRepository) GetOrCreateBorrowerUsers(ctx context.Context, t
 		func(addr common.Address) common.Address { return addr })
 }
 
-// UpsertPools upserts pool registry rows and returns lowercase hex
+// UpsertPools upserts pool registry rows and returns
 // address -> maple_pool.id. On conflict, refreshes name, asset details, and
 // is_syrup.
-func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[string]int64, error) {
+func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error) {
 	if len(pools) == 0 {
-		return make(map[string]int64), nil
+		return make(map[common.Address]int64), nil
 	}
 
 	sorted := sortedByBytesKey(pools, func(p *entity.MaplePool) []byte { return p.Address })
@@ -134,7 +134,7 @@ func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, poo
 	}
 
 	return collectBatchIDs(ctx, tx, batch, sorted, "maple pool",
-		func(p *entity.MaplePool) string { return addressKey(p.Address) })
+		func(p *entity.MaplePool) common.Address { return common.BytesToAddress(p.Address) })
 }
 
 // SavePoolStates inserts pool state snapshots. The BEFORE INSERT trigger
@@ -185,20 +185,22 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	}
 	sb.WriteString(` ON CONFLICT (maple_pool_id, synced_at, processing_version) DO NOTHING`)
 
-	if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+	tag, err := tx.Exec(ctx, sb.String(), args...)
+	if err != nil {
 		return fmt.Errorf("saving maple pool states: %w", err)
 	}
+	r.warnDedupedRows("maple_pool_state", tag, len(states))
 	return nil
 }
 
-// UpsertLoans upserts loan registry rows and returns lowercase hex loan
+// UpsertLoans upserts loan registry rows and returns loan
 // address -> maple_loan.id. On conflict, refreshes the pool reference and the
 // loanMeta columns (a loan's metadata can change between snapshots).
 // borrower_user_id is deliberately not refreshed: a loan contract's borrower
 // is immutable, so the value from first insert stays authoritative.
-func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[string]int64, error) {
+func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
-		return make(map[string]int64), nil
+		return make(map[common.Address]int64), nil
 	}
 
 	sorted := sortedByBytesKey(loans, func(l *entity.MapleLoan) []byte { return l.LoanAddress })
@@ -235,7 +237,7 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 	}
 
 	return collectBatchIDs(ctx, tx, batch, sorted, "maple loan",
-		func(l *entity.MapleLoan) string { return addressKey(l.LoanAddress) })
+		func(l *entity.MapleLoan) common.Address { return common.BytesToAddress(l.LoanAddress) })
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
@@ -277,9 +279,11 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
-	if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+	tag, err := tx.Exec(ctx, sb.String(), args...)
+	if err != nil {
 		return fmt.Errorf("saving maple loan states: %w", err)
 	}
+	r.warnDedupedRows("maple_loan_state", tag, len(states))
 	return nil
 }
 
@@ -318,18 +322,20 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
-	if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+	tag, err := tx.Exec(ctx, sb.String(), args...)
+	if err != nil {
 		return fmt.Errorf("saving maple loan collaterals: %w", err)
 	}
+	r.warnDedupedRows("maple_loan_collateral", tag, len(collaterals))
 	return nil
 }
 
-// UpsertSkyStrategies upserts strategy registry rows and returns lowercase
-// hex strategy address -> maple_sky_strategy.id. On conflict, refreshes the
-// pool reference and version.
-func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[string]int64, error) {
+// UpsertSkyStrategies upserts strategy registry rows and returns strategy
+// address -> maple_sky_strategy.id. On conflict, refreshes the pool
+// reference and version.
+func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
 	if len(strategies) == 0 {
-		return make(map[string]int64), nil
+		return make(map[common.Address]int64), nil
 	}
 
 	sorted := sortedByBytesKey(strategies, func(s *entity.MapleSkyStrategy) []byte { return s.StrategyAddress })
@@ -348,7 +354,7 @@ func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx
 	}
 
 	return collectBatchIDs(ctx, tx, batch, sorted, "maple sky strategy",
-		func(s *entity.MapleSkyStrategy) string { return addressKey(s.StrategyAddress) })
+		func(s *entity.MapleSkyStrategy) common.Address { return common.BytesToAddress(s.StrategyAddress) })
 }
 
 // SaveSkyStrategyStates inserts strategy state snapshots (same
@@ -399,9 +405,11 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 	}
 	sb.WriteString(` ON CONFLICT (maple_sky_strategy_id, synced_at, processing_version) DO NOTHING`)
 
-	if _, err := tx.Exec(ctx, sb.String(), args...); err != nil {
+	tag, err := tx.Exec(ctx, sb.String(), args...)
+	if err != nil {
 		return fmt.Errorf("saving maple sky strategy states: %w", err)
 	}
+	r.warnDedupedRows("maple_sky_strategy_state", tag, len(states))
 	return nil
 }
 
@@ -429,7 +437,7 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 		return fmt.Errorf("converting pool_apy: %w", err)
 	}
 
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO maple_syrup_global_state (chain_id, synced_at, tvl, apy, collateral_apy, pool_apy, drips_yield_boost, build_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (chain_id, synced_at, processing_version) DO NOTHING`,
@@ -439,6 +447,7 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 	if err != nil {
 		return fmt.Errorf("saving maple syrup global state: %w", err)
 	}
+	r.warnDedupedRows("maple_syrup_global_state", tag, 1)
 	return nil
 }
 
@@ -446,10 +455,20 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 // Helpers
 // ---------------------------------------------------------------------------
 
-// addressKey renders a raw address as the lowercase 0x-prefixed hex string
-// used as registry map key (matches strings.ToLower(common.Address.Hex())).
-func addressKey(address []byte) string {
-	return "0x" + hex.EncodeToString(address)
+// warnDedupedRows makes ON CONFLICT DO NOTHING dedup visible. A conflict is
+// expected when a Temporal activity retry re-runs an already-persisted phase
+// at the same synced_at and build (the trigger reuses the processing_version
+// and the insert dedupes); anything else — clock regression, a duplicate
+// that slipped the service guards, a trigger bug assigning a colliding
+// version — is a hidden data bug this log surfaces.
+func (r *MapleGraphQLRepository) warnDedupedRows(table string, tag pgconn.CommandTag, expected int) {
+	if inserted := tag.RowsAffected(); inserted != int64(expected) {
+		r.logger.Warn("state insert deduplicated by ON CONFLICT DO NOTHING",
+			"table", table,
+			"expected", expected,
+			"inserted", inserted,
+		)
+	}
 }
 
 // optionalNumeric converts an optional *big.Int to a nullable NUMERIC arg.

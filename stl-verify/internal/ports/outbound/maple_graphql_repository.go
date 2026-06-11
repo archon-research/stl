@@ -15,8 +15,8 @@ import (
 // standalone registry read.
 //
 // Registry upserts (pools, loans, strategies, borrower users) return
-// lowercase-hex-address -> database-id maps and resolve ids even when the row
-// already exists (ON CONFLICT DO UPDATE ... RETURNING id).
+// address -> database-id maps and resolve ids even when the row already
+// exists (ON CONFLICT DO UPDATE ... RETURNING id).
 //
 // State saves use ON CONFLICT DO NOTHING on the
 // (natural key, processing_version) primary key: the BEFORE INSERT trigger
@@ -35,18 +35,21 @@ type MapleGraphQLRepository interface {
 	// first seen by on-chain indexers keep their earliest block.
 	GetOrCreateBorrowerUsers(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error)
 
-	// UpsertPools upserts pool registry rows and returns lowercase hex
-	// address -> maple_pool.id. On conflict, refreshes name and is_syrup.
-	UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[string]int64, error)
+	// UpsertPools upserts pool registry rows and returns
+	// address -> maple_pool.id. On conflict, refreshes name, asset_address,
+	// asset_symbol, asset_decimals, and is_syrup.
+	UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error)
 
 	// SavePoolStates inserts pool state snapshots.
 	SavePoolStates(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error
 
 	// UpsertLoans upserts loan registry rows (maple_pool_id and
-	// borrower_user_id already resolved by the service) and returns lowercase
-	// hex loan address -> maple_loan.id. On conflict, refreshes the loanMeta
-	// columns (a loan can gain/lose meta between snapshots).
-	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[string]int64, error)
+	// borrower_user_id already resolved by the service) and returns loan
+	// address -> maple_loan.id. On conflict, refreshes maple_pool_id and the
+	// loanMeta columns (a loan can be reassigned and gain/lose meta between
+	// snapshots); borrower_user_id is deliberately never refreshed (a loan
+	// contract's borrower is immutable).
+	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
 	SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error
@@ -55,10 +58,10 @@ type MapleGraphQLRepository interface {
 	// API collateral have no row; callers pass only non-nil collaterals.
 	SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error
 
-	// UpsertSkyStrategies upserts strategy registry rows and returns lowercase
-	// hex strategy address -> maple_sky_strategy.id. On conflict, refreshes
-	// version.
-	UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[string]int64, error)
+	// UpsertSkyStrategies upserts strategy registry rows and returns strategy
+	// address -> maple_sky_strategy.id. On conflict, refreshes maple_pool_id
+	// and version.
+	UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error)
 
 	// SaveSkyStrategyStates inserts strategy state snapshots.
 	SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error

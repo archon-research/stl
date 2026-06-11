@@ -79,20 +79,34 @@ func NewService(config ServiceConfig, client outbound.MapleGraphQLClient, repo o
 	}, nil
 }
 
-// Sync runs one snapshot cycle. Each phase has its own GraphQL query/queries
-// and its own DB transaction; a failing phase does not stop later phases,
-// but its error is joined into the returned error so the run is marked
-// failed. Loans and Sky strategies depend on the pool registry ids, so they
-// are skipped (and reported failed) when the pool phase fails.
+// Sync runs one snapshot cycle stamped with the current time. Prefer SyncAt
+// with a retry-stable timestamp when running under a retrying harness.
 func (s *Service) Sync(ctx context.Context) error {
-	syncedAt := s.now().UTC().Truncate(time.Second)
+	return s.SyncAt(ctx, s.now())
+}
+
+// SyncAt runs one snapshot cycle stamped with syncedAt (normalized to UTC
+// second precision). Each phase has its own GraphQL query/queries and its
+// own DB transaction; a failing phase does not stop later phases, but its
+// error is joined into the returned error so the run is marked failed.
+// Loans and Sky strategies depend on the pool registry ids, so they are
+// skipped (and reported failed) when the pool phase fails.
+//
+// Passing a timestamp that is stable across harness retries (e.g. the
+// Temporal activity's workflow-recorded schedule time) makes retries
+// idempotent: phases that already persisted re-insert at the same synced_at
+// and build, and the processing-version trigger plus ON CONFLICT DO NOTHING
+// dedupe them, so a retry caused by one failing phase does not multiply the
+// healthy phases' snapshots.
+func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
+	syncedAt = syncedAt.UTC().Truncate(time.Second)
 	ctx, span := s.telemetry.StartCycleSpan(ctx, syncedAt)
 	defer span.End()
 
 	s.logger.Info("starting sync cycle", "syncedAt", syncedAt)
 
 	var (
-		poolIDs    map[string]int64
+		poolIDs    map[common.Address]int64
 		protocolID int64
 	)
 	poolsErr := s.runPhase(ctx, "pools", func(ctx context.Context) error {
@@ -158,9 +172,9 @@ func (s *Service) runPhase(ctx context.Context, phase string, fn func(ctx contex
 // ---------------------------------------------------------------------------
 
 // syncPools fetches all pools and persists the registry rows plus one state
-// snapshot per pool in a single transaction. Returns the lowercase hex
+// snapshot per pool in a single transaction. Returns the
 // address -> maple_pool.id map for the dependent phases.
-func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID int64) (map[string]int64, error) {
+func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID int64) (map[common.Address]int64, error) {
 	pools, err := s.client.GetPools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("fetching pools: %w", err)
@@ -185,19 +199,19 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 		}
 		assetDecimals, err := toInt16(p.AssetDecimals)
 		if err != nil {
-			return nil, fmt.Errorf("pool %s: asset decimals: %w", strings.ToLower(p.Address.Hex()), err)
+			return nil, fmt.Errorf("pool %s: asset decimals: %w", lowerHex(p.Address), err)
 		}
 		poolEntity, err := entity.NewMaplePool(
 			s.config.ChainID, protocolID, p.Address.Bytes(), p.Name,
 			p.AssetAddress.Bytes(), p.AssetSymbol, assetDecimals, p.IsSyrup,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("pool %s: %w", strings.ToLower(p.Address.Hex()), err)
+			return nil, fmt.Errorf("pool %s: %w", lowerHex(p.Address), err)
 		}
 		poolEntities = append(poolEntities, poolEntity)
 	}
 
-	var poolIDs map[string]int64
+	var poolIDs map[common.Address]int64
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var err error
 		poolIDs, err = s.repo.UpsertPools(ctx, tx, poolEntities)
@@ -207,17 +221,16 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 
 		states := make([]*entity.MaplePoolState, 0, len(pools))
 		for _, p := range pools {
-			key := strings.ToLower(p.Address.Hex())
-			poolID, ok := poolIDs[key]
+			poolID, ok := poolIDs[p.Address]
 			if !ok {
-				return fmt.Errorf("pool %s missing from upsert result", key)
+				return fmt.Errorf("pool %s missing from upsert result", lowerHex(p.Address))
 			}
 			state, err := entity.NewMaplePoolState(
 				poolID, syncedAt, p.TVL, p.LiquidAssets, p.CollateralUSD, p.PrincipalOut,
 				p.MonthlyAPY, p.SpotAPY,
 			)
 			if err != nil {
-				return fmt.Errorf("pool state %s: %w", key, err)
+				return fmt.Errorf("pool state %s: %w", lowerHex(p.Address), err)
 			}
 			states = append(states, state)
 		}
@@ -245,6 +258,12 @@ func toInt16(v int) (int16, error) {
 	return int16(v), nil
 }
 
+// lowerHex renders an address in the lowercase 0x-prefixed hex form used in
+// this package's logs and error messages.
+func lowerHex(a common.Address) string {
+	return strings.ToLower(a.Hex())
+}
+
 // requireUniqueIDs rejects API result sets containing the same entity twice.
 // The GraphQL queries cannot be ordered (orderBy is invalid on these
 // collections), so skip-based pagination has no stable order; a duplicate
@@ -255,7 +274,7 @@ func requireUniqueIDs(kind string, n int, id func(i int) common.Address) error {
 	for i := range n {
 		addr := id(i)
 		if _, ok := seen[addr]; ok {
-			return fmt.Errorf("API returned duplicate %s %s (unstable pagination?)", kind, strings.ToLower(addr.Hex()))
+			return fmt.Errorf("API returned duplicate %s %s (unstable pagination?)", kind, lowerHex(addr))
 		}
 		seen[addr] = struct{}{}
 	}
@@ -269,7 +288,7 @@ func requireUniqueIDs(kind string, n int, id func(i int) common.Address) error {
 // syncLoans fetches all active loans and persists borrowers, loan registry
 // rows, loan states, and collateral snapshots in a single transaction, so a
 // loan snapshot is all-or-nothing.
-func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map[string]int64, protocolID int64) error {
+func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map[common.Address]int64, protocolID int64) error {
 	loans, err := s.client.GetActiveLoans(ctx)
 	if err != nil {
 		return fmt.Errorf("fetching active loans: %w", err)
@@ -285,9 +304,8 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 	// A loan whose pool is missing from the map is a hard error — pools were
 	// fetched seconds earlier in this same cycle.
 	for _, l := range loans {
-		key := strings.ToLower(l.PoolAddress.Hex())
-		if _, ok := poolIDs[key]; !ok {
-			return fmt.Errorf("loan %s references unknown pool %s", strings.ToLower(l.LoanID.Hex()), key)
+		if _, ok := poolIDs[l.PoolAddress]; !ok {
+			return fmt.Errorf("loan %s references unknown pool %s", lowerHex(l.LoanID), lowerHex(l.PoolAddress))
 		}
 		if l.Collateral != nil {
 			if l.Collateral.AssetAmount == nil {
@@ -344,19 +362,19 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 
 // buildLoanEntities maps API loans to registry entities with resolved pool
 // and borrower ids.
-func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, poolIDs map[string]int64, borrowerIDs map[common.Address]int64, protocolID int64) ([]*entity.MapleLoan, error) {
+func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, poolIDs map[common.Address]int64, borrowerIDs map[common.Address]int64, protocolID int64) ([]*entity.MapleLoan, error) {
 	loanEntities := make([]*entity.MapleLoan, 0, len(loans))
 	for _, l := range loans {
 		borrowerUserID, ok := borrowerIDs[l.Borrower]
 		if !ok {
-			return nil, fmt.Errorf("borrower %s missing from upsert result", strings.ToLower(l.Borrower.Hex()))
+			return nil, fmt.Errorf("borrower %s missing from upsert result", lowerHex(l.Borrower))
 		}
 		loanEntity, err := entity.NewMapleLoan(
 			s.config.ChainID, protocolID, l.LoanID.Bytes(),
-			poolIDs[strings.ToLower(l.PoolAddress.Hex())], borrowerUserID, toEntityLoanMeta(l.LoanMeta),
+			poolIDs[l.PoolAddress], borrowerUserID, toEntityLoanMeta(l.LoanMeta),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("loan %s: %w", strings.ToLower(l.LoanID.Hex()), err)
+			return nil, fmt.Errorf("loan %s: %w", lowerHex(l.LoanID), err)
 		}
 		loanEntities = append(loanEntities, loanEntity)
 	}
@@ -365,19 +383,18 @@ func (s *Service) buildLoanEntities(loans []outbound.MapleActiveLoan, poolIDs ma
 
 // buildLoanSnapshots maps API loans to state and collateral snapshot
 // entities. Loans with null API collateral simply have no collateral row.
-func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[string]int64, syncedAt time.Time) ([]*entity.MapleLoanState, []*entity.MapleLoanCollateral, error) {
+func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[common.Address]int64, syncedAt time.Time) ([]*entity.MapleLoanState, []*entity.MapleLoanCollateral, error) {
 	states := make([]*entity.MapleLoanState, 0, len(loans))
 	collaterals := make([]*entity.MapleLoanCollateral, 0, len(loans))
 	for _, l := range loans {
-		key := strings.ToLower(l.LoanID.Hex())
-		loanID, ok := loanIDs[key]
+		loanID, ok := loanIDs[l.LoanID]
 		if !ok {
-			return nil, nil, fmt.Errorf("loan %s missing from upsert result", key)
+			return nil, nil, fmt.Errorf("loan %s missing from upsert result", lowerHex(l.LoanID))
 		}
 
 		state, err := entity.NewMapleLoanState(loanID, syncedAt, l.State, l.PrincipalOwed, l.AcmRatio)
 		if err != nil {
-			return nil, nil, fmt.Errorf("loan state %s: %w", key, err)
+			return nil, nil, fmt.Errorf("loan state %s: %w", lowerHex(l.LoanID), err)
 		}
 		states = append(states, state)
 
@@ -386,7 +403,7 @@ func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[string]int
 		}
 		collateralDecimals, err := toInt16(l.Collateral.Decimals)
 		if err != nil {
-			return nil, nil, fmt.Errorf("loan collateral %s: decimals: %w", key, err)
+			return nil, nil, fmt.Errorf("loan collateral %s: decimals: %w", lowerHex(l.LoanID), err)
 		}
 		collateral, err := entity.NewMapleLoanCollateral(
 			loanID, syncedAt, l.Collateral.Asset, l.Collateral.AssetAmount,
@@ -394,7 +411,7 @@ func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[string]int
 			l.Collateral.State, l.Collateral.Custodian, l.Collateral.LiquidationLevel,
 		)
 		if err != nil {
-			return nil, nil, fmt.Errorf("loan collateral %s: %w", key, err)
+			return nil, nil, fmt.Errorf("loan collateral %s: %w", lowerHex(l.LoanID), err)
 		}
 		collaterals = append(collaterals, collateral)
 	}
@@ -437,7 +454,7 @@ func toEntityLoanMeta(meta *outbound.MapleLoanMeta) *entity.MapleLoanMeta {
 
 // syncSkyStrategies fetches all Sky strategies and persists registry rows
 // plus one state snapshot per strategy in a single transaction.
-func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poolIDs map[string]int64) error {
+func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poolIDs map[common.Address]int64) error {
 	strategies, err := s.client.GetSkyStrategies(ctx)
 	if err != nil {
 		return fmt.Errorf("fetching sky strategies: %w", err)
@@ -452,14 +469,13 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 
 	strategyEntities := make([]*entity.MapleSkyStrategy, 0, len(strategies))
 	for _, st := range strategies {
-		key := strings.ToLower(st.PoolAddress.Hex())
-		poolID, ok := poolIDs[key]
+		poolID, ok := poolIDs[st.PoolAddress]
 		if !ok {
-			return fmt.Errorf("sky strategy %s references unknown pool %s", strings.ToLower(st.Address.Hex()), key)
+			return fmt.Errorf("sky strategy %s references unknown pool %s", lowerHex(st.Address), lowerHex(st.PoolAddress))
 		}
 		strategyEntity, err := entity.NewMapleSkyStrategy(s.config.ChainID, st.Address.Bytes(), poolID, st.Version)
 		if err != nil {
-			return fmt.Errorf("sky strategy %s: %w", strings.ToLower(st.Address.Hex()), err)
+			return fmt.Errorf("sky strategy %s: %w", lowerHex(st.Address), err)
 		}
 		strategyEntities = append(strategyEntities, strategyEntity)
 	}
@@ -472,17 +488,16 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 
 		states := make([]*entity.MapleSkyStrategyState, 0, len(strategies))
 		for _, st := range strategies {
-			key := strings.ToLower(st.Address.Hex())
-			strategyID, ok := strategyIDs[key]
+			strategyID, ok := strategyIDs[st.Address]
 			if !ok {
-				return fmt.Errorf("sky strategy %s missing from upsert result", key)
+				return fmt.Errorf("sky strategy %s missing from upsert result", lowerHex(st.Address))
 			}
 			state, err := entity.NewMapleSkyStrategyState(
 				strategyID, syncedAt, st.State, st.CurrentlyDeployed,
 				st.DepositedAssets, st.WithdrawnAssets, st.StrategyFeeRate, st.TotalFeesCollected,
 			)
 			if err != nil {
-				return fmt.Errorf("sky strategy state %s: %w", key, err)
+				return fmt.Errorf("sky strategy state %s: %w", lowerHex(st.Address), err)
 			}
 			states = append(states, state)
 		}

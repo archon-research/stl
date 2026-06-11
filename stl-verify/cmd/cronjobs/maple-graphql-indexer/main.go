@@ -91,5 +91,12 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating maple graphql indexer service: %w", err)
 	}
 
-	return temporal.RunnerFunc(service.Sync), nil
+	return temporal.RunnerFunc(func(ctx context.Context) error {
+		// The workflow-recorded schedule time is stable across activity
+		// retries, so retried runs dedupe instead of multiplying snapshots.
+		if scheduledAt, ok := temporal.ScheduledAtFromContext(ctx); ok {
+			return service.SyncAt(ctx, scheduledAt)
+		}
+		return service.Sync(ctx)
+	}), nil
 }

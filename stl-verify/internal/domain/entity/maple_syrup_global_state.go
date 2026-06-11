@@ -23,7 +23,7 @@ type MapleSyrupGlobalState struct {
 func NewMapleSyrupGlobalState(chainID int64, syncedAt time.Time, tvl, apy, collateralAPY, poolAPY, dripsYieldBoost *big.Int) (*MapleSyrupGlobalState, error) {
 	s := &MapleSyrupGlobalState{
 		ChainID:         chainID,
-		SyncedAt:        syncedAt,
+		SyncedAt:        normalizeSyncedAt(syncedAt),
 		TVL:             tvl,
 		APY:             apy,
 		CollateralAPY:   collateralAPY,
