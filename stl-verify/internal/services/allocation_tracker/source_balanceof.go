@@ -38,11 +38,10 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, ato
 			"securitize": true,
 			"superstate": true,
 			"proxy":      true,
-			// Centrifuge tranche tokens (e.g. JTRSY, JAAA) are plain ERC20s held
-			// directly by the proxy, so the position is balanceOf of the token
-			// itself — the same treatment Grove's JTRSY already gets via its
-			// erc20 entry. (centrifuge_feeder is a different mechanism and stays
-			// on the stub source.)
+			// Centrifuge entries are balanceOf-able ERC20s: the axis-synome export
+			// resolves each ERC-7540 vault to its share() token, and Spark's JTRSY is
+			// a direct ERC20, so the position is balanceOf of the token itself.
+			// (centrifuge_feeder is a different mechanism and stays on the stub source.)
 			"centrifuge": true,
 		},
 	}

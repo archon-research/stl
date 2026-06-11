@@ -8,7 +8,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func TestValidateScopedEntriesAndProxies(t *testing.T) {
+// TestNewService_ValidatesScopedEntriesAndProxies exercises the entry/proxy validation
+// through the public NewService constructor (the validation itself is unexported; this is
+// its public entry point). The fetch/handler dependencies are nil because validation runs
+// before they are used.
+func TestNewService_ValidatesScopedEntriesAndProxies(t *testing.T) {
 	entry := func(contract, wallet, chain string) *TokenEntry {
 		return &TokenEntry{
 			ContractAddress: common.HexToAddress(contract),
@@ -49,7 +53,10 @@ func TestValidateScopedEntriesAndProxies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateScopedEntriesAndProxies(tt.entries, tt.proxies, tt.chainID)
+			_, err := NewService(
+				Config{ChainID: tt.chainID, Logger: quietLogger()},
+				nil, nil, nil, tt.entries, nil, tt.proxies,
+			)
 			switch {
 			case tt.wantErr == "":
 				if err != nil {

@@ -12,7 +12,7 @@ type createdAtBlockKey struct {
 // contract was created, keyed by (chain, contract).
 //
 // These are chain-observed values owned by the allocation tracker. They were
-// previously hard-coded inline on each entry in this file, before entries were
+// previously hard-coded inline on each entry in entries.go, before entries were
 // sourced from the axis-synome contract; the axis-synome contract intentionally
 // does not carry created_at_block, because it is observed on-chain rather than
 // sourced from the Sky Atlas. Positions absent from this map fall back to the
