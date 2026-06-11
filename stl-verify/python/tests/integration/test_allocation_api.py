@@ -6,6 +6,8 @@ per test module.  Migrations are applied by the ``module_db`` fixture from
 """
 
 import asyncio
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -200,6 +202,63 @@ async def _seed(async_url: str) -> None:
                 ),
                 {"tid": usdc_id, "pid": obex_id, "proxy": _OBEX_PROXY_HEX, "tx": _TX5_HEX},
             )
+
+            # --- Anchorage custody snapshots (spark only) ---
+            # The escrow token / anchorage protocol / receipt_token rows are
+            # seeded by the migration; here we only add snapshot fixtures.
+            #
+            # Package P1 has two assets and two snapshot times: the later
+            # snapshot wins per (package, asset_type, custody_type). Package P2
+            # is inactive and must be excluded. Expected balance:
+            #   P1 collateral USDC (latest)  200000000
+            # + P1 collateral USDC2 (latest)  50000001.323783
+            # = 250000001.323783  (matches Observatory).
+            earlier = datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc)
+            later = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+
+            async def _snap(
+                package_id: str,
+                active: bool,
+                asset_type: str,
+                custody_type: str,
+                quantity: str,
+                price: str,
+                snapshot_time: datetime,
+            ) -> None:
+                await conn.execute(
+                    text(
+                        "INSERT INTO anchorage_package_snapshot "
+                        "(prime_id, package_id, pledgor_id, secured_party_id, active, state, "
+                        " current_ltv, exposure_value, package_value, "
+                        " margin_call_ltv, critical_ltv, margin_return_ltv, "
+                        " asset_type, custody_type, asset_price, asset_quantity, asset_weighted_value, "
+                        " ltv_timestamp, snapshot_time) "
+                        "VALUES (:pid, :pkg, 'pledgor', 'secured', :active, 'HEALTHY', "
+                        " 0.5, 0, 0, 0.7, 0.8, 0.6, "
+                        " :atype, :ctype, :price, :qty, :wval, :ts, :ts)"
+                    ),
+                    {
+                        "pid": spark_id,
+                        "pkg": package_id,
+                        "active": active,
+                        "atype": asset_type,
+                        "ctype": custody_type,
+                        "price": Decimal(price),
+                        "qty": Decimal(quantity),
+                        # asset_weighted_value is deliberately != qty*price so a
+                        # regression to using it would be caught by the balance assert.
+                        "wval": Decimal(quantity) * Decimal("0.5"),
+                        "ts": snapshot_time,
+                    },
+                )
+
+            # P1: two assets, each snapshotted twice; the later snapshot wins.
+            await _snap("P1", True, "USDC", "COLLATERAL", "1", "1", earlier)
+            await _snap("P1", True, "USDC", "COLLATERAL", "200000000", "1", later)
+            await _snap("P1", True, "USDC2", "COLLATERAL", "2", "1", earlier)
+            await _snap("P1", True, "USDC2", "COLLATERAL", "50000001.323783", "1", later)
+            # P2: inactive — must be excluded entirely.
+            await _snap("P2", False, "USDC", "COLLATERAL", "999999999", "1", later)
     finally:
         await engine.dispose()
 
@@ -244,13 +303,13 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
 
 def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient) -> None:
-    """spark holds both aUSDC and aWETH, enriched with underlying token info."""
+    """spark holds aUSDC and aWETH (enriched), plus the merged Anchorage row."""
     response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/allocations")
 
     assert response.status_code == 200
     data = response.json()
     by_symbol = {item["symbol"]: item for item in data}
-    assert set(by_symbol.keys()) == {"aUSDC", "aWETH"}
+    assert set(by_symbol.keys()) == {"aUSDC", "aWETH", "ANCHORAGE"}
 
     ausdc = by_symbol["aUSDC"]
     # block 2000 is the latest event for aUSDC — its balance wins over the
@@ -271,6 +330,44 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["underlying_token_address"] == f"0x{_WETH_HEX}"
     assert aweth["underlying_symbol"] == "WETH"
     assert aweth["protocol_name"] == "Aave V3"
+
+
+_ANCHORAGE_ESCROW_HEX = "49506c3aa028693458d6ee816b2ec28522946872"
+
+
+def test_anchorage_custody_position_merged_for_spark(client: TestClient) -> None:
+    """spark has Anchorage snapshots → exactly one merged row whose balance is
+    the sum of the latest active snapshot per (package, asset, custody),
+    matching Observatory's 250000001.323783.
+    """
+    response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    data = response.json()
+    anchorage_rows = [r for r in data if r["symbol"] == "ANCHORAGE"]
+    assert len(anchorage_rows) == 1
+    row = anchorage_rows[0]
+    assert row["chain_id"] == 1
+    assert row["receipt_token_address"] == f"0x{_ANCHORAGE_ESCROW_HEX}"
+    assert row["underlying_token_address"] == f"0x{_USDC_HEX}"
+    assert row["underlying_symbol"] == "USDC"
+    assert row["protocol_name"] == "anchorage"
+    assert row["category"] == "allocation"
+    # Latest snapshot wins, inactive P2 excluded: 200000000 + 50000001.323783.
+    assert Decimal(row["balance"]) == Decimal("250000001.323783")
+    assert Decimal(row["amount_usd"]) == Decimal("250000001.323783")
+    assert isinstance(row["receipt_token_id"], int)
+    assert isinstance(row["underlying_token_id"], int)
+    assert row["latest_activity_at"] == "2026-06-11T12:00:00+00:00"
+
+
+def test_no_anchorage_row_for_prime_without_snapshots(client: TestClient) -> None:
+    """grove has no Anchorage snapshots → no anchorage row."""
+    response = client.get(f"/v1/primes/0x{_GROVE_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert all(r["symbol"] != "ANCHORAGE" for r in data)
 
 
 def test_direct_underlying_holdings_surface_as_their_own_rows(

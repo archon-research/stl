@@ -495,9 +495,10 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    positions, direct_holdings = await asyncio.gather(
+    positions, direct_holdings, anchorage = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),
+        service.get_anchorage_position(prime_address),
     )
     category_service = AllocationCategoryService()
 
@@ -535,7 +536,32 @@ async def list_allocations(
         )
         for h in direct_holdings
     ]
-    return receipt_rows + direct_rows
+    # Anchorage custody is ingested into anchorage_package_snapshot by the
+    # anchorage-indexer cronjob, not allocation_position (the tracker skips
+    # token_type "anchorage"). Merge it as a single receipt-token-shaped row when
+    # the prime holds a position. protocol_name "anchorage" yields category
+    # "allocation" via the category service's fallback, matching Observatory.
+    anchorage_rows = (
+        [
+            AllocationResponse(
+                chain_id=anchorage.chain_id,
+                receipt_token_id=anchorage.receipt_token_id,
+                receipt_token_address=anchorage.receipt_token_address,
+                underlying_token_id=anchorage.underlying_token_id,
+                underlying_token_address=anchorage.underlying_token_address,
+                symbol=anchorage.symbol,
+                underlying_symbol=anchorage.underlying_symbol,
+                protocol_name=anchorage.protocol_name,
+                balance=anchorage.balance,
+                amount_usd=anchorage.amount_usd,
+                latest_activity_at=anchorage.latest_activity_at.isoformat(),
+                category=category_service.classify(anchorage.protocol_name, anchorage.symbol),
+            )
+        ]
+        if anchorage is not None
+        else []
+    )
+    return receipt_rows + direct_rows + anchorage_rows
 
 
 @router.get(

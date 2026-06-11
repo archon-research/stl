@@ -10,7 +10,11 @@ from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, Pro
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 from app.main import app
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_direct_asset_holding, make_receipt_token_position
+from tests.conftest import (
+    make_anchorage_position,
+    make_direct_asset_holding,
+    make_receipt_token_position,
+)
 
 _VALID_ADDR = "0x" + "ab" * 20
 
@@ -21,11 +25,14 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
-def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: bool = True) -> AsyncMock:
+def _make_service(
+    primes=None, positions=None, direct_holdings=None, anchorage=None, *, exists: bool = True
+) -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
     service.list_direct_asset_holdings.return_value = direct_holdings or []
+    service.get_anchorage_position.return_value = anchorage
     service.prime_exists.return_value = exists
     return service
 
@@ -155,6 +162,50 @@ def test_list_allocations_combines_receipt_and_direct_rows():
     by_symbol = {row["symbol"]: row for row in rows}
     assert by_symbol["aUSDC"]["receipt_token_id"] == 1
     assert by_symbol["PYUSD"]["receipt_token_id"] is None
+
+
+def test_list_allocations_appends_anchorage_row_when_position_present():
+    """A prime with an Anchorage custody position gets exactly one extra row,
+    shaped like a receipt-token position and categorised as ``allocation``.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage=make_anchorage_position())
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["symbol"] == "ANCHORAGE"
+    assert row["underlying_symbol"] == "USDC"
+    assert row["protocol_name"] == "anchorage"
+    assert row["receipt_token_address"] == "0x49506c3aa028693458d6ee816b2ec28522946872"
+    assert row["balance"] == "250000001.323783"
+    assert row["amount_usd"] == "250000001.323783"
+    assert row["category"] == "allocation"
+    assert row["latest_activity_at"] == "2026-06-11T12:00:00+00:00"
+    service.get_anchorage_position.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_omits_anchorage_row_when_no_position():
+    """A prime without Anchorage snapshots gets no anchorage row."""
+    from app.api.v1 import allocations
+
+    service = _make_service(positions=[make_receipt_token_position()], anchorage=None)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "aUSDC"
+    assert all(row["symbol"] != "ANCHORAGE" for row in rows)
 
 
 def test_list_allocations_returns_empty_when_prime_exists_with_no_holdings():
