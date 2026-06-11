@@ -167,18 +167,15 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 // deposit asset), so distinct vaults can front the same share — tracking both
 // would read the same balanceOf twice and double count the position.
 func (s *ERC7540Source) checkDuplicateShares(entries []*TokenEntry, shareTokens map[common.Address]common.Address) error {
-	type holding struct {
-		share  common.Address
-		wallet common.Address
-	}
-	firstVault := make(map[holding]common.Address, len(entries))
+	firstVault := make(map[string]common.Address, len(entries))
 	for _, e := range entries {
-		h := holding{share: shareTokens[e.ContractAddress], wallet: e.WalletAddress}
-		if prev, ok := firstVault[h]; ok && prev != e.ContractAddress {
+		share := shareTokens[e.ContractAddress]
+		key := fmt.Sprintf("%s/%s", share.Hex(), e.WalletAddress.Hex())
+		if prev, ok := firstVault[key]; ok && prev != e.ContractAddress {
 			return fmt.Errorf("vaults %s and %s both resolve to share %s for wallet %s; tracking both would double count",
-				prev.Hex(), e.ContractAddress.Hex(), h.share.Hex(), h.wallet.Hex())
+				prev.Hex(), e.ContractAddress.Hex(), share.Hex(), e.WalletAddress.Hex())
 		}
-		firstVault[h] = e.ContractAddress
+		firstVault[key] = e.ContractAddress
 	}
 	return nil
 }
