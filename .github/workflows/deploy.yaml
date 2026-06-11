@@ -8,12 +8,22 @@ on:
       sha:
         required: true
         type: string
+      push:
+        description: "Push images to ECR and run the deploy/promote jobs. Set false to build-only: validate and reuse the cache without exporting (warming) it."
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       sha:
         description: "Commit SHA to deploy (defaults to HEAD of selected branch)"
         required: false
         type: string
+      push:
+        description: "Push images to ECR and update the staging image tags. Defaults to build-only (safe on any branch). Note: manual runs go to staging only; prod promotion and the staging health gate run only on the automated main deploy."
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   build-push-staging:
@@ -27,8 +37,13 @@ jobs:
       AWS_REGION: eu-west-1
       STAGING_REGISTRY: 579039992622.dkr.ecr.eu-west-1.amazonaws.com
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+      # Set explicitly so the build can form valid image tags without an AWS STS
+      # call. Lets build-only runs (push=false) work with no AWS credentials.
+      AWS_ACCOUNT_ID: "579039992622"
     permissions:
       id-token: write
+      contents: read
+      packages: write  # push BuildKit layer cache to GHCR
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -42,24 +57,38 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
+      # OIDC role assumption is only permitted from main, so skip AWS/ECR on
+      # build-only runs (push=false), which can run from any branch.
       - name: Configure AWS credentials (staging)
+        if: ${{ inputs.push }}
         uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to staging ECR
+        if: ${{ inputs.push }}
         run: |
           aws ecr get-login-password --region "$AWS_REGION" | \
             docker login --username AWS --password-stdin "$STAGING_REGISTRY"
 
-      - name: Build and push all images to staging ECR
+      # Layer cache lives in GHCR not ECR.
+      # Only the final images are pushed to ECR; the cache manifests
+      # are stored under one `buildcache` package, one tag per image.
+      - name: Login to GHCR (build cache)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Resolve build-cache repo
+        run: echo "DOCKER_CACHE_REPO=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/buildcache" >> "$GITHUB_ENV"
+
+      - name: Build (and, when push=true, push) all images to staging ECR
         working-directory: stl-verify
-        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }}
+        run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO" DOCKER_PUSH=${{ inputs.push && '1' || '0' }}
 
   update-staging:
     name: Update Staging Image Tags
     needs: build-push-staging
+    if: ${{ inputs.push }}  # skip on build-only runs (nothing was pushed)
     runs-on: ubuntu-latest
     concurrency:
       group: deploy-update-staging
@@ -148,7 +177,7 @@ jobs:
   wait-staging-healthy:
     name: Wait for Staging Healthy
     needs: update-staging
-    if: github.event_name != 'workflow_dispatch'
+    if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -178,7 +207,7 @@ jobs:
   build-push-prod:
     name: Build & Push Images (Prod)
     needs: [build-push-staging, wait-staging-healthy]
-    if: github.event_name != 'workflow_dispatch'
+    if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:

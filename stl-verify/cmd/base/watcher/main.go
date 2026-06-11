@@ -27,11 +27,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info
@@ -176,8 +178,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create OpenTelemetry instrumentation for Alchemy client
-	alchemyTelemetry, err := alchemy.NewTelemetry()
+	// Create OpenTelemetry instrumentation for Alchemy client. The chain name
+	// becomes the `chain` metric label; an unknown CHAIN_ID is a misconfiguration
+	// that would silently emit an empty chain, so fail hard like the parse above.
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		logger.Error("resolving chain name for metrics", "error", err)
+		os.Exit(1)
+	}
+	alchemyTelemetry, err := alchemy.NewTelemetry(chainName)
 	if err != nil {
 		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
 	}
@@ -271,6 +280,17 @@ func main() {
 		"topic", snsTopicARN,
 	)
 
+	// Construct the service-level telemetry recorder once and share it
+	// between live and backfill. This wires both:
+	//   - ReorgRecorder       (LiveConfig.Metrics)
+	//   - BackfillRecorder    (BackfillConfig.Metrics)
+	// onto the OTel global meter provider initialised above.
+	serviceTelemetry, err := shared.NewServiceTelemetry()
+	if err != nil {
+		logger.Error("failed to create service telemetry", "error", err)
+		os.Exit(1)
+	}
+
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
 		ChainID:            chainID,
@@ -278,6 +298,7 @@ func main() {
 		EnableTraces:       *enableTraces,
 		EnableBlobs:        *enableBlobs,
 		Logger:             logger,
+		Metrics:            serviceTelemetry,
 	}
 
 	liveService, err := live_data.NewLiveService(
@@ -297,7 +318,7 @@ func main() {
 	var backfillService *backfill_gaps.BackfillService
 	enableBackfill := env.Get("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
-		backfillConfig, err := loadBackfillConfig(chainID, *enableTraces, *enableBlobs, logger)
+		backfillConfig, err := loadBackfillConfig(chainID, *enableTraces, *enableBlobs, logger, serviceTelemetry)
 		if err != nil {
 			logger.Error("invalid backfill config", "error", err)
 			os.Exit(1)
@@ -418,7 +439,7 @@ func requireEnv(key string) string {
 //   - BACKFILL_BATCH_SIZE      (int,      default 10)
 //   - BACKFILL_POLL_INTERVAL   (duration, default 30s)
 //   - BACKFILL_RETRY_MIN_AGE   (duration, default 30s)
-func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger) (backfill_gaps.BackfillConfig, error) {
+func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *slog.Logger, metrics *shared.ServiceTelemetry) (backfill_gaps.BackfillConfig, error) {
 	batchSize, err := env.GetInt("BACKFILL_BATCH_SIZE", 10)
 	if err != nil {
 		return backfill_gaps.BackfillConfig{}, err
@@ -448,5 +469,6 @@ func loadBackfillConfig(chainID int64, enableTraces, enableBlobs bool, logger *s
 		EnableTraces: enableTraces,
 		EnableBlobs:  enableBlobs,
 		Logger:       logger,
+		Metrics:      metrics,
 	}, nil
 }

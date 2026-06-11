@@ -3,18 +3,22 @@ package oracle_price_worker
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 func TestNewTelemetry(t *testing.T) {
-	tel, err := NewTelemetry()
+	tel, err := NewTelemetry("mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetry() returned error: %v", err)
 	}
@@ -22,24 +26,14 @@ func TestNewTelemetry(t *testing.T) {
 		t.Fatal("NewTelemetry() returned nil")
 	}
 
-	// Verify the instance works by calling all public methods without panic.
-	ctx := context.Background()
-	tel.RecordBlockProcessed(ctx, time.Second, nil)
-	tel.RecordPricesChanged(ctx, "test", 1)
-	tel.RecordRPCCall(ctx, "eth_call", time.Millisecond, nil)
-	tel.RecordError(ctx, "op", errors.New("e"))
-
-	_, span := tel.StartBlockSpan(ctx, 1)
-	span.End()
-	_, span = tel.StartSpan(ctx, "test.span")
-	span.End()
+	exerciseAllMethods(t, tel)
 }
 
 func TestNewTelemetryWithProviders(t *testing.T) {
 	tp := tracenoop.NewTracerProvider()
 	mp := metricnoop.NewMeterProvider()
 
-	tel, err := NewTelemetryWithProviders(tp, mp)
+	tel, err := NewTelemetryWithProviders(tp, mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() returned error: %v", err)
 	}
@@ -47,12 +41,21 @@ func TestNewTelemetryWithProviders(t *testing.T) {
 		t.Fatal("NewTelemetryWithProviders() returned nil")
 	}
 
-	// Verify the instance works by calling all public methods without panic.
+	exerciseAllMethods(t, tel)
+}
+
+// exerciseAllMethods calls every public method, covering both the success and
+// error-status branches of the recorders.
+func exerciseAllMethods(t *testing.T, tel *Telemetry) {
+	t.Helper()
 	ctx := context.Background()
+	someErr := errors.New("e")
 	tel.RecordBlockProcessed(ctx, time.Second, nil)
+	tel.RecordBlockProcessed(ctx, time.Second, someErr)
 	tel.RecordPricesChanged(ctx, "test", 1)
-	tel.RecordRPCCall(ctx, "eth_call", time.Millisecond, nil)
-	tel.RecordError(ctx, "op", errors.New("e"))
+	tel.RecordRPCCall(ctx, "getAssetsPrices", time.Millisecond, nil)
+	tel.RecordRPCCall(ctx, "getAssetsPrices", time.Millisecond, someErr)
+	tel.RecordError(ctx, "op", someErr)
 
 	_, span := tel.StartBlockSpan(ctx, 1)
 	span.End()
@@ -66,7 +69,7 @@ func TestNewTelemetryWithProviders_CreatesSpans(t *testing.T) {
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	mp := metricnoop.NewMeterProvider()
 
-	tel, err := NewTelemetryWithProviders(tp, mp)
+	tel, err := NewTelemetryWithProviders(tp, mp, "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}
@@ -98,12 +101,77 @@ func TestNewTelemetryWithProviders_CreatesSpans(t *testing.T) {
 	}
 }
 
+// newRecordingTelemetry returns a Telemetry wired to an in-memory metric reader
+// so tests can record RPC calls and inspect the resulting histogram.
+func newRecordingTelemetry(t *testing.T) (*Telemetry, sdkmetric.Reader) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "mainnet")
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
+	}
+	return tel, reader
+}
+
+// collectHistogramBounds collects the named float64 histogram from reader and
+// returns its bucket upper bounds.
+func collectHistogramBounds(t *testing.T, reader sdkmetric.Reader, name string) []float64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Histogram[float64]", name, m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("metric %q has %d data points, want 1", name, len(hist.DataPoints))
+			}
+			return hist.DataPoints[0].Bounds
+		}
+	}
+	t.Fatalf("metric %q not found", name)
+	return nil
+}
+
+// TestSecondsHistograms_UseSecondsBuckets guards against the bucket-boundary bug
+// behind the VectorOracleIndexerRPCLatencyHigh alert. Without explicit
+// boundaries the SDK applies its default millisecond-scale buckets
+// ([0,5,10,...]), so a seconds-valued metric collapses into the (0,5] bucket and
+// histogram_quantile(0.99,...) interpolates to 0.99*5 = 4.95s, tripping the >3s
+// alert permanently. Every seconds histogram must instead use
+// telemetry.SecondsDurationBuckets.
+func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	ctx := context.Background()
+	tel.RecordBlockProcessed(ctx, 30*time.Millisecond, nil)
+	tel.RecordRPCCall(ctx, "getAssetsPrices", 30*time.Millisecond, nil)
+
+	for _, name := range []string{
+		"oracle.block.duration_seconds",
+		"oracle.rpc.duration_seconds",
+	} {
+		if bounds := collectHistogramBounds(t, reader, name); !slices.Equal(bounds, telemetry.SecondsDurationBuckets) {
+			t.Errorf("%s bounds = %v, want %v", name, bounds, telemetry.SecondsDurationBuckets)
+		}
+	}
+}
+
 func TestTelemetry_NilSafe(t *testing.T) {
 	var tel *Telemetry // nil pointer
 	ctx := context.Background()
 	someErr := errors.New("test error")
 
-	// All methods must be no-ops on nil receiver — no panics.
+	// All methods must be no-ops on nil receiver: no panics.
 	t.Run("RecordBlockProcessed", func(t *testing.T) {
 		tel.RecordBlockProcessed(ctx, time.Second, nil)
 		tel.RecordBlockProcessed(ctx, time.Second, someErr)

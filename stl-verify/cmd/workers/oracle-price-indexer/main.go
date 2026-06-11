@@ -216,7 +216,19 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name for metrics: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
+	oracleTelemetry, err := oracle_price_worker.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
 	}
@@ -236,9 +248,10 @@ func run(ctx context.Context, args []string) error {
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
 			if oracleType == entity.OracleTypeChronicle {
+				// Direct single eth_call path, not a multicall batch, so it intentionally carries no multicall.batch.size telemetry.
 				return multicall.NewDirectCaller(ethClient.Client())
 			}
-			return multicall.NewClient(ethClient, blockchain.Multicall3)
+			return mc, nil
 		},
 	)
 	if err != nil {
