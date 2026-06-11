@@ -16,6 +16,7 @@
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts",
     "preview": "vite preview",
+    "test:explorers": "node scripts/check-explorer-urls.mjs",
     "generate:openapi-types": "openapi-typescript ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts",
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
