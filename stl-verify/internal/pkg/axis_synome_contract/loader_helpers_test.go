@@ -40,21 +40,21 @@ func TestResolveDefaultPath_FindsCommittedContract(t *testing.T) {
 	}
 }
 
-func TestLoadDefault_ReturnsPopulatedBundle(t *testing.T) {
-	bundle, err := LoadDefault()
+func TestLoadDefaultContract_ReturnsPopulatedContract(t *testing.T) {
+	contract, err := LoadDefaultContract()
 	if err != nil {
-		t.Fatalf("LoadDefault() error = %v", err)
+		t.Fatalf("LoadDefaultContract() error = %v", err)
 	}
-	if bundle.Contract.Version == "" {
+	if contract.Version == "" {
 		t.Error("contract version should be non-empty")
 	}
-	if len(bundle.Contract.GetAlmProxies()) == 0 {
+	if contract.AxisSynomeGitCommit == "" {
+		t.Error("contract axis_synome_git_commit should be non-empty")
+	}
+	if len(contract.GetAlmProxies()) == 0 {
 		t.Error("expected at least one ALM proxy star")
 	}
-	if len(bundle.Contract.GetAssetsByPrime()) == 0 {
+	if len(contract.GetAssetsByPrime()) == 0 {
 		t.Error("expected at least one assets-by-prime star")
-	}
-	if len(bundle.Schema) == 0 {
-		t.Error("schema should be loaded into the bundle")
 	}
 }
