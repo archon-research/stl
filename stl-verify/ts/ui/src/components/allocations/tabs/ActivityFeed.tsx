@@ -17,6 +17,7 @@ import {
   getTxProtocolEvents,
 } from '../../../lib/api';
 import {
+  DIRECT_PROTOCOL_FILTER_VALUE,
   formatDateTime,
   formatTokenAmount,
   formatFreshnessLabel,
@@ -38,18 +39,17 @@ type ActivityFeedProps = {
   isEnabled: boolean;
   mode?: 'drawer' | 'page';
   actionFilter?: string;
-  primeOptions?: Prime[];
-  protocolOptions?: string[];
+  selectedNetwork?: string | null;
+  selectedProtocol?: string | null;
   selectedPrime: Prime | null;
   selectedReceiptToken?: Allocation | null;
   selectedCategory?: AllocationCategory | '';
   searchQuery?: string;
+  showAllPrimes?: boolean;
   tokenOptions?: string[];
 };
 
 type ActivityFilters = {
-  prime_id?: string;
-  protocol_name?: string;
   action_type?: string;
   token_symbol?: string;
   from_timestamp?: string;
@@ -417,12 +417,13 @@ export function ActivityFeed({
   actionFilter,
   isEnabled,
   mode = 'drawer',
-  primeOptions = [],
-  protocolOptions = [],
+  selectedNetwork,
+  selectedProtocol,
   selectedCategory = '',
   selectedPrime,
   selectedReceiptToken = null,
   searchQuery = '',
+  showAllPrimes = false,
   tokenOptions = [],
 }: ActivityFeedProps) {
   const isPageMode = mode === 'page';
@@ -442,20 +443,13 @@ export function ActivityFeed({
     Record<string, boolean>
   >({});
   const [filters, setFilters] = useState<ActivityFilters>({
-    prime_id: selectedPrime?.id,
     limit: 50,
   });
-  const uniqueProtocolOptions = useMemo(
-    () => Array.from(new Set(protocolOptions)).sort((a, b) => a.localeCompare(b)),
-    [protocolOptions],
-  );
   const uniqueTokenOptions = useMemo(
     () => Array.from(new Set(tokenOptions)).sort((a, b) => a.localeCompare(b)),
     [tokenOptions],
   );
   const hasActiveFilters = Boolean(
-    filters.prime_id ||
-    filters.protocol_name ||
     filters.action_type ||
     filters.token_symbol ||
     filters.from_timestamp ||
@@ -516,9 +510,22 @@ export function ActivityFeed({
 
   const requestFilters = useMemo(() => {
     if (isPageMode) {
+      const parsedChainId =
+        selectedNetwork && selectedNetwork.length > 0
+          ? Number(selectedNetwork)
+          : undefined;
+
       return {
         ...filters,
-        prime_id: filters.prime_id || undefined,
+        prime_id: showAllPrimes ? undefined : (selectedPrime?.id ?? undefined),
+        chain_id:
+          parsedChainId && Number.isFinite(parsedChainId)
+            ? parsedChainId
+            : undefined,
+        protocol_name:
+          selectedProtocol && selectedProtocol !== DIRECT_PROTOCOL_FILTER_VALUE
+            ? selectedProtocol
+            : undefined,
       };
     }
 
@@ -533,9 +540,12 @@ export function ActivityFeed({
     actionFilter,
     filters,
     isPageMode,
+    selectedNetwork,
     selectedPrime?.id,
+    selectedProtocol,
     selectedReceiptToken?.chain_id,
     selectedReceiptToken?.symbol,
+    showAllPrimes,
   ]);
 
   useEffect(() => {
@@ -791,141 +801,176 @@ export function ActivityFeed({
               mb: '3',
             })}
           >
-          <div
-            className={css({
-              display: 'grid',
-              gridTemplateColumns: {
-                base: '1fr',
-                md: 'repeat(3, minmax(0, 1fr))',
-              },
-              gap: '2',
-              alignItems: 'end',
-            })}
-          >
-            <StyledSelect
-              aria-label="Filter activity by prime"
-              value={filters.prime_id ?? ''}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                updateFilter('prime_id', event.target.value || undefined)
-              }
+            <div
+              className={css({
+                display: 'grid',
+                gridTemplateColumns: {
+                  base: '1fr',
+                  md: 'repeat(2, minmax(0, 1fr))',
+                },
+                gap: '2',
+                alignItems: 'end',
+              })}
             >
-              <option value="">All primes</option>
-              {primeOptions.map((prime) => (
-                <option key={prime.id} value={prime.id}>
-                  {prime.name}
-                </option>
-              ))}
-            </StyledSelect>
-            {uniqueProtocolOptions.length > 0 ? (
-              <StyledSelect
-                aria-label="Filter activity by protocol"
-                value={filters.protocol_name ?? ''}
-                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                  updateFilter(
-                    'protocol_name',
-                    normalizeFilterValue(event.target.value),
-                  )
-                }
+              <label
+                className={css({
+                  display: 'grid',
+                  gap: '1',
+                })}
               >
-                <option value="">All protocols</option>
-                {uniqueProtocolOptions.map((protocolName) => (
-                  <option key={protocolName} value={protocolName}>
-                    {protocolName}
-                  </option>
-                ))}
-              </StyledSelect>
-            ) : null}
+                <span
+                  className={css({
+                    fontSize: 'xs',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.1em',
+                    color: 'text.muted',
+                  })}
+                >
+                  Action
+                </span>
+                <StyledSelect
+                  aria-label="Filter activity by action"
+                  value={filters.action_type ?? ''}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    updateFilter('action_type', event.target.value || undefined)
+                  }
+                >
+                  {ACTION_FILTER_OPTIONS.map((option) => (
+                    <option key={option.value || 'all'} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </StyledSelect>
+              </label>
             {uniqueTokenOptions.length > 0 ? (
-              <StyledSelect
-                aria-label="Filter activity by token symbol"
-                value={filters.token_symbol ?? ''}
-                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                  updateFilter(
-                    'token_symbol',
-                    normalizeFilterValue(event.target.value),
-                  )
-                }
+              <label
+                className={css({
+                  display: 'grid',
+                  gap: '1',
+                })}
               >
-                <option value="">All tokens</option>
-                {uniqueTokenOptions.map((symbol) => (
-                  <option key={symbol} value={symbol}>
-                    {symbol}
-                  </option>
-                ))}
-              </StyledSelect>
+                <span
+                  className={css({
+                    fontSize: 'xs',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.1em',
+                    color: 'text.muted',
+                  })}
+                >
+                  Token
+                </span>
+                <StyledSelect
+                  aria-label="Filter activity by token symbol"
+                  value={filters.token_symbol ?? ''}
+                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                    updateFilter(
+                      'token_symbol',
+                      normalizeFilterValue(event.target.value),
+                    )
+                  }
+                >
+                  <option value="">All tokens</option>
+                  {uniqueTokenOptions.map((symbol) => (
+                    <option key={symbol} value={symbol}>
+                      {symbol}
+                    </option>
+                  ))}
+                </StyledSelect>
+              </label>
             ) : null}
-          </div>
+            </div>
 
           <div
             className={css({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                md: 'repeat(3, minmax(0, 1fr))',
+                md: 'repeat(2, minmax(0, 1fr))',
               },
               gap: '2',
               alignItems: 'end',
             })}
           >
-            <StyledSelect
-              aria-label="Filter activity by action"
-              value={filters.action_type ?? ''}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                updateFilter('action_type', event.target.value || undefined)
-              }
+            <label
+              className={css({
+                display: 'grid',
+                gap: '1',
+              })}
             >
-              {ACTION_FILTER_OPTIONS.map((option) => (
-                <option key={option.value || 'all'} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </StyledSelect>
-            <input
-              aria-label="Filter activity from timestamp"
-              type="datetime-local"
-              value={toDateTimeLocalValue(filters.from_timestamp)}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                updateFilter(
-                  'from_timestamp',
-                  fromDateTimeLocalValue(event.target.value),
-                )
-              }
+              <span
+                className={css({
+                  fontSize: 'xs',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.1em',
+                  color: 'text.muted',
+                })}
+              >
+                From
+              </span>
+              <input
+                aria-label="Filter activity from timestamp"
+                type="datetime-local"
+                value={toDateTimeLocalValue(filters.from_timestamp)}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  updateFilter(
+                    'from_timestamp',
+                    fromDateTimeLocalValue(event.target.value),
+                  )
+                }
+                className={css({
+                  width: 'full',
+                  h: '9',
+                  borderRadius: 'md',
+                  borderWidth: '1px',
+                  borderStyle: 'solid',
+                  borderColor: 'border.subtle',
+                  bg: 'surface.default',
+                  color: 'text.default',
+                  px: '3',
+                  fontSize: 'sm',
+                })}
+              />
+            </label>
+            <label
               className={css({
-                width: 'full',
-                h: '9',
-                borderRadius: 'md',
-                borderWidth: '1px',
-                borderStyle: 'solid',
-                borderColor: 'border.subtle',
-                bg: 'surface.default',
-                color: 'text.default',
-                px: '3',
-                fontSize: 'sm',
+                display: 'grid',
+                gap: '1',
               })}
-            />
-            <input
-              aria-label="Filter activity to timestamp"
-              type="datetime-local"
-              value={toDateTimeLocalValue(filters.to_timestamp)}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                updateFilter(
-                  'to_timestamp',
-                  fromDateTimeLocalValue(event.target.value),
-                )
-              }
-              className={css({
-                width: 'full',
-                h: '9',
-                borderRadius: 'md',
-                borderWidth: '1px',
-                borderStyle: 'solid',
-                borderColor: 'border.subtle',
-                bg: 'surface.default',
-                color: 'text.default',
-                px: '3',
-                fontSize: 'sm',
-              })}
-            />
+            >
+              <span
+                className={css({
+                  fontSize: 'xs',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.1em',
+                  color: 'text.muted',
+                })}
+              >
+                To
+              </span>
+              <input
+                aria-label="Filter activity to timestamp"
+                type="datetime-local"
+                value={toDateTimeLocalValue(filters.to_timestamp)}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  updateFilter(
+                    'to_timestamp',
+                    fromDateTimeLocalValue(event.target.value),
+                  )
+                }
+                className={css({
+                  width: 'full',
+                  h: '9',
+                  borderRadius: 'md',
+                  borderWidth: '1px',
+                  borderStyle: 'solid',
+                  borderColor: 'border.subtle',
+                  bg: 'surface.default',
+                  color: 'text.default',
+                  px: '3',
+                  fontSize: 'sm',
+                })}
+              />
+            </label>
           </div>
 
           <div
@@ -941,7 +986,9 @@ export function ActivityFeed({
             <span>
               {hasActiveFilters
                 ? 'Server filters active'
-                : 'Showing latest activity'}
+                : showAllPrimes
+                  ? 'Showing latest activity across all primes'
+                  : 'Showing latest activity for selected prime'}
             </span>
             {hasActiveFilters ? (
               <button

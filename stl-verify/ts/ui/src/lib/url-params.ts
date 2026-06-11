@@ -11,6 +11,7 @@ export const PARAMS = {
   tab: 'tab',
   receiptToken: 'rt',
   activityAction: 'aa',
+  showAllPrimes: 'allp',
   // Data table params (shared across tables)
   sort: 'sort',
   search: 'q',

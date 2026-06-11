@@ -80,6 +80,9 @@ function App() {
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
+  const [showAllPrimesParam, setShowAllPrimesParam] = useUrlParam(
+    PARAMS.showAllPrimes,
+  );
   const [pathname, setPathname] = usePathname();
   const { globalFilter, setGlobalFilter, setSorting, sorting } =
     useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
@@ -89,6 +92,8 @@ function App() {
   const isDrawerOpen = isDrawerOpenParam === '1';
   const selectedView: 'allocation' | 'activities' =
     pathname === '/activities' ? 'activities' : 'allocation';
+  const showAllPrimesInActivities =
+    selectedView === 'activities' ? showAllPrimesParam !== '0' : false;
 
   useEffect(() => {
     if (pathname === '/allocation' || pathname === '/activities') {
@@ -596,6 +601,10 @@ function App() {
               selectedNetwork={selectedNetwork}
               selectedProtocol={selectedProtocol}
               selectedView={selectedView}
+              showAllPrimes={showAllPrimesInActivities}
+              onShowAllPrimesChange={(value) =>
+                setShowAllPrimesParam(value ? '1' : '0')
+              }
               onViewChange={(view) =>
                 setPathname(view === 'activities' ? '/activities' : '/allocation')
               }
@@ -630,8 +639,9 @@ function App() {
               <ActivityFeed
                 isEnabled
                 mode="page"
-                primeOptions={primes}
-                protocolOptions={localProtocols.map((protocol) => protocol.name)}
+                selectedNetwork={selectedNetwork}
+                selectedProtocol={selectedProtocol}
+                showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
                 tokenOptions={tokenSymbolOptions}
               />
