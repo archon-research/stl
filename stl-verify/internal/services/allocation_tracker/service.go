@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -67,10 +68,13 @@ func NewService(
 		return nil, fmt.Errorf("chain ID is required")
 	}
 	if len(proxies) == 0 {
-		proxies = ProxiesForChainID(DefaultProxies(), config.ChainID)
+		return nil, fmt.Errorf("at least one proxy is required for chain ID %d", config.ChainID)
 	}
 	if len(entries) == 0 {
-		entries = EntriesForChainID(DefaultTokenEntries(), config.ChainID)
+		return nil, fmt.Errorf("at least one token entry is required for chain ID %d", config.ChainID)
+	}
+	if err := validateScopedEntriesAndProxies(entries, proxies, config.ChainID); err != nil {
+		return nil, fmt.Errorf("validating scoped entries/proxies: %w", err)
 	}
 
 	return &Service{
@@ -84,6 +88,52 @@ func NewService(
 		handler:     handler,
 		logger:      config.Logger.With("component", "allocation-tracker"),
 	}, nil
+}
+
+func validateScopedEntriesAndProxies(entries []*TokenEntry, proxies []ProxyConfig, chainID int64) error {
+	chainName, ok := entity.ChainIDToName[chainID]
+	if !ok {
+		return fmt.Errorf("unknown chain ID %d", chainID)
+	}
+
+	seenEntries := make(map[EntryKey]struct{}, len(entries))
+	for i, entry := range entries {
+		if entry == nil {
+			return fmt.Errorf("entry at index %d is nil", i)
+		}
+		if entry.Chain != chainName {
+			return fmt.Errorf(
+				"entry %s/%s has chain %s, want %s",
+				entry.ContractAddress.Hex(),
+				entry.WalletAddress.Hex(),
+				entry.Chain,
+				chainName,
+			)
+		}
+		key := entry.Key()
+		if _, ok := seenEntries[key]; ok {
+			return fmt.Errorf(
+				"duplicate token entry for contract=%s wallet=%s chain=%s",
+				entry.ContractAddress.Hex(),
+				entry.WalletAddress.Hex(),
+				entry.Chain,
+			)
+		}
+		seenEntries[key] = struct{}{}
+	}
+
+	seenProxies := make(map[common.Address]struct{}, len(proxies))
+	for _, proxy := range proxies {
+		if proxy.Chain != chainName {
+			return fmt.Errorf("proxy %s has chain %s, want %s", proxy.Address.Hex(), proxy.Chain, chainName)
+		}
+		if _, ok := seenProxies[proxy.Address]; ok {
+			return fmt.Errorf("duplicate proxy address %s for chain %s", proxy.Address.Hex(), proxy.Chain)
+		}
+		seenProxies[proxy.Address] = struct{}{}
+	}
+
+	return nil
 }
 
 func (s *Service) Start(ctx context.Context) error {

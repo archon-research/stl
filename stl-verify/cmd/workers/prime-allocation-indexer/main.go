@@ -21,6 +21,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -29,6 +30,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
@@ -218,9 +220,25 @@ func run(ctx context.Context, args []string) error {
 	defer rawClient.Close()
 	logger.Info("Ethereum node connected")
 
-	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
+	defaultEntries, err := at.LoadDefaultTokenEntries()
 	if err != nil {
-		return fmt.Errorf("multicall client: %w", err)
+		return fmt.Errorf("load default token entries: %w", err)
+	}
+
+	// Token entries filtered by chain
+	entries := at.EntriesForChainID(defaultEntries, cfg.chainID)
+	if len(entries) == 0 {
+		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
+	}
+
+	defaultProxies, err := at.LoadDefaultProxies()
+	if err != nil {
+		return fmt.Errorf("load default proxies: %w", err)
+	}
+
+	proxies := at.ProxiesForChainID(defaultProxies, cfg.chainID)
+	if len(proxies) == 0 {
+		return fmt.Errorf("no proxies for chain ID %d", cfg.chainID)
 	}
 
 	// Database
@@ -237,6 +255,37 @@ func run(ctx context.Context, args []string) error {
 	buildReg, err := buildregistry.New(ctx, dbPool)
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting allocation tracker",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"commit", buildReg.GitHash())
+
+	// OpenTelemetry
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-allocation-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("multicall client: %w", err)
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
@@ -286,20 +335,6 @@ func run(ctx context.Context, args []string) error {
 	for _, s := range at.DefaultStubSources(logger) {
 		registry.Register(s)
 	}
-
-	// Token entries filtered by chain
-	entries := at.EntriesForChainID(at.DefaultTokenEntries(), cfg.chainID)
-	if len(entries) == 0 {
-		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
-	}
-
-	proxies := at.ProxiesForChainID(at.DefaultProxies(), cfg.chainID)
-
-	logger.Info("starting allocation tracker",
-		"queue", cfg.queueURL,
-		"redis", cfg.redisAddr,
-		"chainID", cfg.chainID,
-		"commit", buildReg.GitHash())
 
 	txm, err := postgres.NewTxManager(dbPool, logger)
 	if err != nil {

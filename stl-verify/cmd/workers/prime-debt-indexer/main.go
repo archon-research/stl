@@ -21,7 +21,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -182,7 +184,15 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("eth rpc client connected", "rpc", maskRPCURL(*rpcURL))
 
 	// Multicaller
-	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}

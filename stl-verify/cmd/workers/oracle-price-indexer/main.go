@@ -221,6 +221,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolving chain name for metrics: %w", err)
 	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
 	oracleTelemetry, err := oracle_price_worker.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
@@ -247,16 +255,15 @@ func run(ctx context.Context, args []string) error {
 		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
-			var mc outbound.Multicaller
-			var err error
 			if oracleType == entity.OracleTypeChronicle {
-				mc, err = multicall.NewDirectCaller(ethClient.Client())
-			} else {
-				mc, err = multicall.NewClient(ethClient, blockchain.Multicall3)
+				// Direct single eth_call path, not a multicall batch, so it intentionally carries no multicall.batch.size telemetry.
+				direct, err := multicall.NewDirectCaller(ethClient.Client())
+				if err != nil {
+					return nil, err
+				}
+				return archiveWrap(direct), nil
 			}
-			if err != nil {
-				return nil, err
-			}
+			// mc is the telemetry-instrumented client built once at startup.
 			return archiveWrap(mc), nil
 		},
 	)
