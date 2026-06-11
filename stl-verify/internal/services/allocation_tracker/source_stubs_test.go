@@ -84,7 +84,7 @@ func TestStubSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 
 func TestDefaultSkipSources(t *testing.T) {
 	logger := slog.Default()
-	sources := DefaultSkipSources(logger)
+	sources := defaultSkipSources(logger)
 
 	if len(sources) != 1 {
 		t.Fatalf("expected 1 skip source, got %d", len(sources))
@@ -111,7 +111,7 @@ func TestDefaultSkipSources(t *testing.T) {
 
 func TestDefaultStubSources(t *testing.T) {
 	logger := slog.Default()
-	sources := DefaultStubSources(logger)
+	sources := defaultStubSources(logger)
 
 	if len(sources) == 0 {
 		t.Fatal("expected at least 1 stub source")
