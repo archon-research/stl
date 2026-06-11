@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"fmt"
@@ -6,13 +6,13 @@ import (
 	"time"
 )
 
-// MaplePoolState is a snapshot of a Maple pool's lending metrics at a sync
+// PoolState is a snapshot of a Maple pool's lending metrics at a sync
 // cycle. All big.Int values are raw API integers in pool-asset decimals
 // (6 for USDC/USDT); APYs use 30 decimals. Utilization is derived in the
 // constructor as principal_out / (liquid_assets + principal_out), in [0, 1],
-// so an inconsistent triple is not representable via NewMaplePoolState.
-type MaplePoolState struct {
-	MaplePoolID        int64
+// so an inconsistent triple is not representable via NewPoolState.
+type PoolState struct {
+	PoolID             int64
 	SyncedAt           time.Time
 	TVL                *big.Int // nil when the API reports null (schema-nullable)
 	LiquidAssets       *big.Int // poolV2.assets
@@ -23,11 +23,11 @@ type MaplePoolState struct {
 	SpotAPY            *big.Int // 30 decimals, nil when absent
 }
 
-// NewMaplePoolState creates a new MaplePoolState entity with validation.
+// NewPoolState creates a new PoolState entity with validation.
 // Utilization is computed from principalOut and liquidAssets.
-func NewMaplePoolState(maplePoolID int64, syncedAt time.Time, tvl, liquidAssets, collateralValueUSD, principalOut, monthlyAPY, spotAPY *big.Int) (*MaplePoolState, error) {
-	s := &MaplePoolState{
-		MaplePoolID:        maplePoolID,
+func NewPoolState(maplePoolID int64, syncedAt time.Time, tvl, liquidAssets, collateralValueUSD, principalOut, monthlyAPY, spotAPY *big.Int) (*PoolState, error) {
+	s := &PoolState{
+		PoolID:             maplePoolID,
 		SyncedAt:           NormalizeSyncedAt(syncedAt),
 		TVL:                tvl,
 		LiquidAssets:       liquidAssets,
@@ -38,7 +38,7 @@ func NewMaplePoolState(maplePoolID int64, syncedAt time.Time, tvl, liquidAssets,
 		SpotAPY:            spotAPY,
 	}
 	if err := s.Validate(); err != nil {
-		return nil, fmt.Errorf("NewMaplePoolState: %w", err)
+		return nil, fmt.Errorf("NewPoolState: %w", err)
 	}
 	return s, nil
 }
@@ -62,9 +62,9 @@ func computeUtilization(principalOut, liquidAssets *big.Int) float64 {
 }
 
 // Validate checks that all fields have valid values.
-func (s *MaplePoolState) Validate() error {
-	if s.MaplePoolID <= 0 {
-		return fmt.Errorf("maplePoolID must be positive, got %d", s.MaplePoolID)
+func (s *PoolState) Validate() error {
+	if s.PoolID <= 0 {
+		return fmt.Errorf("maplePoolID must be positive, got %d", s.PoolID)
 	}
 	if s.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")

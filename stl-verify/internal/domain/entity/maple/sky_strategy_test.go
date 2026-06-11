@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"bytes"
@@ -6,53 +6,53 @@ import (
 	"testing"
 )
 
-func validMapleSkyStrategy() *MapleSkyStrategy {
-	return &MapleSkyStrategy{
+func validSkyStrategy() *SkyStrategy {
+	return &SkyStrategy{
 		ChainID:         1,
 		StrategyAddress: bytes.Repeat([]byte{0xdd}, 20),
-		MaplePoolID:     3,
+		PoolID:          3,
 		Version:         100,
 	}
 }
 
-func TestMapleSkyStrategy_Validate(t *testing.T) {
+func TestSkyStrategy_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(s *MapleSkyStrategy)
+		mutate  func(s *SkyStrategy)
 		wantErr string
 	}{
 		{name: "valid strategy"},
-		{name: "zero version ok", mutate: func(s *MapleSkyStrategy) { s.Version = 0 }},
+		{name: "zero version ok", mutate: func(s *SkyStrategy) { s.Version = 0 }},
 		{
 			name:    "zero chain ID",
-			mutate:  func(s *MapleSkyStrategy) { s.ChainID = 0 },
+			mutate:  func(s *SkyStrategy) { s.ChainID = 0 },
 			wantErr: "chainID must be positive",
 		},
 		{
 			name:    "short strategy address",
-			mutate:  func(s *MapleSkyStrategy) { s.StrategyAddress = []byte{0x01} },
+			mutate:  func(s *SkyStrategy) { s.StrategyAddress = []byte{0x01} },
 			wantErr: "strategyAddress must be 20 bytes",
 		},
 		{
 			name:    "nil strategy address",
-			mutate:  func(s *MapleSkyStrategy) { s.StrategyAddress = nil },
+			mutate:  func(s *SkyStrategy) { s.StrategyAddress = nil },
 			wantErr: "strategyAddress must be 20 bytes",
 		},
 		{
 			name:    "zero pool ID",
-			mutate:  func(s *MapleSkyStrategy) { s.MaplePoolID = 0 },
+			mutate:  func(s *SkyStrategy) { s.PoolID = 0 },
 			wantErr: "maplePoolID must be positive",
 		},
 		{
 			name:    "negative version",
-			mutate:  func(s *MapleSkyStrategy) { s.Version = -1 },
+			mutate:  func(s *SkyStrategy) { s.Version = -1 },
 			wantErr: "version must be non-negative",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := validMapleSkyStrategy()
+			s := validSkyStrategy()
 			if tt.mutate != nil {
 				tt.mutate(s)
 			}
@@ -73,20 +73,20 @@ func TestMapleSkyStrategy_Validate(t *testing.T) {
 	}
 }
 
-func TestNewMapleSkyStrategy_Constructor(t *testing.T) {
-	v := validMapleSkyStrategy()
+func TestNewSkyStrategy_Constructor(t *testing.T) {
+	v := validSkyStrategy()
 
-	got, err := NewMapleSkyStrategy(v.ChainID, v.StrategyAddress, v.MaplePoolID, v.Version)
+	got, err := NewSkyStrategy(v.ChainID, v.StrategyAddress, v.PoolID, v.Version)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Version != v.Version || got.MaplePoolID != v.MaplePoolID {
+	if got.Version != v.Version || got.PoolID != v.PoolID {
 		t.Errorf("fields not set: %+v", got)
 	}
 
-	if _, err := NewMapleSkyStrategy(0, v.StrategyAddress, v.MaplePoolID, v.Version); err == nil {
+	if _, err := NewSkyStrategy(0, v.StrategyAddress, v.PoolID, v.Version); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
-	} else if !strings.Contains(err.Error(), "NewMapleSkyStrategy") {
+	} else if !strings.Contains(err.Error(), "NewSkyStrategy") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())
 	}
 }

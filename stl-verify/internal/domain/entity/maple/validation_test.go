@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"testing"
@@ -15,41 +15,41 @@ func TestStateConstructors_NormalizeSyncedAt(t *testing.T) {
 	want := in.UTC().Truncate(time.Second)
 
 	constructors := map[string]func() (time.Time, error){
-		"MaplePoolState": func() (time.Time, error) {
-			v := validMaplePoolState()
-			s, err := NewMaplePoolState(v.MaplePoolID, in, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY)
+		"PoolState": func() (time.Time, error) {
+			v := validPoolState()
+			s, err := NewPoolState(v.PoolID, in, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY)
 			if err != nil {
 				return time.Time{}, err
 			}
 			return s.SyncedAt, nil
 		},
-		"MapleLoanState": func() (time.Time, error) {
-			v := validMapleLoanState()
-			s, err := NewMapleLoanState(v.MapleLoanID, in, v.State, v.PrincipalOwed, v.AcmRatio)
+		"LoanState": func() (time.Time, error) {
+			v := validLoanState()
+			s, err := NewLoanState(v.LoanID, in, v.State, v.PrincipalOwed, v.AcmRatio)
 			if err != nil {
 				return time.Time{}, err
 			}
 			return s.SyncedAt, nil
 		},
-		"MapleLoanCollateral": func() (time.Time, error) {
-			v := validMapleLoanCollateral()
-			c, err := NewMapleLoanCollateral(v.MapleLoanID, in, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel)
+		"LoanCollateral": func() (time.Time, error) {
+			v := validLoanCollateral()
+			c, err := NewLoanCollateral(v.LoanID, in, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel)
 			if err != nil {
 				return time.Time{}, err
 			}
 			return c.SyncedAt, nil
 		},
-		"MapleSkyStrategyState": func() (time.Time, error) {
-			v := validMapleSkyStrategyState()
-			s, err := NewMapleSkyStrategyState(v.MapleSkyStrategyID, in, v.State, v.CurrentlyDeployed, v.DepositedAssets, v.WithdrawnAssets, v.StrategyFeeRate, v.TotalFeesCollected)
+		"SkyStrategyState": func() (time.Time, error) {
+			v := validSkyStrategyState()
+			s, err := NewSkyStrategyState(v.SkyStrategyID, in, v.State, v.CurrentlyDeployed, v.DepositedAssets, v.WithdrawnAssets, v.StrategyFeeRate, v.TotalFeesCollected)
 			if err != nil {
 				return time.Time{}, err
 			}
 			return s.SyncedAt, nil
 		},
-		"MapleSyrupGlobalState": func() (time.Time, error) {
-			v := validMapleSyrupGlobalState()
-			s, err := NewMapleSyrupGlobalState(v.ChainID, in, v.TVL, v.APY, v.CollateralAPY, v.PoolAPY, v.DripsYieldBoost)
+		"SyrupGlobalState": func() (time.Time, error) {
+			v := validSyrupGlobalState()
+			s, err := NewSyrupGlobalState(v.ChainID, in, v.TVL, v.APY, v.CollateralAPY, v.PoolAPY, v.DripsYieldBoost)
 			if err != nil {
 				return time.Time{}, err
 			}

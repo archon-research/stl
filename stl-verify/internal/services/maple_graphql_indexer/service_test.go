@@ -11,7 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -53,23 +53,23 @@ func (m *mockClient) GetSyrupGlobals(ctx context.Context) (*outbound.MapleSyrupG
 type mockRepo struct {
 	GetMapleProtocolIDFn       func(ctx context.Context, chainID int64) (int64, error)
 	GetOrCreateBorrowerUsersFn func(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error)
-	UpsertPoolsFn              func(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error)
-	SavePoolStatesFn           func(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error
-	UpsertLoansFn              func(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error)
-	SaveLoanStatesFn           func(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error
-	SaveLoanCollateralsFn      func(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error
-	UpsertSkyStrategiesFn      func(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error)
-	SaveSkyStrategyStatesFn    func(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error
-	SaveSyrupGlobalStateFn     func(ctx context.Context, tx pgx.Tx, state *entity.MapleSyrupGlobalState) error
+	UpsertPoolsFn              func(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
+	SavePoolStatesFn           func(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
+	UpsertLoansFn              func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
+	SaveLoanStatesFn           func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
+	SaveLoanCollateralsFn      func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
+	UpsertSkyStrategiesFn      func(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
+	SaveSkyStrategyStatesFn    func(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error
+	SaveSyrupGlobalStateFn     func(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error
 
 	// Captured arguments for assertions.
 	borrowerCalls   [][]common.Address
-	upsertedLoans   []*entity.MapleLoan
-	savedPoolStates []*entity.MaplePoolState
-	savedLoanStates []*entity.MapleLoanState
-	savedCollats    []*entity.MapleLoanCollateral
-	savedStrategies []*entity.MapleSkyStrategyState
-	savedGlobals    []*entity.MapleSyrupGlobalState
+	upsertedLoans   []*maple.Loan
+	savedPoolStates []*maple.PoolState
+	savedLoanStates []*maple.LoanState
+	savedCollats    []*maple.LoanCollateral
+	savedStrategies []*maple.SkyStrategyState
+	savedGlobals    []*maple.SyrupGlobalState
 }
 
 // newMockRepo returns a repo whose registry upserts assign sequential ids
@@ -85,18 +85,18 @@ func newMockRepo() *mockRepo {
 		}
 		return ids, nil
 	}
-	r.UpsertPoolsFn = func(_ context.Context, _ pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error) {
+	r.UpsertPoolsFn = func(_ context.Context, _ pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
 		ids := make(map[common.Address]int64, len(pools))
 		for i, p := range pools {
 			ids[common.BytesToAddress(p.Address)] = int64(10 + i)
 		}
 		return ids, nil
 	}
-	r.SavePoolStatesFn = func(_ context.Context, _ pgx.Tx, states []*entity.MaplePoolState) error {
+	r.SavePoolStatesFn = func(_ context.Context, _ pgx.Tx, states []*maple.PoolState) error {
 		r.savedPoolStates = append(r.savedPoolStates, states...)
 		return nil
 	}
-	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
+	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
 		r.upsertedLoans = append(r.upsertedLoans, loans...)
 		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
@@ -104,26 +104,26 @@ func newMockRepo() *mockRepo {
 		}
 		return ids, nil
 	}
-	r.SaveLoanStatesFn = func(_ context.Context, _ pgx.Tx, states []*entity.MapleLoanState) error {
+	r.SaveLoanStatesFn = func(_ context.Context, _ pgx.Tx, states []*maple.LoanState) error {
 		r.savedLoanStates = append(r.savedLoanStates, states...)
 		return nil
 	}
-	r.SaveLoanCollateralsFn = func(_ context.Context, _ pgx.Tx, collaterals []*entity.MapleLoanCollateral) error {
+	r.SaveLoanCollateralsFn = func(_ context.Context, _ pgx.Tx, collaterals []*maple.LoanCollateral) error {
 		r.savedCollats = append(r.savedCollats, collaterals...)
 		return nil
 	}
-	r.UpsertSkyStrategiesFn = func(_ context.Context, _ pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+	r.UpsertSkyStrategiesFn = func(_ context.Context, _ pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 		ids := make(map[common.Address]int64, len(strategies))
 		for i, s := range strategies {
 			ids[common.BytesToAddress(s.StrategyAddress)] = int64(30 + i)
 		}
 		return ids, nil
 	}
-	r.SaveSkyStrategyStatesFn = func(_ context.Context, _ pgx.Tx, states []*entity.MapleSkyStrategyState) error {
+	r.SaveSkyStrategyStatesFn = func(_ context.Context, _ pgx.Tx, states []*maple.SkyStrategyState) error {
 		r.savedStrategies = append(r.savedStrategies, states...)
 		return nil
 	}
-	r.SaveSyrupGlobalStateFn = func(_ context.Context, _ pgx.Tx, state *entity.MapleSyrupGlobalState) error {
+	r.SaveSyrupGlobalStateFn = func(_ context.Context, _ pgx.Tx, state *maple.SyrupGlobalState) error {
 		r.savedGlobals = append(r.savedGlobals, state)
 		return nil
 	}
@@ -138,35 +138,35 @@ func (m *mockRepo) GetOrCreateBorrowerUsers(ctx context.Context, tx pgx.Tx, chai
 	return m.GetOrCreateBorrowerUsersFn(ctx, tx, chainID, borrowers)
 }
 
-func (m *mockRepo) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error) {
+func (m *mockRepo) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
 	return m.UpsertPoolsFn(ctx, tx, pools)
 }
 
-func (m *mockRepo) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error {
+func (m *mockRepo) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error {
 	return m.SavePoolStatesFn(ctx, tx, states)
 }
 
-func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
+func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
 	return m.UpsertLoansFn(ctx, tx, loans)
 }
 
-func (m *mockRepo) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error {
+func (m *mockRepo) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error {
 	return m.SaveLoanStatesFn(ctx, tx, states)
 }
 
-func (m *mockRepo) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error {
+func (m *mockRepo) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error {
 	return m.SaveLoanCollateralsFn(ctx, tx, collaterals)
 }
 
-func (m *mockRepo) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+func (m *mockRepo) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 	return m.UpsertSkyStrategiesFn(ctx, tx, strategies)
 }
 
-func (m *mockRepo) SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error {
+func (m *mockRepo) SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error {
 	return m.SaveSkyStrategyStatesFn(ctx, tx, states)
 }
 
-func (m *mockRepo) SaveSyrupGlobalState(ctx context.Context, tx pgx.Tx, state *entity.MapleSyrupGlobalState) error {
+func (m *mockRepo) SaveSyrupGlobalState(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error {
 	return m.SaveSyrupGlobalStateFn(ctx, tx, state)
 }
 
@@ -369,33 +369,33 @@ func TestSync_HappyPath(t *testing.T) {
 	// right counts.
 	wantPrincipalByLoanID := map[int64]int64{20: 100, 21: 200, 22: 300}
 	for _, s := range repo.savedLoanStates {
-		want, ok := wantPrincipalByLoanID[s.MapleLoanID]
+		want, ok := wantPrincipalByLoanID[s.LoanID]
 		if !ok {
-			t.Errorf("unexpected loan id %d", s.MapleLoanID)
+			t.Errorf("unexpected loan id %d", s.LoanID)
 			continue
 		}
 		if s.PrincipalOwed.Int64() != want {
-			t.Errorf("loan %d principal = %s, want %d", s.MapleLoanID, s.PrincipalOwed, want)
+			t.Errorf("loan %d principal = %s, want %d", s.LoanID, s.PrincipalOwed, want)
 		}
 		// Only the uncollateralized loan (0x21 -> id 21) has nil AcmRatio.
-		if (s.AcmRatio == nil) != (s.MapleLoanID == 21) {
-			t.Errorf("loan %d AcmRatio nil-ness wrong: %v", s.MapleLoanID, s.AcmRatio)
+		if (s.AcmRatio == nil) != (s.LoanID == 21) {
+			t.Errorf("loan %d AcmRatio nil-ness wrong: %v", s.LoanID, s.AcmRatio)
 		}
 	}
 	wantCollateralByLoanID := map[int64]string{20: "BTC", 22: "SOL"}
 	for _, c := range repo.savedCollats {
-		if want := wantCollateralByLoanID[c.MapleLoanID]; c.AssetSymbol != want {
-			t.Errorf("collateral for loan %d = %q, want %q", c.MapleLoanID, c.AssetSymbol, want)
+		if want := wantCollateralByLoanID[c.LoanID]; c.AssetSymbol != want {
+			t.Errorf("collateral for loan %d = %q, want %q", c.LoanID, c.AssetSymbol, want)
 		}
 	}
 	// Pool states pair with their pool ids (10, 11 in fixture order).
-	if repo.savedPoolStates[0].MaplePoolID != 10 || repo.savedPoolStates[0].TVL.Int64() != 1000 {
+	if repo.savedPoolStates[0].PoolID != 10 || repo.savedPoolStates[0].TVL.Int64() != 1000 {
 		t.Errorf("pool state 0 = id %d tvl %s, want id 10 tvl 1000",
-			repo.savedPoolStates[0].MaplePoolID, repo.savedPoolStates[0].TVL)
+			repo.savedPoolStates[0].PoolID, repo.savedPoolStates[0].TVL)
 	}
-	if repo.savedPoolStates[1].MaplePoolID != 11 || repo.savedPoolStates[1].TVL.Int64() != 0 {
+	if repo.savedPoolStates[1].PoolID != 11 || repo.savedPoolStates[1].TVL.Int64() != 0 {
 		t.Errorf("pool state 1 = id %d tvl %s, want id 11 tvl 0",
-			repo.savedPoolStates[1].MaplePoolID, repo.savedPoolStates[1].TVL)
+			repo.savedPoolStates[1].PoolID, repo.savedPoolStates[1].TVL)
 	}
 
 	// Loan meta maps field-for-field into the registry entity; the loan
@@ -403,11 +403,11 @@ func TestSync_HappyPath(t *testing.T) {
 	if len(repo.upsertedLoans) != 3 {
 		t.Fatalf("upserted loans = %d, want 3", len(repo.upsertedLoans))
 	}
-	metaByAddr := map[common.Address]*entity.MapleLoanMeta{}
+	metaByAddr := map[common.Address]*maple.LoanMeta{}
 	for _, l := range repo.upsertedLoans {
 		metaByAddr[common.BytesToAddress(l.LoanAddress)] = l.LoanMeta
 	}
-	wantMeta := entity.MapleLoanMeta{Type: "amm", DexName: "Uniswap"}
+	wantMeta := maple.LoanMeta{Type: "amm", DexName: "Uniswap"}
 	if got := metaByAddr[addr(0x20)]; got == nil || *got != wantMeta {
 		t.Errorf("loan 0x20 meta = %+v, want %+v", got, wantMeta)
 	}
@@ -698,7 +698,7 @@ func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*entity.MapleLoan) (map[common.Address]int64, error) {
+	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -715,7 +715,7 @@ func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 func TestSync_PoolMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertPoolsFn = func(context.Context, pgx.Tx, []*entity.MaplePool) (map[common.Address]int64, error) {
+	repo.UpsertPoolsFn = func(context.Context, pgx.Tx, []*maple.Pool) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -732,7 +732,7 @@ func TestSync_PoolMissingFromUpsertResult(t *testing.T) {
 func TestSync_StrategyMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+	repo.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*maple.SkyStrategy) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -792,7 +792,7 @@ func TestSync_SaveErrorsPropagate(t *testing.T) {
 		{
 			name: "pool states save fails",
 			mutate: func(r *mockRepo) {
-				r.SavePoolStatesFn = func(context.Context, pgx.Tx, []*entity.MaplePoolState) error {
+				r.SavePoolStatesFn = func(context.Context, pgx.Tx, []*maple.PoolState) error {
 					return errors.New("save failed")
 				}
 			},
@@ -800,7 +800,7 @@ func TestSync_SaveErrorsPropagate(t *testing.T) {
 		{
 			name: "loan states save fails",
 			mutate: func(r *mockRepo) {
-				r.SaveLoanStatesFn = func(context.Context, pgx.Tx, []*entity.MapleLoanState) error {
+				r.SaveLoanStatesFn = func(context.Context, pgx.Tx, []*maple.LoanState) error {
 					return errors.New("save failed")
 				}
 			},
@@ -808,7 +808,7 @@ func TestSync_SaveErrorsPropagate(t *testing.T) {
 		{
 			name: "loan collaterals save fails",
 			mutate: func(r *mockRepo) {
-				r.SaveLoanCollateralsFn = func(context.Context, pgx.Tx, []*entity.MapleLoanCollateral) error {
+				r.SaveLoanCollateralsFn = func(context.Context, pgx.Tx, []*maple.LoanCollateral) error {
 					return errors.New("save failed")
 				}
 			},
@@ -816,7 +816,7 @@ func TestSync_SaveErrorsPropagate(t *testing.T) {
 		{
 			name: "strategy states save fails",
 			mutate: func(r *mockRepo) {
-				r.SaveSkyStrategyStatesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategyState) error {
+				r.SaveSkyStrategyStatesFn = func(context.Context, pgx.Tx, []*maple.SkyStrategyState) error {
 					return errors.New("save failed")
 				}
 			},
@@ -824,7 +824,7 @@ func TestSync_SaveErrorsPropagate(t *testing.T) {
 		{
 			name: "globals save fails",
 			mutate: func(r *mockRepo) {
-				r.SaveSyrupGlobalStateFn = func(context.Context, pgx.Tx, *entity.MapleSyrupGlobalState) error {
+				r.SaveSyrupGlobalStateFn = func(context.Context, pgx.Tx, *maple.SyrupGlobalState) error {
 					return errors.New("save failed")
 				}
 			},
@@ -856,7 +856,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "pool upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertPoolsFn = func(context.Context, pgx.Tx, []*entity.MaplePool) (map[common.Address]int64, error) {
+				r.UpsertPoolsFn = func(context.Context, pgx.Tx, []*maple.Pool) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},
@@ -872,7 +872,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "loan upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*entity.MapleLoan) (map[common.Address]int64, error) {
+				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},
@@ -880,7 +880,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "strategy upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+				r.UpsertSkyStrategiesFn = func(context.Context, pgx.Tx, []*maple.SkyStrategy) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},

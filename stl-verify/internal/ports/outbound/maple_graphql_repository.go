@@ -6,7 +6,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 )
 
 // MapleGraphQLRepository defines the persistence interface for Maple GraphQL
@@ -38,10 +38,10 @@ type MapleGraphQLRepository interface {
 	// UpsertPools upserts pool registry rows and returns
 	// address -> maple_pool.id. On conflict, refreshes name, asset_address,
 	// asset_symbol, asset_decimals, and is_syrup.
-	UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error)
+	UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
 
 	// SavePoolStates inserts pool state snapshots.
-	SavePoolStates(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error
+	SavePoolStates(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
 
 	// UpsertLoans upserts loan registry rows (maple_pool_id and
 	// borrower_user_id already resolved by the service) and returns loan
@@ -50,23 +50,23 @@ type MapleGraphQLRepository interface {
 	// snapshots); borrower_user_id is deliberately never refreshed (a loan
 	// contract's borrower is immutable), and implementations must fail when
 	// the stored borrower differs from the incoming one.
-	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error)
+	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
-	SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error
+	SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
 
 	// SaveLoanCollaterals inserts loan collateral snapshots. Loans with null
 	// API collateral have no row; callers pass only non-nil collaterals.
-	SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error
+	SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
 
 	// UpsertSkyStrategies upserts strategy registry rows and returns strategy
 	// address -> maple_sky_strategy.id. On conflict, refreshes maple_pool_id
 	// and version.
-	UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error)
+	UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
 
 	// SaveSkyStrategyStates inserts strategy state snapshots.
-	SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error
+	SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error
 
 	// SaveSyrupGlobalState inserts the protocol-wide Syrup aggregate snapshot.
-	SaveSyrupGlobalState(ctx context.Context, tx pgx.Tx, state *entity.MapleSyrupGlobalState) error
+	SaveSyrupGlobalState(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error
 }

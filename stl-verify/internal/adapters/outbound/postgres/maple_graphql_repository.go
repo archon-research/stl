@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -108,12 +108,12 @@ func (r *MapleGraphQLRepository) GetOrCreateBorrowerUsers(ctx context.Context, t
 // UpsertPools upserts pool registry rows and returns
 // address -> maple_pool.id. On conflict, refreshes name, asset details, and
 // is_syrup.
-func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*entity.MaplePool) (map[common.Address]int64, error) {
+func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
 	if len(pools) == 0 {
 		return make(map[common.Address]int64), nil
 	}
 
-	sorted := sortedByBytesKey(pools, func(p *entity.MaplePool) []byte { return p.Address })
+	sorted := sortedByBytesKey(pools, func(p *maple.Pool) []byte { return p.Address })
 
 	batch := &pgx.Batch{}
 	for _, p := range sorted {
@@ -132,22 +132,22 @@ func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, poo
 	}
 
 	return collectBatchIDs(ctx, tx, batch, sorted, "maple pool",
-		func(p *entity.MaplePool) common.Address { return common.BytesToAddress(p.Address) })
+		func(p *maple.Pool) common.Address { return common.BytesToAddress(p.Address) })
 }
 
 // SavePoolStates inserts pool state snapshots. The BEFORE INSERT trigger
 // assigns processing_version; ON CONFLICT DO NOTHING dedupes same-build
 // retries (ADR-0002).
-func (r *MapleGraphQLRepository) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error {
+func (r *MapleGraphQLRepository) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error {
 	if len(states) == 0 {
 		return nil
 	}
 
 	// Sort a copy by natural key for stable advisory-lock acquisition order
 	// (the caller's slice is not mutated).
-	sorted := sortedCopy(states, func(a, b *entity.MaplePoolState) int {
+	sorted := sortedCopy(states, func(a, b *maple.PoolState) int {
 		return cmp.Or(
-			cmp.Compare(a.MaplePoolID, b.MaplePoolID),
+			cmp.Compare(a.PoolID, b.PoolID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
@@ -160,7 +160,7 @@ func (r *MapleGraphQLRepository) SavePoolStates(ctx context.Context, tx pgx.Tx, 
 	return nil
 }
 
-func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.Tx, states []*entity.MaplePoolState) error {
+func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error {
 	const cols = 10
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_pool_state (maple_pool_id, synced_at, tvl, liquid_assets, collateral_value_usd, principal_out, utilization, monthly_apy, spot_apy, build_id) VALUES `)
@@ -169,15 +169,15 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	for i, s := range states {
 		liquidAssets, err := bigIntToNumeric(s.LiquidAssets)
 		if err != nil {
-			return fmt.Errorf("converting liquid_assets for pool %d: %w", s.MaplePoolID, err)
+			return fmt.Errorf("converting liquid_assets for pool %d: %w", s.PoolID, err)
 		}
 		principalOut, err := bigIntToNumeric(s.PrincipalOut)
 		if err != nil {
-			return fmt.Errorf("converting principal_out for pool %d: %w", s.MaplePoolID, err)
+			return fmt.Errorf("converting principal_out for pool %d: %w", s.PoolID, err)
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, s.MaplePoolID, s.SyncedAt, optionalNumeric(s.TVL), liquidAssets,
+		args = append(args, s.PoolID, s.SyncedAt, optionalNumeric(s.TVL), liquidAssets,
 			optionalNumeric(s.CollateralValueUSD), principalOut, s.Utilization,
 			optionalNumeric(s.MonthlyAPY), optionalNumeric(s.SpotAPY), int(r.buildID))
 	}
@@ -198,12 +198,12 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 // is immutable, so the value from first insert stays authoritative — and the
 // stored value is compared against the incoming one so a violation of that
 // assumption fails the call instead of vanishing.
-func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
+func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
 	}
 
-	sorted := sortedByBytesKey(loans, func(l *entity.MapleLoan) []byte { return l.LoanAddress })
+	sorted := sortedByBytesKey(loans, func(l *maple.Loan) []byte { return l.LoanAddress })
 
 	batch := &pgx.Batch{}
 	for _, l := range sorted {
@@ -231,7 +231,7 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 			     loan_meta_wallet_type = EXCLUDED.loan_meta_wallet_type,
 			     loan_meta_location = EXCLUDED.loan_meta_location
 			 RETURNING id, borrower_user_id`,
-			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.MaplePoolID, l.BorrowerUserID,
+			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
 			metaType, metaAssetSymbol, metaDex, metaWalletAddress, metaWalletType, metaLocation,
 		)
 	}
@@ -242,7 +242,7 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 	// assumption broke upstream — fail loudly instead of silently keeping
 	// the stale association.
 	return collectBatchRows(ctx, tx, batch, sorted, "maple loan",
-		func(row pgx.Row, l *entity.MapleLoan) (common.Address, int64, error) {
+		func(row pgx.Row, l *maple.Loan) (common.Address, int64, error) {
 			addr := common.BytesToAddress(l.LoanAddress)
 			var id, storedBorrower int64
 			if err := row.Scan(&id, &storedBorrower); err != nil {
@@ -257,14 +257,14 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
 // semantics as SavePoolStates).
-func (r *MapleGraphQLRepository) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error {
+func (r *MapleGraphQLRepository) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error {
 	if len(states) == 0 {
 		return nil
 	}
 
-	sorted := sortedCopy(states, func(a, b *entity.MapleLoanState) int {
+	sorted := sortedCopy(states, func(a, b *maple.LoanState) int {
 		return cmp.Or(
-			cmp.Compare(a.MapleLoanID, b.MapleLoanID),
+			cmp.Compare(a.LoanID, b.LoanID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
@@ -277,7 +277,7 @@ func (r *MapleGraphQLRepository) SaveLoanStates(ctx context.Context, tx pgx.Tx, 
 	return nil
 }
 
-func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.Tx, states []*entity.MapleLoanState) error {
+func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error {
 	const cols = 6
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id) VALUES `)
@@ -286,11 +286,11 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 	for i, s := range states {
 		principalOwed, err := bigIntToNumeric(s.PrincipalOwed)
 		if err != nil {
-			return fmt.Errorf("converting principal_owed for loan %d: %w", s.MapleLoanID, err)
+			return fmt.Errorf("converting principal_owed for loan %d: %w", s.LoanID, err)
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, s.MapleLoanID, s.SyncedAt, s.State, principalOwed, optionalNumeric(s.AcmRatio), int(r.buildID))
+		args = append(args, s.LoanID, s.SyncedAt, s.State, principalOwed, optionalNumeric(s.AcmRatio), int(r.buildID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
@@ -304,14 +304,14 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 
 // SaveLoanCollaterals inserts loan collateral snapshots. Loans with null API
 // collateral have no row; callers pass only non-nil collaterals.
-func (r *MapleGraphQLRepository) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error {
+func (r *MapleGraphQLRepository) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error {
 	if len(collaterals) == 0 {
 		return nil
 	}
 
-	sorted := sortedCopy(collaterals, func(a, b *entity.MapleLoanCollateral) int {
+	sorted := sortedCopy(collaterals, func(a, b *maple.LoanCollateral) int {
 		return cmp.Or(
-			cmp.Compare(a.MapleLoanID, b.MapleLoanID),
+			cmp.Compare(a.LoanID, b.LoanID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
@@ -324,7 +324,7 @@ func (r *MapleGraphQLRepository) SaveLoanCollaterals(ctx context.Context, tx pgx
 	return nil
 }
 
-func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx pgx.Tx, collaterals []*entity.MapleLoanCollateral) error {
+func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error {
 	const cols = 10
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_loan_collateral (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, custodian, liquidation_level, build_id) VALUES `)
@@ -332,7 +332,7 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	args := make([]any, 0, len(collaterals)*cols)
 	for i, c := range collaterals {
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, c.MapleLoanID, c.SyncedAt, c.AssetSymbol, optionalNumeric(c.AssetAmount), c.AssetDecimals,
+		args = append(args, c.LoanID, c.SyncedAt, c.AssetSymbol, optionalNumeric(c.AssetAmount), c.AssetDecimals,
 			optionalNumeric(c.AssetValueUSD), nullIfEmpty(c.State), nullIfEmpty(c.Custodian), optionalNumeric(c.LiquidationLevel), int(r.buildID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
@@ -348,12 +348,12 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 // UpsertSkyStrategies upserts strategy registry rows and returns strategy
 // address -> maple_sky_strategy.id. On conflict, refreshes the pool
 // reference and version.
-func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*entity.MapleSkyStrategy) (map[common.Address]int64, error) {
+func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 	if len(strategies) == 0 {
 		return make(map[common.Address]int64), nil
 	}
 
-	sorted := sortedByBytesKey(strategies, func(s *entity.MapleSkyStrategy) []byte { return s.StrategyAddress })
+	sorted := sortedByBytesKey(strategies, func(s *maple.SkyStrategy) []byte { return s.StrategyAddress })
 
 	batch := &pgx.Batch{}
 	for _, s := range sorted {
@@ -364,24 +364,24 @@ func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx
 			     maple_pool_id = EXCLUDED.maple_pool_id,
 			     version = EXCLUDED.version
 			 RETURNING id`,
-			s.ChainID, s.StrategyAddress, s.MaplePoolID, s.Version,
+			s.ChainID, s.StrategyAddress, s.PoolID, s.Version,
 		)
 	}
 
 	return collectBatchIDs(ctx, tx, batch, sorted, "maple sky strategy",
-		func(s *entity.MapleSkyStrategy) common.Address { return common.BytesToAddress(s.StrategyAddress) })
+		func(s *maple.SkyStrategy) common.Address { return common.BytesToAddress(s.StrategyAddress) })
 }
 
 // SaveSkyStrategyStates inserts strategy state snapshots (same
 // trigger/conflict semantics as SavePoolStates).
-func (r *MapleGraphQLRepository) SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error {
+func (r *MapleGraphQLRepository) SaveSkyStrategyStates(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error {
 	if len(states) == 0 {
 		return nil
 	}
 
-	sorted := sortedCopy(states, func(a, b *entity.MapleSkyStrategyState) int {
+	sorted := sortedCopy(states, func(a, b *maple.SkyStrategyState) int {
 		return cmp.Or(
-			cmp.Compare(a.MapleSkyStrategyID, b.MapleSkyStrategyID),
+			cmp.Compare(a.SkyStrategyID, b.SkyStrategyID),
 			a.SyncedAt.Compare(b.SyncedAt),
 		)
 	})
@@ -394,7 +394,7 @@ func (r *MapleGraphQLRepository) SaveSkyStrategyStates(ctx context.Context, tx p
 	return nil
 }
 
-func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, tx pgx.Tx, states []*entity.MapleSkyStrategyState) error {
+func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error {
 	const cols = 9
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_sky_strategy_state (maple_sky_strategy_id, synced_at, state, currently_deployed, deposited_assets, withdrawn_assets, strategy_fee_rate, total_fees_collected, build_id) VALUES `)
@@ -403,19 +403,19 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 	for i, s := range states {
 		currentlyDeployed, err := bigIntToNumeric(s.CurrentlyDeployed)
 		if err != nil {
-			return fmt.Errorf("converting currently_deployed for strategy %d: %w", s.MapleSkyStrategyID, err)
+			return fmt.Errorf("converting currently_deployed for strategy %d: %w", s.SkyStrategyID, err)
 		}
 		depositedAssets, err := bigIntToNumeric(s.DepositedAssets)
 		if err != nil {
-			return fmt.Errorf("converting deposited_assets for strategy %d: %w", s.MapleSkyStrategyID, err)
+			return fmt.Errorf("converting deposited_assets for strategy %d: %w", s.SkyStrategyID, err)
 		}
 		withdrawnAssets, err := bigIntToNumeric(s.WithdrawnAssets)
 		if err != nil {
-			return fmt.Errorf("converting withdrawn_assets for strategy %d: %w", s.MapleSkyStrategyID, err)
+			return fmt.Errorf("converting withdrawn_assets for strategy %d: %w", s.SkyStrategyID, err)
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, s.MapleSkyStrategyID, s.SyncedAt, s.State, currentlyDeployed, depositedAssets,
+		args = append(args, s.SkyStrategyID, s.SyncedAt, s.State, currentlyDeployed, depositedAssets,
 			withdrawnAssets, optionalNumeric(s.StrategyFeeRate), optionalNumeric(s.TotalFeesCollected), int(r.buildID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_sky_strategy_id, synced_at, processing_version) DO NOTHING`)
@@ -430,7 +430,7 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 
 // SaveSyrupGlobalState inserts the protocol-wide Syrup aggregate snapshot
 // (same trigger/conflict semantics as SavePoolStates).
-func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pgx.Tx, state *entity.MapleSyrupGlobalState) error {
+func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error {
 	if state == nil {
 		return fmt.Errorf("syrup global state cannot be nil")
 	}

@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"math/big"
@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-func validMapleSyrupGlobalState() *MapleSyrupGlobalState {
+func validSyrupGlobalState() *SyrupGlobalState {
 	apy, _ := new(big.Int).SetString("46314953537216910976747498327", 10)
-	return &MapleSyrupGlobalState{
+	return &SyrupGlobalState{
 		ChainID:         1,
 		SyncedAt:        time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC),
 		TVL:             big.NewInt(3563135115920200),
@@ -20,74 +20,74 @@ func validMapleSyrupGlobalState() *MapleSyrupGlobalState {
 	}
 }
 
-func TestMapleSyrupGlobalState_Validate(t *testing.T) {
+func TestSyrupGlobalState_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(s *MapleSyrupGlobalState)
+		mutate  func(s *SyrupGlobalState)
 		wantErr string
 	}{
 		{name: "valid state"},
-		{name: "nil drips yield boost ok", mutate: func(s *MapleSyrupGlobalState) { s.DripsYieldBoost = nil }},
+		{name: "nil drips yield boost ok", mutate: func(s *SyrupGlobalState) { s.DripsYieldBoost = nil }},
 		{
 			name:    "zero chain ID",
-			mutate:  func(s *MapleSyrupGlobalState) { s.ChainID = 0 },
+			mutate:  func(s *SyrupGlobalState) { s.ChainID = 0 },
 			wantErr: "chainID must be positive",
 		},
 		{
 			name:    "zero synced at",
-			mutate:  func(s *MapleSyrupGlobalState) { s.SyncedAt = time.Time{} },
+			mutate:  func(s *SyrupGlobalState) { s.SyncedAt = time.Time{} },
 			wantErr: "syncedAt must not be zero",
 		},
 		{
 			name:    "nil tvl",
-			mutate:  func(s *MapleSyrupGlobalState) { s.TVL = nil },
+			mutate:  func(s *SyrupGlobalState) { s.TVL = nil },
 			wantErr: "tvl must not be nil",
 		},
 		{
 			name:    "negative tvl",
-			mutate:  func(s *MapleSyrupGlobalState) { s.TVL = big.NewInt(-1) },
+			mutate:  func(s *SyrupGlobalState) { s.TVL = big.NewInt(-1) },
 			wantErr: "tvl must be non-negative",
 		},
 		{
 			name:    "nil apy",
-			mutate:  func(s *MapleSyrupGlobalState) { s.APY = nil },
+			mutate:  func(s *SyrupGlobalState) { s.APY = nil },
 			wantErr: "apy must not be nil",
 		},
 		{
 			name:    "negative apy",
-			mutate:  func(s *MapleSyrupGlobalState) { s.APY = big.NewInt(-1) },
+			mutate:  func(s *SyrupGlobalState) { s.APY = big.NewInt(-1) },
 			wantErr: "apy must be non-negative",
 		},
 		{
 			name:    "nil collateral apy",
-			mutate:  func(s *MapleSyrupGlobalState) { s.CollateralAPY = nil },
+			mutate:  func(s *SyrupGlobalState) { s.CollateralAPY = nil },
 			wantErr: "collateralAPY must not be nil",
 		},
 		{
 			name:    "negative collateral apy",
-			mutate:  func(s *MapleSyrupGlobalState) { s.CollateralAPY = big.NewInt(-1) },
+			mutate:  func(s *SyrupGlobalState) { s.CollateralAPY = big.NewInt(-1) },
 			wantErr: "collateralAPY must be non-negative",
 		},
 		{
 			name:    "nil pool apy",
-			mutate:  func(s *MapleSyrupGlobalState) { s.PoolAPY = nil },
+			mutate:  func(s *SyrupGlobalState) { s.PoolAPY = nil },
 			wantErr: "poolAPY must not be nil",
 		},
 		{
 			name:    "negative pool apy",
-			mutate:  func(s *MapleSyrupGlobalState) { s.PoolAPY = big.NewInt(-1) },
+			mutate:  func(s *SyrupGlobalState) { s.PoolAPY = big.NewInt(-1) },
 			wantErr: "poolAPY must be non-negative",
 		},
 		{
 			name:    "negative drips yield boost",
-			mutate:  func(s *MapleSyrupGlobalState) { s.DripsYieldBoost = big.NewInt(-1) },
+			mutate:  func(s *SyrupGlobalState) { s.DripsYieldBoost = big.NewInt(-1) },
 			wantErr: "dripsYieldBoost must be non-negative",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := validMapleSyrupGlobalState()
+			s := validSyrupGlobalState()
 			if tt.mutate != nil {
 				tt.mutate(s)
 			}
@@ -108,10 +108,10 @@ func TestMapleSyrupGlobalState_Validate(t *testing.T) {
 	}
 }
 
-func TestNewMapleSyrupGlobalState_Constructor(t *testing.T) {
-	v := validMapleSyrupGlobalState()
+func TestNewSyrupGlobalState_Constructor(t *testing.T) {
+	v := validSyrupGlobalState()
 
-	got, err := NewMapleSyrupGlobalState(v.ChainID, v.SyncedAt, v.TVL, v.APY, v.CollateralAPY, v.PoolAPY, v.DripsYieldBoost)
+	got, err := NewSyrupGlobalState(v.ChainID, v.SyncedAt, v.TVL, v.APY, v.CollateralAPY, v.PoolAPY, v.DripsYieldBoost)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,9 +119,9 @@ func TestNewMapleSyrupGlobalState_Constructor(t *testing.T) {
 		t.Errorf("fields not set: %+v", got)
 	}
 
-	if _, err := NewMapleSyrupGlobalState(0, v.SyncedAt, v.TVL, v.APY, v.CollateralAPY, v.PoolAPY, v.DripsYieldBoost); err == nil {
+	if _, err := NewSyrupGlobalState(0, v.SyncedAt, v.TVL, v.APY, v.CollateralAPY, v.PoolAPY, v.DripsYieldBoost); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
-	} else if !strings.Contains(err.Error(), "NewMapleSyrupGlobalState") {
+	} else if !strings.Contains(err.Error(), "NewSyrupGlobalState") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())
 	}
 }

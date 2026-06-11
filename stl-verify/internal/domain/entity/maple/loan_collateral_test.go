@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"math/big"
@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-func validMapleLoanCollateral() *MapleLoanCollateral {
-	return &MapleLoanCollateral{
-		MapleLoanID:      1,
+func validLoanCollateral() *LoanCollateral {
+	return &LoanCollateral{
+		LoanID:           1,
 		SyncedAt:         time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC),
 		AssetSymbol:      "BTC",
 		AssetAmount:      big.NewInt(215100000),
@@ -21,16 +21,16 @@ func validMapleLoanCollateral() *MapleLoanCollateral {
 	}
 }
 
-func TestMapleLoanCollateral_Validate(t *testing.T) {
+func TestLoanCollateral_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(c *MapleLoanCollateral)
+		mutate  func(c *LoanCollateral)
 		wantErr string
 	}{
 		{name: "valid collateral"},
 		{
 			name: "optional fields empty ok",
-			mutate: func(c *MapleLoanCollateral) {
+			mutate: func(c *LoanCollateral) {
 				c.State = ""
 				c.Custodian = ""
 				c.LiquidationLevel = nil
@@ -38,54 +38,54 @@ func TestMapleLoanCollateral_Validate(t *testing.T) {
 		},
 		{
 			name:    "zero loan ID",
-			mutate:  func(c *MapleLoanCollateral) { c.MapleLoanID = 0 },
+			mutate:  func(c *LoanCollateral) { c.LoanID = 0 },
 			wantErr: "mapleLoanID must be positive",
 		},
 		{
 			name:    "zero synced at",
-			mutate:  func(c *MapleLoanCollateral) { c.SyncedAt = time.Time{} },
+			mutate:  func(c *LoanCollateral) { c.SyncedAt = time.Time{} },
 			wantErr: "syncedAt must not be zero",
 		},
 		{
 			name:    "empty asset symbol",
-			mutate:  func(c *MapleLoanCollateral) { c.AssetSymbol = "" },
+			mutate:  func(c *LoanCollateral) { c.AssetSymbol = "" },
 			wantErr: "assetSymbol must not be empty",
 		},
 		{
 			// Nullable in the API schema (e.g. DepositPending): nil is valid.
 			name:   "nil asset amount is valid",
-			mutate: func(c *MapleLoanCollateral) { c.AssetAmount = nil },
+			mutate: func(c *LoanCollateral) { c.AssetAmount = nil },
 		},
 		{
 			name:    "negative asset amount",
-			mutate:  func(c *MapleLoanCollateral) { c.AssetAmount = big.NewInt(-1) },
+			mutate:  func(c *LoanCollateral) { c.AssetAmount = big.NewInt(-1) },
 			wantErr: "assetAmount must be non-negative",
 		},
 		{
 			name:    "negative asset decimals",
-			mutate:  func(c *MapleLoanCollateral) { c.AssetDecimals = -1 },
+			mutate:  func(c *LoanCollateral) { c.AssetDecimals = -1 },
 			wantErr: "assetDecimals must be non-negative",
 		},
 		{
 			// Nullable in the API schema (e.g. DepositPending): nil is valid.
 			name:   "nil asset value usd is valid",
-			mutate: func(c *MapleLoanCollateral) { c.AssetValueUSD = nil },
+			mutate: func(c *LoanCollateral) { c.AssetValueUSD = nil },
 		},
 		{
 			name:    "negative asset value usd",
-			mutate:  func(c *MapleLoanCollateral) { c.AssetValueUSD = big.NewInt(-1) },
+			mutate:  func(c *LoanCollateral) { c.AssetValueUSD = big.NewInt(-1) },
 			wantErr: "assetValueUSD must be non-negative",
 		},
 		{
 			name:    "negative liquidation level",
-			mutate:  func(c *MapleLoanCollateral) { c.LiquidationLevel = big.NewInt(-1) },
+			mutate:  func(c *LoanCollateral) { c.LiquidationLevel = big.NewInt(-1) },
 			wantErr: "liquidationLevel must be non-negative",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := validMapleLoanCollateral()
+			c := validLoanCollateral()
 			if tt.mutate != nil {
 				tt.mutate(c)
 			}
@@ -106,10 +106,10 @@ func TestMapleLoanCollateral_Validate(t *testing.T) {
 	}
 }
 
-func TestNewMapleLoanCollateral_Constructor(t *testing.T) {
-	v := validMapleLoanCollateral()
+func TestNewLoanCollateral_Constructor(t *testing.T) {
+	v := validLoanCollateral()
 
-	got, err := NewMapleLoanCollateral(v.MapleLoanID, v.SyncedAt, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel)
+	got, err := NewLoanCollateral(v.LoanID, v.SyncedAt, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,9 +117,9 @@ func TestNewMapleLoanCollateral_Constructor(t *testing.T) {
 		t.Errorf("fields not set: %+v", got)
 	}
 
-	if _, err := NewMapleLoanCollateral(0, v.SyncedAt, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel); err == nil {
+	if _, err := NewLoanCollateral(0, v.SyncedAt, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
-	} else if !strings.Contains(err.Error(), "NewMapleLoanCollateral") {
+	} else if !strings.Contains(err.Error(), "NewLoanCollateral") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())
 	}
 }

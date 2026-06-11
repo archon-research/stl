@@ -1,12 +1,12 @@
-package entity
+package maple
 
 import "fmt"
 
-// MaplePool represents a Maple Finance PoolV2 lending pool discovered via the
+// Pool represents a Maple Finance PoolV2 lending pool discovered via the
 // Maple GraphQL API. Asset details are stored raw (no token FK): pools span
 // assets we do not seed, and Maple collateral assets (BTC, SOL) have no
 // Ethereum token address at all.
-type MaplePool struct {
+type Pool struct {
 	ID            int64
 	ChainID       int64
 	ProtocolID    int64
@@ -18,9 +18,9 @@ type MaplePool struct {
 	IsSyrup       bool // poolV2.syrupRouter != null
 }
 
-// NewMaplePool creates a new MaplePool entity with validation.
-func NewMaplePool(chainID, protocolID int64, address []byte, name string, assetAddress []byte, assetSymbol string, assetDecimals int16, isSyrup bool) (*MaplePool, error) {
-	p := &MaplePool{
+// NewPool creates a new Pool entity with validation.
+func NewPool(chainID, protocolID int64, address []byte, name string, assetAddress []byte, assetSymbol string, assetDecimals int16, isSyrup bool) (*Pool, error) {
+	p := &Pool{
 		ChainID:       chainID,
 		ProtocolID:    protocolID,
 		Address:       address,
@@ -31,13 +31,13 @@ func NewMaplePool(chainID, protocolID int64, address []byte, name string, assetA
 		IsSyrup:       isSyrup,
 	}
 	if err := p.Validate(); err != nil {
-		return nil, fmt.Errorf("NewMaplePool: %w", err)
+		return nil, fmt.Errorf("NewPool: %w", err)
 	}
 	return p, nil
 }
 
 // Validate checks that all fields have valid values.
-func (p *MaplePool) Validate() error {
+func (p *Pool) Validate() error {
 	if p.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", p.ChainID)
 	}

@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// MapleLoanCollateral is the collateral snapshot of an active loan at a sync
+// LoanCollateral is the collateral snapshot of an active loan at a sync
 // cycle. Loans with null API collateral simply have no row. AssetAmount is in
 // native asset decimals; AssetValueUSD is the per-unit USD price with
 // 8 decimals (total USD = amount * price / 10^decimals / 10^8). Both are
@@ -14,8 +14,8 @@ import (
 // so "collateral pending" stays distinguishable from "no collateral". The
 // asset may be custodied off-chain (BTC, SOL), so it is identified by symbol
 // only.
-type MapleLoanCollateral struct {
-	MapleLoanID      int64
+type LoanCollateral struct {
+	LoanID           int64
 	SyncedAt         time.Time
 	AssetSymbol      string
 	AssetAmount      *big.Int // nil when the API reports null
@@ -26,10 +26,10 @@ type MapleLoanCollateral struct {
 	LiquidationLevel *big.Int // nil when absent
 }
 
-// NewMapleLoanCollateral creates a new MapleLoanCollateral entity with validation.
-func NewMapleLoanCollateral(mapleLoanID int64, syncedAt time.Time, assetSymbol string, assetAmount *big.Int, assetDecimals int16, assetValueUSD *big.Int, state, custodian string, liquidationLevel *big.Int) (*MapleLoanCollateral, error) {
-	c := &MapleLoanCollateral{
-		MapleLoanID:      mapleLoanID,
+// NewLoanCollateral creates a new LoanCollateral entity with validation.
+func NewLoanCollateral(mapleLoanID int64, syncedAt time.Time, assetSymbol string, assetAmount *big.Int, assetDecimals int16, assetValueUSD *big.Int, state, custodian string, liquidationLevel *big.Int) (*LoanCollateral, error) {
+	c := &LoanCollateral{
+		LoanID:           mapleLoanID,
 		SyncedAt:         NormalizeSyncedAt(syncedAt),
 		AssetSymbol:      assetSymbol,
 		AssetAmount:      assetAmount,
@@ -40,15 +40,15 @@ func NewMapleLoanCollateral(mapleLoanID int64, syncedAt time.Time, assetSymbol s
 		LiquidationLevel: liquidationLevel,
 	}
 	if err := c.Validate(); err != nil {
-		return nil, fmt.Errorf("NewMapleLoanCollateral: %w", err)
+		return nil, fmt.Errorf("NewLoanCollateral: %w", err)
 	}
 	return c, nil
 }
 
 // Validate checks that all fields have valid values.
-func (c *MapleLoanCollateral) Validate() error {
-	if c.MapleLoanID <= 0 {
-		return fmt.Errorf("mapleLoanID must be positive, got %d", c.MapleLoanID)
+func (c *LoanCollateral) Validate() error {
+	if c.LoanID <= 0 {
+		return fmt.Errorf("mapleLoanID must be positive, got %d", c.LoanID)
 	}
 	if c.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")

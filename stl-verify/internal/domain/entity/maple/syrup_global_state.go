@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"fmt"
@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// MapleSyrupGlobalState is a snapshot of Maple's protocol-wide Syrup
+// SyrupGlobalState is a snapshot of Maple's protocol-wide Syrup
 // aggregates at a sync cycle. APY values use 30 decimals
 // (46314953537216910976747498327 = 4.63%); TVL is in pool-asset decimals.
-type MapleSyrupGlobalState struct {
+type SyrupGlobalState struct {
 	ChainID         int64
 	SyncedAt        time.Time
 	TVL             *big.Int
@@ -19,9 +19,9 @@ type MapleSyrupGlobalState struct {
 	DripsYieldBoost *big.Int // nil when absent
 }
 
-// NewMapleSyrupGlobalState creates a new MapleSyrupGlobalState entity with validation.
-func NewMapleSyrupGlobalState(chainID int64, syncedAt time.Time, tvl, apy, collateralAPY, poolAPY, dripsYieldBoost *big.Int) (*MapleSyrupGlobalState, error) {
-	s := &MapleSyrupGlobalState{
+// NewSyrupGlobalState creates a new SyrupGlobalState entity with validation.
+func NewSyrupGlobalState(chainID int64, syncedAt time.Time, tvl, apy, collateralAPY, poolAPY, dripsYieldBoost *big.Int) (*SyrupGlobalState, error) {
+	s := &SyrupGlobalState{
 		ChainID:         chainID,
 		SyncedAt:        NormalizeSyncedAt(syncedAt),
 		TVL:             tvl,
@@ -31,13 +31,13 @@ func NewMapleSyrupGlobalState(chainID int64, syncedAt time.Time, tvl, apy, colla
 		DripsYieldBoost: dripsYieldBoost,
 	}
 	if err := s.Validate(); err != nil {
-		return nil, fmt.Errorf("NewMapleSyrupGlobalState: %w", err)
+		return nil, fmt.Errorf("NewSyrupGlobalState: %w", err)
 	}
 	return s, nil
 }
 
 // Validate checks that all fields have valid values.
-func (s *MapleSyrupGlobalState) Validate() error {
+func (s *SyrupGlobalState) Validate() error {
 	if s.ChainID <= 0 {
 		return fmt.Errorf("chainID must be positive, got %d", s.ChainID)
 	}

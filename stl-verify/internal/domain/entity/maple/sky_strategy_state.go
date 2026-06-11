@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"fmt"
@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// MapleSkyStrategyState is a snapshot of a Sky strategy at a sync cycle.
+// SkyStrategyState is a snapshot of a Sky strategy at a sync cycle.
 // All big.Int values are raw API integers in pool-asset decimals.
-type MapleSkyStrategyState struct {
-	MapleSkyStrategyID int64
+type SkyStrategyState struct {
+	SkyStrategyID      int64
 	SyncedAt           time.Time
 	State              string
 	CurrentlyDeployed  *big.Int
@@ -19,10 +19,10 @@ type MapleSkyStrategyState struct {
 	TotalFeesCollected *big.Int // nil when absent
 }
 
-// NewMapleSkyStrategyState creates a new MapleSkyStrategyState entity with validation.
-func NewMapleSkyStrategyState(mapleSkyStrategyID int64, syncedAt time.Time, state string, currentlyDeployed, depositedAssets, withdrawnAssets, strategyFeeRate, totalFeesCollected *big.Int) (*MapleSkyStrategyState, error) {
-	s := &MapleSkyStrategyState{
-		MapleSkyStrategyID: mapleSkyStrategyID,
+// NewSkyStrategyState creates a new SkyStrategyState entity with validation.
+func NewSkyStrategyState(mapleSkyStrategyID int64, syncedAt time.Time, state string, currentlyDeployed, depositedAssets, withdrawnAssets, strategyFeeRate, totalFeesCollected *big.Int) (*SkyStrategyState, error) {
+	s := &SkyStrategyState{
+		SkyStrategyID:      mapleSkyStrategyID,
 		SyncedAt:           NormalizeSyncedAt(syncedAt),
 		State:              state,
 		CurrentlyDeployed:  currentlyDeployed,
@@ -32,15 +32,15 @@ func NewMapleSkyStrategyState(mapleSkyStrategyID int64, syncedAt time.Time, stat
 		TotalFeesCollected: totalFeesCollected,
 	}
 	if err := s.Validate(); err != nil {
-		return nil, fmt.Errorf("NewMapleSkyStrategyState: %w", err)
+		return nil, fmt.Errorf("NewSkyStrategyState: %w", err)
 	}
 	return s, nil
 }
 
 // Validate checks that all fields have valid values.
-func (s *MapleSkyStrategyState) Validate() error {
-	if s.MapleSkyStrategyID <= 0 {
-		return fmt.Errorf("mapleSkyStrategyID must be positive, got %d", s.MapleSkyStrategyID)
+func (s *SkyStrategyState) Validate() error {
+	if s.SkyStrategyID <= 0 {
+		return fmt.Errorf("mapleSkyStrategyID must be positive, got %d", s.SkyStrategyID)
 	}
 	if s.SyncedAt.IsZero() {
 		return fmt.Errorf("syncedAt must not be zero")

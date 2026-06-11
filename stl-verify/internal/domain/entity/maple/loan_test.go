@@ -1,4 +1,4 @@
-package entity
+package maple
 
 import (
 	"bytes"
@@ -6,75 +6,75 @@ import (
 	"testing"
 )
 
-func validMapleLoan() *MapleLoan {
-	return &MapleLoan{
+func validLoan() *Loan {
+	return &Loan{
 		ChainID:        1,
 		ProtocolID:     7,
 		LoanAddress:    bytes.Repeat([]byte{0xcc}, 20),
 		LoanType:       "OTL",
-		MaplePoolID:    3,
+		PoolID:         3,
 		BorrowerUserID: 9,
 		LoanMeta:       nil,
 	}
 }
 
-func TestMapleLoan_Validate(t *testing.T) {
+func TestLoan_Validate(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(l *MapleLoan)
+		mutate  func(l *Loan)
 		wantErr string
 	}{
 		{name: "valid external loan"},
 		{
 			name:   "valid internal loan",
-			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{Type: "amm", DexName: "Uniswap"} },
+			mutate: func(l *Loan) { l.LoanMeta = &LoanMeta{Type: "amm", DexName: "Uniswap"} },
 		},
 		{
 			name:    "zero chain ID",
-			mutate:  func(l *MapleLoan) { l.ChainID = 0 },
+			mutate:  func(l *Loan) { l.ChainID = 0 },
 			wantErr: "chainID must be positive",
 		},
 		{
 			name:    "zero protocol ID",
-			mutate:  func(l *MapleLoan) { l.ProtocolID = 0 },
+			mutate:  func(l *Loan) { l.ProtocolID = 0 },
 			wantErr: "protocolID must be positive",
 		},
 		{
 			name:    "short loan address",
-			mutate:  func(l *MapleLoan) { l.LoanAddress = []byte{0x01} },
+			mutate:  func(l *Loan) { l.LoanAddress = []byte{0x01} },
 			wantErr: "loanAddress must be 20 bytes",
 		},
 		{
 			name:    "nil loan address",
-			mutate:  func(l *MapleLoan) { l.LoanAddress = nil },
+			mutate:  func(l *Loan) { l.LoanAddress = nil },
 			wantErr: "loanAddress must be 20 bytes",
 		},
 		{
 			name:    "empty loan type",
-			mutate:  func(l *MapleLoan) { l.LoanType = "" },
+			mutate:  func(l *Loan) { l.LoanType = "" },
 			wantErr: "loanType must not be empty",
 		},
 		{
 			name:    "zero pool ID",
-			mutate:  func(l *MapleLoan) { l.MaplePoolID = 0 },
+			mutate:  func(l *Loan) { l.PoolID = 0 },
 			wantErr: "maplePoolID must be positive",
 		},
 		{
 			name:    "zero borrower user ID",
-			mutate:  func(l *MapleLoan) { l.BorrowerUserID = 0 },
+			mutate:  func(l *Loan) { l.BorrowerUserID = 0 },
 			wantErr: "borrowerUserID must be positive",
 		},
 		{
 			// Live API observation: 27 of 61 active loans carry loanMeta
 			// with a null type — must be accepted, not rejected.
 			name:   "loan meta with empty type ok",
-			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{DexName: "Uniswap"} },
+			mutate: func(l *Loan) { l.LoanMeta = &LoanMeta{DexName: "Uniswap"} },
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := validMapleLoan()
+			l := validLoan()
 			if tt.mutate != nil {
 				tt.mutate(l)
 			}
@@ -95,22 +95,22 @@ func TestMapleLoan_Validate(t *testing.T) {
 	}
 }
 
-func TestMapleLoan_IsInternal(t *testing.T) {
+func TestLoan_IsInternal(t *testing.T) {
 	tests := []struct {
 		name string
-		meta *MapleLoanMeta
+		meta *LoanMeta
 		want bool
 	}{
 		{name: "nil meta is external", meta: nil, want: false},
-		{name: "amm is internal", meta: &MapleLoanMeta{Type: "amm"}, want: true},
-		{name: "strategy is internal", meta: &MapleLoanMeta{Type: "strategy"}, want: true},
-		{name: "tBills type is external", meta: &MapleLoanMeta{Type: "tBills"}, want: false},
-		{name: "empty type is external", meta: &MapleLoanMeta{}, want: false},
+		{name: "amm is internal", meta: &LoanMeta{Type: "amm"}, want: true},
+		{name: "strategy is internal", meta: &LoanMeta{Type: "strategy"}, want: true},
+		{name: "tBills type is external", meta: &LoanMeta{Type: "tBills"}, want: false},
+		{name: "empty type is external", meta: &LoanMeta{}, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			l := validMapleLoan()
+			l := validLoan()
 			l.LoanMeta = tt.meta
 			if got := l.IsInternal(); got != tt.want {
 				t.Errorf("IsInternal() = %v, want %v", got, tt.want)
@@ -119,10 +119,10 @@ func TestMapleLoan_IsInternal(t *testing.T) {
 	}
 }
 
-func TestNewMapleLoan_Constructor(t *testing.T) {
-	v := validMapleLoan()
+func TestNewLoan_Constructor(t *testing.T) {
+	v := validLoan()
 
-	got, err := NewMapleLoan(v.ChainID, v.ProtocolID, v.LoanAddress, v.MaplePoolID, v.BorrowerUserID, nil)
+	got, err := NewLoan(v.ChainID, v.ProtocolID, v.LoanAddress, v.PoolID, v.BorrowerUserID, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,9 +130,9 @@ func TestNewMapleLoan_Constructor(t *testing.T) {
 		t.Errorf("LoanType = %q, want OTL", got.LoanType)
 	}
 
-	if _, err := NewMapleLoan(0, v.ProtocolID, v.LoanAddress, v.MaplePoolID, v.BorrowerUserID, nil); err == nil {
+	if _, err := NewLoan(0, v.ProtocolID, v.LoanAddress, v.PoolID, v.BorrowerUserID, nil); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
-	} else if !strings.Contains(err.Error(), "NewMapleLoan") {
+	} else if !strings.Contains(err.Error(), "NewLoan") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())
 	}
 }
