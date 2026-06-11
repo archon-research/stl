@@ -389,7 +389,10 @@ func TestKrakenSubscribeAndPing(t *testing.T) {
 }
 
 func TestKrakenProviderNameAndValidation(t *testing.T) {
-	p := NewKrakenProvider(testConfig())
+	p, err := NewKrakenProvider(testConfig())
+	if err != nil {
+		t.Fatalf("NewKrakenProvider: %v", err)
+	}
 	if p.Name() != "kraken" {
 		t.Errorf("Name = %q", p.Name())
 	}

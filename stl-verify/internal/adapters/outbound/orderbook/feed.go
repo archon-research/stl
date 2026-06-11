@@ -115,18 +115,24 @@ type feedProvider struct {
 	logger     *slog.Logger
 	exchange   exchangeFeed
 	maxSymbols int
+	metrics    *metrics
 }
 
 var _ outbound.OrderbookProvider = (*feedProvider)(nil)
 
-func newFeedProvider(cfg Config, exchange exchangeFeed, maxSymbols int) *feedProvider {
+func newFeedProvider(cfg Config, exchange exchangeFeed, maxSymbols int) (*feedProvider, error) {
 	cfg = cfg.withDefaults()
+	m, err := newMetrics(cfg.MeterProvider, exchange.name())
+	if err != nil {
+		return nil, fmt.Errorf("creating %s orderbook metrics: %w", exchange.name(), err)
+	}
 	return &feedProvider{
 		cfg:        cfg,
 		logger:     cfg.Logger.With("component", exchange.name()+"-orderbook"),
 		exchange:   exchange,
 		maxSymbols: maxSymbols,
-	}
+		metrics:    m,
+	}, nil
 }
 
 // Name returns the exchange identifier.
@@ -144,7 +150,7 @@ func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 	}
 	groups := chunkSymbols(dedupSymbols(symbols), p.maxSymbols)
 	out := runConnections(ctx, groups, p.cfg.OutputBuffer, func(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate) {
-		reconnectLoop(ctx, p.cfg, p.logger, func(ctx context.Context, ready func()) error {
+		reconnectLoop(ctx, p.cfg, p.logger, p.metrics, func(ctx context.Context, ready func()) error {
 			return p.runConnection(ctx, group, out, ready)
 		})
 	})
@@ -160,6 +166,8 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 		return err
 	}
 	defer ws.Close()
+	p.metrics.connUp()
+	defer p.metrics.connDown()
 
 	// Scope helper goroutines (the app-level keepalive) to this connection rather
 	// than to the long-lived Watch ctx, so they stop the moment this connection
@@ -178,7 +186,7 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 	}
 
 	handler := p.exchange.newHandler(group, p.logger)
-	em := newEmitter(out, p.logger)
+	em := newEmitter(out, p.logger, p.metrics)
 	// Reset the reconnect backoff only once every symbol in the group has produced
 	// its initial snapshot. Resetting on the first symbol would let one healthy
 	// symbol mask another that never syncs (e.g. a bad symbol that errors after a
@@ -271,19 +279,37 @@ func reconnectLoop(
 	ctx context.Context,
 	cfg Config,
 	logger *slog.Logger,
+	m *metrics,
 	connect func(ctx context.Context, ready func()) error,
 ) {
 	backoff := cfg.InitialBackoff
+	// lostAt marks when a previously synced group stopped delivering data; the
+	// next full sync closes the window as a resync sample. Failures before the
+	// group's first-ever sync are cold start, not resync, and stay out of the
+	// histogram.
+	var lostAt time.Time
+	synced := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
-		err := connect(ctx, func() { backoff = cfg.InitialBackoff })
+		err := connect(ctx, func() {
+			backoff = cfg.InitialBackoff
+			synced = true
+			if !lostAt.IsZero() {
+				m.resynced(time.Since(lostAt))
+				lostAt = time.Time{}
+			}
+		})
 
 		if ctx.Err() != nil {
 			return
 		}
+		if synced && lostAt.IsZero() {
+			lostAt = time.Now()
+		}
+		m.reconnected(err)
 		logger.Warn("orderbook connection lost, reconnecting", "error", err, "backoff", backoff)
 
 		select {
@@ -304,6 +330,7 @@ func reconnectLoop(
 type emitter struct {
 	out      chan<- entity.OrderbookUpdate
 	logger   *slog.Logger
+	metrics  *metrics
 	deferred map[string]bool // symbol -> a snapshot was dropped; re-flag next delivery
 
 	dropped     int // drops since the last drop warning
@@ -314,8 +341,8 @@ type emitter struct {
 // is visible without the log itself becoming the next bottleneck.
 const dropLogInterval = time.Minute
 
-func newEmitter(out chan<- entity.OrderbookUpdate, logger *slog.Logger) *emitter {
-	return &emitter{out: out, logger: logger, deferred: make(map[string]bool)}
+func newEmitter(out chan<- entity.OrderbookUpdate, logger *slog.Logger, m *metrics) *emitter {
+	return &emitter{out: out, logger: logger, metrics: m, deferred: make(map[string]bool)}
 }
 
 // emit sends book without blocking and reports whether it was delivered. The
@@ -330,6 +357,7 @@ func (e *emitter) emit(book *entity.Orderbook, isSnapshot bool, t time.Time) boo
 	select {
 	case e.out <- entity.NewOrderbookUpdate(book, snapshot, t, time.Now()):
 		delete(e.deferred, book.Symbol)
+		e.metrics.emitted(book.Symbol, snapshot)
 		return true
 	default:
 		return e.drop(book.Symbol, snapshot)
@@ -342,6 +370,7 @@ func (e *emitter) drop(symbol string, snapshot bool) bool {
 	if snapshot {
 		e.deferred[symbol] = true
 	}
+	e.metrics.dropped()
 	e.dropped++
 	if now := time.Now(); now.Sub(e.lastDropLog) >= dropLogInterval {
 		e.logger.Warn("orderbook updates dropped, consumer not keeping up",

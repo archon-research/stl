@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/gorilla/websocket"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 // testLogger returns a logger that discards output, keeping test runs quiet.
@@ -43,6 +44,27 @@ func (b *syncBuffer) String() string {
 func captureLogger() (*slog.Logger, *syncBuffer) {
 	sb := &syncBuffer{}
 	return slog.New(slog.NewTextHandler(sb, nil)), sb
+}
+
+// testMetrics returns metrics backed by a no-op meter, for tests that do not
+// assert instrumentation.
+func testMetrics(t *testing.T) *metrics {
+	t.Helper()
+	m, err := newMetrics(noop.NewMeterProvider(), "test")
+	if err != nil {
+		t.Fatalf("newMetrics: %v", err)
+	}
+	return m
+}
+
+// newTestFeedProvider builds a feedProvider, failing the test on error.
+func newTestFeedProvider(t *testing.T, cfg Config, ex exchangeFeed, maxSymbols int) *feedProvider {
+	t.Helper()
+	p, err := newFeedProvider(cfg, ex, maxSymbols)
+	if err != nil {
+		t.Fatalf("newFeedProvider: %v", err)
+	}
+	return p
 }
 
 // testConfig returns a Config tuned for fast, quiet tests.
