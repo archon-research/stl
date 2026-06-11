@@ -243,20 +243,34 @@ func TestSourceRegistry_FetchAll_PartialFailure(t *testing.T) {
 // violation: a source returning no result and no error would otherwise silently drop
 // its whole group, so FetchAll must surface it as a fetch failure rather than swallow it.
 func TestSourceRegistry_FetchAll_NilResultIsError(t *testing.T) {
-	registry := NewSourceRegistry(slog.Default())
-	registry.Register(&mockSource{
-		name:       "erc20",
-		tokenTypes: map[string]bool{"erc20": true},
-		returnNil:  true,
-	})
-
-	entries := []*TokenEntry{
-		{ContractAddress: common.HexToAddress("0x1111"), WalletAddress: common.HexToAddress("0xaaaa"), TokenType: "erc20"},
+	tests := []struct {
+		name    string
+		source  *mockSource
+		wantErr string
+	}{
+		{
+			name: "source returns nil result without error",
+			source: &mockSource{
+				name:       "erc20",
+				tokenTypes: map[string]bool{"erc20": true},
+				returnNil:  true,
+			},
+			wantErr: "returned nil result without error",
+		},
 	}
 
-	_, err := registry.FetchAll(context.Background(), entries, 0)
-	if err == nil || !strings.Contains(err.Error(), "returned nil result without error") {
-		t.Fatalf("want nil-result error, got %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewSourceRegistry(slog.Default())
+			registry.Register(tt.source)
+			entries := []*TokenEntry{
+				{ContractAddress: common.HexToAddress("0x1111"), WalletAddress: common.HexToAddress("0xaaaa"), TokenType: "erc20"},
+			}
+			_, err := registry.FetchAll(context.Background(), entries, 0)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
+			}
+		})
 	}
 }
 
