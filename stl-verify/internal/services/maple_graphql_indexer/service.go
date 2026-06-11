@@ -177,6 +177,12 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 
 	poolEntities := make([]*entity.MaplePool, 0, len(pools))
 	for _, p := range pools {
+		if p.TVL == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "pool_tvl")
+		}
+		if p.CollateralUSD == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "pool_collateral_value_usd")
+		}
 		assetDecimals, err := toInt16(p.AssetDecimals)
 		if err != nil {
 			return nil, fmt.Errorf("pool %s: asset decimals: %w", strings.ToLower(p.Address.Hex()), err)
@@ -282,6 +288,14 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 		key := strings.ToLower(l.PoolAddress.Hex())
 		if _, ok := poolIDs[key]; !ok {
 			return fmt.Errorf("loan %s references unknown pool %s", strings.ToLower(l.LoanID.Hex()), key)
+		}
+		if l.Collateral != nil {
+			if l.Collateral.AssetAmount == nil {
+				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_amount")
+			}
+			if l.Collateral.AssetValueUSD == nil {
+				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_value_usd")
+			}
 		}
 	}
 

@@ -35,6 +35,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
 // BuildMeta holds build-time metadata injected via ldflags.
@@ -104,6 +105,22 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		"branch", meta.Branch,
 		"buildTime", meta.BuildTime,
 	)
+
+	// Without this, OTel instruments created from the global providers (e.g.
+	// the maple-graphql-indexer service telemetry) would silently be no-ops.
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    cfg.Name,
+		ServiceVersion: meta.Commit,
+		BuildTime:      meta.BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+	if env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "") == "" {
+		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is not set; metrics are NOT exported anywhere")
+	}
 
 	pool, err := cfg.OpenDatabase(ctx)
 	if err != nil {

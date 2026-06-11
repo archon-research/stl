@@ -18,6 +18,8 @@ spec:
           image: maple-graphql-indexer
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: maple-graphql-indexer
             - secretRef:
                 name: maple-graphql-indexer

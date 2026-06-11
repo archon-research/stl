@@ -24,9 +24,10 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	cyclesTotal metric.Int64Counter
-	phasesTotal metric.Int64Counter
-	rowsWritten metric.Int64Counter
+	cyclesTotal    metric.Int64Counter
+	phasesTotal    metric.Int64Counter
+	rowsWritten    metric.Int64Counter
+	nullDowngrades metric.Int64Counter
 
 	// Histograms
 	phaseDuration metric.Float64Histogram
@@ -73,6 +74,14 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating rowsWritten counter: %w", err)
+	}
+
+	t.nullDowngrades, err = t.meter.Int64Counter(
+		"maple.sync.null_downgrades.total",
+		metric.WithDescription("API values that were null and persisted as SQL NULL, by field; a sustained jump means a Maple API regression"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating nullDowngrades counter: %w", err)
 	}
 
 	t.phaseDuration, err = t.meter.Float64Histogram(
@@ -136,6 +145,18 @@ func (t *Telemetry) RecordRowsWritten(ctx context.Context, table string, count i
 	t.rowsWritten.Add(ctx, int64(count), metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("table", table),
+	))
+}
+
+// RecordNullDowngrade counts an API value that was null and is persisted as
+// SQL NULL instead of failing the phase.
+func (t *Telemetry) RecordNullDowngrade(ctx context.Context, field string) {
+	if t == nil {
+		return
+	}
+	t.nullDowngrades.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("field", field),
 	))
 }
 

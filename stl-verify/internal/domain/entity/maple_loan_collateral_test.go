@@ -52,9 +52,9 @@ func TestMapleLoanCollateral_Validate(t *testing.T) {
 			wantErr: "assetSymbol must not be empty",
 		},
 		{
-			name:    "nil asset amount",
-			mutate:  func(c *MapleLoanCollateral) { c.AssetAmount = nil },
-			wantErr: "assetAmount must not be nil",
+			// Nullable in the API schema (e.g. DepositPending): nil is valid.
+			name:   "nil asset amount is valid",
+			mutate: func(c *MapleLoanCollateral) { c.AssetAmount = nil },
 		},
 		{
 			name:    "negative asset amount",
@@ -67,9 +67,9 @@ func TestMapleLoanCollateral_Validate(t *testing.T) {
 			wantErr: "assetDecimals must be non-negative",
 		},
 		{
-			name:    "nil asset value usd",
-			mutate:  func(c *MapleLoanCollateral) { c.AssetValueUSD = nil },
-			wantErr: "assetValueUSD must not be nil",
+			// Nullable in the API schema (e.g. DepositPending): nil is valid.
+			name:   "nil asset value usd is valid",
+			mutate: func(c *MapleLoanCollateral) { c.AssetValueUSD = nil },
 		},
 		{
 			name:    "negative asset value usd",

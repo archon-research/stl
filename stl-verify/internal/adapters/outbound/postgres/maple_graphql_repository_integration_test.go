@@ -437,12 +437,19 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMapleLoanCollateral: %v", err)
 	}
+	// Pending collateral (live API shape during DepositPending): null amounts
+	// round-trip as SQL NULL instead of dropping the row.
+	pendingCollateral, err := entity.NewMapleLoanCollateral(externalLoanID, mapleSyncedAt(), "SOL",
+		nil, 9, nil, "DepositPending", "ANCHORAGE", nil)
+	if err != nil {
+		t.Fatalf("NewMapleLoanCollateral (pending): %v", err)
+	}
 
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		if err := repo.SaveLoanStates(ctx, tx, []*entity.MapleLoanState{withACM, withoutACM}); err != nil {
 			return err
 		}
-		return repo.SaveLoanCollaterals(ctx, tx, []*entity.MapleLoanCollateral{collateral})
+		return repo.SaveLoanCollaterals(ctx, tx, []*entity.MapleLoanCollateral{collateral, pendingCollateral})
 	})
 
 	var acm *string
@@ -459,8 +466,22 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 		`SELECT COUNT(*) FROM maple_loan_collateral`).Scan(&collateralCount); err != nil {
 		t.Fatalf("counting collaterals: %v", err)
 	}
-	if collateralCount != 1 {
-		t.Errorf("collateral count = %d, want 1 (no row for nil collateral)", collateralCount)
+	if collateralCount != 2 {
+		t.Errorf("collateral count = %d, want 2", collateralCount)
+	}
+
+	var pendingAmount, pendingValue *string
+	var pendingState string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT asset_amount::text, asset_value_usd::text, state FROM maple_loan_collateral WHERE maple_loan_id = $1`,
+		externalLoanID).Scan(&pendingAmount, &pendingValue, &pendingState); err != nil {
+		t.Fatalf("querying pending collateral: %v", err)
+	}
+	if pendingAmount != nil || pendingValue != nil {
+		t.Errorf("pending collateral amounts = %v/%v, want NULL/NULL", pendingAmount, pendingValue)
+	}
+	if pendingState != "DepositPending" {
+		t.Errorf("pending collateral state = %s, want DepositPending", pendingState)
 	}
 
 	var custodian string

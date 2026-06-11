@@ -312,18 +312,9 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 
 	args := make([]any, 0, len(collaterals)*cols)
 	for i, c := range collaterals {
-		assetAmount, err := bigIntToNumeric(c.AssetAmount)
-		if err != nil {
-			return fmt.Errorf("converting asset_amount for loan %d: %w", c.MapleLoanID, err)
-		}
-		assetValueUSD, err := bigIntToNumeric(c.AssetValueUSD)
-		if err != nil {
-			return fmt.Errorf("converting asset_value_usd for loan %d: %w", c.MapleLoanID, err)
-		}
-
 		writeValuesPlaceholders(&sb, i, cols)
-		args = append(args, c.MapleLoanID, c.SyncedAt, c.AssetSymbol, assetAmount, c.AssetDecimals,
-			assetValueUSD, nullIfEmpty(c.State), nullIfEmpty(c.Custodian), optionalNumeric(c.LiquidationLevel), int(r.buildID))
+		args = append(args, c.MapleLoanID, c.SyncedAt, c.AssetSymbol, optionalNumeric(c.AssetAmount), c.AssetDecimals,
+			optionalNumeric(c.AssetValueUSD), nullIfEmpty(c.State), nullIfEmpty(c.Custodian), optionalNumeric(c.LiquidationLevel), int(r.buildID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 

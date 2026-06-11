@@ -260,9 +260,9 @@ CREATE TABLE IF NOT EXISTS maple_loan_collateral
     maple_loan_id      BIGINT      NOT NULL REFERENCES maple_loan (id),
     synced_at          TIMESTAMPTZ NOT NULL,
     asset_symbol       VARCHAR(50) NOT NULL,
-    asset_amount       NUMERIC     NOT NULL, -- native decimals
+    asset_amount       NUMERIC,              -- native decimals; NULL when the API reports null (e.g. DepositPending)
     asset_decimals     SMALLINT    NOT NULL,
-    asset_value_usd    NUMERIC     NOT NULL, -- per-unit price, 8 decimals
+    asset_value_usd    NUMERIC,              -- per-unit price, 8 decimals; NULL when the API reports null
     state              VARCHAR(32),          -- 'Deposited' | 'DepositPending' | ...
     custodian          VARCHAR(64),          -- e.g. 'FORDEFI', 'ANCHORAGE'
     liquidation_level  NUMERIC,

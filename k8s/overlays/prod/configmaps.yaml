@@ -151,6 +151,8 @@ data:
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
   MAPLE_SYNC_INTERVAL: "10m"
+  MAPLE_GRAPHQL_ENDPOINT: "https://api.maple.finance/v2/graphql"
+  ENVIRONMENT: "sentinelprod"
 ---
 apiVersion: v1
 kind: ConfigMap

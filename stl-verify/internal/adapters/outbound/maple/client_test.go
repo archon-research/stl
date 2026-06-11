@@ -104,6 +104,13 @@ func writeJSON(w http.ResponseWriter, body string) {
 	_, _ = w.Write([]byte(body))
 }
 
+func bigIntPtrEqual(a, b *big.Int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Cmp(b) == 0
+}
+
 func poolJSON(id string) string {
 	return fmt.Sprintf(`{
 		"id": %q, "name": "Syrup USDC",
@@ -339,17 +346,110 @@ func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 	}
 }
 
-func TestGetActiveLoans_NullCollateralAmountsTreatedAsAbsent(t *testing.T) {
-	// assetAmount and assetValueUsd are nullable in the API schema (plausibly
-	// during DepositPending). A collateral missing either value is treated as
-	// absent; the loan itself is kept.
+func TestNullCollectionsFailHard(t *testing.T) {
+	// A null top-level collection (data:null or a null collection field with
+	// no errors[]) is upstream breakage and must fail the call. Decoding it
+	// to an empty list would persist an "everything gone" snapshot.
 	for _, tc := range []struct {
-		name        string
-		amount, usd string
+		name    string
+		body    string
+		call    func(c *Client) error
+		wantSub string
 	}{
-		{name: "null assetAmount", amount: "null", usd: `"6357500000"`},
-		{name: "null assetValueUsd", amount: `"215100000"`, usd: "null"},
-		{name: "both null", amount: "null", usd: "null"},
+		{
+			name: "pools data null", body: `{"data": null}`,
+			call:    func(c *Client) error { _, err := c.GetPools(context.Background()); return err },
+			wantSub: "null poolV2S collection",
+		},
+		{
+			name: "pools collection null", body: `{"data": {"poolV2S": null}}`,
+			call:    func(c *Client) error { _, err := c.GetPools(context.Background()); return err },
+			wantSub: "null poolV2S collection",
+		},
+		{
+			name: "loans data null", body: `{"data": null}`,
+			call:    func(c *Client) error { _, err := c.GetActiveLoans(context.Background()); return err },
+			wantSub: "null openTermLoans collection",
+		},
+		{
+			name: "loans collection null", body: `{"data": {"openTermLoans": null}}`,
+			call:    func(c *Client) error { _, err := c.GetActiveLoans(context.Background()); return err },
+			wantSub: "null openTermLoans collection",
+		},
+		{
+			name: "strategies data null", body: `{"data": null}`,
+			call:    func(c *Client) error { _, err := c.GetSkyStrategies(context.Background()); return err },
+			wantSub: "null skyStrategies collection",
+		},
+		{
+			name: "strategies collection null", body: `{"data": {"skyStrategies": null}}`,
+			call:    func(c *Client) error { _, err := c.GetSkyStrategies(context.Background()); return err },
+			wantSub: "null skyStrategies collection",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				writeJSON(w, tc.body)
+			}})
+			err := tc.call(client)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q should contain %q", err.Error(), tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestEmptyCollectionsAreValid(t *testing.T) {
+	// A genuine [] is a legitimate result set (e.g. an empty loan book) and
+	// must not be confused with a null collection.
+	for _, tc := range []struct {
+		name string
+		body string
+		call func(c *Client) (int, error)
+	}{
+		{
+			name: "pools", body: `{"data": {"poolV2S": []}}`,
+			call: func(c *Client) (int, error) { ps, err := c.GetPools(context.Background()); return len(ps), err },
+		},
+		{
+			name: "loans", body: `{"data": {"openTermLoans": []}}`,
+			call: func(c *Client) (int, error) { ls, err := c.GetActiveLoans(context.Background()); return len(ls), err },
+		},
+		{
+			name: "strategies", body: `{"data": {"skyStrategies": []}}`,
+			call: func(c *Client) (int, error) { ss, err := c.GetSkyStrategies(context.Background()); return len(ss), err },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				writeJSON(w, tc.body)
+			}})
+			n, err := tc.call(client)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if n != 0 {
+				t.Errorf("len = %d, want 0", n)
+			}
+		})
+	}
+}
+
+func TestGetActiveLoans_NullCollateralAmountsPersistedAsNull(t *testing.T) {
+	// assetAmount and assetValueUsd are nullable in the API schema (plausibly
+	// during DepositPending). The collateral is kept with nil values so
+	// "collateral pending" stays distinguishable from "no collateral".
+	for _, tc := range []struct {
+		name                string
+		amount, usd         string
+		wantAmount, wantUSD *big.Int
+	}{
+		{name: "null assetAmount", amount: "null", usd: `"6357500000"`, wantAmount: nil, wantUSD: big.NewInt(6357500000)},
+		{name: "null assetValueUsd", amount: `"215100000"`, usd: "null", wantAmount: big.NewInt(215100000), wantUSD: nil},
+		{name: "both null", amount: "null", usd: "null", wantAmount: nil, wantUSD: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			handler := &recordingHandler{}
@@ -374,14 +474,24 @@ func TestGetActiveLoans_NullCollateralAmountsTreatedAsAbsent(t *testing.T) {
 			if len(loans) != 1 {
 				t.Fatalf("len(loans) = %d, want 1 (loan must be kept)", len(loans))
 			}
-			if loans[0].Collateral != nil {
-				t.Errorf("Collateral = %+v, want nil", loans[0].Collateral)
+			col := loans[0].Collateral
+			if col == nil {
+				t.Fatalf("Collateral = nil, want a collateral with nil amounts")
+			}
+			if !bigIntPtrEqual(col.AssetAmount, tc.wantAmount) {
+				t.Errorf("AssetAmount = %v, want %v", col.AssetAmount, tc.wantAmount)
+			}
+			if !bigIntPtrEqual(col.AssetValueUSD, tc.wantUSD) {
+				t.Errorf("AssetValueUSD = %v, want %v", col.AssetValueUSD, tc.wantUSD)
+			}
+			if col.State != "DepositPending" || col.Custodian != "ANCHORAGE" {
+				t.Errorf("State/Custodian = %s/%s, want DepositPending/ANCHORAGE", col.State, col.Custodian)
 			}
 			if loans[0].PrincipalOwed.Cmp(big.NewInt(7000000)) != 0 {
 				t.Errorf("PrincipalOwed = %s, want 7000000", loans[0].PrincipalOwed)
 			}
-			if got := handler.countWarn("treating as absent"); got != 1 {
-				t.Errorf("collateral-skip warn fired %d times, want exactly 1", got)
+			if got := handler.countWarn("storing as NULL"); got != 1 {
+				t.Errorf("null-downgrade warn fired %d times, want exactly 1", got)
 			}
 		})
 	}

@@ -12,6 +12,9 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 func TestNewTelemetry(t *testing.T) {
@@ -45,6 +48,9 @@ func TestTelemetry_RecordsMetrics(t *testing.T) {
 	tel.RecordPhase(phaseCtx, "pools", 250*time.Millisecond, nil)
 	tel.RecordPhase(phaseCtx, "loans", time.Second, errors.New("boom"))
 	tel.RecordRowsWritten(phaseCtx, "maple_pool_state", 21)
+	tel.RecordNullDowngrade(phaseCtx, "pool_tvl")
+	tel.RecordNullDowngrade(phaseCtx, "pool_tvl")
+	tel.RecordNullDowngrade(phaseCtx, "collateral_asset_amount")
 	tel.RecordCycle(cycleCtx, nil)
 	tel.RecordCycle(cycleCtx, errors.New("boom"))
 
@@ -76,6 +82,9 @@ func TestTelemetry_RecordsMetrics(t *testing.T) {
 					if v, ok := dp.Attributes.Value("phase"); ok {
 						key += "|phase=" + v.AsString()
 					}
+					if v, ok := dp.Attributes.Value("field"); ok {
+						key += "|field=" + v.AsString()
+					}
 					sums[key] = dp.Value
 				}
 			case metricdata.Histogram[float64]:
@@ -91,11 +100,13 @@ func TestTelemetry_RecordsMetrics(t *testing.T) {
 	}
 
 	wantSums := map[string]int64{
-		"maple.sync.cycles.total|status=success":             1,
-		"maple.sync.cycles.total|status=error":               1,
-		"maple.sync.phases.total|status=success|phase=pools": 1,
-		"maple.sync.phases.total|status=error|phase=loans":   1,
-		"maple.sync.rows.written|table=maple_pool_state":     21,
+		"maple.sync.cycles.total|status=success":                         1,
+		"maple.sync.cycles.total|status=error":                           1,
+		"maple.sync.phases.total|status=success|phase=pools":             1,
+		"maple.sync.phases.total|status=error|phase=loans":               1,
+		"maple.sync.rows.written|table=maple_pool_state":                 21,
+		"maple.sync.null_downgrades.total|field=pool_tvl":                2,
+		"maple.sync.null_downgrades.total|field=collateral_asset_amount": 1,
 	}
 	for key, want := range wantSums {
 		if got := sums[key]; got != want {
@@ -106,6 +117,84 @@ func TestTelemetry_RecordsMetrics(t *testing.T) {
 		if got := histograms["maple.sync.phase.duration_seconds|phase="+phase]; got != 1 {
 			t.Errorf("duration histogram for %s count = %d, want 1", phase, got)
 		}
+	}
+}
+
+// TestSync_NullDowngradesRecorded drives Sync end-to-end with API data
+// containing every null-downgrade case and asserts the per-field counter.
+func TestSync_NullDowngradesRecorded(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetryWithProviders(tp, mp)
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProviders: %v", err)
+	}
+
+	client := happyClient()
+	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+		pools := fixturePools()
+		pools[0].TVL = nil
+		pools[0].CollateralUSD = nil
+		pools[1].TVL = nil
+		return pools, nil
+	}
+	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
+		loans := fixtureLoans()
+		loans[0].Collateral.AssetAmount = nil
+		loans[0].Collateral.AssetValueUSD = nil
+		loans[2].Collateral.AssetAmount = nil
+		return loans, nil
+	}
+
+	service, err := NewService(ServiceConfig{ChainID: 1}, client, newMockRepo(), &testutil.MockTxManager{}, tel)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	service.now = func() time.Time { return time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC) }
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "maple.sync.null_downgrades.total" {
+				continue
+			}
+			data, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("null_downgrades data type = %T, want Sum[int64]", m.Data)
+			}
+			for _, dp := range data.DataPoints {
+				field, _ := dp.Attributes.Value("field")
+				got[field.AsString()] = dp.Value
+			}
+		}
+	}
+	want := map[string]int64{
+		"pool_tvl":                   2,
+		"pool_collateral_value_usd":  1,
+		"collateral_asset_amount":    2,
+		"collateral_asset_value_usd": 1,
+	}
+	for field, wantCount := range want {
+		if got[field] != wantCount {
+			t.Errorf("null_downgrades[%s] = %d, want %d (all: %v)", field, got[field], wantCount, got)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("unexpected null_downgrade fields: %v", got)
 	}
 }
 
@@ -126,6 +215,7 @@ func TestTelemetry_NilReceiverSafe(t *testing.T) {
 	tel.RecordCycle(ctx, nil)
 	tel.RecordPhase(ctx, "pools", time.Second, nil)
 	tel.RecordRowsWritten(ctx, "maple_pool_state", 1)
+	tel.RecordNullDowngrade(ctx, "pool_tvl")
 	cycleSpan.End()
 	phaseSpan.End()
 }
@@ -167,6 +257,7 @@ func TestNewTelemetryWithProviders_InstrumentErrors(t *testing.T) {
 		"maple.sync.cycles.total",
 		"maple.sync.phases.total",
 		"maple.sync.rows.written",
+		"maple.sync.null_downgrades.total",
 		"maple.sync.phase.duration_seconds",
 	}
 	for _, name := range instruments {

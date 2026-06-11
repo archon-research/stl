@@ -8,10 +8,11 @@
 // skyStrategy.version, which are JSON numbers) and parsed into big.Int;
 // any malformed value fails the whole call — rows are never skipped.
 //
-// Schema-nullable values are handled per field: pool tvl/collateralValue
-// parse to nil (persisted as SQL NULL downstream), and a collateral whose
-// assetAmount or assetValueUsd is null is treated as absent (logged; the
-// loan itself is kept).
+// Schema-nullable values are handled per field: pool tvl/collateralValue and
+// collateral assetAmount/assetValueUsd parse to nil (persisted as SQL NULL
+// downstream, logged here and counted by the service's null-downgrade
+// metric). Null top-level collections (data:null with no errors[]) are a
+// hard error — they are upstream breakage, not an empty result set.
 package maple
 
 import (
@@ -294,15 +295,21 @@ type syrupGlobalsWire struct {
 // GetPools fetches all PoolV2 lending pools, paginating transparently.
 func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
 	wires, err := fetchAll(poolBatchSize, func(first, skip int) ([]poolWire, error) {
+		// The collection decodes through a pointer so a broken upstream
+		// response (data:null or a null collection, with no errors[]) fails
+		// hard instead of masquerading as a legitimate empty list.
 		var resp struct {
 			Data struct {
-				PoolV2S []poolWire `json:"poolV2S"`
+				PoolV2S *[]poolWire `json:"poolV2S"`
 			} `json:"data"`
 		}
 		if err := c.execute(ctx, poolsQuery, pageVariables(first, skip), &resp); err != nil {
 			return nil, fmt.Errorf("querying pools (skip=%d): %w", skip, err)
 		}
-		return resp.Data.PoolV2S, nil
+		if resp.Data.PoolV2S == nil {
+			return nil, fmt.Errorf("querying pools (skip=%d): API returned null poolV2S collection", skip)
+		}
+		return *resp.Data.PoolV2S, nil
 	})
 	if err != nil {
 		return nil, err
@@ -330,15 +337,20 @@ func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
 // transparently.
 func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan, error) {
 	wires, err := fetchAll(loanBatchSize, func(first, skip int) ([]loanWire, error) {
+		// Pointer decode: a null collection must fail hard, not look like an
+		// empty loan book (see GetPools).
 		var resp struct {
 			Data struct {
-				OpenTermLoans []loanWire `json:"openTermLoans"`
+				OpenTermLoans *[]loanWire `json:"openTermLoans"`
 			} `json:"data"`
 		}
 		if err := c.execute(ctx, activeLoansQuery, pageVariables(first, skip), &resp); err != nil {
 			return nil, fmt.Errorf("querying active loans (skip=%d): %w", skip, err)
 		}
-		return resp.Data.OpenTermLoans, nil
+		if resp.Data.OpenTermLoans == nil {
+			return nil, fmt.Errorf("querying active loans (skip=%d): API returned null openTermLoans collection", skip)
+		}
+		return *resp.Data.OpenTermLoans, nil
 	})
 	if err != nil {
 		return nil, err
@@ -350,8 +362,8 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 		if err != nil {
 			return nil, err
 		}
-		if w.Collateral != nil && loan.Collateral == nil {
-			c.logger.Warn("collateral has null assetAmount or assetValueUsd; treating as absent",
+		if w.Collateral != nil && (w.Collateral.AssetAmount == nil || w.Collateral.AssetValueUSD == nil) {
+			c.logger.Warn("collateral has null assetAmount or assetValueUsd; storing as NULL",
 				"loan", w.ID,
 				"collateralState", deref(w.Collateral.State),
 				"assetAmountNull", w.Collateral.AssetAmount == nil,
@@ -366,15 +378,20 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 // GetSkyStrategies fetches all Sky strategies, paginating transparently.
 func (c *Client) GetSkyStrategies(ctx context.Context) ([]outbound.MapleSkyStrategy, error) {
 	wires, err := fetchAll(strategyBatchSize, func(first, skip int) ([]skyStrategyWire, error) {
+		// Pointer decode: a null collection must fail hard, not look like an
+		// empty strategy set (see GetPools).
 		var resp struct {
 			Data struct {
-				SkyStrategies []skyStrategyWire `json:"skyStrategies"`
+				SkyStrategies *[]skyStrategyWire `json:"skyStrategies"`
 			} `json:"data"`
 		}
 		if err := c.execute(ctx, skyStrategiesQuery, pageVariables(first, skip), &resp); err != nil {
 			return nil, fmt.Errorf("querying sky strategies (skip=%d): %w", skip, err)
 		}
-		return resp.Data.SkyStrategies, nil
+		if resp.Data.SkyStrategies == nil {
+			return nil, fmt.Errorf("querying sky strategies (skip=%d): API returned null skyStrategies collection", skip)
+		}
+		return *resp.Data.SkyStrategies, nil
 	})
 	if err != nil {
 		return nil, err
@@ -519,17 +536,14 @@ func parseCollateral(w *collateralWire, loanID string) (*outbound.MapleLoanColla
 	}
 
 	// assetAmount and assetValueUsd are nullable in the schema (plausibly
-	// during DepositPending). A collateral missing either value cannot be
-	// stored or priced, so it is treated as absent; the caller logs the skip.
-	if w.AssetAmount == nil || w.AssetValueUSD == nil {
-		return nil, nil
-	}
-
-	amount, err := parseBigInt(*w.AssetAmount, "collateral.assetAmount", loanID)
+	// during DepositPending). The row is kept with nil values so "collateral
+	// pending" stays distinguishable from "no collateral"; the caller logs
+	// the downgrade and the service records a metric.
+	amount, err := parseOptionalBigInt(w.AssetAmount, "collateral.assetAmount", loanID)
 	if err != nil {
 		return nil, err
 	}
-	valueUSD, err := parseBigInt(*w.AssetValueUSD, "collateral.assetValueUsd", loanID)
+	valueUSD, err := parseOptionalBigInt(w.AssetValueUSD, "collateral.assetValueUsd", loanID)
 	if err != nil {
 		return nil, err
 	}

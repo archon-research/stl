@@ -21,13 +21,13 @@ type MapleLoanMeta struct {
 }
 
 // MapleLoanCollateral is the single (nullable upstream) collateral of a loan.
-// AssetAmount and AssetValueUSD are always non-nil: the client treats an API
-// collateral whose amount or value is null as absent (Collateral = nil on the
-// loan) rather than producing a partial record.
+// AssetAmount and AssetValueUSD are nullable in the API schema (plausibly
+// during DepositPending); the client keeps such a collateral with nil values
+// so "collateral pending" stays distinguishable from "no collateral".
 type MapleLoanCollateral struct {
 	Asset            string   // symbol, e.g. "BTC", "USDC", "SOL"
-	AssetAmount      *big.Int // native decimals
-	AssetValueUSD    *big.Int // per-unit USD price, 8 decimals
+	AssetAmount      *big.Int // native decimals; nil when the API reports null
+	AssetValueUSD    *big.Int // per-unit USD price, 8 decimals; nil when the API reports null
 	Decimals         int
 	State            string   // "Deposited" | "DepositPending" | ...
 	Custodian        string   // e.g. "FORDEFI", "ANCHORAGE"
@@ -43,7 +43,7 @@ type MapleActiveLoan struct {
 	State         string
 	PrincipalOwed *big.Int
 	AcmRatio      *big.Int             // nil when the API reports none (uncollateralized loans)
-	Collateral    *MapleLoanCollateral // nil when the API returns null, or a collateral with null amounts (see MapleLoanCollateral)
+	Collateral    *MapleLoanCollateral // nil only when the API returns null collateral
 	LoanMeta      *MapleLoanMeta       // nil for external loans
 	PoolAddress   common.Address
 }
@@ -90,9 +90,11 @@ type MapleSyrupGlobals struct {
 // MapleGraphQLClient is the outbound port for the Maple GraphQL API
 // (https://api.maple.finance/v2/graphql). All methods query the latest state
 // (no block argument) and paginate transparently; implementations must fail
-// the whole call on any malformed row rather than skipping it. API-sanctioned
-// nulls are not malformed: nullable pool metrics surface as nil, and a
-// collateral with a null amount or USD value surfaces as no collateral.
+// the whole call on any malformed row rather than skipping it, and must fail
+// hard when the API returns a null top-level collection (data:null) — a null
+// collection is upstream breakage, never an empty result set. API-sanctioned
+// nulls are not malformed: nullable pool metrics and collateral amounts
+// surface as nil.
 type MapleGraphQLClient interface {
 	// GetPools fetches all PoolV2 lending pools.
 	GetPools(ctx context.Context) ([]MaplePool, error)
