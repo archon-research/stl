@@ -3,9 +3,10 @@ import {
   EmptyState,
   ErrorState,
   SkeletonStack,
+  StyledSelect,
 } from '@archon-research/design-system';
 import { ArrowDownRight, ArrowRightLeft, ArrowUpLeft } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -40,10 +41,39 @@ type ActivityFeedProps = {
 type ActivityFilters = {
   protocol_name?: string;
   action_type?: string;
+  token_symbol?: string;
   from_timestamp?: string;
   to_timestamp?: string;
   limit?: number;
 };
+
+const ACTION_FILTER_OPTIONS = [
+  { label: 'All actions', value: '' },
+  { label: 'In', value: 'in' },
+  { label: 'Out', value: 'out' },
+  { label: 'Sweep', value: 'sweep' },
+];
+
+function normalizeFilterValue(value: string): string | undefined {
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toDateTimeLocalValue(value: string | undefined): string {
+  return value ? value.slice(0, 16) : '';
+}
+
+function fromDateTimeLocalValue(value: string): string | undefined {
+  return value ? new Date(value).toISOString() : undefined;
+}
+
+function isSweepEvent(event: AllocationActivity): boolean {
+  return event.action_type?.toLowerCase() === 'sweep';
+}
+
+function getRealTxHash(event: AllocationActivity): string | null {
+  return isSweepEvent(event) ? null : (event.tx_hash ?? null);
+}
 
 function getActionIcon(actionType: string | null | undefined) {
   switch (actionType?.toLowerCase()) {
@@ -222,7 +252,7 @@ function ActivityEventRow({
 }) {
   const actionColor = getActionColor(event.action_type);
   const actionIcon = getActionIcon(event.action_type);
-  const txHash = event.tx_hash;
+  const txHash = getRealTxHash(event);
 
   return (
     <div
@@ -319,13 +349,13 @@ function ActivityEventRow({
             <ChainLogo chainId={event.chain_id} size="4" />
             Chain {event.chain_id}
           </span>
-          {event.tx_hash ? (
+          {txHash ? (
             <>
               <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
                 •
               </span>
               <TokenAddress
-                address={event.tx_hash}
+                address={txHash}
                 chainId={event.chain_id}
                 type="tx"
               />
@@ -385,9 +415,43 @@ export function ActivityFeed({
   const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
     Record<string, boolean>
   >({});
-  const [filters] = useState<ActivityFilters>({
+  const [filters, setFilters] = useState<ActivityFilters>({
     limit: 50,
   });
+  const hasActiveFilters = Boolean(
+    filters.protocol_name ||
+    filters.action_type ||
+    filters.token_symbol ||
+    filters.from_timestamp ||
+    filters.to_timestamp,
+  );
+
+  const resetTxInspectionState = () => {
+    Object.values(txRequestControllersRef.current).forEach((controller) => {
+      controller.abort();
+    });
+    txRequestControllersRef.current = {};
+    setSelectedEventKey(null);
+    setTxEventsByHash({});
+    setTxEventErrorsByHash({});
+    setTxEventsLoadingByHash({});
+  };
+
+  const updateFilter = (
+    key: keyof ActivityFilters,
+    value: string | undefined,
+  ) => {
+    setFilters((previous) => ({
+      ...previous,
+      [key]: value,
+    }));
+    resetTxInspectionState();
+  };
+
+  const clearFilters = () => {
+    setFilters({ limit: filters.limit ?? 50 });
+    resetTxInspectionState();
+  };
 
   useEffect(() => {
     if (!isEnabled || !selectedPrime) {
@@ -454,12 +518,14 @@ export function ActivityFeed({
   }, []);
 
   const handleSelectTx = (event: AllocationActivity) => {
-    if (!event.tx_hash) {
+    const txHash = getRealTxHash(event);
+
+    if (!txHash) {
       return;
     }
 
     const eventKey = buildActivityEventKey(event);
-    const txCacheKey = buildTxCacheKey(event.tx_hash, event.chain_id);
+    const txCacheKey = buildTxCacheKey(txHash, event.chain_id);
 
     if (selectedEventKey === eventKey) {
       txRequestControllersRef.current[txCacheKey]?.abort();
@@ -502,7 +568,7 @@ export function ActivityFeed({
     const abortController = new AbortController();
     txRequestControllersRef.current[txCacheKey] = abortController;
 
-    void getTxProtocolEvents(event.tx_hash, abortController.signal)
+    void getTxProtocolEvents(txHash, abortController.signal)
       .then((result) => {
         setTxEventsByHash((previous) => ({
           ...previous,
@@ -517,7 +583,7 @@ export function ActivityFeed({
         try {
           const fallbackResult = await getProtocolEvents(
             {
-              tx_hash: event.tx_hash ?? undefined,
+              tx_hash: txHash,
               limit: 200,
             },
             abortController.signal,
@@ -542,7 +608,7 @@ export function ActivityFeed({
             error: err,
             fallbackError: fallbackErr,
             errorMessage: errorMsg,
-            txHash: event.tx_hash,
+            txHash,
           });
         }
       })
@@ -573,7 +639,7 @@ export function ActivityFeed({
         event.token_symbol?.toLowerCase().includes(lowerQuery) ||
         event.protocol_name?.toLowerCase().includes(lowerQuery) ||
         event.action_type?.toLowerCase().includes(lowerQuery) ||
-        event.tx_hash?.toLowerCase().includes(lowerQuery),
+        getRealTxHash(event)?.toLowerCase().includes(lowerQuery),
     );
   }, [events, searchQuery]);
 
@@ -601,7 +667,7 @@ export function ActivityFeed({
     <AsyncStateRenderer
       isLoading={isLoading && events.length === 0}
       error={error}
-      isEmpty={filteredEvents.length === 0}
+      isEmpty={false}
       loadingView={<SkeletonStack count={3} />}
       errorView={
         <ErrorState
@@ -629,110 +695,292 @@ export function ActivityFeed({
       >
         <div
           className={css({
-            flex: 1,
-            overflowY: 'auto',
             borderRadius: 'lg',
             border: '1px solid token(colors.surface.subtle)',
             bg: 'surface.default',
+            p: '3',
+            display: 'grid',
+            gap: '3',
+            mb: '3',
           })}
         >
-          {filteredEvents.map((event, idx) => {
-            const eventKey = buildActivityEventKey(event);
-            const txHash = event.tx_hash;
-            const txCacheKey = txHash
-              ? buildTxCacheKey(txHash, event.chain_id)
-              : null;
-            const isExpanded = selectedEventKey === eventKey;
-            const txEvents = txCacheKey
-              ? txEventsByHash[txCacheKey]
-              : undefined;
-            const txError = txCacheKey
-              ? txEventErrorsByHash[txCacheKey]
-              : undefined;
-            const isTxLoading =
-              txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
+          <div
+            className={css({
+              display: 'grid',
+              gridTemplateColumns: {
+                base: '1fr',
+                md: 'repeat(5, minmax(0, 1fr))',
+              },
+              gap: '2',
+              alignItems: 'end',
+            })}
+          >
+            <input
+              aria-label="Filter activity by protocol"
+              placeholder="Protocol"
+              value={filters.protocol_name ?? ''}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                updateFilter(
+                  'protocol_name',
+                  normalizeFilterValue(event.target.value),
+                )
+              }
+              className={css({
+                width: 'full',
+                h: '9',
+                borderRadius: 'md',
+                borderWidth: '1px',
+                borderStyle: 'solid',
+                borderColor: 'border.subtle',
+                bg: 'surface.default',
+                color: 'text.default',
+                px: '3',
+                fontSize: 'sm',
+              })}
+            />
+            <StyledSelect
+              aria-label="Filter activity by action"
+              value={filters.action_type ?? ''}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                updateFilter('action_type', event.target.value || undefined)
+              }
+            >
+              {ACTION_FILTER_OPTIONS.map((option) => (
+                <option key={option.value || 'all'} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </StyledSelect>
+            <input
+              aria-label="Filter activity by token symbol"
+              placeholder="Token"
+              value={filters.token_symbol ?? ''}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                updateFilter(
+                  'token_symbol',
+                  normalizeFilterValue(event.target.value),
+                )
+              }
+              className={css({
+                width: 'full',
+                h: '9',
+                borderRadius: 'md',
+                borderWidth: '1px',
+                borderStyle: 'solid',
+                borderColor: 'border.subtle',
+                bg: 'surface.default',
+                color: 'text.default',
+                px: '3',
+                fontSize: 'sm',
+              })}
+            />
+            <input
+              aria-label="Filter activity from timestamp"
+              type="datetime-local"
+              value={toDateTimeLocalValue(filters.from_timestamp)}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                updateFilter(
+                  'from_timestamp',
+                  fromDateTimeLocalValue(event.target.value),
+                )
+              }
+              className={css({
+                width: 'full',
+                h: '9',
+                borderRadius: 'md',
+                borderWidth: '1px',
+                borderStyle: 'solid',
+                borderColor: 'border.subtle',
+                bg: 'surface.default',
+                color: 'text.default',
+                px: '3',
+                fontSize: 'sm',
+              })}
+            />
+            <input
+              aria-label="Filter activity to timestamp"
+              type="datetime-local"
+              value={toDateTimeLocalValue(filters.to_timestamp)}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                updateFilter(
+                  'to_timestamp',
+                  fromDateTimeLocalValue(event.target.value),
+                )
+              }
+              className={css({
+                width: 'full',
+                h: '9',
+                borderRadius: 'md',
+                borderWidth: '1px',
+                borderStyle: 'solid',
+                borderColor: 'border.subtle',
+                bg: 'surface.default',
+                color: 'text.default',
+                px: '3',
+                fontSize: 'sm',
+              })}
+            />
+          </div>
 
-            return (
-              <div key={`${eventKey}:${idx}`}>
-                <ActivityEventRow
-                  event={event}
-                  isExpanded={isExpanded}
-                  onSelectTx={handleSelectTx}
-                />
+          <div
+            className={css({
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: '3',
+              fontSize: 'xs',
+              color: 'text.subtle',
+            })}
+          >
+            <span>
+              {hasActiveFilters
+                ? 'Server filters active'
+                : 'Showing latest activity'}
+            </span>
+            {hasActiveFilters ? (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className={css({
+                  h: '8',
+                  borderRadius: 'md',
+                  borderWidth: '1px',
+                  borderStyle: 'solid',
+                  borderColor: 'border.subtle',
+                  bg: 'surface.default',
+                  color: 'text.default',
+                  px: '3',
+                  fontSize: 'xs',
+                  cursor: 'pointer',
+                  _hover: { bg: 'interactive.hover' },
+                })}
+              >
+                Clear filters
+              </button>
+            ) : null}
+          </div>
+        </div>
 
-                {isExpanded && txHash ? (
-                  <div
-                    className={css({
-                      marginX: '3',
-                      marginBottom: '3',
-                      borderWidth: '1px',
-                      borderStyle: 'solid',
-                      borderColor: 'border.subtle',
-                      borderRadius: 'md',
-                      bg: 'surface.subtle',
-                      padding: '3',
-                      display: 'grid',
-                      gap: '2',
-                    })}
-                  >
+        {filteredEvents.length === 0 ? (
+          <EmptyState
+            title="No Activity Found"
+            description="No allocation activity events match your filters."
+            stretch
+          />
+        ) : null}
+
+        {filteredEvents.length > 0 ? (
+          <div
+            className={css({
+              flex: 1,
+              overflowY: 'auto',
+              borderRadius: 'lg',
+              border: '1px solid token(colors.surface.subtle)',
+              bg: 'surface.default',
+            })}
+          >
+            {filteredEvents.map((event, idx) => {
+              const eventKey = buildActivityEventKey(event);
+              const txHash = getRealTxHash(event);
+              const txCacheKey = txHash
+                ? buildTxCacheKey(txHash, event.chain_id)
+                : null;
+              const isExpanded = selectedEventKey === eventKey;
+              const txEvents = txCacheKey
+                ? txEventsByHash[txCacheKey]
+                : undefined;
+              const txError = txCacheKey
+                ? txEventErrorsByHash[txCacheKey]
+                : undefined;
+              const isTxLoading =
+                txCacheKey !== null &&
+                txEventsLoadingByHash[txCacheKey] === true;
+
+              return (
+                <div key={`${eventKey}:${idx}`}>
+                  <ActivityEventRow
+                    event={event}
+                    isExpanded={isExpanded}
+                    onSelectTx={handleSelectTx}
+                  />
+
+                  {isExpanded && txHash ? (
                     <div
                       className={css({
-                        fontSize: 'xs',
-                        color: 'text.strong',
-                        fontWeight: 'semibold',
+                        marginX: '3',
+                        marginBottom: '3',
+                        borderWidth: '1px',
+                        borderStyle: 'solid',
+                        borderColor: 'border.subtle',
+                        borderRadius: 'md',
+                        bg: 'surface.subtle',
+                        padding: '3',
+                        display: 'grid',
+                        gap: '2',
                       })}
                     >
-                      Protocol Events For TX
+                      <div
+                        className={css({
+                          fontSize: 'xs',
+                          color: 'text.strong',
+                          fontWeight: 'semibold',
+                        })}
+                      >
+                        Protocol Events For TX
+                      </div>
+
+                      {isTxLoading ? (
+                        <span
+                          className={css({
+                            fontSize: 'xs',
+                            color: 'text.default',
+                          })}
+                        >
+                          Loading protocol events...
+                        </span>
+                      ) : null}
+
+                      {!isTxLoading && txError ? (
+                        <span
+                          className={css({
+                            fontSize: 'xs',
+                            color: 'text.warning',
+                          })}
+                        >
+                          Failed to load protocol events: {txError}
+                        </span>
+                      ) : null}
+
+                      {!isTxLoading &&
+                      !txError &&
+                      txEvents &&
+                      txEvents.length === 0 ? (
+                        <EmptyState
+                          title="No Protocol Events"
+                          description="No protocol events were indexed for this transaction."
+                          size="compact"
+                          stretch
+                        />
+                      ) : null}
+
+                      {!isTxLoading &&
+                      !txError &&
+                      txEvents &&
+                      txEvents.length > 0
+                        ? txEvents.map((protocolEvent) => (
+                            <ProtocolEventCard
+                              key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
+                              event={protocolEvent}
+                            />
+                          ))
+                        : null}
                     </div>
-
-                    {isTxLoading ? (
-                      <span
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.default',
-                        })}
-                      >
-                        Loading protocol events...
-                      </span>
-                    ) : null}
-
-                    {!isTxLoading && txError ? (
-                      <span
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.warning',
-                        })}
-                      >
-                        Failed to load protocol events: {txError}
-                      </span>
-                    ) : null}
-
-                    {!isTxLoading &&
-                    !txError &&
-                    txEvents &&
-                    txEvents.length === 0 ? (
-                      <EmptyState
-                        title="No Protocol Events"
-                        description="No protocol events were indexed for this transaction."
-                        size="compact"
-                        stretch
-                      />
-                    ) : null}
-
-                    {!isTxLoading && !txError && txEvents && txEvents.length > 0
-                      ? txEvents.map((protocolEvent) => (
-                          <ProtocolEventCard
-                            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
-                            event={protocolEvent}
-                          />
-                        ))
-                      : null}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
 
         <div
           className={css({
