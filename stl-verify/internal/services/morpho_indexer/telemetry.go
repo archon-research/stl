@@ -31,6 +31,9 @@ type Telemetry struct {
 	receiptDuration metric.Float64Histogram
 	rpcDuration     metric.Float64Histogram
 
+	// Gauges
+	symbolsMissing metric.Int64Gauge
+
 	// chainAttr is the constant per-chain attribute attached to every metric.
 	// One indexer process serves one chain, so the value is fixed at
 	// construction. It surfaces as the `chain` Prometheus label that the Vector
@@ -91,6 +94,14 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating errorsTotal counter: %w", err)
+	}
+
+	t.symbolsMissing, err = meter.Int64Gauge(
+		"morpho.token.symbol.missing",
+		metric.WithDescription("Tokens still missing a symbol as seen by the latest reconciliation sweep (capped at the sweep batch size)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating symbolsMissing gauge: %w", err)
 	}
 
 	t.blockDuration, err = meter.Float64Histogram(
@@ -183,6 +194,17 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 		t.chainAttr,
 		attribute.String("operation", operation),
 	))
+}
+
+// RecordSymbolsMissing records how many tokens the latest reconciliation sweep
+// found still missing a symbol (capped at the sweep batch size). Sustained growth
+// means unresolvable tokens are accumulating; at the batch cap the oldest-first
+// sweep starves newer tokens.
+func (t *Telemetry) RecordSymbolsMissing(ctx context.Context, count int64) {
+	if t == nil {
+		return
+	}
+	t.symbolsMissing.Record(ctx, count, metric.WithAttributes(t.chainAttr))
 }
 
 // StartBlockSpan starts a top-level span for block processing.
