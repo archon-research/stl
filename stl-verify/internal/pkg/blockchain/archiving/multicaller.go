@@ -69,37 +69,41 @@ func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg 
 	return &Multicaller{inner: inner, archiver: arch, cfg: cfg, writes: writes}
 }
 
-// Execute forwards to the inner multicaller, then archives each call/result
-// pair in a detached background goroutine. Archiving never blocks the caller
-// and never affects the returned results or error.
+// Execute forwards to the inner multicaller, then archives the entire
+// (call, result) batch in a single detached background goroutine. Archiving
+// never blocks the caller and never affects the returned results or error.
 func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 	results, err := m.inner.Execute(ctx, calls, blockNumber)
 	if err != nil {
 		return results, err
 	}
 
+	n := len(calls)
+	if len(results) != n {
+		// The inner multicaller returned a different number of results than
+		// calls; archive only the prefix that has both. Surface the anomaly
+		// because an archive feature must not silently drop calls.
+		m.cfg.Logger.Warn("multicaller result count does not match call count; trailing calls will not be archived",
+			"source", m.cfg.Source,
+			"block", blockNumber,
+			"calls", n,
+			"results", len(results),
+		)
+		if len(results) < n {
+			n = len(results)
+		}
+	}
+	if n == 0 {
+		// Nothing to archive — don't schedule a goroutine that would write a
+		// phantom empty object.
+		return results, nil
+	}
+
 	blockVersion, _ := BlockVersionFromContext(ctx)
 	mcAddr := m.inner.Address().Hex()
 	detached := context.WithoutCancel(ctx)
-
-	if len(results) != len(calls) {
-		// The inner multicaller returned a different number of results than
-		// calls; the trailing calls below are silently not archived. For an
-		// archival feature this is a completeness anomaly worth surfacing.
-		m.cfg.Logger.Warn("multicaller result count does not match call count; some calls will not be archived",
-			"source", m.cfg.Source,
-			"block", blockNumber,
-			"calls", len(calls),
-			"results", len(results),
-		)
-	}
-
-	for i := range calls {
-		if i >= len(results) {
-			break
-		}
-		m.scheduleArchive(detached, m.buildRecord(calls[i], results[i], blockNumber, blockVersion, mcAddr))
-	}
+	record := m.buildBatchRecord(calls[:n], results[:n], blockNumber, blockVersion, mcAddr)
+	m.scheduleArchive(detached, record)
 	// err is provably nil here (the err != nil path returned above); archiving
 	// never affects the returned error.
 	return results, nil
@@ -131,39 +135,45 @@ func (m *Multicaller) recordWrite(err error) {
 	))
 }
 
-func (m *Multicaller) buildRecord(call outbound.Call, result outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallRecord {
+func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallBatchRecord {
 	var bn int64
 	if blockNumber != nil {
 		bn = blockNumber.Int64()
 	}
-	return outbound.CallRecord{
-		ChainID:         m.cfg.ChainID,
-		BlockNumber:     bn,
-		BlockVersion:    blockVersion,
-		BuildID:         m.cfg.BuildID,
-		Source:          m.cfg.Source,
-		Multicaller:     mcAddr,
-		Timestamp:       m.cfg.Clock().UTC(),
-		ContractAddress: call.Target.Hex(),
-		Selector:        rawsckey.Selector(call.CallData),
-		CallData:        append([]byte(nil), call.CallData...),
-		Success:         result.Success,
-		Response:        append([]byte(nil), result.ReturnData...),
+	entries := make([]outbound.CallEntry, len(calls))
+	for i := range calls {
+		entries[i] = outbound.CallEntry{
+			ContractAddress: calls[i].Target.Hex(),
+			Selector:        rawsckey.Selector(calls[i].CallData),
+			CallData:        append([]byte(nil), calls[i].CallData...),
+			Success:         results[i].Success,
+			Response:        append([]byte(nil), results[i].ReturnData...),
+		}
+	}
+	return outbound.CallBatchRecord{
+		ChainID:      m.cfg.ChainID,
+		BlockNumber:  bn,
+		BlockVersion: blockVersion,
+		BuildID:      m.cfg.BuildID,
+		Source:       m.cfg.Source,
+		Multicaller:  mcAddr,
+		Timestamp:    m.cfg.Clock().UTC(),
+		Calls:        entries,
 	}
 }
 
-func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallRecord) {
+func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallBatchRecord) {
 	m.cfg.Wait.Go(func() {
 		// Archiving is fire-and-forget: a panic here must never escape and crash
 		// the worker, since archiving must not affect the hot path.
 		defer func() {
 			if r := recover(); r != nil {
-				m.cfg.Logger.Error("panic while archiving SC call",
+				m.cfg.Logger.Error("panic while archiving SC call batch",
 					"panic", r,
 					"source", record.Source,
 					"block", record.BlockNumber,
-					"contract", record.ContractAddress,
-					"selector", record.Selector,
+					"block_version", record.BlockVersion,
+					"calls", len(record.Calls),
 					"stack", string(debug.Stack()),
 				)
 			}
@@ -174,14 +184,15 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallR
 		err := m.archiver.Archive(archiveCtx, record)
 		m.recordWrite(err)
 		if err != nil {
-			// A failed write is a permanent, unretried loss of an archived call,
-			// so surface it at error level rather than burying it in warnings.
-			m.cfg.Logger.Error("archiving SC call failed",
+			// A failed write is a permanent, unretried loss of an archived
+			// batch, so surface it at error level rather than burying it in
+			// warnings.
+			m.cfg.Logger.Error("archiving SC call batch failed",
 				"error", err,
 				"source", record.Source,
 				"block", record.BlockNumber,
-				"contract", record.ContractAddress,
-				"selector", record.Selector,
+				"block_version", record.BlockVersion,
+				"calls", len(record.Calls),
 			)
 		}
 	})
