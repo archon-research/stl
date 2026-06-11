@@ -80,6 +80,31 @@ class DirectAssetHolding:
 
 
 @dataclass(frozen=True)
+class AnchoragePosition:
+    """A prime's aggregated Anchorage custody position.
+
+    Sourced from ``anchorage_package_snapshot`` (written by the anchorage-indexer
+    cronjob), not from ``allocation_position``. ``balance`` is the summed asset
+    quantity of the underlying (USDC); ``amount_usd`` is its market USD value.
+    The token/receipt-token catalog fields are resolved from the seeded
+    Anchorage escrow rows so the API row carries the surrogate ids/addresses
+    ``AllocationResponse`` requires.
+    """
+
+    chain_id: int
+    receipt_token_id: int
+    receipt_token_address: str
+    underlying_token_id: int
+    underlying_token_address: str
+    symbol: str
+    underlying_symbol: str
+    protocol_name: str
+    balance: Decimal
+    amount_usd: Decimal
+    latest_activity_at: datetime
+
+
+@dataclass(frozen=True)
 class Prime:
     id: str
     name: str

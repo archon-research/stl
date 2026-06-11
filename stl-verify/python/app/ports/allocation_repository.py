@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from app.domain.entities.allocation import (
+    AnchoragePosition,
     ChainMetadata,
     DirectAssetHolding,
     EthAddress,
@@ -56,6 +57,10 @@ class AllocationRepository(Protocol):
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         """Return total priced USD exposure for all current positions of a prime."""
+        ...
+
+    async def get_anchorage_position(self, prime_id: EthAddress) -> AnchoragePosition | None:
+        """Return the prime's aggregated Anchorage custody position, or ``None`` if it has none."""
         ...
 
     async def list_allocation_activity(

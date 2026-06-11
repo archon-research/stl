@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from app.domain.entities.allocation import (
+    AnchoragePosition,
     ChainMetadata,
     DirectAssetHolding,
     EthAddress,
@@ -37,6 +38,9 @@ class AllocationService:
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
+
+    async def get_anchorage_position(self, prime_id: EthAddress) -> AnchoragePosition | None:
+        return await self._repository.get_anchorage_position(prime_id)
 
     async def list_allocation_activity(
         self,

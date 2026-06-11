@@ -147,3 +147,27 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
         to_timestamp=to_timestamp,
         limit=50,
     )
+
+
+@pytest.mark.asyncio
+async def test_get_anchorage_position_delegates_to_repository():
+    from tests.conftest import make_anchorage_position
+
+    position = make_anchorage_position()
+    repo = AsyncMock()
+    repo.get_anchorage_position.return_value = position
+    service = AllocationService(repo)
+
+    result = await service.get_anchorage_position(_VALID_ADDR)
+
+    assert result is position
+    repo.get_anchorage_position.assert_awaited_once_with(_VALID_ADDR)
+
+
+@pytest.mark.asyncio
+async def test_get_anchorage_position_returns_none_when_repository_has_none():
+    repo = AsyncMock()
+    repo.get_anchorage_position.return_value = None
+    service = AllocationService(repo)
+
+    assert await service.get_anchorage_position(_VALID_ADDR) is None

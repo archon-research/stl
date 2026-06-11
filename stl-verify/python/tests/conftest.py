@@ -1,7 +1,8 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-from app.domain.entities.allocation import DirectAssetHolding, ReceiptTokenPosition
+from app.domain.entities.allocation import AnchoragePosition, DirectAssetHolding, ReceiptTokenPosition
 
 
 def make_receipt_token_position(**overrides: Any) -> ReceiptTokenPosition:
@@ -30,3 +31,21 @@ def make_direct_asset_holding(**overrides: Any) -> DirectAssetHolding:
     )
     defaults.update(overrides)
     return DirectAssetHolding(**defaults)
+
+
+def make_anchorage_position(**overrides: Any) -> AnchoragePosition:
+    defaults: dict[str, Any] = dict(
+        chain_id=1,
+        receipt_token_id=7,
+        receipt_token_address="0x49506c3aa028693458d6ee816b2ec28522946872",
+        underlying_token_id=20,
+        underlying_token_address="0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        symbol="ANCHORAGE",
+        underlying_symbol="USDC",
+        protocol_name="anchorage",
+        balance=Decimal("250000001.323783"),
+        amount_usd=Decimal("250000001.323783"),
+        latest_activity_at=datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc),
+    )
+    defaults.update(overrides)
+    return AnchoragePosition(**defaults)

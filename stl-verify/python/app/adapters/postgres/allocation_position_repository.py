@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.entities.allocation import (
+    AnchoragePosition,
     ChainMetadata,
     DirectAssetHolding,
     EthAddress,
@@ -321,6 +322,52 @@ class PostgresAllocationRepository:
             )
             raise ValueError(f"Database query failed while fetching total USD exposure: {exc}") from exc
 
+    async def get_anchorage_position(self, prime_id: EthAddress) -> AnchoragePosition | None:
+        """Return the prime's aggregated Anchorage custody position, or ``None``.
+
+        Sourced from ``anchorage_package_snapshot`` (written by the
+        anchorage-indexer cronjob), since the allocation tracker skips
+        ``token_type == "anchorage"`` and never writes an ``allocation_position``
+        row for it. Returns ``None`` when the prime has no Anchorage snapshots —
+        the row is only emitted for primes that actually hold a position.
+        """
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_ANCHORAGE_POSITION_SQL, {"proxy_hex": prime_id.hex})
+                row = result.fetchone()
+
+            if row is None or row.balance is None:
+                return None
+
+            return AnchoragePosition(
+                chain_id=row.chain_id,
+                receipt_token_id=row.receipt_token_id,
+                receipt_token_address="0x" + row.receipt_token_address,
+                underlying_token_id=row.underlying_token_id,
+                underlying_token_address="0x" + row.underlying_token_address,
+                symbol=row.symbol,
+                underlying_symbol=row.underlying_symbol,
+                protocol_name=row.protocol_name,
+                balance=_safe_decimal(row.balance, "balance", f"prime_id={prime_id}"),
+                amount_usd=_safe_decimal(row.amount_usd, "amount_usd", f"prime_id={prime_id}"),
+                latest_activity_at=row.latest_activity_at,
+            )
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch anchorage position from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching anchorage position: {exc}") from exc
+
     async def list_allocation_activity(
         self,
         *,
@@ -540,6 +587,85 @@ LEFT JOIN LATERAL (
     ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
     LIMIT 1
 ) lp ON TRUE
+""")
+
+
+# Aggregate a prime's current Anchorage custody balance from
+# anchorage_package_snapshot. The table keys on prime_id (FK prime.id) while the
+# API works in proxy addresses, so prime.id is resolved from allocation_position
+# the same way the rest of this repository identifies a prime.
+#
+# Aggregation: take the latest snapshot per (package_id, asset_type,
+# custody_type) via DISTINCT ON ... ORDER BY snapshot_time DESC,
+# processing_version DESC (processing_version disambiguates reprocessed writes of
+# the same logical row, matching the latest-row selection elsewhere in this
+# file), restricted to active packages, then SUM across packages/assets.
+#
+# - balance:  SUM(asset_quantity) — the underlying (USDC) token-unit quantity,
+#             matching Observatory's reported balance.
+# - amount_usd: SUM(asset_quantity * asset_price) — the market USD value of the
+#             position. asset_weighted_value is intentionally NOT used: it is an
+#             LTV-weighted (haircut) figure, not the position's USD value.
+# - latest_activity_at: MAX(snapshot_time) — most recent poll.
+_ANCHORAGE_POSITION_SQL = text("""
+WITH target_prime AS (
+    SELECT DISTINCT prime_id
+    FROM allocation_position
+    WHERE proxy_address = decode(:proxy_hex, 'hex')
+),
+latest_per_asset AS (
+    SELECT DISTINCT ON (s.package_id, s.asset_type, s.custody_type)
+        s.asset_quantity,
+        s.asset_price,
+        s.snapshot_time
+    FROM anchorage_package_snapshot s
+    JOIN target_prime tp ON tp.prime_id = s.prime_id
+    WHERE s.active = TRUE
+    ORDER BY s.package_id, s.asset_type, s.custody_type,
+             s.snapshot_time DESC, s.processing_version DESC
+),
+aggregated AS (
+    SELECT
+        SUM(asset_quantity)               AS balance,
+        SUM(asset_quantity * asset_price) AS amount_usd,
+        MAX(snapshot_time)                AS latest_activity_at
+    FROM latest_per_asset
+),
+-- The escrow catalog rows are seeded by
+-- db/migrations/..._seed_anchorage_receipt_token.sql. The CROSS JOIN drops the
+-- aggregate when they are absent, so a missing seed degrades to "no row"
+-- rather than a half-populated response.
+catalog AS (
+    SELECT
+        rt.chain_id                              AS chain_id,
+        rt.id                                    AS receipt_token_id,
+        encode(rt.receipt_token_address, 'hex')  AS receipt_token_address,
+        ut.id                                    AS underlying_token_id,
+        encode(ut.address, 'hex')                AS underlying_token_address,
+        rt.symbol                                AS symbol,
+        ut.symbol                                AS underlying_symbol,
+        pr.name                                  AS protocol_name
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id AND pr.chain_id = rt.chain_id
+    JOIN token ut    ON ut.id = rt.underlying_token_id
+    WHERE pr.name = 'anchorage'
+    LIMIT 1
+)
+SELECT
+    c.chain_id,
+    c.receipt_token_id,
+    c.receipt_token_address,
+    c.underlying_token_id,
+    c.underlying_token_address,
+    c.symbol,
+    c.underlying_symbol,
+    c.protocol_name,
+    a.balance,
+    a.amount_usd,
+    a.latest_activity_at
+FROM aggregated a
+CROSS JOIN catalog c
+WHERE a.balance IS NOT NULL
 """)
 
 
