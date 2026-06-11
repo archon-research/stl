@@ -346,6 +346,32 @@ func TestGetPools_NullTVLAndCollateralValue(t *testing.T) {
 	}
 }
 
+func TestNewClient_ValidatesEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		wantErr  bool
+	}{
+		{name: "default endpoint", endpoint: "", wantErr: false},
+		{name: "valid https", endpoint: "https://example.com/graphql", wantErr: false},
+		{name: "valid http", endpoint: "http://localhost:8080/graphql", wantErr: false},
+		{name: "missing scheme", endpoint: "example.com/graphql", wantErr: true},
+		{name: "unsupported scheme", endpoint: "ftp://example.com/graphql", wantErr: true},
+		{name: "scheme only", endpoint: "https://", wantErr: true},
+		{name: "unparseable", endpoint: "http://[::1]:namedport", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewClient(Config{Endpoint: tc.endpoint})
+			if tc.wantErr && err == nil {
+				t.Fatalf("NewClient(%q): expected error, got nil", tc.endpoint)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("NewClient(%q): unexpected error: %v", tc.endpoint, err)
+			}
+		})
+	}
+}
+
 func TestTransportErrorsAreRetried(t *testing.T) {
 	// A plain connection failure (no HTTP response at all) is the most
 	// common production transient; it must stay retryable. A regression

@@ -15,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -208,7 +209,7 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketState failed")
+			telemetry.SetSpanError(span, retErr, "getMarketState failed")
 		}
 	}()
 
@@ -242,7 +243,7 @@ func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]by
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketParams", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketParams failed")
+			telemetry.SetSpanError(span, retErr, "getMarketParams failed")
 		}
 	}()
 
@@ -308,7 +309,7 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketAndPositionState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketAndPositionState failed")
+			telemetry.SetSpanError(span, retErr, "getMarketAndPositionState failed")
 		}
 	}()
 
@@ -357,7 +358,7 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketAndTwoPositionStates", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketAndTwoPositionStates failed")
+			telemetry.SetSpanError(span, retErr, "getMarketAndTwoPositionStates failed")
 		}
 	}()
 
@@ -416,7 +417,7 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultState failed")
+			telemetry.SetSpanError(span, retErr, "getVaultState failed")
 		}
 	}()
 
@@ -454,7 +455,7 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultStateAndBalance", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultStateAndBalance failed")
+			telemetry.SetSpanError(span, retErr, "getVaultStateAndBalance failed")
 		}
 	}()
 
@@ -507,7 +508,7 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultStateAndTwoBalances", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultStateAndTwoBalances failed")
+			telemetry.SetSpanError(span, retErr, "getVaultStateAndTwoBalances failed")
 		}
 	}()
 
@@ -581,7 +582,7 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getVaultMetadata failed")
 		}
 	}()
 
@@ -657,7 +658,7 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getTokenMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getTokenMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getTokenMetadata failed")
 		}
 	}()
 
@@ -770,7 +771,7 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getTokenPairMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getTokenPairMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getTokenPairMetadata failed")
 		}
 	}()
 

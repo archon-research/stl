@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -143,7 +144,7 @@ func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
 
 	err := errors.Join(poolsErr, loansErr, strategiesErr, globalsErr)
 	s.telemetry.RecordCycle(ctx, err)
-	SetSpanError(span, err, "sync cycle failed")
+	telemetry.SetSpanError(span, err, "sync cycle failed")
 	if err != nil {
 		s.logger.Error("sync cycle finished with errors", "syncedAt", syncedAt, "error", err)
 	} else {
@@ -160,7 +161,7 @@ func (s *Service) runPhase(ctx context.Context, phase string, fn func(ctx contex
 	start := s.now()
 	err := fn(ctx)
 	s.telemetry.RecordPhase(ctx, phase, s.now().Sub(start), err)
-	SetSpanError(span, err, phase+" phase failed")
+	telemetry.SetSpanError(span, err, phase+" phase failed")
 	if err != nil {
 		s.logger.Error("phase failed", "phase", phase, "error", err)
 	}
@@ -441,7 +442,7 @@ func toEntityLoanMeta(meta *outbound.MapleLoanMeta) *entity.MapleLoanMeta {
 	return &entity.MapleLoanMeta{
 		Type:          meta.Type,
 		AssetSymbol:   meta.AssetSymbol,
-		Dex:           meta.DexName,
+		DexName:       meta.DexName,
 		WalletAddress: meta.WalletAddress,
 		WalletType:    meta.WalletType,
 		Location:      meta.Location,

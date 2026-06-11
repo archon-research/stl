@@ -27,7 +27,7 @@ func TestMapleLoan_Validate(t *testing.T) {
 		{name: "valid external loan"},
 		{
 			name:   "valid internal loan",
-			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{Type: "amm", Dex: "Uniswap"} },
+			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{Type: "amm", DexName: "Uniswap"} },
 		},
 		{
 			name:    "zero chain ID",
@@ -68,7 +68,7 @@ func TestMapleLoan_Validate(t *testing.T) {
 			// Live API observation: 27 of 61 active loans carry loanMeta
 			// with a null type — must be accepted, not rejected.
 			name:   "loan meta with empty type ok",
-			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{Dex: "Uniswap"} },
+			mutate: func(l *MapleLoan) { l.LoanMeta = &MapleLoanMeta{DexName: "Uniswap"} },
 		},
 	}
 

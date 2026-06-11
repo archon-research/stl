@@ -20,7 +20,7 @@ const MapleLoanTypeOTL = "OTL"
 type MapleLoanMeta struct {
 	Type          string // '' | 'amm' | 'strategy' | 'tBills' | 'intercompany' | ...
 	AssetSymbol   string
-	Dex           string
+	DexName       string
 	WalletAddress string
 	WalletType    string
 	Location      string

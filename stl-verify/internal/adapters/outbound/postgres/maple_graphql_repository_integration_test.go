@@ -468,7 +468,7 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x21)
 
-	internalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x30, &entity.MapleLoanMeta{Type: "amm", Dex: "Uniswap"})
+	internalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x30, &entity.MapleLoanMeta{Type: "amm", DexName: "Uniswap"})
 	externalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x31, nil)
 
 	// is_internal generated column follows loan_meta_type.
@@ -588,6 +588,56 @@ func TestMapleUpsertLoans_RefreshesMeta(t *testing.T) {
 	}
 	if !isInternal {
 		t.Error("is_internal = false, want true after meta refresh")
+	}
+}
+
+func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
+	// A loan contract's borrower is immutable; the upsert never refreshes
+	// borrower_user_id and must fail loudly when the API contradicts the
+	// stored value instead of silently keeping the stale association.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x24)
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	loanAddr := mapleAddr(0x34)
+	upsertWithBorrower := func(borrowerByte byte) error {
+		tx, err := maplePool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+
+		borrower := common.BytesToAddress(mapleAddr(borrowerByte))
+		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{borrower})
+		if err != nil {
+			t.Fatalf("GetOrCreateBorrowerUsers: %v", err)
+		}
+		loan, err := entity.NewMapleLoan(1, protocolID, loanAddr, poolID, users[borrower], nil)
+		if err != nil {
+			t.Fatalf("NewMapleLoan: %v", err)
+		}
+		if _, err := repo.UpsertLoans(ctx, tx, []*entity.MapleLoan{loan}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := upsertWithBorrower(0xa1); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	// Same loan, same borrower: fine.
+	if err := upsertWithBorrower(0xa1); err != nil {
+		t.Fatalf("same-borrower re-upsert: %v", err)
+	}
+	// Same loan, different borrower: must fail.
+	err := upsertWithBorrower(0xa2)
+	if err == nil {
+		t.Fatal("expected borrower-change error, got nil")
+	}
+	if !strings.Contains(err.Error(), "borrower changed") {
+		t.Errorf("error %q should mention borrower change", err.Error())
 	}
 }
 

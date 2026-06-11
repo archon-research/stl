@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -54,8 +55,8 @@ func TestTelemetry_RecordsMetrics(t *testing.T) {
 	tel.RecordCycle(cycleCtx, nil)
 	tel.RecordCycle(cycleCtx, errors.New("boom"))
 
-	SetSpanError(phaseSpan, errors.New("boom"), "phase failed")
-	SetSpanError(cycleSpan, nil, "ignored for nil error")
+	telemetry.SetSpanError(phaseSpan, errors.New("boom"), "phase failed")
+	telemetry.SetSpanError(cycleSpan, nil, "ignored for nil error")
 	phaseSpan.End()
 	cycleSpan.End()
 
@@ -270,14 +271,5 @@ func TestNewTelemetryWithProviders_InstrumentErrors(t *testing.T) {
 				t.Errorf("error = %q", err.Error())
 			}
 		})
-	}
-}
-
-func TestStatusAttr(t *testing.T) {
-	if got := statusAttr(nil).Value.AsString(); got != "success" {
-		t.Errorf("statusAttr(nil) = %q, want success", got)
-	}
-	if got := statusAttr(errors.New("x")).Value.AsString(); got != "error" {
-		t.Errorf("statusAttr(err) = %q, want error", got)
 	}
 }

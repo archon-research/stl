@@ -2,11 +2,14 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -70,6 +73,54 @@ func collectBatchIDs[T any, K comparable](ctx context.Context, tx pgx.Tx, batch 
 		result[key(row)] = id
 	}
 	return result, nil
+}
+
+// optionalNumeric converts an optional *big.Int to a nullable NUMERIC arg.
+func optionalNumeric(b *big.Int) *string {
+	if b == nil {
+		return nil
+	}
+	s := b.String()
+	return &s
+}
+
+// nullIfEmpty maps empty strings to SQL NULL.
+func nullIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// sortedCopy returns a sorted copy of items, leaving the caller's slice
+// untouched. Sorting before insert gives concurrent writers a stable
+// row/advisory-lock acquisition order (ADR-0002).
+func sortedCopy[T any](items []T, cmpFn func(a, b T) int) []T {
+	sorted := make([]T, len(items))
+	copy(sorted, items)
+	slices.SortFunc(sorted, cmpFn)
+	return sorted
+}
+
+// sortedByBytesKey returns a copy of items sorted by a bytes key.
+func sortedByBytesKey[T any](items []T, key func(T) []byte) []T {
+	return sortedCopy(items, func(a, b T) int { return bytes.Compare(key(a), key(b)) })
+}
+
+// writeValuesPlaceholders appends "($n, $n+1, ...)" for row i with the given
+// column count, comma-separated from the previous row.
+func writeValuesPlaceholders(sb *strings.Builder, row, cols int) {
+	if row > 0 {
+		sb.WriteString(", ")
+	}
+	sb.WriteString("(")
+	for c := range cols {
+		if c > 0 {
+			sb.WriteString(", ")
+		}
+		fmt.Fprintf(sb, "$%d", row*cols+c+1)
+	}
+	sb.WriteString(")")
 }
 
 // marshalMetadata safely marshals metadata to JSON, returning "{}" for nil/empty maps.

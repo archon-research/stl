@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -121,9 +122,18 @@ type Client struct {
 	logger      *slog.Logger
 }
 
-// NewClient creates a new Maple GraphQL client.
+// NewClient creates a new Maple GraphQL client. The endpoint (after
+// defaulting) must be an absolute http(s) URL.
 func NewClient(cfg Config) (*Client, error) {
 	cfg.applyDefaults()
+
+	u, err := url.Parse(cfg.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parsing endpoint %q: %w", cfg.Endpoint, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("endpoint %q must be an absolute http(s) URL", cfg.Endpoint)
+	}
 
 	return &Client{
 		endpoint:   cfg.Endpoint,

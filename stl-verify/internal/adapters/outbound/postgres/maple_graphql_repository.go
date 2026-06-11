@@ -1,13 +1,11 @@
 package postgres
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"slices"
 	"strings"
 
@@ -197,7 +195,9 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 // address -> maple_loan.id. On conflict, refreshes the pool reference and the
 // loanMeta columns (a loan's metadata can change between snapshots).
 // borrower_user_id is deliberately not refreshed: a loan contract's borrower
-// is immutable, so the value from first insert stays authoritative.
+// is immutable, so the value from first insert stays authoritative — and the
+// stored value is compared against the incoming one so a violation of that
+// assumption fails the call instead of vanishing.
 func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
@@ -211,7 +211,7 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 		if l.LoanMeta != nil {
 			metaType = nullIfEmpty(l.LoanMeta.Type)
 			metaAssetSymbol = nullIfEmpty(l.LoanMeta.AssetSymbol)
-			metaDex = nullIfEmpty(l.LoanMeta.Dex)
+			metaDex = nullIfEmpty(l.LoanMeta.DexName)
 			metaWalletAddress = nullIfEmpty(l.LoanMeta.WalletAddress)
 			metaWalletType = nullIfEmpty(l.LoanMeta.WalletType)
 			metaLocation = nullIfEmpty(l.LoanMeta.Location)
@@ -230,14 +230,44 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 			     loan_meta_wallet_address = EXCLUDED.loan_meta_wallet_address,
 			     loan_meta_wallet_type = EXCLUDED.loan_meta_wallet_type,
 			     loan_meta_location = EXCLUDED.loan_meta_location
-			 RETURNING id`,
+			 RETURNING id, borrower_user_id`,
 			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.MaplePoolID, l.BorrowerUserID,
 			metaType, metaAssetSymbol, metaDex, metaWalletAddress, metaWalletType, metaLocation,
 		)
 	}
 
-	return collectBatchIDs(ctx, tx, batch, sorted, "maple loan",
-		func(l *entity.MapleLoan) common.Address { return common.BytesToAddress(l.LoanAddress) })
+	return collectLoanIDsVerifyingBorrower(ctx, tx, batch, sorted)
+}
+
+// collectLoanIDsVerifyingBorrower scans the loan upsert batch and enforces
+// borrower immutability: the upsert never refreshes borrower_user_id, so a
+// stored value differing from the API's resolved borrower means the "a loan
+// contract's borrower is immutable" assumption broke upstream — fail loudly
+// instead of silently keeping the stale association.
+func collectLoanIDsVerifyingBorrower(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, loans []*entity.MapleLoan) (result map[common.Address]int64, err error) {
+	br := tx.SendBatch(ctx, batch)
+	// A scan error takes precedence over the close error; the close error is
+	// only surfaced when everything else succeeded.
+	defer func() {
+		if closeErr := br.Close(); closeErr != nil && err == nil {
+			result = nil
+			err = fmt.Errorf("closing maple loan batch: %w", closeErr)
+		}
+	}()
+
+	result = make(map[common.Address]int64, len(loans))
+	for _, l := range loans {
+		addr := common.BytesToAddress(l.LoanAddress)
+		var id, storedBorrower int64
+		if err := br.QueryRow().Scan(&id, &storedBorrower); err != nil {
+			return nil, fmt.Errorf("upserting maple loan %s: %w", addr, err)
+		}
+		if storedBorrower != l.BorrowerUserID {
+			return nil, fmt.Errorf("maple loan %s borrower changed: stored user id %d, API resolved user id %d (loan borrowers are immutable; refusing the snapshot)", addr, storedBorrower, l.BorrowerUserID)
+		}
+		result[addr] = id
+	}
+	return result, nil
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
@@ -469,52 +499,4 @@ func (r *MapleGraphQLRepository) warnDedupedRows(table string, tag pgconn.Comman
 			"inserted", inserted,
 		)
 	}
-}
-
-// optionalNumeric converts an optional *big.Int to a nullable NUMERIC arg.
-func optionalNumeric(b *big.Int) *string {
-	if b == nil {
-		return nil
-	}
-	s := b.String()
-	return &s
-}
-
-// nullIfEmpty maps empty strings to SQL NULL.
-func nullIfEmpty(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}
-
-// sortedCopy returns a sorted copy of items, leaving the caller's slice
-// untouched. Sorting before insert gives concurrent writers a stable
-// row/advisory-lock acquisition order (ADR-0002).
-func sortedCopy[T any](items []T, cmpFn func(a, b T) int) []T {
-	sorted := make([]T, len(items))
-	copy(sorted, items)
-	slices.SortFunc(sorted, cmpFn)
-	return sorted
-}
-
-// sortedByBytesKey returns a copy of items sorted by a bytes key.
-func sortedByBytesKey[T any](items []T, key func(T) []byte) []T {
-	return sortedCopy(items, func(a, b T) int { return bytes.Compare(key(a), key(b)) })
-}
-
-// writeValuesPlaceholders appends "($n, $n+1, ...)" for row i with the given
-// column count, comma-separated from the previous row.
-func writeValuesPlaceholders(sb *strings.Builder, row, cols int) {
-	if row > 0 {
-		sb.WriteString(", ")
-	}
-	sb.WriteString("(")
-	for c := range cols {
-		if c > 0 {
-			sb.WriteString(", ")
-		}
-		fmt.Fprintf(sb, "$%d", row*cols+c+1)
-	}
-	sb.WriteString(")")
 }

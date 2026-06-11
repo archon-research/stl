@@ -7,7 +7,6 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -100,7 +99,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 // StartCycleSpan starts the top-level span for one sync cycle.
 func (t *Telemetry) StartCycleSpan(ctx context.Context, syncedAt time.Time) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, noopSpan()
+		return ctx, telemetry.NoopSpan()
 	}
 	return t.tracer.Start(ctx, "maple.sync",
 		trace.WithAttributes(attribute.String("synced_at", syncedAt.Format(time.RFC3339))),
@@ -110,7 +109,7 @@ func (t *Telemetry) StartCycleSpan(ctx context.Context, syncedAt time.Time) (con
 // StartPhaseSpan starts a child span for one sync phase.
 func (t *Telemetry) StartPhaseSpan(ctx context.Context, phase string) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, noopSpan()
+		return ctx, telemetry.NoopSpan()
 	}
 	return t.tracer.Start(ctx, "maple.sync."+phase,
 		trace.WithAttributes(attribute.String("phase", phase)),
@@ -122,7 +121,7 @@ func (t *Telemetry) RecordCycle(ctx context.Context, err error) {
 	if t == nil {
 		return
 	}
-	t.cyclesTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr, statusAttr(err)))
+	t.cyclesTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr, telemetry.StatusAttr(err)))
 }
 
 // RecordPhase records the outcome and duration of one sync phase.
@@ -130,7 +129,7 @@ func (t *Telemetry) RecordPhase(ctx context.Context, phase string, duration time
 	if t == nil {
 		return
 	}
-	attrs := metric.WithAttributes(t.chainAttr, attribute.String("phase", phase), statusAttr(err))
+	attrs := metric.WithAttributes(t.chainAttr, attribute.String("phase", phase), telemetry.StatusAttr(err))
 	t.phasesTotal.Add(ctx, 1, attrs)
 	t.phaseDuration.Record(ctx, duration.Seconds(), attrs)
 }
@@ -158,24 +157,4 @@ func (t *Telemetry) RecordNullDowngrade(ctx context.Context, field string) {
 		t.chainAttr,
 		attribute.String("field", field),
 	))
-}
-
-// SetSpanError records an error on a span and sets its status.
-func SetSpanError(span trace.Span, err error, description string) {
-	if err == nil {
-		return
-	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, description)
-}
-
-func statusAttr(err error) attribute.KeyValue {
-	if err != nil {
-		return attribute.String("status", "error")
-	}
-	return attribute.String("status", "success")
-}
-
-func noopSpan() trace.Span {
-	return trace.SpanFromContext(context.Background())
 }

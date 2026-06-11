@@ -48,7 +48,8 @@ type MapleGraphQLRepository interface {
 	// address -> maple_loan.id. On conflict, refreshes maple_pool_id and the
 	// loanMeta columns (a loan can be reassigned and gain/lose meta between
 	// snapshots); borrower_user_id is deliberately never refreshed (a loan
-	// contract's borrower is immutable).
+	// contract's borrower is immutable), and implementations must fail when
+	// the stored borrower differs from the incoming one.
 	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.

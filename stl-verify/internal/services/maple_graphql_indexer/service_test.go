@@ -64,6 +64,7 @@ type mockRepo struct {
 
 	// Captured arguments for assertions.
 	borrowerCalls   [][]common.Address
+	upsertedLoans   []*entity.MapleLoan
 	savedPoolStates []*entity.MaplePoolState
 	savedLoanStates []*entity.MapleLoanState
 	savedCollats    []*entity.MapleLoanCollateral
@@ -96,6 +97,7 @@ func newMockRepo() *mockRepo {
 		return nil
 	}
 	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*entity.MapleLoan) (map[common.Address]int64, error) {
+		r.upsertedLoans = append(r.upsertedLoans, loans...)
 		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
 			ids[common.BytesToAddress(l.LoanAddress)] = int64(20 + i)
@@ -394,6 +396,23 @@ func TestSync_HappyPath(t *testing.T) {
 	if repo.savedPoolStates[1].MaplePoolID != 11 || repo.savedPoolStates[1].TVL.Int64() != 0 {
 		t.Errorf("pool state 1 = id %d tvl %s, want id 11 tvl 0",
 			repo.savedPoolStates[1].MaplePoolID, repo.savedPoolStates[1].TVL)
+	}
+
+	// Loan meta maps field-for-field into the registry entity; the loan
+	// without API meta keeps a nil meta.
+	if len(repo.upsertedLoans) != 3 {
+		t.Fatalf("upserted loans = %d, want 3", len(repo.upsertedLoans))
+	}
+	metaByAddr := map[common.Address]*entity.MapleLoanMeta{}
+	for _, l := range repo.upsertedLoans {
+		metaByAddr[common.BytesToAddress(l.LoanAddress)] = l.LoanMeta
+	}
+	wantMeta := entity.MapleLoanMeta{Type: "amm", DexName: "Uniswap"}
+	if got := metaByAddr[addr(0x20)]; got == nil || *got != wantMeta {
+		t.Errorf("loan 0x20 meta = %+v, want %+v", got, wantMeta)
+	}
+	if got := metaByAddr[addr(0x21)]; got != nil {
+		t.Errorf("loan 0x21 meta = %+v, want nil", got)
 	}
 
 	// Borrower resolution: one call, two distinct borrowers (0xa0 deduped).
@@ -940,22 +959,41 @@ func TestSync_DuplicateIDsFail(t *testing.T) {
 
 func TestSync_DecimalsOverflowFails(t *testing.T) {
 	// An API bug returning decimals > MaxInt16 must not silently wrap into a
-	// plausible small value.
-	client := happyClient()
-	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
-		pools := fixturePools()
-		pools[0].AssetDecimals = 65542
-		return pools, nil
-	}
-	repo := newMockRepo()
-	service := newTestService(t, client, repo)
+	// plausible small value (65542 would wrap to 6).
+	for _, tc := range []struct {
+		name     string
+		decimals int
+		wantErr  bool
+	}{
+		{name: "wraps to plausible value", decimals: 65542, wantErr: true},
+		{name: "one past max int16", decimals: 32768, wantErr: true},
+		{name: "negative", decimals: -1, wantErr: true},
+		{name: "max int16 is valid", decimals: 32767, wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := happyClient()
+			client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+				pools := fixturePools()
+				pools[0].AssetDecimals = tc.decimals
+				return pools, nil
+			}
+			repo := newMockRepo()
+			service := newTestService(t, client, repo)
 
-	err := service.Sync(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "out of int16 range") {
-		t.Errorf("error = %q", err.Error())
+			err := service.Sync(context.Background())
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "out of int16 range") {
+				t.Errorf("error = %q", err.Error())
+			}
+		})
 	}
 }
 
@@ -1093,61 +1131,5 @@ func TestSync_InvalidGlobalsFailsPhase(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tvl must not be nil") {
 		t.Errorf("error = %q", err.Error())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-func TestToInt16(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      int
-		want    int16
-		wantErr bool
-	}{
-		{name: "zero", in: 0, want: 0},
-		{name: "typical decimals", in: 18, want: 18},
-		{name: "max int16", in: 32767, want: 32767},
-		{name: "overflow", in: 32768, wantErr: true},
-		{name: "wraps to plausible value", in: 65542, wantErr: true},
-		{name: "negative", in: -1, wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := toInt16(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("toInt16(%d) = %d, want %d", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestToEntityLoanMeta(t *testing.T) {
-	if toEntityLoanMeta(nil) != nil {
-		t.Error("nil meta should map to nil")
-	}
-
-	got := toEntityLoanMeta(&outbound.MapleLoanMeta{
-		Type: "amm", AssetSymbol: "WETH", DexName: "Uniswap",
-		Location: "base", WalletAddress: "0xabc", WalletType: "EVM",
-	})
-	want := &entity.MapleLoanMeta{
-		Type: "amm", AssetSymbol: "WETH", Dex: "Uniswap",
-		Location: "base", WalletAddress: "0xabc", WalletType: "EVM",
-	}
-	if *got != *want {
-		t.Errorf("toEntityLoanMeta = %+v, want %+v", got, want)
 	}
 }

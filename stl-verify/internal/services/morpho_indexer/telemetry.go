@@ -8,7 +8,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -188,7 +187,7 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 // StartBlockSpan starts a top-level span for block processing.
 func (t *Telemetry) StartBlockSpan(ctx context.Context, blockNumber int64) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, noopSpan()
+		return ctx, telemetry.NoopSpan()
 	}
 	return t.tracer.Start(ctx, "morpho.processBlock",
 		trace.WithAttributes(
@@ -200,22 +199,9 @@ func (t *Telemetry) StartBlockSpan(ctx context.Context, blockNumber int64) (cont
 // StartSpan starts a named child span with optional attributes.
 func (t *Telemetry) StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, noopSpan()
+		return ctx, telemetry.NoopSpan()
 	}
 	return t.tracer.Start(ctx, name,
 		trace.WithAttributes(attrs...),
 	)
-}
-
-// SetSpanError records an error on a span and sets its status.
-func SetSpanError(span trace.Span, err error, description string) {
-	if err == nil {
-		return
-	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, description)
-}
-
-func noopSpan() trace.Span {
-	return trace.SpanFromContext(context.Background())
 }
