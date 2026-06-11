@@ -9,13 +9,12 @@ OPENAPI_SCHEMA := $(TS_DIR)/ui/src/generated/openapi-schema.json
 AXIS_SYNOME_CONTRACT_DIR := ../contracts/axis-synome
 AXIS_SYNOME_CONTRACT_JSON := $(AXIS_SYNOME_CONTRACT_DIR)/axis_synome_entities.json
 AXIS_SYNOME_CONTRACT_SCHEMA := $(AXIS_SYNOME_CONTRACT_DIR)/axis_synome_entities.schema.json
-# Provenance commit embedded in the exported contract. axis-synome's published
-# dev wheels are built with SETUPTOOLS_SCM_PRETEND_VERSION, which leaves the
-# build commit unset, and the export tool's own fallback shells out to
-# `git rev-parse HEAD` — from an installed wheel that resolves THIS repo's HEAD,
-# not axis-synome's. So resolve it from the wheel when embedded and otherwise
-# require it to be passed explicitly (the published commit), never the stl HEAD.
-# For a release bump: make export-axis-synome-contract AXIS_SYNOME_GIT_COMMIT=<sha>
+# Provenance commit stamped into the exported contract. axis-synome's published dev
+# wheels set SETUPTOOLS_SCM_PRETEND_VERSION, so the build commit is unset
+# (_version.commit_id is None). The export tool (>= dev76) guards its own git fallback
+# so it never resolves THIS repo's HEAD. We read the commit from the wheel when present
+# and otherwise default to "unknown"; pass AXIS_SYNOME_GIT_COMMIT=<sha> on a release
+# bump to stamp the published commit.
 AXIS_SYNOME_GIT_COMMIT ?= $(shell $(UV) run python -c "from axis_synome._version import commit_id; print(commit_id or 'unknown')" 2>/dev/null || echo unknown)
 
 typecheck:

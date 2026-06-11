@@ -6,17 +6,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-// TestLoadDefaultProxies_KeepsAlmAndSubProxy guards against a regression where
+// TestProxiesFromContract_KeepsAlmAndSubProxy guards against a regression where
 // the axis-synome export collapsed each (star, chain) to a single proxy,
 // dropping the SubProxy/treasury wallets. Both the ALM proxy and the SubProxy
 // must be present for the mainnet stars.
-func TestLoadDefaultProxies_KeepsAlmAndSubProxy(t *testing.T) {
+func TestProxiesFromContract_KeepsAlmAndSubProxy(t *testing.T) {
 	t.Parallel()
 
-	proxies, err := LoadDefaultProxies()
-	if err != nil {
-		t.Fatalf("LoadDefaultProxies() error = %v", err)
-	}
+	proxies := defaultProxies(t)
 
 	byStarChain := make(map[[2]string]map[common.Address]string)
 	for _, p := range proxies {
