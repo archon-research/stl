@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 const URL_PARAMS_EVENT = 'stl:url-params-change';
+const URL_PATH_EVENT = 'stl:url-path-change';
 
 export const PARAMS = {
   prime: 'prime',
@@ -9,6 +10,7 @@ export const PARAMS = {
   category: 'category',
   tab: 'tab',
   receiptToken: 'rt',
+  activityAction: 'aa',
   // Data table params (shared across tables)
   sort: 'sort',
   search: 'q',
@@ -48,6 +50,28 @@ export function setParam(key: string, value: string | null): void {
   window.dispatchEvent(new Event(URL_PARAMS_EVENT));
 }
 
+export function setPathname(
+  pathname: string,
+  mode: 'push' | 'replace' = 'push',
+): void {
+  if (!isBrowser()) {
+    return;
+  }
+
+  const normalizedPathname = pathname.startsWith('/')
+    ? pathname
+    : `/${pathname}`;
+  const nextUrl = `${normalizedPathname}${window.location.search}${window.location.hash}`;
+
+  if (mode === 'replace') {
+    window.history.replaceState(window.history.state, '', nextUrl);
+  } else {
+    window.history.pushState(window.history.state, '', nextUrl);
+  }
+
+  window.dispatchEvent(new Event(URL_PATH_EVENT));
+}
+
 export function useUrlParam(
   key: string,
 ): [string | null, (value: string | null) => void] {
@@ -82,4 +106,37 @@ export function useUrlParam(
   }, [key]);
 
   return [value, updateValue];
+}
+
+export function usePathname(): [string, (pathname: string) => void] {
+  const [pathname, setPathnameState] = useState<string>(() =>
+    isBrowser() ? window.location.pathname : '/',
+  );
+
+  const updatePathname = useCallback((nextPathname: string) => {
+    setPathname(nextPathname, 'push');
+    setPathnameState(nextPathname.startsWith('/') ? nextPathname : `/${nextPathname}`);
+  }, []);
+
+  useEffect(() => {
+    if (!isBrowser()) {
+      return;
+    }
+
+    const syncFromLocation = () => {
+      setPathnameState(window.location.pathname);
+    };
+
+    syncFromLocation();
+
+    window.addEventListener('popstate', syncFromLocation);
+    window.addEventListener(URL_PATH_EVENT, syncFromLocation);
+
+    return () => {
+      window.removeEventListener('popstate', syncFromLocation);
+      window.removeEventListener(URL_PATH_EVENT, syncFromLocation);
+    };
+  }, []);
+
+  return [pathname, updatePathname];
 }
