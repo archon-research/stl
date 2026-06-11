@@ -24,6 +24,8 @@ import {
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
+  Allocation,
+  AllocationCategory,
   AllocationActivity,
   AllocationActivityResponse,
   Prime,
@@ -34,11 +36,19 @@ import { TokenAddress } from '../../shared';
 
 type ActivityFeedProps = {
   isEnabled: boolean;
+  mode?: 'drawer' | 'page';
+  actionFilter?: string;
+  primeOptions?: Prime[];
+  protocolOptions?: string[];
   selectedPrime: Prime | null;
+  selectedReceiptToken?: Allocation | null;
+  selectedCategory?: AllocationCategory | '';
   searchQuery?: string;
+  tokenOptions?: string[];
 };
 
 type ActivityFilters = {
+  prime_id?: string;
   protocol_name?: string;
   action_type?: string;
   token_symbol?: string;
@@ -404,10 +414,18 @@ function ActivityEventRow({
 }
 
 export function ActivityFeed({
+  actionFilter,
   isEnabled,
+  mode = 'drawer',
+  primeOptions = [],
+  protocolOptions = [],
+  selectedCategory = '',
   selectedPrime,
+  selectedReceiptToken = null,
   searchQuery = '',
+  tokenOptions = [],
 }: ActivityFeedProps) {
+  const isPageMode = mode === 'page';
   const txRequestControllersRef = useRef<Record<string, AbortController>>({});
 
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
@@ -424,9 +442,19 @@ export function ActivityFeed({
     Record<string, boolean>
   >({});
   const [filters, setFilters] = useState<ActivityFilters>({
+    prime_id: selectedPrime?.id,
     limit: 50,
   });
+  const uniqueProtocolOptions = useMemo(
+    () => Array.from(new Set(protocolOptions)).sort((a, b) => a.localeCompare(b)),
+    [protocolOptions],
+  );
+  const uniqueTokenOptions = useMemo(
+    () => Array.from(new Set(tokenOptions)).sort((a, b) => a.localeCompare(b)),
+    [tokenOptions],
+  );
   const hasActiveFilters = Boolean(
+    filters.prime_id ||
     filters.protocol_name ||
     filters.action_type ||
     filters.token_symbol ||
@@ -462,7 +490,56 @@ export function ActivityFeed({
   };
 
   useEffect(() => {
-    if (!isEnabled || !selectedPrime) {
+    if (isPageMode) {
+      return;
+    }
+
+    setFilters((previous) => ({
+      ...previous,
+      prime_id: selectedPrime?.id,
+      token_symbol: selectedReceiptToken?.symbol,
+      action_type: actionFilter,
+      protocol_name: undefined,
+      from_timestamp: undefined,
+      to_timestamp: undefined,
+      chain_id: selectedReceiptToken?.chain_id,
+      limit: previous.limit ?? 50,
+    }));
+  }, [
+    actionFilter,
+    isPageMode,
+    selectedCategory,
+    selectedPrime?.id,
+    selectedReceiptToken?.chain_id,
+    selectedReceiptToken?.symbol,
+  ]);
+
+  const requestFilters = useMemo(() => {
+    if (isPageMode) {
+      return {
+        ...filters,
+        prime_id: filters.prime_id || undefined,
+      };
+    }
+
+    return {
+      prime_id: selectedPrime?.id,
+      chain_id: selectedReceiptToken?.chain_id,
+      token_symbol: selectedReceiptToken?.symbol,
+      action_type: actionFilter,
+      limit: filters.limit ?? 50,
+    };
+  }, [
+    actionFilter,
+    filters,
+    isPageMode,
+    selectedPrime?.id,
+    selectedReceiptToken?.chain_id,
+    selectedReceiptToken?.symbol,
+  ]);
+
+  useEffect(() => {
+    if (!isEnabled || (!isPageMode && !selectedPrime)) {
       Object.values(txRequestControllersRef.current).forEach((controller) => {
         controller.abort();
       });
@@ -477,7 +554,6 @@ export function ActivityFeed({
       return;
     }
 
-    const primeId = selectedPrime.id;
     const abortController = new AbortController();
 
     async function fetchActivity() {
@@ -486,10 +562,7 @@ export function ActivityFeed({
 
       try {
         const result = await getAllocationActivity(
-          {
-            prime_id: primeId,
-            ...filters,
-          },
+          requestFilters,
           abortController.signal,
         );
         setEvents(result);
@@ -503,8 +576,7 @@ export function ActivityFeed({
         logging.error('Failed to fetch allocation activity', {
           error: err,
           errorMessage: errorMsg,
-          primeId,
-          filters,
+          filters: requestFilters,
         });
       } finally {
         if (!abortController.signal.aborted) {
@@ -516,7 +588,7 @@ export function ActivityFeed({
     void fetchActivity();
 
     return () => abortController.abort();
-  }, [filters, isEnabled, selectedPrime]);
+  }, [isEnabled, isPageMode, requestFilters, selectedPrime]);
 
   useEffect(() => {
     return () => {
@@ -656,14 +728,18 @@ export function ActivityFeed({
   if (!isEnabled) {
     return (
       <EmptyState
-        title="Open Activity Tab"
-        description="Activity loads when the drawer is open and the Activity tab is selected."
+        title={isPageMode ? 'Activity Unavailable' : 'Open Activity Tab'}
+        description={
+          isPageMode
+            ? 'Activity view is currently unavailable.'
+            : 'Activity loads when the drawer is open and the Activity tab is selected.'
+        }
         stretch
       />
     );
   }
 
-  if (!selectedPrime) {
+  if (!isPageMode && !selectedPrime) {
     return (
       <EmptyState
         title="No Prime Selected"
@@ -703,51 +779,94 @@ export function ActivityFeed({
           overflow: 'hidden',
         })}
       >
-        <div
-          className={css({
-            borderRadius: 'lg',
-            border: '1px solid token(colors.surface.subtle)',
-            bg: 'surface.default',
-            p: '3',
-            display: 'grid',
-            gap: '3',
-            mb: '3',
-          })}
-        >
+        {isPageMode ? (
+          <div
+            className={css({
+              borderRadius: 'lg',
+              border: '1px solid token(colors.surface.subtle)',
+              bg: 'surface.default',
+              p: '3',
+              display: 'grid',
+              gap: '3',
+              mb: '3',
+            })}
+          >
           <div
             className={css({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                md: 'repeat(5, minmax(0, 1fr))',
+                md: 'repeat(3, minmax(0, 1fr))',
               },
               gap: '2',
               alignItems: 'end',
             })}
           >
-            <input
-              aria-label="Filter activity by protocol"
-              placeholder="Protocol"
-              value={filters.protocol_name ?? ''}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                updateFilter(
-                  'protocol_name',
-                  normalizeFilterValue(event.target.value),
-                )
+            <StyledSelect
+              aria-label="Filter activity by prime"
+              value={filters.prime_id ?? ''}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                updateFilter('prime_id', event.target.value || undefined)
               }
-              className={css({
-                width: 'full',
-                h: '9',
-                borderRadius: 'md',
-                borderWidth: '1px',
-                borderStyle: 'solid',
-                borderColor: 'border.subtle',
-                bg: 'surface.default',
-                color: 'text.default',
-                px: '3',
-                fontSize: 'sm',
-              })}
-            />
+            >
+              <option value="">All primes</option>
+              {primeOptions.map((prime) => (
+                <option key={prime.id} value={prime.id}>
+                  {prime.name}
+                </option>
+              ))}
+            </StyledSelect>
+            {uniqueProtocolOptions.length > 0 ? (
+              <StyledSelect
+                aria-label="Filter activity by protocol"
+                value={filters.protocol_name ?? ''}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                  updateFilter(
+                    'protocol_name',
+                    normalizeFilterValue(event.target.value),
+                  )
+                }
+              >
+                <option value="">All protocols</option>
+                {uniqueProtocolOptions.map((protocolName) => (
+                  <option key={protocolName} value={protocolName}>
+                    {protocolName}
+                  </option>
+                ))}
+              </StyledSelect>
+            ) : null}
+            {uniqueTokenOptions.length > 0 ? (
+              <StyledSelect
+                aria-label="Filter activity by token symbol"
+                value={filters.token_symbol ?? ''}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                  updateFilter(
+                    'token_symbol',
+                    normalizeFilterValue(event.target.value),
+                  )
+                }
+              >
+                <option value="">All tokens</option>
+                {uniqueTokenOptions.map((symbol) => (
+                  <option key={symbol} value={symbol}>
+                    {symbol}
+                  </option>
+                ))}
+              </StyledSelect>
+            ) : null}
+          </div>
+
+          <div
+            className={css({
+              display: 'grid',
+              gridTemplateColumns: {
+                base: '1fr',
+                md: 'repeat(3, minmax(0, 1fr))',
+              },
+              gap: '2',
+              alignItems: 'end',
+            })}
+          >
             <StyledSelect
               aria-label="Filter activity by action"
               value={filters.action_type ?? ''}
@@ -761,29 +880,6 @@ export function ActivityFeed({
                 </option>
               ))}
             </StyledSelect>
-            <input
-              aria-label="Filter activity by token symbol"
-              placeholder="Token"
-              value={filters.token_symbol ?? ''}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                updateFilter(
-                  'token_symbol',
-                  normalizeFilterValue(event.target.value),
-                )
-              }
-              className={css({
-                width: 'full',
-                h: '9',
-                borderRadius: 'md',
-                borderWidth: '1px',
-                borderStyle: 'solid',
-                borderColor: 'border.subtle',
-                bg: 'surface.default',
-                color: 'text.default',
-                px: '3',
-                fontSize: 'sm',
-              })}
-            />
             <input
               aria-label="Filter activity from timestamp"
               type="datetime-local"
@@ -869,7 +965,8 @@ export function ActivityFeed({
               </button>
             ) : null}
           </div>
-        </div>
+          </div>
+        ) : null}
 
         {filteredEvents.length === 0 ? (
           <EmptyState

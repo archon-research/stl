@@ -75,6 +75,9 @@ export function BottomPanel({
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
   const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
+  const [activityActionParam, setActivityActionParam] = useUrlParam(
+    PARAMS.activityAction,
+  );
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
@@ -88,6 +91,12 @@ export function BottomPanel({
 
   const activeTab: ActiveTab =
     tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
+  const activityActionFilter =
+    activityActionParam === 'in' ||
+    activityActionParam === 'out' ||
+    activityActionParam === 'sweep'
+      ? activityActionParam
+      : '';
 
   useEffect(() => {
     const primeId = selectedPrime?.id ?? null;
@@ -96,10 +105,16 @@ export function BottomPanel({
       setReceiptTokenParam(null);
       setCategoryFilter('');
       setCategoryParam(null);
+      setActivityActionParam(null);
     }
 
     previousPrimeIdRef.current = primeId;
-  }, [selectedPrime?.id, setCategoryParam, setReceiptTokenParam]);
+  }, [
+    selectedPrime?.id,
+    setActivityActionParam,
+    setCategoryParam,
+    setReceiptTokenParam,
+  ]);
 
   useEffect(() => {
     const normalized = parseCategoryParam(categoryParam);
@@ -285,7 +300,7 @@ export function BottomPanel({
           display: 'grid',
           gridTemplateColumns: {
             base: '1fr',
-            md: 'repeat(2, minmax(14rem, 1fr)) minmax(18rem, 1fr)',
+            md: 'repeat(3, minmax(12rem, 1fr)) minmax(18rem, 1fr)',
           },
           gap: '4',
           alignItems: 'end',
@@ -372,6 +387,40 @@ export function BottomPanel({
           </StyledSelect>
         </label>
 
+        {activeTab === 'activity' ? (
+          <label
+            htmlFor="activity-action-filter"
+            className={css({
+              display: 'grid',
+              gap: '1',
+            })}
+          >
+            <span
+              className={css({
+                fontSize: 'xs',
+                textTransform: 'uppercase',
+                letterSpacing: '0.1em',
+                color: 'text.muted',
+              })}
+            >
+              Action
+            </span>
+            <StyledSelect
+              id="activity-action-filter"
+              value={activityActionFilter}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                setActivityActionParam(event.target.value || null)
+              }
+              disabled={!focusedAllocation || isLoading || errorMessage !== null}
+            >
+              <option value="">All actions</option>
+              <option value="in">In</option>
+              <option value="out">Out</option>
+              <option value="sweep">Sweep</option>
+            </StyledSelect>
+          </label>
+        ) : null}
+
         {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
@@ -443,7 +492,11 @@ export function BottomPanel({
             ) : (
               <ActivityFeed
                 isEnabled={isDrawerOpen && activeTab === 'activity'}
+                actionFilter={activityActionFilter || undefined}
+                mode="drawer"
+                selectedCategory={categoryFilter}
                 searchQuery={riskSearchValue}
+                selectedReceiptToken={focusedAllocation}
                 selectedPrime={selectedPrime}
               />
             )}
