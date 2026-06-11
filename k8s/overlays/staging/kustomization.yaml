@@ -37,88 +37,88 @@ resources:
 images:
   - name: watcher
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: backup-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: oracle-price-worker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: sparklend-position-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: morpho-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: allocation-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: avalanche-sparklend-position-tracker
     # Shares the sparklend-position-tracker image — no separate ECR repo exists
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-sparklend-position-tracker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: avalanche-watcher
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: avalanche-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: avalanche-oracle-price-worker
     # Shares the oracle-price-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: base-watcher
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: optimism-watcher
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: unichain-watcher
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: arbitrum-watcher
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-watcher
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: base-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: optimism-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: unichain-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: arbitrum-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: prime-debt-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: spark-anchorage-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "anchorage-indexer-dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "anchorage-indexer-3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: offchain-price-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "offchain-price-indexer-dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "offchain-price-indexer-3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "watcher-data-validator-dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "watcher-data-validator-3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: migrate
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-migrate
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
   - name: python-api
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-python-api
-    newTag: "dec1730e4bfb1e817fc953b3aab0ba8c68e2c495"
+    newTag: "3f5fcab5458f11a14276c2d22e468bfe57a6f936"
 
 patches:
   - target:
