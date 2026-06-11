@@ -183,12 +183,7 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	}
 	sb.WriteString(` ON CONFLICT (maple_pool_id, synced_at, processing_version) DO NOTHING`)
 
-	tag, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("saving maple pool states: %w", err)
-	}
-	r.warnDedupedRows("maple_pool_state", tag, len(states))
-	return nil
+	return r.execWarnDedup(ctx, tx, "maple_pool_state", sb.String(), args, len(states))
 }
 
 // UpsertLoans upserts loan registry rows and returns loan
@@ -294,12 +289,7 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
-	tag, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("saving maple loan states: %w", err)
-	}
-	r.warnDedupedRows("maple_loan_state", tag, len(states))
-	return nil
+	return r.execWarnDedup(ctx, tx, "maple_loan_state", sb.String(), args, len(states))
 }
 
 // SaveLoanCollaterals inserts loan collateral snapshots. Loans with null API
@@ -337,12 +327,7 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
-	tag, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("saving maple loan collaterals: %w", err)
-	}
-	r.warnDedupedRows("maple_loan_collateral", tag, len(collaterals))
-	return nil
+	return r.execWarnDedup(ctx, tx, "maple_loan_collateral", sb.String(), args, len(collaterals))
 }
 
 // UpsertSkyStrategies upserts strategy registry rows and returns strategy
@@ -420,12 +405,7 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 	}
 	sb.WriteString(` ON CONFLICT (maple_sky_strategy_id, synced_at, processing_version) DO NOTHING`)
 
-	tag, err := tx.Exec(ctx, sb.String(), args...)
-	if err != nil {
-		return fmt.Errorf("saving maple sky strategy states: %w", err)
-	}
-	r.warnDedupedRows("maple_sky_strategy_state", tag, len(states))
-	return nil
+	return r.execWarnDedup(ctx, tx, "maple_sky_strategy_state", sb.String(), args, len(states))
 }
 
 // SaveSyrupGlobalState inserts the protocol-wide Syrup aggregate snapshot
@@ -452,23 +432,31 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 		return fmt.Errorf("converting pool_apy: %w", err)
 	}
 
-	tag, err := tx.Exec(ctx,
+	return r.execWarnDedup(ctx, tx, "maple_syrup_global_state",
 		`INSERT INTO maple_syrup_global_state (chain_id, synced_at, tvl, apy, collateral_apy, pool_apy, drips_yield_boost, build_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (chain_id, synced_at, processing_version) DO NOTHING`,
-		state.ChainID, state.SyncedAt, tvl, apy, collateralAPY, poolAPY,
-		optionalNumeric(state.DripsYieldBoost), int(r.buildID),
+		[]any{state.ChainID, state.SyncedAt, tvl, apy, collateralAPY, poolAPY,
+			optionalNumeric(state.DripsYieldBoost), int(r.buildID)},
+		1,
 	)
-	if err != nil {
-		return fmt.Errorf("saving maple syrup global state: %w", err)
-	}
-	r.warnDedupedRows("maple_syrup_global_state", tag, 1)
-	return nil
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// execWarnDedup executes a state-insert statement, wraps its error with the
+// table name, and runs the ON CONFLICT dedup check — so a future state
+// table cannot forget the RowsAffected visibility.
+func (r *MapleGraphQLRepository) execWarnDedup(ctx context.Context, tx pgx.Tx, table, sql string, args []any, expected int) error {
+	tag, err := tx.Exec(ctx, sql, args...)
+	if err != nil {
+		return fmt.Errorf("saving %s: %w", table, err)
+	}
+	r.warnDedupedRows(table, tag, expected)
+	return nil
+}
 
 // warnDedupedRows makes ON CONFLICT DO NOTHING dedup visible. A full dedup
 // (zero rows inserted) is the signature of a Temporal activity retry
