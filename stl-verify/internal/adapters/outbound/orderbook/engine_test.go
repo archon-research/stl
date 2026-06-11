@@ -20,8 +20,7 @@ import (
 // fakeExchange is a minimal exchangeFeed for engine tests. Frames are
 // {"symbol","snapshot","price","size"} JSON objects applied to the bid side.
 type fakeExchange struct {
-	url    string
-	subErr error // when set, subscribeMessages fails with it
+	url string
 
 	mu     sync.Mutex
 	groups [][]string // symbol groups passed to subscribeMessages
@@ -35,14 +34,11 @@ func (e *fakeExchange) endpoint() string { return e.url }
 func (e *fakeExchange) normalizeSymbol(s string) (string, error) {
 	return strings.ToUpper(s), nil
 }
-func (e *fakeExchange) subscribeMessages(group []string) ([]any, error) {
+func (e *fakeExchange) subscribeMessages(group []string) []any {
 	e.mu.Lock()
 	e.groups = append(e.groups, group)
 	e.mu.Unlock()
-	if e.subErr != nil {
-		return nil, e.subErr
-	}
-	return []any{map[string]any{"sub": group}}, nil
+	return []any{map[string]any{"sub": group}}
 }
 
 // subscribedGroups returns a copy of the symbol groups subscribed so far.
@@ -260,8 +256,7 @@ func TestWatchDedupsNormalizedSymbols(t *testing.T) {
 	srv := newWSTestServer(t, keepOpen)
 	ex := &fakeExchange{url: srv.url}
 	p := newFeedProvider(testConfig(), ex, 10)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if _, err := p.Watch(ctx, []string{"btc-usd", "BTC-USD"}); err != nil {
 		t.Fatalf("Watch: %v", err)
@@ -374,17 +369,6 @@ func TestRunConnectionReturnsDialError(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate, 1)
 	if err := p.runConnection(context.Background(), []string{"X"}, out, func() {}); err == nil {
 		t.Fatal("expected a dial error for an unroutable endpoint")
-	}
-}
-
-func TestRunConnectionReturnsSubscribeError(t *testing.T) {
-	srv := newWSTestServer(t, keepOpen)
-	ex := &fakeExchange{url: srv.url, subErr: errors.New("boom")}
-	p := newFeedProvider(testConfig(), ex, 10)
-	out := make(chan entity.OrderbookUpdate, 1)
-	err := p.runConnection(context.Background(), []string{"X"}, out, func() {})
-	if err == nil || !strings.Contains(err.Error(), "build subscribe message") {
-		t.Fatalf("err = %v, want a 'build subscribe message' error", err)
 	}
 }
 

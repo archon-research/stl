@@ -202,6 +202,42 @@ func TestOKXHandlerNonContiguousSeqIsGap(t *testing.T) {
 	}
 }
 
+// TestOKXHandlerSeqReset covers OKX's documented sequence reset (e.g. after
+// maintenance): the reset update still chains (prevSeqId == the last applied
+// seqId) but carries a smaller seqId. It must be applied, and subsequent
+// updates chain from the smaller seqId.
+func TestOKXHandlerSeqReset(t *testing.T) {
+	h := newOKXHandler()
+	snapshot := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[
+		{"asks":[["101","3"]],"bids":[["100","2"]],"ts":"1","seqId":15,"prevSeqId":-1}]}`
+	if _, err := h.handle([]byte(snapshot)); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// Reset: chains off 15, sequence rewinds to 3.
+	reset := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[
+		{"asks":[],"bids":[["99","7"]],"ts":"2","seqId":3,"prevSeqId":15}]}`
+	sigs, err := h.handle([]byte(reset))
+	if err != nil {
+		t.Fatalf("reset update must be applied, not treated as a gap: %v", err)
+	}
+	if len(sigs) != 1 || sigs[0].isSnapshot {
+		t.Fatalf("expected one non-snapshot signal, got %+v", sigs)
+	}
+	if sz, ok := sizeAt(sigs[0].book.Bids(), "99"); !ok || sz != "7" {
+		t.Errorf("bid 99 after reset = %q (ok=%v), want 7", sz, ok)
+	}
+	// The next update chains off the smaller seqId.
+	next := `{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[
+		{"asks":[],"bids":[["98","4"]],"ts":"3","seqId":5,"prevSeqId":3}]}`
+	sigs, err = h.handle([]byte(next))
+	if err != nil {
+		t.Fatalf("update after reset should chain from the smaller seqId: %v", err)
+	}
+	if sz, ok := sizeAt(sigs[0].book.Bids(), "98"); !ok || sz != "4" {
+		t.Errorf("bid 98 after reset chain = %q (ok=%v), want 4", sz, ok)
+	}
+}
+
 // TestOKXHandlerMultiObjectSnapshot: a snapshot frame yields a single fully
 // aggregated snapshot, never a partial book per data object. The book resets once
 // and every object's levels survive.
@@ -295,6 +331,13 @@ func TestOKXHandlerRejectsMalformedLevel(t *testing.T) {
 	}
 }
 
+func TestOKXHandlerMalformedFrame(t *testing.T) {
+	h := newOKXHandler()
+	if _, err := h.handle([]byte("{not json")); err == nil {
+		t.Fatal("malformed frame must error so the engine resyncs")
+	}
+}
+
 func TestOKXHandlerIgnoresDatalessFrame(t *testing.T) {
 	h := newOKXHandler()
 	// A data frame carrying no objects produces no change and no error.
@@ -305,9 +348,9 @@ func TestOKXHandlerIgnoresDatalessFrame(t *testing.T) {
 
 func TestOKXSubscribeMessageAndPing(t *testing.T) {
 	e := &okxExchange{}
-	msgs, err := e.subscribeMessages([]string{"BTC-USDT", "ETH-USDT"})
-	if err != nil || len(msgs) != 1 {
-		t.Fatalf("subscribeMessages = %v err %v", msgs, err)
+	msgs := e.subscribeMessages([]string{"BTC-USDT", "ETH-USDT"})
+	if len(msgs) != 1 {
+		t.Fatalf("subscribeMessages = %v", msgs)
 	}
 	m := msgs[0].(map[string]any)
 	if m["op"] != "subscribe" {

@@ -66,12 +66,12 @@ func (e *okxExchange) appPing() ([]byte, time.Duration) {
 	return []byte("ping"), okxPingInterval
 }
 
-func (e *okxExchange) subscribeMessages(group []string) ([]any, error) {
+func (e *okxExchange) subscribeMessages(group []string) []any {
 	args := make([]map[string]string, len(group))
 	for i, sym := range group {
 		args[i] = map[string]string{"channel": okxChannel, "instId": sym}
 	}
-	return []any{map[string]any{"op": "subscribe", "args": args}}, nil
+	return []any{map[string]any{"op": "subscribe", "args": args}}
 }
 
 type okxFrame struct {
@@ -95,7 +95,7 @@ type okxFrame struct {
 type okxHandler struct {
 	books   *bookSet
 	lastSeq map[string]int64 // instId -> last applied seqId
-	allowed map[string]bool  // subscribed instIds; nil allows all (tests)
+	allowed map[string]bool  // subscribed instIds; frames for any other instId are rejected
 	logger  *slog.Logger
 }
 
@@ -117,7 +117,7 @@ func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
 		// carry on instead. A rejected symbol simply never syncs: it keeps the
 		// reconnect backoff unreset and emits nothing, both visible alongside this
 		// log line.
-		h.logger.Error("okx subscription error", "code", f.Code, "msg", f.Msg)
+		h.logger.Error("okx subscription error", "code", f.Code, "msg", f.Msg, "instId", f.Arg.InstID)
 		return nil, nil
 	}
 	if f.Event != "" {
@@ -156,10 +156,12 @@ func (h *okxHandler) handle(raw []byte) ([]bookChange, error) {
 			if len(d.Bids) == 0 && len(d.Asks) == 0 && d.SeqID == d.PrevSeqID && d.SeqID == last {
 				continue
 			}
-			// Any other break in the chain (prevSeqId != last, including an OKX seqId
-			// reset, where seqId < prevSeqId) is a gap: reconnect for a fresh snapshot.
-			// The initial prevSeqId == -1 is not seen here; it rides the first message,
-			// which is a snapshot handled above.
+			// Any break in the chain (prevSeqId != last) is a gap: reconnect for a
+			// fresh snapshot. OKX's documented seqId reset still chains — the reset
+			// frame carries prevSeqId == last with a smaller seqId — so it is applied
+			// and the sequence follows the smaller seqId. The initial prevSeqId == -1
+			// is not seen here; it rides the first message, which is a snapshot
+			// handled above.
 			if d.PrevSeqID != last {
 				return nil, fmt.Errorf("%w: okx %s prevSeqId %d != last %d", errSequenceGap, instID, d.PrevSeqID, last)
 			}

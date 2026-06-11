@@ -68,7 +68,7 @@ type exchangeFeed interface {
 	// endpoint returns the WebSocket URL.
 	endpoint() string
 	// subscribeMessages returns the frames to send after connecting.
-	subscribeMessages(group []string) ([]any, error)
+	subscribeMessages(group []string) []any
 	// newHandler creates a fresh frame handler for one connection, scoped to the
 	// symbols in group (so it can reject book data for anything unsubscribed).
 	// Because each connection (and reconnection) gets its own handler, handlers
@@ -169,11 +169,7 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	subs, err := p.exchange.subscribeMessages(group)
-	if err != nil {
-		return fmt.Errorf("build subscribe message: %w", err)
-	}
-	for _, msg := range subs {
+	for _, msg := range p.exchange.subscribeMessages(group) {
 		if err := ws.WriteJSON(msg); err != nil {
 			return fmt.Errorf("send subscribe: %w", err)
 		}
@@ -220,9 +216,6 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 // its interval until the connection closes or ctx is cancelled.
 func (p *feedProvider) startAppPing(ctx context.Context, ws *wsclient.Conn, pinger appPinger) {
 	frame, interval := pinger.appPing()
-	if interval <= 0 || len(frame) == 0 {
-		return
-	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -293,11 +286,7 @@ func reconnectLoop(
 		if ctx.Err() != nil {
 			return
 		}
-		if err != nil {
-			logger.Warn("orderbook connection lost, reconnecting", "error", err, "backoff", backoff)
-		} else {
-			logger.Info("orderbook connection closed, reconnecting", "backoff", backoff)
-		}
+		logger.Warn("orderbook connection lost, reconnecting", "error", err, "backoff", backoff)
 
 		select {
 		case <-ctx.Done():
