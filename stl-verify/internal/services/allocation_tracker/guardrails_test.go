@@ -8,7 +8,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func TestValidateScopedEntriesAndProxies(t *testing.T) {
+// TestNewService_ValidatesScopedEntriesAndProxies exercises the entry/proxy validation
+// through the public NewService constructor (the validation itself is unexported; this is
+// its public entry point). The fetch/handler dependencies are nil because validation runs
+// before they are used.
+func TestNewService_ValidatesScopedEntriesAndProxies(t *testing.T) {
 	entry := func(contract, wallet, chain string) *TokenEntry {
 		return &TokenEntry{
 			ContractAddress: common.HexToAddress(contract),
@@ -49,7 +53,10 @@ func TestValidateScopedEntriesAndProxies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateScopedEntriesAndProxies(tt.entries, tt.proxies, tt.chainID)
+			_, err := NewService(
+				Config{ChainID: tt.chainID, Logger: quietLogger()},
+				nil, nil, nil, tt.entries, nil, tt.proxies,
+			)
 			switch {
 			case tt.wantErr == "":
 				if err != nil {
@@ -107,6 +114,15 @@ func TestProxiesFromAlmProxy(t *testing.T) {
 		if _, err := proxiesFromAlmProxy(map[string]map[string][]axis_synome_contract.ProxyConfig{}); err == nil ||
 			!strings.Contains(err.Error(), "no ALM proxies") {
 			t.Fatalf("want empty error, got %v", err)
+		}
+	})
+
+	t.Run("rejects proxy whose star disagrees with its key", func(t *testing.T) {
+		in := map[string]map[string][]axis_synome_contract.ProxyConfig{
+			"spark": {"mainnet": {{Star: "grove", Address: "0x00000000000000000000000000000000000000aa", Role: "alm"}}},
+		}
+		if _, err := proxiesFromAlmProxy(in); err == nil || !strings.Contains(err.Error(), "does not match its AlmProxy key") {
+			t.Fatalf("want star-mismatch error, got %v", err)
 		}
 	})
 }

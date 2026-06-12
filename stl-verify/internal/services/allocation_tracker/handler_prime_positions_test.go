@@ -120,8 +120,9 @@ func TestHandleBatch_ERC20(t *testing.T) {
 }
 
 // TestHandleBatch_CreatedAtBlockFloor verifies that a nil/zero CreatedAtBlock
-// (the axis-synome export currently emits null) is floored to the observation
-// block rather than persisted as 0, while an explicit value is preserved.
+// (nil when knownCreatedAtBlocks has no entry for the contract — the axis-synome
+// contract omits created_at_block entirely) is floored to the observation block
+// rather than persisted as 0, while an explicit value is preserved.
 func TestHandleBatch_CreatedAtBlockFloor(t *testing.T) {
 	tokenNil := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	tokenSet := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")

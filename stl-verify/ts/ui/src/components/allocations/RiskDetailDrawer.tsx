@@ -1,3 +1,4 @@
+import { X } from 'lucide-react';
 import {
   useEffect,
   useRef,
@@ -222,7 +223,7 @@ export function RiskDetailDrawer({
         >
           <div
             className={flex({
-              align: 'center',
+              align: 'flex-start',
               justify: 'space-between',
               gap: '3',
             })}
@@ -278,22 +279,31 @@ export function RiskDetailDrawer({
 
             <button
               type="button"
+              aria-label="Close"
               onClick={onClose}
               className={css({
-                minHeight: '11',
-                borderRadius: 'sm',
+                flexShrink: 0,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '9',
+                height: '9',
+                borderRadius: 'md',
                 borderWidth: '1px',
                 borderStyle: 'solid',
                 borderColor: 'border.subtle',
                 bg: 'surface.default',
-                px: '3',
-                py: '2',
-                fontSize: 'sm',
-                color: 'text.strong',
+                color: 'text.muted',
                 cursor: 'pointer',
+                transitionProperty: 'background-color, color, border-color',
+                transitionDuration: 'fast',
+                _hover: {
+                  bg: 'interactive.hover',
+                  color: 'text.strong',
+                },
               })}
             >
-              Close
+              <X className={css({ width: '4', height: '4' })} />
             </button>
           </div>
         </div>

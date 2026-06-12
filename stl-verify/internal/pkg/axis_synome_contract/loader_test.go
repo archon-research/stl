@@ -82,26 +82,22 @@ func TestLoad_OK(t *testing.T) {
 
 			dir := t.TempDir()
 			contractPath := filepath.Join(dir, "contract.json")
-			schemaPath := filepath.Join(dir, "contract.schema.json")
-
-			schema := map[string]any{"type": "object", "$defs": map[string]any{}}
 
 			mustWriteJSON(t, contractPath, testContractPayload(tt.spec))
-			mustWriteJSON(t, schemaPath, schema)
 
-			bundle, err := Load(contractPath, schemaPath)
+			contract, err := LoadContract(contractPath)
 			if err != nil {
-				t.Fatalf("Load() error = %v", err)
+				t.Fatalf("LoadContract() error = %v", err)
 			}
 
-			if bundle.Contract.Version != "v1" {
-				t.Fatalf("version = %q, want %q", bundle.Contract.Version, "v1")
+			if contract.Version != "v1" {
+				t.Fatalf("version = %q, want %q", contract.Version, "v1")
 			}
-			if bundle.Contract.AxisSynomeGitCommit != "deadbeef" {
-				t.Fatalf("axis_synome_git_commit = %q, want %q", bundle.Contract.AxisSynomeGitCommit, "deadbeef")
+			if contract.AxisSynomeGitCommit != "deadbeef" {
+				t.Fatalf("axis_synome_git_commit = %q, want %q", contract.AxisSynomeGitCommit, "deadbeef")
 			}
 
-			sparkMainnet := bundle.Contract.GetAlmProxies()["spark"]["mainnet"]
+			sparkMainnet := contract.GetAlmProxies()["spark"]["mainnet"]
 			if len(sparkMainnet) != 2 {
 				t.Fatalf("spark/mainnet proxies = %d, want 2", len(sparkMainnet))
 			}
@@ -112,7 +108,7 @@ func TestLoad_OK(t *testing.T) {
 				t.Fatalf("role = %q, want %q", got, "alm")
 			}
 
-			sparkAssets := bundle.Contract.GetAssetsByPrime()["spark"]
+			sparkAssets := contract.GetAssetsByPrime()["spark"]
 			if len(sparkAssets) != 1 {
 				t.Fatalf("spark assets = %d, want 1", len(sparkAssets))
 			}

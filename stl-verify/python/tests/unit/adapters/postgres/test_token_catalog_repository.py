@@ -9,6 +9,7 @@ from app.adapters.postgres.token_catalog_repository import (
     PostgresTokenCatalogRepository,
     _escape_like_pattern,
     _normalize_metadata,
+    _normalize_symbol,
     _safe_decimal,
 )
 
@@ -47,6 +48,36 @@ def test_normalize_metadata_returns_dict_or_none() -> None:
     assert _normalize_metadata({"k": "v"}) == {"k": "v"}
     assert _normalize_metadata("not-dict") is None
     assert _normalize_metadata(None) is None
+
+
+def test_normalize_symbol_maps_blank_to_none() -> None:
+    assert _normalize_symbol("USDC") == "USDC"
+    assert _normalize_symbol("  DAI ") == "DAI"
+    assert _normalize_symbol("") is None
+    assert _normalize_symbol("   ") is None
+    assert _normalize_symbol(None) is None
+
+
+@pytest.mark.asyncio
+async def test_list_tokens_tolerates_blank_symbol_rows() -> None:
+    # A catalog row with an empty-string symbol must not fail the whole listing;
+    # the adapter maps it to the domain's "absent" (None).
+    blank = SimpleNamespace(
+        id=2,
+        chain_id=1,
+        address="cd" * 20,
+        symbol="",
+        decimals=18,
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        metadata=None,
+    )
+    engine, _ = _engine_with_fetchall([blank])
+    repo = PostgresTokenCatalogRepository(engine)
+
+    result = await repo.list_tokens(limit=10)
+
+    assert len(result) == 1
+    assert result[0].symbol is None
 
 
 @pytest.mark.asyncio
