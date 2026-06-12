@@ -22,7 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 )
 
 const (
@@ -75,6 +75,7 @@ func NewService(
 	consumer outbound.SQSConsumer,
 	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
+	multicaller outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
 	protocolRepo outbound.ProtocolRepository,
@@ -83,7 +84,7 @@ func NewService(
 	eventRepo outbound.EventRepository,
 	receiptTokenRepo outbound.ReceiptTokenRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, multicaller, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, err
 	}
 
@@ -92,18 +93,13 @@ func NewService(
 		return nil, err
 	}
 
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create multicall client: %w", err)
-	}
-
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load ERC20 ABI: %w", err)
 	}
 
 	readerLogger := config.Logger.With("component", "aavelike-position-tracker")
-	reader := aavelike.NewPositionReader(ethClient, mc, erc20ABI, readerLogger)
+	reader := aavelike.NewPositionReader(ethClient, multicaller, erc20ABI, readerLogger)
 
 	eventExtractor, err := NewEventExtractor()
 	if err != nil {
@@ -209,6 +205,11 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 // ProcessReceipts processes a slice of transaction receipts for a given block.
 // It is safe to call from the backfill service without Redis or SQS.
 func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt, blockTimestamp time.Time) error {
+	// Stamp the reorg-aware block version onto the context so raw SC calls archived
+	// downstream key correctly. This is the single chokepoint for both the live SQS
+	// path and the backfill path, so both archive under their actual block version.
+	ctx = archiving.WithBlockVersion(ctx, version)
+
 	var errs []error
 	for _, receipt := range receipts {
 		if err := s.processReceipt(ctx, receipt, chainID, blockNumber, version, blockTimestamp); err != nil {
@@ -1189,6 +1190,7 @@ func validateDependencies(
 	consumer outbound.SQSConsumer,
 	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
+	multicaller outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
 	protocolRepo outbound.ProtocolRepository,
@@ -1200,6 +1202,9 @@ func validateDependencies(
 	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
 		return fmt.Errorf("ethClient is required")
+	}
+	if multicaller == nil {
+		return fmt.Errorf("multicaller is required")
 	}
 	if txManager == nil {
 		return fmt.Errorf("txManager is required")
