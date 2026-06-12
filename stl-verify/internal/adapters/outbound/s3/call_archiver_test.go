@@ -13,6 +13,15 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+func mustArchiver(t *testing.T, w outbound.S3Writer, bucket string) *CallArchiver {
+	t.Helper()
+	a, err := NewCallArchiver(w, bucket, nil)
+	if err != nil {
+		t.Fatalf("NewCallArchiver: %v", err)
+	}
+	return a
+}
+
 type fakeWriter struct {
 	bucket    string
 	key       string
@@ -71,7 +80,7 @@ func sampleBatch() outbound.CallBatchRecord {
 
 func TestArchiveKeyAndBucket(t *testing.T) {
 	fw := &fakeWriter{}
-	a := NewCallArchiver(fw, "raw-sc-calls-prod", nil)
+	a := mustArchiver(t, fw, "raw-sc-calls-prod")
 
 	if err := a.Archive(context.Background(), sampleBatch()); err != nil {
 		t.Fatalf("Archive: %v", err)
@@ -93,7 +102,7 @@ func TestArchiveKeyAndBucket(t *testing.T) {
 
 func TestArchiveSingleObjectPerBatch(t *testing.T) {
 	fw := &fakeWriter{}
-	a := NewCallArchiver(fw, "bucket", nil)
+	a := mustArchiver(t, fw, "bucket")
 	if err := a.Archive(context.Background(), sampleBatch()); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
@@ -104,7 +113,7 @@ func TestArchiveSingleObjectPerBatch(t *testing.T) {
 
 func TestArchivePayloadIsJSONLOneLinePerCall(t *testing.T) {
 	fw := &fakeWriter{}
-	a := NewCallArchiver(fw, "bucket", nil)
+	a := mustArchiver(t, fw, "bucket")
 	batch := sampleBatch()
 	if err := a.Archive(context.Background(), batch); err != nil {
 		t.Fatalf("Archive: %v", err)
@@ -176,7 +185,7 @@ func TestArchivePayloadIsJSONLOneLinePerCall(t *testing.T) {
 
 func TestArchiveEmptyBatchSkipsWrite(t *testing.T) {
 	fw := &fakeWriter{}
-	a := NewCallArchiver(fw, "bucket", nil)
+	a := mustArchiver(t, fw, "bucket")
 	empty := sampleBatch()
 	empty.Calls = nil
 	if err := a.Archive(context.Background(), empty); err != nil {
@@ -190,8 +199,8 @@ func TestArchiveEmptyBatchSkipsWrite(t *testing.T) {
 func TestArchiveKeyDiffersByBatchComposition(t *testing.T) {
 	fw1 := &fakeWriter{}
 	fw2 := &fakeWriter{}
-	a1 := NewCallArchiver(fw1, "bucket", nil)
-	a2 := NewCallArchiver(fw2, "bucket", nil)
+	a1 := mustArchiver(t, fw1, "bucket")
+	a2 := mustArchiver(t, fw2, "bucket")
 
 	b1 := sampleBatch()
 	b2 := sampleBatch()
@@ -211,7 +220,7 @@ func TestArchiveKeyDiffersByBatchComposition(t *testing.T) {
 
 func TestArchivePropagatesWriterError(t *testing.T) {
 	fw := &fakeWriter{returnErr: io.ErrClosedPipe}
-	a := NewCallArchiver(fw, "bucket", nil)
+	a := mustArchiver(t, fw, "bucket")
 	if err := a.Archive(context.Background(), sampleBatch()); err == nil {
 		t.Fatal("expected error from writer to propagate")
 	}

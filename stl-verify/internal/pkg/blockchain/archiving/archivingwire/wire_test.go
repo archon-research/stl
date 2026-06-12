@@ -23,8 +23,11 @@ func TestEnabled(t *testing.T) {
 		want   bool
 	}{
 		{name: "true enables", envVal: "true", want: true},
+		{name: "1 enables", envVal: "1", want: true},
+		{name: "TitleCase True enables", envVal: "True", want: true},
 		{name: "false disables", envVal: "false", want: false},
 		{name: "unset disables", envVal: "", want: false},
+		{name: "unrecognised value disables", envVal: "yes", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

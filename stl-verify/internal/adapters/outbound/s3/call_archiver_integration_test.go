@@ -21,13 +21,16 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func TestCallArchiverWritesRetrievableObject(t *testing.T) {
-	ctx := context.Background()
-	_, lsCfg := testutil.StartLocalStack(t, ctx, "s3")
+const archiveTestBucket = "raw-sc-calls-test"
 
-	const bucket = "raw-sc-calls-test"
+// newArchiverOnLocalStack provisions a LocalStack S3 bucket and returns a
+// CallArchiver writing to it plus the S3 client for assertions.
+func newArchiverOnLocalStack(t *testing.T, ctx context.Context) (*s3adapter.CallArchiver, *awss3.Client) {
+	t.Helper()
+
+	_, lsCfg := testutil.StartLocalStack(t, ctx, "s3")
 	s3Client := testutil.NewS3Client(t, ctx, lsCfg)
-	if _, err := s3Client.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
+	if _, err := s3Client.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: aws.String(archiveTestBucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
 
@@ -45,9 +48,17 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 
 	logger := slog.Default()
 	writer := s3adapter.NewWriterWithOptions(awsCfg, logger, endpointFn)
-	archiver := s3adapter.NewCallArchiver(writer, bucket, logger)
+	archiver, err := s3adapter.NewCallArchiver(writer, archiveTestBucket, logger)
+	if err != nil {
+		t.Fatalf("NewCallArchiver: %v", err)
+	}
+	return archiver, s3Client
+}
 
-	batch := outbound.CallBatchRecord{
+// sampleBatch returns a two-call batch with one success and one failure, used by
+// the archiver integration tests.
+func sampleBatch() outbound.CallBatchRecord {
+	return outbound.CallBatchRecord{
 		ChainID:      1,
 		BlockNumber:  21500042,
 		BlockVersion: 0,
@@ -72,6 +83,12 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 			},
 		},
 	}
+}
+
+func TestCallArchiverWritesRetrievableObject(t *testing.T) {
+	ctx := context.Background()
+	archiver, s3Client := newArchiverOnLocalStack(t, ctx)
+	batch := sampleBatch()
 
 	if err := archiver.Archive(ctx, batch); err != nil {
 		t.Fatalf("Archive: %v", err)
@@ -80,7 +97,7 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 	// Discover the object via ListObjectsV2 — the key embeds an opaque batch
 	// hash so the test stays decoupled from that hash function.
 	list, err := s3Client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
+		Bucket: aws.String(archiveTestBucket),
 		Prefix: aws.String("raw-sc-calls/chain_id=1/block=21500000-21500999/21500042_0_oracle-price_"),
 	})
 	if err != nil {
@@ -94,7 +111,7 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 		t.Fatalf("key %q missing .jsonl.zst suffix", key)
 	}
 
-	get, err := s3Client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	get, err := s3Client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(archiveTestBucket), Key: aws.String(key)})
 	if err != nil {
 		t.Fatalf("GetObject %s: %v", key, err)
 	}
@@ -131,20 +148,30 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 	if got, want := bytes.Count(raw, []byte{'\n'}), len(batch.Calls); got != want {
 		t.Fatalf("got %d JSONL newlines, want %d (one per call)", got, want)
 	}
+}
 
-	// Idempotency: a second archive of the same batch must not error and must
-	// not produce a second object.
+// TestCallArchiverWritesIdempotent verifies that archiving the same batch twice
+// is a no-op: the second PUT must not error and must not create a second object.
+func TestCallArchiverWritesIdempotent(t *testing.T) {
+	ctx := context.Background()
+	archiver, s3Client := newArchiverOnLocalStack(t, ctx)
+	batch := sampleBatch()
+
+	if err := archiver.Archive(ctx, batch); err != nil {
+		t.Fatalf("first Archive: %v", err)
+	}
 	if err := archiver.Archive(ctx, batch); err != nil {
 		t.Fatalf("second Archive (idempotent) failed: %v", err)
 	}
-	list2, err := s3Client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
-		Bucket: aws.String(bucket),
+
+	list, err := s3Client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
+		Bucket: aws.String(archiveTestBucket),
 		Prefix: aws.String("raw-sc-calls/chain_id=1/"),
 	})
 	if err != nil {
 		t.Fatalf("list after re-archive: %v", err)
 	}
-	if len(list2.Contents) != 1 {
-		t.Fatalf("after idempotent re-archive listed %d objects, want exactly 1", len(list2.Contents))
+	if len(list.Contents) != 1 {
+		t.Fatalf("after idempotent re-archive listed %d objects, want exactly 1", len(list.Contents))
 	}
 }
