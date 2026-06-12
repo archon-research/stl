@@ -237,15 +237,26 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 	env.waitForPrices(t)
 
-	// Archives are fire-and-forget; poll the archive bucket until at least one
-	// object lands under the chain_id partition.
+	// Archives are fire-and-forget; poll the archive bucket until an object lands
+	// whose key carries the expected block version and source. rawsckey.Build
+	// formats the filename as {block}_{blockVersion}_{source}_{batchHash}, so the
+	// segment also pins that the message's version 1 (not the default 0) is keyed.
+	const wantSegment = "18000000_1_oracle-price_"
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		out, err := env.s3Client.ListObjectsV2(env.bgCtx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(archiveBucket),
 			Prefix: aws.String(archivePrefix),
 		})
-		return err == nil && len(out.Contents) > 0
-	}, "raw SC call archives to be written to S3")
+		if err != nil {
+			return false
+		}
+		for _, obj := range out.Contents {
+			if strings.Contains(aws.ToString(obj.Key), wantSegment) {
+				return true
+			}
+		}
+		return false
+	}, "a raw SC call archive whose key contains "+wantSegment)
 
 	env.waitForShutdown(t)
 }

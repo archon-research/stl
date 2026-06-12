@@ -24,19 +24,18 @@ type CallArchiver struct {
 	encoder *zstd.Encoder // (*zstd.Encoder).EncodeAll is safe for concurrent use
 }
 
-// NewCallArchiver returns an S3-backed CallArchiver writing to bucket.
-func NewCallArchiver(writer outbound.S3Writer, bucket string, logger *slog.Logger) *CallArchiver {
+// NewCallArchiver returns an S3-backed CallArchiver writing to bucket. It errors
+// if the zstd encoder cannot be constructed; the caller bubbles that up to main
+// rather than the adapter panicking.
+func NewCallArchiver(writer outbound.S3Writer, bucket string, logger *slog.Logger) (*CallArchiver, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
 	if err != nil {
-		// Construction only fails on an invalid option combination, which is a
-		// programming error fixed at compile-not-run time; failing loud at
-		// startup beats a nil-encoder panic on the first write.
-		panic(fmt.Sprintf("zstd.NewWriter: %v", err))
+		return nil, fmt.Errorf("creating zstd encoder: %w", err)
 	}
-	return &CallArchiver{writer: writer, bucket: bucket, logger: logger, encoder: encoder}
+	return &CallArchiver{writer: writer, bucket: bucket, logger: logger, encoder: encoder}, nil
 }
 
 // archiveLine is the on-disk JSON shape for one call within a batch; bytes are

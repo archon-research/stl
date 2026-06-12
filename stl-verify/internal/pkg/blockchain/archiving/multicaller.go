@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"math/big"
 	"runtime/debug"
-	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rawsckey"
@@ -25,7 +24,7 @@ type Config struct {
 	BuildID int64
 	// Chain is the chain name (e.g. "mainnet") used as the `chain` metric label.
 	Chain string
-	Wait  *sync.WaitGroup // shared across decorators; drained on shutdown
+	Wait  *WriteGroup // shared across decorators; drained on shutdown
 	// MeterProvider builds the archive.writes.total counter. nil uses the global
 	// provider; tests inject a manual reader.
 	MeterProvider metric.MeterProvider
@@ -33,8 +32,11 @@ type Config struct {
 	Clock         func() time.Time // injectable for tests; defaults to time.Now
 }
 
-// Multicaller decorates an inner outbound.Multicaller, archiving every
-// call (success or failure) in the background (fire-and-forget).
+// Multicaller decorates an inner outbound.Multicaller. When the inner call
+// succeeds it archives the whole batch in the background (fire-and-forget),
+// recording each call regardless of its individual success flag. When the inner
+// call itself errors nothing is archived, since there is no result batch to
+// record.
 type Multicaller struct {
 	inner    outbound.Multicaller
 	archiver outbound.CallArchiver
@@ -45,7 +47,7 @@ type Multicaller struct {
 // NewMulticaller wraps inner so its calls are archived via arch.
 func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
 	if cfg.Wait == nil {
-		cfg.Wait = &sync.WaitGroup{}
+		cfg.Wait = &WriteGroup{}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -113,7 +115,9 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 func (m *Multicaller) Address() common.Address { return m.inner.Address() }
 
 // Close blocks until all in-flight archive writes complete. Call during
-// graceful shutdown before the process exits.
+// graceful shutdown before the process exits. Production binaries drain via the
+// shared WriteGroup returned by archivingwire; this is the drain handle for a
+// directly-constructed decorator (tests).
 func (m *Multicaller) Close() { m.cfg.Wait.Wait() }
 
 // recordWrite increments archive.writes.total with the outcome status. A nil
@@ -163,7 +167,7 @@ func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound
 }
 
 func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallBatchRecord) {
-	m.cfg.Wait.Go(func() {
+	scheduled := m.cfg.Wait.Go(func() {
 		// Archiving is fire-and-forget: a panic here must never escape and crash
 		// the worker, since archiving must not affect the hot path.
 		defer func() {
@@ -196,4 +200,15 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallB
 			)
 		}
 	})
+
+	if !scheduled {
+		// The WriteGroup is draining on shutdown, so this batch will not be
+		// archived. Surface the loss rather than dropping it silently.
+		m.cfg.Logger.Warn("archive write dropped: archiver draining on shutdown",
+			"source", record.Source,
+			"block", record.BlockNumber,
+			"block_version", record.BlockVersion,
+			"calls", len(record.Calls),
+		)
+	}
 }

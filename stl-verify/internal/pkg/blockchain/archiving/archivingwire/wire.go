@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -30,8 +30,13 @@ const (
 // Wrap decorates a multicaller with archiving. Identity when archiving is off.
 type Wrap func(outbound.Multicaller) outbound.Multicaller
 
-// Enabled reports whether ARCHIVE_SC_CALLS=true.
-func Enabled() bool { return env.Get(EnvFlag, "") == "true" }
+// Enabled reports whether ARCHIVE_SC_CALLS is set to a truthy value. It accepts
+// anything strconv.ParseBool does (1, t, T, TRUE, true, True, ...) so a common
+// value like "1" enables archiving instead of being silently ignored.
+func Enabled() bool {
+	enabled, err := strconv.ParseBool(env.Get(EnvFlag, ""))
+	return err == nil && enabled
+}
 
 // identityWrap returns its argument unchanged; used when archiving is disabled
 // so callers can apply the returned Wrap unconditionally.
@@ -49,11 +54,21 @@ func identityWrap(inner outbound.Multicaller) outbound.Multicaller { return inne
 // This keeps the enable/build/log/drain wiring in one place instead of repeating
 // it across every cmd binary.
 func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
-	if !Enabled() {
-		return identityWrap, func() {}, nil
-	}
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if !Enabled() {
+		// Log the resolved state so a mistyped flag (e.g. ARCHIVE_SC_CALLS=yes) is
+		// visible at startup rather than silently leaving archiving off. Warn loudly
+		// when the value is non-empty but unparseable, since that signals intent to
+		// enable archiving that we are not honouring.
+		if raw := env.Get(EnvFlag, ""); raw != "" {
+			if _, err := strconv.ParseBool(raw); err != nil {
+				logger.Warn("ARCHIVE_SC_CALLS set to an unrecognised value; archiving stays off", EnvFlag, raw)
+			}
+		}
+		logger.Info("raw SC call archiving disabled")
+		return identityWrap, func() {}, nil
 	}
 	wrap, drain, err := NewS3WrapFromEnv(ctx, logger, chainID, buildID, source)
 	if err != nil {
@@ -97,16 +112,19 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 		writer = s3adapter.NewWriter(awsCfg, logger)
 	}
 
-	archiver := s3adapter.NewCallArchiver(writer, bucket, logger)
+	archiver, err := s3adapter.NewCallArchiver(writer, bucket, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating call archiver: %w", err)
+	}
 
-	var wg sync.WaitGroup
+	wg := &archiving.WriteGroup{}
 	wrap := func(inner outbound.Multicaller) outbound.Multicaller {
 		return archiving.NewMulticaller(inner, archiver, archiving.Config{
 			Source:  source,
 			ChainID: chainID,
 			Chain:   chainName,
 			BuildID: buildID,
-			Wait:    &wg,
+			Wait:    wg,
 			Logger:  logger,
 		})
 	}

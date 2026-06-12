@@ -175,6 +175,11 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
+	// Stamp the reorg-aware block version once, here, so both receipt processing
+	// and the symbol-reconciliation sweep below archive raw SC calls under the
+	// block's actual version. Setting it only inside fetchAndProcessReceipts would
+	// leave reconcilePendingSymbols' multicalls keyed as version 0.
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	if err := s.fetchAndProcessReceipts(ctx, event); err != nil {
 		return err
 	}
@@ -239,7 +244,8 @@ func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNum
 }
 
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
-	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	// Block version is stamped by the caller (processBlockEvent) so the symbol
+	// sweep shares it; see the comment there.
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 
