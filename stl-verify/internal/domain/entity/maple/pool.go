@@ -8,7 +8,6 @@ import "fmt"
 // construction). Loan collateral assets (BTC, SOL) stay raw on
 // LoanCollateral instead: they have no Ethereum token address.
 type Pool struct {
-	ID           int64
 	ChainID      int64
 	ProtocolID   int64
 	Address      []byte // 20 bytes, poolV2.id

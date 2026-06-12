@@ -11,7 +11,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -186,15 +185,18 @@ func (r *MapleGraphQLRepository) SavePoolStates(ctx context.Context, tx pgx.Tx, 
 		)
 	})
 
+	var inserted int64
 	for chunk := range slices.Chunk(sorted, r.batchSize) {
-		if err := r.savePoolStateBatch(ctx, tx, chunk); err != nil {
+		n, err := r.savePoolStateBatch(ctx, tx, chunk)
+		if err != nil {
 			return err
 		}
+		inserted += n
 	}
-	return nil
+	return r.checkDedupedRows("maple_pool_state", inserted, len(states))
 }
 
-func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error {
+func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) (int64, error) {
 	const cols = 10
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_pool_state (maple_pool_id, synced_at, tvl, liquid_assets, collateral_value_usd, principal_out, utilization, monthly_apy, spot_apy, build_id) VALUES `)
@@ -203,11 +205,11 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	for i, s := range states {
 		liquidAssets, err := bigIntToNumeric(s.LiquidAssets)
 		if err != nil {
-			return fmt.Errorf("converting liquid_assets for pool %d: %w", s.PoolID, err)
+			return 0, fmt.Errorf("converting liquid_assets for pool %d: %w", s.PoolID, err)
 		}
 		principalOut, err := bigIntToNumeric(s.PrincipalOut)
 		if err != nil {
-			return fmt.Errorf("converting principal_out for pool %d: %w", s.PoolID, err)
+			return 0, fmt.Errorf("converting principal_out for pool %d: %w", s.PoolID, err)
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
@@ -217,7 +219,7 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	}
 	sb.WriteString(` ON CONFLICT (maple_pool_id, synced_at, processing_version) DO NOTHING`)
 
-	return r.execWarnDedup(ctx, tx, "maple_pool_state", sb.String(), args, len(states))
+	return r.execInsert(ctx, tx, "maple_pool_state", sb.String(), args)
 }
 
 // UpsertLoans upserts loan registry rows and returns loan
@@ -298,15 +300,18 @@ func (r *MapleGraphQLRepository) SaveLoanStates(ctx context.Context, tx pgx.Tx, 
 		)
 	})
 
+	var inserted int64
 	for chunk := range slices.Chunk(sorted, r.batchSize) {
-		if err := r.saveLoanStateBatch(ctx, tx, chunk); err != nil {
+		n, err := r.saveLoanStateBatch(ctx, tx, chunk)
+		if err != nil {
 			return err
 		}
+		inserted += n
 	}
-	return nil
+	return r.checkDedupedRows("maple_loan_state", inserted, len(states))
 }
 
-func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error {
+func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) (int64, error) {
 	const cols = 6
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id) VALUES `)
@@ -315,7 +320,7 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 	for i, s := range states {
 		principalOwed, err := bigIntToNumeric(s.PrincipalOwed)
 		if err != nil {
-			return fmt.Errorf("converting principal_owed for loan %d: %w", s.LoanID, err)
+			return 0, fmt.Errorf("converting principal_owed for loan %d: %w", s.LoanID, err)
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
@@ -323,7 +328,7 @@ func (r *MapleGraphQLRepository) saveLoanStateBatch(ctx context.Context, tx pgx.
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
-	return r.execWarnDedup(ctx, tx, "maple_loan_state", sb.String(), args, len(states))
+	return r.execInsert(ctx, tx, "maple_loan_state", sb.String(), args)
 }
 
 // SaveLoanCollaterals inserts loan collateral snapshots. Loans with null API
@@ -340,15 +345,18 @@ func (r *MapleGraphQLRepository) SaveLoanCollaterals(ctx context.Context, tx pgx
 		)
 	})
 
+	var inserted int64
 	for chunk := range slices.Chunk(sorted, r.batchSize) {
-		if err := r.saveLoanCollateralBatch(ctx, tx, chunk); err != nil {
+		n, err := r.saveLoanCollateralBatch(ctx, tx, chunk)
+		if err != nil {
 			return err
 		}
+		inserted += n
 	}
-	return nil
+	return r.checkDedupedRows("maple_loan_collateral", inserted, len(collaterals))
 }
 
-func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error {
+func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) (int64, error) {
 	const cols = 10
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_loan_collateral (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, custodian, liquidation_level, build_id) VALUES `)
@@ -361,7 +369,7 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	}
 	sb.WriteString(` ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`)
 
-	return r.execWarnDedup(ctx, tx, "maple_loan_collateral", sb.String(), args, len(collaterals))
+	return r.execInsert(ctx, tx, "maple_loan_collateral", sb.String(), args)
 }
 
 // UpsertSkyStrategies upserts strategy registry rows and returns strategy
@@ -405,15 +413,18 @@ func (r *MapleGraphQLRepository) SaveSkyStrategyStates(ctx context.Context, tx p
 		)
 	})
 
+	var inserted int64
 	for chunk := range slices.Chunk(sorted, r.batchSize) {
-		if err := r.saveSkyStrategyStateBatch(ctx, tx, chunk); err != nil {
+		n, err := r.saveSkyStrategyStateBatch(ctx, tx, chunk)
+		if err != nil {
 			return err
 		}
+		inserted += n
 	}
-	return nil
+	return r.checkDedupedRows("maple_sky_strategy_state", inserted, len(states))
 }
 
-func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error {
+func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) (int64, error) {
 	const cols = 9
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_sky_strategy_state (maple_sky_strategy_id, synced_at, state, currently_deployed, deposited_assets, withdrawn_assets, strategy_fee_rate, total_fees_collected, build_id) VALUES `)
@@ -422,15 +433,15 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 	for i, s := range states {
 		currentlyDeployed, err := bigIntToNumeric(s.CurrentlyDeployed)
 		if err != nil {
-			return fmt.Errorf("converting currently_deployed for strategy %d: %w", s.SkyStrategyID, err)
+			return 0, fmt.Errorf("converting currently_deployed for strategy %d: %w", s.SkyStrategyID, err)
 		}
 		depositedAssets, err := bigIntToNumeric(s.DepositedAssets)
 		if err != nil {
-			return fmt.Errorf("converting deposited_assets for strategy %d: %w", s.SkyStrategyID, err)
+			return 0, fmt.Errorf("converting deposited_assets for strategy %d: %w", s.SkyStrategyID, err)
 		}
 		withdrawnAssets, err := bigIntToNumeric(s.WithdrawnAssets)
 		if err != nil {
-			return fmt.Errorf("converting withdrawn_assets for strategy %d: %w", s.SkyStrategyID, err)
+			return 0, fmt.Errorf("converting withdrawn_assets for strategy %d: %w", s.SkyStrategyID, err)
 		}
 
 		writeValuesPlaceholders(&sb, i, cols)
@@ -439,7 +450,7 @@ func (r *MapleGraphQLRepository) saveSkyStrategyStateBatch(ctx context.Context, 
 	}
 	sb.WriteString(` ON CONFLICT (maple_sky_strategy_id, synced_at, processing_version) DO NOTHING`)
 
-	return r.execWarnDedup(ctx, tx, "maple_sky_strategy_state", sb.String(), args, len(states))
+	return r.execInsert(ctx, tx, "maple_sky_strategy_state", sb.String(), args)
 }
 
 // SaveSyrupGlobalState inserts the protocol-wide Syrup aggregate snapshot
@@ -466,55 +477,63 @@ func (r *MapleGraphQLRepository) SaveSyrupGlobalState(ctx context.Context, tx pg
 		return fmt.Errorf("converting pool_apy: %w", err)
 	}
 
-	return r.execWarnDedup(ctx, tx, "maple_syrup_global_state",
+	inserted, err := r.execInsert(ctx, tx, "maple_syrup_global_state",
 		`INSERT INTO maple_syrup_global_state (chain_id, synced_at, tvl, apy, collateral_apy, pool_apy, drips_yield_boost, build_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (chain_id, synced_at, processing_version) DO NOTHING`,
 		[]any{state.ChainID, state.SyncedAt, tvl, apy, collateralAPY, poolAPY,
 			optionalNumeric(state.DripsYieldBoost), int(r.buildID)},
-		1,
 	)
+	if err != nil {
+		return err
+	}
+	return r.checkDedupedRows("maple_syrup_global_state", inserted, 1)
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// execWarnDedup executes a state-insert statement, wraps its error with the
-// table name, and runs the ON CONFLICT dedup check — so a future state
-// table cannot forget the RowsAffected visibility.
-func (r *MapleGraphQLRepository) execWarnDedup(ctx context.Context, tx pgx.Tx, table, sql string, args []any, expected int) error {
+// execInsert executes a state-insert statement, wraps its error with the
+// table name, and returns the number of rows actually inserted. Save methods
+// must sum the counts across their chunks and run checkDedupedRows once on
+// the whole logical save — checking per chunk would misread a partial dedup
+// whose collided and fresh rows land in different chunks as one full dedup
+// plus one clean insert.
+func (r *MapleGraphQLRepository) execInsert(ctx context.Context, tx pgx.Tx, table, sql string, args []any) (int64, error) {
 	tag, err := tx.Exec(ctx, sql, args...)
 	if err != nil {
-		return fmt.Errorf("saving %s: %w", table, err)
+		return 0, fmt.Errorf("saving %s: %w", table, err)
 	}
-	r.warnDedupedRows(table, tag, expected)
-	return nil
+	return tag.RowsAffected(), nil
 }
 
-// warnDedupedRows makes ON CONFLICT DO NOTHING dedup visible. A full dedup
+// checkDedupedRows makes ON CONFLICT DO NOTHING dedup visible. A full dedup
 // (zero rows inserted) is the signature of a Temporal activity retry
 // re-running an already-persisted phase at the same synced_at and build (the
 // trigger reuses the processing_version and the insert dedupes), so it logs
-// at warn. A partial dedup within a single batch is never a retry artifact —
-// some rows collided while siblings did not (clock regression, a duplicate
-// that slipped the service guards, a trigger bug assigning a colliding
-// version) — so it logs at error.
-func (r *MapleGraphQLRepository) warnDedupedRows(table string, tag pgconn.CommandTag, expected int) {
-	inserted := tag.RowsAffected()
+// at warn and succeeds. A partial dedup means some rows collided while
+// siblings did not — a clock regression, a duplicate that slipped the
+// service guards, a trigger bug assigning a colliding version, or upstream
+// data changing between retry attempts at the same synced_at. Committing
+// would silently drop the collided rows, so it fails the save and the
+// caller's transaction rolls the snapshot back. In the changed-upstream-data
+// case every retry of that tick keeps failing (the committed rows collide
+// again each attempt) until the next scheduled tick's fresh synced_at —
+// loud by design. Single-row saves (expected == 1) can only ever hit the
+// full-dedup warn path.
+func (r *MapleGraphQLRepository) checkDedupedRows(table string, inserted int64, expected int) error {
 	switch {
 	case inserted == int64(expected):
+		return nil
 	case inserted == 0:
 		r.logger.Warn("state insert fully deduplicated by ON CONFLICT DO NOTHING (expected on activity retries)",
 			"table", table,
 			"expected", expected,
 			"inserted", inserted,
 		)
+		return nil
 	default:
-		r.logger.Error("state insert PARTIALLY deduplicated by ON CONFLICT DO NOTHING (never a retry artifact; investigate)",
-			"table", table,
-			"expected", expected,
-			"inserted", inserted,
-		)
+		return fmt.Errorf("state insert into %s partially deduplicated by ON CONFLICT DO NOTHING (%d of %d rows inserted); failing the save so the caller rolls back instead of silently dropping the collided rows", table, inserted, expected)
 	}
 }

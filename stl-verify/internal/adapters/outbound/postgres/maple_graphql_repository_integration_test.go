@@ -512,6 +512,97 @@ func TestMaplePoolStates_DedupWarnsOnConflict(t *testing.T) {
 	}
 }
 
+func TestMaplePoolStates_PartialDedupFailsAndRollsBack(t *testing.T) {
+	// A batch where one row collides (same pool, synced_at, and build) while
+	// a sibling does not must fail instead of committing: committing would
+	// silently drop the collided row from the snapshot.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x24)
+
+	first, err := maple.NewPoolState(poolID, mapleSyncedAt(),
+		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+	if err != nil {
+		t.Fatalf("NewPoolState: %v", err)
+	}
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*maple.PoolState{first})
+	})
+
+	fresh, err := maple.NewPoolState(poolID, mapleSyncedAt().Add(time.Minute),
+		big.NewInt(1100), big.NewInt(450), big.NewInt(550), big.NewInt(650), nil, nil)
+	if err != nil {
+		t.Fatalf("NewPoolState: %v", err)
+	}
+
+	tx, err := maplePool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	saveErr := repo.SavePoolStates(ctx, tx, []*maple.PoolState{first, fresh})
+	if saveErr == nil {
+		t.Fatal("expected partial-dedup error, got nil")
+	}
+	if !strings.Contains(saveErr.Error(), "partially deduplicated") {
+		t.Errorf("error %q should report the partial dedup", saveErr.Error())
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	var count int
+	if err := maplePool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_pool_state WHERE maple_pool_id = $1`, poolID).Scan(&count); err != nil {
+		t.Fatalf("counting pool states: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("pool state count = %d, want 1 (partial dedup must roll back the batch)", count)
+	}
+}
+
+func TestMaplePoolStates_PartialDedupAcrossChunksFails(t *testing.T) {
+	// batchSize 1 puts the collided row and the fresh rows in separate
+	// chunks; the dedup check must judge the whole save, not each chunk —
+	// per-chunk it would read as one full dedup plus clean inserts.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo, err := NewMapleGraphQLRepository(maplePool, nil, 0, 1)
+	if err != nil {
+		t.Fatalf("NewMapleGraphQLRepository: %v", err)
+	}
+	poolID := upsertTestPool(t, ctx, repo, 0x25)
+
+	newState := func(offset time.Duration) *maple.PoolState {
+		t.Helper()
+		state, err := maple.NewPoolState(poolID, mapleSyncedAt().Add(offset),
+			big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+		if err != nil {
+			t.Fatalf("NewPoolState: %v", err)
+		}
+		return state
+	}
+
+	first := newState(0)
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*maple.PoolState{first})
+	})
+
+	inMapleTxExpectErr(t, ctx, func(tx pgx.Tx) error {
+		return repo.SavePoolStates(ctx, tx, []*maple.PoolState{first, newState(time.Minute), newState(2 * time.Minute)})
+	})
+
+	var count int
+	if err := maplePool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_pool_state WHERE maple_pool_id = $1`, poolID).Scan(&count); err != nil {
+		t.Fatalf("counting pool states: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("pool state count = %d, want 1 (cross-chunk partial dedup must roll back)", count)
+	}
+}
+
 func TestMaplePoolStates_MultiChunkBatch(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)

@@ -95,30 +95,6 @@ func TestLoan_Validate(t *testing.T) {
 	}
 }
 
-func TestLoan_IsInternal(t *testing.T) {
-	tests := []struct {
-		name string
-		meta *LoanMeta
-		want bool
-	}{
-		{name: "nil meta is external", meta: nil, want: false},
-		{name: "amm is internal", meta: &LoanMeta{Type: "amm"}, want: true},
-		{name: "strategy is internal", meta: &LoanMeta{Type: "strategy"}, want: true},
-		{name: "tBills type is external", meta: &LoanMeta{Type: "tBills"}, want: false},
-		{name: "empty type is external", meta: &LoanMeta{}, want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			l := validLoan()
-			l.LoanMeta = tt.meta
-			if got := l.IsInternal(); got != tt.want {
-				t.Errorf("IsInternal() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestNewLoan_Constructor(t *testing.T) {
 	v := validLoan()
 

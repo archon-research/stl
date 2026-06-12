@@ -30,6 +30,9 @@ type MapleAssetToken struct {
 // (natural key, processing_version) primary key: the BEFORE INSERT trigger
 // reuses the processing_version for same-build retries (deduplicated by the
 // conflict clause) and assigns MAX+1 for a new build_id (insert succeeds).
+// A save where every row dedupes succeeds (the retry path); a save where
+// only some rows dedupe returns an error so the caller's transaction rolls
+// back instead of silently dropping the collided rows.
 // Implementations must sort batches by natural key before inserting so
 // concurrent writers acquire the per-row advisory locks in a stable order
 // (ADR-0002).

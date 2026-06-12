@@ -120,11 +120,7 @@ func (t *Telemetry) RecordBlockProcessed(ctx context.Context, duration time.Dura
 		return
 	}
 
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	attrs := metric.WithAttributes(t.chainAttr, attribute.String("status", status))
+	attrs := metric.WithAttributes(t.chainAttr, telemetry.StatusAttr(err))
 
 	t.blocksProcessed.Add(ctx, 1, attrs)
 	t.blockDuration.Record(ctx, duration.Seconds(), attrs)
@@ -152,11 +148,7 @@ func (t *Telemetry) RecordRPCCall(ctx context.Context, method string, duration t
 		attribute.String("rpc.method", method),
 	}
 
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	attrs = append(attrs, attribute.String("status", status))
+	attrs = append(attrs, telemetry.StatusAttr(err))
 
 	t.rpcCallsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 	t.rpcDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))

@@ -617,6 +617,103 @@ func TestSync_GlobalsFailAlone(t *testing.T) {
 	}
 }
 
+func TestSync_TwoIndependentPhaseFailuresJoinBoth(t *testing.T) {
+	client := happyClient()
+	client.GetActiveLoansFn = func(context.Context) ([]outbound.MapleActiveLoan, error) {
+		return nil, errors.New("loans exploded")
+	}
+	client.GetSyrupGlobalsFn = func(context.Context) (*outbound.MapleSyrupGlobals, error) {
+		return nil, errors.New("globals exploded")
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "loans exploded") || !strings.Contains(err.Error(), "globals exploded") {
+		t.Errorf("error %q should carry both independent phase failures", err.Error())
+	}
+	if len(repo.savedPoolStates) != 2 || len(repo.savedStrategies) != 1 {
+		t.Errorf("healthy phases must run: pools=%d strategies=%d",
+			len(repo.savedPoolStates), len(repo.savedStrategies))
+	}
+}
+
+func TestSync_CtxCancelledDuringPoolsAbortsCycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := happyClient()
+	client.GetPoolsFn = func(ctx context.Context) ([]outbound.MaplePool, error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v should be context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "aborting sync cycle after pools phase") {
+		t.Errorf("error %q should mark the cycle as aborted after pools", err.Error())
+	}
+	if client.activeLoansCalled || client.strategiesCalled || client.globalsCalled {
+		t.Error("no later phase may run against a cancelled context")
+	}
+}
+
+func TestSync_CtxCancelledDuringLoansAbortsCycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := happyClient()
+	client.GetActiveLoansFn = func(ctx context.Context) ([]outbound.MapleActiveLoan, error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v should be context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "aborting sync cycle after loans phase") {
+		t.Errorf("error %q should mark the cycle as aborted after loans", err.Error())
+	}
+	if client.strategiesCalled || client.globalsCalled {
+		t.Error("strategies/globals must not run against a cancelled context")
+	}
+	if len(repo.savedPoolStates) != 2 {
+		t.Errorf("pool states = %d, want 2 (pools phase completed before cancellation)", len(repo.savedPoolStates))
+	}
+}
+
+func TestSync_CtxCancelledDuringStrategiesAbortsCycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := happyClient()
+	client.GetSkyStrategiesFn = func(ctx context.Context) ([]outbound.MapleSkyStrategy, error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v should be context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "aborting sync cycle after sky strategies phase") {
+		t.Errorf("error %q should mark the cycle as aborted after sky strategies", err.Error())
+	}
+	if client.globalsCalled {
+		t.Error("globals must not run against a cancelled context")
+	}
+	if len(repo.savedPoolStates) != 2 || len(repo.savedLoanStates) != 3 {
+		t.Errorf("earlier phases must have completed: pools=%d loans=%d",
+			len(repo.savedPoolStates), len(repo.savedLoanStates))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Edge cases and error paths
 // ---------------------------------------------------------------------------

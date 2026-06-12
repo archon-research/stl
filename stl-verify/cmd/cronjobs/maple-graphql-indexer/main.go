@@ -67,18 +67,18 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 
 	client, err := maple.NewClient(maple.Config{
 		Endpoint: os.Getenv("MAPLE_GRAPHQL_ENDPOINT"),
-		Logger:   deps.Logger,
+		Logger:   logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating maple client: %w", err)
 	}
 
-	repo, err := postgres.NewMapleGraphQLRepository(deps.Pool, deps.Logger, buildReg.BuildID(), 0)
+	repo, err := postgres.NewMapleGraphQLRepository(deps.Pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("creating maple repository: %w", err)
 	}
 
-	txManager, err := postgres.NewTxManager(deps.Pool, deps.Logger)
+	txManager, err := postgres.NewTxManager(deps.Pool, logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
@@ -90,7 +90,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 
 	service, err := maple_graphql_indexer.NewService(maple_graphql_indexer.ServiceConfig{
 		ChainID: int64(chainID),
-		Logger:  deps.Logger,
+		Logger:  logger,
 	}, client, repo, txManager, telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating maple graphql indexer service: %w", err)

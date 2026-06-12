@@ -2,12 +2,6 @@ package maple
 
 import "fmt"
 
-// LoanMetaTypes that mark a loan as an internal Maple position.
-const (
-	LoanMetaTypeAMM      = "amm"
-	LoanMetaTypeStrategy = "strategy"
-)
-
 // LoanTypeOTL is the loan_type discriminator for Open Term Loans, the
 // only Maple loan type indexed today.
 const LoanTypeOTL = "OTL"
@@ -29,7 +23,6 @@ type LoanMeta struct {
 // Loan represents a Maple Open Term Loan contract (registry row, one per
 // loan). Snapshot data lives in LoanState / LoanCollateral.
 type Loan struct {
-	ID             int64
 	ChainID        int64
 	ProtocolID     int64
 	LoanAddress    []byte // 20 bytes, openTermLoan.id
@@ -77,14 +70,4 @@ func (l *Loan) Validate() error {
 		return fmt.Errorf("borrowerUserID must be positive, got %d", l.BorrowerUserID)
 	}
 	return nil
-}
-
-// IsInternal reports whether the loan is an internal Maple position
-// (loanMeta.type in {'amm', 'strategy'}), matching the generated
-// is_internal column on maple_loan.
-func (l *Loan) IsInternal() bool {
-	if l.LoanMeta == nil {
-		return false
-	}
-	return l.LoanMeta.Type == LoanMetaTypeAMM || l.LoanMeta.Type == LoanMetaTypeStrategy
 }

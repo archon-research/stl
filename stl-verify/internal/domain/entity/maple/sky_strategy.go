@@ -5,7 +5,6 @@ import "fmt"
 // SkyStrategy represents a Sky strategy (internal Maple deployment of
 // pool assets into DeFi positions) discovered via the Maple GraphQL API.
 type SkyStrategy struct {
-	ID              int64
 	ChainID         int64
 	StrategyAddress []byte // 20 bytes, skyStrategy.id
 	PoolID          int64

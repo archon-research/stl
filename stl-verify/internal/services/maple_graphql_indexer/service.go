@@ -91,7 +91,9 @@ func (s *Service) Sync(ctx context.Context) error {
 // own DB transaction; a failing phase does not stop later phases, but its
 // error is joined into the returned error so the run is marked failed.
 // Loans and Sky strategies depend on the pool registry ids, so they are
-// skipped (and reported failed) when the pool phase fails.
+// skipped (and reported failed) when the pool phase fails. A cancelled
+// context short-circuits the remaining phases instead of attempting them
+// with a dead context.
 //
 // Passing a timestamp that is stable across harness retries (e.g. the
 // Temporal activity's workflow-recorded schedule time) makes retries
@@ -106,6 +108,22 @@ func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
 
 	s.logger.Info("starting sync cycle", "syncedAt", syncedAt)
 
+	err := s.runPhases(ctx, syncedAt)
+	s.telemetry.RecordCycle(ctx, err)
+	telemetry.SetSpanError(span, err, "sync cycle failed")
+	if err != nil {
+		s.logger.Error("sync cycle finished with errors", "syncedAt", syncedAt, "error", err)
+	} else {
+		s.logger.Info("sync cycle complete", "syncedAt", syncedAt)
+	}
+	return err
+}
+
+// runPhases runs the four sync phases in order, joining their errors. A
+// context cancelled during a phase aborts the cycle there: later phases
+// would only fail against the dead context, adding error-metric noise for
+// every routine shutdown.
+func (s *Service) runPhases(ctx context.Context, syncedAt time.Time) error {
 	var (
 		poolIDs    map[common.Address]int64
 		protocolID int64
@@ -119,15 +137,24 @@ func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
 		poolIDs, err = s.syncPools(ctx, syncedAt, protocolID)
 		return err
 	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return errors.Join(poolsErr, fmt.Errorf("aborting sync cycle after pools phase: %w", ctxErr))
+	}
 
 	var loansErr, strategiesErr error
 	if poolsErr == nil {
 		loansErr = s.runPhase(ctx, "loans", func(ctx context.Context) error {
 			return s.syncLoans(ctx, syncedAt, poolIDs, protocolID)
 		})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return errors.Join(poolsErr, loansErr, fmt.Errorf("aborting sync cycle after loans phase: %w", ctxErr))
+		}
 		strategiesErr = s.runPhase(ctx, "sky_strategies", func(ctx context.Context) error {
 			return s.syncSkyStrategies(ctx, syncedAt, poolIDs)
 		})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return errors.Join(poolsErr, loansErr, strategiesErr, fmt.Errorf("aborting sync cycle after sky strategies phase: %w", ctxErr))
+		}
 	} else {
 		// The pool error joins once below; the skip errors deliberately do
 		// not wrap it again. Record the skipped phases so per-phase error
@@ -142,15 +169,7 @@ func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
 		return s.syncSyrupGlobals(ctx, syncedAt)
 	})
 
-	err := errors.Join(poolsErr, loansErr, strategiesErr, globalsErr)
-	s.telemetry.RecordCycle(ctx, err)
-	telemetry.SetSpanError(span, err, "sync cycle failed")
-	if err != nil {
-		s.logger.Error("sync cycle finished with errors", "syncedAt", syncedAt, "error", err)
-	} else {
-		s.logger.Info("sync cycle complete", "syncedAt", syncedAt)
-	}
-	return err
+	return errors.Join(poolsErr, loansErr, strategiesErr, globalsErr)
 }
 
 // runPhase wraps a phase with a span, duration metric, and error logging.

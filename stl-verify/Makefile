@@ -654,6 +654,7 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
+		"MAPLE_GRAPHQL_ENDPOINT=" \
 		"MAPLE_SYNC_INTERVAL=10m" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
