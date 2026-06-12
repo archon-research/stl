@@ -480,26 +480,26 @@ export function RiskBreakdownTab({
                   selectedReceiptToken.underlying_symbol)
             }
             detail={
-              isTokenMetaLoading
-                ? 'Fetching token metadata'
-                : tokenCatalog
-                  ? (
-                      <span
-                        className={css({
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '1.5',
-                          flexWrap: 'wrap',
-                        })}
-                      >
-                        <TokenAddress
-                          address={tokenCatalog.address}
-                          chainId={selectedReceiptToken.chain_id}
-                        />
-                        <span>{tokenCatalog.decimals ?? 'Unknown'} decimals</span>
-                      </span>
-                    )
-                  : 'Token metadata unavailable'
+              isTokenMetaLoading ? (
+                'Fetching token metadata'
+              ) : tokenCatalog ? (
+                <span
+                  className={css({
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    flexWrap: 'wrap',
+                  })}
+                >
+                  <TokenAddress
+                    address={tokenCatalog.address}
+                    chainId={selectedReceiptToken.chain_id}
+                  />
+                  <span>{tokenCatalog.decimals ?? 'Unknown'} decimals</span>
+                </span>
+              ) : (
+                'Token metadata unavailable'
+              )
             }
           />
           <SummaryMetric
