@@ -20,7 +20,7 @@ import (
 func BuildSourceRegistry(mc outbound.Multicaller, logger *slog.Logger) (*SourceRegistry, error) {
 	registry := NewSourceRegistry(logger)
 
-	for _, s := range DefaultSkipSources(logger) {
+	for _, s := range defaultSkipSources(logger) {
 		registry.Register(s)
 	}
 
@@ -52,7 +52,7 @@ func BuildSourceRegistry(mc outbound.Multicaller, logger *slog.Logger) (*SourceR
 	}
 	registry.Register(uniV3)
 
-	for _, s := range DefaultStubSources(logger) {
+	for _, s := range defaultStubSources(logger) {
 		registry.Register(s)
 	}
 

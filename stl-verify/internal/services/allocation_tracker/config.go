@@ -37,10 +37,10 @@ func ConfigDefaults() Config {
 	}
 }
 
-// ProxiesFromContract flattens the contract's ALM proxy map into []ProxyConfig. It is
+// proxiesFromContract flattens the contract's ALM proxy map into []ProxyConfig. It is
 // pure (no I/O): callers load the contract once and pass it here. It validates the chain
 // vocabulary so an unrecognised chain fails loudly instead of being silently dropped.
-func ProxiesFromContract(contract *axis_synome_contract.Contract) ([]ProxyConfig, error) {
+func proxiesFromContract(contract *axis_synome_contract.Contract) ([]ProxyConfig, error) {
 	proxies, err := proxiesFromAlmProxy(contract.GetAlmProxies())
 	if err != nil {
 		return nil, err
