@@ -37,7 +37,7 @@ CREATE TABLE psm3_snapshot (
     block_number       BIGINT      NOT NULL,
     block_version      INT         NOT NULL DEFAULT 0,
     block_timestamp    TIMESTAMPTZ NOT NULL,
-    source             TEXT        NOT NULL CHECK (source IN ('event', 'sweep')),
+    source             TEXT        NOT NULL CHECK (source = 'sweep'),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
