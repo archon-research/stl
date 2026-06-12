@@ -656,6 +656,8 @@ dev-env:
 		"TEMPORAL_NAMESPACE=vector" \
 		"MAPLE_GRAPHQL_ENDPOINT=" \
 		"MAPLE_SYNC_INTERVAL=10m" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
