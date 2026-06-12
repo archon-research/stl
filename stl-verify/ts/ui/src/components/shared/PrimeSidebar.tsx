@@ -7,7 +7,7 @@ import {
   ThemeToggle,
 } from '@archon-research/design-system';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
@@ -26,6 +26,24 @@ type PrimeSidebarProps = {
 };
 
 const switchStyles = toggleSwitch();
+// The shared toggleSwitch recipe keys its checked styling off `data-checked`
+// (Base UI convention), but the Ark Switch we render emits `data-state="checked"`.
+// These overrides re-apply the track/thumb checked styling on the correct
+// attribute so the control visibly reflects its state.
+const switchControlCheckedClassName = css({
+  '&[data-state="checked"]': {
+    bg: 'gray.800',
+    borderColor: 'gray.700',
+    _dark: { bg: 'gray.600', borderColor: 'gray.500' },
+  },
+});
+const switchThumbCheckedClassName = css({
+  '[data-state="checked"] &': {
+    transform: 'translateX(calc(2.25rem - 100% - 2px))',
+    bg: 'white',
+    _dark: { bg: 'gray.100' },
+  },
+});
 
 export function PrimeSidebar({
   primes,
@@ -135,8 +153,12 @@ export function PrimeSidebar({
           >
             Show all primes
           </Switch.Label>
-          <Switch.Control className={switchStyles.root}>
-            <Switch.Thumb className={switchStyles.thumb} />
+          <Switch.Control
+            className={cx(switchStyles.root, switchControlCheckedClassName)}
+          >
+            <Switch.Thumb
+              className={cx(switchStyles.thumb, switchThumbCheckedClassName)}
+            />
           </Switch.Control>
           <Switch.HiddenInput />
         </Switch.Root>

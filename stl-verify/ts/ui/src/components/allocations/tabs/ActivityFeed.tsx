@@ -769,28 +769,19 @@ export function ActivityFeed({
           flex: '1 1 20rem',
         })}
       >
-        <div className={flex({ align: 'center', gap: '2.5' })}>
-          {!showAllPrimes && selectedPrime ? (
-            <ProtocolLogo protocolName={selectedPrime.name} size="8" />
-          ) : null}
-          <h1
-            className={css({
-              m: 0,
-              fontSize: { base: '3xl', md: '4xl' },
-              lineHeight: 'tight',
-              color: 'text.strong',
-            })}
-          >
-            {showAllPrimes ? 'Activity' : (selectedPrime?.name ?? 'Activity')}
-          </h1>
-        </div>
-        {showAllPrimes ? (
-          <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
-            Across all primes
-          </span>
-        ) : selectedPrime ? (
-          <TokenAddress address={selectedPrime.id} />
-        ) : null}
+        <h1
+          className={css({
+            m: 0,
+            fontSize: { base: '3xl', md: '4xl' },
+            lineHeight: 'tight',
+            color: 'text.strong',
+          })}
+        >
+          Activities
+        </h1>
+        <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
+          {showAllPrimes ? 'Across all primes' : 'Selected prime'}
+        </span>
       </div>
       {latestActivityAt ? (
         <div
