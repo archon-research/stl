@@ -1,0 +1,423 @@
+# =============================================================================
+# Multicall call volume (VEC-81)
+# =============================================================================
+# Observes the `multicall_batch_size` histogram emitted by the indexers'
+# multicall batching (PR #399):
+#   * _count  → multicalls (Execute calls) per second
+#   * _sum    → individual smart-contract calls per second
+#   * buckets → per-Execute burst size distribution
+#
+# Two CRs in this file — one per Grafana stack. The
+# `grafana-dashboards-{prod,staging}` ApplicationSets in the infra repo sync
+# this same path into both clusters, so both CRs land in each cluster; the
+# `environment` instanceSelector routes them to the matching Grafana CR at
+# the operator layer. Note the `-prod`/`-staging` suffix on metadata.name —
+# Kubernetes resource identity is (group, kind, namespace, name), so they
+# must differ even though only one is "active" per cluster. The dashboard
+# JSON is identical for both stacks (no cluster-scoped queries) but is
+# duplicated to keep the file self-contained (Grafana Operator does not
+# support YAML anchors inside `spec.json`).
+#
+# The datasource is templated as `${DS_PROM}` rather than a hard-coded UID so
+# it resolves to whichever Prometheus datasource exists in each stack.
+#
+# Folder UID `vector` is owned by Terraform (`infra/18_grafana_rbac.tf`).
+# =============================================================================
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: multicall-call-volume-prod
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app: grafana-operator
+      environment: prod
+  folderUID: vector
+  resyncPeriod: 5m
+  json: |
+    {
+      "title": "Multicall Call Volume (VEC-81)",
+      "uid": "multicall-call-volume",
+      "description": "multicall_batch_size histogram: _count=multicalls, _sum=individual SC calls, buckets=per-Execute burst. PR #399.",
+      "tags": ["vector", "multicall", "vec-81", "indexers"],
+      "schemaVersion": 39,
+      "timezone": "",
+      "time": { "from": "now-3h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROM",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "", "value": "" },
+            "hide": 0
+          },
+          {
+            "name": "service_name",
+            "type": "query",
+            "label": "service_name",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": { "query": "label_values(multicall_batch_size_count, service_name)", "refId": "service_name" },
+            "allValue": ".*",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "current": { "text": ["All"], "value": ["$__all"] }
+          },
+          {
+            "name": "chain",
+            "type": "query",
+            "label": "chain",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": { "query": "label_values(multicall_batch_size_count, chain)", "refId": "chain" },
+            "allValue": ".*",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "current": { "text": ["All"], "value": ["$__all"] }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Multicalls / sec",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "id": 1,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (service_name, chain) (rate(multicall_batch_size_count{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval]))",
+              "legendFormat": "{{service_name}} / {{chain}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Individual SC calls / sec",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "id": 2,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (service_name, chain) (rate(multicall_batch_size_sum{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval]))",
+              "legendFormat": "{{service_name}} / {{chain}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Avg calls per Execute",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "id": 3,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (service_name, chain) (rate(multicall_batch_size_sum{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval])) / sum by (service_name, chain) (rate(multicall_batch_size_count{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval]))",
+              "legendFormat": "{{service_name}} / {{chain}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Burst size per Execute (p50 / p99 / p100)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "id": 4,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "histogram_quantile(0.50, sum by (le, service_name, chain) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval])))",
+              "legendFormat": "p50 {{service_name}}/{{chain}}",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "histogram_quantile(0.99, sum by (le, service_name, chain) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval])))",
+              "legendFormat": "p99 {{service_name}}/{{chain}}",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "histogram_quantile(1.00, sum by (le, service_name, chain) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval])))",
+              "legendFormat": "p100 {{service_name}}/{{chain}}",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "type": "heatmap",
+          "title": "Burst size distribution (heatmap)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+          "id": 5,
+          "options": {
+            "calculate": false,
+            "cellGap": 1,
+            "color": { "mode": "scheme", "scheme": "Spectral" },
+            "yAxis": { "unit": "short" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (le) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: multicall-call-volume-staging
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app: grafana-operator
+      environment: staging
+  folderUID: vector
+  resyncPeriod: 5m
+  json: |
+    {
+      "title": "Multicall Call Volume (VEC-81)",
+      "uid": "multicall-call-volume",
+      "description": "multicall_batch_size histogram: _count=multicalls, _sum=individual SC calls, buckets=per-Execute burst. PR #399.",
+      "tags": ["vector", "multicall", "vec-81", "indexers"],
+      "schemaVersion": 39,
+      "timezone": "",
+      "time": { "from": "now-3h", "to": "now" },
+      "refresh": "30s",
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROM",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "", "value": "" },
+            "hide": 0
+          },
+          {
+            "name": "service_name",
+            "type": "query",
+            "label": "service_name",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": { "query": "label_values(multicall_batch_size_count, service_name)", "refId": "service_name" },
+            "allValue": ".*",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "current": { "text": ["All"], "value": ["$__all"] }
+          },
+          {
+            "name": "chain",
+            "type": "query",
+            "label": "chain",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": { "query": "label_values(multicall_batch_size_count, chain)", "refId": "chain" },
+            "allValue": ".*",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "current": { "text": ["All"], "value": ["$__all"] }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Multicalls / sec",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "id": 1,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (service_name, chain) (rate(multicall_batch_size_count{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval]))",
+              "legendFormat": "{{service_name}} / {{chain}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Individual SC calls / sec",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "id": 2,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (service_name, chain) (rate(multicall_batch_size_sum{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval]))",
+              "legendFormat": "{{service_name}} / {{chain}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Avg calls per Execute",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "id": 3,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (service_name, chain) (rate(multicall_batch_size_sum{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval])) / sum by (service_name, chain) (rate(multicall_batch_size_count{service_name=~\"$service_name\", chain=~\"$chain\"}[$__rate_interval]))",
+              "legendFormat": "{{service_name}} / {{chain}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Burst size per Execute (p50 / p99 / p100)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "id": 4,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
+            "tooltip": { "mode": "multi" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "histogram_quantile(0.50, sum by (le, service_name, chain) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval])))",
+              "legendFormat": "p50 {{service_name}}/{{chain}}",
+              "refId": "A"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "histogram_quantile(0.99, sum by (le, service_name, chain) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval])))",
+              "legendFormat": "p99 {{service_name}}/{{chain}}",
+              "refId": "B"
+            },
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "histogram_quantile(1.00, sum by (le, service_name, chain) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval])))",
+              "legendFormat": "p100 {{service_name}}/{{chain}}",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "type": "heatmap",
+          "title": "Burst size distribution (heatmap)",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+          "id": 5,
+          "options": {
+            "calculate": false,
+            "cellGap": 1,
+            "color": { "mode": "scheme", "scheme": "Spectral" },
+            "yAxis": { "unit": "short" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (le) (rate(multicall_batch_size_bucket{service_name=~\"$service_name\", chain=~\"$chain\", le!=\"\"}[$__rate_interval]))",
+              "format": "heatmap",
+              "legendFormat": "{{le}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
