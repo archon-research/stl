@@ -39,6 +39,7 @@ type mockSource struct {
 	tokenTypes map[string]bool
 	result     *FetchResult
 	err        error
+	returnNil  bool // return (nil, nil) — a contract violation the registry must surface
 	called     int
 }
 
@@ -52,6 +53,9 @@ func (m *mockSource) FetchBalances(ctx context.Context, entries []*TokenEntry, b
 	m.called++
 	if m.err != nil {
 		return nil, m.err
+	}
+	if m.returnNil {
+		return nil, nil
 	}
 	if m.result == nil {
 		return NewFetchResult(), nil
@@ -232,6 +236,41 @@ func TestSourceRegistry_FetchAll_PartialFailure(t *testing.T) {
 	}
 	if results.Balances[key1].Balance.Cmp(big.NewInt(100)) != 0 {
 		t.Errorf("good source result should still be present")
+	}
+}
+
+// TestSourceRegistry_FetchAll_NilResultIsError covers the (nil, nil) contract
+// violation: a source returning no result and no error would otherwise silently drop
+// its whole group, so FetchAll must surface it as a fetch failure rather than swallow it.
+func TestSourceRegistry_FetchAll_NilResultIsError(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  *mockSource
+		wantErr string
+	}{
+		{
+			name: "source returns nil result without error",
+			source: &mockSource{
+				name:       "erc20",
+				tokenTypes: map[string]bool{"erc20": true},
+				returnNil:  true,
+			},
+			wantErr: "returned nil result without error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry := NewSourceRegistry(slog.Default())
+			registry.Register(tt.source)
+			entries := []*TokenEntry{
+				{ContractAddress: common.HexToAddress("0x1111"), WalletAddress: common.HexToAddress("0xaaaa"), TokenType: "erc20"},
+			}
+			_, err := registry.FetchAll(context.Background(), entries, 0)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
+			}
+		})
 	}
 }
 

@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-func TestLoad_OK(t *testing.T) {
+func TestLoadContract_OK(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	contractPath := filepath.Join(dir, "contract.json")
-	schemaPath := filepath.Join(dir, "contract.schema.json")
 
 	contract := map[string]any{
 		"version":                "v1",
@@ -64,24 +63,21 @@ func TestLoad_OK(t *testing.T) {
 		},
 	}
 
-	schema := map[string]any{"type": "object", "$defs": map[string]any{}}
-
 	mustWriteJSON(t, contractPath, contract)
-	mustWriteJSON(t, schemaPath, schema)
 
-	bundle, err := Load(contractPath, schemaPath)
+	loaded, err := LoadContract(contractPath)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadContract() error = %v", err)
 	}
 
-	if bundle.Contract.Version != "v1" {
-		t.Fatalf("version = %q, want %q", bundle.Contract.Version, "v1")
+	if loaded.Version != "v1" {
+		t.Fatalf("version = %q, want %q", loaded.Version, "v1")
 	}
-	if bundle.Contract.AxisSynomeGitCommit != "deadbeef" {
-		t.Fatalf("axis_synome_git_commit = %q, want %q", bundle.Contract.AxisSynomeGitCommit, "deadbeef")
+	if loaded.AxisSynomeGitCommit != "deadbeef" {
+		t.Fatalf("axis_synome_git_commit = %q, want %q", loaded.AxisSynomeGitCommit, "deadbeef")
 	}
 
-	sparkMainnet := bundle.Contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"]
+	sparkMainnet := loaded.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"]
 	if len(sparkMainnet) != 2 {
 		t.Fatalf("spark/mainnet proxies = %d, want 2", len(sparkMainnet))
 	}

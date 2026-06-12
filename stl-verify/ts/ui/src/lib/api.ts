@@ -125,14 +125,19 @@ export function getRiskBreakdown(
 }
 
 export function getRrc(
-  assetId: number,
+  chainId: number,
+  tokenAddress: string,
   primeAddress: string,
   signal?: AbortSignal,
 ): Promise<Rrc> {
   return requestData(
     apiClient.GET('/v1/risk/rrc', {
       params: {
-        query: { asset_id: assetId, prime_id: primeAddress },
+        query: {
+          chain_id: chainId,
+          prime_id: primeAddress,
+          token_address: tokenAddress,
+        },
       },
       signal,
     }),

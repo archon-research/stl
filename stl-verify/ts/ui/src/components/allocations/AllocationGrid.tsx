@@ -38,6 +38,7 @@ import type { LocalProtocolRow } from '../../types/local-data';
 import {
   AppTooltip,
   ChainLogo,
+  PageShell,
   ProtocolLogo,
   SummaryMetric,
   TokenAddress,
@@ -499,410 +500,388 @@ export function AllocationGrid({
   });
 
   return (
-    <div
-      className={css({
-        minHeight: '100%',
-        bg: 'surface.subtle',
-        px: { base: '4', md: '5' },
-        py: { base: '4', md: '5' },
-      })}
-    >
-      <section
+    <PageShell>
+      <div
         className={css({
-          borderRadius: 'lg',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.default',
-          bg: 'surface.default',
-          p: { base: '4', md: '5' },
-          boxShadow: '2xl',
+          display: 'grid',
+          gap: '4',
         })}
       >
         <div
-          className={css({
-            display: 'grid',
-            gap: '4',
+          className={flex({
+            align: 'flex-start',
+            justify: 'space-between',
+            gap: { base: '3', md: '4' },
+            wrap: 'wrap',
           })}
         >
           <div
-            className={flex({
-              align: 'flex-start',
-              justify: 'space-between',
-              gap: { base: '3', md: '4' },
-              wrap: 'wrap',
+            className={css({
+              display: 'grid',
+              gap: '1',
+              minWidth: { base: '0', md: '18rem' },
+              flex: '1 1 20rem',
             })}
           >
-            <div
-              className={css({
-                display: 'grid',
-                gap: '1',
-                minWidth: { base: '0', md: '18rem' },
-                flex: '1 1 20rem',
-              })}
-            >
-              <div className={flex({ align: 'center', gap: '2.5' })}>
-                {selectedPrime ? (
-                  <ProtocolLogo protocolName={selectedPrime.name} size="8" />
-                ) : null}
-                <h1
-                  className={css({
-                    m: 0,
-                    fontSize: { base: '3xl', md: '4xl' },
-                    lineHeight: 'tight',
-                    color: 'text.strong',
-                  })}
-                >
-                  {selectedPrime ? selectedPrime.name : 'Select a prime'}
-                </h1>
-              </div>
+            <div className={flex({ align: 'center', gap: '2.5' })}>
               {selectedPrime ? (
-                <TokenAddress address={selectedPrime.id} />
+                <ProtocolLogo protocolName={selectedPrime.name} size="8" />
               ) : null}
-            </div>
-            {!showTopMetricsSkeleton ? (
-              <div
+              <h1
                 className={css({
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: { base: '2.5', md: '4' },
-                  justifyContent: { base: 'flex-start', md: 'flex-end' },
-                  textAlign: { base: 'left', md: 'right' },
-                  flex: '1 1 22rem',
+                  m: 0,
+                  fontSize: { base: '3xl', md: '4xl' },
+                  lineHeight: 'tight',
+                  color: 'text.strong',
                 })}
               >
-                {summary ? (
-                  <div
-                    className={css({
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '1.5',
-                      flexWrap: 'wrap',
-                      justifyContent: 'flex-end',
-                    })}
-                  >
-                    <span
-                      className={css({
-                        fontSize: 'sm',
-                        fontWeight: 'semibold',
-                        color: 'text.strong',
-                      })}
-                    >
-                      Latest activity{' '}
-                      {summary.latestActivityAt
-                        ? formatFreshnessLabel(summary.latestActivityAt)
-                        : '—'}
-                    </span>
-                    <span
-                      className={css({
-                        fontSize: 'xs',
-                        lineHeight: 'short',
-                        color: 'text.muted',
-                      })}
-                    >
-                      {summary.latestActivityAt
-                        ? formatDateTime(summary.latestActivityAt)
-                        : 'No indexed activity'}
-                    </span>
-                  </div>
-                ) : null}
-                {selectedPrime ? (
-                  <div
-                    className={css({
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '1.5',
-                      flexWrap: 'wrap',
-                      justifyContent: 'flex-end',
-                    })}
-                  >
-                    <span
-                      className={css({
-                        fontSize: 'sm',
-                        fontWeight: 'semibold',
-                        color: 'text.strong',
-                      })}
-                    >
-                      Debt sync{' '}
-                      {isPrimeDebtLoading
-                        ? 'Loading...'
-                        : primeDebtSnapshot?.synced_at
-                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
-                          : '—'}
-                    </span>
-                    <span
-                      className={css({
-                        fontSize: 'xs',
-                        lineHeight: 'short',
-                        color: 'text.muted',
-                      })}
-                    >
-                      {isPrimeDebtLoading
-                        ? 'Waiting for sync timestamp'
-                        : primeDebtSnapshot?.synced_at
-                          ? formatDateTime(primeDebtSnapshot.synced_at)
-                          : 'No debt sync timestamp'}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-          {showTopMetricsSkeleton ? (
-            <div
-              className={css({
-                display: 'grid',
-                gridTemplateColumns: {
-                  base: '1fr',
-                  sm: 'repeat(2, minmax(0, 1fr))',
-                  lg: 'repeat(4, minmax(0, 1fr))',
-                },
-                gap: '3',
-              })}
-            >
-              {Array.from({ length: 4 }).map((_, index) => (
-                <div
-                  key={`metrics-skeleton-${index}`}
-                  className={css({
-                    height: '88px',
-                    borderRadius: 'md',
-                    borderStyle: 'solid',
-                    borderWidth: '1px',
-                    borderColor: 'border.subtle',
-                    bg: 'surface.subtle',
-                  })}
-                />
-              ))}
+                {selectedPrime ? selectedPrime.name : 'Select a prime'}
+              </h1>
             </div>
-          ) : null}
-          {!showTopMetricsSkeleton && hasTopMetrics ? (
+            {selectedPrime ? <TokenAddress address={selectedPrime.id} /> : null}
+          </div>
+          {!showTopMetricsSkeleton ? (
             <div
               className={css({
-                display: 'grid',
-                gridTemplateColumns: {
-                  base: '1fr',
-                  sm: 'repeat(2, minmax(0, 1fr))',
-                  lg: 'repeat(4, minmax(0, 1fr))',
-                },
-                gap: '3',
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: { base: '2.5', md: '4' },
+                justifyContent: { base: 'flex-start', md: 'flex-end' },
+                textAlign: { base: 'left', md: 'right' },
+                flex: '1 1 22rem',
               })}
             >
               {summary ? (
-                <SummaryMetric
-                  className={metricsCardClassName}
-                  label="Total allocation"
-                  value={
-                    hasSearchQuery && overallSummary
-                      ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
-                      : formatUsdValue(summary.totalUsd)
-                  }
-                  detail={
-                    hasSearchQuery && overallSummary
-                      ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
-                      : `${summary.allocationCount} allocations`
-                  }
-                />
+                <div
+                  className={css({
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    flexWrap: 'wrap',
+                    justifyContent: 'flex-end',
+                  })}
+                >
+                  <span
+                    className={css({
+                      fontSize: 'sm',
+                      fontWeight: 'semibold',
+                      color: 'text.strong',
+                    })}
+                  >
+                    Latest activity{' '}
+                    {summary.latestActivityAt
+                      ? formatFreshnessLabel(summary.latestActivityAt)
+                      : '—'}
+                  </span>
+                  <span
+                    className={css({
+                      fontSize: 'xs',
+                      lineHeight: 'short',
+                      color: 'text.muted',
+                    })}
+                  >
+                    {summary.latestActivityAt
+                      ? formatDateTime(summary.latestActivityAt)
+                      : 'No indexed activity'}
+                  </span>
+                </div>
               ) : null}
-
-              {capitalMetrics ? (
-                <>
-                  <SummaryMetric
-                    className={metricsCardClassName}
-                    label="Risk capital"
-                    value={formatUsdValue(capitalMetrics.risk_capital)}
-                    detail={
-                      parseNumericValue(
-                        capitalMetrics.risk_to_capital_ratio,
-                      ) !== null
-                        ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
-                        : undefined
-                    }
-                  />
-                </>
-              ) : null}
-
-              {capitalMetrics ? (
-                <SummaryMetric
-                  className={metricsCardClassName}
-                  label="Total capital"
-                  value={formatUsdValue(capitalMetrics.total_capital)}
-                  detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
-                />
-              ) : null}
-
               {selectedPrime ? (
-                <>
-                  <SummaryMetric
-                    className={metricsCardClassName}
-                    label="Prime debt exposure"
-                    value={
-                      isPrimeDebtLoading
-                        ? 'Loading...'
-                        : formatWadValue(primeDebtSnapshot?.debt_wad)
-                    }
-                    detail={
-                      isPrimeDebtLoading ? (
-                        'Fetching latest debt snapshot'
-                      ) : (
-                        <div
-                          className={css({
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            alignItems: 'center',
-                            gap: '1',
-                          })}
-                        >
-                          <span>
-                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <AppTooltip
-                            ariaLabel={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
-                                : 'Raw WAD unavailable'
-                            }
-                            trigger={
-                              <span
-                                className={css({
-                                  textDecoration: 'underline',
-                                  textDecorationStyle: 'dotted',
-                                  textUnderlineOffset: '2px',
-                                })}
-                              >
-                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
-                              </span>
-                            }
-                            content={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
-                                : 'Raw WAD unavailable'
-                            }
-                          />
-                        </div>
-                      )
-                    }
-                  />
-                </>
+                <div
+                  className={css({
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    flexWrap: 'wrap',
+                    justifyContent: 'flex-end',
+                  })}
+                >
+                  <span
+                    className={css({
+                      fontSize: 'sm',
+                      fontWeight: 'semibold',
+                      color: 'text.strong',
+                    })}
+                  >
+                    Debt sync{' '}
+                    {isPrimeDebtLoading
+                      ? 'Loading...'
+                      : primeDebtSnapshot?.synced_at
+                        ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                        : '—'}
+                  </span>
+                  <span
+                    className={css({
+                      fontSize: 'xs',
+                      lineHeight: 'short',
+                      color: 'text.muted',
+                    })}
+                  >
+                    {isPrimeDebtLoading
+                      ? 'Waiting for sync timestamp'
+                      : primeDebtSnapshot?.synced_at
+                        ? formatDateTime(primeDebtSnapshot.synced_at)
+                        : 'No debt sync timestamp'}
+                  </span>
+                </div>
               ) : null}
             </div>
           ) : null}
-          {!showTopMetricsSkeleton && capitalMetrics?.validation_note ? (
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'xs',
-                color: 'text.muted',
-                fontStyle: 'italic',
-                textAlign: 'left',
-              })}
-            >
-              {capitalMetrics.validation_note}
-            </p>
-          ) : null}
+        </div>
+        {showTopMetricsSkeleton ? (
           <div
             className={css({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                lg: 'auto minmax(20rem, 24rem)',
+                sm: 'repeat(2, minmax(0, 1fr))',
+                lg: 'repeat(4, minmax(0, 1fr))',
               },
-              gap: { base: '3', md: '4', lg: '5' },
-              alignItems: 'end',
+              gap: '3',
             })}
           >
-            <span
-              className={css({
-                display: 'inline-flex',
-                width: 'fit-content',
-                alignItems: 'center',
-                borderRadius: 'full',
-                bg: { _dark: 'gray.700', base: 'gray.200' },
-                px: '3',
-                py: '1',
-                fontSize: 'xs',
-                fontWeight: 'semibold',
-                letterSpacing: '0.1em',
-                textTransform: 'uppercase',
-                color: 'text.muted',
-              })}
-            >
-              Allocations
-            </span>
-            <div
-              className={css({
-                minWidth: '0',
-                width: '100%',
-                justifySelf: { lg: 'end' },
-              })}
-            >
-              <SearchInput
-                aria-label="Search allocations"
-                disabled={!selectedPrime}
-                onValueChange={setLocalSearchValue}
-                placeholder="Search assets, protocols, chains"
-                value={localSearchValue}
+            {Array.from({ length: 4 }).map((_, index) => (
+              <div
+                key={`metrics-skeleton-${index}`}
+                className={css({
+                  height: '88px',
+                  borderRadius: 'md',
+                  borderStyle: 'solid',
+                  borderWidth: '1px',
+                  borderColor: 'border.subtle',
+                  bg: 'surface.subtle',
+                })}
               />
-            </div>
+            ))}
+          </div>
+        ) : null}
+        {!showTopMetricsSkeleton && hasTopMetrics ? (
+          <div
+            className={css({
+              display: 'grid',
+              gridTemplateColumns: {
+                base: '1fr',
+                sm: 'repeat(2, minmax(0, 1fr))',
+                lg: 'repeat(4, minmax(0, 1fr))',
+              },
+              gap: '3',
+            })}
+          >
+            {summary ? (
+              <SummaryMetric
+                className={metricsCardClassName}
+                label="Total allocation"
+                value={
+                  hasSearchQuery && overallSummary
+                    ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+                    : formatUsdValue(summary.totalUsd)
+                }
+                detail={
+                  hasSearchQuery && overallSummary
+                    ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                    : `${summary.allocationCount} allocations`
+                }
+              />
+            ) : null}
+
+            {capitalMetrics ? (
+              <>
+                <SummaryMetric
+                  className={metricsCardClassName}
+                  label="Risk capital"
+                  value={formatUsdValue(capitalMetrics.risk_capital)}
+                  detail={
+                    parseNumericValue(capitalMetrics.risk_to_capital_ratio) !==
+                    null
+                      ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
+                      : undefined
+                  }
+                />
+              </>
+            ) : null}
+
+            {capitalMetrics ? (
+              <SummaryMetric
+                className={metricsCardClassName}
+                label="Total capital"
+                value={formatUsdValue(capitalMetrics.total_capital)}
+                detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+              />
+            ) : null}
+
+            {selectedPrime ? (
+              <>
+                <SummaryMetric
+                  className={metricsCardClassName}
+                  label="Prime debt exposure"
+                  value={
+                    isPrimeDebtLoading
+                      ? 'Loading...'
+                      : formatWadValue(primeDebtSnapshot?.debt_wad)
+                  }
+                  detail={
+                    isPrimeDebtLoading ? (
+                      'Fetching latest debt snapshot'
+                    ) : (
+                      <div
+                        className={css({
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          alignItems: 'center',
+                          gap: '1',
+                        })}
+                      >
+                        <span>
+                          Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <AppTooltip
+                          ariaLabel={
+                            primeDebtSnapshot?.debt_wad
+                              ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                              : 'Raw WAD unavailable'
+                          }
+                          trigger={
+                            <span
+                              className={css({
+                                textDecoration: 'underline',
+                                textDecorationStyle: 'dotted',
+                                textUnderlineOffset: '2px',
+                              })}
+                            >
+                              {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                            </span>
+                          }
+                          content={
+                            primeDebtSnapshot?.debt_wad
+                              ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                              : 'Raw WAD unavailable'
+                          }
+                        />
+                      </div>
+                    )
+                  }
+                />
+              </>
+            ) : null}
+          </div>
+        ) : null}
+        {!showTopMetricsSkeleton && capitalMetrics?.validation_note ? (
+          <p
+            className={css({
+              m: 0,
+              fontSize: 'xs',
+              color: 'text.muted',
+              fontStyle: 'italic',
+              textAlign: 'left',
+            })}
+          >
+            {capitalMetrics.validation_note}
+          </p>
+        ) : null}
+        <div
+          className={css({
+            display: 'grid',
+            gridTemplateColumns: {
+              base: '1fr',
+              lg: 'auto minmax(20rem, 24rem)',
+            },
+            gap: { base: '3', md: '4', lg: '5' },
+            alignItems: 'end',
+          })}
+        >
+          <span
+            className={css({
+              display: 'inline-flex',
+              width: 'fit-content',
+              alignItems: 'center',
+              borderRadius: 'full',
+              bg: { _dark: 'gray.700', base: 'gray.200' },
+              px: '3',
+              py: '1',
+              fontSize: 'xs',
+              fontWeight: 'semibold',
+              letterSpacing: '0.1em',
+              textTransform: 'uppercase',
+              color: 'text.muted',
+            })}
+          >
+            Allocations
+          </span>
+          <div
+            className={css({
+              minWidth: '0',
+              width: '100%',
+              justifySelf: { lg: 'end' },
+            })}
+          >
+            <SearchInput
+              aria-label="Search allocations"
+              disabled={!selectedPrime}
+              onValueChange={setLocalSearchValue}
+              placeholder="Search assets, protocols, chains"
+              value={localSearchValue}
+            />
           </div>
         </div>
+      </div>
 
-        <div className={css({ mt: '6' })}>
-          {!selectedPrime && !isLoading ? (
-            <EmptyState
-              title="Choose a prime to load positions"
-              description="The main grid activates once a prime is selected from the sidebar."
-              stretch
+      <div className={css({ mt: '6' })}>
+        {!selectedPrime && !isLoading ? (
+          <EmptyState
+            title="Choose a prime to load positions"
+            description="The main grid activates once a prime is selected from the sidebar."
+            stretch
+          />
+        ) : null}
+
+        {selectedPrime && errorMessage ? (
+          <ErrorState
+            title="Unable to load allocations"
+            description="An error occurred while fetching allocation data."
+            errorMessage={errorMessage}
+          />
+        ) : null}
+
+        {selectedPrime &&
+        !errorMessage &&
+        !isLoading &&
+        allocations.length === 0 ? (
+          <EmptyState
+            title="No allocations returned"
+            description="The selected prime did not return any allocation rows from the API."
+            stretch
+          />
+        ) : null}
+
+        {selectedPrime &&
+        !errorMessage &&
+        !isLoading &&
+        allocations.length > 0 &&
+        filteredAllocations.length === 0 ? (
+          <EmptyState
+            title="No rows match the active filters"
+            description="Clear one of the filters in the top bar to restore the allocation grid."
+            stretch
+          />
+        ) : null}
+
+        {selectedPrime &&
+        !errorMessage &&
+        (isLoading || filteredAllocations.length > 0) ? (
+          <div className={tableHeaderTypographyClassName}>
+            <DataTable
+              table={table}
+              isLoading={isLoading}
+              onRowClick={(allocation) =>
+                onSelectAllocation(getAllocationKey(allocation))
+              }
+              getRowKey={getAllocationKey}
+              selectedRowKey={selectedAllocationKey}
             />
-          ) : null}
-
-          {selectedPrime && errorMessage ? (
-            <ErrorState
-              title="Unable to load allocations"
-              description="An error occurred while fetching allocation data."
-              errorMessage={errorMessage}
-            />
-          ) : null}
-
-          {selectedPrime &&
-          !errorMessage &&
-          !isLoading &&
-          allocations.length === 0 ? (
-            <EmptyState
-              title="No allocations returned"
-              description="The selected prime did not return any allocation rows from the API."
-              stretch
-            />
-          ) : null}
-
-          {selectedPrime &&
-          !errorMessage &&
-          !isLoading &&
-          allocations.length > 0 &&
-          filteredAllocations.length === 0 ? (
-            <EmptyState
-              title="No rows match the active filters"
-              description="Clear one of the filters in the top bar to restore the allocation grid."
-              stretch
-            />
-          ) : null}
-
-          {selectedPrime &&
-          !errorMessage &&
-          (isLoading || filteredAllocations.length > 0) ? (
-            <div className={tableHeaderTypographyClassName}>
-              <DataTable
-                table={table}
-                isLoading={isLoading}
-                onRowClick={(allocation) =>
-                  onSelectAllocation(getAllocationKey(allocation))
-                }
-                getRowKey={getAllocationKey}
-                selectedRowKey={selectedAllocationKey}
-              />
-            </div>
-          ) : null}
-        </div>
-      </section>
-    </div>
+          </div>
+        ) : null}
+      </div>
+    </PageShell>
   );
 }
