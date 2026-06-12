@@ -697,7 +697,4 @@ query {
 
 ---
 
-**Document Version:** 1.1
-**Last Updated:** June 2026
-
 **Contributors:** Technical specification based on Maple Finance protocol documentation, GraphQL API schema, and smart contract interfaces.
