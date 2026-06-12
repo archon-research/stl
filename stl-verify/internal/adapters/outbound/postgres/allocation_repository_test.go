@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"math/big"
 	"testing"
 
@@ -101,6 +102,49 @@ func TestBuildInsertArgs_VaultPositionUsesTokenDecimals(t *testing.T) {
 		t.Fatalf("expected args[10] to be pgtype.Numeric, got %T", args[10])
 	}
 	assertNumeric(t, "txAmount", txAmount, rawShares, -18)
+}
+
+func TestEncodeTxHash_SweepUsesZeroSentinel(t *testing.T) {
+	// Sweep (reconciliation) positions have no originating transaction. Rather
+	// than fabricating a realistic-looking hash that masquerades as an on-chain
+	// transaction (VEC-340), encodeTxHash stores the zero hash as an explicit
+	// "no transaction" sentinel — a value that can never collide with a real
+	// 32-byte transaction hash.
+	pos := &entity.AllocationPosition{
+		ChainID:      1,
+		TokenAddress: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+		ProxyAddress: common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		BlockNumber:  24584100,
+		Direction:    "sweep",
+		// TxHash intentionally empty: sweeps are not transaction-driven.
+	}
+
+	got, err := encodeTxHash(pos)
+	if err != nil {
+		t.Fatalf("encodeTxHash: %v", err)
+	}
+
+	want := make([]byte, common.HashLength)
+	if !bytes.Equal(got, want) {
+		t.Errorf("sweep tx_hash = %x, want all-zero %d-byte sentinel", got, common.HashLength)
+	}
+}
+
+func TestEncodeTxHash_RealTransactionDecoded(t *testing.T) {
+	// Transaction-driven positions keep their on-chain hash verbatim.
+	pos := &entity.AllocationPosition{
+		TxHash: "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+	}
+
+	got, err := encodeTxHash(pos)
+	if err != nil {
+		t.Fatalf("encodeTxHash: %v", err)
+	}
+
+	want := common.FromHex(pos.TxHash)
+	if !bytes.Equal(got, want) {
+		t.Errorf("tx_hash = %x, want %x", got, want)
+	}
 }
 
 func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
