@@ -13,6 +13,7 @@ import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
 import {
+  type ChainLabelLookup,
   getAllocationKey,
   getCategoryLabel,
   getProtocolLabel,
@@ -31,6 +32,7 @@ import { RrcTab } from './tabs/RrcTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
+  chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   isDrawerOpen: boolean;
   isLoading: boolean;
@@ -63,6 +65,7 @@ const toggleClassName = `${segmentedControlStyles.item} ${css({
 
 export function BottomPanel({
   allocations,
+  chainLabels,
   errorMessage,
   isDrawerOpen,
   isLoading,
@@ -495,6 +498,7 @@ export function BottomPanel({
               <ActivityFeed
                 isEnabled={isDrawerOpen && activeTab === 'activity'}
                 actionFilter={activityActionFilter || undefined}
+                chainLabels={chainLabels}
                 mode="drawer"
                 searchQuery={riskSearchValue}
                 selectedReceiptToken={focusedAllocation}

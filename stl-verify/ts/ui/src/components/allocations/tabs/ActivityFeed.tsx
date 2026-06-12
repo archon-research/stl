@@ -17,10 +17,12 @@ import {
   getTxProtocolEvents,
 } from '../../../lib/api';
 import {
+  type ChainLabelLookup,
   DIRECT_PROTOCOL_FILTER_VALUE,
   formatDateTime,
   formatTokenAmount,
   formatFreshnessLabel,
+  getChainLabel,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
@@ -44,6 +46,7 @@ type ActivityFeedProps = {
   searchQuery?: string;
   showAllPrimes?: boolean;
   tokenOptions?: string[];
+  chainLabels?: ChainLabelLookup;
 };
 
 type ActivityFilters = {
@@ -280,10 +283,12 @@ function ActivityEventRow({
   event,
   isExpanded,
   onSelectTx,
+  chainLabels,
 }: {
   event: AllocationActivity;
   isExpanded: boolean;
   onSelectTx: (event: AllocationActivity) => void;
+  chainLabels?: ChainLabelLookup;
 }) {
   const actionColor = getActionColor(event.action_type);
   const actionIcon = getActionIcon(event.action_type);
@@ -382,7 +387,7 @@ function ActivityEventRow({
             })}
           >
             <ChainLogo chainId={event.chain_id} size="4" />
-            Chain {event.chain_id}
+            {getChainLabel(event.chain_id, chainLabels)}
           </span>
           {txHash ? (
             <>
@@ -441,6 +446,7 @@ export function ActivityFeed({
   searchQuery = '',
   showAllPrimes = false,
   tokenOptions = [],
+  chainLabels,
 }: ActivityFeedProps) {
   const isPageMode = mode === 'page';
   const txRequestControllersRef = useRef<Record<string, AbortController>>({});
@@ -779,9 +785,11 @@ export function ActivityFeed({
         >
           Activities
         </h1>
-        <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
-          {showAllPrimes ? 'Across all primes' : 'Selected prime'}
-        </span>
+        {showAllPrimes ? (
+          <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
+            Across all primes
+          </span>
+        ) : null}
       </div>
       {latestActivityAt ? (
         <div
@@ -893,24 +901,18 @@ export function ActivityFeed({
         </label>
       </div>
 
-      <div
-        className={css({
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '3',
-          fontSize: 'xs',
-          color: 'text.subtle',
-        })}
-      >
-        <span>
-          {hasActiveFilters
-            ? 'Server filters active'
-            : showAllPrimes
-              ? 'Showing latest activity across all primes'
-              : 'Showing latest activity for selected prime'}
-        </span>
-        {hasActiveFilters ? (
+      {hasActiveFilters ? (
+        <div
+          className={css({
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: '3',
+            fontSize: 'xs',
+            color: 'text.subtle',
+          })}
+        >
+          <span>Server filters active</span>
           <button
             type="button"
             onClick={clearFilters}
@@ -930,8 +932,8 @@ export function ActivityFeed({
           >
             Clear filters
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 
@@ -985,6 +987,7 @@ export function ActivityFeed({
                   event={event}
                   isExpanded={isExpanded}
                   onSelectTx={handleSelectTx}
+                  chainLabels={chainLabels}
                 />
 
                 {isExpanded && txHash ? (

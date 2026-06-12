@@ -120,52 +120,6 @@ export function PrimeSidebar({
 
       <div
         className={css({
-          width: '100%',
-          boxSizing: 'border-box',
-          px: '5',
-          py: '3',
-          borderBottomWidth: '1px',
-          borderBottomStyle: 'solid',
-          borderBottomColor: 'border.subtle',
-        })}
-      >
-        <Switch.Root
-          checked={showAllPrimes}
-          disabled={!canShowAllPrimes}
-          onCheckedChange={(details: { checked: boolean }) =>
-            onShowAllPrimesChange(details.checked)
-          }
-          className={flex({
-            align: 'center',
-            justify: 'space-between',
-            gap: '3',
-            width: '100%',
-            cursor: canShowAllPrimes ? 'pointer' : 'not-allowed',
-            opacity: canShowAllPrimes ? 1 : 0.5,
-          })}
-        >
-          <Switch.Label
-            className={css({
-              fontSize: 'sm',
-              fontWeight: 'medium',
-              color: 'text.default',
-            })}
-          >
-            Show all primes
-          </Switch.Label>
-          <Switch.Control
-            className={cx(switchStyles.root, switchControlCheckedClassName)}
-          >
-            <Switch.Thumb
-              className={cx(switchStyles.thumb, switchThumbCheckedClassName)}
-            />
-          </Switch.Control>
-          <Switch.HiddenInput />
-        </Switch.Root>
-      </div>
-
-      <div
-        className={css({
           flex: '1',
           minHeight: 0,
           width: '100%',
@@ -287,11 +241,50 @@ export function PrimeSidebar({
         className={css({
           width: '100%',
           boxSizing: 'border-box',
+          px: '5',
+          pt: '3',
+        })}
+      >
+        <Switch.Root
+          checked={showAllPrimes}
+          disabled={!canShowAllPrimes}
+          onCheckedChange={(details: { checked: boolean }) =>
+            onShowAllPrimesChange(details.checked)
+          }
+          className={flex({
+            align: 'center',
+            justify: 'space-between',
+            gap: '3',
+            width: '100%',
+            cursor: canShowAllPrimes ? 'pointer' : 'not-allowed',
+            opacity: canShowAllPrimes ? 1 : 0.5,
+          })}
+        >
+          <Switch.Label
+            className={css({
+              fontSize: 'sm',
+              color: 'text.muted',
+            })}
+          >
+            Show all primes
+          </Switch.Label>
+          <Switch.Control
+            className={cx(switchStyles.root, switchControlCheckedClassName)}
+          >
+            <Switch.Thumb
+              className={cx(switchStyles.thumb, switchThumbCheckedClassName)}
+            />
+          </Switch.Control>
+          <Switch.HiddenInput />
+        </Switch.Root>
+      </div>
+
+      <div
+        className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '4',
           py: '3',
-          borderTopWidth: '1px',
-          borderTopStyle: 'solid',
-          borderTopColor: 'border.subtle',
           bg: 'surface.default',
         })}
       >

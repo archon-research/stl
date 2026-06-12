@@ -653,6 +653,7 @@ function App() {
               <ActivityFeed
                 isEnabled
                 mode="page"
+                chainLabels={chainLabels}
                 selectedNetwork={selectedNetwork}
                 selectedProtocol={selectedProtocol}
                 showAllPrimes={showAllPrimesInActivities}
@@ -748,6 +749,7 @@ function App() {
       >
         <BottomPanel
           allocations={allocations}
+          chainLabels={chainLabels}
           errorMessage={allocationsErrorMessage}
           isDrawerOpen={isDrawerOpen}
           isLoading={isAllocationsLoading}
