@@ -133,6 +133,10 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
     - Always think hard and carefully about schema design.
     - For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
     - NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
+- **System-wide registries** (`chain`, `token`, `user`, `protocol`, `prime`, `oracle` + mapping tables): FK these instead of duplicating address/symbol/decimals/name columns.
+    - FK by natural key only (`token`/`user`/`protocol`: `(chain_id, address)`; `oracle`/`prime`: `name`). Never resolve FKs by display label (e.g. token symbol) — labels are not unique or authoritative.
+    - Assets with no on-chain address (custodied BTC/SOL, off-chain API symbols) get no `token` row: store raw symbol or curated nullable `token_id` (see `offchain_price_asset`). Never invent addresses.
+    - Registry upserts must not clobber richer existing data: sources without block context insert NULL `created_at_block`/`first_seen_block` with no-op `ON CONFLICT` (see `GetOrCreateAssetTokens`); `LEAST()`-style merges clobber when your value is 0.
 - **External API adapters**:
     - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
 
