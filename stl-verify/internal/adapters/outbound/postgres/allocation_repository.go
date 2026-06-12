@@ -191,17 +191,32 @@ func (r *AllocationRepository) buildInsertArgs(
 // log_index, direction, processing_version, created_at) — already uniquely
 // identifies a sweep observation, so the hash carries no dedup information for
 // them. We therefore store the zero hash as an explicit "no transaction"
-// sentinel: it can never collide with a real 32-byte transaction hash, and it
-// no longer masquerades as a genuine on-chain tx the way the previous
-// content-addressed synthetic hash did (VEC-340).
+// sentinel: no real transaction hash takes that value in practice (a collision
+// is cryptographically negligible), and it no longer masquerades as a genuine
+// on-chain tx the way the previous content-addressed synthetic hash did
+// (VEC-340).
+//
+// The sentinel is only valid for sweeps. A transaction-driven position without
+// a hash signals an upstream bug, so we reject it rather than silently persist
+// it as "no transaction"; and a present hash must be a full 32-byte value
+// (common.FromHex decodes truncated hex, which we must not store).
 func encodeTxHash(pos *entity.AllocationPosition) ([]byte, error) {
 	if pos.TxHash == "" {
+		if pos.Direction != "sweep" {
+			return nil, fmt.Errorf(
+				"missing tx_hash for non-sweep position (direction=%q)",
+				pos.Direction,
+			)
+		}
 		return common.Hash{}.Bytes(), nil
 	}
 
 	b := common.FromHex(pos.TxHash)
-	if len(b) == 0 {
-		return nil, fmt.Errorf("invalid hex tx_hash: %s", pos.TxHash)
+	if len(b) != common.HashLength {
+		return nil, fmt.Errorf(
+			"tx_hash must be %d bytes, got %d: %s",
+			common.HashLength, len(b), pos.TxHash,
+		)
 	}
 	return b, nil
 }

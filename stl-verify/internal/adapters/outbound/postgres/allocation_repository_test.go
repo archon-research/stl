@@ -108,8 +108,8 @@ func TestEncodeTxHash_SweepUsesZeroSentinel(t *testing.T) {
 	// Sweep (reconciliation) positions have no originating transaction. Rather
 	// than fabricating a realistic-looking hash that masquerades as an on-chain
 	// transaction (VEC-340), encodeTxHash stores the zero hash as an explicit
-	// "no transaction" sentinel — a value that can never collide with a real
-	// 32-byte transaction hash.
+	// "no transaction" sentinel — a value no real transaction hash takes in
+	// practice (a collision is cryptographically negligible).
 	pos := &entity.AllocationPosition{
 		ChainID:      1,
 		TokenAddress: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
@@ -127,6 +127,27 @@ func TestEncodeTxHash_SweepUsesZeroSentinel(t *testing.T) {
 	want := make([]byte, common.HashLength)
 	if !bytes.Equal(got, want) {
 		t.Errorf("sweep tx_hash = %x, want all-zero %d-byte sentinel", got, common.HashLength)
+	}
+}
+
+func TestEncodeTxHash_NonSweepMissingHashErrors(t *testing.T) {
+	// Only sweeps may omit a transaction hash. A transaction-driven position
+	// without one signals an upstream bug and must be rejected, not silently
+	// stored as the "no transaction" sentinel.
+	pos := &entity.AllocationPosition{Direction: "in"}
+
+	if _, err := encodeTxHash(pos); err == nil {
+		t.Fatal("expected error for non-sweep position with empty tx_hash")
+	}
+}
+
+func TestEncodeTxHash_TruncatedHashErrors(t *testing.T) {
+	// common.FromHex decodes short/truncated hex without complaint; encodeTxHash
+	// must reject anything that isn't a full 32-byte transaction hash.
+	pos := &entity.AllocationPosition{Direction: "in", TxHash: "0xabc"}
+
+	if _, err := encodeTxHash(pos); err == nil {
+		t.Fatal("expected error for truncated tx_hash")
 	}
 }
 
@@ -160,7 +181,7 @@ func TestBuildInsertArgs_NilScaledBalanceIsNull(t *testing.T) {
 		ProxyAddress:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
 		Balance:       big.NewInt(1000000),
 		BlockNumber:   24584100,
-		TxHash:        "0xabc",
+		TxHash:        "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
 		LogIndex:      1,
 		TxAmount:      big.NewInt(1000000),
 		Direction:     "in",
