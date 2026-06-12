@@ -6,6 +6,7 @@ import {
   StyledSelect,
   ToggleGroup,
 } from '@archon-research/design-system';
+import { ArrowUpRight } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
@@ -19,7 +20,7 @@ import {
   getProtocolLabel,
   sortAllocations,
 } from '../../lib/dashboard';
-import { PARAMS, useUrlParam } from '../../lib/url-params';
+import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
 import type {
   Allocation,
   AllocationCategory,
@@ -265,8 +266,8 @@ export function BottomPanel({
       <div
         className={flex({
           align: 'center',
-          justify: 'flex-start',
-          gap: '2',
+          justify: 'space-between',
+          gap: '3',
           wrap: 'wrap',
         })}
       >
@@ -296,6 +297,44 @@ export function BottomPanel({
             Activity
           </ToggleGroup.Item>
         </ToggleGroup.Root>
+
+        <button
+          type="button"
+          disabled={!focusedAllocation}
+          onClick={() =>
+            navigateWithParams('/activities', {
+              [PARAMS.prime]: selectedPrime?.id ?? null,
+              [PARAMS.network]: focusedAllocation
+                ? String(focusedAllocation.chain_id)
+                : null,
+              [PARAMS.token]: focusedAllocation?.symbol ?? null,
+              [PARAMS.activityAction]: activityActionFilter || null,
+              [PARAMS.showAllPrimes]: '0',
+            })
+          }
+          className={css({
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '1',
+            bg: 'transparent',
+            border: 'none',
+            p: 0,
+            fontSize: 'sm',
+            fontWeight: 'medium',
+            color: 'interactive.accent',
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            _hover: { textDecoration: 'underline' },
+            _disabled: {
+              color: 'text.subtle',
+              cursor: 'not-allowed',
+              textDecoration: 'none',
+            },
+          })}
+        >
+          View in Activities
+          <ArrowUpRight className={css({ width: '4', height: '4' })} />
+        </button>
       </div>
 
       <div

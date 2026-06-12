@@ -225,30 +225,47 @@ export function buildProtocolOptions(
     }));
 }
 
-// Activities view spans every prime, so its protocol filter is sourced from
-// the full protocol registry rather than a single prime's allocations. The
-// activity API matches on `protocol.name`, which is exactly `LocalProtocolRow.name`,
-// so the option value can be the name verbatim. Counts reflect the number of
-// chains the protocol is deployed on.
+// The Activities view spans every prime, so its protocol/network filters are
+// sourced from the full registries rather than a single prime's allocations
+// (which is all the allocation-scoped builders can see). Per-option counts are
+// meaningless across primes here, so they are set to 0 and hidden by the
+// dropdown. The activity API matches `protocol.name` (== `LocalProtocolRow.name`)
+// and `chain_id`, so option values map verbatim.
 export function buildProtocolOptionsFromMetadata(
   localProtocols: LocalProtocolRow[],
 ): FilterOption[] {
-  const counts = new Map<string, number>();
+  const names = new Set<string>();
 
   for (const protocol of localProtocols) {
     const name = protocol.name?.trim();
-    if (!name) {
-      continue;
+    if (name) {
+      names.add(name);
     }
-    counts.set(name, (counts.get(name) ?? 0) + 1);
   }
 
-  return [...counts.entries()]
-    .sort((left, right) => left[0].localeCompare(right[0]))
-    .map(([name, count]) => ({
-      count,
-      label: name,
-      value: name,
+  return [...names]
+    .sort((left, right) => left.localeCompare(right))
+    .map((name) => ({ count: 0, label: name, value: name }));
+}
+
+export function buildNetworkOptionsFromMetadata(
+  localChains: LocalChainRow[],
+): FilterOption[] {
+  const seen = new Set<number>();
+
+  return localChains
+    .filter((chain) => {
+      if (seen.has(chain.chain_id)) {
+        return false;
+      }
+      seen.add(chain.chain_id);
+      return true;
+    })
+    .sort((left, right) => left.chain_id - right.chain_id)
+    .map((chain) => ({
+      count: 0,
+      label: chain.name,
+      value: String(chain.chain_id),
     }));
 }
 

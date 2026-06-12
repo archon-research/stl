@@ -10,6 +10,7 @@ export const PARAMS = {
   category: 'category',
   tab: 'tab',
   receiptToken: 'rt',
+  token: 'token',
   activityAction: 'aa',
   showAllPrimes: 'allp',
   // Data table params (shared across tables)
@@ -71,6 +72,38 @@ export function setPathname(
   }
 
   window.dispatchEvent(new Event(URL_PATH_EVENT));
+}
+
+/**
+ * Navigate to `pathname` with a fresh query string built from exactly the
+ * provided params (null/empty values are omitted, everything else is dropped).
+ * Use this for cross-view deep links that should not inherit unrelated state
+ * from the current URL.
+ */
+export function navigateWithParams(
+  pathname: string,
+  params: Record<string, string | null>,
+): void {
+  if (!isBrowser()) {
+    return;
+  }
+
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== null && value !== '') {
+      search.set(key, value);
+    }
+  }
+
+  const normalizedPathname = pathname.startsWith('/')
+    ? pathname
+    : `/${pathname}`;
+  const query = search.toString();
+  const nextUrl = `${normalizedPathname}${query ? `?${query}` : ''}`;
+
+  window.history.pushState(window.history.state, '', nextUrl);
+  window.dispatchEvent(new Event(URL_PATH_EVENT));
+  window.dispatchEvent(new Event(URL_PARAMS_EVENT));
 }
 
 export function useUrlParam(

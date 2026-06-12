@@ -29,6 +29,7 @@ import {
 import {
   buildChainLabelLookup,
   buildNetworkOptions,
+  buildNetworkOptionsFromMetadata,
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
@@ -86,6 +87,10 @@ function App() {
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
+  const [activityTokenParam, setActivityTokenParam] = useUrlParam(PARAMS.token);
+  const [activityActionParam, setActivityActionParam] = useUrlParam(
+    PARAMS.activityAction,
+  );
   const [showAllPrimesParam, setShowAllPrimesParam] = useUrlParam(
     PARAMS.showAllPrimes,
   );
@@ -96,20 +101,26 @@ function App() {
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
   const isDrawerOpen = isDrawerOpenParam === '1';
+  // Trim trailing slashes so "/activities/" links resolve the same as
+  // "/activities" on hosts that append one.
+  const normalizedPathname = pathname.replace(/\/+$/, '') || '/';
   const selectedView: 'allocation' | 'activities' =
-    pathname === '/activities' ? 'activities' : 'allocation';
+    normalizedPathname === '/activities' ? 'activities' : 'allocation';
   const showAllPrimesInActivities =
     selectedView === 'activities' ? showAllPrimesParam !== '0' : false;
 
   useEffect(() => {
-    if (pathname === '/allocation' || pathname === '/activities') {
+    if (
+      normalizedPathname === '/allocation' ||
+      normalizedPathname === '/activities'
+    ) {
       return;
     }
 
     // Redirect unknown paths (e.g. "/") to the default view, preserving query
     // params. `replace` so the bare path never lands in the back-history.
     replacePathname('/allocation', 'replace');
-  }, [pathname]);
+  }, [normalizedPathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -391,21 +402,38 @@ function App() {
     [localChains],
   );
 
+  // Activities spans every prime, so its filter options come from the global
+  // registries; allocations scope to the selected prime's holdings.
+  const isActivitiesView = selectedView === 'activities';
+
   const networkOptions = useMemo(
-    () => buildNetworkOptions(allocations, chainLabels),
-    [allocations, chainLabels],
+    () =>
+      isActivitiesView
+        ? buildNetworkOptionsFromMetadata(localChains)
+        : buildNetworkOptions(allocations, chainLabels),
+    [allocations, chainLabels, isActivitiesView, localChains],
   );
 
   const protocolOptions = useMemo(
     () =>
-      selectedView === 'activities'
+      isActivitiesView
         ? buildProtocolOptionsFromMetadata(localProtocols)
         : buildProtocolOptions(allocations, localProtocols),
-    [allocations, localProtocols, selectedView],
+    [allocations, isActivitiesView, localProtocols],
   );
 
+  // Drop a stale filter only once its option source is ready — otherwise a
+  // valid deep link (e.g. ?network=/?protocol=) is cleared on first render
+  // before chains/protocols metadata has loaded.
+  const networkOptionsLoading = isActivitiesView
+    ? localChains.length === 0
+    : isAllocationsLoading;
+  const protocolOptionsLoading = isActivitiesView
+    ? localProtocols.length === 0
+    : isAllocationsLoading;
+
   useEffect(() => {
-    if (isAllocationsLoading || !selectedNetwork) {
+    if (networkOptionsLoading || !selectedNetwork) {
       return;
     }
 
@@ -413,14 +441,14 @@ function App() {
       setSelectedNetwork(null);
     }
   }, [
-    isAllocationsLoading,
+    networkOptionsLoading,
     networkOptions,
     selectedNetwork,
     setSelectedNetwork,
   ]);
 
   useEffect(() => {
-    if (isAllocationsLoading || !selectedProtocol) {
+    if (protocolOptionsLoading || !selectedProtocol) {
       return;
     }
 
@@ -428,7 +456,7 @@ function App() {
       setSelectedProtocol(null);
     }
   }, [
-    isAllocationsLoading,
+    protocolOptionsLoading,
     protocolOptions,
     selectedProtocol,
     setSelectedProtocol,
@@ -659,6 +687,10 @@ function App() {
                 showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
                 tokenOptions={tokenSymbolOptions}
+                tokenFilter={activityTokenParam}
+                onTokenFilterChange={setActivityTokenParam}
+                actionFilter={activityActionParam ?? undefined}
+                onActionFilterChange={setActivityActionParam}
               />
             )
           }

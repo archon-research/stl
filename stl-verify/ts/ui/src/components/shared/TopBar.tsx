@@ -83,7 +83,9 @@ function FilterField({
         <option value="">{placeholder}</option>
         {options.map((option) => (
           <option key={option.value} value={option.value}>
-            {`${option.label} (${option.count})`}
+            {option.count > 0
+              ? `${option.label} (${option.count})`
+              : option.label}
           </option>
         ))}
       </StyledSelect>

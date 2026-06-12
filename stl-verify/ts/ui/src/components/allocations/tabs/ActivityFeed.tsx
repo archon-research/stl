@@ -39,6 +39,11 @@ type ActivityFeedProps = {
   isEnabled: boolean;
   mode?: 'drawer' | 'page';
   actionFilter?: string;
+  // Page mode: action/token filters are URL-backed and controlled by the parent
+  // so they survive reloads and power deep links (e.g. "View in Activities").
+  onActionFilterChange?: (value: string | null) => void;
+  tokenFilter?: string | null;
+  onTokenFilterChange?: (value: string | null) => void;
   selectedNetwork?: string | null;
   selectedProtocol?: string | null;
   selectedPrime: Prime | null;
@@ -50,8 +55,6 @@ type ActivityFeedProps = {
 };
 
 type ActivityFilters = {
-  action_type?: string;
-  token_symbol?: string;
   from_timestamp?: string;
   to_timestamp?: string;
   limit?: number;
@@ -437,6 +440,9 @@ function ActivityEventRow({
 
 export function ActivityFeed({
   actionFilter,
+  onActionFilterChange,
+  tokenFilter = null,
+  onTokenFilterChange,
   isEnabled,
   mode = 'drawer',
   selectedNetwork,
@@ -467,13 +473,19 @@ export function ActivityFeed({
   const [filters, setFilters] = useState<ActivityFilters>({
     limit: 50,
   });
-  const uniqueTokenOptions = useMemo(
-    () => Array.from(new Set(tokenOptions)).sort((a, b) => a.localeCompare(b)),
-    [tokenOptions],
-  );
+  const uniqueTokenOptions = useMemo(() => {
+    const symbols = new Set(tokenOptions);
+    // Keep a deep-linked token selectable even if it isn't in the catalog list.
+    if (tokenFilter) {
+      symbols.add(tokenFilter);
+    }
+    return Array.from(symbols).sort((a, b) => a.localeCompare(b));
+  }, [tokenOptions, tokenFilter]);
+  // Page mode: action/token come from controlled props (URL-backed); the date
+  // range stays local. hasActiveFilters drives the "clear" affordance.
   const hasActiveFilters = Boolean(
-    filters.action_type ||
-    filters.token_symbol ||
+    actionFilter ||
+    tokenFilter ||
     filters.from_timestamp ||
     filters.to_timestamp,
   );
@@ -500,7 +512,19 @@ export function ActivityFeed({
     resetTxInspectionState();
   };
 
+  const updateActionFilter = (value: string | null) => {
+    onActionFilterChange?.(value);
+    resetTxInspectionState();
+  };
+
+  const updateTokenFilter = (value: string | null) => {
+    onTokenFilterChange?.(value);
+    resetTxInspectionState();
+  };
+
   const clearFilters = () => {
+    onActionFilterChange?.(null);
+    onTokenFilterChange?.(null);
     setFilters({ limit: filters.limit ?? 50 });
     resetTxInspectionState();
   };
@@ -513,7 +537,6 @@ export function ActivityFeed({
           : undefined;
 
       return {
-        ...filters,
         prime_id: showAllPrimes ? undefined : (selectedPrime?.id ?? undefined),
         chain_id:
           parsedChainId && Number.isFinite(parsedChainId)
@@ -523,6 +546,11 @@ export function ActivityFeed({
           selectedProtocol && selectedProtocol !== DIRECT_PROTOCOL_FILTER_VALUE
             ? selectedProtocol
             : undefined,
+        token_symbol: tokenFilter || undefined,
+        action_type: actionFilter || undefined,
+        from_timestamp: filters.from_timestamp,
+        to_timestamp: filters.to_timestamp,
+        limit: filters.limit ?? 50,
       };
     }
 
@@ -543,10 +571,18 @@ export function ActivityFeed({
     selectedReceiptToken?.chain_id,
     selectedReceiptToken?.symbol,
     showAllPrimes,
+    tokenFilter,
   ]);
 
   useEffect(() => {
-    if (!isEnabled || (!isPageMode && !selectedPrime)) {
+    // Don't fetch without a scope: drawer always needs a prime; page mode needs
+    // one too unless "show all primes" is on (otherwise prime_id is undefined
+    // and we'd issue an unfiltered request the UI never asked for).
+    const missingScope = isPageMode
+      ? !showAllPrimes && !selectedPrime
+      : !selectedPrime;
+
+    if (!isEnabled || missingScope) {
       Object.values(txRequestControllersRef.current).forEach((controller) => {
         controller.abort();
       });
@@ -595,7 +631,7 @@ export function ActivityFeed({
     void fetchActivity();
 
     return () => abortController.abort();
-  }, [isEnabled, isPageMode, requestFilters, selectedPrime]);
+  }, [isEnabled, isPageMode, requestFilters, selectedPrime, showAllPrimes]);
 
   useEffect(() => {
     return () => {
@@ -835,9 +871,9 @@ export function ActivityFeed({
           <span className={filterLabelClassName}>Action</span>
           <StyledSelect
             aria-label="Filter activity by action"
-            value={filters.action_type ?? ''}
+            value={actionFilter ?? ''}
             onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              updateFilter('action_type', event.target.value || undefined)
+              updateActionFilter(event.target.value || null)
             }
           >
             {ACTION_FILTER_OPTIONS.map((option) => (
@@ -852,11 +888,10 @@ export function ActivityFeed({
             <span className={filterLabelClassName}>Token</span>
             <StyledSelect
               aria-label="Filter activity by token symbol"
-              value={filters.token_symbol ?? ''}
+              value={tokenFilter ?? ''}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                updateFilter(
-                  'token_symbol',
-                  normalizeFilterValue(event.target.value),
+                updateTokenFilter(
+                  normalizeFilterValue(event.target.value) ?? null,
                 )
               }
             >
