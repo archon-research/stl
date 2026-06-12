@@ -314,6 +314,7 @@ func run(args []string) error {
 		nil, // no SQS consumer
 		nil, // no cache reader
 		ethClient,
+		mc,
 		txManager,
 		userRepo,
 		protocolRepo,
