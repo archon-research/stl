@@ -1,10 +1,10 @@
 # Maple Finance Protocol Specification
 
-**Version:** 1.1
+**Version:** 1.2
 **Last Updated:** June 2026
 **Purpose:** Technical reference for understanding Maple Finance protocol mechanics and data retrieval
 
-> **Note:** GraphQL introspection on the Maple API is disabled (Apollo `INTROSPECTION_DISABLED`), so queries can only be validated by executing them. Response shapes have been observed to drift over time; re-verify queries against the live API before relying on this document.
+> **Note:** GraphQL introspection on the Maple API is disabled (Apollo `INTROSPECTION_DISABLED`), but the full schema (SDL, ~19,400 lines) is published to [Apollo Studio](https://studio.apollographql.com/public/maple-api/variant/mainnet/schema/reference) and fetchable unauthenticated via the Apollo platform API. Two caveats keep live verification relevant: the public SDL strips `@auth` directive applications, so field-level auth gating is only discoverable by execution; and schema-vs-runtime encoding drift exists (the schema says `String`, but some fields arrive as JSON numbers). Re-verify queries against the live API before relying on this document.
 
 ---
 
@@ -35,9 +35,12 @@ Maple Finance is a **digital asset lending platform** that provides institutiona
 #### Layer 1: Institutional Lending
 - **Open Term Loans (OTL)**: Evergreen loans, callable by lender with notice
 - **Fixed Term Loans (FTL)**: Traditional loans with specific maturity dates
-- **Native Loans**: Non-Ethereum assets (SOL, BTC) held in custody
+- **Native Loans**: Off-chain custody loans collateralized by native assets (BTC, SOL, ETH, weETH observed) — records in Maple's operational database (Mongo ObjectId IDs), not smart contracts
 
-> **Note:** FTLs are not exposed via the v2 GraphQL API: there is no `fixedTermLoans` root query, and the legacy generic `loans` query returns no active entries. `openTermLoans` is the only loan query with live data.
+> **Note:** `openTermLoans` is the active book, but not the only loan query with live data:
+> - **FTLs** are exposed via the generic `loans` root query (there is no `fixedTermLoans` query; the `Loan` type *is* the fixed-term entity — `maturityDate`, `termDays`, `paymentsRemaining`). The FTL book is **dormant, not retired**: zero loans in any live state as of 2026-06-12, but originations ran through 2025-02-28 (overlapping the open-term era by ~15 months), and the Fixed Term Loan Manager remains part of Maple's documented pool architecture. New FTLs could appear without warning.
+> - **Native loans** are exposed via `nativeLoans` / `nativeLoanById` / `nativeLoansSnapshot(timestamp)`. As of 2026-06-11: 12 records, 1 with outstanding principal (~20k USDT against BTC), no new origination since 2025-08-14, but the book is still administered. `nativeLoans` takes no arguments (no pagination or filters), and there is no state field — nonzero `principalOwed` is the only liveness signal.
+> - Two further families are auth-gated and unreachable without credentials: `collateralizedLoans` (root-level `UNAUTHORIZED`) and OTC loans (no public root query; only `otcCollateralTxs(loanId)`).
 
 #### Layer 2: Syrup Vaults (ERC-4626)
 - **SyrupUSDC**: USDC-denominated vault
@@ -175,7 +178,7 @@ Syrup vault yield comes from:
 Borrowers post collateral:
 - Crypto assets: ETH, WBTC, wstETH, cbETH
 - Stablecoins: USDC, USDT, DAI (over-collateralization)
-- Native assets: BTC, SOL (custody arrangements)
+- Native assets: BTC, SOL, XRP (custody arrangements; these flow through `openTermLoans` as `collateral.asset` symbols with `custodian`/`loanMeta.walletType` hints — distinct from the `nativeLoans` entity)
 
 **Collateral Ratio (ACM):**
 
@@ -392,7 +395,7 @@ This query supports pagination (required for >1000 loans) and returns all active
 
 The **only** reliable signal that a loan is an internal Maple position is `loanMeta.type` being `"amm"` or `"strategy"`. Do **not** treat the mere presence of `loanMeta` as an internal-loan indicator: most active loans (internal and external) carry a non-null `loanMeta`, and every field inside it (including `type`) is nullable. External loans commonly have `loanMeta` present with `type: null`.
 
-Observed `loanMeta.type` values on active loans include `null`, `"amm"`, `"strategy"`, `"tBills"`, and `"intercompany"`. The semantics of `"tBills"` and `"intercompany"` are undocumented and need confirmation from Maple; new values may appear over time.
+Observed `loanMeta.type` values on active loans include `null`, `"amm"`, `"strategy"`, `"tBills"`, and `"intercompany"`. The schema defines a `LoanType` enum (`amm`, `intercompany`, `mapleTrading`, `strategy`), but treat it as approximate: `"tBills"` (observed live) is absent from the enum, and `"mapleTrading"` has not been seen live. The semantics of `"tBills"` and `"intercompany"` are undocumented and need confirmation from Maple; new values may appear over time.
 
 When `loanMeta.type` is `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
 
@@ -626,7 +629,9 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 
 **Endpoint:** `https://api.maple.finance/v2/graphql`
 
-**Authentication:** Public, no authentication required
+**Authentication:** Most resources are public and need no authentication. Some resources are internal-use only and return `UNAUTHORIZED` — root-level (e.g. `collateralizedLoans`) or field-level (e.g. `NativeLoan.collateralAccountType`, `NativeLoan.marginCallActive`). Maple provides **no third-party authentication mechanism at all**; access to gated resources requires a direct arrangement with Maple (partnerships@maple.finance).
+
+**Gated-field behavior:** a gated *nullable* field produces per-row `UNAUTHORIZED` partial errors alongside usable `data`; a gated **non-nullable** field cannot be nulled per-row, so the error propagates and nulls the entire result (e.g. selecting `NativeLoan.marginCallActive` anonymously nulls the whole `nativeLoans` array). Omit gated fields rather than tolerating partial errors.
 
 **Key Conventions:**
 - All addresses must be **lowercased** (e.g., `0x123abc` not `0x123ABC`)
@@ -635,7 +640,8 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 - Collateral ratios: 6 decimals
 - Interest rates: 6 decimals
 - **Exceptions (JSON numbers, not strings):** `collateral.liquidationLevel` (e.g. `900000`) and `skyStrategy.version` (e.g. `100`) arrive as JSON numbers. Decoders that strictly expect string-encoded integers will fail on these two fields.
-- Introspection is disabled (`INTROSPECTION_DISABLED`); validate queries by executing them
+- **Encoding is not uniform across entity families.** The conventions above hold for subgraph entities (`OpenTermLoan`, `PoolV2`, `Loan`). `NativeLoan` uses strings for amounts but JSON `Int`s for `liquidationLevel`/`initialLevel`/thresholds, and epoch-millis strings for timestamps (e.g. `"1716566130811"`). `NativeLoanSnapshot` uses plain `Float`s for all monetary values.
+- Introspection is disabled (`INTROSPECTION_DISABLED`), but the schema is published to Apollo Studio (see [References](#references)). Auth-gating directives are stripped from the public SDL, so field-level access must still be verified by execution
 
 **Pagination:**
 
@@ -674,8 +680,8 @@ query {
 ### GraphQL API
 
 - **Endpoint:** https://api.maple.finance/v2/graphql
-- **Graph Registry:** maple-api@mainnet
-- **Schema:** Available via GraphQL introspection
+- **Graph Registry:** maple-api@mainnet (single variant `mainnet` — the endpoint is global and Ethereum-mainnet-scoped; `mainnet` is the Apollo Studio variant name, not a URL path segment)
+- **Schema:** Introspection is disabled. Browsable schema reference: https://studio.apollographql.com/public/maple-api/variant/mainnet/schema/reference (full SDL also fetchable unauthenticated via the Apollo platform API)
 
 ### Technical Standards
 
