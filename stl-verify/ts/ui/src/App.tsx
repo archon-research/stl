@@ -30,6 +30,7 @@ import {
   buildChainLabelLookup,
   buildNetworkOptions,
   buildProtocolOptions,
+  buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
   formatTokenAmount,
   formatUsdValue,
@@ -39,7 +40,12 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import { PARAMS, usePathname, useUrlParam } from './lib/url-params';
+import {
+  PARAMS,
+  setPathname as replacePathname,
+  usePathname,
+  useUrlParam,
+} from './lib/url-params';
 import type {
   Allocation,
   CapitalMetrics,
@@ -100,8 +106,10 @@ function App() {
       return;
     }
 
-    setPathname('/allocation');
-  }, [pathname, setPathname]);
+    // Redirect unknown paths (e.g. "/") to the default view, preserving query
+    // params. `replace` so the bare path never lands in the back-history.
+    replacePathname('/allocation', 'replace');
+  }, [pathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -389,8 +397,11 @@ function App() {
   );
 
   const protocolOptions = useMemo(
-    () => buildProtocolOptions(allocations, localProtocols),
-    [allocations, localProtocols],
+    () =>
+      selectedView === 'activities'
+        ? buildProtocolOptionsFromMetadata(localProtocols)
+        : buildProtocolOptions(allocations, localProtocols),
+    [allocations, localProtocols, selectedView],
   );
 
   useEffect(() => {
@@ -589,6 +600,11 @@ function App() {
               isLoading={isPrimesLoading}
               errorMessage={primesErrorMessage}
               onSelectPrime={setSelectedPrimeId}
+              showAllPrimes={showAllPrimesInActivities}
+              canShowAllPrimes={selectedView === 'activities'}
+              onShowAllPrimesChange={(value) =>
+                setShowAllPrimesParam(value ? '1' : '0')
+              }
             />
           }
           topBar={
@@ -601,12 +617,10 @@ function App() {
               selectedNetwork={selectedNetwork}
               selectedProtocol={selectedProtocol}
               selectedView={selectedView}
-              showAllPrimes={showAllPrimesInActivities}
-              onShowAllPrimesChange={(value) =>
-                setShowAllPrimesParam(value ? '1' : '0')
-              }
               onViewChange={(view) =>
-                setPathname(view === 'activities' ? '/activities' : '/allocation')
+                setPathname(
+                  view === 'activities' ? '/activities' : '/allocation',
+                )
               }
             />
           }

@@ -3,11 +3,13 @@ import {
   EmptyState,
   ErrorState,
   SkeletonStack,
+  Switch,
   ThemeToggle,
 } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
+import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
@@ -18,7 +20,12 @@ type PrimeSidebarProps = {
   isLoading: boolean;
   errorMessage: string | null;
   onSelectPrime: (primeId: string) => void;
+  showAllPrimes: boolean;
+  canShowAllPrimes: boolean;
+  onShowAllPrimesChange: (value: boolean) => void;
 };
+
+const switchStyles = toggleSwitch();
 
 export function PrimeSidebar({
   primes,
@@ -26,7 +33,11 @@ export function PrimeSidebar({
   isLoading,
   errorMessage,
   onSelectPrime,
+  showAllPrimes,
+  canShowAllPrimes,
+  onShowAllPrimesChange,
 }: PrimeSidebarProps) {
+  const primeButtonsDisabled = showAllPrimes && canShowAllPrimes;
   return (
     <div
       className={css({
@@ -91,6 +102,48 @@ export function PrimeSidebar({
 
       <div
         className={css({
+          width: '100%',
+          boxSizing: 'border-box',
+          px: '5',
+          py: '3',
+          borderBottomWidth: '1px',
+          borderBottomStyle: 'solid',
+          borderBottomColor: 'border.subtle',
+        })}
+      >
+        <Switch.Root
+          checked={showAllPrimes}
+          disabled={!canShowAllPrimes}
+          onCheckedChange={(details: { checked: boolean }) =>
+            onShowAllPrimesChange(details.checked)
+          }
+          className={flex({
+            align: 'center',
+            justify: 'space-between',
+            gap: '3',
+            width: '100%',
+            cursor: canShowAllPrimes ? 'pointer' : 'not-allowed',
+            opacity: canShowAllPrimes ? 1 : 0.5,
+          })}
+        >
+          <Switch.Label
+            className={css({
+              fontSize: 'sm',
+              fontWeight: 'medium',
+              color: 'text.default',
+            })}
+          >
+            Show all primes
+          </Switch.Label>
+          <Switch.Control className={switchStyles.root}>
+            <Switch.Thumb className={switchStyles.thumb} />
+          </Switch.Control>
+          <Switch.HiddenInput />
+        </Switch.Root>
+      </div>
+
+      <div
+        className={css({
           flex: '1',
           minHeight: 0,
           width: '100%',
@@ -132,6 +185,7 @@ export function PrimeSidebar({
                   key={prime.id}
                   type="button"
                   aria-pressed={isSelected}
+                  disabled={primeButtonsDisabled}
                   onClick={() => onSelectPrime(prime.id)}
                   className={css({
                     width: '100%',
@@ -153,6 +207,11 @@ export function PrimeSidebar({
                     _hover: {
                       bg: 'interactive.hover',
                       transform: 'translateY(-1px)',
+                    },
+                    _disabled: {
+                      cursor: 'not-allowed',
+                      opacity: 0.45,
+                      _hover: { bg: 'surface.default', transform: 'none' },
                     },
                   })}
                 >

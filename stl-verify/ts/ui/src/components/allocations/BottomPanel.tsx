@@ -411,7 +411,9 @@ export function BottomPanel({
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                 setActivityActionParam(event.target.value || null)
               }
-              disabled={!focusedAllocation || isLoading || errorMessage !== null}
+              disabled={
+                !focusedAllocation || isLoading || errorMessage !== null
+              }
             >
               <option value="">All actions</option>
               <option value="in">In</option>
@@ -494,7 +496,6 @@ export function BottomPanel({
                 isEnabled={isDrawerOpen && activeTab === 'activity'}
                 actionFilter={activityActionFilter || undefined}
                 mode="drawer"
-                selectedCategory={categoryFilter}
                 searchQuery={riskSearchValue}
                 selectedReceiptToken={focusedAllocation}
                 selectedPrime={selectedPrime}

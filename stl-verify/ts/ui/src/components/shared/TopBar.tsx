@@ -1,9 +1,8 @@
-import { StyledSelect, ToggleGroup } from '@archon-research/design-system';
+import { StyledSelect, Tabs } from '@archon-research/design-system';
 import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
-import { segmentedControl } from '#styled-system/recipes';
 
 import type { FilterOption } from '../../lib/dashboard';
 
@@ -17,52 +16,62 @@ type TopBarProps = {
   selectedNetwork: string | null;
   selectedProtocol: string | null;
   selectedView: 'allocation' | 'activities';
-  showAllPrimes: boolean;
-  onShowAllPrimesChange: (value: boolean) => void;
 };
 
-const segmentedControlStyles = segmentedControl();
-const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '8', px: '2.5', fontSize: 'sm' })}`;
+const tabsListClassName = css({
+  display: 'inline-flex',
+  gap: '7',
+});
+
+// Prominent, well-separated tabs: heavier weight + a thick underline, kept
+// calm with a muted neutral indicator rather than a loud accent. The large
+// list gap guarantees adjacent underlines never touch.
+const tabTriggerClassName = css({
+  appearance: 'none',
+  bg: 'transparent',
+  border: 'none',
+  cursor: 'pointer',
+  px: '0.5',
+  pb: '2',
+  fontSize: 'lg',
+  fontWeight: 'semibold',
+  color: 'text.subtle',
+  borderBottomWidth: '3px',
+  borderBottomStyle: 'solid',
+  borderBottomColor: 'transparent',
+  transitionProperty: 'color, border-color',
+  transitionDuration: 'fast',
+  whiteSpace: 'nowrap',
+  _hover: { color: 'text.default' },
+  '&[data-selected]': {
+    color: 'text.strong',
+    fontWeight: 'bold',
+    borderBottomColor: 'text.strong',
+  },
+});
 
 function FilterField({
   ariaLabel,
   disabled,
-  label,
   onChange,
   options,
   placeholder,
-  showLabel,
   value,
 }: {
   ariaLabel: string;
   disabled: boolean;
-  label: string;
   onChange: (value: string | null) => void;
   options: FilterOption[];
   placeholder: string;
-  showLabel: boolean;
   value: string | null;
 }) {
   return (
-    <label
+    <div
       className={css({
-        display: 'grid',
-        gap: '1',
+        width: { base: '100%', sm: '11rem' },
+        flexShrink: 0,
       })}
     >
-      {showLabel ? (
-        <span
-          className={css({
-            fontSize: 'xs',
-            textTransform: 'uppercase',
-            letterSpacing: '0.1em',
-            color: 'text.muted',
-          })}
-        >
-          {label}
-        </span>
-      ) : null}
       <StyledSelect
         aria-label={ariaLabel}
         value={value ?? ''}
@@ -78,7 +87,7 @@ function FilterField({
           </option>
         ))}
       </StyledSelect>
-    </label>
+    </div>
   );
 }
 
@@ -92,61 +101,55 @@ export function TopBar({
   selectedNetwork,
   selectedProtocol,
   selectedView,
-  showAllPrimes,
-  onShowAllPrimesChange,
 }: TopBarProps) {
-  const showLabels = selectedView === 'activities';
-
   return (
     <div
       className={css({
-        display: 'grid',
-        gap: '3',
-        alignItems: 'end',
+        width: '100%',
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'flex-end',
+        justifyContent: 'space-between',
+        gap: '4',
       })}
     >
-      <div className={flex({ justify: 'flex-start' })}
+      <Tabs.Root
+        value={selectedView}
+        onValueChange={(details: { value: string }) => {
+          if (
+            details.value === 'allocation' ||
+            details.value === 'activities'
+          ) {
+            onViewChange(details.value);
+          }
+        }}
+        aria-label="Core navigation"
+        className={css({ flexShrink: 0 })}
       >
-        <ToggleGroup.Root
-          value={[selectedView]}
-          onValueChange={(details: { value: string[] }) => {
-            const nextValue = details.value[0];
-
-            if (nextValue === 'allocation' || nextValue === 'activities') {
-              onViewChange(nextValue);
-            }
-          }}
-          aria-label="Core navigation"
-          className={toggleGroupClassName}
-        >
-          <ToggleGroup.Item value="allocation" className={toggleClassName}>
+        <Tabs.List className={tabsListClassName}>
+          <Tabs.Trigger value="allocation" className={tabTriggerClassName}>
             Allocations
-          </ToggleGroup.Item>
-          <ToggleGroup.Item value="activities" className={toggleClassName}>
+          </Tabs.Trigger>
+          <Tabs.Trigger value="activities" className={tabTriggerClassName}>
             Activities
-          </ToggleGroup.Item>
-        </ToggleGroup.Root>
-      </div>
+          </Tabs.Trigger>
+        </Tabs.List>
+      </Tabs.Root>
 
       <div
-        className={css({
-          display: 'grid',
-          gridTemplateColumns: {
-            base: '1fr',
-            md: 'repeat(3, minmax(0, 1fr))',
-          },
+        className={flex({
           gap: '3',
-          alignItems: 'end',
+          align: 'end',
+          wrap: 'wrap',
+          justify: 'flex-end',
         })}
       >
         <FilterField
           ariaLabel="Filter by network"
           disabled={networkOptions.length === 0}
-          label="Network"
           onChange={onNetworkChange}
           options={networkOptions}
           placeholder="All networks"
-          showLabel={showLabels}
           value={selectedNetwork}
         />
         <FilterField
@@ -155,54 +158,11 @@ export function TopBar({
             (!hasSelectedPrime && selectedView === 'allocation') ||
             protocolOptions.length === 0
           }
-          label="Protocol"
           onChange={onProtocolChange}
           options={protocolOptions}
           placeholder="All protocols"
-          showLabel={showLabels}
           value={selectedProtocol}
         />
-        <label
-          className={css({
-            display: 'grid',
-            gap: '1',
-            alignContent: 'end',
-            minHeight: '100%',
-          })}
-        >
-          {showLabels ? (
-            <span
-              className={css({
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.1em',
-                color: 'text.muted',
-              })}
-            >
-              Prime scope
-            </span>
-          ) : null}
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '2',
-              fontSize: 'sm',
-              color: selectedView === 'allocation' ? 'text.muted' : 'text.default',
-            })}
-          >
-            <input
-              type="checkbox"
-              aria-label="Show all primes"
-              checked={showAllPrimes}
-              disabled={selectedView === 'allocation'}
-              onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                onShowAllPrimesChange(event.target.checked)
-              }
-            />
-            Show all primes
-          </span>
-        </label>
       </div>
     </div>
   );

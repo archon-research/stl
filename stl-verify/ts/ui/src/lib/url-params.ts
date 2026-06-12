@@ -116,7 +116,9 @@ export function usePathname(): [string, (pathname: string) => void] {
 
   const updatePathname = useCallback((nextPathname: string) => {
     setPathname(nextPathname, 'push');
-    setPathnameState(nextPathname.startsWith('/') ? nextPathname : `/${nextPathname}`);
+    setPathnameState(
+      nextPathname.startsWith('/') ? nextPathname : `/${nextPathname}`,
+    );
   }, []);
 
   useEffect(() => {

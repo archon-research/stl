@@ -225,6 +225,33 @@ export function buildProtocolOptions(
     }));
 }
 
+// Activities view spans every prime, so its protocol filter is sourced from
+// the full protocol registry rather than a single prime's allocations. The
+// activity API matches on `protocol.name`, which is exactly `LocalProtocolRow.name`,
+// so the option value can be the name verbatim. Counts reflect the number of
+// chains the protocol is deployed on.
+export function buildProtocolOptionsFromMetadata(
+  localProtocols: LocalProtocolRow[],
+): FilterOption[] {
+  const counts = new Map<string, number>();
+
+  for (const protocol of localProtocols) {
+    const name = protocol.name?.trim();
+    if (!name) {
+      continue;
+    }
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map(([name, count]) => ({
+      count,
+      label: name,
+      value: name,
+    }));
+}
+
 export function formatTokenAmount(
   value: number | string | null | undefined,
 ): string {

@@ -26,14 +26,12 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
   Allocation,
-  AllocationCategory,
   AllocationActivity,
   AllocationActivityResponse,
   Prime,
   ProtocolEvent,
 } from '../../../types/allocation';
-import { ChainLogo, ProtocolLogo } from '../../shared';
-import { TokenAddress } from '../../shared';
+import { ChainLogo, PageShell, ProtocolLogo, TokenAddress } from '../../shared';
 
 type ActivityFeedProps = {
   isEnabled: boolean;
@@ -43,7 +41,6 @@ type ActivityFeedProps = {
   selectedProtocol?: string | null;
   selectedPrime: Prime | null;
   selectedReceiptToken?: Allocation | null;
-  selectedCategory?: AllocationCategory | '';
   searchQuery?: string;
   showAllPrimes?: boolean;
   tokenOptions?: string[];
@@ -63,6 +60,26 @@ const ACTION_FILTER_OPTIONS = [
   { label: 'Out', value: 'out' },
   { label: 'Sweep', value: 'sweep' },
 ];
+
+const filterFieldClassName = css({ display: 'grid', gap: '1', minWidth: 0 });
+const filterLabelClassName = css({
+  fontSize: 'xs',
+  textTransform: 'uppercase',
+  letterSpacing: '0.1em',
+  color: 'text.muted',
+});
+const dateInputClassName = css({
+  width: 'full',
+  h: '9',
+  borderRadius: 'md',
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  bg: 'surface.default',
+  color: 'text.default',
+  px: '3',
+  fontSize: 'sm',
+});
 
 function normalizeFilterValue(value: string): string | undefined {
   const trimmed = value.trim();
@@ -419,7 +436,6 @@ export function ActivityFeed({
   mode = 'drawer',
   selectedNetwork,
   selectedProtocol,
-  selectedCategory = '',
   selectedPrime,
   selectedReceiptToken = null,
   searchQuery = '',
@@ -482,31 +498,6 @@ export function ActivityFeed({
     setFilters({ limit: filters.limit ?? 50 });
     resetTxInspectionState();
   };
-
-  useEffect(() => {
-    if (isPageMode) {
-      return;
-    }
-
-    setFilters((previous) => ({
-      ...previous,
-      prime_id: selectedPrime?.id,
-      token_symbol: selectedReceiptToken?.symbol,
-      action_type: actionFilter,
-      protocol_name: undefined,
-      from_timestamp: undefined,
-      to_timestamp: undefined,
-      chain_id: selectedReceiptToken?.chain_id,
-      limit: previous.limit ?? 50,
-    }));
-  }, [
-    actionFilter,
-    isPageMode,
-    selectedCategory,
-    selectedPrime?.id,
-    selectedReceiptToken?.chain_id,
-    selectedReceiptToken?.symbol,
-  ]);
 
   const requestFilters = useMemo(() => {
     if (isPageMode) {
@@ -759,7 +750,350 @@ export function ActivityFeed({
     );
   }
 
-  return (
+  const latestActivityAt = events[0]?.created_at ?? null;
+
+  const activityHeader = (
+    <div
+      className={flex({
+        align: 'flex-start',
+        justify: 'space-between',
+        gap: { base: '3', md: '4' },
+        wrap: 'wrap',
+      })}
+    >
+      <div
+        className={css({
+          display: 'grid',
+          gap: '1',
+          minWidth: { base: '0', md: '18rem' },
+          flex: '1 1 20rem',
+        })}
+      >
+        <div className={flex({ align: 'center', gap: '2.5' })}>
+          {!showAllPrimes && selectedPrime ? (
+            <ProtocolLogo protocolName={selectedPrime.name} size="8" />
+          ) : null}
+          <h1
+            className={css({
+              m: 0,
+              fontSize: { base: '3xl', md: '4xl' },
+              lineHeight: 'tight',
+              color: 'text.strong',
+            })}
+          >
+            {showAllPrimes ? 'Activity' : (selectedPrime?.name ?? 'Activity')}
+          </h1>
+        </div>
+        {showAllPrimes ? (
+          <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
+            Across all primes
+          </span>
+        ) : selectedPrime ? (
+          <TokenAddress address={selectedPrime.id} />
+        ) : null}
+      </div>
+      {latestActivityAt ? (
+        <div
+          className={css({
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: { base: 'flex-start', md: 'flex-end' },
+            gap: '0.5',
+          })}
+        >
+          <span
+            className={css({
+              fontSize: 'sm',
+              fontWeight: 'semibold',
+              color: 'text.strong',
+            })}
+          >
+            Latest activity {formatFreshnessLabel(latestActivityAt)}
+          </span>
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
+            {formatDateTime(latestActivityAt)}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+
+  const activityFilters = (
+    <div className={css({ display: 'grid', gap: '3' })}>
+      <div
+        className={css({
+          display: 'grid',
+          gridTemplateColumns: {
+            base: '1fr',
+            sm: 'repeat(2, minmax(0, 1fr))',
+            lg: 'repeat(4, minmax(0, 1fr))',
+          },
+          gap: '3',
+          alignItems: 'end',
+        })}
+      >
+        <label className={filterFieldClassName}>
+          <span className={filterLabelClassName}>Action</span>
+          <StyledSelect
+            aria-label="Filter activity by action"
+            value={filters.action_type ?? ''}
+            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+              updateFilter('action_type', event.target.value || undefined)
+            }
+          >
+            {ACTION_FILTER_OPTIONS.map((option) => (
+              <option key={option.value || 'all'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </StyledSelect>
+        </label>
+        {uniqueTokenOptions.length > 0 ? (
+          <label className={filterFieldClassName}>
+            <span className={filterLabelClassName}>Token</span>
+            <StyledSelect
+              aria-label="Filter activity by token symbol"
+              value={filters.token_symbol ?? ''}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                updateFilter(
+                  'token_symbol',
+                  normalizeFilterValue(event.target.value),
+                )
+              }
+            >
+              <option value="">All tokens</option>
+              {uniqueTokenOptions.map((symbol) => (
+                <option key={symbol} value={symbol}>
+                  {symbol}
+                </option>
+              ))}
+            </StyledSelect>
+          </label>
+        ) : null}
+        <label className={filterFieldClassName}>
+          <span className={filterLabelClassName}>From</span>
+          <input
+            aria-label="Filter activity from timestamp"
+            type="datetime-local"
+            value={toDateTimeLocalValue(filters.from_timestamp)}
+            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+              updateFilter(
+                'from_timestamp',
+                fromDateTimeLocalValue(event.target.value),
+              )
+            }
+            className={dateInputClassName}
+          />
+        </label>
+        <label className={filterFieldClassName}>
+          <span className={filterLabelClassName}>To</span>
+          <input
+            aria-label="Filter activity to timestamp"
+            type="datetime-local"
+            value={toDateTimeLocalValue(filters.to_timestamp)}
+            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+              updateFilter(
+                'to_timestamp',
+                fromDateTimeLocalValue(event.target.value),
+              )
+            }
+            className={dateInputClassName}
+          />
+        </label>
+      </div>
+
+      <div
+        className={css({
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: '3',
+          fontSize: 'xs',
+          color: 'text.subtle',
+        })}
+      >
+        <span>
+          {hasActiveFilters
+            ? 'Server filters active'
+            : showAllPrimes
+              ? 'Showing latest activity across all primes'
+              : 'Showing latest activity for selected prime'}
+        </span>
+        {hasActiveFilters ? (
+          <button
+            type="button"
+            onClick={clearFilters}
+            className={css({
+              h: '8',
+              borderRadius: 'md',
+              borderWidth: '1px',
+              borderStyle: 'solid',
+              borderColor: 'border.subtle',
+              bg: 'surface.default',
+              color: 'text.default',
+              px: '3',
+              fontSize: 'xs',
+              cursor: 'pointer',
+              _hover: { bg: 'interactive.hover' },
+            })}
+          >
+            Clear filters
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const feedBody = (
+    <div
+      className={css({
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        borderRadius: 'lg',
+        overflow: 'hidden',
+      })}
+    >
+      {filteredEvents.length === 0 ? (
+        <EmptyState
+          title="No Activity Found"
+          description="No allocation activity events match your filters."
+          stretch
+        />
+      ) : null}
+
+      {filteredEvents.length > 0 ? (
+        <div
+          className={css({
+            flex: 1,
+            overflowY: 'auto',
+            borderRadius: 'lg',
+            border: '1px solid token(colors.surface.subtle)',
+            bg: 'surface.default',
+          })}
+        >
+          {filteredEvents.map((event, idx) => {
+            const eventKey = buildActivityEventKey(event);
+            const txHash = getRealTxHash(event);
+            const txCacheKey = txHash
+              ? buildTxCacheKey(txHash, event.chain_id)
+              : null;
+            const isExpanded = selectedEventKey === eventKey;
+            const txEvents = txCacheKey
+              ? txEventsByHash[txCacheKey]
+              : undefined;
+            const txError = txCacheKey
+              ? txEventErrorsByHash[txCacheKey]
+              : undefined;
+            const isTxLoading =
+              txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
+
+            return (
+              <div key={`${eventKey}:${idx}`}>
+                <ActivityEventRow
+                  event={event}
+                  isExpanded={isExpanded}
+                  onSelectTx={handleSelectTx}
+                />
+
+                {isExpanded && txHash ? (
+                  <div
+                    className={css({
+                      marginX: '3',
+                      marginBottom: '3',
+                      borderWidth: '1px',
+                      borderStyle: 'solid',
+                      borderColor: 'border.subtle',
+                      borderRadius: 'md',
+                      bg: 'surface.subtle',
+                      padding: '3',
+                      display: 'grid',
+                      gap: '2',
+                    })}
+                  >
+                    <div
+                      className={css({
+                        fontSize: 'xs',
+                        color: 'text.strong',
+                        fontWeight: 'semibold',
+                      })}
+                    >
+                      Protocol Events For TX
+                    </div>
+
+                    {isTxLoading ? (
+                      <span
+                        className={css({
+                          fontSize: 'xs',
+                          color: 'text.default',
+                        })}
+                      >
+                        Loading protocol events...
+                      </span>
+                    ) : null}
+
+                    {!isTxLoading && txError ? (
+                      <span
+                        className={css({
+                          fontSize: 'xs',
+                          color: 'text.warning',
+                        })}
+                      >
+                        Failed to load protocol events: {txError}
+                      </span>
+                    ) : null}
+
+                    {!isTxLoading &&
+                    !txError &&
+                    txEvents &&
+                    txEvents.length === 0 ? (
+                      <EmptyState
+                        title="No Protocol Events"
+                        description="No protocol events were indexed for this transaction."
+                        size="compact"
+                        stretch
+                      />
+                    ) : null}
+
+                    {!isTxLoading && !txError && txEvents && txEvents.length > 0
+                      ? txEvents.map((protocolEvent) => (
+                          <ProtocolEventCard
+                            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
+                            event={protocolEvent}
+                          />
+                        ))
+                      : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
+      <div
+        className={css({
+          padding: '3',
+          borderTop: '1px solid token(colors.surface.subtle)',
+          bg: 'surface.subtle',
+          fontSize: 'xs',
+          color: 'text.default',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        })}
+      >
+        <span>Showing {filteredEvents.length} events</span>
+        {filteredEvents.length >= (filters.limit || 50) ? (
+          <span className={css({ color: 'text.subtle' })}>
+            Limited to most recent {filters.limit || 50}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const feedArea = (
     <AsyncStateRenderer
       isLoading={isLoading && events.length === 0}
       error={error}
@@ -780,382 +1114,29 @@ export function ActivityFeed({
         />
       }
     >
-      <div
-        className={css({
-          display: 'flex',
-          flexDirection: 'column',
-          height: '100%',
-          borderRadius: 'lg',
-          overflow: 'hidden',
-        })}
-      >
-        {isPageMode ? (
-          <div
-            className={css({
-              borderRadius: 'lg',
-              border: '1px solid token(colors.surface.subtle)',
-              bg: 'surface.default',
-              p: '3',
-              display: 'grid',
-              gap: '3',
-              mb: '3',
-            })}
-          >
-            <div
-              className={css({
-                display: 'grid',
-                gridTemplateColumns: {
-                  base: '1fr',
-                  md: 'repeat(2, minmax(0, 1fr))',
-                },
-                gap: '2',
-                alignItems: 'end',
-              })}
-            >
-              <label
-                className={css({
-                  display: 'grid',
-                  gap: '1',
-                })}
-              >
-                <span
-                  className={css({
-                    fontSize: 'xs',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.1em',
-                    color: 'text.muted',
-                  })}
-                >
-                  Action
-                </span>
-                <StyledSelect
-                  aria-label="Filter activity by action"
-                  value={filters.action_type ?? ''}
-                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                    updateFilter('action_type', event.target.value || undefined)
-                  }
-                >
-                  {ACTION_FILTER_OPTIONS.map((option) => (
-                    <option key={option.value || 'all'} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </StyledSelect>
-              </label>
-            {uniqueTokenOptions.length > 0 ? (
-              <label
-                className={css({
-                  display: 'grid',
-                  gap: '1',
-                })}
-              >
-                <span
-                  className={css({
-                    fontSize: 'xs',
-                    textTransform: 'uppercase',
-                    letterSpacing: '0.1em',
-                    color: 'text.muted',
-                  })}
-                >
-                  Token
-                </span>
-                <StyledSelect
-                  aria-label="Filter activity by token symbol"
-                  value={filters.token_symbol ?? ''}
-                  onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                    updateFilter(
-                      'token_symbol',
-                      normalizeFilterValue(event.target.value),
-                    )
-                  }
-                >
-                  <option value="">All tokens</option>
-                  {uniqueTokenOptions.map((symbol) => (
-                    <option key={symbol} value={symbol}>
-                      {symbol}
-                    </option>
-                  ))}
-                </StyledSelect>
-              </label>
-            ) : null}
-            </div>
+      {feedBody}
+    </AsyncStateRenderer>
+  );
 
-          <div
-            className={css({
-              display: 'grid',
-              gridTemplateColumns: {
-                base: '1fr',
-                md: 'repeat(2, minmax(0, 1fr))',
-              },
-              gap: '2',
-              alignItems: 'end',
-            })}
-          >
-            <label
-              className={css({
-                display: 'grid',
-                gap: '1',
-              })}
-            >
-              <span
-                className={css({
-                  fontSize: 'xs',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                  color: 'text.muted',
-                })}
-              >
-                From
-              </span>
-              <input
-                aria-label="Filter activity from timestamp"
-                type="datetime-local"
-                value={toDateTimeLocalValue(filters.from_timestamp)}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  updateFilter(
-                    'from_timestamp',
-                    fromDateTimeLocalValue(event.target.value),
-                  )
-                }
-                className={css({
-                  width: 'full',
-                  h: '9',
-                  borderRadius: 'md',
-                  borderWidth: '1px',
-                  borderStyle: 'solid',
-                  borderColor: 'border.subtle',
-                  bg: 'surface.default',
-                  color: 'text.default',
-                  px: '3',
-                  fontSize: 'sm',
-                })}
-              />
-            </label>
-            <label
-              className={css({
-                display: 'grid',
-                gap: '1',
-              })}
-            >
-              <span
-                className={css({
-                  fontSize: 'xs',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.1em',
-                  color: 'text.muted',
-                })}
-              >
-                To
-              </span>
-              <input
-                aria-label="Filter activity to timestamp"
-                type="datetime-local"
-                value={toDateTimeLocalValue(filters.to_timestamp)}
-                onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                  updateFilter(
-                    'to_timestamp',
-                    fromDateTimeLocalValue(event.target.value),
-                  )
-                }
-                className={css({
-                  width: 'full',
-                  h: '9',
-                  borderRadius: 'md',
-                  borderWidth: '1px',
-                  borderStyle: 'solid',
-                  borderColor: 'border.subtle',
-                  bg: 'surface.default',
-                  color: 'text.default',
-                  px: '3',
-                  fontSize: 'sm',
-                })}
-              />
-            </label>
-          </div>
+  if (!isPageMode) {
+    return feedArea;
+  }
 
-          <div
-            className={css({
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '3',
-              fontSize: 'xs',
-              color: 'text.subtle',
-            })}
-          >
-            <span>
-              {hasActiveFilters
-                ? 'Server filters active'
-                : showAllPrimes
-                  ? 'Showing latest activity across all primes'
-                  : 'Showing latest activity for selected prime'}
-            </span>
-            {hasActiveFilters ? (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className={css({
-                  h: '8',
-                  borderRadius: 'md',
-                  borderWidth: '1px',
-                  borderStyle: 'solid',
-                  borderColor: 'border.subtle',
-                  bg: 'surface.default',
-                  color: 'text.default',
-                  px: '3',
-                  fontSize: 'xs',
-                  cursor: 'pointer',
-                  _hover: { bg: 'interactive.hover' },
-                })}
-              >
-                Clear filters
-              </button>
-            ) : null}
-          </div>
-          </div>
-        ) : null}
-
-        {filteredEvents.length === 0 ? (
-          <EmptyState
-            title="No Activity Found"
-            description="No allocation activity events match your filters."
-            stretch
-          />
-        ) : null}
-
-        {filteredEvents.length > 0 ? (
-          <div
-            className={css({
-              flex: 1,
-              overflowY: 'auto',
-              borderRadius: 'lg',
-              border: '1px solid token(colors.surface.subtle)',
-              bg: 'surface.default',
-            })}
-          >
-            {filteredEvents.map((event, idx) => {
-              const eventKey = buildActivityEventKey(event);
-              const txHash = getRealTxHash(event);
-              const txCacheKey = txHash
-                ? buildTxCacheKey(txHash, event.chain_id)
-                : null;
-              const isExpanded = selectedEventKey === eventKey;
-              const txEvents = txCacheKey
-                ? txEventsByHash[txCacheKey]
-                : undefined;
-              const txError = txCacheKey
-                ? txEventErrorsByHash[txCacheKey]
-                : undefined;
-              const isTxLoading =
-                txCacheKey !== null &&
-                txEventsLoadingByHash[txCacheKey] === true;
-
-              return (
-                <div key={`${eventKey}:${idx}`}>
-                  <ActivityEventRow
-                    event={event}
-                    isExpanded={isExpanded}
-                    onSelectTx={handleSelectTx}
-                  />
-
-                  {isExpanded && txHash ? (
-                    <div
-                      className={css({
-                        marginX: '3',
-                        marginBottom: '3',
-                        borderWidth: '1px',
-                        borderStyle: 'solid',
-                        borderColor: 'border.subtle',
-                        borderRadius: 'md',
-                        bg: 'surface.subtle',
-                        padding: '3',
-                        display: 'grid',
-                        gap: '2',
-                      })}
-                    >
-                      <div
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.strong',
-                          fontWeight: 'semibold',
-                        })}
-                      >
-                        Protocol Events For TX
-                      </div>
-
-                      {isTxLoading ? (
-                        <span
-                          className={css({
-                            fontSize: 'xs',
-                            color: 'text.default',
-                          })}
-                        >
-                          Loading protocol events...
-                        </span>
-                      ) : null}
-
-                      {!isTxLoading && txError ? (
-                        <span
-                          className={css({
-                            fontSize: 'xs',
-                            color: 'text.warning',
-                          })}
-                        >
-                          Failed to load protocol events: {txError}
-                        </span>
-                      ) : null}
-
-                      {!isTxLoading &&
-                      !txError &&
-                      txEvents &&
-                      txEvents.length === 0 ? (
-                        <EmptyState
-                          title="No Protocol Events"
-                          description="No protocol events were indexed for this transaction."
-                          size="compact"
-                          stretch
-                        />
-                      ) : null}
-
-                      {!isTxLoading &&
-                      !txError &&
-                      txEvents &&
-                      txEvents.length > 0
-                        ? txEvents.map((protocolEvent) => (
-                            <ProtocolEventCard
-                              key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
-                              event={protocolEvent}
-                            />
-                          ))
-                        : null}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        ) : null}
-
+  return (
+    <PageShell>
+      <div className={css({ display: 'grid', gap: '5' })}>
+        {activityHeader}
+        {activityFilters}
         <div
           className={css({
-            padding: '3',
-            borderTop: '1px solid token(colors.surface.subtle)',
-            bg: 'surface.subtle',
-            fontSize: 'xs',
-            color: 'text.default',
             display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
+            flexDirection: 'column',
+            minHeight: '24rem',
           })}
         >
-          <span>Showing {filteredEvents.length} events</span>
-          {filteredEvents.length >= (filters.limit || 50) ? (
-            <span className={css({ color: 'text.subtle' })}>
-              Limited to most recent {filters.limit || 50}
-            </span>
-          ) : null}
+          {feedArea}
         </div>
       </div>
-    </AsyncStateRenderer>
+    </PageShell>
   );
 }
