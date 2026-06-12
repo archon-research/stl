@@ -6,6 +6,7 @@ import {
   StyledSelect,
   ToggleGroup,
 } from '@archon-research/design-system';
+import { ArrowUpRight } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
@@ -13,12 +14,13 @@ import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
 import {
+  type ChainLabelLookup,
   getAllocationKey,
   getCategoryLabel,
   getProtocolLabel,
   sortAllocations,
 } from '../../lib/dashboard';
-import { PARAMS, useUrlParam } from '../../lib/url-params';
+import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
 import type {
   Allocation,
   AllocationCategory,
@@ -31,6 +33,7 @@ import { RrcTab } from './tabs/RrcTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
+  chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   isDrawerOpen: boolean;
   isLoading: boolean;
@@ -63,6 +66,7 @@ const toggleClassName = `${segmentedControlStyles.item} ${css({
 
 export function BottomPanel({
   allocations,
+  chainLabels,
   errorMessage,
   isDrawerOpen,
   isLoading,
@@ -75,6 +79,9 @@ export function BottomPanel({
   );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
   const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
+  const [activityActionParam, setActivityActionParam] = useUrlParam(
+    PARAMS.activityAction,
+  );
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
@@ -88,6 +95,12 @@ export function BottomPanel({
 
   const activeTab: ActiveTab =
     tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
+  const activityActionFilter =
+    activityActionParam === 'in' ||
+    activityActionParam === 'out' ||
+    activityActionParam === 'sweep'
+      ? activityActionParam
+      : '';
 
   useEffect(() => {
     const primeId = selectedPrime?.id ?? null;
@@ -96,10 +109,16 @@ export function BottomPanel({
       setReceiptTokenParam(null);
       setCategoryFilter('');
       setCategoryParam(null);
+      setActivityActionParam(null);
     }
 
     previousPrimeIdRef.current = primeId;
-  }, [selectedPrime?.id, setCategoryParam, setReceiptTokenParam]);
+  }, [
+    selectedPrime?.id,
+    setActivityActionParam,
+    setCategoryParam,
+    setReceiptTokenParam,
+  ]);
 
   useEffect(() => {
     const normalized = parseCategoryParam(categoryParam);
@@ -247,8 +266,8 @@ export function BottomPanel({
       <div
         className={flex({
           align: 'center',
-          justify: 'flex-start',
-          gap: '2',
+          justify: 'space-between',
+          gap: '3',
           wrap: 'wrap',
         })}
       >
@@ -278,6 +297,44 @@ export function BottomPanel({
             Activity
           </ToggleGroup.Item>
         </ToggleGroup.Root>
+
+        <button
+          type="button"
+          disabled={!focusedAllocation}
+          onClick={() =>
+            navigateWithParams('/activities', {
+              [PARAMS.prime]: selectedPrime?.id ?? null,
+              [PARAMS.network]: focusedAllocation
+                ? String(focusedAllocation.chain_id)
+                : null,
+              [PARAMS.token]: focusedAllocation?.symbol ?? null,
+              [PARAMS.activityAction]: activityActionFilter || null,
+              [PARAMS.showAllPrimes]: '0',
+            })
+          }
+          className={css({
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '1',
+            bg: 'transparent',
+            border: 'none',
+            p: 0,
+            fontSize: 'sm',
+            fontWeight: 'medium',
+            color: 'interactive.accent',
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            _hover: { textDecoration: 'underline' },
+            _disabled: {
+              color: 'text.subtle',
+              cursor: 'not-allowed',
+              textDecoration: 'none',
+            },
+          })}
+        >
+          View in Activities
+          <ArrowUpRight className={css({ width: '4', height: '4' })} />
+        </button>
       </div>
 
       <div
@@ -285,7 +342,7 @@ export function BottomPanel({
           display: 'grid',
           gridTemplateColumns: {
             base: '1fr',
-            md: 'repeat(2, minmax(14rem, 1fr)) minmax(18rem, 1fr)',
+            md: 'repeat(3, minmax(12rem, 1fr)) minmax(18rem, 1fr)',
           },
           gap: '4',
           alignItems: 'end',
@@ -372,6 +429,42 @@ export function BottomPanel({
           </StyledSelect>
         </label>
 
+        {activeTab === 'activity' ? (
+          <label
+            htmlFor="activity-action-filter"
+            className={css({
+              display: 'grid',
+              gap: '1',
+            })}
+          >
+            <span
+              className={css({
+                fontSize: 'xs',
+                textTransform: 'uppercase',
+                letterSpacing: '0.1em',
+                color: 'text.muted',
+              })}
+            >
+              Action
+            </span>
+            <StyledSelect
+              id="activity-action-filter"
+              value={activityActionFilter}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                setActivityActionParam(event.target.value || null)
+              }
+              disabled={
+                !focusedAllocation || isLoading || errorMessage !== null
+              }
+            >
+              <option value="">All actions</option>
+              <option value="in">In</option>
+              <option value="out">Out</option>
+              <option value="sweep">Sweep</option>
+            </StyledSelect>
+          </label>
+        ) : null}
+
         {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
@@ -443,7 +536,11 @@ export function BottomPanel({
             ) : (
               <ActivityFeed
                 isEnabled={isDrawerOpen && activeTab === 'activity'}
+                actionFilter={activityActionFilter || undefined}
+                chainLabels={chainLabels}
+                mode="drawer"
                 searchQuery={riskSearchValue}
+                selectedReceiptToken={focusedAllocation}
                 selectedPrime={selectedPrime}
               />
             )}
