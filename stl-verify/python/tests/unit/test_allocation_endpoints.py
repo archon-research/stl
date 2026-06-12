@@ -322,6 +322,38 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
     service.list_allocation_activity.assert_not_awaited()
 
 
+def test_list_allocation_activity_hides_synthetic_sweep_tx_hash():
+    from app.api.v1 import allocations
+
+    created_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    service = _make_service()
+    service.list_allocation_activity.return_value = [
+        AllocationActivityEvent(
+            chain_id=1,
+            prime_address=_VALID_ADDR,
+            prime_name="spark",
+            protocol_name="SparkLend",
+            token_id=1,
+            token_symbol="spUSDC",
+            action_type="sweep",
+            tx_amount=Decimal("0"),
+            balance=Decimal("200.0"),
+            tx_hash="0x" + "cd" * 32,
+            log_index=0,
+            block_number=100,
+            block_version=0,
+            created_at=created_at,
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity", params={"action_type": "sweep"})
+
+    assert response.status_code == 200
+    assert response.json()[0]["tx_hash"] is None
+
+
 def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id():
     """Valid-format prime_id with no rows is a filter miss, not a missing resource → 200 []."""
     from app.api.v1 import allocations

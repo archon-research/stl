@@ -79,7 +79,9 @@ export function TokenAddress({
     return (
       <span
         style={monoStyle}
-        className={className ? `${emptyClassName} ${className}` : emptyClassName}
+        className={
+          className ? `${emptyClassName} ${className}` : emptyClassName
+        }
       >
         —
       </span>
