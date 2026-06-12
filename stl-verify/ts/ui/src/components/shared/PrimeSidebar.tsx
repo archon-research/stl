@@ -3,11 +3,13 @@ import {
   EmptyState,
   ErrorState,
   SkeletonStack,
+  Switch,
   ThemeToggle,
 } from '@archon-research/design-system';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
+import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
@@ -18,7 +20,30 @@ type PrimeSidebarProps = {
   isLoading: boolean;
   errorMessage: string | null;
   onSelectPrime: (primeId: string) => void;
+  showAllPrimes: boolean;
+  canShowAllPrimes: boolean;
+  onShowAllPrimesChange: (value: boolean) => void;
 };
+
+const switchStyles = toggleSwitch();
+// The shared toggleSwitch recipe keys its checked styling off `data-checked`
+// (Base UI convention), but the Ark Switch we render emits `data-state="checked"`.
+// These overrides re-apply the track/thumb checked styling on the correct
+// attribute so the control visibly reflects its state.
+const switchControlCheckedClassName = css({
+  '&[data-state="checked"]': {
+    bg: 'gray.800',
+    borderColor: 'gray.700',
+    _dark: { bg: 'gray.600', borderColor: 'gray.500' },
+  },
+});
+const switchThumbCheckedClassName = css({
+  '[data-state="checked"] &': {
+    transform: 'translateX(calc(2.25rem - 100% - 2px))',
+    bg: 'white',
+    _dark: { bg: 'gray.100' },
+  },
+});
 
 export function PrimeSidebar({
   primes,
@@ -26,7 +51,11 @@ export function PrimeSidebar({
   isLoading,
   errorMessage,
   onSelectPrime,
+  showAllPrimes,
+  canShowAllPrimes,
+  onShowAllPrimesChange,
 }: PrimeSidebarProps) {
+  const primeButtonsDisabled = showAllPrimes && canShowAllPrimes;
   return (
     <div
       className={css({
@@ -132,6 +161,7 @@ export function PrimeSidebar({
                   key={prime.id}
                   type="button"
                   aria-pressed={isSelected}
+                  disabled={primeButtonsDisabled}
                   onClick={() => onSelectPrime(prime.id)}
                   className={css({
                     width: '100%',
@@ -153,6 +183,11 @@ export function PrimeSidebar({
                     _hover: {
                       bg: 'interactive.hover',
                       transform: 'translateY(-1px)',
+                    },
+                    _disabled: {
+                      cursor: 'not-allowed',
+                      opacity: 0.45,
+                      _hover: { bg: 'surface.default', transform: 'none' },
                     },
                   })}
                 >
@@ -206,11 +241,50 @@ export function PrimeSidebar({
         className={css({
           width: '100%',
           boxSizing: 'border-box',
+          px: '5',
+          pt: '3',
+        })}
+      >
+        <Switch.Root
+          checked={showAllPrimes}
+          disabled={!canShowAllPrimes}
+          onCheckedChange={(details: { checked: boolean }) =>
+            onShowAllPrimesChange(details.checked)
+          }
+          className={flex({
+            align: 'center',
+            justify: 'space-between',
+            gap: '3',
+            width: '100%',
+            cursor: canShowAllPrimes ? 'pointer' : 'not-allowed',
+            opacity: canShowAllPrimes ? 1 : 0.5,
+          })}
+        >
+          <Switch.Label
+            className={css({
+              fontSize: 'sm',
+              color: 'text.muted',
+            })}
+          >
+            Show all primes
+          </Switch.Label>
+          <Switch.Control
+            className={cx(switchStyles.root, switchControlCheckedClassName)}
+          >
+            <Switch.Thumb
+              className={cx(switchStyles.thumb, switchThumbCheckedClassName)}
+            />
+          </Switch.Control>
+          <Switch.HiddenInput />
+        </Switch.Root>
+      </div>
+
+      <div
+        className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '4',
           py: '3',
-          borderTopWidth: '1px',
-          borderTopStyle: 'solid',
-          borderTopColor: 'border.subtle',
           bg: 'surface.default',
         })}
       >
