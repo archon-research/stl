@@ -276,6 +276,9 @@ func TestNewService_Validation(t *testing.T) {
 			cfg.PSM3Address = common.Address{}
 			return psm3.NewService(cfg, caller, repo, consumer, querier)
 		}, "psm3 address"},
+		{"negative sweep blocks", func() (*psm3.Service, error) {
+			return psm3.NewService(defaultConfig(-1), caller, repo, consumer, querier)
+		}, "sweep every n blocks"},
 	}
 
 	for _, tc := range tests {

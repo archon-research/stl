@@ -7,9 +7,9 @@
 -- sUSDS 1e18, USDC 1e6, total_assets 1e18, conversion_rate 1e27); all USD math
 -- happens in the Python API at read time.
 --
--- source is 'sweep'-only today; 'event' exists so a future event-driven path
--- (ERC-20 Transfer deltas for exact time-weighted averages) is purely additive,
--- mirroring token_total_supply's event/sweep split.
+-- source is 'sweep'-only; the future event-driven path (ERC-20 Transfer deltas
+-- for exact time-weighted averages) will widen this constraint in its own
+-- migration, mirroring token_total_supply's event/sweep split.
 --
 -- Auditability follows the repo+trigger pattern used by token_total_supply:
 --   - Repository supplies build_id at construction.
@@ -28,7 +28,7 @@ CREATE TABLE psm3_snapshot (
     block_number       BIGINT      NOT NULL,
     block_version      INT         NOT NULL DEFAULT 0,
     block_timestamp    TIMESTAMPTZ NOT NULL,
-    source             TEXT        NOT NULL CHECK (source IN ('event', 'sweep')),
+    source             TEXT        NOT NULL CHECK (source = 'sweep'),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),

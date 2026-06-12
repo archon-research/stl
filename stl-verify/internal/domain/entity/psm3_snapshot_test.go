@@ -34,7 +34,7 @@ func TestPSM3Snapshot_Validate(t *testing.T) {
 		wantErr string
 	}{
 		{"valid", func(s *PSM3Snapshot) {}, ""},
-		{"valid event source", func(s *PSM3Snapshot) { s.Source = "event" }, ""},
+		{"event source not yet supported", func(s *PSM3Snapshot) { s.Source = "event" }, "source"},
 		{"zero chain id", func(s *PSM3Snapshot) { s.ChainID = 0 }, "chain_id"},
 		{"negative chain id", func(s *PSM3Snapshot) { s.ChainID = -1 }, "chain_id"},
 		{"zero address", func(s *PSM3Snapshot) { s.Address = common.Address{} }, "address"},

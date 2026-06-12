@@ -25,7 +25,7 @@ type PSM3Snapshot struct {
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time
-	Source         string // "event" | "sweep"
+	Source         string // "sweep"; widened when the event-driven path lands
 }
 
 // Validate checks that the snapshot is well-formed before persistence.
@@ -57,8 +57,8 @@ func (s *PSM3Snapshot) Validate() error {
 	if s.BlockTimestamp.IsZero() {
 		return fmt.Errorf("block_timestamp is required")
 	}
-	if s.Source != "event" && s.Source != "sweep" {
-		return fmt.Errorf("source must be 'event' or 'sweep', got %q", s.Source)
+	if s.Source != "sweep" {
+		return fmt.Errorf("source must be 'sweep', got %q", s.Source)
 	}
 	return nil
 }

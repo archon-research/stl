@@ -91,6 +91,9 @@ func NewService(
 	if config.PSM3Address == (common.Address{}) {
 		return nil, fmt.Errorf("psm3 address is required")
 	}
+	if config.SweepEveryNBlocks < 0 {
+		return nil, fmt.Errorf("sweep every n blocks must not be negative, got %d", config.SweepEveryNBlocks)
+	}
 
 	if config.SweepEveryNBlocks == 0 {
 		config.SweepEveryNBlocks = defaultSweepEveryNBlocks
