@@ -18,7 +18,7 @@ from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBacke
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
-from app.api.v1 import allocations, data_sources, prime_debts, protocol_events, risk, status, tokens
+from app.api.v1 import allocations, data_sources, prime_debts, protocol_events, psm3, risk, status, tokens
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
@@ -68,6 +68,7 @@ OPENAPI_TAGS: list[dict[str, str]] = [
     },
     {"name": "tokens", "description": "Token catalog metadata and latest USD prices."},
     {"name": "protocol events", "description": "Decoded on-chain events emitted by tracked protocols."},
+    {"name": "psm3", "description": "Spark PSM3 reserve snapshots with USD prices joined at read time."},
     {"name": "data sources", "description": "Registry of upstream data sources used by STL."},
     {"name": "metadata", "description": "Reference data for clients (chains, protocols)."},
 ]
@@ -264,6 +265,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.include_router(tokens.router, prefix="/v1")
     application.include_router(protocol_events.router, prefix="/v1")
     application.include_router(prime_debts.router, prefix="/v1")
+    application.include_router(psm3.router, prefix="/v1")
     application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
 
