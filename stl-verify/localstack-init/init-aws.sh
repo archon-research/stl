@@ -98,6 +98,11 @@ create_consumer_queue() {
 # Create resources for each supported chain
 create_chain_resources "ethereum"
 create_chain_resources "avalanche"
+# L2 chains; matches the chain list in k8s/infra/localstack.yaml
+create_chain_resources "base"
+create_chain_resources "optimism"
+create_chain_resources "unichain"
+create_chain_resources "arbitrum"
 
 # Ethereum-only consumers
 for queue in oracle-price morpho-indexing; do
@@ -109,6 +114,11 @@ for queue in sparklend-position allocation-tracker; do
   for chain in ethereum avalanche; do
     create_consumer_queue "$chain" "$queue"
   done
+done
+
+# PSM3 indexer runs on the four L2 chains
+for chain in base optimism unichain arbitrum; do
+  create_consumer_queue "$chain" "psm3-indexer"
 done
 
 echo "=== LocalStack initialization complete ==="
