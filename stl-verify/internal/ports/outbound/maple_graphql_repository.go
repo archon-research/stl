@@ -9,6 +9,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 )
 
+// MapleAssetToken identifies a pool's underlying ERC-20 asset as reported by
+// the Maple GraphQL API (poolV2.asset).
+type MapleAssetToken struct {
+	Address  common.Address
+	Symbol   string
+	Decimals int16
+}
+
 // MapleGraphQLRepository defines the persistence interface for Maple GraphQL
 // indexer data. All write methods run within an external transaction so the
 // service controls snapshot atomicity per sync phase; GetMapleProtocolID is a
@@ -35,9 +43,19 @@ type MapleGraphQLRepository interface {
 	// first seen by on-chain indexers keep their earliest block.
 	GetOrCreateBorrowerUsers(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error)
 
-	// UpsertPools upserts pool registry rows and returns
-	// address -> maple_pool.id. On conflict, refreshes name, asset_address,
-	// asset_symbol, asset_decimals, and is_syrup.
+	// GetOrCreateAssetTokens bulk-upserts pool asset tokens into token and
+	// returns address -> token id. Inserts NULL created_at_block (GraphQL data
+	// has no block) and never modifies existing rows on conflict, so tokens
+	// seeded by migrations or on-chain indexers keep their created_at_block,
+	// symbol, and decimals. (TokenRepository.GetOrCreateTokens is unsuitable
+	// here: its LEAST() merge would clobber created_at_block down to our zero
+	// value.)
+	GetOrCreateAssetTokens(ctx context.Context, tx pgx.Tx, chainID int64, assets []MapleAssetToken) (map[common.Address]int64, error)
+
+	// UpsertPools upserts pool registry rows (asset_token_id already resolved
+	// by the service via GetOrCreateAssetTokens) and returns
+	// address -> maple_pool.id. On conflict, refreshes name, asset_token_id,
+	// and is_syrup.
 	UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
 
 	// SavePoolStates inserts pool state snapshots.

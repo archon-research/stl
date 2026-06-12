@@ -39,8 +39,10 @@ END $$;
 
 -- ============================================================================
 -- maple_pool: registry of PoolV2 lending pools (discovered dynamically per sync).
--- asset_* stored raw (no token FK): pools span assets we do not seed, and
--- Maple collateral assets (BTC, SOL) have no Ethereum token address at all.
+-- asset_token_id FKs token: every pool's underlying asset (poolV2.asset) is a
+-- mainnet ERC-20 (USDC/USDT/...), upserted into token at sync time. Loan
+-- collateral stays raw (maple_loan_collateral.asset_symbol): collateral assets
+-- (BTC, SOL) are custodied off-chain and have no Ethereum token address.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS maple_pool
 (
@@ -49,15 +51,14 @@ CREATE TABLE IF NOT EXISTS maple_pool
     protocol_id    BIGINT      NOT NULL REFERENCES protocol (id),
     address        BYTEA       NOT NULL,               -- poolV2.id
     name           VARCHAR(255),
-    asset_address  BYTEA,                              -- poolV2.asset.id
-    asset_symbol   VARCHAR(50),
-    asset_decimals SMALLINT,
+    asset_token_id BIGINT      NOT NULL REFERENCES token (id), -- poolV2.asset
     is_syrup       BOOLEAN     NOT NULL DEFAULT FALSE, -- poolV2.syrupRouter != null
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (chain_id, address)
 );
 
 CREATE INDEX IF NOT EXISTS idx_maple_pool_chain ON maple_pool (chain_id);
+CREATE INDEX IF NOT EXISTS idx_maple_pool_asset_token ON maple_pool (asset_token_id);
 CREATE INDEX IF NOT EXISTS idx_maple_pool_is_syrup ON maple_pool (is_syrup) WHERE is_syrup;
 
 -- ============================================================================

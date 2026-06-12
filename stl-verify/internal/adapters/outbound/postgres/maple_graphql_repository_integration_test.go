@@ -16,6 +16,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -102,21 +103,39 @@ func mapleProtocolID(t *testing.T, ctx context.Context, repo *MapleGraphQLReposi
 	return id
 }
 
+// upsertTestAssetToken resolves a token id for a pool asset, creating the
+// token row if needed.
+func upsertTestAssetToken(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, tx pgx.Tx, addrByte byte, symbol string) int64 {
+	t.Helper()
+	asset := outbound.MapleAssetToken{Address: common.BytesToAddress(mapleAddr(addrByte)), Symbol: symbol, Decimals: 6}
+	ids, err := repo.GetOrCreateAssetTokens(ctx, tx, 1, []outbound.MapleAssetToken{asset})
+	if err != nil {
+		t.Fatalf("GetOrCreateAssetTokens: %v", err)
+	}
+	id, ok := ids[asset.Address]
+	if !ok {
+		t.Fatalf("asset token id missing from map: %v", ids)
+	}
+	return id
+}
+
 func upsertTestPool(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, addrByte byte) int64 {
 	t.Helper()
 	protocolID := mapleProtocolID(t, ctx, repo)
-	pool, err := maple.NewPool(1, protocolID, mapleAddr(addrByte), "Test Pool", mapleAddr(0xee), "USDC", 6, true)
-	if err != nil {
-		t.Fatalf("NewPool: %v", err)
-	}
 
 	var ids map[common.Address]int64
+	var poolAddr common.Address
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
+		assetTokenID := upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		pool, err := maple.NewPool(1, protocolID, mapleAddr(addrByte), "Test Pool", assetTokenID, true)
+		if err != nil {
+			t.Fatalf("NewPool: %v", err)
+		}
+		poolAddr = common.BytesToAddress(pool.Address)
 		ids, err = repo.UpsertPools(ctx, tx, []*maple.Pool{pool})
 		return err
 	})
-	id, ok := ids[common.BytesToAddress(pool.Address)]
+	id, ok := ids[poolAddr]
 	if !ok {
 		t.Fatalf("pool id missing from map: %v", ids)
 	}
@@ -239,24 +258,110 @@ func TestMapleGetOrCreateBorrowerUsers(t *testing.T) {
 	}
 }
 
+func TestMapleGetOrCreateAssetTokens(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+
+	usdc := outbound.MapleAssetToken{Address: common.BytesToAddress(mapleAddr(0xe1)), Symbol: "USDC", Decimals: 6}
+	usdt := outbound.MapleAssetToken{Address: common.BytesToAddress(mapleAddr(0xe2)), Symbol: "USDT", Decimals: 6}
+
+	var first map[common.Address]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		// Duplicate input must be deduplicated.
+		first, err = repo.GetOrCreateAssetTokens(ctx, tx, 1, []outbound.MapleAssetToken{usdc, usdt, usdc})
+		return err
+	})
+	if len(first) != 2 {
+		t.Fatalf("len(first) = %d, want 2", len(first))
+	}
+
+	// New asset tokens must have NULL created_at_block and the API metadata.
+	var cab *int64
+	var symbol string
+	var decimals int16
+	if err := maplePool.QueryRow(ctx,
+		`SELECT created_at_block, symbol, decimals FROM token WHERE chain_id = 1 AND address = $1`,
+		usdc.Address.Bytes()).Scan(&cab, &symbol, &decimals); err != nil {
+		t.Fatalf("querying token: %v", err)
+	}
+	if cab != nil {
+		t.Errorf("created_at_block = %v, want NULL", *cab)
+	}
+	if symbol != "USDC" || decimals != 6 {
+		t.Errorf("symbol/decimals = %s/%d, want USDC/6", symbol, decimals)
+	}
+
+	// Re-upserting returns the same ids.
+	var second map[common.Address]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		second, err = repo.GetOrCreateAssetTokens(ctx, tx, 1, []outbound.MapleAssetToken{usdc, usdt})
+		return err
+	})
+	if second[usdc.Address] != first[usdc.Address] || second[usdt.Address] != first[usdt.Address] {
+		t.Errorf("ids changed across upserts: %v vs %v", first, second)
+	}
+
+	// An existing token created by a migration or on-chain indexer keeps its
+	// created_at_block, symbol, and decimals (the shared GetOrCreateTokens
+	// LEAST() merge would have clobbered created_at_block to 0).
+	existing := common.BytesToAddress(mapleAddr(0xe3))
+	var existingID int64
+	if err := maplePool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
+		 VALUES (1, $1, 'WETH', 18, 12345, '{}'::jsonb, NOW()) RETURNING id`,
+		existing.Bytes()).Scan(&existingID); err != nil {
+		t.Fatalf("seeding existing token: %v", err)
+	}
+
+	var third map[common.Address]int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		third, err = repo.GetOrCreateAssetTokens(ctx, tx, 1,
+			[]outbound.MapleAssetToken{{Address: existing, Symbol: "DIFFERENT", Decimals: 6}})
+		return err
+	})
+	if third[existing] != existingID {
+		t.Errorf("existing token id = %d, want %d", third[existing], existingID)
+	}
+	var preservedCAB int64
+	var preservedSymbol string
+	var preservedDecimals int16
+	if err := maplePool.QueryRow(ctx,
+		`SELECT created_at_block, symbol, decimals FROM token WHERE id = $1`,
+		existingID).Scan(&preservedCAB, &preservedSymbol, &preservedDecimals); err != nil {
+		t.Fatalf("querying preserved token: %v", err)
+	}
+	if preservedCAB != 12345 || preservedSymbol != "WETH" || preservedDecimals != 18 {
+		t.Errorf("token = %d/%s/%d, want 12345/WETH/18 (must not be clobbered)",
+			preservedCAB, preservedSymbol, preservedDecimals)
+	}
+}
+
 func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	repo := newMapleRepo(t, 0)
 	protocolID := mapleProtocolID(t, ctx, repo)
 
-	poolA, err := maple.NewPool(1, protocolID, mapleAddr(0x10), "Pool A", mapleAddr(0xee), "USDC", 6, false)
-	if err != nil {
-		t.Fatalf("NewPool: %v", err)
-	}
-	poolB, err := maple.NewPool(1, protocolID, mapleAddr(0x11), "Pool B", mapleAddr(0xef), "USDT", 6, true)
-	if err != nil {
-		t.Fatalf("NewPool: %v", err)
-	}
-
 	var ids map[common.Address]int64
+	var poolA *maple.Pool
+	var usdtTokenID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		usdcTokenID := upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		usdtTokenID = upsertTestAssetToken(t, ctx, repo, tx, 0xef, "USDT")
+
 		var err error
+		poolA, err = maple.NewPool(1, protocolID, mapleAddr(0x10), "Pool A", usdcTokenID, false)
+		if err != nil {
+			t.Fatalf("NewPool: %v", err)
+		}
+		poolB, err := maple.NewPool(1, protocolID, mapleAddr(0x11), "Pool B", usdtTokenID, true)
+		if err != nil {
+			t.Fatalf("NewPool: %v", err)
+		}
 		ids, err = repo.UpsertPools(ctx, tx, []*maple.Pool{poolA, poolB})
 		return err
 	})
@@ -264,9 +369,11 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 		t.Fatalf("len(ids) = %d, want 2", len(ids))
 	}
 
-	// Re-upsert with changed name/is_syrup refreshes and keeps the same id.
+	// Re-upsert with changed name/is_syrup/asset refreshes and keeps the
+	// same id.
 	poolA.Name = "Pool A renamed"
 	poolA.IsSyrup = true
+	poolA.AssetTokenID = usdtTokenID
 	var again map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
@@ -279,13 +386,14 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 
 	var name string
 	var isSyrup bool
+	var assetTokenID int64
 	if err := maplePool.QueryRow(ctx,
-		`SELECT name, is_syrup FROM maple_pool WHERE chain_id = 1 AND address = $1`,
-		poolA.Address).Scan(&name, &isSyrup); err != nil {
+		`SELECT name, is_syrup, asset_token_id FROM maple_pool WHERE chain_id = 1 AND address = $1`,
+		poolA.Address).Scan(&name, &isSyrup, &assetTokenID); err != nil {
 		t.Fatalf("querying pool: %v", err)
 	}
-	if name != "Pool A renamed" || !isSyrup {
-		t.Errorf("name/is_syrup = %q/%v, want refreshed values", name, isSyrup)
+	if name != "Pool A renamed" || !isSyrup || assetTokenID != usdtTokenID {
+		t.Errorf("name/is_syrup/asset_token_id = %q/%v/%d, want refreshed values", name, isSyrup, assetTokenID)
 	}
 }
 

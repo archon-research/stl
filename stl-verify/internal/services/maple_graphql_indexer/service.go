@@ -190,7 +190,6 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 		return nil, err
 	}
 
-	poolEntities := make([]*maple.Pool, 0, len(pools))
 	for _, p := range pools {
 		if p.TVL == nil {
 			s.telemetry.RecordNullDowngrade(ctx, "pool_tvl")
@@ -204,23 +203,36 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 		if p.SpotAPY == nil {
 			s.telemetry.RecordNullDowngrade(ctx, "pool_spot_apy")
 		}
-		assetDecimals, err := toInt16(p.AssetDecimals)
-		if err != nil {
-			return nil, fmt.Errorf("pool %s: asset decimals: %w", lowerHex(p.Address), err)
-		}
-		poolEntity, err := maple.NewPool(
-			s.config.ChainID, protocolID, p.Address.Bytes(), p.Name,
-			p.AssetAddress.Bytes(), p.AssetSymbol, assetDecimals, p.IsSyrup,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("pool %s: %w", lowerHex(p.Address), err)
-		}
-		poolEntities = append(poolEntities, poolEntity)
+	}
+
+	assets, err := distinctAssetTokens(pools)
+	if err != nil {
+		return nil, err
 	}
 
 	var poolIDs map[common.Address]int64
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		var err error
+		assetTokenIDs, err := s.repo.GetOrCreateAssetTokens(ctx, tx, s.config.ChainID, assets)
+		if err != nil {
+			return fmt.Errorf("resolving asset tokens: %w", err)
+		}
+
+		poolEntities := make([]*maple.Pool, 0, len(pools))
+		for _, p := range pools {
+			assetTokenID, ok := assetTokenIDs[p.AssetAddress]
+			if !ok {
+				return fmt.Errorf("pool %s: asset token %s missing from upsert result", lowerHex(p.Address), lowerHex(p.AssetAddress))
+			}
+			poolEntity, err := maple.NewPool(
+				s.config.ChainID, protocolID, p.Address.Bytes(), p.Name,
+				assetTokenID, p.IsSyrup,
+			)
+			if err != nil {
+				return fmt.Errorf("pool %s: %w", lowerHex(p.Address), err)
+			}
+			poolEntities = append(poolEntities, poolEntity)
+		}
+
 		poolIDs, err = s.repo.UpsertPools(ctx, tx, poolEntities)
 		if err != nil {
 			return fmt.Errorf("upserting pools: %w", err)
@@ -254,6 +266,35 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 	s.telemetry.RecordRowsWritten(ctx, "maple_pool_state", len(pools))
 	s.logger.Info("pools synced", "count", len(pools))
 	return poolIDs, nil
+}
+
+// distinctAssetTokens extracts the unique pool asset tokens, validating each
+// asset's metadata and failing when two pools report the same asset address
+// with conflicting symbol or decimals (an inconsistency the token table
+// cannot represent and must not silently first-write-wins).
+func distinctAssetTokens(pools []outbound.MaplePool) ([]outbound.MapleAssetToken, error) {
+	seen := make(map[common.Address]outbound.MapleAssetToken, len(pools))
+	assets := make([]outbound.MapleAssetToken, 0, len(pools))
+	for _, p := range pools {
+		if p.AssetSymbol == "" {
+			return nil, fmt.Errorf("pool %s: asset %s: symbol must not be empty", lowerHex(p.Address), lowerHex(p.AssetAddress))
+		}
+		decimals, err := toInt16(p.AssetDecimals)
+		if err != nil {
+			return nil, fmt.Errorf("pool %s: asset decimals: %w", lowerHex(p.Address), err)
+		}
+		asset := outbound.MapleAssetToken{Address: p.AssetAddress, Symbol: p.AssetSymbol, Decimals: decimals}
+		if prev, ok := seen[p.AssetAddress]; ok {
+			if prev != asset {
+				return nil, fmt.Errorf("asset %s reported with conflicting metadata: %s/%d vs %s/%d",
+					lowerHex(p.AssetAddress), prev.Symbol, prev.Decimals, asset.Symbol, asset.Decimals)
+			}
+			continue
+		}
+		seen[p.AssetAddress] = asset
+		assets = append(assets, asset)
+	}
+	return assets, nil
 }
 
 // toInt16 converts an int to int16, rejecting values that would silently

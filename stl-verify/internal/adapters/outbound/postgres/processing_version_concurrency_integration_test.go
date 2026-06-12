@@ -688,11 +688,20 @@ func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey 
 		t.Fatalf("seed borrower user: %v", err)
 	}
 
+	var assetTokenID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, '\x8844444444444444444444444444444444444488'::bytea, 'USDC', 6, '{}'::jsonb, NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`).Scan(&assetTokenID); err != nil {
+		t.Fatalf("seed asset token: %v", err)
+	}
+
 	var poolID int64
 	if err := concurrencyPool.QueryRow(ctx,
-		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, is_syrup)
-		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, 'Race Pool', false)
-		 RETURNING id`, protocolID).Scan(&poolID); err != nil {
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
+		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, 'Race Pool', $2, false)
+		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
 		t.Fatalf("seed maple pool: %v", err)
 	}
 

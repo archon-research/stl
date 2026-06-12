@@ -186,6 +186,33 @@ func TestSyncIntegration_FullCycle(t *testing.T) {
 		t.Errorf("user rows = %d, want 2", got)
 	}
 
+	// Both pools share USDC: one token row upserted (NULL created_at_block —
+	// GraphQL has no block context), both pools FK it.
+	var tokenCount, poolsOnToken int
+	var tokenSymbol string
+	var tokenCAB *int64
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM token WHERE chain_id = 1 AND address = decode($1, 'hex')`,
+		strings.TrimPrefix(itUSDC, "0x")).Scan(&tokenCount); err != nil {
+		t.Fatalf("counting usdc token: %v", err)
+	}
+	if tokenCount != 1 {
+		t.Errorf("usdc token rows = %d, want 1 (shared asset must dedupe)", tokenCount)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(p.id), MIN(t.symbol), MIN(t.created_at_block)
+		FROM maple_pool p JOIN token t ON t.id = p.asset_token_id
+		WHERE t.address = decode($1, 'hex')`,
+		strings.TrimPrefix(itUSDC, "0x")).Scan(&poolsOnToken, &tokenSymbol, &tokenCAB); err != nil {
+		t.Fatalf("joining pools to token: %v", err)
+	}
+	if poolsOnToken != 2 || tokenSymbol != "USDC" {
+		t.Errorf("pools on usdc token = %d/%s, want 2/USDC", poolsOnToken, tokenSymbol)
+	}
+	if tokenCAB != nil {
+		t.Errorf("token created_at_block = %v, want NULL", *tokenCAB)
+	}
+
 	// is_internal derives from loanMeta type.
 	var internalCount int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM maple_loan WHERE is_internal`).Scan(&internalCount); err != nil {

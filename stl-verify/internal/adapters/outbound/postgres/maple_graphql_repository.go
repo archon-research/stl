@@ -105,8 +105,44 @@ func (r *MapleGraphQLRepository) GetOrCreateBorrowerUsers(ctx context.Context, t
 		func(addr common.Address) common.Address { return addr })
 }
 
+// GetOrCreateAssetTokens bulk-upserts pool asset tokens into token and
+// returns address -> token id.
+//
+// Unlike TokenRepository.GetOrCreateTokens, this inserts NULL
+// created_at_block (GraphQL data has no block context) and never modifies
+// existing rows on conflict — that method's LEAST() merge would clobber
+// seeded tokens' created_at_block down to our zero value.
+func (r *MapleGraphQLRepository) GetOrCreateAssetTokens(ctx context.Context, tx pgx.Tx, chainID int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+	if len(assets) == 0 {
+		return make(map[common.Address]int64), nil
+	}
+
+	// Sort + dedupe by address for a stable row-lock acquisition order across
+	// concurrent writers.
+	sorted := make([]outbound.MapleAssetToken, len(assets))
+	copy(sorted, assets)
+	slices.SortFunc(sorted, func(a, b outbound.MapleAssetToken) int { return a.Address.Cmp(b.Address) })
+	sorted = slices.CompactFunc(sorted, func(a, b outbound.MapleAssetToken) bool { return a.Address == b.Address })
+
+	batch := &pgx.Batch{}
+	for _, a := range sorted {
+		// The no-op DO UPDATE (instead of DO NOTHING) makes RETURNING yield
+		// the existing row's id on conflict; DO NOTHING returns no row.
+		batch.Queue(
+			`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+			 VALUES ($1, $2, $3, $4, '{}'::jsonb, NOW())
+			 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+			 RETURNING id`,
+			chainID, a.Address.Bytes(), a.Symbol, a.Decimals,
+		)
+	}
+
+	return collectBatchIDs(ctx, tx, batch, sorted, "asset token",
+		func(a outbound.MapleAssetToken) common.Address { return a.Address })
+}
+
 // UpsertPools upserts pool registry rows and returns
-// address -> maple_pool.id. On conflict, refreshes name, asset details, and
+// address -> maple_pool.id. On conflict, refreshes name, asset_token_id, and
 // is_syrup.
 func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
 	if len(pools) == 0 {
@@ -118,16 +154,14 @@ func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, poo
 	batch := &pgx.Batch{}
 	for _, p := range sorted {
 		batch.Queue(
-			`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_address, asset_symbol, asset_decimals, is_syrup)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
+			 VALUES ($1, $2, $3, $4, $5, $6)
 			 ON CONFLICT (chain_id, address) DO UPDATE SET
 			     name = EXCLUDED.name,
-			     asset_address = EXCLUDED.asset_address,
-			     asset_symbol = EXCLUDED.asset_symbol,
-			     asset_decimals = EXCLUDED.asset_decimals,
+			     asset_token_id = EXCLUDED.asset_token_id,
 			     is_syrup = EXCLUDED.is_syrup
 			 RETURNING id`,
-			p.ChainID, p.ProtocolID, p.Address, p.Name, p.AssetAddress, p.AssetSymbol, p.AssetDecimals, p.IsSyrup,
+			p.ChainID, p.ProtocolID, p.Address, p.Name, p.AssetTokenID, p.IsSyrup,
 		)
 	}
 

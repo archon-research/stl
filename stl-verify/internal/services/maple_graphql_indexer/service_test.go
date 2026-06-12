@@ -53,6 +53,7 @@ func (m *mockClient) GetSyrupGlobals(ctx context.Context) (*outbound.MapleSyrupG
 type mockRepo struct {
 	GetMapleProtocolIDFn       func(ctx context.Context, chainID int64) (int64, error)
 	GetOrCreateBorrowerUsersFn func(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error)
+	GetOrCreateAssetTokensFn   func(ctx context.Context, tx pgx.Tx, chainID int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error)
 	UpsertPoolsFn              func(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
 	SavePoolStatesFn           func(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
 	UpsertLoansFn              func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
@@ -64,6 +65,8 @@ type mockRepo struct {
 
 	// Captured arguments for assertions.
 	borrowerCalls   [][]common.Address
+	assetTokenCalls [][]outbound.MapleAssetToken
+	upsertedPools   []*maple.Pool
 	upsertedLoans   []*maple.Loan
 	savedPoolStates []*maple.PoolState
 	savedLoanStates []*maple.LoanState
@@ -85,7 +88,16 @@ func newMockRepo() *mockRepo {
 		}
 		return ids, nil
 	}
+	r.GetOrCreateAssetTokensFn = func(_ context.Context, _ pgx.Tx, _ int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+		r.assetTokenCalls = append(r.assetTokenCalls, assets)
+		ids := make(map[common.Address]int64, len(assets))
+		for i, a := range assets {
+			ids[a.Address] = int64(500 + i)
+		}
+		return ids, nil
+	}
 	r.UpsertPoolsFn = func(_ context.Context, _ pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
+		r.upsertedPools = append(r.upsertedPools, pools...)
 		ids := make(map[common.Address]int64, len(pools))
 		for i, p := range pools {
 			ids[common.BytesToAddress(p.Address)] = int64(10 + i)
@@ -136,6 +148,10 @@ func (m *mockRepo) GetMapleProtocolID(ctx context.Context, chainID int64) (int64
 
 func (m *mockRepo) GetOrCreateBorrowerUsers(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error) {
 	return m.GetOrCreateBorrowerUsersFn(ctx, tx, chainID, borrowers)
+}
+
+func (m *mockRepo) GetOrCreateAssetTokens(ctx context.Context, tx pgx.Tx, chainID int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+	return m.GetOrCreateAssetTokensFn(ctx, tx, chainID, assets)
 }
 
 func (m *mockRepo) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
@@ -413,6 +429,27 @@ func TestSync_HappyPath(t *testing.T) {
 	}
 	if got := metaByAddr[addr(0x21)]; got != nil {
 		t.Errorf("loan 0x21 meta = %+v, want nil", got)
+	}
+
+	// Asset token resolution: one call with the two distinct pool assets, and
+	// each pool entity carries the token id mapped from ITS asset address
+	// (mock assigns 500, 501 in fixture order).
+	if len(repo.assetTokenCalls) != 1 {
+		t.Fatalf("asset token calls = %d, want 1", len(repo.assetTokenCalls))
+	}
+	gotAssets := repo.assetTokenCalls[0]
+	if len(gotAssets) != 2 || gotAssets[0].Address != addr(0xee) || gotAssets[1].Address != addr(0xef) {
+		t.Errorf("assets = %v, want [0xee..., 0xef...]", gotAssets)
+	}
+	if gotAssets[0].Symbol != "USDC" || gotAssets[0].Decimals != 6 {
+		t.Errorf("asset 0 = %+v, want USDC/6", gotAssets[0])
+	}
+	if len(repo.upsertedPools) != 2 {
+		t.Fatalf("upserted pools = %d, want 2", len(repo.upsertedPools))
+	}
+	if repo.upsertedPools[0].AssetTokenID != 500 || repo.upsertedPools[1].AssetTokenID != 501 {
+		t.Errorf("pool asset token ids = %d/%d, want 500/501",
+			repo.upsertedPools[0].AssetTokenID, repo.upsertedPools[1].AssetTokenID)
 	}
 
 	// Borrower resolution: one call, two distinct borrowers (0xa0 deduped).
@@ -746,11 +783,11 @@ func TestSync_StrategyMissingFromUpsertResult(t *testing.T) {
 	}
 }
 
-func TestSync_InvalidPoolEntityFailsPhase(t *testing.T) {
+func TestSync_EmptyAssetSymbolFailsPhase(t *testing.T) {
 	client := happyClient()
 	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
 		pools := fixturePools()
-		pools[0].AssetSymbol = "" // entity validation rejects this
+		pools[0].AssetSymbol = ""
 		return pools, nil
 	}
 	repo := newMockRepo()
@@ -760,7 +797,98 @@ func TestSync_InvalidPoolEntityFailsPhase(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "assetSymbol must not be empty") {
+	if !strings.Contains(err.Error(), "symbol must not be empty") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestSync_SharedAssetIsDeduplicated(t *testing.T) {
+	// Two pools denominated in the same asset must resolve one token, and
+	// both pool entities must reference it.
+	client := happyClient()
+	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+		pools := fixturePools()
+		pools[1].AssetAddress = pools[0].AssetAddress
+		pools[1].AssetSymbol = pools[0].AssetSymbol
+		pools[1].AssetDecimals = pools[0].AssetDecimals
+		return pools, nil
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(repo.assetTokenCalls) != 1 || len(repo.assetTokenCalls[0]) != 1 {
+		t.Fatalf("asset token calls = %v, want one call with one asset", repo.assetTokenCalls)
+	}
+	if len(repo.upsertedPools) != 2 {
+		t.Fatalf("upserted pools = %d, want 2", len(repo.upsertedPools))
+	}
+	if repo.upsertedPools[0].AssetTokenID != 500 || repo.upsertedPools[1].AssetTokenID != 500 {
+		t.Errorf("pool asset token ids = %d/%d, want 500/500",
+			repo.upsertedPools[0].AssetTokenID, repo.upsertedPools[1].AssetTokenID)
+	}
+}
+
+func TestSync_ConflictingAssetMetadataFails(t *testing.T) {
+	// The same asset address reported with different symbol or decimals is an
+	// API inconsistency the token table cannot represent; first-write-wins
+	// would silently persist one of the two.
+	client := happyClient()
+	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+		pools := fixturePools()
+		pools[1].AssetAddress = pools[0].AssetAddress
+		pools[1].AssetSymbol = "USDT" // differs from pool 0's USDC
+		return pools, nil
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "conflicting metadata") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestSync_InvalidPoolEntityFailsPhase(t *testing.T) {
+	// A zero token id resolves from the map but fails pool entity validation.
+	client := happyClient()
+	repo := newMockRepo()
+	repo.GetOrCreateAssetTokensFn = func(_ context.Context, _ pgx.Tx, _ int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+		ids := make(map[common.Address]int64, len(assets))
+		for _, a := range assets {
+			ids[a.Address] = 0
+		}
+		return ids, nil
+	}
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "assetTokenID must be positive") {
+		t.Errorf("error = %q", err.Error())
+	}
+}
+
+func TestSync_AssetTokenMissingFromUpsertResult(t *testing.T) {
+	client := happyClient()
+	repo := newMockRepo()
+	repo.GetOrCreateAssetTokensFn = func(context.Context, pgx.Tx, int64, []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+		return map[common.Address]int64{}, nil
+	}
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing from upsert result") {
 		t.Errorf("error = %q", err.Error())
 	}
 }
@@ -857,6 +985,14 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 			name: "pool upsert fails",
 			mutate: func(r *mockRepo) {
 				r.UpsertPoolsFn = func(context.Context, pgx.Tx, []*maple.Pool) (map[common.Address]int64, error) {
+					return nil, errors.New("upsert failed")
+				}
+			},
+		},
+		{
+			name: "asset token upsert fails",
+			mutate: func(r *mockRepo) {
+				r.GetOrCreateAssetTokensFn = func(context.Context, pgx.Tx, int64, []outbound.MapleAssetToken) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},

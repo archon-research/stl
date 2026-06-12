@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-func validPoolArgs() (chainID, protocolID int64, address []byte, name string, assetAddress []byte, assetSymbol string, assetDecimals int16, isSyrup bool) {
-	return 1, 7, bytes.Repeat([]byte{0xaa}, 20), "Syrup USDC", bytes.Repeat([]byte{0xbb}, 20), "USDC", 6, true
+func validPoolArgs() (chainID, protocolID int64, address []byte, name string, assetTokenID int64, isSyrup bool) {
+	return 1, 7, bytes.Repeat([]byte{0xaa}, 20), "Syrup USDC", 42, true
 }
 
 func TestNewPool(t *testing.T) {
@@ -43,28 +43,23 @@ func TestNewPool(t *testing.T) {
 			wantErr: "address must be 20 bytes",
 		},
 		{
-			name:    "short asset address",
-			mutate:  func(p *Pool) { p.AssetAddress = []byte{0x01, 0x02} },
-			wantErr: "assetAddress must be 20 bytes",
+			name:    "zero asset token ID",
+			mutate:  func(p *Pool) { p.AssetTokenID = 0 },
+			wantErr: "assetTokenID must be positive",
 		},
 		{
-			name:    "empty asset symbol",
-			mutate:  func(p *Pool) { p.AssetSymbol = "" },
-			wantErr: "assetSymbol must not be empty",
-		},
-		{
-			name:    "negative asset decimals",
-			mutate:  func(p *Pool) { p.AssetDecimals = -1 },
-			wantErr: "assetDecimals must be non-negative",
+			name:    "negative asset token ID",
+			mutate:  func(p *Pool) { p.AssetTokenID = -1 },
+			wantErr: "assetTokenID must be positive",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			chainID, protocolID, address, name, assetAddress, assetSymbol, assetDecimals, isSyrup := validPoolArgs()
+			chainID, protocolID, address, name, assetTokenID, isSyrup := validPoolArgs()
 			p := &Pool{
 				ChainID: chainID, ProtocolID: protocolID, Address: address, Name: name,
-				AssetAddress: assetAddress, AssetSymbol: assetSymbol, AssetDecimals: assetDecimals, IsSyrup: isSyrup,
+				AssetTokenID: assetTokenID, IsSyrup: isSyrup,
 			}
 			if tt.mutate != nil {
 				tt.mutate(p)
@@ -87,17 +82,17 @@ func TestNewPool(t *testing.T) {
 }
 
 func TestNewPool_Constructor(t *testing.T) {
-	chainID, protocolID, address, name, assetAddress, assetSymbol, assetDecimals, isSyrup := validPoolArgs()
+	chainID, protocolID, address, name, assetTokenID, isSyrup := validPoolArgs()
 
-	got, err := NewPool(chainID, protocolID, address, name, assetAddress, assetSymbol, assetDecimals, isSyrup)
+	got, err := NewPool(chainID, protocolID, address, name, assetTokenID, isSyrup)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Name != name || got.AssetSymbol != assetSymbol || !got.IsSyrup {
+	if got.Name != name || got.AssetTokenID != assetTokenID || !got.IsSyrup {
 		t.Errorf("fields not set: %+v", got)
 	}
 
-	if _, err := NewPool(0, protocolID, address, name, assetAddress, assetSymbol, assetDecimals, isSyrup); err == nil {
+	if _, err := NewPool(0, protocolID, address, name, assetTokenID, isSyrup); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
 	} else if !strings.Contains(err.Error(), "NewPool") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())
