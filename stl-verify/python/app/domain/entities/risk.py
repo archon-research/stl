@@ -10,7 +10,7 @@ from app.domain.entities.allocation import EthAddress
 # Discriminated details for RrcResult
 # ---------------------------------------------------------------------------
 
-ModelName = Literal["suraf", "gap_sweep"]
+ModelName = Literal["suraf", "gap_sweep", "core_model"]
 
 
 class SurafDetails(BaseModel):
@@ -56,12 +56,36 @@ class GapSweepDetails(BaseModel):
     loss_usd: Decimal
 
 
-RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails], Field(discriminator="risk_model")]
+class CoreModelDetails(BaseModel):
+    """CORE model-specific output embedded in an RrcResult.
+
+    ``crr_el_pct`` is the expected-loss CRR used as the primary capital
+    charge (0-100 scale, e.g. ``Decimal("12.5")`` means 12.5%).
+    ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
+    expressed as a percentage; ``None`` when liquidation analysis was
+    not run or the market had fewer than two borrowers.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    risk_model: Literal["core_model"]
+    crr_el_pct: Decimal
+    crr_es_pct: Decimal
+    crr_var_pct: Decimal
+    hhi: Decimal | None
+    protocol: str
+    forecast_step: int
+    n_mc: int
+    copula_type: str
+
+
+RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails, CoreModelDetails], Field(discriminator="risk_model")]
 """Discriminated union of model-specific detail payloads keyed on ``risk_model``."""
 
 _RISK_MODEL_TO_DETAILS: dict[str, type] = {
     "suraf": SurafDetails,
     "gap_sweep": GapSweepDetails,
+    "core_model": CoreModelDetails,
 }
 
 # Catch drift at import time: adding a literal to ``ModelName`` without

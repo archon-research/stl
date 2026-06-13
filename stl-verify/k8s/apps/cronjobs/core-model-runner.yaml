@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: core-model-runner
+spec:
+  # Run daily at 02:00 UTC. Adjust once real-time data sources replace parquet
+  # snapshots -- at that point the schedule should align with data freshness.
+  schedule: "0 2 * * *"
+
+  # Never run two instances simultaneously. If a run is still in progress when
+  # the next trigger fires, skip the new run (it will be retried the next day).
+  concurrencyPolicy: Forbid
+
+  # If the scheduler misses the start time by more than 10 minutes (e.g. due to
+  # a cluster restart), skip the run and wait for the next scheduled window.
+  startingDeadlineSeconds: 600
+
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+  jobTemplate:
+    spec:
+      # No retries on failure: a bad run should not be retried immediately
+      # since the inputs won't change until the next scheduled window.
+      backoffLimit: 0
+
+      # Hard deadline: kill the job if it runs longer than 4 hours.
+      activeDeadlineSeconds: 14400
+
+      template:
+        metadata:
+          labels:
+            app: core-model-runner
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: core-model-runner
+              image: localhost/stl-python-api:local
+              imagePullPolicy: Never
+              command: ["python", "-m", "cli.cronjobs.core_model_runner.main"]
+              envFrom:
+                - configMapRef:
+                    name: stl-config
+                - secretRef:
+                    name: stl-secrets
+              env:
+                - name: CORE_MODEL_MARKET_KEY
+                  value: "all"
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: "2Gi"
+                limits:
+                  cpu: "4"
+                  memory: "8Gi"

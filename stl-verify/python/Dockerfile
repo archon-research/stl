@@ -33,6 +33,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY python/.env.default ./.env.default
 COPY python/app/ app/
 COPY python/suraf/ suraf/
+COPY python/cli/ cli/
 RUN uv sync --frozen --no-dev
 
 FROM python:${PYTHON_VERSION}-slim
@@ -50,6 +51,7 @@ COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/app /app/app
 COPY --from=builder --chown=appuser:appuser /app/suraf /app/suraf
 COPY --from=builder --chown=appuser:appuser /app/.env.default /app/.env.default
+COPY --chown=appuser:appuser python/cli /app/cli
 
 # Copy built UI assets for static hosting
 COPY --from=ui-builder --chown=appuser:appuser /ui/ui/dist /app/app/static
