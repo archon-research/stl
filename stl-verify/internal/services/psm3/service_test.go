@@ -57,6 +57,7 @@ type fakePSM3Caller struct {
 	state        entity.PSM3State
 	resolveBlock *big.Int
 	readBlocks   []int64
+	readAttempts int
 }
 
 func newFakePSM3Caller() *fakePSM3Caller {
@@ -88,6 +89,7 @@ func (f *fakePSM3Caller) ResolveImmutables(_ context.Context, blockNumber *big.I
 func (f *fakePSM3Caller) ReadState(_ context.Context, blockNumber *big.Int) (*entity.PSM3State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.readAttempts++
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
@@ -100,6 +102,13 @@ func (f *fakePSM3Caller) readCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.readBlocks)
+}
+
+// attemptCount counts all ReadState calls, including ones that returned an error.
+func (f *fakePSM3Caller) attemptCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readAttempts
 }
 
 // fakePSM3Repo is a controllable in-memory snapshot repository.
@@ -492,6 +501,39 @@ func TestSweep_Cadence(t *testing.T) {
 	}
 	if got := caller.readCount(); got != 4 {
 		t.Errorf("expected 4 chain reads, got %d", got)
+	}
+}
+
+func TestSweep_PersistentError_DoesNotStorm(t *testing.T) {
+	// A sweep that keeps failing must not turn every subsequent block into a
+	// sweep attempt: the cadence budget is consumed even on error. With sweep
+	// every 3 over 10 blocks, only blocks 1, 4, 7, 10 may attempt a read (4),
+	// never one-per-block (10).
+	const sweepN = 3
+	const numBlocks = 10
+
+	caller := newFakePSM3Caller()
+	caller.readErr = errors.New("multicall RPC failure")
+	repo := &fakePSM3Repo{}
+	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, numBlocks, 0))
+	svc := newService(t, defaultConfig(sweepN), caller, repo, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	// 6 non-sweep blocks ACK (delete); the 4 sweep blocks NACK on error.
+	waitFor(t, func() bool { return consumer.deleteCount() >= 6 }, "non-sweep blocks not all processed")
+	cancel()
+	_ = svc.Stop()
+
+	if got := caller.attemptCount(); got != 4 {
+		t.Errorf("expected 4 read attempts (no per-block storm), got %d", got)
+	}
+	if got := repo.savedCount(); got != 0 {
+		t.Errorf("expected 0 saved snapshots on persistent read failure, got %d", got)
 	}
 }
 

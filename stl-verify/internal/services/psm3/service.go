@@ -174,12 +174,12 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 		return nil
 	}
 
-	if err := s.sweep(ctx, event); err != nil {
-		return err
-	}
-
+	// Reset before sweeping so a failing sweep still consumes the cadence budget.
+	// Otherwise the counter stays at the threshold and every subsequent block
+	// re-sweeps until one succeeds — a per-block RPC storm during an RPC outage.
+	// The failed block NACKs and is retried via SQS redelivery.
 	s.blocksSinceSweep = 0
-	return nil
+	return s.sweep(ctx, event)
 }
 
 // sweep reads the reserve state pinned to the event's block and writes one
