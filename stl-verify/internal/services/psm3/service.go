@@ -171,18 +171,29 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 	if s.blocksSinceSweep < s.config.SweepEveryNBlocks {
 		return nil
 	}
-
-	// Reset before sweeping so a failing sweep still consumes the cadence budget.
-	// Otherwise the counter stays at the threshold and every subsequent block
-	// re-sweeps until one succeeds — a per-block RPC storm during an RPC outage.
-	// The failed block NACKs and is retried via SQS redelivery.
 	s.blocksSinceSweep = 0
-	return s.sweep(ctx, event)
+
+	// A failed sweep is logged and ACKed, not returned. Block events are a
+	// per-chain FIFO cadence clock (MessageGroupId = chainId), not a unit of
+	// work to retry: NACKing would redeliver the event, which the reset counter
+	// then treats as a non-sweep block (no real retry) while head-of-line
+	// blocking the whole chain's group and eventually sending a valid block
+	// event to the DLQ. Returning the error on every block instead would storm
+	// the RPC during an outage. So we skip the failed interval and sweep again
+	// at the next one; persistent failure surfaces via snapshot-freshness
+	// metrics, not the DLQ.
+	if err := s.sweep(ctx, event); err != nil {
+		s.logger.Error("psm3 sweep failed; skipping to next interval",
+			"block", event.BlockNumber,
+			"blockVersion", event.Version,
+			"error", err)
+	}
+	return nil
 }
 
 // sweep reads the reserve state pinned to the event's block and writes one
-// snapshot row. Any failure aborts the sweep so the SQS message NACKs and is
-// redelivered — no partial rows.
+// snapshot row, returning an error on any failure so no partial rows are
+// written. The caller decides how to handle that error (see processBlock).
 func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 	start := time.Now()
 

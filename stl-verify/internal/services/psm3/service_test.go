@@ -521,8 +521,9 @@ func TestSweep_PersistentError_DoesNotStorm(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	// 6 non-sweep blocks ACK (delete); the 4 sweep blocks NACK on error.
-	waitFor(t, func() bool { return consumer.deleteCount() >= 6 }, "non-sweep blocks not all processed")
+	// Every block is ACKed (deleted), including the 4 failed sweeps — a failed
+	// sweep skips the interval rather than NACKing.
+	waitFor(t, func() bool { return consumer.deleteCount() >= numBlocks }, "blocks not all processed")
 	cancel()
 	_ = svc.Stop()
 
@@ -534,7 +535,7 @@ func TestSweep_PersistentError_DoesNotStorm(t *testing.T) {
 	}
 }
 
-func TestSweep_ReadStateError_NoSaveAndNACK(t *testing.T) {
+func TestSweep_ReadStateError_NoSaveACKsAndSkips(t *testing.T) {
 	caller := newFakePSM3Caller()
 	caller.readErr = errors.New("multicall RPC failure")
 	repo := &fakePSM3Repo{}
@@ -547,20 +548,18 @@ func TestSweep_ReadStateError_NoSaveAndNACK(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	// A failed sweep ACKs (deletes) the block and skips the interval — it must
+	// not NACK, which would head-of-line block the chain's FIFO group.
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not ACKed after failed sweep")
 	cancel()
 	_ = svc.Stop()
 
 	if got := repo.savedCount(); got != 0 {
 		t.Errorf("expected 0 saved snapshots on read failure, got %d", got)
 	}
-	// NACK: handler error means the message must not be deleted.
-	if got := consumer.deleteCount(); got != 0 {
-		t.Errorf("expected 0 deleted messages (NACK on read error), got %d", got)
-	}
 }
 
-func TestSweep_SaveSnapshotError_NACK(t *testing.T) {
+func TestSweep_SaveSnapshotError_ACKsAndSkips(t *testing.T) {
 	caller := newFakePSM3Caller()
 	repo := &fakePSM3Repo{saveErr: errors.New("database write failed")}
 	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, 1, 0))
@@ -572,15 +571,12 @@ func TestSweep_SaveSnapshotError_NACK(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not ACKed after failed save")
 	cancel()
 	_ = svc.Stop()
 
 	if got := repo.savedCount(); got != 0 {
 		t.Errorf("expected 0 saved snapshots, got %d", got)
-	}
-	if got := consumer.deleteCount(); got != 0 {
-		t.Errorf("expected 0 deleted messages (NACK on save error), got %d", got)
 	}
 }
 
@@ -597,14 +593,11 @@ func TestSweep_InvalidStateFromCaller_NoSave(t *testing.T) {
 		t.Fatalf("Start returned error: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not ACKed after invalid state")
 	cancel()
 	_ = svc.Stop()
 
 	if got := repo.savedCount(); got != 0 {
 		t.Errorf("expected 0 saved snapshots for invalid state, got %d", got)
-	}
-	if got := consumer.deleteCount(); got != 0 {
-		t.Errorf("expected 0 deleted messages (NACK on invalid state), got %d", got)
 	}
 }
