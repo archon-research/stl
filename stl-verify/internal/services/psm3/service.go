@@ -127,8 +127,7 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("get latest block for immutable resolution: %w", err)
 	}
 
-	rateProvider, err := s.caller.ResolveImmutables(ctx, new(big.Int).SetUint64(blockNum))
-	if err != nil {
+	if err := s.caller.ResolveImmutables(ctx, new(big.Int).SetUint64(blockNum)); err != nil {
 		return fmt.Errorf("resolve psm3 immutables: %w", err)
 	}
 
@@ -147,7 +146,6 @@ func (s *Service) Start(ctx context.Context) error {
 
 	s.logger.Info("psm3 service started",
 		"psm3", s.config.PSM3Address.Hex(),
-		"rateProvider", rateProvider.Hex(),
 		"sweepEveryNBlocks", s.config.SweepEveryNBlocks,
 		"chainID", s.config.ChainID,
 		"block", blockNum,

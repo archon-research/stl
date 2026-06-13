@@ -70,7 +70,7 @@ func resolvedCaller(t *testing.T, mc *testutil.MockMulticaller) *PSM3Caller {
 	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		return immutableResults(t, caller, cfg), nil
 	}
-	if _, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000)); err != nil {
+	if err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000)); err != nil {
 		t.Fatalf("resolve immutables: %v", err)
 	}
 	mc.CallCount = 0
@@ -221,13 +221,11 @@ func TestResolveImmutables_HappyPath(t *testing.T) {
 		return immutableResults(t, caller, cfg), nil
 	}
 
-	rp, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
-	if err != nil {
+	if err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if rp != testRateProvider {
-		t.Errorf("rate provider = %s, want %s", rp.Hex(), testRateProvider.Hex())
-	}
+	// That the resolved rate provider is the one used downstream is covered by
+	// the ReadState call-targets test.
 }
 
 func TestResolveImmutables_TokenMismatch(t *testing.T) {
@@ -242,7 +240,7 @@ func TestResolveImmutables_TokenMismatch(t *testing.T) {
 		return results, nil
 	}
 
-	_, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
+	err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
 	if err == nil || !strings.Contains(err.Error(), "usds()") {
 		t.Fatalf("expected usds mismatch error, got: %v", err)
 	}
@@ -259,7 +257,7 @@ func TestResolveImmutables_ZeroRateProvider(t *testing.T) {
 		return results, nil
 	}
 
-	_, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
+	err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
 	if err == nil || !strings.Contains(err.Error(), "zero address") {
 		t.Fatalf("expected zero rate provider error, got: %v", err)
 	}
@@ -273,7 +271,7 @@ func TestResolveImmutables_MulticallError(t *testing.T) {
 		return nil, errors.New("RPC unavailable")
 	}
 
-	_, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
+	err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
 	if err == nil || !strings.Contains(err.Error(), "RPC unavailable") {
 		t.Fatalf("expected wrapped multicall error, got: %v", err)
 	}
@@ -288,7 +286,7 @@ func TestResolveImmutables_TruncatedResults(t *testing.T) {
 		return immutableResults(t, caller, cfg)[:2], nil
 	}
 
-	_, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
+	err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
 	if err == nil || !strings.Contains(err.Error(), "expected 4 multicall results") {
 		t.Fatalf("expected truncated results error, got: %v", err)
 	}
@@ -305,7 +303,7 @@ func TestResolveImmutables_DecodeFailure(t *testing.T) {
 		return results, nil
 	}
 
-	_, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
+	err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
 	if err == nil || !strings.Contains(err.Error(), "unpack rateProvider") {
 		t.Fatalf("expected unpack error, got: %v", err)
 	}
@@ -322,7 +320,7 @@ func TestResolveImmutables_FailedCall(t *testing.T) {
 		return results, nil
 	}
 
-	_, err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
+	err := caller.ResolveImmutables(context.Background(), big.NewInt(30_999_000))
 	if err == nil || !strings.Contains(err.Error(), "susds call failed") {
 		t.Fatalf("expected failed call error, got: %v", err)
 	}

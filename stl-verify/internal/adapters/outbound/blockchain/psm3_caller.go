@@ -131,27 +131,27 @@ func NewPSM3Caller(multicaller outbound.Multicaller, cfg PSM3Config) (*PSM3Calle
 // ResolveImmutables reads rateProvider(), usds(), susds() and usdc() from the
 // PSM3 contract in one multicall, fails hard if the on-chain token addresses
 // do not match the configured ones, and caches the rate provider for ReadState.
-func (c *PSM3Caller) ResolveImmutables(ctx context.Context, blockNumber *big.Int) (common.Address, error) {
+func (c *PSM3Caller) ResolveImmutables(ctx context.Context, blockNumber *big.Int) error {
 	methods := []string{"rateProvider", "usds", "susds", "usdc"}
 	calls := make([]outbound.Call, len(methods))
 	for i, m := range methods {
 		data, err := c.psm3ABI.Pack(m)
 		if err != nil {
-			return common.Address{}, fmt.Errorf("pack %s: %w", m, err)
+			return fmt.Errorf("pack %s: %w", m, err)
 		}
 		calls[i] = outbound.Call{Target: c.cfg.PSM3, AllowFailure: false, CallData: data}
 	}
 
 	results, err := c.execute(ctx, calls, blockNumber)
 	if err != nil {
-		return common.Address{}, fmt.Errorf("multicall psm3 immutables: %w", err)
+		return fmt.Errorf("multicall psm3 immutables: %w", err)
 	}
 
 	addrs := make([]common.Address, len(methods))
 	for i, m := range methods {
 		addrs[i], err = unpackAddress(&c.psm3ABI, m, results[i])
 		if err != nil {
-			return common.Address{}, err
+			return err
 		}
 	}
 
@@ -165,15 +165,15 @@ func (c *PSM3Caller) ResolveImmutables(ctx context.Context, blockNumber *big.Int
 	}
 	for _, chk := range checks {
 		if chk.got != chk.want {
-			return common.Address{}, fmt.Errorf("psm3 %s() = %s, config has %s", chk.method, chk.got.Hex(), chk.want.Hex())
+			return fmt.Errorf("psm3 %s() = %s, config has %s", chk.method, chk.got.Hex(), chk.want.Hex())
 		}
 	}
 
 	if addrs[0] == (common.Address{}) {
-		return common.Address{}, fmt.Errorf("psm3 rateProvider() returned the zero address")
+		return fmt.Errorf("psm3 rateProvider() returned the zero address")
 	}
 	c.rateProvider = addrs[0]
-	return c.rateProvider, nil
+	return nil
 }
 
 // ReadState reads the PSM3 reserve state pinned to blockNumber in two rounds:

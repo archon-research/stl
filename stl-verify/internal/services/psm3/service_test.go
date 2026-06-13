@@ -23,10 +23,7 @@ const (
 	testChainID  int64 = 8453
 )
 
-var (
-	testPSM3Address  = common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
-	testRateProvider = common.HexToAddress("0x2722C8f8A5F880401Fa5b01eD548d657F5Cd6175")
-)
+var testPSM3Address = common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -72,18 +69,18 @@ func newFakePSM3Caller() *fakePSM3Caller {
 	}
 }
 
-func (f *fakePSM3Caller) ResolveImmutables(_ context.Context, blockNumber *big.Int) (common.Address, error) {
+func (f *fakePSM3Caller) ResolveImmutables(_ context.Context, blockNumber *big.Int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if blockNumber == nil {
 		// Mirror the production Multicaller, which rejects nil block numbers.
-		return common.Address{}, errors.New("block number is required")
+		return errors.New("block number is required")
 	}
 	if f.resolveErr != nil {
-		return common.Address{}, f.resolveErr
+		return f.resolveErr
 	}
 	f.resolveBlock = new(big.Int).Set(blockNumber)
-	return testRateProvider, nil
+	return nil
 }
 
 func (f *fakePSM3Caller) ReadState(_ context.Context, blockNumber *big.Int) (*entity.PSM3State, error) {

@@ -4,8 +4,6 @@ import (
 	"context"
 	"math/big"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
@@ -15,8 +13,8 @@ type PSM3Caller interface {
 	// ResolveImmutables reads rateProvider() plus the usds/susds/usdc token
 	// addresses from the PSM3 contract at the given block, fails hard if the
 	// tokens do not match the configured addresses, and caches the rate
-	// provider for ReadState. Returns the resolved rate provider address.
-	ResolveImmutables(ctx context.Context, blockNumber *big.Int) (common.Address, error)
+	// provider for ReadState.
+	ResolveImmutables(ctx context.Context, blockNumber *big.Int) error
 
 	// ReadState reads the reserve state pinned to blockNumber: USDS/sUSDS
 	// balances at the PSM3, the USDC balance at the current pocket (resolved
