@@ -364,7 +364,7 @@ dev-up:
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS)"; \
+	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer psm3-indexer python-api $(CRONJOBS)"; \
 	else \
 	  DEPS="mock-blockchain-server watcher python-api $(CRONJOBS)"; \
 	fi; \
@@ -424,8 +424,9 @@ _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
+	$(call build-if-needed,stl-psm3-indexer:local,docker-build-psm3-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
+	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer psm3-indexer; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
 	    { echo "ERROR: deployment $$dep not ready after 300s"; exit 1; }; \
 	done
@@ -1673,7 +1674,7 @@ kind-load-watcher:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:local"
 
 kind-load-workers:
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local stl-psm3-indexer:local"
 
 kind-deploy-watcher:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
@@ -1681,7 +1682,7 @@ kind-deploy-watcher:
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer deployment/psm3-indexer -n $(KUBE_NS)
 
 kind-load-python-api:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-python-api:local"
