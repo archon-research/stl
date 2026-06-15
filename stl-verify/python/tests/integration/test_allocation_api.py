@@ -16,6 +16,16 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import Settings
 from app.main import create_app
+from tests.integration.conftest import (
+    GHOST_CLOSED_PROXY_HEX,
+    GHOST_MIXED_PROXY_HEX,
+    GHOST_OPEN_PROXY_HEX,
+    GHOST_SWEEP_PROXY_HEX,
+    GHOST_TIEBREAK_PROXY_HEX,
+    insert_allocation_position,
+    insert_token_sa,
+    seed_ghost_balance,
+)
 
 # Prime proxy addresses (20 bytes).
 _SPARK_PROXY_HEX = "1234567890abcdef1234567890abcdef12345678"
@@ -43,63 +53,33 @@ _TX4_HEX = "dd" * 32
 _TX5_HEX = "ee" * 32
 
 
+async def _token_id_by_address(conn, addr_hex: str) -> int:
+    """Return the id of the chain-1 token at *addr_hex* (seeded by the migrations)."""
+    return (
+        await conn.execute(
+            text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
+            {"addr": addr_hex},
+        )
+    ).scalar_one()
+
+
 async def _seed(async_url: str) -> None:
     """Insert fixture rows. Protocol/token/prime data is already present from the migrations."""
     engine = create_async_engine(async_url)
     try:
         async with engine.begin() as conn:
             # Look up the IDs that the migrations populated.
-            usdc_id = (
-                await conn.execute(
-                    text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
-                    {"addr": _USDC_HEX},
-                )
-            ).scalar_one()
-            weth_id = (
-                await conn.execute(
-                    text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
-                    {"addr": _WETH_HEX},
-                )
-            ).scalar_one()
-            gno_id = (
-                await conn.execute(
-                    text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
-                    {"addr": _GNO_HEX},
-                )
-            ).scalar_one()
+            usdc_id = await _token_id_by_address(conn, _USDC_HEX)
+            weth_id = await _token_id_by_address(conn, _WETH_HEX)
+            gno_id = await _token_id_by_address(conn, _GNO_HEX)
             aave_id = (await conn.execute(text("SELECT id FROM protocol WHERE name = 'Aave V3'"))).scalar_one()
             spark_id = (await conn.execute(text("SELECT id FROM prime WHERE name = 'spark'"))).scalar_one()
             grove_id = (await conn.execute(text("SELECT id FROM prime WHERE name = 'grove'"))).scalar_one()
             obex_id = (await conn.execute(text("SELECT id FROM prime WHERE name = 'obex'"))).scalar_one()
 
             # Register aUSDC / aWETH as tokens so allocation_position can reference them.
-            await conn.execute(
-                text(
-                    "INSERT INTO token (chain_id, address, symbol, decimals) "
-                    "VALUES (1, decode(:addr, 'hex'), 'aUSDC', 6)"
-                ),
-                {"addr": _AUSDC_HEX},
-            )
-            ausdc_token_id = (
-                await conn.execute(
-                    text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
-                    {"addr": _AUSDC_HEX},
-                )
-            ).scalar_one()
-
-            await conn.execute(
-                text(
-                    "INSERT INTO token (chain_id, address, symbol, decimals) "
-                    "VALUES (1, decode(:addr, 'hex'), 'aWETH', 18)"
-                ),
-                {"addr": _AWETH_HEX},
-            )
-            aweth_token_id = (
-                await conn.execute(
-                    text("SELECT id FROM token WHERE chain_id = 1 AND address = decode(:addr, 'hex')"),
-                    {"addr": _AWETH_HEX},
-                )
-            ).scalar_one()
+            ausdc_token_id = await insert_token_sa(conn, _AUSDC_HEX, "aUSDC", 6)
+            aweth_token_id = await insert_token_sa(conn, _AWETH_HEX, "aWETH", 18)
 
             # receipt_token rows map (underlying, protocol) -> receipt token.
             await conn.execute(
@@ -127,78 +107,71 @@ async def _seed(async_url: str) -> None:
                 (1000, 1, 999, _TX1_HEX),
                 (2000, 0, 750, _TX2_HEX),
             ]:
-                await conn.execute(
-                    text(
-                        "INSERT INTO allocation_position "
-                        "(chain_id, token_id, prime_id, proxy_address, balance, "
-                        "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
-                        "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), :bal, :bn, :bv, "
-                        "decode(:tx, 'hex'), 0, :bal, 'in')"
-                    ),
-                    {
-                        "tid": ausdc_token_id,
-                        "pid": spark_id,
-                        "proxy": _SPARK_PROXY_HEX,
-                        "bal": bal,
-                        "bn": bn,
-                        "bv": bv,
-                        "tx": tx,
-                    },
+                await insert_allocation_position(
+                    conn,
+                    token_id=ausdc_token_id,
+                    prime_id=spark_id,
+                    proxy_hex=_SPARK_PROXY_HEX,
+                    balance=bal,
+                    block=bn,
+                    tx=tx,
+                    direction="in",
+                    block_version=bv,
                 )
 
             # spark also holds aWETH at block 2000.
-            await conn.execute(
-                text(
-                    "INSERT INTO allocation_position "
-                    "(chain_id, token_id, prime_id, proxy_address, balance, "
-                    "block_number, tx_hash, log_index, tx_amount, direction) "
-                    "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), 100, 2000, decode(:tx, 'hex'), 0, 100, 'in')"
-                ),
-                {"tid": aweth_token_id, "pid": spark_id, "proxy": _SPARK_PROXY_HEX, "tx": _TX3_HEX},
+            await insert_allocation_position(
+                conn,
+                token_id=aweth_token_id,
+                prime_id=spark_id,
+                proxy_hex=_SPARK_PROXY_HEX,
+                balance=100,
+                block=2000,
+                tx=_TX3_HEX,
+                direction="in",
             )
 
             # grove holds raw GNO. GNO has no receipt_token row, so the query
             # returns no receipt-token holdings for grove.
-            await conn.execute(
-                text(
-                    "INSERT INTO allocation_position "
-                    "(chain_id, token_id, prime_id, proxy_address, balance, "
-                    "block_number, tx_hash, log_index, tx_amount, direction) "
-                    "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), 50, 1000, decode(:tx, 'hex'), 0, 50, 'in')"
-                ),
-                {"tid": gno_id, "pid": grove_id, "proxy": _GROVE_PROXY_HEX, "tx": _TX4_HEX},
+            await insert_allocation_position(
+                conn,
+                token_id=gno_id,
+                prime_id=grove_id,
+                proxy_hex=_GROVE_PROXY_HEX,
+                balance=50,
+                block=1000,
+                tx=_TX4_HEX,
+                direction="in",
             )
 
             # Spark also has an entry under its SubProxy wallet (risk capital).
             # /v1/primes must NOT surface this as a separate prime — it shares
             # spark_id with the ALM proxy above.
-            await conn.execute(
-                text(
-                    "INSERT INTO allocation_position "
-                    "(chain_id, token_id, prime_id, proxy_address, balance, "
-                    "block_number, tx_hash, log_index, tx_amount, direction) "
-                    "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), 42, 2000, decode(:tx, 'hex'), 1, 42, 'in')"
-                ),
-                {
-                    "tid": ausdc_token_id,
-                    "pid": spark_id,
-                    "proxy": _SPARK_SUB_PROXY_HEX,
-                    "tx": _TX2_HEX,
-                },
+            await insert_allocation_position(
+                conn,
+                token_id=ausdc_token_id,
+                prime_id=spark_id,
+                proxy_hex=_SPARK_SUB_PROXY_HEX,
+                balance=42,
+                block=2000,
+                tx=_TX2_HEX,
+                direction="in",
+                log_index=1,
             )
 
             # obex holds raw USDC directly (not wrapped in any receipt token).
             # The endpoint should not surface this under aUSDC or any other
             # receipt token whose underlying is USDC: a direct underlying
             # holding is its own asset, not a position in a wrapper.
-            await conn.execute(
-                text(
-                    "INSERT INTO allocation_position "
-                    "(chain_id, token_id, prime_id, proxy_address, balance, "
-                    "block_number, tx_hash, log_index, tx_amount, direction) "
-                    "VALUES (1, :tid, :pid, decode(:proxy, 'hex'), 250, 1500, decode(:tx, 'hex'), 0, 250, 'in')"
-                ),
-                {"tid": usdc_id, "pid": obex_id, "proxy": _OBEX_PROXY_HEX, "tx": _TX5_HEX},
+            await insert_allocation_position(
+                conn,
+                token_id=usdc_id,
+                prime_id=obex_id,
+                proxy_hex=_OBEX_PROXY_HEX,
+                balance=250,
+                block=1500,
+                tx=_TX5_HEX,
+                direction="in",
             )
     finally:
         await engine.dispose()
@@ -206,8 +179,13 @@ async def _seed(async_url: str) -> None:
 
 @pytest.fixture(scope="module")
 def async_db_url(module_db):
-    """Seed test data into the module's isolated database and yield the async URL."""
+    """Seed test data into the module's isolated database and yield the async URL.
+
+    Loads both this module's allocation fixtures and the shared ghost-balance
+    regression rows (their own ``ghost_balance`` prime, disjoint addresses).
+    """
     asyncio.run(_seed(module_db["async_url"]))
+    asyncio.run(seed_ghost_balance(module_db["async_url"]))
     return module_db["async_url"]
 
 
@@ -228,19 +206,21 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
-    # filtered out — only the ALM proxy per prime should appear.
-    assert len(data) == 3
-    addresses = {item["address"] for item in data}
-    assert f"0x{_SPARK_SUB_PROXY_HEX}" not in addresses
+    # Assert presence of the primes this test seeds rather than an exact global
+    # count: other scenarios in this module (ghost-balance) add their own ALM
+    # proxies to the same database, and a "list everything" endpoint returns
+    # them all.
     by_name = {item["name"]: item for item in data}
-    assert set(by_name.keys()) == {"spark", "grove", "obex"}
     assert by_name["spark"]["id"] == f"0x{_SPARK_PROXY_HEX}"
     assert by_name["spark"]["address"] == f"0x{_SPARK_PROXY_HEX}"
     assert by_name["grove"]["id"] == f"0x{_GROVE_PROXY_HEX}"
     assert by_name["grove"]["address"] == f"0x{_GROVE_PROXY_HEX}"
     assert by_name["obex"]["id"] == f"0x{_OBEX_PROXY_HEX}"
     assert by_name["obex"]["address"] == f"0x{_OBEX_PROXY_HEX}"
+    # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
+    # filtered out — only the ALM proxy per prime should appear.
+    addresses = {item["address"] for item in data}
+    assert f"0x{_SPARK_SUB_PROXY_HEX}" not in addresses
 
 
 def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient) -> None:
@@ -331,3 +311,71 @@ def test_list_allocations_returns_422_for_malformed_prime_id(client: TestClient)
     response = client.get("/v1/primes/0xdeadbeef/allocations")
 
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Ghost-balance regression: positions whose latest balance is zero must not
+# resurface their last non-zero balance.  Seed shape lives in
+# ``conftest.seed_ghost_balance``.
+# ---------------------------------------------------------------------------
+
+
+def test_closed_receipt_token_absent_from_allocations_endpoint(client: TestClient) -> None:
+    """A position closed to 0 (latest balance=0) must not appear in /allocations."""
+    response = client.get(f"/v1/primes/0x{GHOST_CLOSED_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    symbols = {row["symbol"] for row in response.json()}
+    assert "aSyrupUSDT" not in symbols, "ghost receipt-token position surfaced"
+    assert "USDS" not in symbols, "ghost direct-asset position surfaced"
+
+
+def test_closed_direct_asset_absent_from_allocations_endpoint(client: TestClient) -> None:
+    """A direct asset swept to 0 must not appear."""
+    response = client.get(f"/v1/primes/0x{GHOST_CLOSED_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    direct_symbols = {r["symbol"] for r in rows if r.get("category") == "asset"}
+    assert "USDS" not in direct_symbols, "ghost direct-asset holding surfaced"
+
+
+def test_swept_position_absent_from_allocations_endpoint(client: TestClient) -> None:
+    """Zero-balance sweep rows newer than the last non-zero row close the position."""
+    response = client.get(f"/v1/primes/0x{GHOST_SWEEP_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    symbols = {row["symbol"] for row in response.json()}
+    assert "aSyrupUSDT" not in symbols, "ghost balance surfaced for swept position"
+
+
+def test_open_position_with_older_zero_rows_still_returned(client: TestClient) -> None:
+    """An open position whose history contains earlier zero rows must still appear."""
+    response = client.get(f"/v1/primes/0x{GHOST_OPEN_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    by_symbol = {row["symbol"]: row for row in response.json()}
+    assert "aSyrupUSDT" in by_symbol, "open position incorrectly filtered out"
+    assert by_symbol["aSyrupUSDT"]["balance"] == "500"
+
+
+def test_mixed_proxy_drops_only_swept_token(client: TestClient) -> None:
+    """Filtering is per token: the swept holding disappears, the open one stays."""
+    response = client.get(f"/v1/primes/0x{GHOST_MIXED_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    by_symbol = {row["symbol"]: row for row in response.json()}
+    assert "aSyrupUSDT" not in by_symbol, "swept receipt-token position surfaced on mixed proxy"
+    assert "USDS" in by_symbol, "open direct holding incorrectly filtered out on mixed proxy"
+    assert by_symbol["USDS"]["balance"] == "1000"
+
+
+def test_same_block_log_index_tiebreak_decides_latest_row(client: TestClient) -> None:
+    """Within a single block, log_index ordering decides which row is latest."""
+    response = client.get(f"/v1/primes/0x{GHOST_TIEBREAK_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    by_symbol = {row["symbol"]: row for row in response.json()}
+    assert "aSyrupUSDT" not in by_symbol, "position zeroed within its final block surfaced"
+    assert "USDS" in by_symbol, "position opened within the same block incorrectly filtered out"
+    assert by_symbol["USDS"]["balance"] == "400"
