@@ -524,6 +524,28 @@ func TestReport_FormatJSON(t *testing.T) {
 	}
 }
 
+func TestService_Validate_EmptyDatabaseErrors(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 0,
+		maxBlockNumber: 0,
+	}
+	verifier := &mockBlockVerifier{}
+
+	svc, err := NewService(DefaultConfig(), repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	ctx := context.Background()
+	_, err = svc.Validate(ctx)
+	if err == nil {
+		t.Fatal("Validate() expected a non-nil error for empty database, got nil")
+	}
+	if !strings.Contains(err.Error(), "no blocks found") {
+		t.Errorf("error %q should contain %q", err.Error(), "no blocks found")
+	}
+}
+
 func TestReport_Success(t *testing.T) {
 	tests := []struct {
 		name   string

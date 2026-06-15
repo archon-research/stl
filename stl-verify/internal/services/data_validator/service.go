@@ -159,6 +159,10 @@ func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
 		toBlock = maxBlock
 	}
 
+	if toBlock == 0 {
+		return 0, 0, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
+	}
+
 	if fromBlock > toBlock {
 		return 0, 0, fmt.Errorf("from_block (%d) > to_block (%d)", fromBlock, toBlock)
 	}
