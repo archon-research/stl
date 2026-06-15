@@ -680,6 +680,87 @@ func TestGetSkyStrategies_MalformedValueNamesStrategyID(t *testing.T) {
 	}
 }
 
+func TestGetPools_NullAssetDecimalsRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
+			"id": %q, "name": "Pool",
+			"monthlyApy": "0", "spotApy": "0",
+			"assets": "1", "collateralValue": "2", "principalOut": "3", "tvl": "4",
+			"asset": {"id": %q, "symbol": "USDC", "decimals": null},
+			"syrupRouter": null
+		}]}}`, poolAddr, usdcAddr))
+	}})
+
+	_, err := client.GetPools(context.Background())
+	if err == nil {
+		t.Fatal("expected error for null asset decimals, got nil")
+	}
+	if !strings.Contains(err.Error(), poolAddr) || !strings.Contains(err.Error(), "asset.decimals") {
+		t.Errorf("error %q should name the pool id and asset.decimals", err.Error())
+	}
+}
+
+func TestGetPools_ZeroAssetDecimalsRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
+			"id": %q, "name": "Pool",
+			"monthlyApy": "0", "spotApy": "0",
+			"assets": "1", "collateralValue": "2", "principalOut": "3", "tvl": "4",
+			"asset": {"id": %q, "symbol": "USDC", "decimals": 0},
+			"syrupRouter": null
+		}]}}`, poolAddr, usdcAddr))
+	}})
+
+	_, err := client.GetPools(context.Background())
+	if err == nil {
+		t.Fatal("expected error for zero asset decimals, got nil")
+	}
+	if !strings.Contains(err.Error(), "asset.decimals") || !strings.Contains(err.Error(), "zero") {
+		t.Errorf("error %q should report asset.decimals is zero", err.Error())
+	}
+}
+
+func TestGetActiveLoans_NullCollateralDecimalsRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
+			"id": %q, "borrower": {"id": %q}, "state": "Active",
+			"principalOwed": "1", "acmRatio": "1",
+			"collateral": {
+				"asset": "BTC", "assetAmount": "1", "assetValueUsd": "2",
+				"decimals": null, "state": "Deposited", "custodian": "ANCHORAGE"
+			},
+			"loanMeta": null, "fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
+	}})
+
+	_, err := client.GetActiveLoans(context.Background())
+	if err == nil {
+		t.Fatal("expected error for null collateral decimals, got nil")
+	}
+	if !strings.Contains(err.Error(), loanAddr) || !strings.Contains(err.Error(), "collateral.decimals") {
+		t.Errorf("error %q should name the loan id and collateral.decimals", err.Error())
+	}
+}
+
+func TestGetSkyStrategies_NullVersionRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"skyStrategies": [{
+			"id": %q, "state": "Active",
+			"currentlyDeployed": "0", "depositedAssets": "1", "withdrawnAssets": "0",
+			"strategyFeeRate": null, "totalFeesCollected": null, "version": null,
+			"pool": {"id": %q, "name": "Pool"}
+		}]}}`, strategyAddr, poolAddr))
+	}})
+
+	_, err := client.GetSkyStrategies(context.Background())
+	if err == nil {
+		t.Fatal("expected error for null version, got nil")
+	}
+	if !strings.Contains(err.Error(), strategyAddr) || !strings.Contains(err.Error(), "version") {
+		t.Errorf("error %q should name the strategy id and version", err.Error())
+	}
+}
+
 func TestGetSyrupGlobals_MalformedValue(t *testing.T) {
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, `{"data": {"syrupGlobals": {

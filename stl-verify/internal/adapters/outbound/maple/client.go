@@ -232,7 +232,7 @@ const syrupGlobalsQuery = `query GetSyrupGlobals {
 type assetWire struct {
 	ID       string `json:"id"`
 	Symbol   string `json:"symbol"`
-	Decimals int    `json:"decimals"`
+	Decimals *int   `json:"decimals"` // pointer so a null/missing decimals fails instead of defaulting to 0
 }
 
 type poolWire struct {
@@ -254,7 +254,7 @@ type collateralWire struct {
 	Asset            string       `json:"asset"`
 	AssetAmount      *string      `json:"assetAmount"`   // nullable in schema
 	AssetValueUSD    *string      `json:"assetValueUsd"` // nullable in schema
-	Decimals         int          `json:"decimals"`
+	Decimals         *int         `json:"decimals"`      // pointer so a null/missing decimals fails instead of defaulting to 0
 	State            *string      `json:"state"`
 	Custodian        *string      `json:"custodian"`
 	LiquidationLevel *json.Number `json:"liquidationLevel"`
@@ -292,7 +292,7 @@ type skyStrategyWire struct {
 	WithdrawnAssets    string  `json:"withdrawnAssets"`
 	StrategyFeeRate    *string `json:"strategyFeeRate"`
 	TotalFeesCollected *string `json:"totalFeesCollected"`
-	Version            int     `json:"version"`
+	Version            *int    `json:"version"` // pointer so a null/missing version fails instead of defaulting to 0
 	Pool               struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -482,13 +482,17 @@ func parsePool(w poolWire) (outbound.MaplePool, error) {
 	if err != nil {
 		return outbound.MaplePool{}, err
 	}
+	assetDecimals, err := requireDecimals(w.Asset.Decimals, "asset.decimals", w.ID)
+	if err != nil {
+		return outbound.MaplePool{}, err
+	}
 
 	return outbound.MaplePool{
 		Address:       address,
 		Name:          w.Name,
 		AssetAddress:  assetAddress,
 		AssetSymbol:   w.Asset.Symbol,
-		AssetDecimals: w.Asset.Decimals,
+		AssetDecimals: assetDecimals,
 		IsSyrup:       w.SyrupRouter != nil,
 		TVL:           tvl,
 		LiquidAssets:  liquidAssets,
@@ -580,11 +584,16 @@ func parseCollateral(w *collateralWire, loanID string) (*outbound.MapleLoanColla
 		}
 	}
 
+	decimals, err := requireDecimals(w.Decimals, "collateral.decimals", loanID)
+	if err != nil {
+		return nil, err
+	}
+
 	return &outbound.MapleLoanCollateral{
 		Asset:            w.Asset,
 		AssetAmount:      amount,
 		AssetValueUSD:    valueUSD,
-		Decimals:         w.Decimals,
+		Decimals:         decimals,
 		State:            deref(w.State),
 		Custodian:        deref(w.Custodian),
 		LiquidationLevel: liquidationLevel,
@@ -620,12 +629,16 @@ func parseSkyStrategy(w skyStrategyWire) (outbound.MapleSkyStrategy, error) {
 	if err != nil {
 		return outbound.MapleSkyStrategy{}, err
 	}
+	version, err := requireInt(w.Version, "version", w.ID)
+	if err != nil {
+		return outbound.MapleSkyStrategy{}, err
+	}
 
 	return outbound.MapleSkyStrategy{
 		Address:            address,
 		PoolAddress:        poolAddress,
 		State:              w.State,
-		Version:            w.Version,
+		Version:            version,
 		CurrentlyDeployed:  currentlyDeployed,
 		DepositedAssets:    depositedAssets,
 		WithdrawnAssets:    withdrawnAssets,
@@ -698,6 +711,31 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// requireInt fails when a JSON-number int field is null or absent on the wire.
+// Such fields are decoded as *int: json.Unmarshal of null (or a missing key)
+// into a non-pointer int silently leaves it at 0, which would pass downstream
+// validation and corrupt scaling, so the nil case must be a hard error.
+func requireInt(v *int, field, id string) (int, error) {
+	if v == nil {
+		return 0, fmt.Errorf("%s missing or null for %s", field, id)
+	}
+	return *v, nil
+}
+
+// requireDecimals is requireInt plus a zero-rejection: a 0 decimals value
+// passes toInt16 and the non-negative validators but mis-scales every
+// downstream USD computation, so it is never a legitimate token decimals.
+func requireDecimals(v *int, field, id string) (int, error) {
+	d, err := requireInt(v, field, id)
+	if err != nil {
+		return 0, err
+	}
+	if d == 0 {
+		return 0, fmt.Errorf("%s is zero for %s", field, id)
+	}
+	return d, nil
 }
 
 func pageVariables(first, skip int) map[string]any {
