@@ -367,6 +367,11 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 		return fmt.Errorf("fetching active loans: %w", err)
 	}
 	if len(loans) == 0 {
+		// Emit explicit zeros so a dropped-to-zero loan book is distinguishable
+		// from a broken metric pipeline (metric absence). A genuine zero is
+		// unexpected for Maple (~61 active loans today), so it also warns.
+		s.telemetry.RecordRowsWritten(ctx, "maple_loan_state", 0)
+		s.telemetry.RecordRowsWritten(ctx, "maple_loan_collateral", 0)
 		s.logger.Warn("no active loans returned by the API")
 		return nil
 	}
@@ -545,6 +550,9 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 		return fmt.Errorf("fetching sky strategies: %w", err)
 	}
 	if len(strategies) == 0 {
+		// Emit an explicit zero so an empty strategy set is distinguishable
+		// from a broken metric pipeline (metric absence).
+		s.telemetry.RecordRowsWritten(ctx, "maple_sky_strategy_state", 0)
 		s.logger.Warn("no sky strategies returned by the API")
 		return nil
 	}
