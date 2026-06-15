@@ -1,21 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: watcher-data-validator
+  name: base-watcher-data-validator
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: watcher-data-validator
+      app: base-watcher-data-validator
   template:
     metadata:
       labels:
-        app: watcher-data-validator
+        app: base-watcher-data-validator
     spec:
-      serviceAccountName: watcher-data-validator
+      serviceAccountName: base-watcher-data-validator
       containers:
-        - name: watcher-data-validator
-          image: watcher-data-validator
+        - name: base-watcher-data-validator
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: base-watcher-data-validator
           env:
             # Inject the deployment name so this validator registers its own
             # Temporal schedule/task queue (cfg.Name) distinct from other chains.
@@ -25,9 +27,9 @@ spec:
                   fieldPath: metadata.labels['app']
           envFrom:
             - configMapRef:
-                name: watcher-data-validator
+                name: base-watcher-data-validator
             - secretRef:
-                name: watcher-data-validator
+                name: base-watcher-data-validator
           resources:
             requests:
               cpu: "50m"
