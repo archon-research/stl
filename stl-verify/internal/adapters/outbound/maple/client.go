@@ -173,6 +173,12 @@ const poolsQuery = `query GetPools($first: Int!, $skip: Int!) {
   }
 }`
 
+// loanStateActive is the only loan state the indexer persists. The query
+// filters on it (where: { state: Active }); parseLoan re-checks the returned
+// value so a filter-semantics drift or a new enum value cannot push an
+// unexpected state into maple_loan_state.
+const loanStateActive = "Active"
+
 const activeLoansQuery = `query GetActiveLoans($first: Int!, $skip: Int!) {
   openTermLoans(first: $first, skip: $skip, where: { state: Active }) {
     id
@@ -494,6 +500,9 @@ func parsePool(w poolWire) (outbound.MaplePool, error) {
 }
 
 func parseLoan(w loanWire) (outbound.MapleActiveLoan, error) {
+	if w.State != loanStateActive {
+		return outbound.MapleActiveLoan{}, fmt.Errorf("loan %s: unexpected state %q, want %q", w.ID, w.State, loanStateActive)
+	}
 	loanID, err := parseAddress(w.ID, "loan id", w.ID)
 	if err != nil {
 		return outbound.MapleActiveLoan{}, err

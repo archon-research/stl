@@ -600,6 +600,28 @@ func TestGetActiveLoans_MalformedBigIntNamesLoanID(t *testing.T) {
 	}
 }
 
+func TestGetActiveLoans_NonActiveStateRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
+			"id": %q, "borrower": {"id": %q}, "state": "Liquidated",
+			"principalOwed": "1", "acmRatio": "1",
+			"collateral": null, "loanMeta": null,
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
+	}})
+
+	_, err := client.GetActiveLoans(context.Background())
+	if err == nil {
+		t.Fatal("expected error for non-Active loan state, got nil")
+	}
+	if !strings.Contains(err.Error(), loanAddr) {
+		t.Errorf("error %q should name the loan id %s", err.Error(), loanAddr)
+	}
+	if !strings.Contains(err.Error(), "Liquidated") {
+		t.Errorf("error %q should name the unexpected state", err.Error())
+	}
+}
+
 func TestGetActiveLoans_InvalidBorrowerAddress(t *testing.T) {
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
