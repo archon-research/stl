@@ -3,6 +3,7 @@ package axis_synome_contract
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,10 +26,21 @@ type AxisSynomeModel struct {
 	Spec SpecModel `json:"spec"`
 }
 
+// SpecModel accepts both contract shapes during the axis-synome spec
+// restructure (TEN-224): the legacy {spec:{asc:{entities:...}}} and the
+// current {spec:{entities:...}}. Exactly one of the two must be present;
+// LoadContract enforces this.
 type SpecModel struct {
-	ASC ASCModel `json:"asc"`
+	ASC      *ASCModel      `json:"asc"`
+	Entities *EntitiesModel `json:"entities"`
 }
 
+// Deprecated: legacy {spec:{asc:{entities:...}}} wrapper (TEN-224).
+//
+// TODO(TEN-224): delete ASCModel, the SpecModel.ASC field, the legacy branch
+// in (*Contract).entities() and validateSpecShape, and the "legacy asc shape" test cases once
+// the committed contracts/axis-synome files and all axis-synome exporters
+// emit {spec:{entities:...}}.
 type ASCModel struct {
 	Entities EntitiesModel `json:"entities"`
 }
@@ -72,16 +84,37 @@ type TokenEntry struct {
 	// allocation tracker owns it via knownCreatedAtBlocks (see created_at_blocks.go).
 }
 
+// entities resolves the entities payload regardless of which contract shape
+// carried it. Returns nil when neither shape is present; LoadContract rejects
+// such contracts, so this only happens for hand-built values.
+func (c *Contract) entities() *EntitiesModel {
+	if c.AxisSynome.Spec.Entities != nil {
+		return c.AxisSynome.Spec.Entities
+	}
+	if c.AxisSynome.Spec.ASC != nil {
+		return &c.AxisSynome.Spec.ASC.Entities
+	}
+	return nil
+}
+
 // GetAlmProxies returns the ALM proxy configurations keyed by star and then
 // chain. Each (star, chain) maps to a list of proxies (canonical ALM proxy plus
 // any additional SubProxy/treasury wallets).
 func (c *Contract) GetAlmProxies() map[string]map[string][]ProxyConfig {
-	return c.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
+	entities := c.entities()
+	if entities == nil {
+		return nil
+	}
+	return entities.AlmProxies.AlmProxy
 }
 
 // GetAssetsByPrime returns the token entries keyed by star.
 func (c *Contract) GetAssetsByPrime() map[string][]TokenEntry {
-	return c.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime
+	entities := c.entities()
+	if entities == nil {
+		return nil
+	}
+	return entities.AssetsByPrime.ASSETSByPrime
 }
 
 func LoadDefaultContract() (*Contract, error) {
@@ -110,11 +143,28 @@ func LoadContract(path string) (*Contract, error) {
 	if contract.AxisSynomeGitCommit == "" {
 		return nil, fmt.Errorf("decoding axis-synome contract file %q: missing axis_synome_git_commit", path)
 	}
+	if err := validateSpecShape(&contract); err != nil {
+		return nil, fmt.Errorf("decoding axis-synome contract file %q: %w", path, err)
+	}
 	if err := validateAddresses(&contract); err != nil {
 		return nil, fmt.Errorf("decoding axis-synome contract file %q: %w", path, err)
 	}
 
 	return &contract, nil
+}
+
+// validateSpecShape requires exactly one of the legacy ({spec:{asc:{entities}}})
+// and current ({spec:{entities}}) shapes.
+func validateSpecShape(contract *Contract) error {
+	hasLegacy := contract.AxisSynome.Spec.ASC != nil
+	hasCurrent := contract.AxisSynome.Spec.Entities != nil
+	switch {
+	case hasLegacy && hasCurrent:
+		return errors.New("spec carries both the legacy asc shape and the current entities shape; expected exactly one")
+	case !hasLegacy && !hasCurrent:
+		return errors.New("spec carries neither the legacy asc shape nor the current entities shape; expected exactly one")
+	}
+	return nil
 }
 
 func validateAddresses(contract *Contract) error {
