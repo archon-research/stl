@@ -331,7 +331,9 @@ Individual loans include both:
 
 On Maple's frontend, they explicitly report collateral backing for **external parties' collateral only**. If following this methodology, internal Maple loan collateral should be filtered out.
 
-**Note:** More research is needed to determine whether the backing for Syrup pools is truly isolated from the collateral backing for internal loans. Additionally, internal Maple strategies called **`skyStrategies`** may also need to be fetched if it is determined they are backing the pools (see [Sky Strategies section](#sky-strategies) below).
+**Note:** Internal Maple positions back Syrup pools through **two distinct channels** (verified live 2026-06-15):
+1. **AMM/strategy loans** — `openTermLoans` with `loanMeta.type` in `["amm", "strategy"]`, funded by the Syrup pools. **~$100M outstanding across Syrup USDC + USDT as of 2026-06-15.** These are counted in `poolV2.principalOut` (they carry `principalOwed`), so the principal is not missing from pool metrics — but their `collateral` field is a placeholder and misrepresents the real backing (see warning below).
+2. **Sky Strategies** (`skyStrategies`) — pool cash deployed into Sky/Maker DeFi yield. **Dormant: `currentlyDeployed = 0` for every strategy as of 2026-06-15**, but the Syrup USDC strategy has cycled ~9.46B USDC cumulatively (`depositedAssets`), so it is live infrastructure that can become nonzero without notice. Only Syrup USDC has a Sky Strategy entity; Syrup USDT and USDG have none. See [Sky Strategies section](#sky-strategies) below.
 
 ---
 
@@ -472,10 +474,19 @@ query GetSkyStrategies($poolId: ID!, $first: Int!, $skip: Int!) {
 - `strategyFeeRate`: Fee rate for the strategy (integer, likely 6 decimals)
 - `totalFeesCollected`: Total fees collected by the strategy (integer string)
 
-**Note:** Further investigation is needed to determine:
-1. Whether Sky Strategies contribute to Syrup pool backing
-2. The underlying assets and positions held by each strategy
-3. How to value these positions for collateral calculations
+**Live findings (2026-06-15):** querying `skyStrategies(first: 100)` returns 4 strategies total, 1 tied to a Syrup pool:
+
+| Strategy `id` | `pool.id` (= vault addr) | pool name | state | `currentlyDeployed` | `depositedAssets` (cumulative) |
+|---|---|---|---|---|---|
+| `0x859c…b038c` | `0x80ac24aa…` | Syrup USDC | Active | `0` | `9464548714891221` (~9.46B) |
+| `0x34e7…3b00` | `0xc9c9bab5…` | Maple Lend + Long USDC2 | Active | `0` | `0` |
+| `0xb390…5807` | `0x37154b07…` | Maple Lend+Long USDC1 | Active | `0` | `0` |
+| `0xe3ee…55cc` | `0xc39a5a61…` | High Yield Secured Lending USDC1 | Active | `0` | `419563235236556` |
+
+Resolved:
+1. **Do Sky Strategies back Syrup pools?** Yes in principle — only Syrup USDC has a strategy, and it has cycled ~9.46B cumulatively. **But `currentlyDeployed = 0` everywhere right now**, so they contribute **zero** to current backing. Treat as a live source that must be re-polled, not a one-time decision.
+2. **`pool.id` on a strategy equals the pool's VAULT address** (`0x80ac24aa…` for Syrup USDC), which is the same key as `poolV2.id` — they join cleanly. (See the [vault-address keying note](#graphql-api) — `poolV2` is keyed by vault address, not by the "Pool Address" in the contract tables.)
+3. **Double-count / valuation:** undeterminable while `currentlyDeployed = 0`. When a strategy goes nonzero, confirm whether its deployed amount is already reflected in `poolV2.assets`/`principalOut` before adding it to a backing total, and verify the underlying asset + decimals/encoding live (`version` arrives as a JSON number, e.g. `100`; `currentlyDeployed`/`depositedAssets`/`totalFeesCollected` arrive as integer strings; `strategyFeeRate` observed `100000`).
 
 ### TVL (Total Value Locked)
 
@@ -505,9 +516,15 @@ const protocolTvl = (usdcAssets / 1e6) + (usdtAssets / 1e6);
 **GraphQL API (Pool-Level Data):**
 
 ```graphql
+# ⚠️ `poolV2` is keyed by the VAULT address, NOT the "Pool Address" in the contract tables below.
+#   poolV2(id: "0x80ac24aa…")  [Syrup USDC vault]  → returns the pool ✅
+#   poolV2(id: "0x20b79d39…")  [Syrup USDC pool addr] → null ❌  (verified 2026-06-15)
+# `skyStrategies.pool.id` also uses the vault address, so the two join cleanly.
 query PoolData($poolAddress: ID!) {
   poolV2(id: $poolAddress) {
-    tvl                  # Sum of assets + collateralValue + principalOut (not the same as vault totalAssets)
+    tvl                  # NOT a clean sum of assets + collateralValue + principalOut, and NOT vault totalAssets.
+                         # Verified 2026-06-15: USDC tvl=2835.13M but assets+collateral+principalOut=3172.36M;
+                         # USDT tvl=838.36M vs sum 895.47M. Treat `tvl` as an opaque API-provided figure.
     assets               # Liquid pool cash (6 decimals)
     collateralValue      # USD value of loan collateral (6 decimals)
     principalOut         # Outstanding loan principal (6 decimals)
