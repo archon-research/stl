@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -59,7 +60,14 @@ class PostgresPrimeDebtRepository:
             )
             raise ValueError(f"Database query failed while checking if prime {prime_address} exists: {exc}") from exc
 
-    async def list_debt_snapshots(self, prime_address: EthAddress, *, limit: int = 100) -> list[PrimeDebtSnapshot]:
+    async def list_debt_snapshots(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        limit: int = 100,
+    ) -> list[PrimeDebtSnapshot]:
         query = text(
             """
             SELECT
@@ -76,6 +84,8 @@ class PostgresPrimeDebtRepository:
             """
             + self._prime_match_clause()
             + """
+            AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR pd.synced_at >= CAST(:from_timestamp AS TIMESTAMP))
+            AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR pd.synced_at <= CAST(:to_timestamp AS TIMESTAMP))
             ORDER BY pd.synced_at DESC, pd.block_number DESC, pd.block_version DESC
             LIMIT :limit
             """
@@ -83,6 +93,8 @@ class PostgresPrimeDebtRepository:
 
         params = {
             "address_hex": prime_address.hex,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
             "limit": min(max(limit, 1), 500),
         }
 

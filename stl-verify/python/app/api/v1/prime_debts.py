@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.prime_debt_repository import PostgresPrimeDebtRepository
 from app.api._validators import EthAddressParam
 from app.api.deps import get_engine
+from app.api.time_series import TimeSeriesQueryParams, get_time_series_query_params
 from app.domain.entities.allocation import EthAddress
 from app.services.prime_debt_service import PrimeDebtService
 
@@ -71,6 +72,7 @@ async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> 
 )
 async def list_prime_debt_snapshots(
     prime_id: EthAddressParam,
+    time_series: TimeSeriesQueryParams = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max snapshots returned (default 100, max 500)."),
     service: PrimeDebtService = Depends(_get_prime_debt_service),
 ) -> list[PrimeDebtSnapshotResponse]:
@@ -78,5 +80,10 @@ async def list_prime_debt_snapshots(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    snapshots = await service.list_debt_snapshots(prime_address, limit=limit)
+    snapshots = await service.list_debt_snapshots(
+        prime_address,
+        from_timestamp=time_series.from_timestamp,
+        to_timestamp=time_series.to_timestamp,
+        limit=limit,
+    )
     return [PrimeDebtSnapshotResponse(**snapshot.__dict__) for snapshot in snapshots]

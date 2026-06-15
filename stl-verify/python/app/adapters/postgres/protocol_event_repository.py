@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Row, text
@@ -57,6 +58,8 @@ class PostgresProtocolEventRepository:
         *,
         tx_hash: str | None = None,
         protocol_name: str | None = None,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[ProtocolEvent]:
         """List protocol events with optional filters."""
@@ -65,6 +68,8 @@ class PostgresProtocolEventRepository:
             + """
             WHERE (CAST(:tx_hash AS TEXT) IS NULL OR pe.tx_hash = decode(CAST(:tx_hash AS TEXT), 'hex'))
             AND (CAST(:protocol_name AS TEXT) IS NULL OR p.name = CAST(:protocol_name AS TEXT))
+            AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR pe.created_at >= CAST(:from_timestamp AS TIMESTAMP))
+            AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR pe.created_at <= CAST(:to_timestamp AS TIMESTAMP))
             ORDER BY pe.created_at DESC, pe.block_number DESC, pe.log_index DESC
             LIMIT :limit
         """
@@ -73,6 +78,8 @@ class PostgresProtocolEventRepository:
         params = {
             "tx_hash": self._normalize_tx_hash(tx_hash),
             "protocol_name": protocol_name,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
             "limit": min(max(limit, 1), 500),
         }
 

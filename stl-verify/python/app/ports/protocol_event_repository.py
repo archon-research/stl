@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol
 
 from app.domain.entities.protocol_event import ProtocolEvent
@@ -11,6 +12,8 @@ class ProtocolEventRepository(Protocol):
         *,
         tx_hash: str | None = None,
         protocol_name: str | None = None,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[ProtocolEvent]:
         """List protocol events with optional filters."""

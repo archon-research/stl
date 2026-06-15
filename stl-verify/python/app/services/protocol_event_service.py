@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from app.domain.entities.protocol_event import ProtocolEvent
 from app.ports.protocol_event_repository import ProtocolEventRepository
 
@@ -13,12 +15,16 @@ class ProtocolEventService:
         *,
         tx_hash: str | None = None,
         protocol_name: str | None = None,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[ProtocolEvent]:
         """List protocol events with optional filters."""
         return await self._repository.list_events(
             tx_hash=tx_hash,
             protocol_name=protocol_name,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
             limit=limit,
         )
 

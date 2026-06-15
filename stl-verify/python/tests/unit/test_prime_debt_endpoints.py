@@ -66,7 +66,10 @@ def test_list_prime_debt_snapshots_returns_rows():
             }
         ]
         service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
-        service.list_debt_snapshots.assert_awaited_once_with(EthAddress(_VALID_ADDR), limit=25)
+        kwargs = service.list_debt_snapshots.await_args.kwargs
+        assert service.list_debt_snapshots.await_args.args[0] == EthAddress(_VALID_ADDR)
+        assert kwargs["limit"] == 25
+        assert (kwargs["to_timestamp"] - kwargs["from_timestamp"]).total_seconds() == 24 * 60 * 60
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -178,5 +181,30 @@ def test_list_prime_debt_snapshots_returns_500_when_service_errors():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
 
         assert response.status_code == 500
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_forwards_explicit_time_window():
+    from app.api.v1 import prime_debts
+
+    service = _make_service(snapshots=[])
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(
+            f"/v1/primes/{_VALID_ADDR}/debt",
+            params={
+                "from_timestamp": "2026-03-01T00:00:00Z",
+                "to_timestamp": "2026-03-05T00:00:00Z",
+                "resolution": "PT15M",
+            },
+        )
+
+        assert response.status_code == 200
+        kwargs = service.list_debt_snapshots.await_args.kwargs
+        assert kwargs["from_timestamp"] == datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
+        assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 0, 0, tzinfo=UTC)
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)

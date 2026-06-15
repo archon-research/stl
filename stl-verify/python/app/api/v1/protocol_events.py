@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.protocol_event_repository import PostgresProtocolEventRepository
 from app.api._validators import TX_HASH_PATTERN
 from app.api.deps import get_engine
+from app.api.time_series import TimeSeriesQueryParams, get_time_series_query_params
 from app.services.protocol_event_service import ProtocolEventService
 
 logger = logging.getLogger(__name__)
@@ -81,11 +82,18 @@ async def list_protocol_events(
         description="Filter by transaction hash (0x-prefixed, 32 bytes).",
     ),
     protocol_name: str | None = Query(None, description="Filter by protocol name."),
+    time_series: TimeSeriesQueryParams = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max events returned (default 100, max 500)."),
     service: ProtocolEventService = Depends(_get_protocol_event_service),
 ) -> list[ProtocolEventResponse]:
     try:
-        events = await service.list_events(tx_hash=tx_hash, protocol_name=protocol_name, limit=limit)
+        events = await service.list_events(
+            tx_hash=tx_hash,
+            protocol_name=protocol_name,
+            from_timestamp=time_series.from_timestamp,
+            to_timestamp=time_series.to_timestamp,
+            limit=limit,
+        )
         return [ProtocolEventResponse(**event.__dict__) for event in events]
     except ValueError as exc:
         logger.error(

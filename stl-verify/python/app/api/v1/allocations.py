@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
 from app.api._validators import EthAddressParam, OptionalEthAddressParam
 from app.api.deps import get_engine
+from app.api.time_series import TimeSeriesQueryParams, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
@@ -578,8 +579,7 @@ async def list_allocation_activity(
         description="Filter by transaction hash (0x-prefixed).",
         examples=["0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"],
     ),
-    from_timestamp: datetime | None = Query(default=None, description="Inclusive lower timestamp bound (ISO-8601)."),
-    to_timestamp: datetime | None = Query(default=None, description="Inclusive upper timestamp bound (ISO-8601)."),
+    time_series: TimeSeriesQueryParams = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
 ):
@@ -600,8 +600,8 @@ async def list_allocation_activity(
             action_type=action_type,
             token_symbol=token_symbol,
             tx_hash=tx_hash,
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
+            from_timestamp=time_series.from_timestamp,
+            to_timestamp=time_series.to_timestamp,
             limit=limit,
         )
     except ValueError as exc:

@@ -64,6 +64,9 @@ def test_list_protocol_events_returns_rows_and_applies_filters():
         params={
             "tx_hash": _VALID_TX_HASH,
             "protocol_name": "spark",
+            "from_timestamp": "2026-03-05T00:00:00Z",
+            "to_timestamp": "2026-03-05T12:00:00Z",
+            "resolution": "PT5M",
             "limit": 25,
         },
     )
@@ -72,11 +75,12 @@ def test_list_protocol_events_returns_rows_and_applies_filters():
     payload = response.json()
     assert len(payload) == 1
     assert payload[0]["tx_hash"] == _VALID_TX_HASH
-    service.list_events.assert_awaited_once_with(
-        tx_hash=_VALID_TX_HASH,
-        protocol_name="spark",
-        limit=25,
-    )
+    kwargs = service.list_events.await_args.kwargs
+    assert kwargs["tx_hash"] == _VALID_TX_HASH
+    assert kwargs["protocol_name"] == "spark"
+    assert kwargs["from_timestamp"] == datetime(2026, 3, 5, 0, 0, tzinfo=UTC)
+    assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
+    assert kwargs["limit"] == 25
 
 
 def test_list_protocol_events_returns_422_for_invalid_tx_hash_query():
@@ -144,6 +148,26 @@ def test_list_protocol_events_returns_422_for_limit_too_large():
     client = TestClient(app)
 
     response = client.get("/v1/protocol-events", params={"limit": 600})
+
+    assert response.status_code == 422
+    service.list_events.assert_not_awaited()
+
+
+def test_list_protocol_events_returns_422_for_too_fine_resolution_for_window():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/protocol-events",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-02-15T00:00:00Z",
+            "resolution": "PT1M",
+        },
+    )
 
     assert response.status_code == 422
     service.list_events.assert_not_awaited()

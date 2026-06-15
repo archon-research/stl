@@ -66,12 +66,17 @@ async def test_list_debt_snapshots_maps_rows_and_clamps_limit() -> None:
     engine, conn = _engine_with_rows(rows)
     repo = PostgresPrimeDebtRepository(engine)
 
-    result = await repo.list_debt_snapshots(_VALID_ADDR, limit=9999)
+    from_ts = datetime(2026, 1, 1, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, tzinfo=UTC)
+
+    result = await repo.list_debt_snapshots(_VALID_ADDR, from_timestamp=from_ts, to_timestamp=to_ts, limit=9999)
 
     assert len(result) == 1
     assert result[0].prime_address == "0x" + "ab" * 20
     call_params = conn.execute.await_args.args[1]
     assert call_params["limit"] == 500
+    assert call_params["from_timestamp"] == from_ts
+    assert call_params["to_timestamp"] == to_ts
 
 
 @pytest.mark.asyncio

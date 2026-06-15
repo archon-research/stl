@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol
 
 from app.domain.entities.allocation import EthAddress
@@ -11,6 +12,13 @@ class PrimeDebtRepository(Protocol):
         """Return whether a prime exists for the given vault address."""
         ...
 
-    async def list_debt_snapshots(self, prime_address: EthAddress, *, limit: int = 100) -> list[PrimeDebtSnapshot]:
+    async def list_debt_snapshots(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime | None = None,
+        to_timestamp: datetime | None = None,
+        limit: int = 100,
+    ) -> list[PrimeDebtSnapshot]:
         """Return debt snapshots for a prime vault address."""
         ...
