@@ -1,5 +1,5 @@
 # =============================================================================
-# Multicall call volume (VEC-81)
+# Multicall call volume
 # =============================================================================
 # Observes the `multicall_batch_size` histogram emitted by the indexers'
 # multicall batching (PR #399):
@@ -38,10 +38,10 @@ spec:
   resyncPeriod: 5m
   json: |
     {
-      "title": "Multicall Call Volume (VEC-81)",
+      "title": "Multicall Call Volume",
       "uid": "multicall-call-volume",
       "description": "multicall_batch_size histogram: _count=multicalls, _sum=individual SC calls, buckets=per-Execute burst. PR #399.",
-      "tags": ["vector", "multicall", "vec-81", "indexers"],
+      "tags": ["vector", "multicall", "indexers"],
       "schemaVersion": 39,
       "timezone": "",
       "time": { "from": "now-3h", "to": "now" },
@@ -237,10 +237,10 @@ spec:
   resyncPeriod: 5m
   json: |
     {
-      "title": "Multicall Call Volume (VEC-81)",
+      "title": "Multicall Call Volume",
       "uid": "multicall-call-volume",
       "description": "multicall_batch_size histogram: _count=multicalls, _sum=individual SC calls, buckets=per-Execute burst. PR #399.",
-      "tags": ["vector", "multicall", "vec-81", "indexers"],
+      "tags": ["vector", "multicall", "indexers"],
       "schemaVersion": 39,
       "timezone": "",
       "time": { "from": "now-3h", "to": "now" },
