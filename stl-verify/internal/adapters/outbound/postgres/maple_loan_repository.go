@@ -126,18 +126,45 @@ func (r *MapleGraphQLRepository) GetOrCreateAssetTokens(ctx context.Context, tx 
 	batch := &pgx.Batch{}
 	for _, a := range sorted {
 		// The no-op DO UPDATE (instead of DO NOTHING) makes RETURNING yield
-		// the existing row's id on conflict; DO NOTHING returns no row.
+		// the existing row's columns on conflict; DO NOTHING returns no row.
+		// Because the update touches only id, the returned symbol/decimals are
+		// the stored values, which the scan compares against the API's.
 		batch.Queue(
 			`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
 			 VALUES ($1, $2, $3, $4, '{}'::jsonb, NOW())
 			 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
-			 RETURNING id`,
+			 RETURNING id, symbol, decimals`,
 			chainID, a.Address.Bytes(), a.Symbol, a.Decimals,
 		)
 	}
 
-	return collectBatchIDs(ctx, tx, batch, sorted, "asset token",
-		func(a outbound.MapleAssetToken) common.Address { return a.Address })
+	// The scan rejects token-registry drift: the upsert deliberately never
+	// refreshes symbol/decimals, so a stored value differing from the API's
+	// means the registry and the API disagree on this asset. Decimals drift
+	// would silently mis-scale every downstream USD computation, so it fails
+	// the call loudly. Symbol drift only warns: the registry may legitimately
+	// hold a canonical symbol that differs from Maple's label, so it must not
+	// block the snapshot.
+	return collectBatchRows(ctx, tx, batch, sorted, "asset token",
+		func(row pgx.Row, a outbound.MapleAssetToken) (common.Address, int64, error) {
+			var id int64
+			var storedSymbol string
+			var storedDecimals int16
+			if err := row.Scan(&id, &storedSymbol, &storedDecimals); err != nil {
+				return common.Address{}, 0, fmt.Errorf("upserting asset token %s: %w", a.Address, err)
+			}
+			if storedDecimals != a.Decimals {
+				return common.Address{}, 0, fmt.Errorf("asset token %s decimals changed: stored %d, API reported %d (token decimals are immutable; refusing the snapshot)", a.Address, storedDecimals, a.Decimals)
+			}
+			if storedSymbol != a.Symbol {
+				r.logger.Warn("asset token symbol differs from registry; keeping the stored symbol",
+					"address", a.Address,
+					"storedSymbol", storedSymbol,
+					"apiSymbol", a.Symbol,
+				)
+			}
+			return a.Address, id, nil
+		})
 }
 
 // UpsertPools upserts pool registry rows and returns

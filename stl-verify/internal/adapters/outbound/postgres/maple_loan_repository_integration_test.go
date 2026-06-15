@@ -306,7 +306,9 @@ func TestMapleGetOrCreateAssetTokens(t *testing.T) {
 
 	// An existing token created by a migration or on-chain indexer keeps its
 	// created_at_block, symbol, and decimals (the shared GetOrCreateTokens
-	// LEAST() merge would have clobbered created_at_block to 0).
+	// LEAST() merge would have clobbered created_at_block to 0). A differing
+	// API symbol only warns (the registry may hold a canonical symbol), so the
+	// upsert still succeeds and the stored symbol wins.
 	existing := common.BytesToAddress(mapleAddr(0xe3))
 	var existingID int64
 	if err := maplePool.QueryRow(ctx,
@@ -320,7 +322,7 @@ func TestMapleGetOrCreateAssetTokens(t *testing.T) {
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
 		third, err = repo.GetOrCreateAssetTokens(ctx, tx, 1,
-			[]outbound.MapleAssetToken{{Address: existing, Symbol: "DIFFERENT", Decimals: 6}})
+			[]outbound.MapleAssetToken{{Address: existing, Symbol: "DIFFERENT", Decimals: 18}})
 		return err
 	})
 	if third[existing] != existingID {
@@ -337,6 +339,37 @@ func TestMapleGetOrCreateAssetTokens(t *testing.T) {
 	if preservedCAB != 12345 || preservedSymbol != "WETH" || preservedDecimals != 18 {
 		t.Errorf("token = %d/%s/%d, want 12345/WETH/18 (must not be clobbered)",
 			preservedCAB, preservedSymbol, preservedDecimals)
+	}
+}
+
+func TestMapleGetOrCreateAssetTokens_DecimalsDriftFails(t *testing.T) {
+	// Decimals are immutable and safety-critical (they scale every USD
+	// computation), so a stored value differing from the API's must fail the
+	// call instead of returning an id keyed to stale scaling.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+
+	existing := common.BytesToAddress(mapleAddr(0xe4))
+	if _, err := maplePool.Exec(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, $1, 'USDC', 6, '{}'::jsonb, NOW())`,
+		existing.Bytes()); err != nil {
+		t.Fatalf("seeding existing token: %v", err)
+	}
+
+	tx, err := maplePool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, driftErr := repo.GetOrCreateAssetTokens(ctx, tx, 1,
+		[]outbound.MapleAssetToken{{Address: existing, Symbol: "USDC", Decimals: 18}})
+	if driftErr == nil {
+		t.Fatal("expected decimals-drift error, got nil")
+	}
+	if !strings.Contains(driftErr.Error(), "decimals changed") {
+		t.Errorf("error %q should report the decimals drift", driftErr.Error())
 	}
 }
 
