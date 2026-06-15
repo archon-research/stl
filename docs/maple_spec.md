@@ -439,6 +439,12 @@ In this case:
 
 **Recommendation:** When aggregating collateral data, flag loans with `loanMeta.type` in `["amm", "strategy"]` as having potentially incomplete asset information.
 
+**Why the collateral is a placeholder (verified live 2026-06-15):** on internal loans the `collateral` block restates the loan principal as same-asset collateral at par — an accounting identity, not market backing. All 9 live `amm` loans show `acmRatio = 1000000` (exactly 100%), `collateral.asset` equal to the lent stablecoin, `assetAmount` equal to `principalOwed` to the wei, and `assetValueUsd = 100000000` ($1.00 flat). The real backing is the DeFi position at `loanMeta.walletAddress` (e.g. a Uniswap/Orca LP, often on another chain), whose value Maple's loan contract does not track. (The one `strategy` loan, `0xd2443e…`, shows `acmRatio = 1666600` against an "Idle " Finance position — same par-USDC placeholder, just a notional 1.67× multiple.)
+
+**Double-count hazard:** this placeholder USDC is the *same capital* already counted in `poolV2.principalOut` (it was lent out to the strategy wallet). Summing `collateral.assetValueUsd` across all loans therefore (a) double-counts internal principal, (b) reports volatile DeFi positions as par stablecoin, and (c) hides LP/depeg risk. **Backing aggregations must exclude internal loans.**
+
+**Indexer support (`is_internal`):** the `maple_loan` table carries a STORED generated column `is_internal = COALESCE(loan_meta_type IN ('amm','strategy'), FALSE)`, so internal loans are flagged at write time. **Caveat:** the flag lives on `maple_loan`, not on `maple_loan_collateral` — the indexer still persists the placeholder collateral row for every internal loan. Consumers must filter it themselves by joining the loan, e.g. `… JOIN maple_loan l ON l.id = c.maple_loan_id WHERE NOT l.is_internal`. Nothing enforces this downstream. Note the flag hardcodes `{amm, strategy}`: new/undocumented internal types (`tBills`, `intercompany`, …) are **not** flagged and would need a new migration to include.
+
 ---
 
 #### Sky Strategies
