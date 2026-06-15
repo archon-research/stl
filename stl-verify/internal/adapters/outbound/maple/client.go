@@ -313,7 +313,7 @@ type syrupGlobalsWire struct {
 
 // GetPools fetches all PoolV2 lending pools, paginating transparently.
 func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
-	wires, err := fetchAll(poolBatchSize, func(first, skip int) ([]poolWire, error) {
+	wires, err := fetchAll(c.logger, "pools", poolBatchSize, func(first, skip int) ([]poolWire, error) {
 		// The collection decodes through a pointer so a broken upstream
 		// response (data:null or a null collection, with no errors[]) fails
 		// hard instead of masquerading as a legitimate empty list.
@@ -355,7 +355,7 @@ func (c *Client) GetPools(ctx context.Context) ([]outbound.MaplePool, error) {
 // GetActiveLoans fetches all Open Term Loans with state Active, paginating
 // transparently.
 func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan, error) {
-	wires, err := fetchAll(loanBatchSize, func(first, skip int) ([]loanWire, error) {
+	wires, err := fetchAll(c.logger, "active loans", loanBatchSize, func(first, skip int) ([]loanWire, error) {
 		// Pointer decode: a null collection must fail hard, not look like an
 		// empty loan book (see GetPools).
 		var resp struct {
@@ -396,7 +396,7 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 
 // GetSkyStrategies fetches all Sky strategies, paginating transparently.
 func (c *Client) GetSkyStrategies(ctx context.Context) ([]outbound.MapleSkyStrategy, error) {
-	wires, err := fetchAll(strategyBatchSize, func(first, skip int) ([]skyStrategyWire, error) {
+	wires, err := fetchAll(c.logger, "sky strategies", strategyBatchSize, func(first, skip int) ([]skyStrategyWire, error) {
 		// Pointer decode: a null collection must fail hard, not look like an
 		// empty strategy set (see GetPools).
 		var resp struct {
@@ -743,11 +743,18 @@ func pageVariables(first, skip int) map[string]any {
 }
 
 // fetchAll paginates skip += batchSize until a page returns fewer than
-// batchSize rows. Paginating past skipCap fails hard: The-Graph-style APIs
+// batchSize rows. Reaching skipCap fails hard: The-Graph-style APIs
 // commonly cap skip at 5000, so continuing would either persist a silently
-// truncated snapshot or, if the API ignores skip, loop forever.
-func fetchAll[T any](batchSize int, page func(first, skip int) ([]T, error)) ([]T, error) {
+// truncated snapshot or, if the API ignores skip, loop forever. A page that
+// returns MORE than batchSize means the API ignored the `first` argument; that
+// is also a hard error, since it signals the page-size contract is broken and
+// the termination condition can no longer be trusted. The page count and total
+// row count are logged per collection so a server-clamped page (which would
+// otherwise masquerade as a genuine last page) is detectable in log-based
+// dashboards.
+func fetchAll[T any](logger *slog.Logger, collection string, batchSize int, page func(first, skip int) ([]T, error)) ([]T, error) {
 	var all []T
+	pages := 0
 	for skip := 0; ; skip += batchSize {
 		if skip >= skipCap {
 			return nil, fmt.Errorf("pagination reached skip=%d (cap %d); refusing to return a possibly truncated result set", skip, skipCap)
@@ -756,8 +763,17 @@ func fetchAll[T any](batchSize int, page func(first, skip int) ([]T, error)) ([]
 		if err != nil {
 			return nil, err
 		}
+		if len(items) > batchSize {
+			return nil, fmt.Errorf("page at skip=%d returned %d rows for batch size %d; API ignored the `first` argument", skip, len(items), batchSize)
+		}
+		pages++
 		all = append(all, items...)
 		if len(items) < batchSize {
+			logger.Info("fetched paginated collection",
+				"collection", collection,
+				"pages_fetched", pages,
+				"total_rows", len(all),
+			)
 			return all, nil
 		}
 	}

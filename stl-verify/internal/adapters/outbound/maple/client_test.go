@@ -641,6 +641,25 @@ func TestGetActiveLoans_InvalidBorrowerAddress(t *testing.T) {
 	}
 }
 
+func TestGetPools_OverReturnRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		// API ignores `first` and returns more rows than the batch size.
+		pools := make([]string, poolBatchSize+1)
+		for i := range pools {
+			pools[i] = poolJSON(fmt.Sprintf("0x%040x", i+1))
+		}
+		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [%s]}}`, strings.Join(pools, ",")))
+	}})
+
+	_, err := client.GetPools(context.Background())
+	if err == nil {
+		t.Fatal("expected error for over-returned page, got nil")
+	}
+	if !strings.Contains(err.Error(), "ignored the `first` argument") {
+		t.Errorf("error %q should report the API ignored `first`", err.Error())
+	}
+}
+
 func TestGetPools_MalformedValueNamesPoolID(t *testing.T) {
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"poolV2S": [{
