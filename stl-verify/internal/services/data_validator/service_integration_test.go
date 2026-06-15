@@ -91,6 +91,7 @@ func TestValidate_BaseChain_Integration(t *testing.T) {
 	}
 
 	cfg := DefaultConfig()
+	cfg.SpotCheckCount = int(lastBlock - firstBlock + 1) // 11 blocks seeded; check all deterministically
 	cfg.Logger = logger
 	svc, err := NewService(cfg, repo, verifier)
 	if err != nil {
@@ -101,7 +102,6 @@ func TestValidate_BaseChain_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Validate returned error: %v", err)
 	}
-	report.Finalize()
 
 	if !report.Success() {
 		t.Fatalf("expected validation success for Base chain, got failure (failed=%d, errors=%d):\n%s",
