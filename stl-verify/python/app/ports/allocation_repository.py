@@ -40,22 +40,37 @@ class AllocationRepository(Protocol):
         ...
 
     async def list_receipt_token_positions(self, prime_id: EthAddress) -> list[ReceiptTokenPosition]:
-        """Return current receipt-token holdings for the given prime."""
+        """Return current receipt-token holdings for the given prime.
+
+        A position whose latest balance is zero (a closed or swept position)
+        is excluded, even when older non-zero balance records exist in its
+        history.
+        """
         ...
 
     async def list_direct_asset_holdings(self, prime_id: EthAddress) -> list[DirectAssetHolding]:
-        """Return tokens held directly by the prime that are not registered as receipt-token wrappers."""
+        """Return tokens held directly by the prime that are not registered as receipt-token wrappers.
+
+        A holding whose latest balance is zero (closed or swept) is excluded,
+        even when older non-zero balance records exist in its history.
+        """
         ...
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token.
 
-        Raises ``ValueError`` if the position or price cannot be resolved.
+        Raises ``ValueError`` if the position or price cannot be resolved. A
+        position whose latest balance is zero (closed or swept) is treated as
+        unresolved and raises, rather than resurfacing a stale non-zero balance.
         """
         ...
 
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
-        """Return total priced USD exposure for all current positions of a prime."""
+        """Return total priced USD exposure for all current receipt-token positions of a prime.
+
+        Positions whose latest balance is zero (closed or swept) are excluded
+        from the total.
+        """
         ...
 
     async def list_allocation_activity(

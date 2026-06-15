@@ -419,7 +419,6 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-          AND ap.balance > 0
         ORDER BY rt.id,
                  ap.block_number DESC, ap.block_version DESC,
                  ap.processing_version DESC, ap.log_index DESC
@@ -446,6 +445,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
         LIMIT 1
     ) lp ON TRUE
+    WHERE p.balance > 0
     ORDER BY p.balance DESC
 """)
 
@@ -463,7 +463,6 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             ap.created_at AS latest_activity_at
         FROM allocation_position ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-          AND ap.balance > 0
         ORDER BY ap.token_id,
                  ap.block_number DESC, ap.block_version DESC,
                  ap.processing_version DESC, ap.log_index DESC
@@ -479,7 +478,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
     JOIN token t ON t.id = lp.token_id
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
-    WHERE rt.id IS NULL
+    WHERE rt.id IS NULL AND lp.balance > 0
     ORDER BY lp.balance DESC
 """)
 
@@ -492,7 +491,6 @@ WITH latest_balance AS (
     JOIN token t ON t.id = ap.token_id AND t.address = rt.receipt_token_address
     JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-      AND ap.balance > 0
     ORDER BY ap.block_number DESC, ap.block_version DESC,
              ap.processing_version DESC, ap.log_index DESC
     LIMIT 1
@@ -509,6 +507,7 @@ latest_price AS (
 SELECT lb.balance, lp.price_usd
 FROM latest_balance lb
 CROSS JOIN latest_price lp
+WHERE lb.balance > 0
 """)
 
 
@@ -524,7 +523,6 @@ WITH latest_receipt_positions AS (
     JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-      AND ap.balance > 0
     ORDER BY rt.id,
              ap.block_number DESC, ap.block_version DESC,
              ap.processing_version DESC, ap.log_index DESC
@@ -540,6 +538,7 @@ LEFT JOIN LATERAL (
     ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
     LIMIT 1
 ) lp ON TRUE
+WHERE p.balance > 0
 """)
 
 
