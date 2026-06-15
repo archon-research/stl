@@ -11,7 +11,9 @@ try:
     from axis_synome.spec.draft.crypto_lending.formulas.lif import (  # ty: ignore[unresolved-import]
         lif as compute_lif_float,
     )
-except ImportError:
+except ModuleNotFoundError as e:
+    if e.name and not e.name.startswith("axis_synome.spec.draft"):
+        raise
     from axis_synome.spec.crypto_lending.formulas.lif import (  # ty: ignore[unresolved-import]
         lif as compute_lif_float,
     )
