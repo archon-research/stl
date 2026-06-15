@@ -1,6 +1,6 @@
-// Package main consumes Ethereum block events from SQS, reads on-chain debt
-// for each prime agent vault every N blocks, and writes append-only snapshots
-// to Postgres.
+// Package main consumes per-chain block events from SQS, reads Spark PSM3
+// reserve state every N blocks pinned to the event's block, and writes
+// append-only snapshots to Postgres.
 package main
 
 import (
@@ -14,14 +14,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
-	vatAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
+	psm3Adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -29,7 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
-	"github.com/archon-research/stl/stl-verify/internal/services/prime_debt"
+	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
 )
 
 // Build-time variables - can be set via ldflags, otherwise populated from Go's build info.
@@ -55,20 +53,19 @@ func main() {
 	}()
 
 	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("prime-debt-indexer exited with error", "error", err)
+		slog.Error("psm3-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
 }
 
-// run is the entry point for the prime-debt-indexer.
+// run is the entry point for the psm3-indexer.
 // It is extracted from main() to allow integration testing.
 func run(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("prime-debt-indexer", flag.ContinueOnError)
+	fs := flag.NewFlagSet("psm3-indexer", flag.ContinueOnError)
 	dbURL := fs.String("db", env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"), "PostgreSQL connection string")
-	vatAddr := fs.String("vat", env.Get("VAT_ADDRESS", "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"), "MCD Vat contract address")
-	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://eth-mainnet.g.alchemy.com/v2/<key>)")
+	rpcURL := fs.String("rpc", env.Get("ETH_RPC_URL", ""), "Ethereum JSON-RPC endpoint (e.g. https://base-mainnet.g.alchemy.com/v2/<key>)")
 	queueURL := fs.String("queue", env.Get("AWS_SQS_QUEUE_URL", ""), "SQS Queue URL")
-	sweepBlocks := fs.Int("sweep-blocks", 75, "Read debt every N blocks")
+	sweepBlocks := fs.Int("sweep-blocks", 300, "Read PSM3 state every N blocks")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	waitTime := fs.Int("wait", 20, "SQS wait time in seconds (long polling)")
 	if err := fs.Parse(args); err != nil {
@@ -76,17 +73,22 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	if *rpcURL == "" {
-		// Fallback: compose from legacy ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
-		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
-		alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
-		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
+		// Fallback: compose from ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
+		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "")
+		if alchemyHTTPURL == "" {
+			return fmt.Errorf("RPC endpoint not provided (use -rpc flag, ETH_RPC_URL or ALCHEMY_HTTP_URL+ALCHEMY_API_KEY env vars)")
+		}
+		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, env.Get("ALCHEMY_API_KEY", ""))
 	}
 
 	if *queueURL == "" {
 		return fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
 	}
 
-	chainIDStr := env.Get("CHAIN_ID", "1")
+	chainIDStr := env.Get("CHAIN_ID", "")
+	if chainIDStr == "" {
+		return fmt.Errorf("CHAIN_ID env var not provided")
+	}
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
@@ -106,11 +108,32 @@ func run(ctx context.Context, args []string) error {
 		}
 		*visibilityTimeout = v
 	}
+	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
+		v, err := strconv.Atoi(sweepBlocksStr)
+		if err != nil {
+			return fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)
+		}
+		*sweepBlocks = v
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
 	slog.SetDefault(logger)
+
+	// Per-chain PSM3 addresses, cross-checked against axis-synome so the two
+	// registries cannot drift silently.
+	psm3Cfg, err := psm3Adapter.PSM3ConfigForChain(chainID)
+	if err != nil {
+		return fmt.Errorf("psm3 config: %w", err)
+	}
+	axisSynome, err := axis_synome_contract.LoadDefaultContract()
+	if err != nil {
+		return fmt.Errorf("load axis-synome contract: %w", err)
+	}
+	if err := psm3Cfg.ValidateAgainstAxisSynome(axisSynome, chainID); err != nil {
+		return fmt.Errorf("validate psm3 config against axis-synome: %w", err)
+	}
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
@@ -144,16 +167,17 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("registering build: %w", err)
 	}
 
-	logger.Info("starting prime-debt-indexer",
+	logger.Info("starting psm3-indexer",
 		"commit", buildReg.GitHash(),
 		"branch", GitBranch,
 		"buildTime", BuildTime,
 		"chainID", chainID,
+		"psm3", psm3Cfg.PSM3.Hex(),
 	)
 
 	// OpenTelemetry
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-debt-indexer",
+		ServiceName:    "psm3-indexer",
 		ServiceVersion: buildReg.GitHash(),
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -172,55 +196,44 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("eth rpc client connected", "rpc", rpchttp.MaskURL(*rpcURL))
 
 	// Multicaller
-	chainName, err := entity.ChainName(chainID)
-	if err != nil {
-		return fmt.Errorf("resolving chain name: %w", err)
-	}
-	mcTel, err := multicall.NewTelemetry(chainName)
-	if err != nil {
-		return fmt.Errorf("multicall telemetry: %w", err)
-	}
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
 
-	// Vat caller (backed by multicall)
-	if !common.IsHexAddress(*vatAddr) {
-		return fmt.Errorf("invalid vat address: %q", *vatAddr)
-	}
-	vatCaller, err := vatAdapter.NewVatCaller(mc, common.HexToAddress(*vatAddr))
+	// PSM3 caller (backed by multicall)
+	psm3Caller, err := psm3Adapter.NewPSM3Caller(mc, psm3Cfg)
 	if err != nil {
-		return fmt.Errorf("vat caller: %w", err)
+		return fmt.Errorf("psm3 caller: %w", err)
 	}
-	logger.Info("vat caller configured", "vatAddress", *vatAddr)
 
-	// Prime debt repository
+	// Snapshot repository
 	txm, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	primeDebtRepo := postgres.NewPrimeDebtRepository(pool, txm, logger, buildReg.BuildID())
+	snapshotRepo := postgres.NewPSM3SnapshotRepository(txm, logger, buildReg.BuildID())
 
-	// Vault debt service
-	svc, err := prime_debt.NewVaultDebtService(
-		prime_debt.Config{
+	// PSM3 service
+	svc, err := psm3.NewService(
+		psm3.Config{
 			SweepEveryNBlocks: *sweepBlocks,
 			ChainID:           chainID,
+			PSM3Address:       psm3Cfg.PSM3,
 			MaxMessages:       10,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
 		},
-		vatCaller,
-		primeDebtRepo,
+		psm3Caller,
+		snapshotRepo,
 		sqsConsumer,
 		ethClient,
 	)
 	if err != nil {
-		return fmt.Errorf("prime debt indexer: %w", err)
+		return fmt.Errorf("psm3 indexer: %w", err)
 	}
 
-	logger.Info("starting prime debt indexer...",
+	logger.Info("starting psm3 indexer...",
 		"sweepEveryNBlocks", *sweepBlocks,
 		"chainID", chainID,
 	)
