@@ -38,7 +38,7 @@ type SpecModel struct {
 // Deprecated: legacy {spec:{asc:{entities:...}}} wrapper (TEN-224).
 //
 // TODO(TEN-224): delete ASCModel, the SpecModel.ASC field, the legacy branch
-// in entities/validateSpecShape, and the "legacy asc shape" test cases once
+// in (*Contract).entities() and validateSpecShape, and the "legacy asc shape" test cases once
 // the committed contracts/axis-synome files and all axis-synome exporters
 // emit {spec:{entities:...}}.
 type ASCModel struct {
