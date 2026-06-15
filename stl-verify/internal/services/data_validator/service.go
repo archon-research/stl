@@ -1,5 +1,7 @@
 // Package data_validator provides validation of block chain data stored by the watcher.
-// It verifies reorg events against Etherscan's canonical chain and validates chain integrity.
+// It verifies reorg events against a canonical chain source (provided via the
+// BlockVerifier port) and validates chain integrity. The source is chain-specific
+// and selected by the caller; the service itself is chain-agnostic.
 package data_validator
 
 import (
@@ -189,7 +191,7 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 	}
 }
 
-// validateReorgs validates each reorg event against Etherscan.
+// validateReorgs validates each reorg event against the canonical chain source.
 func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) ([]CheckResult, error) {
 	s.logger.Info("fetching reorg events", "from", fromBlock, "to", toBlock)
 
@@ -221,7 +223,7 @@ func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) 
 	return results, nil
 }
 
-// validateSingleReorg validates a single reorg event against Etherscan.
+// validateSingleReorg validates a single reorg event against the canonical chain source.
 func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgEvent) CheckResult {
 	start := time.Now()
 	name := fmt.Sprintf("Reorg %d at block %d", event.ID, event.BlockNumber)
@@ -233,7 +235,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		"new_hash", event.NewHash,
 	)
 
-	// Fetch the canonical block from Etherscan
+	// Fetch the canonical block from the verifier source
 	canonicalBlock, err := s.blockVerifier.GetBlockByNumber(ctx, event.BlockNumber)
 	duration := time.Since(start)
 
@@ -254,7 +256,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		return CheckResult{
 			Name:     name,
 			Status:   StatusError,
-			Message:  "Block not found on Etherscan",
+			Message:  fmt.Sprintf("Block not found on %s", s.blockVerifier.Name()),
 			Duration: duration,
 			Details: map[string]any{
 				"reorg_id":     event.ID,
@@ -318,7 +320,7 @@ func (s *Service) runSpotChecks(ctx context.Context, fromBlock, toBlock int64) [
 	return results
 }
 
-// spotCheckBlock verifies a single block's hash against Etherscan.
+// spotCheckBlock verifies a single block's hash against the canonical chain source.
 func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResult {
 	start := time.Now()
 	name := fmt.Sprintf("Spot check block %d", blockNum)
