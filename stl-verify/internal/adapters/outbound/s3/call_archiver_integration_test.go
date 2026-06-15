@@ -23,6 +23,10 @@ import (
 
 const archiveTestBucket = "raw-sc-calls-test"
 
+// chainPrefix lists every archive object written for chainID=1, used to assert
+// object counts independent of the per-batch hash suffix.
+const chainPrefix = "raw-sc-calls/chain_id=1/"
+
 // newArchiverOnLocalStack provisions a LocalStack S3 bucket and returns a
 // CallArchiver writing to it plus the S3 client for assertions.
 func newArchiverOnLocalStack(t *testing.T, ctx context.Context) (*s3adapter.CallArchiver, *awss3.Client) {
@@ -55,9 +59,32 @@ func newArchiverOnLocalStack(t *testing.T, ctx context.Context) (*s3adapter.Call
 	return archiver, s3Client
 }
 
-// sampleBatch returns a two-call batch with one success and one failure, used by
-// the archiver integration tests.
-func sampleBatch() outbound.CallBatchRecord {
+// successCall and failureCall are the two call fixtures the archiver tests draw
+// from; the JSON substrings each one must produce live alongside them so the
+// table rows can assert on content without re-deriving the hex encoding.
+var (
+	successCall = outbound.CallEntry{
+		ContractAddress: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+		Selector:        "0xfeaf968c",
+		CallData:        []byte{0xfe, 0xaf, 0x96, 0x8c, 0xaa},
+		Success:         true,
+		Response:        []byte{0x00, 0x01, 0x02},
+	}
+	failureCall = outbound.CallEntry{
+		ContractAddress: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+		Selector:        "0x1816d0dd",
+		CallData:        []byte{0x18, 0x16, 0x0d, 0xdd},
+		Success:         false,
+		Response:        []byte{0xde, 0xad},
+	}
+
+	successCallSubstrings = []string{`"call_data":"0xfeaf968caa"`, `"response":"0x000102"`}
+	failureCallSubstrings = []string{`"call_data":"0x18160ddd"`, `"response":"0xdead"`}
+)
+
+// batchWith returns the standard batch metadata stamped with the given calls,
+// keeping the table rows free of repeated boilerplate.
+func batchWith(calls ...outbound.CallEntry) outbound.CallBatchRecord {
 	return outbound.CallBatchRecord{
 		ChainID:      1,
 		BlockNumber:  21500042,
@@ -66,39 +93,30 @@ func sampleBatch() outbound.CallBatchRecord {
 		Source:       "oracle-price",
 		Multicaller:  "0xcA11bde05977b3631167028862bE2a173976CA11",
 		Timestamp:    time.Date(2026, 6, 8, 10, 30, 45, 0, time.UTC),
-		Calls: []outbound.CallEntry{
-			{
-				ContractAddress: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
-				Selector:        "0xfeaf968c",
-				CallData:        []byte{0xfe, 0xaf, 0x96, 0x8c, 0xaa},
-				Success:         true,
-				Response:        []byte{0x00, 0x01, 0x02},
-			},
-			{
-				ContractAddress: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-				Selector:        "0x1816d0dd",
-				CallData:        []byte{0x18, 0x16, 0x0d, 0xdd},
-				Success:         false,
-				Response:        []byte{0xde, 0xad},
-			},
-		},
+		Calls:        calls,
 	}
 }
 
-func TestCallArchiverWritesRetrievableObject(t *testing.T) {
-	ctx := context.Background()
-	archiver, s3Client := newArchiverOnLocalStack(t, ctx)
-	batch := sampleBatch()
-
-	if err := archiver.Archive(ctx, batch); err != nil {
-		t.Fatalf("Archive: %v", err)
-	}
-
-	// Discover the object via ListObjectsV2 — the key embeds an opaque batch
-	// hash so the test stays decoupled from that hash function.
+// countObjects returns how many archive objects exist for chainID=1.
+func countObjects(t *testing.T, ctx context.Context, s3Client *awss3.Client) int {
+	t.Helper()
 	list, err := s3Client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
 		Bucket: aws.String(archiveTestBucket),
-		Prefix: aws.String("raw-sc-calls/chain_id=1/block=21500000-21500999/21500042_0_oracle-price_"),
+		Prefix: aws.String(chainPrefix),
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	return len(list.Contents)
+}
+
+// fetchAndDecode reads the single archive object under chainPrefix and returns
+// its decompressed JSONL bytes. It fails the test unless exactly one exists.
+func fetchAndDecode(t *testing.T, ctx context.Context, s3Client *awss3.Client) []byte {
+	t.Helper()
+	list, err := s3Client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
+		Bucket: aws.String(archiveTestBucket),
+		Prefix: aws.String(chainPrefix),
 	})
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -131,22 +149,64 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("zstd decode: %v", err)
 	}
+	return raw
+}
 
-	// Both calls' payload fields appear in the multi-line JSONL.
-	if !bytes.Contains(raw, []byte(`"call_data":"0xfeaf968caa"`)) {
-		t.Fatalf("archived object missing first call_data; got: %s", raw)
+// TestCallArchiverWrites covers the empty (0), single (1), and multi (2) call
+// batch cases: an empty batch writes nothing, while a non-empty batch writes one
+// object with one JSONL line per call carrying that call's payload.
+func TestCallArchiverWrites(t *testing.T) {
+	tests := []struct {
+		name           string
+		calls          []outbound.CallEntry
+		wantObjects    int
+		wantSubstrings []string
+	}{
+		{
+			name:        "empty batch writes nothing",
+			calls:       nil,
+			wantObjects: 0,
+		},
+		{
+			name:           "single call",
+			calls:          []outbound.CallEntry{successCall},
+			wantObjects:    1,
+			wantSubstrings: successCallSubstrings,
+		},
+		{
+			name:           "two calls",
+			calls:          []outbound.CallEntry{successCall, failureCall},
+			wantObjects:    1,
+			wantSubstrings: append(append([]string{}, successCallSubstrings...), failureCallSubstrings...),
+		},
 	}
-	if !bytes.Contains(raw, []byte(`"response":"0x000102"`)) {
-		t.Fatalf("archived object missing first response; got: %s", raw)
-	}
-	if !bytes.Contains(raw, []byte(`"call_data":"0x18160ddd"`)) {
-		t.Fatalf("archived object missing second call_data; got: %s", raw)
-	}
-	if !bytes.Contains(raw, []byte(`"response":"0xdead"`)) {
-		t.Fatalf("archived object missing second response; got: %s", raw)
-	}
-	if got, want := bytes.Count(raw, []byte{'\n'}), len(batch.Calls); got != want {
-		t.Fatalf("got %d JSONL newlines, want %d (one per call)", got, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			archiver, s3Client := newArchiverOnLocalStack(t, ctx)
+
+			if err := archiver.Archive(ctx, batchWith(tt.calls...)); err != nil {
+				t.Fatalf("Archive: %v", err)
+			}
+
+			if got := countObjects(t, ctx, s3Client); got != tt.wantObjects {
+				t.Fatalf("wrote %d objects, want %d", got, tt.wantObjects)
+			}
+			if tt.wantObjects == 0 {
+				return
+			}
+
+			raw := fetchAndDecode(t, ctx, s3Client)
+			for _, want := range tt.wantSubstrings {
+				if !bytes.Contains(raw, []byte(want)) {
+					t.Fatalf("archived object missing %q; got: %s", want, raw)
+				}
+			}
+			if got, want := bytes.Count(raw, []byte{'\n'}), len(tt.calls); got != want {
+				t.Fatalf("got %d JSONL newlines, want %d (one per call)", got, want)
+			}
+		})
 	}
 }
 
@@ -155,7 +215,7 @@ func TestCallArchiverWritesRetrievableObject(t *testing.T) {
 func TestCallArchiverWritesIdempotent(t *testing.T) {
 	ctx := context.Background()
 	archiver, s3Client := newArchiverOnLocalStack(t, ctx)
-	batch := sampleBatch()
+	batch := batchWith(successCall, failureCall)
 
 	if err := archiver.Archive(ctx, batch); err != nil {
 		t.Fatalf("first Archive: %v", err)
@@ -164,14 +224,7 @@ func TestCallArchiverWritesIdempotent(t *testing.T) {
 		t.Fatalf("second Archive (idempotent) failed: %v", err)
 	}
 
-	list, err := s3Client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
-		Bucket: aws.String(archiveTestBucket),
-		Prefix: aws.String("raw-sc-calls/chain_id=1/"),
-	})
-	if err != nil {
-		t.Fatalf("list after re-archive: %v", err)
-	}
-	if len(list.Contents) != 1 {
-		t.Fatalf("after idempotent re-archive listed %d objects, want exactly 1", len(list.Contents))
+	if got := countObjects(t, ctx, s3Client); got != 1 {
+		t.Fatalf("after idempotent re-archive listed %d objects, want exactly 1", got)
 	}
 }
