@@ -57,7 +57,6 @@ CREATE TABLE IF NOT EXISTS maple_pool
     UNIQUE (chain_id, address)
 );
 
-CREATE INDEX IF NOT EXISTS idx_maple_pool_chain ON maple_pool (chain_id);
 CREATE INDEX IF NOT EXISTS idx_maple_pool_asset_token ON maple_pool (asset_token_id);
 CREATE INDEX IF NOT EXISTS idx_maple_pool_is_syrup ON maple_pool (is_syrup) WHERE is_syrup;
 
