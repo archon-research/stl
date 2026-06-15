@@ -825,6 +825,35 @@ func TestMapleUpsertLoans_RefreshesMeta(t *testing.T) {
 	}
 }
 
+func TestMapleUpsertLoans_NullMetaTypeIsNotInternal(t *testing.T) {
+	// Live API drift documented in CLAUDE.md: loanMeta present but type null.
+	// The empty Type maps to a NULL loan_meta_type, so the is_internal
+	// generated column stays false while the other meta fields persist.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x33)
+
+	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x34, &maple.LoanMeta{Type: "", Location: "Cayman"})
+
+	var metaType, location *string
+	var isInternal bool
+	if err := maplePool.QueryRow(ctx,
+		`SELECT loan_meta_type, loan_meta_location, is_internal FROM maple_loan WHERE id = $1`,
+		loanID).Scan(&metaType, &location, &isInternal); err != nil {
+		t.Fatalf("querying loan: %v", err)
+	}
+	if metaType != nil {
+		t.Errorf("loan_meta_type = %v, want NULL", *metaType)
+	}
+	if location == nil || *location != "Cayman" {
+		t.Errorf("loan_meta_location = %v, want Cayman", location)
+	}
+	if isInternal {
+		t.Error("is_internal = true, want false for null meta type")
+	}
+}
+
 func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
 	// A loan contract's borrower is immutable; the upsert never refreshes
 	// borrower_user_id and must fail loudly when the API contradicts the

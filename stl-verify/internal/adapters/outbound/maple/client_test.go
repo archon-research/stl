@@ -264,6 +264,41 @@ func TestGetActiveLoans_HappyPath(t *testing.T) {
 	}
 }
 
+func TestGetActiveLoans_LoanMetaWithNullType(t *testing.T) {
+	// Live API drift documented in CLAUDE.md: loanMeta is present but its type
+	// is null. The wire *string must deref to "" so the row persists with a
+	// NULL loan_meta_type (is_internal = false), not a nil LoanMeta.
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"openTermLoans": [{
+			"id": %q, "borrower": {"id": %q}, "state": "Active",
+			"principalOwed": "1", "acmRatio": null, "collateral": null,
+			"loanMeta": {
+				"type": null, "assetSymbol": null, "dexName": null,
+				"location": "Cayman", "walletAddress": null, "walletType": null
+			},
+			"fundingPool": {"id": %q}
+		}]}}`, loanAddr, borrowerAddr, poolAddr))
+	}})
+
+	loans, err := client.GetActiveLoans(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveLoans: %v", err)
+	}
+	if len(loans) != 1 {
+		t.Fatalf("len(loans) = %d, want 1", len(loans))
+	}
+	l := loans[0]
+	if l.LoanMeta == nil {
+		t.Fatal("LoanMeta = nil, want non-nil meta with empty Type")
+	}
+	if l.LoanMeta.Type != "" {
+		t.Errorf("LoanMeta.Type = %q, want \"\" (null type)", l.LoanMeta.Type)
+	}
+	if l.LoanMeta.Location != "Cayman" {
+		t.Errorf("LoanMeta.Location = %q, want Cayman", l.LoanMeta.Location)
+	}
+}
+
 func TestGetActiveLoans_NullCollateralMetaAndAcmRatio(t *testing.T) {
 	// Mirrors a live API observation: active uncollateralized loans return
 	// null collateral, null loanMeta, AND null acmRatio.
