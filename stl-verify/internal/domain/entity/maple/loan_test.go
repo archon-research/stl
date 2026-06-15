@@ -52,7 +52,12 @@ func TestLoan_Validate(t *testing.T) {
 		{
 			name:    "empty loan type",
 			mutate:  func(l *Loan) { l.LoanType = "" },
-			wantErr: "loanType must not be empty",
+			wantErr: `loanType must be "OTL"`,
+		},
+		{
+			name:    "non-OTL loan type",
+			mutate:  func(l *Loan) { l.LoanType = "FTL" },
+			wantErr: `loanType must be "OTL"`,
 		},
 		{
 			name:    "zero pool ID",

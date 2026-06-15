@@ -60,8 +60,8 @@ func (l *Loan) Validate() error {
 	if len(l.LoanAddress) != 20 {
 		return fmt.Errorf("loanAddress must be 20 bytes, got %d", len(l.LoanAddress))
 	}
-	if l.LoanType == "" {
-		return fmt.Errorf("loanType must not be empty")
+	if l.LoanType != LoanTypeOTL {
+		return fmt.Errorf("loanType must be %q, got %q", LoanTypeOTL, l.LoanType)
 	}
 	if l.PoolID <= 0 {
 		return fmt.Errorf("maplePoolID must be positive, got %d", l.PoolID)
