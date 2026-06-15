@@ -117,7 +117,17 @@ func TestSkyStrategyState_Validate(t *testing.T) {
 func TestNewSkyStrategyState_Constructor(t *testing.T) {
 	v := validSkyStrategyState()
 
-	got, err := NewSkyStrategyState(v.SkyStrategyID, v.SyncedAt, v.State, v.CurrentlyDeployed, v.DepositedAssets, v.WithdrawnAssets, v.StrategyFeeRate, v.TotalFeesCollected)
+	params := SkyStrategyStateParams{
+		SkyStrategyID:      v.SkyStrategyID,
+		SyncedAt:           v.SyncedAt,
+		State:              v.State,
+		CurrentlyDeployed:  v.CurrentlyDeployed,
+		DepositedAssets:    v.DepositedAssets,
+		WithdrawnAssets:    v.WithdrawnAssets,
+		StrategyFeeRate:    v.StrategyFeeRate,
+		TotalFeesCollected: v.TotalFeesCollected,
+	}
+	got, err := NewSkyStrategyState(params)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +135,9 @@ func TestNewSkyStrategyState_Constructor(t *testing.T) {
 		t.Errorf("fields not set: %+v", got)
 	}
 
-	if _, err := NewSkyStrategyState(0, v.SyncedAt, v.State, v.CurrentlyDeployed, v.DepositedAssets, v.WithdrawnAssets, v.StrategyFeeRate, v.TotalFeesCollected); err == nil {
+	invalid := params
+	invalid.SkyStrategyID = 0
+	if _, err := NewSkyStrategyState(invalid); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
 	} else if !strings.Contains(err.Error(), "NewSkyStrategyState") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())

@@ -24,19 +24,33 @@ type PoolState struct {
 	SpotAPY            *big.Int // 30 decimals, nil when absent
 }
 
+// PoolStateParams are the inputs to NewPoolState. The named fields prevent a
+// swapped argument among the run of same-typed *big.Int values from silently
+// writing the wrong metric.
+type PoolStateParams struct {
+	PoolID             int64
+	SyncedAt           time.Time
+	TVL                *big.Int
+	LiquidAssets       *big.Int
+	CollateralValueUSD *big.Int
+	PrincipalOut       *big.Int
+	MonthlyAPY         *big.Int
+	SpotAPY            *big.Int
+}
+
 // NewPoolState creates a new PoolState entity with validation.
-// Utilization is computed from principalOut and liquidAssets.
-func NewPoolState(maplePoolID int64, syncedAt time.Time, tvl, liquidAssets, collateralValueUSD, principalOut, monthlyAPY, spotAPY *big.Int) (*PoolState, error) {
+// Utilization is computed from PrincipalOut and LiquidAssets.
+func NewPoolState(p PoolStateParams) (*PoolState, error) {
 	s := &PoolState{
-		PoolID:             maplePoolID,
-		SyncedAt:           NormalizeSyncedAt(syncedAt),
-		TVL:                tvl,
-		LiquidAssets:       liquidAssets,
-		CollateralValueUSD: collateralValueUSD,
-		PrincipalOut:       principalOut,
-		Utilization:        computeUtilization(principalOut, liquidAssets),
-		MonthlyAPY:         monthlyAPY,
-		SpotAPY:            spotAPY,
+		PoolID:             p.PoolID,
+		SyncedAt:           NormalizeSyncedAt(p.SyncedAt),
+		TVL:                p.TVL,
+		LiquidAssets:       p.LiquidAssets,
+		CollateralValueUSD: p.CollateralValueUSD,
+		PrincipalOut:       p.PrincipalOut,
+		Utilization:        computeUtilization(p.PrincipalOut, p.LiquidAssets),
+		MonthlyAPY:         p.MonthlyAPY,
+		SpotAPY:            p.SpotAPY,
 	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("NewPoolState: %w", err)

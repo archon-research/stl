@@ -121,7 +121,17 @@ func TestPoolState_Validate(t *testing.T) {
 func TestNewPoolState_Constructor(t *testing.T) {
 	v := validPoolState()
 
-	got, err := NewPoolState(v.PoolID, v.SyncedAt, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY)
+	params := PoolStateParams{
+		PoolID:             v.PoolID,
+		SyncedAt:           v.SyncedAt,
+		TVL:                v.TVL,
+		LiquidAssets:       v.LiquidAssets,
+		CollateralValueUSD: v.CollateralValueUSD,
+		PrincipalOut:       v.PrincipalOut,
+		MonthlyAPY:         v.MonthlyAPY,
+		SpotAPY:            v.SpotAPY,
+	}
+	got, err := NewPoolState(params)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -134,7 +144,9 @@ func TestNewPoolState_Constructor(t *testing.T) {
 		t.Errorf("Utilization = %f, want 0.6", got.Utilization)
 	}
 
-	if _, err := NewPoolState(0, v.SyncedAt, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY); err == nil {
+	invalid := params
+	invalid.PoolID = 0
+	if _, err := NewPoolState(invalid); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
 	} else if !strings.Contains(err.Error(), "NewPoolState") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())

@@ -263,10 +263,16 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 			if !ok {
 				return fmt.Errorf("pool %s missing from upsert result", lowerHex(p.Address))
 			}
-			state, err := maple.NewPoolState(
-				poolID, syncedAt, p.TVL, p.LiquidAssets, p.CollateralUSD, p.PrincipalOut,
-				p.MonthlyAPY, p.SpotAPY,
-			)
+			state, err := maple.NewPoolState(maple.PoolStateParams{
+				PoolID:             poolID,
+				SyncedAt:           syncedAt,
+				TVL:                p.TVL,
+				LiquidAssets:       p.LiquidAssets,
+				CollateralValueUSD: p.CollateralUSD,
+				PrincipalOut:       p.PrincipalOut,
+				MonthlyAPY:         p.MonthlyAPY,
+				SpotAPY:            p.SpotAPY,
+			})
 			if err != nil {
 				return fmt.Errorf("pool state %s: %w", lowerHex(p.Address), err)
 			}
@@ -478,11 +484,17 @@ func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[common.Add
 		if err != nil {
 			return nil, nil, fmt.Errorf("loan collateral %s: decimals: %w", lowerHex(l.LoanID), err)
 		}
-		collateral, err := maple.NewLoanCollateral(
-			loanID, syncedAt, l.Collateral.Asset, l.Collateral.AssetAmount,
-			collateralDecimals, l.Collateral.AssetValueUSD,
-			l.Collateral.State, l.Collateral.Custodian, l.Collateral.LiquidationLevel,
-		)
+		collateral, err := maple.NewLoanCollateral(maple.LoanCollateralParams{
+			LoanID:           loanID,
+			SyncedAt:         syncedAt,
+			AssetSymbol:      l.Collateral.Asset,
+			AssetAmount:      l.Collateral.AssetAmount,
+			AssetDecimals:    collateralDecimals,
+			AssetValueUSD:    l.Collateral.AssetValueUSD,
+			State:            l.Collateral.State,
+			Custodian:        l.Collateral.Custodian,
+			LiquidationLevel: l.Collateral.LiquidationLevel,
+		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("loan collateral %s: %w", lowerHex(l.LoanID), err)
 		}
@@ -571,10 +583,16 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 			if !ok {
 				return fmt.Errorf("sky strategy %s missing from upsert result", lowerHex(st.Address))
 			}
-			state, err := maple.NewSkyStrategyState(
-				strategyID, syncedAt, st.State, st.CurrentlyDeployed,
-				st.DepositedAssets, st.WithdrawnAssets, st.StrategyFeeRate, st.TotalFeesCollected,
-			)
+			state, err := maple.NewSkyStrategyState(maple.SkyStrategyStateParams{
+				SkyStrategyID:      strategyID,
+				SyncedAt:           syncedAt,
+				State:              st.State,
+				CurrentlyDeployed:  st.CurrentlyDeployed,
+				DepositedAssets:    st.DepositedAssets,
+				WithdrawnAssets:    st.WithdrawnAssets,
+				StrategyFeeRate:    st.StrategyFeeRate,
+				TotalFeesCollected: st.TotalFeesCollected,
+			})
 			if err != nil {
 				return fmt.Errorf("sky strategy state %s: %w", lowerHex(st.Address), err)
 			}

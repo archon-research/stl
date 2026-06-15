@@ -17,7 +17,16 @@ func TestStateConstructors_NormalizeSyncedAt(t *testing.T) {
 	constructors := map[string]func() (time.Time, error){
 		"PoolState": func() (time.Time, error) {
 			v := validPoolState()
-			s, err := NewPoolState(v.PoolID, in, v.TVL, v.LiquidAssets, v.CollateralValueUSD, v.PrincipalOut, v.MonthlyAPY, v.SpotAPY)
+			s, err := NewPoolState(PoolStateParams{
+				PoolID:             v.PoolID,
+				SyncedAt:           in,
+				TVL:                v.TVL,
+				LiquidAssets:       v.LiquidAssets,
+				CollateralValueUSD: v.CollateralValueUSD,
+				PrincipalOut:       v.PrincipalOut,
+				MonthlyAPY:         v.MonthlyAPY,
+				SpotAPY:            v.SpotAPY,
+			})
 			if err != nil {
 				return time.Time{}, err
 			}
@@ -33,7 +42,17 @@ func TestStateConstructors_NormalizeSyncedAt(t *testing.T) {
 		},
 		"LoanCollateral": func() (time.Time, error) {
 			v := validLoanCollateral()
-			c, err := NewLoanCollateral(v.LoanID, in, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel)
+			c, err := NewLoanCollateral(LoanCollateralParams{
+				LoanID:           v.LoanID,
+				SyncedAt:         in,
+				AssetSymbol:      v.AssetSymbol,
+				AssetAmount:      v.AssetAmount,
+				AssetDecimals:    v.AssetDecimals,
+				AssetValueUSD:    v.AssetValueUSD,
+				State:            v.State,
+				Custodian:        v.Custodian,
+				LiquidationLevel: v.LiquidationLevel,
+			})
 			if err != nil {
 				return time.Time{}, err
 			}
@@ -41,7 +60,16 @@ func TestStateConstructors_NormalizeSyncedAt(t *testing.T) {
 		},
 		"SkyStrategyState": func() (time.Time, error) {
 			v := validSkyStrategyState()
-			s, err := NewSkyStrategyState(v.SkyStrategyID, in, v.State, v.CurrentlyDeployed, v.DepositedAssets, v.WithdrawnAssets, v.StrategyFeeRate, v.TotalFeesCollected)
+			s, err := NewSkyStrategyState(SkyStrategyStateParams{
+				SkyStrategyID:      v.SkyStrategyID,
+				SyncedAt:           in,
+				State:              v.State,
+				CurrentlyDeployed:  v.CurrentlyDeployed,
+				DepositedAssets:    v.DepositedAssets,
+				WithdrawnAssets:    v.WithdrawnAssets,
+				StrategyFeeRate:    v.StrategyFeeRate,
+				TotalFeesCollected: v.TotalFeesCollected,
+			})
 			if err != nil {
 				return time.Time{}, err
 			}

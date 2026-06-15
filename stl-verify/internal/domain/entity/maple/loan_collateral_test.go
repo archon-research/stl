@@ -109,7 +109,18 @@ func TestLoanCollateral_Validate(t *testing.T) {
 func TestNewLoanCollateral_Constructor(t *testing.T) {
 	v := validLoanCollateral()
 
-	got, err := NewLoanCollateral(v.LoanID, v.SyncedAt, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel)
+	params := LoanCollateralParams{
+		LoanID:           v.LoanID,
+		SyncedAt:         v.SyncedAt,
+		AssetSymbol:      v.AssetSymbol,
+		AssetAmount:      v.AssetAmount,
+		AssetDecimals:    v.AssetDecimals,
+		AssetValueUSD:    v.AssetValueUSD,
+		State:            v.State,
+		Custodian:        v.Custodian,
+		LiquidationLevel: v.LiquidationLevel,
+	}
+	got, err := NewLoanCollateral(params)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +128,9 @@ func TestNewLoanCollateral_Constructor(t *testing.T) {
 		t.Errorf("fields not set: %+v", got)
 	}
 
-	if _, err := NewLoanCollateral(0, v.SyncedAt, v.AssetSymbol, v.AssetAmount, v.AssetDecimals, v.AssetValueUSD, v.State, v.Custodian, v.LiquidationLevel); err == nil {
+	invalid := params
+	invalid.LoanID = 0
+	if _, err := NewLoanCollateral(invalid); err == nil {
 		t.Fatal("expected constructor to propagate validation error")
 	} else if !strings.Contains(err.Error(), "NewLoanCollateral") {
 		t.Errorf("error %q should be wrapped with constructor name", err.Error())

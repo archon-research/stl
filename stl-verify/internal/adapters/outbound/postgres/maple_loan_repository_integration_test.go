@@ -403,9 +403,11 @@ func TestMaplePoolStates_RoundTrip(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
-	state, err := maple.NewPoolState(poolID, mapleSyncedAt(),
-		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600),
-		big.NewInt(123), nil)
+	state, err := maple.NewPoolState(maple.PoolStateParams{
+		PoolID: poolID, SyncedAt: mapleSyncedAt(),
+		TVL: big.NewInt(1000), LiquidAssets: big.NewInt(400), CollateralValueUSD: big.NewInt(500),
+		PrincipalOut: big.NewInt(600), MonthlyAPY: big.NewInt(123),
+	})
 	if err != nil {
 		t.Fatalf("NewPoolState: %v", err)
 	}
@@ -440,9 +442,10 @@ func TestMaplePoolStates_NullTVLAndCollateralValueRoundTrip(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x21)
 
-	state, err := maple.NewPoolState(poolID, mapleSyncedAt(),
-		nil, big.NewInt(400), nil, big.NewInt(600),
-		nil, nil)
+	state, err := maple.NewPoolState(maple.PoolStateParams{
+		PoolID: poolID, SyncedAt: mapleSyncedAt(),
+		LiquidAssets: big.NewInt(400), PrincipalOut: big.NewInt(600),
+	})
 	if err != nil {
 		t.Fatalf("NewPoolState: %v", err)
 	}
@@ -482,8 +485,11 @@ func TestMaplePoolStates_DedupWarnsOnConflict(t *testing.T) {
 	}
 	poolID := upsertTestPool(t, ctx, repo, 0x23)
 
-	state, err := maple.NewPoolState(poolID, mapleSyncedAt(),
-		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+	state, err := maple.NewPoolState(maple.PoolStateParams{
+		PoolID: poolID, SyncedAt: mapleSyncedAt(),
+		TVL: big.NewInt(1000), LiquidAssets: big.NewInt(400),
+		CollateralValueUSD: big.NewInt(500), PrincipalOut: big.NewInt(600),
+	})
 	if err != nil {
 		t.Fatalf("NewPoolState: %v", err)
 	}
@@ -521,8 +527,11 @@ func TestMaplePoolStates_PartialDedupFailsAndRollsBack(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x24)
 
-	first, err := maple.NewPoolState(poolID, mapleSyncedAt(),
-		big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+	first, err := maple.NewPoolState(maple.PoolStateParams{
+		PoolID: poolID, SyncedAt: mapleSyncedAt(),
+		TVL: big.NewInt(1000), LiquidAssets: big.NewInt(400),
+		CollateralValueUSD: big.NewInt(500), PrincipalOut: big.NewInt(600),
+	})
 	if err != nil {
 		t.Fatalf("NewPoolState: %v", err)
 	}
@@ -530,8 +539,11 @@ func TestMaplePoolStates_PartialDedupFailsAndRollsBack(t *testing.T) {
 		return repo.SavePoolStates(ctx, tx, []*maple.PoolState{first})
 	})
 
-	fresh, err := maple.NewPoolState(poolID, mapleSyncedAt().Add(time.Minute),
-		big.NewInt(1100), big.NewInt(450), big.NewInt(550), big.NewInt(650), nil, nil)
+	fresh, err := maple.NewPoolState(maple.PoolStateParams{
+		PoolID: poolID, SyncedAt: mapleSyncedAt().Add(time.Minute),
+		TVL: big.NewInt(1100), LiquidAssets: big.NewInt(450),
+		CollateralValueUSD: big.NewInt(550), PrincipalOut: big.NewInt(650),
+	})
 	if err != nil {
 		t.Fatalf("NewPoolState: %v", err)
 	}
@@ -576,8 +588,11 @@ func TestMaplePoolStates_PartialDedupAcrossChunksFails(t *testing.T) {
 
 	newState := func(offset time.Duration) *maple.PoolState {
 		t.Helper()
-		state, err := maple.NewPoolState(poolID, mapleSyncedAt().Add(offset),
-			big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+		state, err := maple.NewPoolState(maple.PoolStateParams{
+			PoolID: poolID, SyncedAt: mapleSyncedAt().Add(offset),
+			TVL: big.NewInt(1000), LiquidAssets: big.NewInt(400),
+			CollateralValueUSD: big.NewInt(500), PrincipalOut: big.NewInt(600),
+		})
 		if err != nil {
 			t.Fatalf("NewPoolState: %v", err)
 		}
@@ -618,8 +633,11 @@ func TestMaplePoolStates_MultiChunkBatch(t *testing.T) {
 	const stateCount = 5
 	states := make([]*maple.PoolState, 0, stateCount)
 	for i := range stateCount {
-		state, err := maple.NewPoolState(poolID, mapleSyncedAt().Add(time.Duration(i)*time.Minute),
-			big.NewInt(1000), big.NewInt(400), big.NewInt(500), big.NewInt(600), nil, nil)
+		state, err := maple.NewPoolState(maple.PoolStateParams{
+			PoolID: poolID, SyncedAt: mapleSyncedAt().Add(time.Duration(i) * time.Minute),
+			TVL: big.NewInt(1000), LiquidAssets: big.NewInt(400),
+			CollateralValueUSD: big.NewInt(500), PrincipalOut: big.NewInt(600),
+		})
 		if err != nil {
 			t.Fatalf("NewPoolState: %v", err)
 		}
@@ -676,15 +694,20 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoanState: %v", err)
 	}
-	collateral, err := maple.NewLoanCollateral(internalLoanID, mapleSyncedAt(), "BTC",
-		big.NewInt(21510), 8, big.NewInt(6357500000), "Deposited", "ANCHORAGE", big.NewInt(1020000))
+	collateral, err := maple.NewLoanCollateral(maple.LoanCollateralParams{
+		LoanID: internalLoanID, SyncedAt: mapleSyncedAt(), AssetSymbol: "BTC",
+		AssetAmount: big.NewInt(21510), AssetDecimals: 8, AssetValueUSD: big.NewInt(6357500000),
+		State: "Deposited", Custodian: "ANCHORAGE", LiquidationLevel: big.NewInt(1020000),
+	})
 	if err != nil {
 		t.Fatalf("NewLoanCollateral: %v", err)
 	}
 	// Pending collateral (live API shape during DepositPending): null amounts
 	// round-trip as SQL NULL instead of dropping the row.
-	pendingCollateral, err := maple.NewLoanCollateral(externalLoanID, mapleSyncedAt(), "SOL",
-		nil, 9, nil, "DepositPending", "ANCHORAGE", nil)
+	pendingCollateral, err := maple.NewLoanCollateral(maple.LoanCollateralParams{
+		LoanID: externalLoanID, SyncedAt: mapleSyncedAt(), AssetSymbol: "SOL",
+		AssetDecimals: 9, State: "DepositPending", Custodian: "ANCHORAGE",
+	})
 	if err != nil {
 		t.Fatalf("NewLoanCollateral (pending): %v", err)
 	}
@@ -929,8 +952,10 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 		t.Errorf("version = %d, want 200", version)
 	}
 
-	state, err := maple.NewSkyStrategyState(strategyID, mapleSyncedAt(), "Active",
-		big.NewInt(0), big.NewInt(100), big.NewInt(50), nil, nil)
+	state, err := maple.NewSkyStrategyState(maple.SkyStrategyStateParams{
+		SkyStrategyID: strategyID, SyncedAt: mapleSyncedAt(), State: "Active",
+		CurrentlyDeployed: big.NewInt(0), DepositedAssets: big.NewInt(100), WithdrawnAssets: big.NewInt(50),
+	})
 	if err != nil {
 		t.Fatalf("NewSkyStrategyState: %v", err)
 	}

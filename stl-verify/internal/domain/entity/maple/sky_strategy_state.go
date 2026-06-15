@@ -19,17 +19,31 @@ type SkyStrategyState struct {
 	TotalFeesCollected *big.Int // nil when absent
 }
 
+// SkyStrategyStateParams are the inputs to NewSkyStrategyState. The named
+// fields prevent a swapped argument among the run of same-typed *big.Int
+// values from silently writing the wrong metric.
+type SkyStrategyStateParams struct {
+	SkyStrategyID      int64
+	SyncedAt           time.Time
+	State              string
+	CurrentlyDeployed  *big.Int
+	DepositedAssets    *big.Int
+	WithdrawnAssets    *big.Int
+	StrategyFeeRate    *big.Int
+	TotalFeesCollected *big.Int
+}
+
 // NewSkyStrategyState creates a new SkyStrategyState entity with validation.
-func NewSkyStrategyState(mapleSkyStrategyID int64, syncedAt time.Time, state string, currentlyDeployed, depositedAssets, withdrawnAssets, strategyFeeRate, totalFeesCollected *big.Int) (*SkyStrategyState, error) {
+func NewSkyStrategyState(p SkyStrategyStateParams) (*SkyStrategyState, error) {
 	s := &SkyStrategyState{
-		SkyStrategyID:      mapleSkyStrategyID,
-		SyncedAt:           NormalizeSyncedAt(syncedAt),
-		State:              state,
-		CurrentlyDeployed:  currentlyDeployed,
-		DepositedAssets:    depositedAssets,
-		WithdrawnAssets:    withdrawnAssets,
-		StrategyFeeRate:    strategyFeeRate,
-		TotalFeesCollected: totalFeesCollected,
+		SkyStrategyID:      p.SkyStrategyID,
+		SyncedAt:           NormalizeSyncedAt(p.SyncedAt),
+		State:              p.State,
+		CurrentlyDeployed:  p.CurrentlyDeployed,
+		DepositedAssets:    p.DepositedAssets,
+		WithdrawnAssets:    p.WithdrawnAssets,
+		StrategyFeeRate:    p.StrategyFeeRate,
+		TotalFeesCollected: p.TotalFeesCollected,
 	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("NewSkyStrategyState: %w", err)

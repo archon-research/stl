@@ -26,18 +26,33 @@ type LoanCollateral struct {
 	LiquidationLevel *big.Int // nil when absent
 }
 
+// LoanCollateralParams are the inputs to NewLoanCollateral. The named fields
+// prevent a swapped argument among the same-typed values (the two *big.Int
+// amounts, the two strings) from silently writing the wrong column.
+type LoanCollateralParams struct {
+	LoanID           int64
+	SyncedAt         time.Time
+	AssetSymbol      string
+	AssetAmount      *big.Int
+	AssetDecimals    int16
+	AssetValueUSD    *big.Int
+	State            string
+	Custodian        string
+	LiquidationLevel *big.Int
+}
+
 // NewLoanCollateral creates a new LoanCollateral entity with validation.
-func NewLoanCollateral(mapleLoanID int64, syncedAt time.Time, assetSymbol string, assetAmount *big.Int, assetDecimals int16, assetValueUSD *big.Int, state, custodian string, liquidationLevel *big.Int) (*LoanCollateral, error) {
+func NewLoanCollateral(p LoanCollateralParams) (*LoanCollateral, error) {
 	c := &LoanCollateral{
-		LoanID:           mapleLoanID,
-		SyncedAt:         NormalizeSyncedAt(syncedAt),
-		AssetSymbol:      assetSymbol,
-		AssetAmount:      assetAmount,
-		AssetDecimals:    assetDecimals,
-		AssetValueUSD:    assetValueUSD,
-		State:            state,
-		Custodian:        custodian,
-		LiquidationLevel: liquidationLevel,
+		LoanID:           p.LoanID,
+		SyncedAt:         NormalizeSyncedAt(p.SyncedAt),
+		AssetSymbol:      p.AssetSymbol,
+		AssetAmount:      p.AssetAmount,
+		AssetDecimals:    p.AssetDecimals,
+		AssetValueUSD:    p.AssetValueUSD,
+		State:            p.State,
+		Custodian:        p.Custodian,
+		LiquidationLevel: p.LiquidationLevel,
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("NewLoanCollateral: %w", err)
