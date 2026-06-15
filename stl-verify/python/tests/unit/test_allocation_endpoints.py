@@ -10,7 +10,6 @@ from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, Pro
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 from app.main import app
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = "0x" + "ab" * 20
 
@@ -71,7 +70,7 @@ def test_list_primes_returns_empty_list_when_no_primes():
     assert response.json() == []
 
 
-def test_list_allocations_returns_200_with_enriched_holdings():
+def test_list_allocations_returns_200_with_enriched_holdings(make_receipt_token_position):
     from app.api.v1 import allocations
 
     position = make_receipt_token_position()
@@ -102,7 +101,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
 
 
-def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
+def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields(make_direct_asset_holding):
     """Direct holdings (e.g. raw PYUSD in a proxy) surface as their own rows.
     receipt_token_id / receipt_token_address / protocol_name / amount_usd
     are null; symbol and underlying_symbol both name the held asset; category
@@ -137,7 +136,7 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
 
 
-def test_list_allocations_combines_receipt_and_direct_rows():
+def test_list_allocations_combines_receipt_and_direct_rows(make_receipt_token_position, make_direct_asset_holding):
     from app.api.v1 import allocations
 
     service = _make_service(

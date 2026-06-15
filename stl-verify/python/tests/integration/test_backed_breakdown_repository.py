@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.conftest import insert_token, insert_user, store_test_ids
+from tests.integration.db_utils import insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):

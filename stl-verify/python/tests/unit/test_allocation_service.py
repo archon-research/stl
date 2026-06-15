@@ -5,7 +5,6 @@ import pytest
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
 
@@ -65,7 +64,7 @@ async def test_list_primes_returns_all_primes():
 
 
 @pytest.mark.asyncio
-async def test_list_receipt_token_positions_delegates_to_repository():
+async def test_list_receipt_token_positions_delegates_to_repository(make_receipt_token_position):
     repo = AsyncMock()
     position = make_receipt_token_position()
     repo.list_receipt_token_positions.return_value = [position]
@@ -90,7 +89,7 @@ async def test_list_receipt_token_positions_returns_empty_for_unknown_prime():
 
 
 @pytest.mark.asyncio
-async def test_list_direct_asset_holdings_delegates_to_repository():
+async def test_list_direct_asset_holdings_delegates_to_repository(make_direct_asset_holding):
     repo = AsyncMock()
     holding = make_direct_asset_holding()
     repo.list_direct_asset_holdings.return_value = [holding]
