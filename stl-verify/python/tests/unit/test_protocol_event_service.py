@@ -32,7 +32,13 @@ async def test_list_events_delegates_filters_and_limit() -> None:
     result = await service.list_events(tx_hash=event.tx_hash, protocol_name="spark", limit=10)
 
     assert result == [event]
-    repo.list_events.assert_awaited_once_with(tx_hash=event.tx_hash, protocol_name="spark", limit=10)
+    repo.list_events.assert_awaited_once_with(
+        tx_hash=event.tx_hash,
+        protocol_name="spark",
+        from_timestamp=None,
+        to_timestamp=None,
+        limit=10,
+    )
 
 
 @pytest.mark.asyncio

@@ -46,7 +46,12 @@ async def test_list_debt_snapshots_delegates_with_limit() -> None:
     result = await service.list_debt_snapshots(_VALID_ADDR, limit=25)
 
     assert result == [snap]
-    repo.list_debt_snapshots.assert_awaited_once_with(_VALID_ADDR, limit=25)
+    repo.list_debt_snapshots.assert_awaited_once_with(
+        _VALID_ADDR,
+        from_timestamp=None,
+        to_timestamp=None,
+        limit=25,
+    )
 
 
 @pytest.mark.asyncio
