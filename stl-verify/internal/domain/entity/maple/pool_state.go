@@ -24,9 +24,6 @@ type PoolState struct {
 	SpotAPY            *big.Int // 30 decimals, nil when absent
 }
 
-// PoolStateParams are the inputs to NewPoolState. The named fields prevent a
-// swapped argument among the run of same-typed *big.Int values from silently
-// writing the wrong metric.
 type PoolStateParams struct {
 	PoolID             int64
 	SyncedAt           time.Time

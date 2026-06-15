@@ -26,9 +26,6 @@ type LoanCollateral struct {
 	LiquidationLevel *big.Int // nil when absent
 }
 
-// LoanCollateralParams are the inputs to NewLoanCollateral. The named fields
-// prevent a swapped argument among the same-typed values (the two *big.Int
-// amounts, the two strings) from silently writing the wrong column.
 type LoanCollateralParams struct {
 	LoanID           int64
 	SyncedAt         time.Time

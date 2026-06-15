@@ -19,9 +19,6 @@ type SkyStrategyState struct {
 	TotalFeesCollected *big.Int // nil when absent
 }
 
-// SkyStrategyStateParams are the inputs to NewSkyStrategyState. The named
-// fields prevent a swapped argument among the run of same-typed *big.Int
-// values from silently writing the wrong metric.
 type SkyStrategyStateParams struct {
 	SkyStrategyID      int64
 	SyncedAt           time.Time

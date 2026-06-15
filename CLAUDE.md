@@ -125,6 +125,12 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **Function composition**:
     - Compose large functions from smaller functions.
     - Large functions should read like prose, with each step delegated to a well-named helper function.
+- **Comments**: Explain *why*, not *what*; default to none.
+    - Never restate the code or the language: no comments on signatures, field names, or standard Go behavior (zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc.). The reader knows Go.
+    - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
+    - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
+    - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+    - When unsure, leave it out: a stale or redundant comment is worse than none.
 - **Libraries**:
     - Use the standard library as much as possible.
     - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
