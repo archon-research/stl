@@ -23,10 +23,10 @@ type ServiceConfig struct {
 	// ToBlock is the end of the block range to validate (0 = max block in DB).
 	ToBlock int64
 
-	// SpotCheckCount is the number of random blocks to verify against Etherscan.
+	// SpotCheckCount is the number of random blocks to verify against the canonical chain source.
 	SpotCheckCount int
 
-	// ValidateReorgs enables reorg event validation against Etherscan.
+	// ValidateReorgs enables reorg event validation against the canonical chain source.
 	ValidateReorgs bool
 
 	// ValidateChainIntegrity enables parent-hash chain validation.
@@ -265,7 +265,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		}
 	}
 
-	// The new_hash from our reorg event should match Etherscan's canonical hash
+	// The new_hash from our reorg event should match the canonical chain source's hash
 	if !hashesMatch(event.NewHash, canonicalBlock.Hash) {
 		return CheckResult{
 			Name:   name,
@@ -345,7 +345,7 @@ func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResul
 		}
 	}
 
-	// Get canonical block from Etherscan
+	// Get canonical block from the verifier source
 	canonicalBlock, err := s.blockVerifier.GetBlockByNumber(ctx, blockNum)
 	duration := time.Since(start)
 
