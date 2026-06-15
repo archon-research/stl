@@ -303,6 +303,60 @@ func TestSyncIntegration_FullCycle(t *testing.T) {
 	}
 }
 
+func TestSyncIntegration_PoolsPhaseFailsOthersIsolated(t *testing.T) {
+	// Only the pools query breaks (null top-level collection). Phases run in
+	// their own transactions, so the run must fail yet the independent globals
+	// phase still commits its row, and the pool-dependent loans/strategies
+	// phases (skipped because pools failed) leave their tables empty. A
+	// regression to one transaction per cycle would wipe the globals row too.
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	globalsJSON := `{"apy": "46314950526928033107296807949", "collateralApy": "11044228807145689488478201423",
+	                 "poolApy": "35270730693993489373296467374", "dripsYieldBoost": "0", "tvl": "3563135115920200"}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "poolV2S"):
+			// Null top-level collection: a hard error in the pools phase.
+			_, _ = w.Write([]byte(`{"data": {"poolV2S": null}}`))
+		case strings.Contains(req.Query, "syrupGlobals"):
+			_, _ = w.Write([]byte(`{"data": {"syrupGlobals": ` + globalsJSON + `}}`))
+		default:
+			t.Errorf("unexpected query (loans/strategies should be skipped): %s", req.Query)
+		}
+	}))
+	defer server.Close()
+
+	service := newIntegrationService(t, pool, server.URL)
+
+	if err := service.Sync(ctx); err == nil {
+		t.Fatal("expected error from the failed pools phase, got nil")
+	}
+
+	// The independent globals phase committed its row.
+	if got := countRows(t, ctx, pool, "maple_syrup_global_state"); got != 1 {
+		t.Errorf("maple_syrup_global_state rows = %d, want 1 (globals phase is independent)", got)
+	}
+	// Pools failed and its dependents were skipped: all empty.
+	for _, table := range []string{
+		"maple_pool", "maple_pool_state", "maple_loan", "maple_loan_state",
+		"maple_loan_collateral", "maple_sky_strategy", "maple_sky_strategy_state",
+	} {
+		if got := countRows(t, ctx, pool, table); got != 0 {
+			t.Errorf("%s rows = %d, want 0", table, got)
+		}
+	}
+}
+
 func TestSyncIntegration_GraphQLErrorMarksRunFailed(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
