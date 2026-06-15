@@ -29,7 +29,7 @@ func TestEntriesAndProxiesForChainID(t *testing.T) {
 	synthetic := &axis_synome_contract.Contract{
 		Version:             "v1",
 		AxisSynomeGitCommit: "test",
-		AxisSynome: axis_synome_contract.AxisSynomeModel{Spec: axis_synome_contract.SpecModel{ASC: axis_synome_contract.ASCModel{Entities: axis_synome_contract.EntitiesModel{
+		AxisSynome: axis_synome_contract.AxisSynomeModel{Spec: axis_synome_contract.SpecModel{ASC: &axis_synome_contract.ASCModel{Entities: axis_synome_contract.EntitiesModel{
 			AssetsByPrime: axis_synome_contract.AssetsByPrimeModel{ASSETSByPrime: map[string][]axis_synome_contract.TokenEntry{
 				"spark": {{
 					ContractAddress: "0x0000000000000000000000000000000000000001",
@@ -58,7 +58,7 @@ func contractWithEntry(key string, entry axis_synome_contract.TokenEntry) *axis_
 	return &axis_synome_contract.Contract{
 		Version:             "v1",
 		AxisSynomeGitCommit: "test",
-		AxisSynome: axis_synome_contract.AxisSynomeModel{Spec: axis_synome_contract.SpecModel{ASC: axis_synome_contract.ASCModel{Entities: axis_synome_contract.EntitiesModel{
+		AxisSynome: axis_synome_contract.AxisSynomeModel{Spec: axis_synome_contract.SpecModel{ASC: &axis_synome_contract.ASCModel{Entities: axis_synome_contract.EntitiesModel{
 			AssetsByPrime: axis_synome_contract.AssetsByPrimeModel{ASSETSByPrime: map[string][]axis_synome_contract.TokenEntry{
 				key: {entry},
 			}},
