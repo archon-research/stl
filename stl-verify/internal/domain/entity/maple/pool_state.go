@@ -7,8 +7,9 @@ import (
 )
 
 // PoolState is a snapshot of a Maple pool's lending metrics at a sync
-// cycle. All big.Int values are raw API integers in pool-asset decimals
-// (6 for USDC/USDT); APYs use 30 decimals. Utilization is derived in the
+// cycle. TVL, LiquidAssets and PrincipalOut are raw API integers in
+// pool-asset decimals (6 for USDC/USDT); CollateralValueUSD is USD-denominated,
+// not pool-asset-denominated; APYs use 30 decimals. Utilization is derived in the
 // constructor as principal_out / (liquid_assets + principal_out), in [0, 1],
 // so an inconsistent triple is not representable via NewPoolState.
 type PoolState struct {

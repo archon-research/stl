@@ -44,7 +44,7 @@ type MapleActiveLoan struct {
 	PrincipalOwed *big.Int
 	AcmRatio      *big.Int             // nil when the API reports none (uncollateralized loans)
 	Collateral    *MapleLoanCollateral // nil only when the API returns null collateral
-	LoanMeta      *MapleLoanMeta       // nil for external loans
+	LoanMeta      *MapleLoanMeta       // nil when the API returns null loanMeta
 	PoolAddress   common.Address
 }
 
@@ -89,7 +89,9 @@ type MapleSyrupGlobals struct {
 
 // MapleGraphQLClient is the outbound port for the Maple GraphQL API
 // (https://api.maple.finance/v2/graphql). All methods query the latest state
-// (no block argument) and paginate transparently; implementations must fail
+// (no block argument); the collection methods (GetPools, GetActiveLoans,
+// GetSkyStrategies) paginate transparently, while GetSyrupGlobals fetches a
+// singleton with no pagination. Implementations must fail
 // the whole call on any malformed row rather than skipping it, and must fail
 // hard when the API returns a null top-level collection (data:null) — a null
 // collection is upstream breakage, never an empty result set. API-sanctioned

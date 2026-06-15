@@ -29,7 +29,7 @@ type Loan struct {
 	LoanType       string // LoanTypeOTL
 	PoolID         int64
 	BorrowerUserID int64
-	LoanMeta       *LoanMeta // nil for external loans
+	LoanMeta       *LoanMeta // nil when the API returns null loanMeta
 }
 
 // NewLoan creates a new Loan entity with validation.

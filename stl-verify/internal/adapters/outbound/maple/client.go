@@ -3,10 +3,12 @@
 //
 // The API is public and unauthenticated, Apollo-served with introspection
 // disabled. It can return HTTP 200 with a GraphQL errors[] envelope, so every
-// response is checked for errors before decoding data. Integer values are
-// returned as decimal strings (except collateral.liquidationLevel and
-// skyStrategy.version, which are JSON numbers) and parsed into big.Int;
-// any malformed value fails the whole call — rows are never skipped.
+// response is checked for errors before decoding data. Most integer values are
+// returned as decimal strings and parsed into big.Int; a few are JSON numbers
+// instead: collateral.liquidationLevel (big.Int), and the small counts
+// asset.decimals, collateral.decimals and skyStrategy.version (parsed as int,
+// never big.Int). Any malformed value fails the whole call, rows are never
+// skipped.
 //
 // Schema-nullable values parse to nil per field and are persisted as SQL
 // NULL downstream; the service counts every such null in its per-field
@@ -725,7 +727,7 @@ type graphqlRequest struct {
 
 // execute sends a GraphQL request with rate limiting and retries on transient
 // failures (HTTP 429/5xx, network errors), then decodes the response into
-// result. GraphQL errors[] and HTTP 4xx are not retried.
+// result. GraphQL errors[] and non-429 HTTP 4xx are not retried.
 func (c *Client) execute(ctx context.Context, query string, variables map[string]any, result any) error {
 	body, err := json.Marshal(graphqlRequest{Query: query, Variables: variables})
 	if err != nil {
