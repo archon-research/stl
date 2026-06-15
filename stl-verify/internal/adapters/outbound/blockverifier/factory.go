@@ -61,11 +61,16 @@ func New(chainID int64, opts Options) (outbound.BlockVerifier, error) {
 	case KindEtherscan:
 		return newEtherscanVerifier(chainID, opts)
 	default:
+		// Unreachable while every chainKind entry uses a declared Kind constant.
+		// Kept so a future Kind added to the registry without a matching switch
+		// arm fails loudly instead of silently.
 		return nil, fmt.Errorf("unsupported verifier kind %q for chain ID %d", kind, chainID)
 	}
 }
 
 func newEtherscanVerifier(chainID int64, opts Options) (outbound.BlockVerifier, error) {
+	// Validate before NewClient so the error names the chain (NewClient also
+	// rejects an empty key, but without the chain ID).
 	if opts.EtherscanAPIKey == "" {
 		return nil, fmt.Errorf("etherscan API key required for chain ID %d", chainID)
 	}
