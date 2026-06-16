@@ -63,7 +63,11 @@ func (a *CallArchiver) Archive(ctx context.Context, record outbound.CallBatchRec
 		return nil
 	}
 
-	key := rawsckey.Build(record.ChainID, record.BlockNumber, record.BlockVersion, record.Source, batchHash(record.Calls))
+	hash, err := batchHash(record.Calls)
+	if err != nil {
+		return fmt.Errorf("hashing call batch: %w", err)
+	}
+	key := rawsckey.Build(record.ChainID, record.BlockNumber, record.BlockVersion, record.Source, hash)
 
 	payload, err := a.encode(record)
 	if err != nil {
@@ -80,7 +84,7 @@ func (a *CallArchiver) Archive(ctx context.Context, record outbound.CallBatchRec
 // ContractAddress is the EIP-55 checksum hex returned by common.Address.Hex();
 // hashing the string form is deterministic because the same address always
 // produces the same hex.
-func batchHash(calls []outbound.CallEntry) string {
+func batchHash(calls []outbound.CallEntry) (string, error) {
 	inputs := make([]rawsckey.BatchHashInput, len(calls))
 	for i := range calls {
 		inputs[i] = rawsckey.BatchHashInput{

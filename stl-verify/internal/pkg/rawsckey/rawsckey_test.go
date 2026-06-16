@@ -16,7 +16,14 @@ func TestBatchHashDeterministic(t *testing.T) {
 		{Target: []byte{0x01}, CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
 		{Target: []byte{0x02}, CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
 	}
-	h1, h2 := BatchHash(inputs), BatchHash(inputs)
+	h1, err := BatchHash(inputs)
+	if err != nil {
+		t.Fatalf("BatchHash returned error: %v", err)
+	}
+	h2, err := BatchHash(inputs)
+	if err != nil {
+		t.Fatalf("BatchHash returned error: %v", err)
+	}
 	if h1 != h2 {
 		t.Fatalf("BatchHash not deterministic: %q vs %q", h1, h2)
 	}
@@ -25,10 +32,21 @@ func TestBatchHashDeterministic(t *testing.T) {
 	}
 }
 
+// mustBatchHash fails the test if BatchHash errors; the hash.Hash contract
+// guarantees it never does, so the helper keeps the assertion tests readable.
+func mustBatchHash(t *testing.T, inputs []BatchHashInput) string {
+	t.Helper()
+	got, err := BatchHash(inputs)
+	if err != nil {
+		t.Fatalf("BatchHash returned error: %v", err)
+	}
+	return got
+}
+
 func TestBatchHashOrderSensitive(t *testing.T) {
 	a := BatchHashInput{Target: []byte{0x01}, CallData: []byte{0xaa}}
 	b := BatchHashInput{Target: []byte{0x02}, CallData: []byte{0xbb}}
-	if BatchHash([]BatchHashInput{a, b}) == BatchHash([]BatchHashInput{b, a}) {
+	if mustBatchHash(t, []BatchHashInput{a, b}) == mustBatchHash(t, []BatchHashInput{b, a}) {
 		t.Fatal("BatchHash should differ when call order differs")
 	}
 }
@@ -36,13 +54,13 @@ func TestBatchHashOrderSensitive(t *testing.T) {
 func TestBatchHashDistinctByContent(t *testing.T) {
 	base := BatchHashInput{Target: []byte{0x01}, CallData: []byte{0xaa}}
 	mut := BatchHashInput{Target: []byte{0x01}, CallData: []byte{0xab}} // one byte differs
-	if BatchHash([]BatchHashInput{base}) == BatchHash([]BatchHashInput{mut}) {
+	if mustBatchHash(t, []BatchHashInput{base}) == mustBatchHash(t, []BatchHashInput{mut}) {
 		t.Fatal("BatchHash should differ when call data differs")
 	}
 }
 
 func TestBatchHashEmpty(t *testing.T) {
-	if got := BatchHash(nil); len(got) != 16 {
+	if got := mustBatchHash(t, nil); len(got) != 16 {
 		t.Fatalf("BatchHash(nil) len = %d, want 16", len(got))
 	}
 }

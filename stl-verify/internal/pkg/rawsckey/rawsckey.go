@@ -41,13 +41,21 @@ type BatchHashInput struct {
 // BatchHash returns the FNV-1a 64-bit hash of the batch in issue order, as a
 // fixed 16-char hex string. Identical batches in the same order produce the
 // same hash; reordering changes the hash.
-func BatchHash(inputs []BatchHashInput) string {
+//
+// The hash.Hash contract guarantees Write never returns a non-nil error, but we
+// check and surface it anyway so a future hasher swap cannot silently corrupt a
+// key, and to honour the "never ignore errors" convention.
+func BatchHash(inputs []BatchHashInput) (string, error) {
 	h := fnv.New64a()
-	for _, in := range inputs {
-		_, _ = h.Write(in.Target)   // fnv.Write never returns an error
-		_, _ = h.Write(in.CallData) // fnv.Write never returns an error
+	for i, in := range inputs {
+		if _, err := h.Write(in.Target); err != nil {
+			return "", fmt.Errorf("hashing target for input %d: %w", i, err)
+		}
+		if _, err := h.Write(in.CallData); err != nil {
+			return "", fmt.Errorf("hashing call data for input %d: %w", i, err)
+		}
 	}
-	return fmt.Sprintf("%016x", h.Sum64())
+	return fmt.Sprintf("%016x", h.Sum64()), nil
 }
 
 // Build constructs the full S3 key for an archived batch. batchHash should be
