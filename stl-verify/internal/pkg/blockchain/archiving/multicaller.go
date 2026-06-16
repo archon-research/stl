@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/big"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rawsckey"
@@ -24,7 +25,11 @@ type Config struct {
 	BuildID int64
 	// Chain is the chain name (e.g. "mainnet") used as the `chain` metric label.
 	Chain string
-	Wait  *WriteGroup // shared across decorators; drained on shutdown
+	// Wait tracks in-flight background archive writes; shared across decorators
+	// and drained on shutdown. It is safe to drain with a plain sync.WaitGroup
+	// because every service stops its message loop (joining the goroutine that
+	// calls Execute) before the drain runs, so no Add races the Wait.
+	Wait *sync.WaitGroup
 	// MeterProvider builds the archive.writes.total counter. nil uses the global
 	// provider; tests inject a manual reader.
 	MeterProvider metric.MeterProvider
@@ -47,7 +52,7 @@ type Multicaller struct {
 // NewMulticaller wraps inner so its calls are archived via arch.
 func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
 	if cfg.Wait == nil {
-		cfg.Wait = &WriteGroup{}
+		cfg.Wait = &sync.WaitGroup{}
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -116,8 +121,8 @@ func (m *Multicaller) Address() common.Address { return m.inner.Address() }
 
 // Close blocks until all in-flight archive writes complete. Call during
 // graceful shutdown before the process exits. Production binaries drain via the
-// shared WriteGroup returned by archivingwire; this is the drain handle for a
-// directly-constructed decorator (tests).
+// shared sync.WaitGroup returned by archivingwire; this is the drain handle for
+// a directly-constructed decorator (tests).
 func (m *Multicaller) Close() { m.cfg.Wait.Wait() }
 
 // recordWrite increments archive.writes.total with the outcome status. A nil
@@ -167,7 +172,10 @@ func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound
 }
 
 func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallBatchRecord) {
-	scheduled := m.cfg.Wait.Go(func() {
+	// Tracked by the shared WaitGroup so graceful shutdown drains this write. No
+	// Add-after-Wait race: each service stops its message loop before draining,
+	// so Execute (hence this Go) can never run concurrently with the drain.
+	m.cfg.Wait.Go(func() {
 		// Archiving is fire-and-forget: a panic here must never escape and crash
 		// the worker, since archiving must not affect the hot path.
 		defer func() {
@@ -200,15 +208,4 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallB
 			)
 		}
 	})
-
-	if !scheduled {
-		// The WriteGroup is draining on shutdown, so this batch will not be
-		// archived. Surface the loss rather than dropping it silently.
-		m.cfg.Logger.Warn("archive write dropped: archiver draining on shutdown",
-			"source", record.Source,
-			"block", record.BlockNumber,
-			"block_version", record.BlockVersion,
-			"calls", len(record.Calls),
-		)
-	}
 }

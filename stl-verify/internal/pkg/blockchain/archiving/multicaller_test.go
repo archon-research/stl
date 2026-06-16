@@ -50,7 +50,7 @@ func (panicArchiver) Archive(context.Context, outbound.CallBatchRecord) error {
 	panic("archiver boom")
 }
 
-func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, wg *WriteGroup) *Multicaller {
+func newTestDecorator(inner outbound.Multicaller, arch outbound.CallArchiver, wg *sync.WaitGroup) *Multicaller {
 	return NewMulticaller(inner, arch, Config{
 		Source:  "oracle-price",
 		ChainID: 1,
@@ -200,7 +200,7 @@ func TestExecute(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := &recordingArchiver{}
-			var wg WriteGroup
+			var wg sync.WaitGroup
 			d := newTestDecorator(&stubInner{results: tt.innerResults, err: tt.innerErr}, rec, &wg)
 
 			ctx := WithBlockVersion(context.Background(), tt.blockVersion)
@@ -240,7 +240,7 @@ func TestExecute(t *testing.T) {
 // Close still drains cleanly.
 func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	var wg WriteGroup
+	var wg sync.WaitGroup
 	d := newTestDecorator(inner, errArchiver{err: errors.New("s3 down")}, &wg)
 
 	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
@@ -257,7 +257,7 @@ func TestExecuteSucceedsWhenArchiveErrors(t *testing.T) {
 // recovered rather than propagated (which would crash the process).
 func TestExecuteSurvivesArchivePanic(t *testing.T) {
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	var wg WriteGroup
+	var wg sync.WaitGroup
 	d := newTestDecorator(inner, panicArchiver{}, &wg)
 
 	res, err := d.Execute(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(1))
@@ -291,7 +291,7 @@ func TestExecuteRecordsArchiveWriteStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inner := &stubInner{results: []outbound.Result{{Success: true}}}
 			arch := errArchiver{err: tc.archiveErr}
-			var wg WriteGroup
+			var wg sync.WaitGroup
 			m := NewMulticaller(inner, arch, Config{
 				Source:        "test-source",
 				ChainID:       1,
@@ -323,7 +323,7 @@ func TestExecuteEmptyBatchSkipsMetric(t *testing.T) {
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
 	rec := &recordingArchiver{}
-	var wg WriteGroup
+	var wg sync.WaitGroup
 	m := NewMulticaller(&stubInner{results: []outbound.Result{}}, rec, Config{
 		Source:        "test-source",
 		ChainID:       1,
@@ -357,7 +357,7 @@ func TestExecuteCountsOneBatchOnTruncation(t *testing.T) {
 
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
 	rec := &recordingArchiver{}
-	var wg WriteGroup
+	var wg sync.WaitGroup
 	m := NewMulticaller(inner, rec, Config{
 		Source:        "test-source",
 		ChainID:       1,
@@ -411,7 +411,7 @@ func TestExecuteCompletesArchiveAfterCallerCancels(t *testing.T) {
 	}
 
 	inner := &stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}
-	var wg WriteGroup
+	var wg sync.WaitGroup
 	d := newTestDecorator(inner, arch, &wg)
 
 	ctx, cancel := context.WithCancel(context.Background())

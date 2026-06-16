@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -117,7 +118,7 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 		return nil, nil, fmt.Errorf("creating call archiver: %w", err)
 	}
 
-	wg := &archiving.WriteGroup{}
+	wg := &sync.WaitGroup{}
 	wrap := func(inner outbound.Multicaller) outbound.Multicaller {
 		return archiving.NewMulticaller(inner, archiver, archiving.Config{
 			Source:  source,

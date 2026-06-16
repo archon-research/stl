@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -38,6 +39,7 @@ type Service struct {
 	handler          AllocationHandler
 	ctx              context.Context
 	cancel           context.CancelFunc
+	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger           *slog.Logger
 	blocksSinceSweep int
 }
@@ -139,13 +141,15 @@ func validateScopedEntriesAndProxies(entries []*TokenEntry, proxies []ProxyConfi
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.sqsConsumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlock)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.sqsConsumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlock)
+	})
 
 	s.logger.Info("started",
 		"chainID", s.config.ChainID,
@@ -154,10 +158,14 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("stopped")
 	return nil
 }
