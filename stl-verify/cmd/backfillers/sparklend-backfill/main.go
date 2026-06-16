@@ -19,6 +19,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
@@ -203,6 +206,19 @@ func run(args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	// Multicall client, optionally wrapped for raw SC call archiving (VEC-81).
+	// Off unless ARCHIVE_SC_CALLS=true.
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend-backfill")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
 	// Build position tracker (nil consumer and nil redisClient for backfill mode)
 	trackerSvc, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
@@ -212,6 +228,7 @@ func run(args []string) error {
 		nil,
 		nil,
 		ethClient,
+		mc,
 		txManager,
 		userRepo,
 		protocolRepo,

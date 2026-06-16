@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -165,6 +166,7 @@ func (s *Service) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
 ) error {
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	start := time.Now()
 
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
