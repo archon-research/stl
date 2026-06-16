@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
@@ -94,10 +95,14 @@ func TestCronjobActivities_Execute(t *testing.T) {
 			suite := &testsuite.WorkflowTestSuite{}
 			activityEnv := suite.NewTestActivityEnvironment()
 
+			scheduledAt := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
 			var called bool
+			var gotScheduledAt time.Time
+			var gotOK bool
 			activities, err := newCronjobActivities(&mockRunner{
-				runFn: func(_ context.Context) error {
+				runFn: func(ctx context.Context) error {
 					called = true
+					gotScheduledAt, gotOK = ScheduledAtFromContext(ctx)
 					return tt.runErr
 				},
 			})
@@ -106,10 +111,13 @@ func TestCronjobActivities_Execute(t *testing.T) {
 			}
 
 			activityEnv.RegisterActivity(activities.Execute)
-			_, err = activityEnv.ExecuteActivity(activities.Execute)
+			_, err = activityEnv.ExecuteActivity(activities.Execute, scheduledAt)
 
 			if !called {
 				t.Fatal("expected runner.Run to be called")
+			}
+			if !gotOK || !gotScheduledAt.Equal(scheduledAt) {
+				t.Errorf("ScheduledAtFromContext = %v/%v, want %v/true", gotScheduledAt, gotOK, scheduledAt)
 			}
 
 			if tt.wantErr {
@@ -153,14 +161,20 @@ func TestCronjobWorkflow(t *testing.T) {
 			env := suite.NewTestWorkflowEnvironment()
 
 			activityErr := tt.activityErr
+			var gotScheduledAt time.Time
 			env.RegisterActivityWithOptions(
-				func(_ context.Context) error {
+				func(_ context.Context, scheduledAt time.Time) error {
+					gotScheduledAt = scheduledAt
 					return activityErr
 				},
 				activity.RegisterOptions{Name: "Execute"},
 			)
 
 			env.ExecuteWorkflow(cronjobWorkflow)
+
+			if gotScheduledAt.IsZero() {
+				t.Error("workflow did not pass a scheduledAt to the activity")
+			}
 
 			if !env.IsWorkflowCompleted() {
 				t.Fatal("expected workflow to be completed")

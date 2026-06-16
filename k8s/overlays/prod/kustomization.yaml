@@ -25,6 +25,7 @@ resources:
   - ../../base/prime-debt-indexer
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
+  - ../../base/maple-graphql-indexer
   - ../../base/watcher-data-validator
   - ../../base/migrate
   - ../../base/python-api
@@ -110,6 +111,9 @@ images:
   - name: offchain-price-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "offchain-price-indexer-7abeb809148bd7cf9698592bfb16a350597885fc"
+  - name: maple-graphql-indexer
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "maple-graphql-indexer-7abeb809148bd7cf9698592bfb16a350597885fc"
   - name: watcher-data-validator
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "watcher-data-validator-7abeb809148bd7cf9698592bfb16a350597885fc"

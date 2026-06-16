@@ -30,7 +30,9 @@ reviews:
       instructions: |
         This is the ports layer (interface definitions only).
         Interfaces should be small and focused — flag large interfaces that could be split.
-        Use the -er suffix for behavior interfaces (Reader, Publisher, etc.).
+        The -er suffix applies ONLY to behavior interfaces (Reader, Publisher, BlockSubscriber).
+        Persistence and external-system ports intentionally use noun names: XxxRepository,
+        XxxClient, XxxCache, XxxProvider. Do NOT flag these for missing -er suffixes.
         No implementation logic should appear here.
 
     - path: "stl-verify/internal/services/**"
