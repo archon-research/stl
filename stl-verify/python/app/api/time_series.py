@@ -84,8 +84,7 @@ def get_time_series_query_params(
         raise HTTPException(
             status_code=422,
             detail=(
-                "resolution is too fine for the selected window; "
-                f"minimum allowed resolution is {min_resolution.value}"
+                f"resolution is too fine for the selected window; minimum allowed resolution is {min_resolution.value}"
             ),
         )
 
