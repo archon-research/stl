@@ -168,8 +168,10 @@ func (r *MapleGraphQLRepository) GetOrCreateAssetTokens(ctx context.Context, tx 
 }
 
 // UpsertPools upserts pool registry rows and returns
-// address -> maple_pool.id. On conflict, refreshes name, asset_token_id, and
-// is_syrup.
+// address -> maple_pool.id. name, asset_token_id, and is_syrup are immutable
+// per pool, so the upsert refreshes nothing on conflict (the no-op DO UPDATE
+// keeps RETURNING yielding the stored row) and the scan fails the run if any
+// stored value differs from the incoming one.
 func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
 	if len(pools) == 0 {
 		return make(map[common.Address]int64), nil
@@ -182,17 +184,36 @@ func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, poo
 		batch.Queue(
 			`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
 			 VALUES ($1, $2, $3, $4, $5, $6)
-			 ON CONFLICT (chain_id, address) DO UPDATE SET
-			     name = EXCLUDED.name,
-			     asset_token_id = EXCLUDED.asset_token_id,
-			     is_syrup = EXCLUDED.is_syrup
-			 RETURNING id`,
+			 ON CONFLICT (chain_id, address) DO UPDATE SET id = maple_pool.id
+			 RETURNING id, name, asset_token_id, is_syrup`,
 			p.ChainID, p.ProtocolID, p.Address, p.Name, p.AssetTokenID, p.IsSyrup,
 		)
 	}
 
-	return collectBatchIDs(ctx, tx, batch, sorted, "maple pool",
-		func(p *maple.Pool) common.Address { return common.BytesToAddress(p.Address) })
+	return collectBatchRows(ctx, tx, batch, sorted, "maple pool",
+		func(row pgx.Row, p *maple.Pool) (common.Address, int64, error) {
+			addr := common.BytesToAddress(p.Address)
+			var id, storedAssetTokenID int64
+			var storedName *string // name is a nullable column; a stored NULL is itself a mismatch
+			var storedIsSyrup bool
+			if err := row.Scan(&id, &storedName, &storedAssetTokenID, &storedIsSyrup); err != nil {
+				return common.Address{}, 0, fmt.Errorf("upserting maple pool %s: %w", addr, err)
+			}
+			var mismatches []string
+			if storedName == nil || *storedName != p.Name {
+				mismatches = append(mismatches, fmt.Sprintf("name (stored %s, incoming %q)", strOrNull(storedName), p.Name))
+			}
+			if storedAssetTokenID != p.AssetTokenID {
+				mismatches = append(mismatches, fmt.Sprintf("asset_token_id (stored %d, incoming %d)", storedAssetTokenID, p.AssetTokenID))
+			}
+			if storedIsSyrup != p.IsSyrup {
+				mismatches = append(mismatches, fmt.Sprintf("is_syrup (stored %t, incoming %t)", storedIsSyrup, p.IsSyrup))
+			}
+			if err := registryMismatchError("maple pool", addr, mismatches); err != nil {
+				return common.Address{}, 0, err
+			}
+			return addr, id, nil
+		})
 }
 
 // SavePoolStates inserts pool state snapshots. The BEFORE INSERT trigger
@@ -249,13 +270,35 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	return r.execInsert(ctx, tx, "maple_pool_state", sb.String(), args)
 }
 
+// loanMetaCols holds a loan's six nullable loanMeta columns as upsert args.
+type loanMetaCols struct {
+	typ, assetSymbol, dex, walletAddress, walletType, location *string
+}
+
+// loanMetaColsOf maps a loan's metadata to its column args, treating a nil
+// LoanMeta and every empty field alike as SQL NULL.
+func loanMetaColsOf(l *maple.Loan) loanMetaCols {
+	if l.LoanMeta == nil {
+		return loanMetaCols{}
+	}
+	return loanMetaCols{
+		typ:           nullIfEmpty(l.LoanMeta.Type),
+		assetSymbol:   nullIfEmpty(l.LoanMeta.AssetSymbol),
+		dex:           nullIfEmpty(l.LoanMeta.DexName),
+		walletAddress: nullIfEmpty(l.LoanMeta.WalletAddress),
+		walletType:    nullIfEmpty(l.LoanMeta.WalletType),
+		location:      nullIfEmpty(l.LoanMeta.Location),
+	}
+}
+
 // UpsertLoans upserts loan registry rows and returns loan
-// address -> maple_loan.id. On conflict, refreshes the pool reference and the
-// loanMeta columns (a loan's metadata can change between snapshots).
-// borrower_user_id is deliberately not refreshed: a loan contract's borrower
-// is immutable, so the value from first insert stays authoritative — and the
-// stored value is compared against the incoming one so a violation of that
-// assumption fails the call instead of vanishing.
+// address -> maple_loan.id. maple_pool_id, borrower_user_id, and every
+// loanMeta column are immutable per loan — empirically unchanged across ~1
+// year of subgraph history — so the upsert refreshes nothing on conflict (the
+// no-op DO UPDATE keeps RETURNING yielding the stored row) and the scan fails
+// the run if any stored value differs from the incoming one. Nullable
+// loanMeta columns compare NULL-safely, so editorial enrichment (null→value)
+// trips the guard like any other change.
 func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
@@ -265,49 +308,57 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 
 	batch := &pgx.Batch{}
 	for _, l := range sorted {
-		var metaType, metaAssetSymbol, metaDex, metaWalletAddress, metaWalletType, metaLocation *string
-		if l.LoanMeta != nil {
-			metaType = nullIfEmpty(l.LoanMeta.Type)
-			metaAssetSymbol = nullIfEmpty(l.LoanMeta.AssetSymbol)
-			metaDex = nullIfEmpty(l.LoanMeta.DexName)
-			metaWalletAddress = nullIfEmpty(l.LoanMeta.WalletAddress)
-			metaWalletType = nullIfEmpty(l.LoanMeta.WalletType)
-			metaLocation = nullIfEmpty(l.LoanMeta.Location)
-		}
-
+		m := loanMetaColsOf(l)
 		batch.Queue(
 			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
 			                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
 			                         loan_meta_wallet_type, loan_meta_location)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET
-			     maple_pool_id = EXCLUDED.maple_pool_id,
-			     loan_meta_type = EXCLUDED.loan_meta_type,
-			     loan_meta_asset_symbol = EXCLUDED.loan_meta_asset_symbol,
-			     loan_meta_dex = EXCLUDED.loan_meta_dex,
-			     loan_meta_wallet_address = EXCLUDED.loan_meta_wallet_address,
-			     loan_meta_wallet_type = EXCLUDED.loan_meta_wallet_type,
-			     loan_meta_location = EXCLUDED.loan_meta_location
-			 RETURNING id, borrower_user_id`,
+			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET id = maple_loan.id
+			 RETURNING id, maple_pool_id, borrower_user_id,
+			           loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
+			           loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location`,
 			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
-			metaType, metaAssetSymbol, metaDex, metaWalletAddress, metaWalletType, metaLocation,
+			m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location,
 		)
 	}
 
-	// The scan enforces borrower immutability: the upsert never refreshes
-	// borrower_user_id, so a stored value differing from the API's resolved
-	// borrower means the "a loan contract's borrower is immutable"
-	// assumption broke upstream — fail loudly instead of silently keeping
-	// the stale association.
 	return collectBatchRows(ctx, tx, batch, sorted, "maple loan",
 		func(row pgx.Row, l *maple.Loan) (common.Address, int64, error) {
 			addr := common.BytesToAddress(l.LoanAddress)
-			var id, storedBorrower int64
-			if err := row.Scan(&id, &storedBorrower); err != nil {
+			var id, storedPoolID, storedBorrower int64
+			var stored loanMetaCols
+			if err := row.Scan(&id, &storedPoolID, &storedBorrower,
+				&stored.typ, &stored.assetSymbol, &stored.dex,
+				&stored.walletAddress, &stored.walletType, &stored.location); err != nil {
 				return common.Address{}, 0, fmt.Errorf("upserting maple loan %s: %w", addr, err)
 			}
+
+			incoming := loanMetaColsOf(l)
+			var mismatches []string
+			if storedPoolID != l.PoolID {
+				mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, l.PoolID))
+			}
 			if storedBorrower != l.BorrowerUserID {
-				return common.Address{}, 0, fmt.Errorf("maple loan %s borrower changed: stored user id %d, API resolved user id %d (loan borrowers are immutable; refusing the snapshot)", addr, storedBorrower, l.BorrowerUserID)
+				mismatches = append(mismatches, fmt.Sprintf("borrower_user_id (stored %d, incoming %d)", storedBorrower, l.BorrowerUserID))
+			}
+			for _, c := range []struct {
+				field            string
+				stored, incoming *string
+			}{
+				{"loan_meta_type", stored.typ, incoming.typ},
+				{"loan_meta_asset_symbol", stored.assetSymbol, incoming.assetSymbol},
+				{"loan_meta_dex", stored.dex, incoming.dex},
+				{"loan_meta_wallet_address", stored.walletAddress, incoming.walletAddress},
+				{"loan_meta_wallet_type", stored.walletType, incoming.walletType},
+				{"loan_meta_location", stored.location, incoming.location},
+			} {
+				if !equalStringPtr(c.stored, c.incoming) {
+					mismatches = append(mismatches, fmt.Sprintf("%s (stored %s, incoming %s)", c.field, strOrNull(c.stored), strOrNull(c.incoming)))
+				}
+			}
+			if err := registryMismatchError("maple loan", addr, mismatches); err != nil {
+				return common.Address{}, 0, err
 			}
 			return addr, id, nil
 		})
@@ -400,8 +451,13 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 }
 
 // UpsertSkyStrategies upserts strategy registry rows and returns strategy
-// address -> maple_sky_strategy.id. On conflict, refreshes the pool
-// reference and version.
+// address -> maple_sky_strategy.id. maple_pool_id and version are immutable
+// per strategy, so the upsert refreshes nothing on conflict (the no-op DO
+// UPDATE keeps RETURNING yielding the stored row) and the scan fails the run
+// if any stored value differs from the incoming one. version has a documented
+// live mutation path (Governor-enabled proxy upgrade) but is empirically
+// unchanged to date; a real upgrade would trip this guard, which is the
+// intended first-observed-mismatch signal.
 func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 	if len(strategies) == 0 {
 		return make(map[common.Address]int64), nil
@@ -414,16 +470,32 @@ func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx
 		batch.Queue(
 			`INSERT INTO maple_sky_strategy (chain_id, strategy_address, maple_pool_id, version)
 			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (chain_id, strategy_address) DO UPDATE SET
-			     maple_pool_id = EXCLUDED.maple_pool_id,
-			     version = EXCLUDED.version
-			 RETURNING id`,
+			 ON CONFLICT (chain_id, strategy_address) DO UPDATE SET id = maple_sky_strategy.id
+			 RETURNING id, maple_pool_id, version`,
 			s.ChainID, s.StrategyAddress, s.PoolID, s.Version,
 		)
 	}
 
-	return collectBatchIDs(ctx, tx, batch, sorted, "maple sky strategy",
-		func(s *maple.SkyStrategy) common.Address { return common.BytesToAddress(s.StrategyAddress) })
+	return collectBatchRows(ctx, tx, batch, sorted, "maple sky strategy",
+		func(row pgx.Row, s *maple.SkyStrategy) (common.Address, int64, error) {
+			addr := common.BytesToAddress(s.StrategyAddress)
+			var id, storedPoolID int64
+			var storedVersion *int // version is a nullable column; a stored NULL is itself a mismatch
+			if err := row.Scan(&id, &storedPoolID, &storedVersion); err != nil {
+				return common.Address{}, 0, fmt.Errorf("upserting maple sky strategy %s: %w", addr, err)
+			}
+			var mismatches []string
+			if storedPoolID != s.PoolID {
+				mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, s.PoolID))
+			}
+			if storedVersion == nil || *storedVersion != s.Version {
+				mismatches = append(mismatches, fmt.Sprintf("version (stored %s, incoming %d)", intOrNull(storedVersion), s.Version))
+			}
+			if err := registryMismatchError("maple sky strategy", addr, mismatches); err != nil {
+				return common.Address{}, 0, err
+			}
+			return addr, id, nil
+		})
 }
 
 // SaveSkyStrategyStates inserts strategy state snapshots (same

@@ -57,8 +57,10 @@ type MapleGraphQLRepository interface {
 
 	// UpsertPools upserts pool registry rows (asset_token_id already resolved
 	// by the service via GetOrCreateAssetTokens) and returns
-	// address -> maple_pool.id. On conflict, refreshes name, asset_token_id,
-	// and is_syrup.
+	// address -> maple_pool.id. name, asset_token_id, and is_syrup are
+	// immutable per pool: nothing is refreshed on conflict, and
+	// implementations must fail when any stored value differs from the
+	// incoming one.
 	UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
 
 	// SavePoolStates inserts pool state snapshots.
@@ -66,11 +68,10 @@ type MapleGraphQLRepository interface {
 
 	// UpsertLoans upserts loan registry rows (maple_pool_id and
 	// borrower_user_id already resolved by the service) and returns loan
-	// address -> maple_loan.id. On conflict, refreshes maple_pool_id and the
-	// loanMeta columns (a loan can be reassigned and gain/lose meta between
-	// snapshots); borrower_user_id is deliberately never refreshed (a loan
-	// contract's borrower is immutable), and implementations must fail when
-	// the stored borrower differs from the incoming one.
+	// address -> maple_loan.id. maple_pool_id, borrower_user_id, and every
+	// loanMeta column are immutable per loan: nothing is refreshed on
+	// conflict, and implementations must fail when any stored value differs
+	// from the incoming one (nullable loanMeta columns compared NULL-safely).
 	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
@@ -81,8 +82,10 @@ type MapleGraphQLRepository interface {
 	SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
 
 	// UpsertSkyStrategies upserts strategy registry rows and returns strategy
-	// address -> maple_sky_strategy.id. On conflict, refreshes maple_pool_id
-	// and version.
+	// address -> maple_sky_strategy.id. maple_pool_id and version are
+	// immutable per strategy: nothing is refreshed on conflict, and
+	// implementations must fail when any stored value differs from the
+	// incoming one.
 	UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
 
 	// SaveSkyStrategyStates inserts strategy state snapshots.

@@ -373,7 +373,7 @@ func TestMapleGetOrCreateAssetTokens_DecimalsDriftFails(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
+func TestMapleUpsertPools_RoundTripAndNoOp(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	repo := newMapleRepo(t, 0)
@@ -381,17 +381,15 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 
 	var ids map[common.Address]int64
 	var poolA *maple.Pool
-	var usdtTokenID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		usdcTokenID := upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
-		usdtTokenID = upsertTestAssetToken(t, ctx, repo, tx, 0xef, "USDT")
 
 		var err error
 		poolA, err = maple.NewPool(1, protocolID, mapleAddr(0x10), "Pool A", usdcTokenID, false)
 		if err != nil {
 			t.Fatalf("NewPool: %v", err)
 		}
-		poolB, err := maple.NewPool(1, protocolID, mapleAddr(0x11), "Pool B", usdtTokenID, true)
+		poolB, err := maple.NewPool(1, protocolID, mapleAddr(0x11), "Pool B", usdcTokenID, true)
 		if err != nil {
 			t.Fatalf("NewPool: %v", err)
 		}
@@ -402,11 +400,8 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 		t.Fatalf("len(ids) = %d, want 2", len(ids))
 	}
 
-	// Re-upsert with changed name/is_syrup/asset refreshes and keeps the
-	// same id.
-	poolA.Name = "Pool A renamed"
-	poolA.IsSyrup = true
-	poolA.AssetTokenID = usdtTokenID
+	// Re-upsert with all values unchanged is a clean no-op that keeps the
+	// same id (nothing is refreshed).
 	var again map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
@@ -414,19 +409,82 @@ func TestMapleUpsertPools_RoundTripAndRefresh(t *testing.T) {
 		return err
 	})
 	if again[common.BytesToAddress(poolA.Address)] != ids[common.BytesToAddress(poolA.Address)] {
-		t.Errorf("pool id changed on re-upsert")
+		t.Errorf("pool id changed on unchanged re-upsert")
 	}
 
 	var name string
 	var isSyrup bool
-	var assetTokenID int64
 	if err := maplePool.QueryRow(ctx,
-		`SELECT name, is_syrup, asset_token_id FROM maple_pool WHERE chain_id = 1 AND address = $1`,
-		poolA.Address).Scan(&name, &isSyrup, &assetTokenID); err != nil {
+		`SELECT name, is_syrup FROM maple_pool WHERE chain_id = 1 AND address = $1`,
+		poolA.Address).Scan(&name, &isSyrup); err != nil {
 		t.Fatalf("querying pool: %v", err)
 	}
-	if name != "Pool A renamed" || !isSyrup || assetTokenID != usdtTokenID {
-		t.Errorf("name/is_syrup/asset_token_id = %q/%v/%d, want refreshed values", name, isSyrup, assetTokenID)
+	if name != "Pool A" || isSyrup {
+		t.Errorf("name/is_syrup = %q/%v, want unchanged Pool A/false", name, isSyrup)
+	}
+}
+
+func TestMapleUpsertPools_RejectsFieldChange(t *testing.T) {
+	// Every pool attribute is immutable; a re-upsert with any changed value
+	// must fail the run, naming the field, instead of refreshing the row.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	var usdcID, usdtID int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		usdcID = upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		usdtID = upsertTestAssetToken(t, ctx, repo, tx, 0xef, "USDT")
+		return nil
+	})
+
+	baseline, err := maple.NewPool(1, protocolID, mapleAddr(0x10), "Pool A", usdcID, false)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+
+	upsert := func(p *maple.Pool) error {
+		tx, err := maplePool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		if _, err := repo.UpsertPools(ctx, tx, []*maple.Pool{p}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := upsert(baseline); err != nil {
+		t.Fatalf("baseline upsert: %v", err)
+	}
+	// Unchanged re-upsert is a clean no-op.
+	if err := upsert(baseline); err != nil {
+		t.Fatalf("unchanged re-upsert: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		mutate    func(p *maple.Pool)
+		wantField string
+	}{
+		{"name", func(p *maple.Pool) { p.Name = "Pool A renamed" }, "name"},
+		{"asset_token_id", func(p *maple.Pool) { p.AssetTokenID = usdtID }, "asset_token_id"},
+		{"is_syrup", func(p *maple.Pool) { p.IsSyrup = true }, "is_syrup"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := *baseline
+			tc.mutate(&changed)
+			err := upsert(&changed)
+			if err == nil {
+				t.Fatal("expected mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) || !strings.Contains(err.Error(), "registry fields changed") {
+				t.Errorf("error %q should report a registry mismatch naming %q", err.Error(), tc.wantField)
+			}
+		})
 	}
 }
 
@@ -796,18 +854,20 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_RefreshesMeta(t *testing.T) {
+func TestMapleUpsertLoans_NoOpOnUnchanged(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x22)
 
-	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x32, nil)
+	meta := &maple.LoanMeta{Type: "strategy", Location: "base"}
+	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta)
 
-	// Same loan reappears with meta — columns refresh, id stable.
-	sameID := upsertTestLoan(t, ctx, repo, poolID, 0x32, &maple.LoanMeta{Type: "strategy", Location: "base"})
+	// Same loan with all values unchanged is a clean no-op, id stable, and
+	// the stored meta is intact (nothing is refreshed).
+	sameID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta)
 	if sameID != loanID {
-		t.Fatalf("loan id changed on re-upsert: %d vs %d", sameID, loanID)
+		t.Fatalf("loan id changed on unchanged re-upsert: %d vs %d", sameID, loanID)
 	}
 
 	var metaType, location *string
@@ -818,10 +878,207 @@ func TestMapleUpsertLoans_RefreshesMeta(t *testing.T) {
 		t.Fatalf("querying loan: %v", err)
 	}
 	if metaType == nil || *metaType != "strategy" || location == nil || *location != "base" {
-		t.Errorf("meta not refreshed: type=%v location=%v", metaType, location)
+		t.Errorf("meta changed: type=%v location=%v, want strategy/base", metaType, location)
 	}
 	if !isInternal {
-		t.Error("is_internal = false, want true after meta refresh")
+		t.Error("is_internal = false, want true")
+	}
+}
+
+func TestMapleUpsertLoans_RejectsFieldChange(t *testing.T) {
+	// maple_pool_id and every loanMeta column are immutable; a re-upsert with
+	// any changed value (including editorial null->value enrichment of a
+	// nullable loanMeta field) must fail the run naming the field, instead of
+	// refreshing the row.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+	poolA := upsertTestPool(t, ctx, repo, 0x20)
+	poolB := upsertTestPool(t, ctx, repo, 0x21)
+
+	var borrowerID int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{common.BytesToAddress(mapleAddr(0xab))})
+		if err != nil {
+			return err
+		}
+		borrowerID = users[common.BytesToAddress(mapleAddr(0xab))]
+		return nil
+	})
+
+	loanAddr := mapleAddr(0x30)
+	upsert := func(poolID int64, meta *maple.LoanMeta) error {
+		tx, err := maplePool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, borrowerID, meta)
+		if err != nil {
+			t.Fatalf("NewLoan: %v", err)
+		}
+		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	// Baseline: poolA, nil meta (every loan_meta_* column NULL).
+	if err := upsert(poolA, nil); err != nil {
+		t.Fatalf("baseline upsert: %v", err)
+	}
+	// Unchanged re-upsert is a clean no-op.
+	if err := upsert(poolA, nil); err != nil {
+		t.Fatalf("unchanged re-upsert: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		poolID    int64
+		meta      *maple.LoanMeta
+		wantField string
+	}{
+		{"pool reassignment", poolB, nil, "maple_pool_id"},
+		{"loan_meta_type null->value", poolA, &maple.LoanMeta{Type: "amm"}, "loan_meta_type"},
+		{"loan_meta_asset_symbol null->value", poolA, &maple.LoanMeta{AssetSymbol: "BTC"}, "loan_meta_asset_symbol"},
+		{"loan_meta_dex null->value", poolA, &maple.LoanMeta{DexName: "Uniswap"}, "loan_meta_dex"},
+		{"loan_meta_wallet_address null->value", poolA, &maple.LoanMeta{WalletAddress: "0xdead"}, "loan_meta_wallet_address"},
+		{"loan_meta_wallet_type null->value", poolA, &maple.LoanMeta{WalletType: "custody"}, "loan_meta_wallet_type"},
+		{"loan_meta_location null->value", poolA, &maple.LoanMeta{Location: "Cayman"}, "loan_meta_location"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := upsert(tc.poolID, tc.meta)
+			if err == nil {
+				t.Fatal("expected mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) || !strings.Contains(err.Error(), "registry fields changed") {
+				t.Errorf("error %q should report a registry mismatch naming %q", err.Error(), tc.wantField)
+			}
+		})
+	}
+}
+
+func TestMapleUpsertLoans_RejectsMetaClear(t *testing.T) {
+	// The NULL-safe comparison must trip in the value->null direction too: a
+	// loan that stored a non-null loanMeta field and reappears with that field
+	// cleared is a mismatch, not a silent clear.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+	poolID := upsertTestPool(t, ctx, repo, 0x28)
+
+	var borrowerID int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{common.BytesToAddress(mapleAddr(0xab))})
+		if err != nil {
+			return err
+		}
+		borrowerID = users[common.BytesToAddress(mapleAddr(0xab))]
+		return nil
+	})
+
+	loanAddr := mapleAddr(0x35)
+	upsert := func(meta *maple.LoanMeta) error {
+		tx, err := maplePool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, borrowerID, meta)
+		if err != nil {
+			t.Fatalf("NewLoan: %v", err)
+		}
+		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := upsert(&maple.LoanMeta{Type: "amm", Location: "Cayman"}); err != nil {
+		t.Fatalf("baseline upsert: %v", err)
+	}
+	// Clearing Location (value->null) must fail naming loan_meta_location.
+	err := upsert(&maple.LoanMeta{Type: "amm"})
+	if err == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "loan_meta_location") || !strings.Contains(err.Error(), "registry fields changed") {
+		t.Errorf("error %q should report a registry mismatch naming loan_meta_location", err.Error())
+	}
+}
+
+func TestMapleUpsertPools_RejectsNullStoredName(t *testing.T) {
+	// name is a nullable column. A row seeded with NULL name (e.g. by another
+	// writer) that re-upserts with a concrete name must surface as a named
+	// registry mismatch, not a misattributed scan error.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	var assetID int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		assetID = upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		return nil
+	})
+	if _, err := maplePool.Exec(ctx,
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
+		 VALUES (1, $1, $2, NULL, $3, false)`,
+		protocolID, mapleAddr(0x12), assetID); err != nil {
+		t.Fatalf("seeding NULL-name pool: %v", err)
+	}
+
+	pool, err := maple.NewPool(1, protocolID, mapleAddr(0x12), "Pool A", assetID, false)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	tx, err := maplePool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, upsertErr := repo.UpsertPools(ctx, tx, []*maple.Pool{pool})
+	if upsertErr == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+	if !strings.Contains(upsertErr.Error(), "name") || !strings.Contains(upsertErr.Error(), "registry fields changed") {
+		t.Errorf("error %q should report a registry mismatch naming name (stored NULL)", upsertErr.Error())
+	}
+}
+
+func TestMapleUpsertSkyStrategies_RejectsNullStoredVersion(t *testing.T) {
+	// version is a nullable column; a stored NULL re-upserted with a concrete
+	// version must surface as a named registry mismatch, not a scan error.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x29)
+
+	if _, err := maplePool.Exec(ctx,
+		`INSERT INTO maple_sky_strategy (chain_id, strategy_address, maple_pool_id, version)
+		 VALUES (1, $1, $2, NULL)`,
+		mapleAddr(0x42), poolID); err != nil {
+		t.Fatalf("seeding NULL-version strategy: %v", err)
+	}
+
+	strategy, err := maple.NewSkyStrategy(1, mapleAddr(0x42), poolID, 100)
+	if err != nil {
+		t.Fatalf("NewSkyStrategy: %v", err)
+	}
+	tx, err := maplePool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, upsertErr := repo.UpsertSkyStrategies(ctx, tx, []*maple.SkyStrategy{strategy})
+	if upsertErr == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+	if !strings.Contains(upsertErr.Error(), "version") || !strings.Contains(upsertErr.Error(), "registry fields changed") {
+		t.Errorf("error %q should report a registry mismatch naming version (stored NULL)", upsertErr.Error())
 	}
 }
 
@@ -899,8 +1156,8 @@ func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected borrower-change error, got nil")
 	}
-	if !strings.Contains(err.Error(), "borrower changed") {
-		t.Errorf("error %q should mention borrower change", err.Error())
+	if !strings.Contains(err.Error(), "borrower_user_id") || !strings.Contains(err.Error(), "registry fields changed") {
+		t.Errorf("error %q should report a registry mismatch naming borrower_user_id", err.Error())
 	}
 }
 
@@ -995,23 +1252,23 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 		t.Fatal("strategy id not resolved")
 	}
 
-	// Version refresh keeps the id.
-	strategy.Version = 200
+	// Unchanged re-upsert is a clean no-op that keeps the id (nothing is
+	// refreshed).
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
 		ids, err = repo.UpsertSkyStrategies(ctx, tx, []*maple.SkyStrategy{strategy})
 		return err
 	})
 	if ids[common.BytesToAddress(strategy.StrategyAddress)] != strategyID {
-		t.Error("strategy id changed on re-upsert")
+		t.Error("strategy id changed on unchanged re-upsert")
 	}
 	var version int
 	if err := maplePool.QueryRow(ctx,
 		`SELECT version FROM maple_sky_strategy WHERE id = $1`, strategyID).Scan(&version); err != nil {
 		t.Fatalf("querying strategy: %v", err)
 	}
-	if version != 200 {
-		t.Errorf("version = %d, want 200", version)
+	if version != 100 {
+		t.Errorf("version = %d, want unchanged 100", version)
 	}
 
 	state, err := maple.NewSkyStrategyState(maple.SkyStrategyStateParams{
@@ -1034,6 +1291,64 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 	}
 	if deposited != "100" || feeRate != nil {
 		t.Errorf("deposited/feeRate = %s/%v", deposited, feeRate)
+	}
+}
+
+func TestMapleUpsertSkyStrategies_RejectsFieldChange(t *testing.T) {
+	// maple_pool_id and version are immutable; a re-upsert with any changed
+	// value must fail the run naming the field, instead of refreshing the row.
+	// version is the field with a live mutation path (proxy upgrade), so its
+	// guard firing is the expected first-observed-mismatch signal.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolA := upsertTestPool(t, ctx, repo, 0x26)
+	poolB := upsertTestPool(t, ctx, repo, 0x27)
+
+	strategyAddr := mapleAddr(0x41)
+	upsert := func(poolID int64, version int) error {
+		tx, err := maplePool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		strategy, err := maple.NewSkyStrategy(1, strategyAddr, poolID, version)
+		if err != nil {
+			t.Fatalf("NewSkyStrategy: %v", err)
+		}
+		if _, err := repo.UpsertSkyStrategies(ctx, tx, []*maple.SkyStrategy{strategy}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := upsert(poolA, 100); err != nil {
+		t.Fatalf("baseline upsert: %v", err)
+	}
+	// Unchanged re-upsert is a clean no-op.
+	if err := upsert(poolA, 100); err != nil {
+		t.Fatalf("unchanged re-upsert: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		poolID    int64
+		version   int
+		wantField string
+	}{
+		{"pool reassignment", poolB, 100, "maple_pool_id"},
+		{"version upgrade", poolA, 200, "version"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := upsert(tc.poolID, tc.version)
+			if err == nil {
+				t.Fatal("expected mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) || !strings.Contains(err.Error(), "registry fields changed") {
+				t.Errorf("error %q should report a registry mismatch naming %q", err.Error(), tc.wantField)
+			}
+		})
 	}
 }
 
