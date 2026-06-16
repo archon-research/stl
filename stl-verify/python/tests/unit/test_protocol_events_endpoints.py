@@ -78,8 +78,8 @@ def test_list_protocol_events_returns_rows_and_applies_filters():
     kwargs = service.list_events.await_args.kwargs
     assert kwargs["tx_hash"] == _VALID_TX_HASH
     assert kwargs["protocol_name"] == "spark"
-    assert kwargs["from_timestamp"] == datetime(2026, 3, 5, 0, 0, tzinfo=UTC)
-    assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
+    assert kwargs["from_timestamp"] == datetime(2026, 3, 5, 0, 0)
+    assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 12, 0)
     assert kwargs["limit"] == 25
 
 

@@ -204,7 +204,7 @@ def test_list_prime_debt_snapshots_forwards_explicit_time_window():
 
         assert response.status_code == 200
         kwargs = service.list_debt_snapshots.await_args.kwargs
-        assert kwargs["from_timestamp"] == datetime(2026, 3, 1, 0, 0, tzinfo=UTC)
-        assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 0, 0, tzinfo=UTC)
+        assert kwargs["from_timestamp"] == datetime(2026, 3, 1, 0, 0)
+        assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 0, 0)
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)

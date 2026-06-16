@@ -16,8 +16,8 @@ def test_defaults_to_last_24h_window_and_window_based_resolution() -> None:
         resolution=None,
     )
 
-    assert params.from_timestamp == datetime(2026, 3, 4, 12, 0, tzinfo=UTC)
-    assert params.to_timestamp == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
+    assert params.from_timestamp == datetime(2026, 3, 4, 12, 0)
+    assert params.to_timestamp == datetime(2026, 3, 5, 12, 0)
     assert params.resolution == TimeSeriesResolution.PT5M
     assert params.interval_ms == 5 * 60 * 1000
 

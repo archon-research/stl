@@ -301,8 +301,8 @@ def test_list_allocation_activity_returns_rows_and_forwards_filters():
     assert kwargs["action_type"] == "in"
     assert kwargs["token_symbol"] == "usdc"
     assert kwargs["tx_hash"] == "0x" + "ab" * 32
-    assert kwargs["from_timestamp"] == from_ts
-    assert kwargs["to_timestamp"] == to_ts
+    assert kwargs["from_timestamp"] == from_ts.replace(tzinfo=None)
+    assert kwargs["to_timestamp"] == to_ts.replace(tzinfo=None)
     assert kwargs["limit"] == 50
 
 
