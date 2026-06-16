@@ -19,6 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -246,7 +247,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		duration := time.Since(start)
 		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "block processing failed")
+			telemetry.SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "fetchAndProcessReceipts", retErr)
 		}
 		s.logger.Debug("fetchAndProcessReceipts completed",
@@ -350,7 +351,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		attribute.String("tx.hash", receipt.TransactionHash))
 	defer func() {
 		if retErr != nil {
-			SetSpanError(span, retErr, "receipt processing failed")
+			telemetry.SetSpanError(span, retErr, "receipt processing failed")
 		}
 		span.End()
 	}()
