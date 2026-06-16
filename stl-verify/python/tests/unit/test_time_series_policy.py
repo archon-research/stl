@@ -14,15 +14,21 @@ from app.domain.time_series import (
 _NOW = datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
 
 
-def _resolve(**overrides):
-    kwargs = {
-        "from_timestamp": None,
-        "to_timestamp": None,
-        "resolution": None,
-        "now": _NOW,
-    }
-    kwargs.update(overrides)
-    return resolve_time_series_query(**kwargs)
+def _resolve(
+    *,
+    from_timestamp: datetime | None = None,
+    to_timestamp: datetime | None = None,
+    resolution: TimeSeriesResolution | None = None,
+    aggregate: bool = False,
+    now: datetime = _NOW,
+) -> TimeSeriesQuery:
+    return resolve_time_series_query(
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+        resolution=resolution,
+        aggregate=aggregate,
+        now=now,
+    )
 
 
 # --- resolution enum -------------------------------------------------------
