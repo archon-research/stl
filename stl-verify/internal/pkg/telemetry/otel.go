@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
@@ -32,6 +33,9 @@ func InitOTEL(ctx context.Context, config OTELConfig) (func(context.Context), er
 
 	// Tracer
 	traceEndpoint := env.Get("JAEGER_ENDPOINT", "")
+	if traceEndpoint == "" {
+		logger.Warn("JAEGER_ENDPOINT is not set; traces are exported to stdout (pretty-printed span JSON in the process logs)")
+	}
 	shutdownTracer, err := InitTracer(ctx, TracerConfig{
 		ServiceName:    config.ServiceName,
 		ServiceVersion: config.ServiceVersion,
@@ -62,6 +66,11 @@ func InitOTEL(ctx context.Context, config OTELConfig) (func(context.Context), er
 	}
 
 	return func(ctx context.Context) {
+		// Bound the final flush: with an unreachable collector the exporters
+		// would otherwise block process exit for their internal defaults
+		// (10-30s each).
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
 		for _, fn := range shutdowns {
 			if err := fn(ctx); err != nil {
 				logger.Warn("failed to shutdown telemetry", "error", err)

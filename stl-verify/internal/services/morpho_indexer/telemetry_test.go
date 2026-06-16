@@ -172,8 +172,8 @@ func TestTelemetry_NilSafe(t *testing.T) {
 
 	t.Run("SetSpanError", func(t *testing.T) {
 		// SetSpanError is a package-level function, not a method.
-		span := noopSpan()
-		SetSpanError(span, nil, "should be no-op")
-		SetSpanError(span, someErr, "test error description")
+		span := telemetry.NoopSpan()
+		telemetry.SetSpanError(span, nil, "should be no-op")
+		telemetry.SetSpanError(span, someErr, "test error description")
 	})
 }

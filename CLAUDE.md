@@ -103,35 +103,47 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 ## Code Conventions
 
 - **Keep an eye out for deduplicate possibilities**: Try to consolidate lots of duplicated code. Create shareable libraries instead of duplicating code everywhere.
-- **Interfaces**: Use `-er` suffix (Reader, Publisher)
+- **Interfaces**: Behavior interfaces use the `-er` suffix (Reader, Publisher, BlockSubscriber). Ports follow the established noun patterns instead: persistence ports are `XxxRepository`, external-system ports are `XxxClient`/`XxxCache`/`XxxProvider`. Do not rename Repository/Client ports to `-er` forms.
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
 - **Errors**:
-Wrap with context: `fmt.Errorf("doing X: %w", err)`.
-Never ignore errors.
-Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
-**Fail hard and early on unexpected errors.**
+    - Wrap with context: `fmt.Errorf("doing X: %w", err)`.
+    - Never ignore errors.
+    - Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
+    - **Fail hard and early on unexpected errors.**
 - **Testing**:
-    Table-driven tests, mock outbound ports for unit tests.
-    Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission critical that code is correct and robust.
-    In services, ONLY test the public api. Dont test internals if you can avoid it.
-    You can move the main.go code into a function and only call that from main() so that you can test it properly.
-    For main.go files, only create integration tests.
-    For services, create both unit and integration tests.
-    Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
+    - Table-driven tests, mock outbound ports for unit tests.
+    - Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission-critical that code is correct and robust.
+    - In services, ONLY test the public api. Don't test internals if you can avoid it.
+    - You can move the main.go code into a function and only call that from main() so that you can test it properly.
+    - For main.go files, only create integration tests.
+    - For services, create both unit and integration tests.
+    - Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
+    - **No test-order dependencies in integration tests sharing a schema**: never rely on migration-seeded rows or on rows another test created — sibling tests TRUNCATE/DELETE shared tables (e.g. `TRUNCATE protocol CASCADE`), so seed everything your test needs yourself via idempotent upserts. Verify by running the whole test file/package, not just your tests filtered with `-run` (a filtered run hides the wipe that breaks you).
 - **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition**:
-    Compose large functions from smaller functions.
-    Large functions should read like prose, with each step delegated to a well-named helper function.
+    - Compose large functions from smaller functions.
+    - Large functions should read like prose, with each step delegated to a well-named helper function.
+- **Comments**: Explain *why*, not *what*; default to none.
+    - Never restate the code or the language: no comments on signatures, field names, or standard Go behavior (zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc.). The reader knows Go.
+    - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
+    - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
+    - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+    - When unsure, leave it out: a stale or redundant comment is worse than none.
 - **Libraries**:
-    Use the standard library as much as possible.
-    Instead of duplicating code, create a function containing the shared functionality, and re-use it.
+    - Use the standard library as much as possible.
+    - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
 - **Database**:
-    Always think hard and carefully about how the wrong data could be written to the database.
-    Always think hard and carefully about schema design.
-    For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
-    NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
+    - Always think hard and carefully about how the wrong data could be written to the database.
+    - Always think hard and carefully about schema design.
+    - For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
+    - NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
+- **System-wide registries** (`chain`, `token`, `user`, `protocol`, `prime`, `oracle` + mapping tables): FK these instead of duplicating address/symbol/decimals/name columns.
+    - FK by natural key only (`token`/`user`/`protocol`: `(chain_id, address)`; `oracle`/`prime`: `name`). Never resolve FKs by display label (e.g. token symbol) — labels are not unique or authoritative.
+    - Assets with no on-chain address (custodied BTC/SOL, off-chain API symbols) get no `token` row: store raw symbol or curated nullable `token_id` (see `offchain_price_asset`). Never invent addresses.
+- **External API adapters**:
+    - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
 
 ## Do NOT
 

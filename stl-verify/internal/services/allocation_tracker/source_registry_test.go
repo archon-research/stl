@@ -8,30 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
 )
-
-// recordingHandler captures slog records for assertions. Tests using it call the
-// registry sequentially, so it needs no locking.
-type recordingHandler struct{ records []slog.Record }
-
-func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
-	h.records = append(h.records, r)
-	return nil
-}
-func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
-
-func (h *recordingHandler) countWarn(substr string) int {
-	n := 0
-	for _, r := range h.records {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, substr) {
-			n++
-		}
-	}
-	return n
-}
 
 // mockSource is a mock PositionSource for testing the registry.
 type mockSource struct {
@@ -275,7 +254,7 @@ func TestSourceRegistry_FetchAll_NilResultIsError(t *testing.T) {
 }
 
 func TestSourceRegistry_FetchAll_WarnsOnceForStubRouted(t *testing.T) {
-	h := &recordingHandler{}
+	h := &testutil.SlogRecorder{}
 	logger := slog.New(h)
 	registry := NewSourceRegistry(logger)
 	stub := NewStubSource("psm3", "psm3", logger)
@@ -293,7 +272,7 @@ func TestSourceRegistry_FetchAll_WarnsOnceForStubRouted(t *testing.T) {
 		}
 	}
 
-	if got := h.countWarn("not-yet-implemented stub"); got != 1 {
+	if got := h.CountWarn("not-yet-implemented stub"); got != 1 {
 		t.Errorf("stub warning fired %d times, want exactly 1 (deduped per type/protocol)", got)
 	}
 }
@@ -305,7 +284,7 @@ type placeholderMockSource struct{ mockSource }
 func (m *placeholderMockSource) isPlaceholder() {}
 
 func TestSourceRegistry_FetchAll_StubStillFetchedAfterWarn(t *testing.T) {
-	h := &recordingHandler{}
+	h := &testutil.SlogRecorder{}
 	registry := NewSourceRegistry(slog.New(h))
 	stub := &placeholderMockSource{mockSource{name: "psm3", tokenTypes: map[string]bool{"psm3": true}}}
 	registry.Register(stub)
@@ -317,7 +296,7 @@ func TestSourceRegistry_FetchAll_StubStillFetchedAfterWarn(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if got := h.countWarn("not-yet-implemented stub"); got != 1 {
+	if got := h.CountWarn("not-yet-implemented stub"); got != 1 {
 		t.Errorf("stub warning fired %d times, want 1", got)
 	}
 	if stub.called != 1 {
@@ -326,7 +305,7 @@ func TestSourceRegistry_FetchAll_StubStillFetchedAfterWarn(t *testing.T) {
 }
 
 func TestSourceRegistry_FetchAll_SkipSourceDoesNotWarn(t *testing.T) {
-	h := &recordingHandler{}
+	h := &testutil.SlogRecorder{}
 	logger := slog.New(h)
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewSkipSource("anchorage-skip", "anchorage", nil, logger))
@@ -339,16 +318,16 @@ func TestSourceRegistry_FetchAll_SkipSourceDoesNotWarn(t *testing.T) {
 	}
 
 	// A SkipSource's work is intentionally done elsewhere, so it must not warn.
-	if got := h.countWarn("not-yet-implemented stub"); got != 0 {
+	if got := h.CountWarn("not-yet-implemented stub"); got != 0 {
 		t.Errorf("skip source emitted %d stub warnings, want 0", got)
 	}
-	if got := h.countWarn("unsupported entry skipped"); got != 0 {
+	if got := h.CountWarn("unsupported entry skipped"); got != 0 {
 		t.Errorf("skip source emitted %d unsupported warnings, want 0", got)
 	}
 }
 
 func TestSourceRegistry_FetchAll_WarnsOnceForUnsupported(t *testing.T) {
-	h := &recordingHandler{}
+	h := &testutil.SlogRecorder{}
 	registry := NewSourceRegistry(slog.New(h))
 
 	entries := []*TokenEntry{
@@ -361,7 +340,7 @@ func TestSourceRegistry_FetchAll_WarnsOnceForUnsupported(t *testing.T) {
 		}
 	}
 
-	if got := h.countWarn("unsupported entry skipped"); got != 1 {
+	if got := h.CountWarn("unsupported entry skipped"); got != 1 {
 		t.Errorf("unsupported warning fired %d times, want exactly 1", got)
 	}
 }
