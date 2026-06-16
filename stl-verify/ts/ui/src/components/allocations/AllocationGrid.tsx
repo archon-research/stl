@@ -153,7 +153,7 @@ function MetricCardTrend({
   const lastPoint = chart.data[chart.data.length - 1];
   const yRange = Math.max(maxValue - minValue, 0);
   const midValue = minValue + yRange / 2;
-  const chartHeight = 156;
+  const chartHeight = 184;
 
   return (
     <div className={css({ mt: '2', display: 'grid', gap: '1.5' })}>
