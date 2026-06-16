@@ -19,7 +19,7 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 
 ### Hexagonal (Ports and Adapters)
 
-```
+```text
 stl-verify/
 ├── cmd/                    # Entry points (watcher, bulk-download, raw_data_backup, event-persister, migrate)
 ├── internal/
@@ -44,13 +44,13 @@ stl-verify/
 
 ### Data Flow
 
-```
+```text
 Alchemy WebSocket → Live Data Service → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS consumers
 ```
 
 ### Cache Key Convention
 
-```
+```text
 stl:{chainId}:{blockNumber}:{version}:{dataType}
 ```
 - version increments on chain reorgs
