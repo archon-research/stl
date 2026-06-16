@@ -24,6 +24,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -243,7 +244,7 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (
 		duration := time.Since(start)
 		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "block processing failed")
+			telemetry.SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "processBlock", retErr)
 		}
 	}()
@@ -317,7 +318,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 		attribute.String("oracle.type", string(unit.Oracle.OracleType)))
 	defer func() {
 		if retErr != nil {
-			SetSpanError(span, retErr, "oracle processing failed")
+			telemetry.SetSpanError(span, retErr, "oracle processing failed")
 		}
 		span.End()
 	}()
@@ -341,7 +342,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "getAssetsPrices", rpcDuration, err)
 	if err != nil {
-		SetSpanError(fetchSpan, err, "fetch oracle prices failed")
+		telemetry.SetSpanError(fetchSpan, err, "fetch oracle prices failed")
 	}
 	fetchSpan.End()
 	if err != nil {
@@ -357,7 +358,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		attribute.Int("prices.total", len(prices)))
 	changed, err := s.detectChanges(prices, event, blockTimestamp, unit)
 	if err != nil {
-		SetSpanError(detectSpan, err, "detect changes failed")
+		telemetry.SetSpanError(detectSpan, err, "detect changes failed")
 		detectSpan.End()
 		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
 	}
@@ -375,7 +376,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		attribute.Int("prices.changed", len(changed)))
 	err = s.repo.UpsertPrices(ctx, changed)
 	if err != nil {
-		SetSpanError(upsertSpan, err, "upsert prices failed")
+		telemetry.SetSpanError(upsertSpan, err, "upsert prices failed")
 	}
 	upsertSpan.End()
 	if err != nil {
@@ -402,7 +403,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "latestRoundData", rpcDuration, err)
 	if err != nil {
-		SetSpanError(fetchSpan, err, "fetch feed prices failed")
+		telemetry.SetSpanError(fetchSpan, err, "fetch feed prices failed")
 	}
 	fetchSpan.End()
 	if err != nil {
@@ -416,7 +417,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 		attribute.Int("prices.total", len(results)))
 	changed, err := s.detectFeedChanges(results, event, blockTimestamp, unit)
 	if err != nil {
-		SetSpanError(detectSpan, err, "detect feed changes failed")
+		telemetry.SetSpanError(detectSpan, err, "detect feed changes failed")
 		detectSpan.End()
 		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
 	}
@@ -434,7 +435,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 		attribute.Int("prices.changed", len(changed)))
 	err = s.repo.UpsertPrices(ctx, changed)
 	if err != nil {
-		SetSpanError(upsertSpan, err, "upsert prices failed")
+		telemetry.SetSpanError(upsertSpan, err, "upsert prices failed")
 	}
 	upsertSpan.End()
 	if err != nil {

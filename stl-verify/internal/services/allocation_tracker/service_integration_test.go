@@ -176,6 +176,138 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	}
 }
 
+// TestIntegration_SweepPosition_UsesZeroTxHash drives a periodic sweep
+// (SweepEveryNBlocks=1) against a real Postgres and asserts that the persisted
+// sweep rows carry the zero-hash tx_hash sentinel rather than a fabricated
+// synthetic hash (VEC-340). This exercises the full sweep → AllocationRepository
+// → Postgres path, confirming the sentinel satisfies the NOT-NULL primary key
+// and round-trips, and that repeated sweeps for the same observation dedup to a
+// single row.
+func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
+	ctx := context.Background()
+
+	t.Setenv("BUILD_GIT_HASH", "test-integration-sweep-zero-hash")
+
+	pool, _, dbCleanup := testutil.SetupTimescaleDB(t)
+	defer dbCleanup()
+
+	var sparkID int64
+	if err := pool.QueryRow(ctx, "SELECT id FROM prime WHERE name = 'spark'").Scan(&sparkID); err != nil {
+		t.Fatalf("read spark prime id: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		t.Fatalf("buildregistry: %v", err)
+	}
+	txm, err := postgres.NewTxManager(pool, logger)
+	if err != nil {
+		t.Fatalf("tx manager: %v", err)
+	}
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 1)
+	if err != nil {
+		t.Fatalf("token repo: %v", err)
+	}
+	allocRepo := postgres.NewAllocationRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
+	supplyRepo := postgres.NewTokenTotalSupplyRepository(pool, txm, tokenRepo, logger, buildReg.BuildID())
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("erc20 abi: %v", err)
+	}
+	atokenABI, err := abis.GetATokenReadABI()
+	if err != nil {
+		t.Fatalf("atoken abi: %v", err)
+	}
+
+	almProxy := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	subProxy := common.HexToAddress("0x3300f198988e4c9c63f75df86de36421f06af8c4")
+	usds := common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f")
+
+	wad := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	almBalance := new(big.Int).Mul(big.NewInt(50_000_000), wad)
+	subBalance := new(big.Int).Mul(big.NewInt(25_000_000), wad)
+
+	mc := newERC20BalanceMockMulticaller(t, erc20ABI, usds, "USDS", 18, map[common.Address]*big.Int{
+		almProxy: almBalance,
+		subProxy: subBalance,
+	})
+
+	primeLookup := map[string]int64{"spark": sparkID}
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+
+	registry := NewSourceRegistry(logger)
+	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))
+
+	entries := []*TokenEntry{
+		{ContractAddress: usds, WalletAddress: almProxy, Star: "spark", Chain: "mainnet", Protocol: "sky", AllocationType: "pol", TokenType: "erc20"},
+		{ContractAddress: usds, WalletAddress: subProxy, Star: "spark", Chain: "mainnet", Protocol: "sky", AllocationType: "risk_capital", TokenType: "erc20"},
+	}
+	proxies := []ProxyConfig{
+		{Star: "spark", Chain: "mainnet", Address: almProxy},
+		{Star: "spark", Chain: "mainnet", Address: subProxy},
+	}
+
+	// Empty receipts: no Transfer logs, so the only rows are sweep observations.
+	const blockNumber = int64(19_000_000)
+	receiptsJSON := mustMarshalReceipts(t, []TransactionReceipt{})
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, blockNumber, 0, receiptsJSON)
+
+	svc, err := NewService(
+		// SweepEveryNBlocks=1 so the single driven block triggers a sweep.
+		Config{ChainID: 1, SweepEveryNBlocks: 1, Logger: logger},
+		nil,
+		cache,
+		registry,
+		entries,
+		pgHandler,
+		proxies,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    blockNumber,
+		Version:        0,
+		BlockTimestamp: time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC).Unix(),
+	}
+	// Drive the same block twice: idempotent reprocessing must not create
+	// duplicate sweep rows despite the constant (zero) tx_hash.
+	if err := svc.processBlock(ctx, event); err != nil {
+		t.Fatalf("processBlock (1): %v", err)
+	}
+	if err := svc.processBlock(ctx, event); err != nil {
+		t.Fatalf("processBlock (2): %v", err)
+	}
+
+	var sweepRows int
+	if err := pool.QueryRow(ctx,
+		"SELECT COUNT(*) FROM allocation_position WHERE direction = 'sweep'",
+	).Scan(&sweepRows); err != nil {
+		t.Fatalf("count sweep rows: %v", err)
+	}
+	if sweepRows != 2 {
+		t.Fatalf("sweep rows: got %d, want 2 (one per entry, deduped across reprocessing)", sweepRows)
+	}
+
+	// Every sweep row must carry the all-zero sentinel, not a synthetic hash.
+	var nonZero int
+	if err := pool.QueryRow(ctx,
+		"SELECT COUNT(*) FROM allocation_position WHERE direction = 'sweep' AND tx_hash <> $1",
+		make([]byte, 32),
+	).Scan(&nonZero); err != nil {
+		t.Fatalf("count non-zero sweep tx_hash: %v", err)
+	}
+	if nonZero != 0 {
+		t.Fatalf("sweep rows with non-zero tx_hash: got %d, want 0", nonZero)
+	}
+}
+
 // TestIntegration_UsdcTransferToSubProxy_IsIgnored is the negative complement
 // to the test above. The SubProxy is a tracked address (so the
 // TransferExtractor will emit a TransferEvent for transfers touching it), but
