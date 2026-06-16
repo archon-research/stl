@@ -22,6 +22,8 @@ class AllocationActivityBucket:
     def __post_init__(self) -> None:
         if self.event_count < 0:
             raise ValueError(f"event_count must be non-negative, got {self.event_count}")
+        if self.total_tx_amount < 0:
+            raise ValueError(f"total_tx_amount must be non-negative, got {self.total_tx_amount}")
 
 
 @dataclass(frozen=True)
