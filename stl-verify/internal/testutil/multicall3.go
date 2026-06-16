@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -41,11 +42,15 @@ func init() {
 // and returns the hex-encoded aggregate3 result. Mock RPC servers use it to
 // answer multicall-batched reads in integration tests.
 func HandleMulticall3(calldata []byte, dispatch SubcallDispatcher) (string, error) {
+	method := parsedMulticall3ABI.Methods["aggregate3"]
 	if len(calldata) < 4 {
 		return "", fmt.Errorf("calldata too short")
 	}
+	if !bytes.Equal(calldata[:4], method.ID) {
+		return "", fmt.Errorf("unexpected selector %#x, want aggregate3 %#x", calldata[:4], method.ID)
+	}
 
-	args, err := parsedMulticall3ABI.Methods["aggregate3"].Inputs.Unpack(calldata[4:])
+	args, err := method.Inputs.Unpack(calldata[4:])
 	if err != nil {
 		return "", fmt.Errorf("unpack aggregate3 inputs: %w", err)
 	}
@@ -67,10 +72,14 @@ func HandleMulticall3(calldata []byte, dispatch SubcallDispatcher) (string, erro
 	encoded := make([]abiResult, len(rawCalls))
 	for i, c := range rawCalls {
 		returnData, success := dispatch(c.Target, c.CallData)
+		if !success && !c.AllowFailure {
+			// Real Multicall3 reverts the whole aggregate3 in this case.
+			return "", fmt.Errorf("aggregate3 subcall %d to %s failed with allowFailure=false", i, c.Target.Hex())
+		}
 		encoded[i] = abiResult{Success: success, ReturnData: returnData}
 	}
 
-	packed, err := parsedMulticall3ABI.Methods["aggregate3"].Outputs.Pack(encoded)
+	packed, err := method.Outputs.Pack(encoded)
 	if err != nil {
 		return "", fmt.Errorf("pack aggregate3 outputs: %w", err)
 	}

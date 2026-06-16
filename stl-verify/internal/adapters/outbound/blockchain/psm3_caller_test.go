@@ -465,3 +465,24 @@ func TestReadState_Round2Error(t *testing.T) {
 		t.Fatalf("expected round 2 error, got: %v", err)
 	}
 }
+
+func TestReadState_ZeroPocket(t *testing.T) {
+	mc := testutil.NewMockMulticaller()
+	caller := resolvedCaller(t, mc)
+
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", common.Address{})},
+			{Success: true, ReturnData: packUintOutput(t, big.NewInt(1))},
+			{Success: true, ReturnData: packUintOutput(t, big.NewInt(2))},
+			{Success: true, ReturnData: packUintOutput(t, big.NewInt(3))},
+			{Success: true, ReturnData: packUintOutput(t, big.NewInt(4))},
+		}, nil
+	}
+
+	// A zero pocket must hard-fail before reading USDC.balanceOf(0x0).
+	_, err := caller.ReadState(context.Background(), big.NewInt(100))
+	if err == nil || !strings.Contains(err.Error(), "pocket() returned the zero address") {
+		t.Fatalf("expected zero-pocket error, got: %v", err)
+	}
+}

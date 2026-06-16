@@ -155,17 +155,11 @@ func (c *PSM3Caller) ResolveImmutables(ctx context.Context, blockNumber *big.Int
 		}
 	}
 
-	checks := []struct {
-		method    string
-		got, want common.Address
-	}{
-		{"usds", addrs[1], c.cfg.USDS},
-		{"susds", addrs[2], c.cfg.SUSDS},
-		{"usdc", addrs[3], c.cfg.USDC},
-	}
-	for _, chk := range checks {
-		if chk.got != chk.want {
-			return fmt.Errorf("psm3 %s() = %s, config has %s", chk.method, chk.got.Hex(), chk.want.Hex())
+	// addrs is [rateProvider, usds, susds, usdc]; verify the three token
+	// addresses match config (offset by 1 to skip rateProvider).
+	for i, want := range []common.Address{c.cfg.USDS, c.cfg.SUSDS, c.cfg.USDC} {
+		if got := addrs[i+1]; got != want {
+			return fmt.Errorf("psm3 %s() = %s, config has %s", methods[i+1], got.Hex(), want.Hex())
 		}
 	}
 
@@ -219,6 +213,11 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockNumber *big.Int) (*enti
 	pocket, err := unpackAddress(&c.psm3ABI, "pocket", results[0])
 	if err != nil {
 		return nil, err
+	}
+	if pocket == (common.Address{}) {
+		// Reading USDC.balanceOf(0x0) would persist a plausible-but-wrong reserve
+		// (the burn address can hold USDC), so fail hard instead.
+		return nil, fmt.Errorf("psm3 pocket() returned the zero address")
 	}
 	usdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[1])
 	if err != nil {

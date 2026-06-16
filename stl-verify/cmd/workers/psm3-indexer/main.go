@@ -72,6 +72,10 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("parse flags: %w", err)
 	}
 
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
 	if *rpcURL == "" {
 		// Fallback: compose from ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
 		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "")
@@ -94,21 +98,21 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
 		v, err := strconv.Atoi(waitTimeStr)
 		if err != nil {
 			return fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
 		}
 		*waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
 		v, err := strconv.Atoi(visTimeStr)
 		if err != nil {
 			return fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
 		}
 		*visibilityTimeout = v
 	}
-	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
+	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" && !setFlags["sweep-blocks"] {
 		v, err := strconv.Atoi(sweepBlocksStr)
 		if err != nil {
 			return fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)

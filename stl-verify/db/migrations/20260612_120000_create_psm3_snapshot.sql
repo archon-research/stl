@@ -17,7 +17,7 @@
 --     processing_version so same-build replays are idempotent and cross-build
 --     reprocesses append a new version.
 
-CREATE TABLE psm3_snapshot (
+CREATE TABLE IF NOT EXISTS psm3_snapshot (
     chain_id           INT         NOT NULL REFERENCES chain (chain_id),
     address            BYTEA       NOT NULL,            -- PSM3 contract
     usds_balance       NUMERIC     NOT NULL,            -- raw 1e18
