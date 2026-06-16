@@ -2,7 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Repository Structure
+## Project & Architecture
+
+### Repository Structure
 
 This repository contains the application code:
 - **stl-verify/** - Main Go service (block watcher, backfill, backup worker)
@@ -15,7 +17,55 @@ This repository contains the application code:
 
 Infrastructure code (Terraform/OpenTofu) lives in a separate repository for security reasons.
 
-## Common Commands
+### Hexagonal (Ports and Adapters)
+
+```text
+stl-verify/
+├── cmd/                    # Entry points (watcher, bulk-download, raw_data_backup, event-persister, migrate)
+├── internal/
+│   ├── domain/entity/      # Core business entities (no external dependencies)
+│   ├── ports/
+│   │   ├── inbound/        # Use case interfaces
+│   │   └── outbound/       # Infrastructure interfaces
+│   ├── adapters/
+│   │   ├── inbound/        # HTTP, gRPC, CLI handlers
+│   │   └── outbound/       # Implementations: alchemy, postgres, redis, sns, sqs, s3, telemetry
+│   └── services/           # Use case implementations (live_data, backfill_gaps, raw_data_backup)
+└── db/migrations/          # SQL migrations (auto-applied)
+```
+
+**Dependency Rule**: Dependencies flow inward only. Domain has no dependencies; adapters depend on ports; ports depend on domain.
+
+### Core Services
+
+1. **Live Data Service** - WebSocket subscription to Alchemy for new blocks, handles chain reorgs, publishes to SNS FIFO
+2. **Backfill Service** - Fills gaps in block data via HTTP polling
+3. **Raw Data Backup** - Backs up block data to S3
+
+### Data Flow
+
+```text
+Alchemy WebSocket → Live Data Service → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS consumers
+```
+
+### Cache Key Convention
+
+```text
+stl:{chainId}:{blockNumber}:{version}:{dataType}
+```
+- version increments on chain reorgs
+- dataType: block, receipts, traces, blobs
+
+### Environment
+
+- Go 1.26+
+- Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
+- AWS for production (EKS on Graviton arm64 — migrating from ECS Fargate. RDS Aurora (TimescaleDB via TigerData), ElastiCache Redis, SNS/SQS, S3)
+- Alchemy API key required for Ethereum mainnet access
+
+## Building & Running
+
+### Common Commands
 
 All commands run from `stl-verify/`:
 
@@ -59,46 +109,70 @@ make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 
 See [stl-verify/Makefile](stl-verify/Makefile) for the complete list of targets.
 
-## Architecture
+### Linting & Code Quality
 
-### Hexagonal (Ports and Adapters)
+#### Architecture
 
+Quality is enforced at three levels:
+
+1. **Git Hooks (Lefthook)** — Runs on `git commit` and `git push`
+   - Automatically fixes formatting issues (`stage_fixed: true`)
+   - Prevents broken code from being pushed
+   - Pre-commit: runs on staged files only (fast)
+   - Pre-push: runs full-module checks (go vet, etc.)
+   - Configured per-language: `stl-verify/lefthook.yml`, `stl-verify/python/lefthook.yml`, `stl-verify/ts/lefthook.yml`
+
+2. **Local Development** — Convenience Makefile targets
+   - `make install-hooks` — Install git hooks
+   - `make format` — Auto-format code across all languages
+   - `make lint` — Run linters locally
+   - Delegates to language-specific tooling (Go, Python, TS)
+
+3. **CI Workflows** — Post-push checks (`.github/workflows/`)
+   - `go-ci.yml` — Go linting, vet, staticcheck, tests, vulncheck
+   - `python-ci.yml` — Ruff lint/format, unit & integration tests
+   - `ts-ci.yml` — oxlint, oxfmt, typecheck, build
+   - Triggered on changed files (via `changed-files.yml`)
+   - **These are the source of truth** — CI definitions are authoritative
+
+#### Linting by Language
+
+**Go:**
+- Pre-commit hooks: gofmt, goimports (staged files only)
+- Pre-push hooks: go vet (full module)
+- CI: `make ci-checks` (vet, staticcheck, golangci-lint, vulncheck, tidy)
+- Tools: Install with `make tools`
+
+**Python:**
+- Hooks: ruff lint, ruff format
+- CI: `make lint` (from `stl-verify/python/Makefile`)
+- Tools: `uv sync --all-extras` (includes ruff, pytest, etc.)
+
+**TypeScript:**
+- Hooks: oxlint, oxfmt
+- CI: `npm run lint`, `npm run format:check`, `npm run build`
+- Tools: `npm ci` (includes oxlint, oxfmt, etc.)
+
+#### Running Manually
+
+```bash
+# Run git hooks manually without committing
+lefthook run pre-commit   # Run all pre-commit hooks
+
+# Format and lint locally before committing
+make format
+make lint
+
+# Or let git hooks do it automatically on commit
+git commit  # Hooks auto-fix, may stage changes
 ```
-stl-verify/
-├── cmd/                    # Entry points (watcher, bulk-download, raw_data_backup, event-persister, migrate)
-├── internal/
-│   ├── domain/entity/      # Core business entities (no external dependencies)
-│   ├── ports/
-│   │   ├── inbound/        # Use case interfaces
-│   │   └── outbound/       # Infrastructure interfaces
-│   ├── adapters/
-│   │   ├── inbound/        # HTTP, gRPC, CLI handlers
-│   │   └── outbound/       # Implementations: alchemy, postgres, redis, sns, sqs, s3, telemetry
-│   └── services/           # Use case implementations (live_data, backfill_gaps, raw_data_backup)
-└── db/migrations/          # SQL migrations (auto-applied)
-```
 
-**Dependency Rule**: Dependencies flow inward only. Domain has no dependencies; adapters depend on ports; ports depend on domain.
+#### Key Points
 
-### Core Services
-
-1. **Live Data Service** - WebSocket subscription to Alchemy for new blocks, handles chain reorgs, publishes to SNS FIFO
-2. **Backfill Service** - Fills gaps in block data via HTTP polling
-3. **Raw Data Backup** - Backs up block data to S3
-
-### Data Flow
-
-```
-Alchemy WebSocket → Live Data Service → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS consumers
-```
-
-### Cache Key Convention
-
-```
-stl:{chainId}:{blockNumber}:{version}:{dataType}
-```
-- version increments on chain reorgs
-- dataType: block, receipts, traces, blobs
+- **Don't bypass hooks**: They catch issues early and cheaply
+- **Hooks are fast**: Only check staged files, not entire codebase
+- **CI is strict**: Fails if any checks don't pass (source of truth)
+- **Language pipelines are independent**: Changes to one language don't trigger linting for others
 
 ## Code Conventions
 
@@ -146,7 +220,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 - **External API adapters**:
     - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
 
-## Do NOT
+### Do NOT
 
 - Import adapters in domain or application layer
 - Add business logic to adapters
@@ -178,75 +252,3 @@ Each reviewer prompt must include:
 - The expected output format: **Blocking** / **Should-fix** / **Nice-to-have** / **Verified correct**, with file:line citations.
 
 Apply blocking and should-fix items before declaring the work done. Nice-to-have items are surfaced to the user for an explicit decision.
-
-## Environment
-
-- Go 1.26+
-- Docker for local development (PostgreSQL, Redis, Jaeger, LocalStack)
-- AWS for production (EKS on Graviton arm64 — migrating from ECS Fargate. RDS Aurora (TimescaleDB via TigerData), ElastiCache Redis, SNS/SQS, S3)
-- Alchemy API key required for Ethereum mainnet access
-
-## Linting & Code Quality
-
-### Architecture
-
-Quality is enforced at three levels:
-
-1. **Git Hooks (Lefthook)** — Runs on `git commit` and `git push`
-   - Automatically fixes formatting issues (`stage_fixed: true`)
-   - Prevents broken code from being pushed
-   - Pre-commit: runs on staged files only (fast)
-   - Pre-push: runs full-module checks (go vet, etc.)
-   - Configured per-language: `stl-verify/lefthook.yml`, `stl-verify/python/lefthook.yml`, `stl-verify/ts/lefthook.yml`
-
-2. **Local Development** — Convenience Makefile targets
-   - `make install-hooks` — Install git hooks
-   - `make format` — Auto-format code across all languages
-   - `make lint` — Run linters locally
-   - Delegates to language-specific tooling (Go, Python, TS)
-
-3. **CI Workflows** — Post-push checks (`.github/workflows/`)
-   - `go-ci.yml` — Go linting, vet, staticcheck, tests, vulncheck
-   - `python-ci.yml` — Ruff lint/format, unit & integration tests
-   - `ts-ci.yml` — oxlint, oxfmt, typecheck, build
-   - Triggered on changed files (via `changed-files.yml`)
-   - **These are the source of truth** — CI definitions are authoritative
-
-### Linting by Language
-
-**Go:**
-- Pre-commit hooks: gofmt, goimports (staged files only)
-- Pre-push hooks: go vet (full module)
-- CI: `make ci-checks` (vet, staticcheck, golangci-lint, vulncheck, tidy)
-- Tools: Install with `make tools`
-
-**Python:**
-- Hooks: ruff lint, ruff format
-- CI: `make lint` (from `stl-verify/python/Makefile`)
-- Tools: `uv sync --all-extras` (includes ruff, pytest, etc.)
-
-**TypeScript:**
-- Hooks: oxlint, oxfmt
-- CI: `npm run lint`, `npm run format:check`, `npm run build`
-- Tools: `npm ci` (includes oxlint, oxfmt, etc.)
-
-### Running Manually
-
-```bash
-# Run git hooks manually without committing
-lefthook run pre-commit   # Run all pre-commit hooks
-
-# Format and lint locally before committing
-make format
-make lint
-
-# Or let git hooks do it automatically on commit
-git commit  # Hooks auto-fix, may stage changes
-```
-
-### Key Points
-
-- **Don't bypass hooks**: They catch issues early and cheaply
-- **Hooks are fast**: Only check staged files, not entire codebase
-- **CI is strict**: Fails if any checks don't pass (source of truth)
-- **Language pipelines are independent**: Changes to one language don't trigger linting for others
