@@ -185,26 +185,34 @@ function MetricCardTrend({
           </span>
         </div>
 
-        <div
-          className={css({
-            borderWidth: '1px',
-            borderStyle: 'solid',
-            borderColor: 'border.subtle',
-            borderRadius: 'sm',
-            bg: 'surface.subtle',
-            px: '1.5',
-            py: '1',
-          })}
-        >
-          <LineChart
-            data={chart.data}
-            stroke={chart.stroke}
-            fill={chart.fill}
-            showPoints
-            height={112}
-            ariaLabel={chart.title}
-          />
-        </div>
+        <AppTooltip
+          ariaLabel={`Trend details for ${chart.title}`}
+          fullWidth
+          trigger={
+            <div
+              className={css({
+                borderWidth: '1px',
+                borderStyle: 'solid',
+                borderColor: 'border.subtle',
+                borderRadius: 'sm',
+                bg: 'surface.subtle',
+                px: '1.5',
+                py: '1',
+                width: 'full',
+              })}
+            >
+              <LineChart
+                data={chart.data}
+                stroke={chart.stroke}
+                fill={chart.fill}
+                showPoints
+                height={112}
+                ariaLabel={chart.title}
+              />
+            </div>
+          }
+          content={`${latestPoint.label}: ${chart.formatValue(latestPoint.value)}`}
+        />
       </div>
 
       <div
@@ -227,24 +235,6 @@ function MetricCardTrend({
         </span>
       </div>
 
-      <AppTooltip
-        ariaLabel={`Latest ${chart.title}`}
-        trigger={
-          <span
-            className={css({
-              fontSize: 'xs',
-              color: 'text.default',
-              textDecoration: 'underline',
-              textDecorationStyle: 'dotted',
-              textUnderlineOffset: '2px',
-              width: 'fit-content',
-            })}
-          >
-            Latest point
-          </span>
-        }
-        content={`${latestPoint.label}: ${chart.formatValue(latestPoint.value)}`}
-      />
     </div>
   );
 }
@@ -684,6 +674,10 @@ export function AllocationGrid({
     bg: 'surface.subtle',
     p: { base: '3', md: '3.5' },
     boxShadow: 'none',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'space-between',
+    minHeight: '24rem',
   });
 
   const allocationActivityChart = findMetricChart(
@@ -833,8 +827,7 @@ export function AllocationGrid({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                sm: 'repeat(2, minmax(0, 1fr))',
-                lg: 'repeat(4, minmax(0, 1fr))',
+                md: 'repeat(auto-fit, minmax(22rem, 1fr))',
               },
               gap: '3',
             })}
@@ -860,8 +853,7 @@ export function AllocationGrid({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                sm: 'repeat(2, minmax(0, 1fr))',
-                lg: 'repeat(4, minmax(0, 1fr))',
+                md: 'repeat(auto-fit, minmax(22rem, 1fr))',
               },
               gap: '3',
             })}
@@ -876,7 +868,15 @@ export function AllocationGrid({
                     : formatUsdValue(summary.totalUsd)
                 }
                 detail={
-                  <div className={css({ display: 'grid', gap: '1' })}>
+                  <div
+                    className={css({
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      gap: '3',
+                      minHeight: '15rem',
+                    })}
+                  >
                     <span>
                       {hasSearchQuery && overallSummary
                         ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
@@ -900,7 +900,15 @@ export function AllocationGrid({
                   label="Risk capital"
                   value={formatUsdValue(capitalMetrics.risk_capital)}
                   detail={
-                    <div className={css({ display: 'grid', gap: '1' })}>
+                    <div
+                      className={css({
+                        display: 'flex',
+                        flexDirection: 'column',
+                        justifyContent: 'space-between',
+                        gap: '3',
+                        minHeight: '15rem',
+                      })}
+                    >
                       {parseNumericValue(
                         capitalMetrics.risk_to_capital_ratio,
                       ) !== null ? (
@@ -927,7 +935,15 @@ export function AllocationGrid({
                 label="Total capital"
                 value={formatUsdValue(capitalMetrics.total_capital)}
                 detail={
-                  <div className={css({ display: 'grid', gap: '1' })}>
+                  <div
+                    className={css({
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      gap: '3',
+                      minHeight: '15rem',
+                    })}
+                  >
                     <span>
                       Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·
                       {' '}First loss{' '}
@@ -958,7 +974,15 @@ export function AllocationGrid({
                     isPrimeDebtLoading ? (
                       'Fetching latest debt snapshot'
                     ) : (
-                      <div className={css({ display: 'grid', gap: '1' })}>
+                      <div
+                        className={css({
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: 'space-between',
+                          gap: '3',
+                          minHeight: '15rem',
+                        })}
+                      >
                         <div
                           className={css({
                             display: 'flex',
