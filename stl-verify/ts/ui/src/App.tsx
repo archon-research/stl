@@ -776,8 +776,8 @@ function App() {
           activityVolumeSeries.length > 0
             ? activityVolumeSeries
             : fallbackChart(allocationSummaryTotalUsd),
-        stroke: 'var(--colors-chart-primary)',
-        fill: 'color-mix(in srgb, var(--colors-chart-primary) 22%, transparent)',
+        stroke: 'var(--colors-chart-series-primary, #60a5fa)',
+        fill: 'color-mix(in srgb, var(--colors-chart-area-primary, #60a5fa) 24%, transparent)',
         formatValue: (value: number) => formatUsdValue(value),
       },
       {
@@ -785,8 +785,8 @@ function App() {
         title: 'Risk capital trend',
         subtitle: 'Current value repeated until historical series lands',
         data: fallbackChart(riskCapitalValue),
-        stroke: 'var(--colors-chart-success)',
-        fill: 'color-mix(in srgb, var(--colors-chart-success) 22%, transparent)',
+        stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
+        fill: 'color-mix(in srgb, var(--colors-chart-series-secondary, #14b8a6) 22%, transparent)',
         formatValue: (value: number) => formatUsdValue(value),
       },
       {
@@ -794,8 +794,8 @@ function App() {
         title: 'Total capital trend',
         subtitle: 'Current value repeated until historical series lands',
         data: fallbackChart(totalCapitalValue),
-        stroke: 'var(--colors-chart-secondary)',
-        fill: 'color-mix(in srgb, var(--colors-chart-secondary) 22%, transparent)',
+        stroke: 'var(--colors-chart-series-primary, #f59e0b)',
+        fill: 'color-mix(in srgb, #f59e0b 20%, transparent)',
         formatValue: (value: number) => formatUsdValue(value),
       },
       {
@@ -803,8 +803,8 @@ function App() {
         title: 'Prime debt exposure',
         subtitle: 'Aggregated debt buckets in debt units',
         data: primeDebtSeries.length > 0 ? primeDebtSeries : fallbackChart(primeDebtValue),
-        stroke: 'var(--colors-chart-alert)',
-        fill: 'color-mix(in srgb, var(--colors-chart-alert) 22%, transparent)',
+        stroke: '#f97316',
+        fill: 'color-mix(in srgb, #f97316 20%, transparent)',
         formatValue: (value: number) => `${value.toLocaleString()} DAI`,
       },
     ].filter((chart) => chart.data.length > 0);

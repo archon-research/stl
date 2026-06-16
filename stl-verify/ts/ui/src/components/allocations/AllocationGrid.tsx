@@ -191,7 +191,7 @@ function MetricCardTrend({
             borderStyle: 'solid',
             borderColor: 'border.subtle',
             borderRadius: 'sm',
-            bg: 'surface.default',
+            bg: 'surface.subtle',
             px: '1.5',
             py: '1',
           })}
@@ -200,7 +200,7 @@ function MetricCardTrend({
             data={chart.data}
             stroke={chart.stroke}
             fill={chart.fill}
-            showPoints={false}
+            showPoints
             height={112}
             ariaLabel={chart.title}
           />
