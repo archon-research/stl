@@ -113,7 +113,6 @@ export function TopBar({
   onRangeChange,
 }: TopBarProps) {
   const showRangePicker =
-    selectedView === 'activities' &&
     rangePreset !== undefined &&
     timeRange !== undefined &&
     onRangeChange !== undefined;
@@ -160,35 +159,39 @@ export function TopBar({
           justify: 'flex-end',
         })}
       >
+        <FilterField
+          ariaLabel="Filter by network"
+          disabled={networkOptions.length === 0}
+          onChange={onNetworkChange}
+          options={networkOptions}
+          placeholder="All networks"
+          value={selectedNetwork}
+        />
+        <FilterField
+          ariaLabel="Filter by protocol"
+          disabled={
+            (!hasSelectedPrime && selectedView === 'allocation') ||
+            protocolOptions.length === 0
+          }
+          onChange={onProtocolChange}
+          options={protocolOptions}
+          placeholder="All protocols"
+          value={selectedProtocol}
+        />
         {showRangePicker ? (
-          <RangePicker
-            preset={rangePreset}
-            range={timeRange}
-            onChange={onRangeChange}
-          />
-        ) : (
-          <>
-            <FilterField
-              ariaLabel="Filter by network"
-              disabled={networkOptions.length === 0}
-              onChange={onNetworkChange}
-              options={networkOptions}
-              placeholder="All networks"
-              value={selectedNetwork}
+          <div
+            className={css({
+              width: { base: '100%', sm: '14rem' },
+              flexShrink: 0,
+            })}
+          >
+            <RangePicker
+              preset={rangePreset}
+              range={timeRange}
+              onChange={onRangeChange}
             />
-            <FilterField
-              ariaLabel="Filter by protocol"
-              disabled={
-                (!hasSelectedPrime && selectedView === 'allocation') ||
-                protocolOptions.length === 0
-              }
-              onChange={onProtocolChange}
-              options={protocolOptions}
-              placeholder="All protocols"
-              value={selectedProtocol}
-            />
-          </>
-        )}
+          </div>
+        ) : null}
       </div>
     </div>
   );

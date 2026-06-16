@@ -60,9 +60,7 @@ type ActivityFeedProps = {
   showAllPrimes?: boolean;
   tokenOptions?: string[];
   chainLabels?: ChainLabelLookup;
-  // External range control: when provided, the feed syncs with a parent-owned
-  // RangePicker (e.g. TopBar). The internal filter-bar picker is still shown
-  // but acts as an alternative control for the same state.
+  // External range control: provided by parent-owned top bar picker.
   externalRangePreset?: RangePreset;
   externalTimeRange?: TimeRange;
   onRangeChange?: (preset: RangePreset, range: TimeRange) => void;
@@ -834,6 +832,17 @@ export function ActivityFeed({
             Across all primes
           </span>
         ) : null}
+
+        {!isPageMode ? (
+          <div className={css({ display: 'grid', gap: '1' })}>
+            <span className={filterLabelClassName}>Time range</span>
+            <RangePicker
+              preset={effectivePreset}
+              range={effectiveRange}
+              onChange={updateRangePreset}
+            />
+          </div>
+        ) : null}
       </div>
       {latestActivityAt ? (
         <div
@@ -913,15 +922,6 @@ export function ActivityFeed({
           </label>
         ) : null}
       </div>
-      <div className={css({ display: 'grid', gap: '1' })}>
-        <span className={filterLabelClassName}>Time range</span>
-        <RangePicker
-          preset={effectivePreset}
-          range={effectiveRange}
-          onChange={updateRangePreset}
-        />
-      </div>
-
       {hasActiveFilters ? (
         <div
           className={css({
