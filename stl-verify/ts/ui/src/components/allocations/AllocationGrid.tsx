@@ -149,10 +149,11 @@ function MetricCardTrend({
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
-  const latestPoint = chart.data[chart.data.length - 1];
   const firstPoint = chart.data[0];
+  const lastPoint = chart.data[chart.data.length - 1];
   const yRange = Math.max(maxValue - minValue, 0);
   const midValue = minValue + yRange / 2;
+  const chartHeight = 156;
 
   return (
     <div className={css({ mt: '2', display: 'grid', gap: '1.5' })}>
@@ -185,34 +186,31 @@ function MetricCardTrend({
           </span>
         </div>
 
-        <AppTooltip
-          ariaLabel={`Trend details for ${chart.title}`}
-          fullWidth
-          trigger={
-            <div
-              className={css({
-                borderWidth: '1px',
-                borderStyle: 'solid',
-                borderColor: 'border.subtle',
-                borderRadius: 'sm',
-                bg: 'surface.subtle',
-                px: '1.5',
-                py: '1',
-                width: 'full',
-              })}
-            >
-              <LineChart
-                data={chart.data}
-                stroke={chart.stroke}
-                fill={chart.fill}
-                showPoints
-                height={112}
-                ariaLabel={chart.title}
-              />
-            </div>
-          }
-          content={`${latestPoint.label}: ${chart.formatValue(latestPoint.value)}`}
-        />
+        <div
+          className={css({
+            borderWidth: '1px',
+            borderStyle: 'solid',
+            borderColor: 'border.subtle',
+            borderRadius: 'sm',
+            bg: 'surface.subtle',
+            px: '1.5',
+            py: '1',
+            width: 'full',
+          })}
+        >
+          <LineChart
+            data={chart.data}
+            stroke={chart.stroke}
+            fill={chart.fill}
+            showPoints
+            height={chartHeight}
+            ariaLabel={chart.title}
+            getDatumTooltip={(datum, index) => {
+              const fallbackLabel = chart.data[index]?.label ?? `Point ${index + 1}`;
+              return `${fallbackLabel}: ${chart.formatValue(datum.value)}`;
+            }}
+          />
+        </div>
       </div>
 
       <div
@@ -231,7 +229,7 @@ function MetricCardTrend({
           {chartResolution}
         </span>
         <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
-          {latestPoint.label}
+          {lastPoint.label}
         </span>
       </div>
 
