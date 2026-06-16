@@ -89,8 +89,8 @@ def get_time_series_query_params(
         )
 
     return TimeSeriesQueryParams(
-        from_timestamp=normalized_from,
-        to_timestamp=normalized_to,
+        from_timestamp=normalized_from.replace(tzinfo=None),
+        to_timestamp=normalized_to.replace(tzinfo=None),
         resolution=effective_resolution,
         interval_ms=int(_RESOLUTION_TO_DURATION[effective_resolution].total_seconds() * 1000),
     )
