@@ -21,6 +21,7 @@
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts"
   },
   "dependencies": {
+    "@archon-research/charting": "^0.6.0-rohit-charting-and-improved-theming.1",
     "@archon-research/http-client-core": "0.6.0-rohit-charting-and-improved-theming.2",
     "@archon-research/http-client-react": "0.6.0-rohit-charting-and-improved-theming.2",
     "@tanstack/react-query": "5.100.14",
