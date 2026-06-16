@@ -15,6 +15,10 @@ import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
+import {
+  type RangePreset,
+  type TimeRange,
+} from './components/shared/RangePicker';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import {
   getAllocations,
@@ -98,6 +102,18 @@ function App() {
   const { globalFilter, setGlobalFilter, setSorting, sorting } =
     useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
+
+  // Shared range state: drives ActivityFeed and TopBar RangePicker in sync.
+  const [rangePreset, setRangePreset] = useState<RangePreset>('24h');
+  const [timeRange, setTimeRange] = useState<TimeRange>({
+    from_timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    to_timestamp: new Date().toISOString(),
+  });
+
+  const handleRangeChange = (preset: RangePreset, range: TimeRange) => {
+    setRangePreset(preset);
+    setTimeRange(range);
+  };
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
   const isDrawerOpen = isDrawerOpenParam === '1';
@@ -650,6 +666,9 @@ function App() {
                   view === 'activities' ? '/activities' : '/allocation',
                 )
               }
+              rangePreset={rangePreset}
+              timeRange={timeRange}
+              onRangeChange={handleRangeChange}
             />
           }
           main={
@@ -691,6 +710,9 @@ function App() {
                 onTokenFilterChange={setActivityTokenParam}
                 actionFilter={activityActionParam ?? undefined}
                 onActionFilterChange={setActivityActionParam}
+                externalRangePreset={rangePreset}
+                externalTimeRange={timeRange}
+                onRangeChange={handleRangeChange}
               />
             )
           }

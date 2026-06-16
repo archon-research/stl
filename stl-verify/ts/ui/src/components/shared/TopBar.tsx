@@ -5,6 +5,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import type { FilterOption } from '../../lib/dashboard';
+import { RangePicker, type RangePreset, type TimeRange } from './RangePicker';
 
 type TopBarProps = {
   hasSelectedPrime: boolean;
@@ -16,6 +17,10 @@ type TopBarProps = {
   selectedNetwork: string | null;
   selectedProtocol: string | null;
   selectedView: 'allocation' | 'activities';
+  // Range picker (shown in Activities view only)
+  rangePreset?: RangePreset;
+  timeRange?: TimeRange;
+  onRangeChange?: (preset: RangePreset, range: TimeRange) => void;
 };
 
 const tabsListClassName = css({
@@ -103,7 +108,16 @@ export function TopBar({
   selectedNetwork,
   selectedProtocol,
   selectedView,
+  rangePreset,
+  timeRange,
+  onRangeChange,
 }: TopBarProps) {
+  const showRangePicker =
+    selectedView === 'activities' &&
+    rangePreset !== undefined &&
+    timeRange !== undefined &&
+    onRangeChange !== undefined;
+
   return (
     <div
       className={css({
@@ -146,25 +160,35 @@ export function TopBar({
           justify: 'flex-end',
         })}
       >
-        <FilterField
-          ariaLabel="Filter by network"
-          disabled={networkOptions.length === 0}
-          onChange={onNetworkChange}
-          options={networkOptions}
-          placeholder="All networks"
-          value={selectedNetwork}
-        />
-        <FilterField
-          ariaLabel="Filter by protocol"
-          disabled={
-            (!hasSelectedPrime && selectedView === 'allocation') ||
-            protocolOptions.length === 0
-          }
-          onChange={onProtocolChange}
-          options={protocolOptions}
-          placeholder="All protocols"
-          value={selectedProtocol}
-        />
+        {showRangePicker ? (
+          <RangePicker
+            preset={rangePreset}
+            range={timeRange}
+            onChange={onRangeChange}
+          />
+        ) : (
+          <>
+            <FilterField
+              ariaLabel="Filter by network"
+              disabled={networkOptions.length === 0}
+              onChange={onNetworkChange}
+              options={networkOptions}
+              placeholder="All networks"
+              value={selectedNetwork}
+            />
+            <FilterField
+              ariaLabel="Filter by protocol"
+              disabled={
+                (!hasSelectedPrime && selectedView === 'allocation') ||
+                protocolOptions.length === 0
+              }
+              onChange={onProtocolChange}
+              options={protocolOptions}
+              placeholder="All protocols"
+              value={selectedProtocol}
+            />
+          </>
+        )}
       </div>
     </div>
   );
