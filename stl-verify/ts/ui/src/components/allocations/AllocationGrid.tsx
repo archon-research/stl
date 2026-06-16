@@ -8,8 +8,11 @@ import {
   useDataTable,
 } from '@archon-research/design-system';
 import {
-  type ChartDatum,
-  LineChart,
+  XYChart,
+  LineSeries,
+  Tooltip,
+  Axis,
+  chartTheme,
 } from '@archon-research/charting';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -76,6 +79,11 @@ type AllocationGridProps = {
   chartsErrorMessage: string | null;
   capitalMetricsErrorMessage: string | null;
   primeDebtErrorMessage: string | null;
+};
+
+export type ChartDatum = {
+  label: string;
+  value: number;
 };
 
 export type MetricChartSpec = {
@@ -153,7 +161,7 @@ function MetricCardTrend({
   const lastPoint = chart.data[chart.data.length - 1];
   const yRange = Math.max(maxValue - minValue, 0);
   const midValue = minValue + yRange / 2;
-  const chartHeight = 184;
+  const chartHeight = 200;
 
   return (
     <div className={css({ mt: '2', display: 'grid', gap: '1.5' })}>
@@ -193,23 +201,45 @@ function MetricCardTrend({
             borderColor: 'border.subtle',
             borderRadius: 'sm',
             bg: 'surface.subtle',
-            px: '1.5',
-            py: '1',
+            overflow: 'hidden',
             width: 'full',
           })}
         >
-          <LineChart
-            data={chart.data}
-            stroke={chart.stroke}
-            fill={chart.fill}
-            showPoints
+          <XYChart
+            theme={chartTheme}
             height={chartHeight}
-            ariaLabel={chart.title}
-            getDatumTooltip={(datum, index) => {
-              const fallbackLabel = chart.data[index]?.label ?? `Point ${index + 1}`;
-              return `${fallbackLabel}: ${chart.formatValue(datum.value)}`;
-            }}
-          />
+            xScale={{ type: 'band', paddingInner: 0.2 }}
+            yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
+          >
+            <Axis
+              orientation="bottom"
+              numTicks={4}
+              tickLabelProps={{ fontSize: 9, dy: '0.5em' }}
+              hideTicks
+            />
+            <LineSeries
+              dataKey={chart.key}
+              data={chart.data as ChartDatum[]}
+              xAccessor={(d: ChartDatum) => d.label}
+              yAccessor={(d: ChartDatum) => d.value}
+              stroke={chart.stroke}
+            />
+            <Tooltip
+              snapTooltipToDatumX
+              snapTooltipToDatumY
+              showVerticalCrosshair
+              renderTooltip={({ tooltipData }: { tooltipData?: { nearestDatum?: { datum: unknown } } }) => {
+                const datum = tooltipData?.nearestDatum?.datum as ChartDatum | undefined;
+                if (!datum) return null;
+                return (
+                  <div style={{ fontSize: 11, padding: '2px 4px' }}>
+                    <div style={{ fontWeight: 600 }}>{datum.label}</div>
+                    <div>{chart.formatValue(datum.value)}</div>
+                  </div>
+                );
+              }}
+            />
+          </XYChart>
         </div>
       </div>
 

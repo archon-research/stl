@@ -4,7 +4,7 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
-import type { ChartDatum } from '@archon-research/charting';
+import type { ChartDatum } from './components/allocations/AllocationGrid';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
