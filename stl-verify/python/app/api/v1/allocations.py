@@ -628,7 +628,7 @@ async def list_allocation_activity(
             action_type=e.action_type,
             tx_amount=e.tx_amount,
             balance=e.balance,
-            tx_hash=e.tx_hash,
+            tx_hash=None if e.action_type.lower() == "sweep" else e.tx_hash,
             log_index=e.log_index,
             block_number=e.block_number,
             block_version=e.block_version,

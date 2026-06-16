@@ -93,6 +93,68 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 	return result, nil
 }
 
+// ListTokensMissingSymbol returns addresses of tokens with an empty symbol
+// (the zero-address sentinel is excluded), ordered by created_at_block, capped
+// at limit rows.
+func (r *TokenRepository) ListTokensMissingSymbol(ctx context.Context, chainID int64, limit int) ([]common.Address, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("listing tokens missing symbol: limit must be positive, got %d", limit)
+	}
+	// COALESCE: token.symbol is nullable, and a NULL symbol is just as missing as
+	// an empty one. The expression must match the idx_token_missing_symbol
+	// partial-index predicate exactly for the planner to use it.
+	rows, err := r.pool.Query(ctx,
+		`SELECT address
+		   FROM token
+		  WHERE chain_id = $1
+		    AND COALESCE(symbol, '') = ''
+		    AND address <> $2
+		  ORDER BY created_at_block
+		  LIMIT $3`,
+		chainID, common.Address{}.Bytes(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing tokens missing symbol: %w", err)
+	}
+	defer rows.Close()
+
+	var out []common.Address
+	for rows.Next() {
+		var addrBytes []byte
+		if err := rows.Scan(&addrBytes); err != nil {
+			return nil, fmt.Errorf("scanning missing-symbol token: %w", err)
+		}
+		out = append(out, common.BytesToAddress(addrBytes))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating missing-symbol tokens: %w", err)
+	}
+	return out, nil
+}
+
+// ResolveTokenSymbol sets a token's symbol. It only fills an empty symbol —
+// a token that already has one is left untouched and an error is returned, so
+// a resolved symbol can never be clobbered.
+func (r *TokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64, address common.Address, symbol string) error {
+	// An empty resolution would match the empty-symbol guard below, report
+	// success, and leave the row pending — reject it outright.
+	if symbol == "" {
+		return fmt.Errorf("resolving token symbol %s: symbol must not be empty", address.Hex())
+	}
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE token
+		    SET symbol = $3,
+		        updated_at = NOW()
+		  WHERE chain_id = $1 AND address = $2 AND COALESCE(symbol, '') = ''`,
+		chainID, address.Bytes(), symbol)
+	if err != nil {
+		return fmt.Errorf("resolving token symbol: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("resolving token symbol %s: no matching empty-symbol row", address.Hex())
+	}
+	return nil
+}
+
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
