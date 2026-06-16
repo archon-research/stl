@@ -7,6 +7,10 @@ import {
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
+import {
+  type ChartDatum,
+  LineChart,
+} from '@archon-research/charting';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -66,7 +70,184 @@ type AllocationGridProps = {
   selectedAllocationKey: string | null;
   selectedPrime: Prime | null;
   sorting: SortingState;
+  chartResolution: ChartResolution;
+  metricCharts: MetricChartSpec[];
+  isChartsLoading: boolean;
+  chartsErrorMessage: string | null;
+  capitalMetricsErrorMessage: string | null;
+  primeDebtErrorMessage: string | null;
 };
+
+export type MetricChartSpec = {
+  key: string;
+  title: string;
+  subtitle: string;
+  data: ChartDatum[];
+  stroke: string;
+  fill: string;
+  formatValue: (value: number) => string;
+};
+
+export type ChartResolution =
+  | 'PT1M'
+  | 'PT5M'
+  | 'PT15M'
+  | 'PT1H'
+  | 'PT6H'
+  | 'P1D';
+
+function findMetricChart(
+  charts: MetricChartSpec[],
+  key: MetricChartSpec['key'],
+): MetricChartSpec | null {
+  return charts.find((chart) => chart.key === key) ?? null;
+}
+
+function MetricCardTrend({
+  chart,
+  chartResolution,
+  isLoading,
+  errorMessage,
+}: {
+  chart: MetricChartSpec | null;
+  chartResolution: ChartResolution;
+  isLoading: boolean;
+  errorMessage: string | null;
+}) {
+  if (isLoading) {
+    return (
+      <div
+        className={css({
+          mt: '2',
+          h: '20',
+          borderRadius: 'sm',
+          borderWidth: '1px',
+          borderStyle: 'solid',
+          borderColor: 'border.subtle',
+          bg: 'surface.default',
+        })}
+      />
+    );
+  }
+
+  if (errorMessage) {
+    return (
+      <p className={css({ m: 0, mt: '2', fontSize: 'xs', color: 'text.warning' })}>
+        Chart unavailable for this range.
+      </p>
+    );
+  }
+
+  if (!chart || chart.data.length === 0) {
+    return (
+      <p className={css({ m: 0, mt: '2', fontSize: 'xs', color: 'text.subtle' })}>
+        No trend data in this window.
+      </p>
+    );
+  }
+
+  const values = chart.data.map((point) => point.value);
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const latestPoint = chart.data[chart.data.length - 1];
+  const firstPoint = chart.data[0];
+  const yRange = Math.max(maxValue - minValue, 0);
+  const midValue = minValue + yRange / 2;
+
+  return (
+    <div className={css({ mt: '2', display: 'grid', gap: '1.5' })}>
+      <div
+        className={css({
+          display: 'grid',
+          gridTemplateColumns: 'auto 1fr',
+          alignItems: 'stretch',
+          gap: '2',
+        })}
+      >
+        <div
+          className={css({
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            alignItems: 'flex-end',
+            py: '1',
+            minW: '3.5rem',
+          })}
+        >
+          <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
+            {chart.formatValue(maxValue)}
+          </span>
+          <span className={css({ fontSize: '2xs', color: 'text.subtle' })}>
+            {chart.formatValue(midValue)}
+          </span>
+          <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
+            {chart.formatValue(minValue)}
+          </span>
+        </div>
+
+        <div
+          className={css({
+            borderWidth: '1px',
+            borderStyle: 'solid',
+            borderColor: 'border.subtle',
+            borderRadius: 'sm',
+            bg: 'surface.default',
+            px: '1.5',
+            py: '1',
+          })}
+        >
+          <LineChart
+            data={chart.data}
+            stroke={chart.stroke}
+            fill={chart.fill}
+            showPoints={false}
+            height={112}
+            ariaLabel={chart.title}
+          />
+        </div>
+      </div>
+
+      <div
+        className={css({
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: '2',
+          px: '1',
+        })}
+      >
+        <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
+          {firstPoint.label}
+        </span>
+        <span className={css({ fontSize: '2xs', color: 'text.subtle' })}>
+          {chartResolution}
+        </span>
+        <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
+          {latestPoint.label}
+        </span>
+      </div>
+
+      <AppTooltip
+        ariaLabel={`Latest ${chart.title}`}
+        trigger={
+          <span
+            className={css({
+              fontSize: 'xs',
+              color: 'text.default',
+              textDecoration: 'underline',
+              textDecorationStyle: 'dotted',
+              textUnderlineOffset: '2px',
+              width: 'fit-content',
+            })}
+          >
+            Latest point
+          </span>
+        }
+        content={`${latestPoint.label}: ${chart.formatValue(latestPoint.value)}`}
+      />
+    </div>
+  );
+}
 
 const tableHeaderTypographyClassName = css({
   '& thead th': {
@@ -399,6 +580,12 @@ export function AllocationGrid({
   selectedAllocationKey,
   selectedPrime,
   sorting,
+  chartResolution,
+  metricCharts,
+  isChartsLoading,
+  chartsErrorMessage,
+  capitalMetricsErrorMessage,
+  primeDebtErrorMessage,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -498,6 +685,14 @@ export function AllocationGrid({
     p: { base: '3', md: '3.5' },
     boxShadow: 'none',
   });
+
+  const allocationActivityChart = findMetricChart(
+    metricCharts,
+    'allocation-activity-volume',
+  );
+  const riskCapitalChart = findMetricChart(metricCharts, 'risk-capital');
+  const totalCapitalChart = findMetricChart(metricCharts, 'total-capital');
+  const primeDebtChart = findMetricChart(metricCharts, 'prime-debt-exposure');
 
   return (
     <PageShell>
@@ -606,6 +801,8 @@ export function AllocationGrid({
                     Debt sync{' '}
                     {isPrimeDebtLoading
                       ? 'Loading...'
+                      : primeDebtErrorMessage
+                        ? 'Error'
                       : primeDebtSnapshot?.synced_at
                         ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
                         : '—'}
@@ -619,6 +816,8 @@ export function AllocationGrid({
                   >
                     {isPrimeDebtLoading
                       ? 'Waiting for sync timestamp'
+                      : primeDebtErrorMessage
+                        ? primeDebtErrorMessage
                       : primeDebtSnapshot?.synced_at
                         ? formatDateTime(primeDebtSnapshot.synced_at)
                         : 'No debt sync timestamp'}
@@ -677,9 +876,19 @@ export function AllocationGrid({
                     : formatUsdValue(summary.totalUsd)
                 }
                 detail={
-                  hasSearchQuery && overallSummary
-                    ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
-                    : `${summary.allocationCount} allocations`
+                  <div className={css({ display: 'grid', gap: '1' })}>
+                    <span>
+                      {hasSearchQuery && overallSummary
+                        ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+                        : `${summary.allocationCount} allocations`}
+                    </span>
+                    <MetricCardTrend
+                      chart={allocationActivityChart}
+                      chartResolution={chartResolution}
+                      isLoading={isChartsLoading}
+                      errorMessage={chartsErrorMessage}
+                    />
+                  </div>
                 }
               />
             ) : null}
@@ -691,10 +900,22 @@ export function AllocationGrid({
                   label="Risk capital"
                   value={formatUsdValue(capitalMetrics.risk_capital)}
                   detail={
-                    parseNumericValue(capitalMetrics.risk_to_capital_ratio) !==
-                    null
-                      ? `Risk-to-capital ${formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}`
-                      : undefined
+                    <div className={css({ display: 'grid', gap: '1' })}>
+                      {parseNumericValue(
+                        capitalMetrics.risk_to_capital_ratio,
+                      ) !== null ? (
+                        <span>
+                          Risk-to-capital{' '}
+                          {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
+                        </span>
+                      ) : null}
+                      <MetricCardTrend
+                        chart={riskCapitalChart}
+                        chartResolution={chartResolution}
+                        isLoading={isChartsLoading}
+                        errorMessage={chartsErrorMessage}
+                      />
+                    </div>
                   }
                 />
               </>
@@ -705,7 +926,21 @@ export function AllocationGrid({
                 className={metricsCardClassName}
                 label="Total capital"
                 value={formatUsdValue(capitalMetrics.total_capital)}
-                detail={`Buffer ${formatUsdValue(capitalMetrics.capital_buffer)} · First loss ${formatUsdValue(capitalMetrics.first_loss_capital)}`}
+                detail={
+                  <div className={css({ display: 'grid', gap: '1' })}>
+                    <span>
+                      Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·
+                      {' '}First loss{' '}
+                      {formatUsdValue(capitalMetrics.first_loss_capital)}
+                    </span>
+                    <MetricCardTrend
+                      chart={totalCapitalChart}
+                      chartResolution={chartResolution}
+                      isLoading={isChartsLoading}
+                      errorMessage={chartsErrorMessage}
+                    />
+                  </div>
+                }
               />
             ) : null}
 
@@ -723,40 +958,48 @@ export function AllocationGrid({
                     isPrimeDebtLoading ? (
                       'Fetching latest debt snapshot'
                     ) : (
-                      <div
-                        className={css({
-                          display: 'flex',
-                          flexWrap: 'wrap',
-                          alignItems: 'center',
-                          gap: '1',
-                        })}
-                      >
-                        <span>
-                          Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <AppTooltip
-                          ariaLabel={
-                            primeDebtSnapshot?.debt_wad
-                              ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
-                              : 'Raw WAD unavailable'
-                          }
-                          trigger={
-                            <span
-                              className={css({
-                                textDecoration: 'underline',
-                                textDecorationStyle: 'dotted',
-                                textUnderlineOffset: '2px',
-                              })}
-                            >
-                              {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
-                            </span>
-                          }
-                          content={
-                            primeDebtSnapshot?.debt_wad
-                              ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
-                              : 'Raw WAD unavailable'
-                          }
+                      <div className={css({ display: 'grid', gap: '1' })}>
+                        <div
+                          className={css({
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: '1',
+                          })}
+                        >
+                          <span>
+                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <AppTooltip
+                            ariaLabel={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                            trigger={
+                              <span
+                                className={css({
+                                  textDecoration: 'underline',
+                                  textDecorationStyle: 'dotted',
+                                  textUnderlineOffset: '2px',
+                                })}
+                              >
+                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                              </span>
+                            }
+                            content={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                          />
+                        </div>
+                        <MetricCardTrend
+                          chart={primeDebtChart}
+                          chartResolution={chartResolution}
+                          isLoading={isChartsLoading}
+                          errorMessage={chartsErrorMessage}
                         />
                       </div>
                     )
@@ -778,6 +1021,13 @@ export function AllocationGrid({
           >
             {capitalMetrics.validation_note}
           </p>
+        ) : null}
+        {!showTopMetricsSkeleton && capitalMetricsErrorMessage ? (
+          <ErrorState
+            title="Capital metrics are unavailable"
+            description="The capital metrics endpoint failed for this session."
+            errorMessage={capitalMetricsErrorMessage}
+          />
         ) : null}
         <div
           className={css({

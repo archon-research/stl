@@ -4,11 +4,16 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
+import type { ChartDatum } from '@archon-research/charting';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { AllocationGrid } from './components/allocations/AllocationGrid';
+import {
+  AllocationGrid,
+  type ChartResolution,
+  type MetricChartSpec,
+} from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
@@ -21,11 +26,13 @@ import {
 } from './components/shared/RangePicker';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import {
+  getAllocationActivityEnvelope,
   getAllocations,
   getCapitalMetrics,
   getChains,
   getDataSources,
   getLatestPrimeDebtSnapshot,
+  getPrimeDebtEnvelope,
   getPrimes,
   getProtocols,
   getTokens,
@@ -42,6 +49,7 @@ import {
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
+  parseNumericValue,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
@@ -53,13 +61,68 @@ import {
 } from './lib/url-params';
 import type {
   Allocation,
+  AllocationActivityBucket,
   CapitalMetrics,
   DataSource,
   Prime,
+  PrimeDebtBucket,
   PrimeDebtSnapshot,
   TokensResponse,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
+
+function getResolutionForRange(
+  preset: RangePreset,
+  range: TimeRange,
+): ChartResolution {
+  const presetMap: Record<Exclude<RangePreset, 'custom'>, ChartResolution> =
+    {
+      '1h': 'PT1M',
+      '6h': 'PT5M',
+      '24h': 'PT15M',
+      '7d': 'PT1H',
+      '30d': 'PT6H',
+    };
+
+  if (preset !== 'custom') {
+    return presetMap[preset];
+  }
+
+  const fromMs = range.from_timestamp
+    ? new Date(range.from_timestamp).getTime()
+    : Number.NaN;
+  const toMs = range.to_timestamp
+    ? new Date(range.to_timestamp).getTime()
+    : Number.NaN;
+
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs) {
+    return 'PT15M';
+  }
+
+  const durationMs = toMs - fromMs;
+
+  if (durationMs <= 2 * 60 * 60 * 1000) {
+    return 'PT1M';
+  }
+  if (durationMs <= 12 * 60 * 60 * 1000) {
+    return 'PT5M';
+  }
+  if (durationMs <= 48 * 60 * 60 * 1000) {
+    return 'PT15M';
+  }
+  if (durationMs <= 14 * 24 * 60 * 60 * 1000) {
+    return 'PT1H';
+  }
+  if (durationMs <= 60 * 24 * 60 * 60 * 1000) {
+    return 'PT6H';
+  }
+  return 'P1D';
+}
+
+function toTimestampMs(timestamp: string): number {
+  const value = new Date(timestamp).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
 
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
@@ -73,15 +136,29 @@ function App() {
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
   const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
+  const [capitalMetricsErrorMessage, setCapitalMetricsErrorMessage] = useState<
+    string | null
+  >(null);
   const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
-  const [capitalMetrics, setCapitalMetrics] = useState<CapitalMetrics | null>(
-    null,
+  const [capitalMetricsList, setCapitalMetricsList] = useState<CapitalMetrics[]>(
+    [],
   );
   const [primeDebtSnapshot, setPrimeDebtSnapshot] =
     useState<PrimeDebtSnapshot | null>(null);
   const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
+  const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<string | null>(
+    null,
+  );
+  const [activityBuckets, setActivityBuckets] = useState<
+    AllocationActivityBucket[]
+  >([]);
+  const [debtBuckets, setDebtBuckets] = useState<PrimeDebtBucket[]>([]);
+  const [isChartsLoading, setIsChartsLoading] = useState(false);
+  const [chartsErrorMessage, setChartsErrorMessage] = useState<string | null>(
+    null,
+  );
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -320,35 +397,13 @@ function App() {
   }, [selectedPrimeId]);
 
   useEffect(() => {
-    if (!selectedPrimeId) {
-      setCapitalMetrics(null);
-      setIsCapitalMetricsLoading(false);
-      return;
-    }
-
     const controller = new AbortController();
     setIsCapitalMetricsLoading(true);
-
-    if (!primes.some((prime) => prime.id === selectedPrimeId)) {
-      setCapitalMetrics(null);
-      setIsCapitalMetricsLoading(false);
-      return () => controller.abort();
-    }
+    setCapitalMetricsErrorMessage(null);
 
     void getCapitalMetrics(controller.signal)
       .then((metrics) => {
-        const selectedMetric = metrics.find(
-          (metric) =>
-            metric.prime_id.trim().toLowerCase() ===
-            selectedPrimeId.trim().toLowerCase(),
-        );
-
-        if (!selectedMetric) {
-          setCapitalMetrics(null);
-          return;
-        }
-
-        setCapitalMetrics(selectedMetric);
+        setCapitalMetricsList(metrics);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
@@ -357,9 +412,9 @@ function App() {
 
         logging.error('Failed to load capital metrics', {
           error,
-          primeId: selectedPrimeId,
         });
-        setCapitalMetrics(null);
+        setCapitalMetricsList([]);
+        setCapitalMetricsErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) {
@@ -368,12 +423,13 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId, primes]);
+  }, []);
 
   useEffect(() => {
     if (!selectedPrimeId) {
       setPrimeDebtSnapshot(null);
       setIsPrimeDebtLoading(false);
+      setPrimeDebtErrorMessage(null);
       return;
     }
 
@@ -381,6 +437,7 @@ function App() {
 
     setIsPrimeDebtLoading(true);
     setPrimeDebtSnapshot(null);
+    setPrimeDebtErrorMessage(null);
 
     void getLatestPrimeDebtSnapshot(selectedPrimeId, controller.signal)
       .then((snapshot) => {
@@ -398,6 +455,7 @@ function App() {
           primeId: selectedPrimeId,
         });
         setPrimeDebtSnapshot(null);
+        setPrimeDebtErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) {
@@ -412,6 +470,104 @@ function App() {
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
     [selectedPrimeId, primes],
   );
+
+  const capitalMetrics = useMemo(() => {
+    if (!selectedPrimeId) {
+      return null;
+    }
+
+    return (
+      capitalMetricsList.find(
+        (metric) =>
+          metric.prime_id.trim().toLowerCase() ===
+          selectedPrimeId.trim().toLowerCase(),
+      ) ?? null
+    );
+  }, [capitalMetricsList, selectedPrimeId]);
+
+  const chartResolution = useMemo(
+    () => getResolutionForRange(rangePreset, timeRange),
+    [rangePreset, timeRange],
+  );
+
+  useEffect(() => {
+    if (!selectedPrimeId) {
+      setActivityBuckets([]);
+      setDebtBuckets([]);
+      setChartsErrorMessage(null);
+      setIsChartsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsChartsLoading(true);
+    setChartsErrorMessage(null);
+
+    void Promise.all([
+      getAllocationActivityEnvelope(
+        {
+          prime_id: selectedPrimeId,
+          from_timestamp: timeRange.from_timestamp,
+          to_timestamp: timeRange.to_timestamp,
+          resolution: chartResolution,
+          aggregate: true,
+        },
+        controller.signal,
+      ),
+      getPrimeDebtEnvelope(
+        selectedPrimeId,
+        {
+          from_timestamp: timeRange.from_timestamp,
+          to_timestamp: timeRange.to_timestamp,
+          resolution: chartResolution,
+          aggregate: true,
+        },
+        controller.signal,
+      ),
+    ])
+      .then(([activityEnvelope, debtEnvelope]) => {
+        const nextActivityBuckets =
+          activityEnvelope.mode === 'aggregated'
+            ? (activityEnvelope.data as AllocationActivityBucket[])
+            : [];
+        const nextDebtBuckets =
+          debtEnvelope.mode === 'aggregated'
+            ? (debtEnvelope.data as PrimeDebtBucket[])
+            : [];
+
+        setActivityBuckets(
+          [...nextActivityBuckets].sort(
+            (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+          ),
+        );
+        setDebtBuckets(
+          [...nextDebtBuckets].sort(
+            (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+          ),
+        );
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.error('Failed to load chart buckets', {
+          error,
+          primeId: selectedPrimeId,
+          chartResolution,
+        });
+        setActivityBuckets([]);
+        setDebtBuckets([]);
+        setChartsErrorMessage(toErrorMessage(error));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsChartsLoading(false);
+        }
+      });
+
+    return () => controller.abort();
+  }, [chartResolution, selectedPrimeId, timeRange.from_timestamp, timeRange.to_timestamp]);
 
   const chainLabels = useMemo(
     () => buildChainLabelLookup(localChains),
@@ -519,6 +675,149 @@ function App() {
       }),
     [searchFilteredAllocations, selectedNetwork, selectedProtocol],
   );
+
+  const allocationSummaryTotalUsd = useMemo(
+    () =>
+      searchFilteredAllocations.reduce((sum, allocation) => {
+        const numericAmount = parseNumericValue(allocation.amount_usd);
+        return numericAmount === null ? sum : sum + numericAmount;
+      }, 0),
+    [searchFilteredAllocations],
+  );
+
+  const activityVolumeSeries = useMemo<ChartDatum[]>(
+    () =>
+      activityBuckets
+        .map((bucket) => ({
+          label: new Date(bucket.bucket_start).toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          value: parseNumericValue(bucket.total_tx_amount) ?? Number.NaN,
+        }))
+        .filter((point) => Number.isFinite(point.value)),
+    [activityBuckets],
+  );
+
+  const primeDebtSeries = useMemo<ChartDatum[]>(
+    () =>
+      debtBuckets
+        .map((bucket) => ({
+          label: new Date(bucket.bucket_start).toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          value:
+            bucket.debt_wad === null || bucket.debt_wad === undefined
+              ? Number.NaN
+              : (parseNumericValue(bucket.debt_wad) ?? Number.NaN) / 1e18,
+        }))
+        .filter((point) => Number.isFinite(point.value)),
+    [debtBuckets],
+  );
+
+  const chartFromLabel = timeRange.from_timestamp
+    ? new Date(timeRange.from_timestamp).toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : 'Range start';
+
+  const chartToLabel = timeRange.to_timestamp
+    ? new Date(timeRange.to_timestamp).toLocaleString([], {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : 'Range end';
+
+  const metricCharts = useMemo<MetricChartSpec[]>(() => {
+    const fallbackChart = (value: number | null): ChartDatum[] => {
+      if (value === null) {
+        return [];
+      }
+      return [
+        { label: chartFromLabel, value },
+        { label: chartToLabel, value },
+      ];
+    };
+
+    const riskCapitalValue =
+      capitalMetrics?.risk_capital === undefined ||
+      capitalMetrics?.risk_capital === null
+        ? null
+        : parseNumericValue(capitalMetrics.risk_capital);
+
+    const totalCapitalValue =
+      capitalMetrics?.total_capital === undefined ||
+      capitalMetrics?.total_capital === null
+        ? null
+        : parseNumericValue(capitalMetrics.total_capital);
+
+    const primeDebtValue =
+      primeDebtSnapshot?.debt_wad === undefined ||
+      primeDebtSnapshot?.debt_wad === null
+        ? null
+        : (parseNumericValue(primeDebtSnapshot.debt_wad) ?? Number.NaN) / 1e18;
+
+    return [
+      {
+        key: 'allocation-activity-volume',
+        title: 'Allocation activity volume',
+        subtitle: 'Bucketed tx amount from allocation activity',
+        data:
+          activityVolumeSeries.length > 0
+            ? activityVolumeSeries
+            : fallbackChart(allocationSummaryTotalUsd),
+        stroke: 'var(--colors-chart-primary)',
+        fill: 'color-mix(in srgb, var(--colors-chart-primary) 22%, transparent)',
+        formatValue: (value: number) => formatUsdValue(value),
+      },
+      {
+        key: 'risk-capital',
+        title: 'Risk capital trend',
+        subtitle: 'Current value repeated until historical series lands',
+        data: fallbackChart(riskCapitalValue),
+        stroke: 'var(--colors-chart-success)',
+        fill: 'color-mix(in srgb, var(--colors-chart-success) 22%, transparent)',
+        formatValue: (value: number) => formatUsdValue(value),
+      },
+      {
+        key: 'total-capital',
+        title: 'Total capital trend',
+        subtitle: 'Current value repeated until historical series lands',
+        data: fallbackChart(totalCapitalValue),
+        stroke: 'var(--colors-chart-secondary)',
+        fill: 'color-mix(in srgb, var(--colors-chart-secondary) 22%, transparent)',
+        formatValue: (value: number) => formatUsdValue(value),
+      },
+      {
+        key: 'prime-debt-exposure',
+        title: 'Prime debt exposure',
+        subtitle: 'Aggregated debt buckets in debt units',
+        data: primeDebtSeries.length > 0 ? primeDebtSeries : fallbackChart(primeDebtValue),
+        stroke: 'var(--colors-chart-alert)',
+        fill: 'color-mix(in srgb, var(--colors-chart-alert) 22%, transparent)',
+        formatValue: (value: number) => `${value.toLocaleString()} DAI`,
+      },
+    ].filter((chart) => chart.data.length > 0);
+  }, [
+    activityVolumeSeries,
+    allocationSummaryTotalUsd,
+    capitalMetrics?.risk_capital,
+    capitalMetrics?.total_capital,
+    chartFromLabel,
+    chartToLabel,
+    primeDebtSeries,
+    primeDebtSnapshot?.debt_wad,
+  ]);
 
   useEffect(() => {
     if (filteredAllocations.length === 0) {
@@ -695,6 +994,12 @@ function App() {
                 selectedAllocationKey={selectedAllocationKey}
                 selectedPrime={selectedPrime}
                 sorting={sorting as SortingState}
+                chartResolution={chartResolution}
+                metricCharts={metricCharts}
+                isChartsLoading={isChartsLoading}
+                chartsErrorMessage={chartsErrorMessage}
+                capitalMetricsErrorMessage={capitalMetricsErrorMessage}
+                primeDebtErrorMessage={primeDebtErrorMessage}
               />
             ) : (
               <ActivityFeed

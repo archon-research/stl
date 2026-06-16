@@ -1,11 +1,13 @@
 import { createApiClient } from '@archon-research/http-client-react';
 
-import type { paths } from '../generated/openapi-types';
+import type { components, paths } from '../generated/openapi-types';
 import type {
+  AllocationActivityEnvelope,
   AllocationActivityResponse,
   AllocationsResponse,
   CapitalMetricsListResponse,
   DataSourcesResponse,
+  PrimeDebtEnvelope,
   PrimeDebtSnapshot,
   PrimesResponse,
   ProtocolEventsResponse,
@@ -22,6 +24,8 @@ import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
+
+type TimeSeriesResolution = components['schemas']['TimeSeriesResolution'];
 
 type ApiResult<TData, TError> = Promise<{
   data?: TData;
@@ -155,10 +159,32 @@ export async function getAllocationActivity(
     tx_hash?: string;
     from_timestamp?: string;
     to_timestamp?: string;
+    resolution?: TimeSeriesResolution;
+    aggregate?: boolean;
     limit?: number;
   },
   signal?: AbortSignal,
 ): Promise<AllocationActivityResponse> {
+  const envelope = await getAllocationActivityEnvelope(filters, signal);
+  return (envelope.data ?? []) as AllocationActivityResponse;
+}
+
+export async function getAllocationActivityEnvelope(
+  filters?: {
+    prime_id?: string;
+    chain_id?: number;
+    protocol_name?: string;
+    action_type?: string;
+    token_symbol?: string;
+    tx_hash?: string;
+    from_timestamp?: string;
+    to_timestamp?: string;
+    resolution?: TimeSeriesResolution;
+    aggregate?: boolean;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<AllocationActivityEnvelope> {
   const envelope = await requestData(
     apiClient.GET('/v1/allocations/activity', {
       params: { query: filters },
@@ -166,7 +192,7 @@ export async function getAllocationActivity(
     }),
     'GET /v1/allocations/activity',
   );
-  return (envelope.data ?? []) as AllocationActivityResponse;
+  return envelope as AllocationActivityEnvelope;
 }
 
 export function getCapitalMetrics(
@@ -297,15 +323,34 @@ export function getTokenPrice(
 
 export async function getPrimeDebtSnapshots(
   primeId: string,
-  limit?: number,
+  filters?: {
+    from_timestamp?: string;
+    to_timestamp?: string;
+    resolution?: TimeSeriesResolution;
+    aggregate?: boolean;
+    limit?: number;
+  },
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot[]> {
+  const envelope = await getPrimeDebtEnvelope(primeId, filters, signal);
+  return (envelope.data ?? []) as PrimeDebtSnapshot[];
+}
+
+export async function getPrimeDebtEnvelope(
+  primeId: string,
+  filters?: {
+    from_timestamp?: string;
+    to_timestamp?: string;
+    resolution?: TimeSeriesResolution;
+    aggregate?: boolean;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<PrimeDebtEnvelope> {
   const query =
-    typeof limit === 'number'
-      ? ({
-          limit,
-        } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
-      : undefined;
+    filters as
+      | paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query']
+      | undefined;
 
   const envelope = await requestData(
     apiClient.GET('/v1/primes/{prime_id}/debt', {
@@ -319,13 +364,19 @@ export async function getPrimeDebtSnapshots(
     }),
     'GET /v1/primes/{prime_id}/debt',
   );
-  return (envelope.data ?? []) as PrimeDebtSnapshot[];
+  return envelope as PrimeDebtEnvelope;
 }
 
 export async function getLatestPrimeDebtSnapshot(
   primeId: string,
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot | null> {
-  const snapshots = await getPrimeDebtSnapshots(primeId, 1, signal);
+  const snapshots = await getPrimeDebtSnapshots(
+    primeId,
+    {
+      limit: 1,
+    },
+    signal,
+  );
   return snapshots[0] ?? null;
 }
