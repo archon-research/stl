@@ -66,6 +66,34 @@ async def test_list_debt_snapshots_returns_empty_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_debt_buckets_delegates_to_repository() -> None:
+    from datetime import UTC, datetime
+
+    repo = AsyncMock()
+    repo.list_debt_buckets.return_value = []
+    service = PrimeDebtService(repo)
+    from_ts = datetime(2026, 1, 1, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, tzinfo=UTC)
+
+    result = await service.list_debt_buckets(
+        _VALID_ADDR,
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+    assert result == []
+    repo.list_debt_buckets.assert_awaited_once_with(
+        _VALID_ADDR,
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+
+@pytest.mark.asyncio
 async def test_prime_exists_propagates_repository_error() -> None:
     repo = AsyncMock()
     repo.prime_exists.side_effect = ValueError("db failure")

@@ -1,58 +1,21 @@
-from datetime import UTC, datetime, timedelta
-from enum import StrEnum
+"""FastAPI integration for the shared time-series query policy.
+
+This is the inbound adapter for the domain ``time_series`` policy: it declares
+the HTTP query parameters, delegates normalization/validation to the domain
+resolver, and maps domain ``ValueError``s to HTTP 422. The response envelope
+types live here too, since they are an HTTP-contract concern.
+"""
+
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, Query
 from pydantic import BaseModel, Field
 
-DEFAULT_WINDOW = timedelta(hours=24)
-
-
-class TimeSeriesResolution(StrEnum):
-    """Allowed ISO-8601 durations for time-series downsampling."""
-
-    PT1M = "PT1M"
-    PT5M = "PT5M"
-    PT15M = "PT15M"
-    PT1H = "PT1H"
-    PT6H = "PT6H"
-    P1D = "P1D"
-
-
-_RESOLUTION_TO_DURATION = {
-    TimeSeriesResolution.PT1M: timedelta(minutes=1),
-    TimeSeriesResolution.PT5M: timedelta(minutes=5),
-    TimeSeriesResolution.PT15M: timedelta(minutes=15),
-    TimeSeriesResolution.PT1H: timedelta(hours=1),
-    TimeSeriesResolution.PT6H: timedelta(hours=6),
-    TimeSeriesResolution.P1D: timedelta(days=1),
-}
-
-
-class TimeSeriesQueryParams(BaseModel):
-    """Normalized time-series query parameters shared across endpoints."""
-
-    from_timestamp: datetime = Field(description="Inclusive lower timestamp bound (UTC).")
-    to_timestamp: datetime = Field(description="Inclusive upper timestamp bound (UTC).")
-    resolution: TimeSeriesResolution = Field(description="ISO-8601 duration enum for requested resolution.")
-    interval_ms: int = Field(description="Resolution in milliseconds.")
-
-
-def _normalize_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def _minimum_resolution(window: timedelta) -> TimeSeriesResolution:
-    if window <= timedelta(hours=6):
-        return TimeSeriesResolution.PT1M
-    if window <= timedelta(hours=24):
-        return TimeSeriesResolution.PT5M
-    if window <= timedelta(days=7):
-        return TimeSeriesResolution.PT15M
-    if window <= timedelta(days=30):
-        return TimeSeriesResolution.PT1H
-    return TimeSeriesResolution.PT6H
+from app.domain.time_series import (
+    TimeSeriesQuery,
+    TimeSeriesResolution,
+    resolve_time_series_query,
+)
 
 
 def get_time_series_query_params(
@@ -62,35 +25,50 @@ def get_time_series_query_params(
     ),
     to_timestamp: datetime | None = Query(
         default=None,
-        description="Inclusive upper timestamp bound (ISO-8601). Defaults to current UTC time.",
+        description="Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
     ),
     resolution: TimeSeriesResolution | None = Query(
         default=None,
-        description="ISO-8601 duration resolution (for example `PT5M`, `PT1H`).",
+        description=(
+            "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing "
+            "when `aggregate=true`; defaults to the finest resolution allowed for the window."
+        ),
     ),
-) -> TimeSeriesQueryParams:
-    now_utc = datetime.now(UTC)
-    normalized_to = _normalize_utc(to_timestamp) if to_timestamp is not None else now_utc
-    normalized_from = _normalize_utc(from_timestamp) if from_timestamp is not None else normalized_to - DEFAULT_WINDOW
-
-    if normalized_from > normalized_to:
-        raise HTTPException(status_code=422, detail="from_timestamp must be less than or equal to to_timestamp")
-
-    window = normalized_to - normalized_from
-    min_resolution = _minimum_resolution(window)
-    effective_resolution = resolution or min_resolution
-
-    if _RESOLUTION_TO_DURATION[effective_resolution] < _RESOLUTION_TO_DURATION[min_resolution]:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"resolution is too fine for the selected window; minimum allowed resolution is {min_resolution.value}"
-            ),
+    aggregate: bool = Query(
+        default=False,
+        description="When true, return time-bucketed aggregates instead of raw rows.",
+    ),
+) -> TimeSeriesQuery:
+    try:
+        return resolve_time_series_query(
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            resolution=resolution,
+            aggregate=aggregate,
+            now=datetime.now(UTC),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return TimeSeriesQueryParams(
-        from_timestamp=normalized_from.replace(tzinfo=None),
-        to_timestamp=normalized_to.replace(tzinfo=None),
-        resolution=effective_resolution,
-        interval_ms=int(_RESOLUTION_TO_DURATION[effective_resolution].total_seconds() * 1000),
+
+class TimeSeriesWindow(BaseModel):
+    """The resolved window and resolution actually applied to a request.
+
+    Echoing this back lets consumers distinguish an empty result caused by the
+    window from one caused by the absence of data.
+    """
+
+    from_timestamp: datetime = Field(description="Inclusive lower bound applied (UTC).")
+    to_timestamp: datetime = Field(description="Inclusive upper bound applied (UTC).")
+    resolution: TimeSeriesResolution = Field(description="Resolution applied (relevant when aggregated).")
+    interval_ms: int = Field(description="Resolution width in milliseconds.")
+
+
+def build_window(query: TimeSeriesQuery) -> TimeSeriesWindow:
+    """Build the response window descriptor from a resolved query."""
+    return TimeSeriesWindow(
+        from_timestamp=query.from_timestamp,
+        to_timestamp=query.to_timestamp,
+        resolution=query.resolution,
+        interval_ms=query.interval_ms,
     )

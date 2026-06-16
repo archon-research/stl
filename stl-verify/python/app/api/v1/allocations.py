@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
 from app.api._validators import EthAddressParam, OptionalEthAddressParam
 from app.api.deps import get_engine
-from app.api.time_series import TimeSeriesQueryParams, get_time_series_query_params
+from app.api.time_series import TimeSeriesWindow, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
+from app.domain.time_series import TimeSeriesQuery
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
 
@@ -539,15 +540,38 @@ async def list_allocations(
     return receipt_rows + direct_rows
 
 
+class AllocationActivityBucketResponse(BaseModel):
+    """Allocation activity aggregated into a single time bucket."""
+
+    bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
+    event_count: int = Field(description="Number of activity events in the bucket.", examples=[42])
+    total_tx_amount: Decimal = Field(
+        description="Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
+        examples=["1234567890000000000000"],
+    )
+
+
+class AllocationActivityEnvelope(BaseModel):
+    """Allocation activity response: raw events or aggregated time buckets."""
+
+    mode: Literal["raw", "aggregated"] = Field(description="`raw` for events, `aggregated` for time buckets.")
+    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    data: list[AllocationActivityResponse] | list[AllocationActivityBucketResponse] = Field(
+        description="Events when `mode=raw`, count/sum buckets when `mode=aggregated`."
+    )
+
+
 @router.get(
     "/allocations/activity",
-    response_model=list[AllocationActivityResponse],
+    response_model=AllocationActivityEnvelope,
     tags=["allocations"],
     summary="Allocation activity feed",
     description=(
-        "Retrieve allocation activity events with optional filters. All filters are optional "
-        "and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive "
-        "substring matching; the rest are exact matches. Results are ordered newest first."
+        "Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` "
+        "envelope. All filters are optional and combine with logical AND. `protocol_name` and "
+        "`token_symbol` use case-insensitive substring matching; the rest are exact matches. Results "
+        "are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for "
+        "per-bucket event counts and tx-amount sums."
     ),
 )
 async def list_allocation_activity(
@@ -579,20 +603,40 @@ async def list_allocation_activity(
         description="Filter by transaction hash (0x-prefixed).",
         examples=["0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"],
     ),
-    time_series: TimeSeriesQueryParams = Depends(get_time_series_query_params),
+    time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
-):
+) -> AllocationActivityEnvelope:
     """Errors:
 
     - 422 if ``prime_id`` is malformed (or ``limit`` is out of range).
-    - 200 with an empty list if filters match no rows — including when
+    - 200 with an empty ``data`` list if filters match no rows — including when
       ``prime_id`` is well-formed but unknown. ``prime_id`` is treated as
       a filter here, not a path resource.
     """
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
+    window = build_window(time_series)
 
     try:
+        if time_series.aggregate:
+            buckets = await service.list_activity_buckets(
+                prime_id=parsed_prime_id,
+                chain_id=chain_id,
+                protocol_name=protocol_name,
+                action_type=action_type,
+                token_symbol=token_symbol,
+                tx_hash=tx_hash,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            )
+            return AllocationActivityEnvelope(
+                mode="aggregated",
+                window=window,
+                data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
+            )
+
         events = await service.list_allocation_activity(
             prime_id=parsed_prime_id,
             chain_id=chain_id,
@@ -617,22 +661,26 @@ async def list_allocation_activity(
         )
         raise HTTPException(status_code=500, detail="Failed to retrieve allocation activity") from exc
 
-    return [
-        AllocationActivityResponse(
-            chain_id=e.chain_id,
-            prime_address=e.prime_address,
-            prime_name=e.prime_name,
-            protocol_name=e.protocol_name,
-            token_id=e.token_id,
-            token_symbol=e.token_symbol,
-            action_type=e.action_type,
-            tx_amount=e.tx_amount,
-            balance=e.balance,
-            tx_hash=None if e.action_type.lower() == "sweep" else e.tx_hash,
-            log_index=e.log_index,
-            block_number=e.block_number,
-            block_version=e.block_version,
-            created_at=e.created_at.isoformat(),
-        )
-        for e in events
-    ]
+    return AllocationActivityEnvelope(
+        mode="raw",
+        window=window,
+        data=[
+            AllocationActivityResponse(
+                chain_id=e.chain_id,
+                prime_address=e.prime_address,
+                prime_name=e.prime_name,
+                protocol_name=e.protocol_name,
+                token_id=e.token_id,
+                token_symbol=e.token_symbol,
+                action_type=e.action_type,
+                tx_amount=e.tx_amount,
+                balance=e.balance,
+                tx_hash=None if e.action_type.lower() == "sweep" else e.tx_hash,
+                log_index=e.log_index,
+                block_number=e.block_number,
+                block_version=e.block_version,
+                created_at=e.created_at.isoformat(),
+            )
+            for e in events
+        ],
+    )

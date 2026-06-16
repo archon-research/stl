@@ -66,6 +66,34 @@ async def test_list_events_returns_empty_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_event_buckets_delegates_to_repository() -> None:
+    repo = AsyncMock()
+    repo.list_event_buckets.return_value = []
+    service = ProtocolEventService(repo)
+    from_ts = datetime(2026, 1, 1, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, tzinfo=UTC)
+
+    result = await service.list_event_buckets(
+        tx_hash=None,
+        protocol_name="spark",
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+    assert result == []
+    repo.list_event_buckets.assert_awaited_once_with(
+        tx_hash=None,
+        protocol_name="spark",
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_events_by_tx_propagates_repository_error() -> None:
     repo = AsyncMock()
     repo.list_events_by_tx.side_effect = ValueError("db failure")

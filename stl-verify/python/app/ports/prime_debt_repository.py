@@ -3,6 +3,7 @@ from typing import Protocol
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
+from app.domain.entities.time_series_bucket import PrimeDebtBucket
 
 
 class PrimeDebtRepository(Protocol):
@@ -21,4 +22,16 @@ class PrimeDebtRepository(Protocol):
         limit: int = 100,
     ) -> list[PrimeDebtSnapshot]:
         """Return debt snapshots for a prime vault address."""
+        ...
+
+    async def list_debt_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[PrimeDebtBucket]:
+        """Return the last observed debt per time bucket (LOCF gap-filled)."""
         ...

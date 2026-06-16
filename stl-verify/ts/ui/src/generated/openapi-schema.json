@@ -1,6 +1,84 @@
 {
   "components": {
     "schemas": {
+      "AllocationActivityBucketResponse": {
+        "description": "Allocation activity aggregated into a single time bucket.",
+        "properties": {
+          "bucket_start": {
+            "description": "Inclusive start of the time bucket (UTC).",
+            "format": "date-time",
+            "title": "Bucket Start",
+            "type": "string"
+          },
+          "event_count": {
+            "description": "Number of activity events in the bucket.",
+            "examples": [
+              42
+            ],
+            "title": "Event Count",
+            "type": "integer"
+          },
+          "total_tx_amount": {
+            "description": "Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
+            "examples": [
+              "1234567890000000000000"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Tx Amount",
+            "type": "string"
+          }
+        },
+        "required": [
+          "bucket_start",
+          "event_count",
+          "total_tx_amount"
+        ],
+        "title": "AllocationActivityBucketResponse",
+        "type": "object"
+      },
+      "AllocationActivityEnvelope": {
+        "description": "Allocation activity response: raw events or aggregated time buckets.",
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AllocationActivityResponse"
+                },
+                "type": "array"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AllocationActivityBucketResponse"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "Events when `mode=raw`, count/sum buckets when `mode=aggregated`.",
+            "title": "Data"
+          },
+          "mode": {
+            "description": "`raw` for events, `aggregated` for time buckets.",
+            "enum": [
+              "raw",
+              "aggregated"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "AllocationActivityEnvelope",
+        "type": "object"
+      },
       "AllocationActivityResponse": {
         "description": "Allocation activity event record for timeline feeds.",
         "properties": {
@@ -649,6 +727,81 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "PrimeDebtBucketResponse": {
+        "description": "Last observed debt within a single time bucket (LOCF gap-filled).",
+        "properties": {
+          "bucket_start": {
+            "description": "Inclusive start of the time bucket (UTC).",
+            "format": "date-time",
+            "title": "Bucket Start",
+            "type": "string"
+          },
+          "debt_wad": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Last observed debt in `wad` units carried forward into the bucket, serialized as a JSON string. `null` for leading buckets before the first observation.",
+            "examples": [
+              "1234567890000000000000"
+            ],
+            "title": "Debt Wad"
+          }
+        },
+        "required": [
+          "bucket_start"
+        ],
+        "title": "PrimeDebtBucketResponse",
+        "type": "object"
+      },
+      "PrimeDebtEnvelope": {
+        "description": "Prime debt response: raw snapshots or aggregated time buckets.",
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
+                },
+                "type": "array"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PrimeDebtBucketResponse"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "Snapshots when `mode=raw`, value buckets when `mode=aggregated`.",
+            "title": "Data"
+          },
+          "mode": {
+            "description": "`raw` for snapshots, `aggregated` for time buckets.",
+            "enum": [
+              "raw",
+              "aggregated"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "PrimeDebtEnvelope",
+        "type": "object"
+      },
       "PrimeDebtSnapshotResponse": {
         "description": "A single observed prime-debt position at a point in time.",
         "example": {
@@ -763,6 +916,31 @@
           "address"
         ],
         "title": "PrimeResponse",
+        "type": "object"
+      },
+      "ProtocolEventBucketResponse": {
+        "description": "Count of protocol events within a single time bucket.",
+        "properties": {
+          "bucket_start": {
+            "description": "Inclusive start of the time bucket (UTC).",
+            "format": "date-time",
+            "title": "Bucket Start",
+            "type": "string"
+          },
+          "event_count": {
+            "description": "Number of events in the bucket.",
+            "examples": [
+              42
+            ],
+            "title": "Event Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "bucket_start",
+          "event_count"
+        ],
+        "title": "ProtocolEventBucketResponse",
         "type": "object"
       },
       "ProtocolEventResponse": {
@@ -880,6 +1058,49 @@
           "created_at"
         ],
         "title": "ProtocolEventResponse",
+        "type": "object"
+      },
+      "ProtocolEventsEnvelope": {
+        "description": "Protocol events response: raw rows or aggregated time buckets.",
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ProtocolEventResponse"
+                },
+                "type": "array"
+              },
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ProtocolEventBucketResponse"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "Events when `mode=raw`, count buckets when `mode=aggregated`.",
+            "title": "Data"
+          },
+          "mode": {
+            "description": "`raw` for events, `aggregated` for time buckets.",
+            "enum": [
+              "raw",
+              "aggregated"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "ProtocolEventsEnvelope",
         "type": "object"
       },
       "ProtocolResponse": {
@@ -1334,6 +1555,53 @@
         "title": "SurafDetails",
         "type": "object"
       },
+      "TimeSeriesResolution": {
+        "description": "Allowed ISO-8601 durations for time-series downsampling.",
+        "enum": [
+          "PT1M",
+          "PT5M",
+          "PT15M",
+          "PT1H",
+          "PT6H",
+          "P1D"
+        ],
+        "title": "TimeSeriesResolution",
+        "type": "string"
+      },
+      "TimeSeriesWindow": {
+        "description": "The resolved window and resolution actually applied to a request.\n\nEchoing this back lets consumers distinguish an empty result caused by the\nwindow from one caused by the absence of data.",
+        "properties": {
+          "from_timestamp": {
+            "description": "Inclusive lower bound applied (UTC).",
+            "format": "date-time",
+            "title": "From Timestamp",
+            "type": "string"
+          },
+          "interval_ms": {
+            "description": "Resolution width in milliseconds.",
+            "title": "Interval Ms",
+            "type": "integer"
+          },
+          "resolution": {
+            "$ref": "#/components/schemas/TimeSeriesResolution",
+            "description": "Resolution applied (relevant when aggregated)."
+          },
+          "to_timestamp": {
+            "description": "Inclusive upper bound applied (UTC).",
+            "format": "date-time",
+            "title": "To Timestamp",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from_timestamp",
+          "to_timestamp",
+          "resolution",
+          "interval_ms"
+        ],
+        "title": "TimeSeriesWindow",
+        "type": "object"
+      },
       "TokenPriceResponse": {
         "description": "Latest token price state.\n\nThe endpoint returns `200` when the token exists even if no quote is currently\navailable. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and\nquote fields are `null`.",
         "example": {
@@ -1636,7 +1904,7 @@
   "paths": {
     "/v1/allocations/activity": {
       "get": {
-        "description": "Retrieve allocation activity events with optional filters. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are ordered newest first.",
+        "description": "Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for per-bucket event counts and tx-amount sums.",
         "operationId": "list_allocation_activity_v1_allocations_activity_get",
         "parameters": [
           {
@@ -1766,7 +2034,21 @@
             }
           },
           {
-            "description": "Inclusive lower timestamp bound (ISO-8601).",
+            "description": "Max results (default 100, max 1000).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Max results (default 100, max 1000).",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
             "in": "query",
             "name": "from_timestamp",
             "required": false,
@@ -1780,12 +2062,12 @@
                   "type": "null"
                 }
               ],
-              "description": "Inclusive lower timestamp bound (ISO-8601).",
+              "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
               "title": "From Timestamp"
             }
           },
           {
-            "description": "Inclusive upper timestamp bound (ISO-8601).",
+            "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
             "in": "query",
             "name": "to_timestamp",
             "required": false,
@@ -1799,22 +2081,38 @@
                   "type": "null"
                 }
               ],
-              "description": "Inclusive upper timestamp bound (ISO-8601).",
+              "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
               "title": "To Timestamp"
             }
           },
           {
-            "description": "Max results (default 100, max 1000).",
+            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
             "in": "query",
-            "name": "limit",
+            "name": "resolution",
             "required": false,
             "schema": {
-              "default": 100,
-              "description": "Max results (default 100, max 1000).",
-              "maximum": 1000,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+              "title": "Resolution"
+            }
+          },
+          {
+            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "in": "query",
+            "name": "aggregate",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "When true, return time-bucketed aggregates instead of raw rows.",
+              "title": "Aggregate",
+              "type": "boolean"
             }
           }
         ],
@@ -1823,11 +2121,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AllocationActivityResponse"
-                  },
-                  "title": "Response List Allocation Activity V1 Allocations Activity Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/AllocationActivityEnvelope"
                 }
               }
             },
@@ -2000,7 +2294,7 @@
     },
     "/v1/primes/{prime_id}/debt": {
       "get": {
-        "description": "Return recent debt snapshots for a prime, newest first. Returns `404` if the prime is unknown. Each row carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions.",
+        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled).",
         "operationId": "list_prime_debt_snapshots_v1_primes__prime_id__debt_get",
         "parameters": [
           {
@@ -2025,6 +2319,74 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+            "in": "query",
+            "name": "from_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+              "title": "From Timestamp"
+            }
+          },
+          {
+            "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+            "in": "query",
+            "name": "to_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+              "title": "To Timestamp"
+            }
+          },
+          {
+            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+              "title": "Resolution"
+            }
+          },
+          {
+            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "in": "query",
+            "name": "aggregate",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "When true, return time-bucketed aggregates instead of raw rows.",
+              "title": "Aggregate",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -2032,11 +2394,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/PrimeDebtSnapshotResponse"
-                  },
-                  "title": "Response List Prime Debt Snapshots V1 Primes  Prime Id  Debt Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/PrimeDebtEnvelope"
                 }
               }
             },
@@ -2061,7 +2419,7 @@
     },
     "/v1/protocol-events": {
       "get": {
-        "description": "List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are ordered newest first and capped at `limit`.",
+        "description": "List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregate=true` to get per-bucket event counts.",
         "operationId": "list_protocol_events_v1_protocol_events_get",
         "parameters": [
           {
@@ -2114,6 +2472,74 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+            "in": "query",
+            "name": "from_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+              "title": "From Timestamp"
+            }
+          },
+          {
+            "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+            "in": "query",
+            "name": "to_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+              "title": "To Timestamp"
+            }
+          },
+          {
+            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+              "title": "Resolution"
+            }
+          },
+          {
+            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "in": "query",
+            "name": "aggregate",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "When true, return time-bucketed aggregates instead of raw rows.",
+              "title": "Aggregate",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -2121,11 +2547,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ProtocolEventResponse"
-                  },
-                  "title": "Response List Protocol Events V1 Protocol Events Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/ProtocolEventsEnvelope"
                 }
               }
             },

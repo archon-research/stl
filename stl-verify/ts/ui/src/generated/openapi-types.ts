@@ -13,7 +13,7 @@ export interface paths {
     };
     /**
      * Allocation activity feed
-     * @description Retrieve allocation activity events with optional filters. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are ordered newest first.
+     * @description Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for per-bucket event counts and tx-amount sums.
      */
     get: operations['list_allocation_activity_v1_allocations_activity_get'];
     put?: never;
@@ -133,7 +133,7 @@ export interface paths {
     };
     /**
      * List prime debt snapshots
-     * @description Return recent debt snapshots for a prime, newest first. Returns `404` if the prime is unknown. Each row carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions.
+     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled).
      */
     get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
     put?: never;
@@ -153,7 +153,7 @@ export interface paths {
     };
     /**
      * List protocol events
-     * @description List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are ordered newest first and capped at `limit`.
+     * @description List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregate=true` to get per-bucket event counts.
      */
     get: operations['list_protocol_events_v1_protocol_events_get'];
     put?: never;
@@ -528,6 +528,51 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
   schemas: {
+    /**
+     * AllocationActivityBucketResponse
+     * @description Allocation activity aggregated into a single time bucket.
+     */
+    AllocationActivityBucketResponse: {
+      /**
+       * Bucket Start
+       * Format: date-time
+       * @description Inclusive start of the time bucket (UTC).
+       */
+      bucket_start: string;
+      /**
+       * Event Count
+       * @description Number of activity events in the bucket.
+       * @example 42
+       */
+      event_count: number;
+      /**
+       * Total Tx Amount
+       * @description Sum of `tx_amount` across the bucket's events, serialized as a JSON string.
+       * @example 1234567890000000000000
+       */
+      total_tx_amount: string;
+    };
+    /**
+     * AllocationActivityEnvelope
+     * @description Allocation activity response: raw events or aggregated time buckets.
+     */
+    AllocationActivityEnvelope: {
+      /**
+       * Data
+       * @description Events when `mode=raw`, count/sum buckets when `mode=aggregated`.
+       */
+      data:
+        | components['schemas']['AllocationActivityResponse'][]
+        | components['schemas']['AllocationActivityBucketResponse'][];
+      /**
+       * Mode
+       * @description `raw` for events, `aggregated` for time buckets.
+       * @enum {string}
+       */
+      mode: 'raw' | 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
     /**
      * AllocationActivityResponse
      * @description Allocation activity event record for timeline feeds.
@@ -928,6 +973,45 @@ export interface components {
       detail?: components['schemas']['ValidationError'][];
     };
     /**
+     * PrimeDebtBucketResponse
+     * @description Last observed debt within a single time bucket (LOCF gap-filled).
+     */
+    PrimeDebtBucketResponse: {
+      /**
+       * Bucket Start
+       * Format: date-time
+       * @description Inclusive start of the time bucket (UTC).
+       */
+      bucket_start: string;
+      /**
+       * Debt Wad
+       * @description Last observed debt in `wad` units carried forward into the bucket, serialized as a JSON string. `null` for leading buckets before the first observation.
+       * @example 1234567890000000000000
+       */
+      debt_wad?: string | null;
+    };
+    /**
+     * PrimeDebtEnvelope
+     * @description Prime debt response: raw snapshots or aggregated time buckets.
+     */
+    PrimeDebtEnvelope: {
+      /**
+       * Data
+       * @description Snapshots when `mode=raw`, value buckets when `mode=aggregated`.
+       */
+      data:
+        | components['schemas']['PrimeDebtSnapshotResponse'][]
+        | components['schemas']['PrimeDebtBucketResponse'][];
+      /**
+       * Mode
+       * @description `raw` for snapshots, `aggregated` for time buckets.
+       * @enum {string}
+       */
+      mode: 'raw' | 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
      * PrimeDebtSnapshotResponse
      * @description A single observed prime-debt position at a point in time.
      * @example {
@@ -1007,6 +1091,24 @@ export interface components {
        * @example Acme Prime
        */
       name: string;
+    };
+    /**
+     * ProtocolEventBucketResponse
+     * @description Count of protocol events within a single time bucket.
+     */
+    ProtocolEventBucketResponse: {
+      /**
+       * Bucket Start
+       * Format: date-time
+       * @description Inclusive start of the time bucket (UTC).
+       */
+      bucket_start: string;
+      /**
+       * Event Count
+       * @description Number of events in the bucket.
+       * @example 42
+       */
+      event_count: number;
     };
     /**
      * ProtocolEventResponse
@@ -1090,6 +1192,27 @@ export interface components {
        * @example 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
        */
       tx_hash: string;
+    };
+    /**
+     * ProtocolEventsEnvelope
+     * @description Protocol events response: raw rows or aggregated time buckets.
+     */
+    ProtocolEventsEnvelope: {
+      /**
+       * Data
+       * @description Events when `mode=raw`, count buckets when `mode=aggregated`.
+       */
+      data:
+        | components['schemas']['ProtocolEventResponse'][]
+        | components['schemas']['ProtocolEventBucketResponse'][];
+      /**
+       * Mode
+       * @description `raw` for events, `aggregated` for time buckets.
+       * @enum {string}
+       */
+      mode: 'raw' | 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
     };
     /**
      * ProtocolResponse
@@ -1395,6 +1518,40 @@ export interface components {
       unadjusted_crr_pct: string;
     };
     /**
+     * TimeSeriesResolution
+     * @description Allowed ISO-8601 durations for time-series downsampling.
+     * @enum {string}
+     */
+    TimeSeriesResolution: 'PT1M' | 'PT5M' | 'PT15M' | 'PT1H' | 'PT6H' | 'P1D';
+    /**
+     * TimeSeriesWindow
+     * @description The resolved window and resolution actually applied to a request.
+     *
+     *     Echoing this back lets consumers distinguish an empty result caused by the
+     *     window from one caused by the absence of data.
+     */
+    TimeSeriesWindow: {
+      /**
+       * From Timestamp
+       * Format: date-time
+       * @description Inclusive lower bound applied (UTC).
+       */
+      from_timestamp: string;
+      /**
+       * Interval Ms
+       * @description Resolution width in milliseconds.
+       */
+      interval_ms: number;
+      /** @description Resolution applied (relevant when aggregated). */
+      resolution: components['schemas']['TimeSeriesResolution'];
+      /**
+       * To Timestamp
+       * Format: date-time
+       * @description Inclusive upper bound applied (UTC).
+       */
+      to_timestamp: string;
+    };
+    /**
      * TokenPriceResponse
      * @description Latest token price state.
      *
@@ -1570,12 +1727,16 @@ export interface operations {
         token_symbol?: string | null;
         /** @description Filter by transaction hash (0x-prefixed). */
         tx_hash?: string | null;
-        /** @description Inclusive lower timestamp bound (ISO-8601). */
-        from_timestamp?: string | null;
-        /** @description Inclusive upper timestamp bound (ISO-8601). */
-        to_timestamp?: string | null;
         /** @description Max results (default 100, max 1000). */
         limit?: number;
+        /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+        from_timestamp?: string | null;
+        /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+        to_timestamp?: string | null;
+        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+        resolution?: components['schemas']['TimeSeriesResolution'] | null;
+        /** @description When true, return time-bucketed aggregates instead of raw rows. */
+        aggregate?: boolean;
       };
       header?: never;
       path?: never;
@@ -1589,7 +1750,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['AllocationActivityResponse'][];
+          'application/json': components['schemas']['AllocationActivityEnvelope'];
         };
       };
       /** @description Validation Error */
@@ -1719,6 +1880,14 @@ export interface operations {
       query?: {
         /** @description Max snapshots returned (default 100, max 500). */
         limit?: number;
+        /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+        from_timestamp?: string | null;
+        /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+        to_timestamp?: string | null;
+        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+        resolution?: components['schemas']['TimeSeriesResolution'] | null;
+        /** @description When true, return time-bucketed aggregates instead of raw rows. */
+        aggregate?: boolean;
       };
       header?: never;
       path: {
@@ -1734,7 +1903,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['PrimeDebtSnapshotResponse'][];
+          'application/json': components['schemas']['PrimeDebtEnvelope'];
         };
       };
       /** @description Validation Error */
@@ -1757,6 +1926,14 @@ export interface operations {
         protocol_name?: string | null;
         /** @description Max events returned (default 100, max 500). */
         limit?: number;
+        /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+        from_timestamp?: string | null;
+        /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+        to_timestamp?: string | null;
+        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+        resolution?: components['schemas']['TimeSeriesResolution'] | null;
+        /** @description When true, return time-bucketed aggregates instead of raw rows. */
+        aggregate?: boolean;
       };
       header?: never;
       path?: never;
@@ -1770,7 +1947,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          'application/json': components['schemas']['ProtocolEventResponse'][];
+          'application/json': components['schemas']['ProtocolEventsEnvelope'];
         };
       };
       /** @description Validation Error */

@@ -2,10 +2,11 @@
 
 These tests verify that endpoints using the shared time-series controller
 implicitly apply a 24h window when callers omit `from_timestamp` and
-`to_timestamp`.
+`to_timestamp`, and that `aggregate=true` returns time-bucketed results.
 """
 
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -119,7 +120,9 @@ def test_allocations_activity_defaults_to_last_24h(client: TestClient) -> None:
     response = client.get(f"/v1/allocations/activity?prime_id=0x{_SPARK_PROXY_ADDR}")
 
     assert response.status_code == 200
-    rows = response.json()
+    body = response.json()
+    assert body["mode"] == "raw"
+    rows = body["data"]
     assert len(rows) == 1
     assert rows[0]["tx_hash"] == "0x" + ("aa" * 32)
 
@@ -128,20 +131,56 @@ def test_protocol_events_defaults_to_last_24h(client: TestClient) -> None:
     response = client.get("/v1/protocol-events?protocol_name=SparkLend")
 
     assert response.status_code == 200
-    rows = response.json()
+    body = response.json()
+    assert body["mode"] == "raw"
+    rows = body["data"]
     assert len(rows) == 1
     assert rows[0]["tx_hash"] == "0x" + ("cc" * 32)
 
 
 def test_prime_debt_defaults_to_last_24h(client: TestClient) -> None:
-    # Note: prime_debt filtering has a known issue to investigate in follow-up work.
-    # For now, verify the endpoint responds and returns data.
-    # The endpoint is wired correctly and unit tests pass.
     response = client.get(f"/v1/primes/{_SPARK_VAULT_ADDR}/debt")
 
     assert response.status_code == 200
-    rows = response.json()
-    # Both rows are returned (time filtering not yet working as expected)
-    # but we verify the endpoint is functional and returns the expected structure
-    assert len(rows) >= 1
-    assert all("block_number" in row for row in rows)
+    body = response.json()
+    assert body["mode"] == "raw"
+    rows = body["data"]
+    # Only the snapshot inside the default 24h window is returned (the 30-day-old
+    # one is filtered out). This exercises the TIMESTAMPTZ window fix.
+    assert len(rows) == 1
+    assert rows[0]["block_number"] == 200
+
+
+def test_allocations_activity_aggregate_buckets_count_in_window(client: TestClient) -> None:
+    response = client.get(f"/v1/allocations/activity?prime_id=0x{_SPARK_PROXY_ADDR}&aggregate=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "aggregated"
+    buckets = body["data"]
+    # Only the in-window event contributes; count and tx_amount sum reflect it.
+    assert sum(b["event_count"] for b in buckets) == 1
+    assert sum((Decimal(b["total_tx_amount"]) for b in buckets), Decimal(0)) == Decimal("10")
+
+
+def test_protocol_events_aggregate_buckets_count_in_window(client: TestClient) -> None:
+    response = client.get("/v1/protocol-events?protocol_name=SparkLend&aggregate=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "aggregated"
+    assert sum(b["event_count"] for b in body["data"]) == 1
+
+
+def test_prime_debt_aggregate_buckets_carry_last_value(client: TestClient) -> None:
+    # Coarse resolution keeps the bucket count small and fully within the limit.
+    response = client.get(f"/v1/primes/{_SPARK_VAULT_ADDR}/debt?aggregate=true&resolution=PT1H")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "aggregated"
+    debts = {b["debt_wad"] for b in body["data"]}
+    # The in-window observation (1000) is carried forward; the out-of-window
+    # observation (900) is excluded entirely.
+    assert "1000" in debts
+    assert "900" not in debts

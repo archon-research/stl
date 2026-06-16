@@ -2,6 +2,7 @@ from datetime import datetime
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
+from app.domain.entities.time_series_bucket import PrimeDebtBucket
 from app.ports.prime_debt_repository import PrimeDebtRepository
 
 
@@ -26,5 +27,22 @@ class PrimeDebtService:
             prime_address,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
+            limit=limit,
+        )
+
+    async def list_debt_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[PrimeDebtBucket]:
+        return await self._repository.list_debt_buckets(
+            prime_address,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            bucket_seconds=bucket_seconds,
             limit=limit,
         )

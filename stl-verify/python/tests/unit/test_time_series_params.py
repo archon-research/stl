@@ -3,49 +3,85 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import HTTPException
 
-from app.api.time_series import (
-    TimeSeriesResolution,
-    get_time_series_query_params,
-)
+from app.api.time_series import build_window, get_time_series_query_params
+from app.domain.time_series import TimeSeriesResolution
 
 
-def test_defaults_to_last_24h_window_and_window_based_resolution() -> None:
-    params = get_time_series_query_params(
+def test_returns_resolved_query_with_defaults() -> None:
+    query = get_time_series_query_params(
         from_timestamp=None,
         to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
         resolution=None,
+        aggregate=False,
     )
 
-    assert params.from_timestamp == datetime(2026, 3, 4, 12, 0)
-    assert params.to_timestamp == datetime(2026, 3, 5, 12, 0)
-    assert params.resolution == TimeSeriesResolution.PT5M
-    assert params.interval_ms == 5 * 60 * 1000
+    assert query.from_timestamp == datetime(2026, 3, 4, 12, 0, tzinfo=UTC)
+    assert query.to_timestamp == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
+    assert query.resolution == TimeSeriesResolution.PT5M
+    assert query.aggregate is False
 
 
-def test_rejects_inverted_time_range() -> None:
-    with pytest.raises(HTTPException, match="from_timestamp"):
+def test_defaults_to_bound_to_current_time() -> None:
+    before = datetime.now(UTC)
+    query = get_time_series_query_params(from_timestamp=None, to_timestamp=None, resolution=None)
+    after = datetime.now(UTC)
+
+    assert query.to_timestamp.tzinfo is not None
+    assert before <= query.to_timestamp <= after
+    assert query.window == timedelta(hours=24)
+
+
+def test_passes_aggregate_flag_through() -> None:
+    query = get_time_series_query_params(
+        from_timestamp=None,
+        to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
+        resolution=None,
+        aggregate=True,
+    )
+    assert query.aggregate is True
+
+
+def test_maps_inverted_range_to_http_422() -> None:
+    with pytest.raises(HTTPException) as exc_info:
         get_time_series_query_params(
             from_timestamp=datetime(2026, 3, 6, 0, 0, tzinfo=UTC),
             to_timestamp=datetime(2026, 3, 5, 0, 0, tzinfo=UTC),
-            resolution=TimeSeriesResolution.PT5M,
+            resolution=None,
         )
+    assert exc_info.value.status_code == 422
+    assert "from_timestamp" in exc_info.value.detail
 
 
-def test_rejects_resolution_finer_than_window_minimum() -> None:
-    with pytest.raises(HTTPException, match="minimum allowed resolution"):
+def test_maps_resolution_too_fine_to_http_422() -> None:
+    with pytest.raises(HTTPException) as exc_info:
         get_time_series_query_params(
             from_timestamp=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
             to_timestamp=datetime(2026, 2, 15, 0, 0, tzinfo=UTC),
             resolution=TimeSeriesResolution.PT1M,
         )
+    assert exc_info.value.status_code == 422
+    assert "minimum allowed resolution" in exc_info.value.detail
 
 
-def test_accepts_resolution_when_not_finer_than_window_minimum() -> None:
-    params = get_time_series_query_params(
-        from_timestamp=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
-        to_timestamp=datetime(2026, 2, 15, 0, 0, tzinfo=UTC),
-        resolution=TimeSeriesResolution.P1D,
+def test_maps_window_too_large_to_http_422() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        get_time_series_query_params(
+            from_timestamp=datetime(2024, 1, 1, 0, 0, tzinfo=UTC),
+            to_timestamp=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            resolution=None,
+        )
+    assert exc_info.value.status_code == 422
+    assert "exceeds the maximum" in exc_info.value.detail
+
+
+def test_build_window_reflects_resolved_query() -> None:
+    query = get_time_series_query_params(
+        from_timestamp=datetime(2026, 3, 5, 6, 0, tzinfo=UTC),
+        to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
+        resolution=None,
     )
-
-    assert params.resolution == TimeSeriesResolution.P1D
-    assert params.interval_ms == int(timedelta(days=1).total_seconds() * 1000)
+    window = build_window(query)
+    assert window.from_timestamp == query.from_timestamp
+    assert window.to_timestamp == query.to_timestamp
+    assert window.resolution == query.resolution
+    assert window.interval_ms == query.interval_ms

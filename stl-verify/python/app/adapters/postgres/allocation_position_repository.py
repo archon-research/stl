@@ -7,6 +7,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres._time_window import (
+    clamp_limit,
+    required_time_window_clause,
+    time_bucket_expr,
+)
 from app.domain.entities.allocation import (
     ChainMetadata,
     DirectAssetHolding,
@@ -16,9 +21,12 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.time_series_bucket import AllocationActivityBucket
 from app.domain.proxy_kind import ProxyKind, classify_proxy
 
 logger = logging.getLogger(__name__)
+
+_ALLOCATION_ACTIVITY_LIMIT = 1000
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -344,7 +352,7 @@ class PostgresAllocationRepository:
             "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
-            "limit": min(max(limit, 1), 1000),
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
         }
 
         logger.debug(
@@ -390,6 +398,60 @@ class PostgresAllocationRepository:
                 block_number=row.block_number,
                 block_version=row.block_version,
                 created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def list_activity_buckets(
+        self,
+        *,
+        prime_id: EthAddress | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[AllocationActivityBucket]:
+        """Return allocation activity counts and tx-amount sums per time bucket."""
+        params = {
+            "prime_hex": prime_id.hex if prime_id else None,
+            "chain_id": chain_id,
+            "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
+            "action_type": action_type,
+            "token_symbol": _escape_like_pattern(token_symbol) if token_symbol else None,
+            "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "bucket_seconds": bucket_seconds,
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_ALLOCATION_ACTIVITY_BUCKETS_SQL, params)
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Allocation activity bucket query failed",
+                extra={
+                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "error_type": type(exc).__name__,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while aggregating allocation activity: {exc}") from exc
+
+        return [
+            AllocationActivityBucket(
+                bucket_start=row.bucket_start,
+                event_count=row.event_count,
+                total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
             )
             for row in rows
         ]
@@ -594,8 +656,55 @@ WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime
     AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
          LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\')
     AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
-    AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMP))
-    AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMP))
+    AND (CAST(:from_timestamp AS TIMESTAMPTZ) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ))
+    AND (CAST(:to_timestamp AS TIMESTAMPTZ) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ))
 ORDER BY ap.created_at DESC, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+LIMIT :limit
+""")
+
+
+# Aggregated counterpart of _ALLOCATION_ACTIVITY_SQL: same filters, bucketed by
+# time. Reuses the shared window/bucket SQL helpers. Bounds are required so the
+# JOIN/filter set matches the raw query exactly.
+_ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
+SELECT
+    {time_bucket_expr("ap.created_at")} AS bucket_start,
+    COUNT(*) AS event_count,
+    COALESCE(SUM(ap.tx_amount), 0) AS total_tx_amount
+FROM allocation_position ap
+JOIN prime p ON p.id = ap.prime_id
+JOIN token t ON t.id = ap.token_id
+LEFT JOIN LATERAL (
+    SELECT pr.name AS protocol_name, 1 AS match_priority
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id
+    WHERE pr.chain_id = ap.chain_id
+      AND rt.receipt_token_address = t.address
+
+    UNION ALL
+
+    SELECT pr.name AS protocol_name, 2 AS match_priority
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id
+    WHERE pr.chain_id = ap.chain_id
+      AND rt.underlying_token_id = t.id
+    ORDER BY match_priority
+    LIMIT 1
+) AS protocol_match ON TRUE
+WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+    AND ap.direction IS NOT NULL
+    AND ap.tx_amount IS NOT NULL
+    AND ap.created_at IS NOT NULL
+    AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
+    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, ''))
+         LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
+    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) =
+         LOWER(CAST(:action_type AS TEXT)))
+    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
+         LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
+    AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
+    {required_time_window_clause("ap.created_at")}
+GROUP BY bucket_start
+ORDER BY bucket_start DESC
 LIMIT :limit
 """)

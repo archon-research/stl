@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.domain.entities.protocol_event import ProtocolEvent
+from app.domain.entities.time_series_bucket import ProtocolEventBucket
 from app.main import app
 from app.services.protocol_event_service import ProtocolEventService
 
@@ -26,6 +27,7 @@ def _make_service(
     service = AsyncMock(spec=ProtocolEventService)
     service.list_events.return_value = events or []
     service.get_events_by_tx.return_value = tx_events or []
+    service.list_event_buckets.return_value = []
     return service
 
 
@@ -73,14 +75,44 @@ def test_list_protocol_events_returns_rows_and_applies_filters():
 
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["tx_hash"] == _VALID_TX_HASH
+    assert payload["mode"] == "raw"
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["tx_hash"] == _VALID_TX_HASH
     kwargs = service.list_events.await_args.kwargs
     assert kwargs["tx_hash"] == _VALID_TX_HASH
     assert kwargs["protocol_name"] == "spark"
-    assert kwargs["from_timestamp"] == datetime(2026, 3, 5, 0, 0)
-    assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 12, 0)
+    assert kwargs["from_timestamp"] == datetime(2026, 3, 5, 0, 0, tzinfo=UTC)
+    assert kwargs["to_timestamp"] == datetime(2026, 3, 5, 12, 0, tzinfo=UTC)
     assert kwargs["limit"] == 25
+
+
+def test_list_protocol_events_returns_aggregated_buckets():
+    from app.api.v1 import protocol_events
+
+    service = _make_service()
+    service.list_event_buckets.return_value = [
+        ProtocolEventBucket(bucket_start=datetime(2026, 3, 5, 12, 0, tzinfo=UTC), event_count=4),
+    ]
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/protocol-events",
+        params={
+            "protocol_name": "spark",
+            "from_timestamp": "2026-03-05T00:00:00Z",
+            "to_timestamp": "2026-03-05T12:00:00Z",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "aggregated"
+    assert payload["data"] == [{"bucket_start": "2026-03-05T12:00:00Z", "event_count": 4}]
+    kwargs = service.list_event_buckets.await_args.kwargs
+    assert kwargs["bucket_seconds"] == 5 * 60  # 12h window -> PT5M default
+    service.list_events.assert_not_awaited()
 
 
 def test_list_protocol_events_returns_422_for_invalid_tx_hash_query():
@@ -136,7 +168,9 @@ def test_list_protocol_events_returns_empty_list_when_no_matches():
     response = client.get("/v1/protocol-events", params={"protocol_name": "nonexistent"})
 
     assert response.status_code == 200
-    assert response.json() == []
+    body = response.json()
+    assert body["mode"] == "raw"
+    assert body["data"] == []
     service.list_events.assert_awaited_once()
 
 
