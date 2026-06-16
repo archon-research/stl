@@ -6,7 +6,6 @@ implicitly apply a 24h window when callers omit `from_timestamp` and
 """
 
 import asyncio
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
