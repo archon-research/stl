@@ -61,6 +61,10 @@ data:
   CHAIN_ID: "1"
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#393 (VEC-361).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -126,6 +130,10 @@ data:
   CHAIN_ID: "43114"
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#393 (VEC-361).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
