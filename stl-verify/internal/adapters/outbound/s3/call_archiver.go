@@ -67,6 +67,8 @@ func NewCallArchiver(writer outbound.S3Writer, bucket, chainName string, logger 
 			"archive.object_size",
 			metric.WithDescription("Compressed size in bytes of archived raw SC call batch objects"),
 			metric.WithUnit("By"),
+			// The 64-byte boundary is load-bearing: the VectorArchivingEmptyObjects
+			// alert matches le="64" to catch degenerate writes. Don't drop it.
 			metric.WithExplicitBucketBoundaries(64, 256, 1024, 4096, 16384, 65536, 262144, 1048576),
 		)
 	if err != nil {
