@@ -53,3 +53,21 @@ class PrimeDebtBucket:
     def __post_init__(self) -> None:
         if self.debt_wad is not None and self.debt_wad < 0:
             raise ValueError(f"debt_wad must be non-negative, got {self.debt_wad}")
+
+
+@dataclass(frozen=True)
+class CapitalMetricsBucket:
+    """Per-prime capital metrics for a single time bucket (LOCF gap-filled).
+
+    Each value is the last observation carried forward into the bucket, or
+    ``None`` for leading buckets before the first observation. ``capital_buffer``
+    is derived as ``max(total_capital - first_loss_capital, 0)`` and is ``None``
+    when either input is missing.
+    """
+
+    bucket_start: datetime
+    risk_capital: Decimal | None
+    total_capital: Decimal | None
+    first_loss_capital: Decimal | None
+    capital_buffer: Decimal | None
+    risk_to_capital_ratio: Decimal | None
