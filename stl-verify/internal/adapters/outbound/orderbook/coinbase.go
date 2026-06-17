@@ -153,7 +153,7 @@ func (h *coinbaseHandler) handle(raw []byte) ([]bookChange, error) {
 		for _, u := range ev.Updates {
 			side, err := coinbaseSide(u.Side)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("coinbase %s: %w", ev.ProductID, err)
 			}
 			lvl, err := parseLevel(u.PriceLevel, u.NewQuantity)
 			if err != nil {
