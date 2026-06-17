@@ -163,3 +163,60 @@ groups:
             `oracle-price-worker` on chain `{{ $labels.chain }}` p99 RPC
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
+
+      # ---------------------------------------------------------------------
+      # Raw SC call archiving (VEC-364 / PR #399)
+      # ---------------------------------------------------------------------
+      # archive_writes_total{status,source,chain,service_name} is emitted by the
+      # archiving decorator; archive_object_size_bytes is the S3 adapter's
+      # compressed-object-size histogram. Both only exist for binaries with
+      # ARCHIVE_SC_CALLS=true, so a disabled source has no series and never fires.
+
+      - alert: VectorArchivingStalled
+        # No successful S3 archive writes for 10m while the indexer is still
+        # executing multicalls. multicall_batch_size_count increments on the same
+        # Execute path that archives, so writes==0 with multicalls>0 is a genuine
+        # archiving failure, not an idle/disabled source (those have no archive
+        # series, or no multicalls, so the guard or the ==0 match excludes them).
+        expr: |
+          sum by (service_name, chain, cluster) (
+            increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[10m])
+          ) == 0
+          and on (service_name, chain, cluster)
+          sum by (service_name, chain, cluster) (
+            increase(multicall_batch_size_count{k8s_namespace_name="vector"}[10m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archiving stalled for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is still
+            executing multicalls but has written no raw SC call archives to S3 for
+            >10m. Replay data is being lost (Alchemy remains the fallback).
+
+      - alert: VectorArchivingEmptyObjects
+        # Any archived object lands in the smallest size bucket (<=64B). A real
+        # one-call zstd object is comfortably larger, so this signals degenerate
+        # / near-empty writes. Depends on archive_object_size_bytes (sibling task),
+        # so it stays dormant until that metric is deployed.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            increase(archive_object_size_bytes_bucket{le="64", k8s_namespace_name="vector"}[10m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archiving wrote near-empty objects for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` wrote one or
+            more archived objects <=64 bytes in the last 10m. Inspect the object
+            and the encode path; the file is likely missing call/response data.
