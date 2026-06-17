@@ -99,6 +99,11 @@ func (a *CallArchiver) Archive(ctx context.Context, record outbound.CallBatchRec
 		return fmt.Errorf("encoding call batch: %w", err)
 	}
 
+	// WriteFileIfNotExists is a no-op when the object already exists (idempotent
+	// replay on redelivery), so the written bool is intentionally ignored: the
+	// size is recorded regardless to stay consistent with archive_writes_total,
+	// which likewise counts replays as success. Gating only this histogram on
+	// written would make write counts and size observations disagree.
 	if _, err := a.writer.WriteFileIfNotExists(ctx, a.bucket, key, bytes.NewReader(payload), false); err != nil {
 		return fmt.Errorf("writing call batch archive %s: %w", key, err)
 	}
