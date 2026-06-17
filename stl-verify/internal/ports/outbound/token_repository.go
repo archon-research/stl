@@ -11,7 +11,7 @@ import (
 //
 // CreatedAtBlock is a pointer so "no block context" (nil) is distinct from
 // "genesis block" (0). A nil block inserts NULL and the LEAST() merge preserves
-// any existing stored block; passing 0 would clobber it (VEC-353).
+// any existing stored block; passing 0 would clobber it.
 type TokenInput struct {
 	ChainID        int64
 	Address        common.Address
@@ -26,7 +26,7 @@ type TokenRepository interface {
 	// GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 	// This method participates in an external transaction. createdAtBlock is nil
 	// when the caller has no block context (NULL is preserved by the LEAST() merge;
-	// a 0 would clobber an existing block, VEC-353).
+	// a 0 would clobber an existing block).
 	//
 	// Unlike GetOrCreateTokens, this single-row path does not run the decimals
 	// drift guard: its callers (on-chain indexers) read decimals fresh from the

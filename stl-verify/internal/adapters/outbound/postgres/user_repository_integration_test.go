@@ -312,9 +312,9 @@ func TestGetOrCreateUsers_NilBlockInsertsNull(t *testing.T) {
 	}
 }
 
-// TestGetOrCreateUsers_NilBlockPreservesExisting is the core VEC-353 clobber
-// fix: a user seen on-chain at a real block keeps it when an off-block-context
-// (nil) caller re-upserts it (LEAST ignores NULL).
+// TestGetOrCreateUsers_NilBlockPreservesExisting is the core clobber fix: a
+// user seen on-chain at a real block keeps it when an off-block-context (nil)
+// caller re-upserts it (LEAST ignores NULL).
 func TestGetOrCreateUsers_NilBlockPreservesExisting(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
@@ -389,8 +389,8 @@ func TestGetOrCreateUsers_NullBlockSelfHeals(t *testing.T) {
 	}
 }
 
-// TestUserFirstSeenBlockCheckConstraint verifies the VEC-353 migration guard:
-// a literal first_seen_block of 0 is rejected at the column level.
+// TestUserFirstSeenBlockCheckConstraint verifies the migration guard: a literal
+// first_seen_block of 0 is rejected at the column level.
 func TestUserFirstSeenBlockCheckConstraint(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()

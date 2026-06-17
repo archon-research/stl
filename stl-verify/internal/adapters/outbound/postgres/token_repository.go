@@ -61,10 +61,10 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 
 	batch := &pgx.Batch{}
 	for _, t := range sorted {
-		// created_at_block merges with LEAST(); a NULL incoming block (no block
-		// context) is ignored by LEAST and preserves the stored block (VEC-353).
-		// symbol/decimals are never refreshed on conflict, so RETURNING yields
-		// the stored values, which the scan checks against the incoming ones.
+		// created_at_block merges with LEAST(): a NULL incoming block (no block
+		// context) is ignored, preserving the stored block. symbol/decimals are
+		// never refreshed on conflict, so RETURNING yields the stored values,
+		// which the scan checks against the incoming ones.
 		batch.Queue(
 			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())

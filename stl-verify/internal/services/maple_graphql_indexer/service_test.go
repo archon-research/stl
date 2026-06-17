@@ -471,7 +471,7 @@ func TestSync_HappyPath(t *testing.T) {
 		t.Errorf("asset 0 = %+v, want USDC/6", gotAssets[0])
 	}
 	// GraphQL data has no block context: the block must be nil so the shared
-	// upsert preserves any existing on-chain block (VEC-353).
+	// upsert preserves any existing on-chain block.
 	if gotAssets[0].CreatedAtBlock != nil || gotAssets[1].CreatedAtBlock != nil {
 		t.Errorf("asset CreatedAtBlock = %v/%v, want nil/nil", gotAssets[0].CreatedAtBlock, gotAssets[1].CreatedAtBlock)
 	}
@@ -490,7 +490,7 @@ func TestSync_HappyPath(t *testing.T) {
 	if got := repo.borrowerCalls[0]; len(got) != 2 || got[0].Address != addr(0xa0) || got[1].Address != addr(0xa1) {
 		t.Errorf("borrowers = %v, want [0xa0..., 0xa1...]", got)
 	}
-	// Borrowers carry no block context: FirstSeenBlock must be nil (VEC-353).
+	// Borrowers carry no block context: FirstSeenBlock must be nil.
 	if got := repo.borrowerCalls[0]; got[0].FirstSeenBlock != nil || got[1].FirstSeenBlock != nil {
 		t.Errorf("borrower FirstSeenBlock = %v/%v, want nil/nil", got[0].FirstSeenBlock, got[1].FirstSeenBlock)
 	}

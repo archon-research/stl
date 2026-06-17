@@ -59,7 +59,7 @@ func (r *TokenTotalSupplyRepository) SaveSupplies(
 
 	// Validate before the token upsert so an invalid created_at_block (e.g. 0,
 	// which would clobber the registry block via LEAST) fails with a legible
-	// domain error rather than a raw CHECK-constraint violation (VEC-353).
+	// domain error rather than a raw CHECK-constraint violation.
 	for i, s := range supplies {
 		if err := s.Validate(); err != nil {
 			return fmt.Errorf("supply %d: %w", i, err)

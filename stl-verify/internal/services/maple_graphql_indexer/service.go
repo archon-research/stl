@@ -54,7 +54,7 @@ type Service struct {
 // NewService creates a new Maple GraphQL indexer service. telemetry may be
 // nil (all telemetry methods are nil-receiver-safe). The shared token and user
 // registries are upserted via tokenRepo/userRepo with a nil block (GraphQL data
-// has no block context), so an existing on-chain block is preserved (VEC-353).
+// has no block context), so an existing on-chain block is preserved.
 func NewService(config ServiceConfig, client outbound.MapleGraphQLClient, repo outbound.MapleGraphQLRepository, tokenRepo outbound.TokenRepository, userRepo outbound.UserRepository, txManager outbound.TxManager, telemetry *Telemetry) (*Service, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client cannot be nil")
@@ -311,7 +311,7 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 // report the same asset address with conflicting symbol or decimals (an
 // inconsistency the token table cannot represent and must not silently
 // first-write-wins). CreatedAtBlock is left nil: GraphQL data has no block
-// context, and a nil block preserves any existing on-chain block (VEC-353).
+// context, and a nil block preserves any existing on-chain block.
 func distinctAssetTokens(chainID int64, pools []outbound.MaplePool) ([]outbound.TokenInput, error) {
 	seen := make(map[common.Address]outbound.TokenInput, len(pools))
 	assets := make([]outbound.TokenInput, 0, len(pools))
@@ -423,7 +423,7 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 	collateralCount := 0
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		// FirstSeenBlock left nil: GraphQL data has no block context, and a nil
-		// block preserves any existing on-chain first-seen block (VEC-353).
+		// block preserves any existing on-chain first-seen block.
 		borrowerUsers := make([]entity.User, len(borrowers))
 		for i, addr := range borrowers {
 			borrowerUsers[i] = entity.User{ChainID: s.config.ChainID, Address: addr}

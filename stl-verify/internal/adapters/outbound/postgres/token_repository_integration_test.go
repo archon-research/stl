@@ -606,9 +606,9 @@ func TestGetOrCreateTokens_NilBlockInsertsNull(t *testing.T) {
 	}
 }
 
-// TestGetOrCreateTokens_NilBlockPreservesExisting is the core VEC-353 clobber
-// fix: a token seeded with a real on-chain block keeps it when an
-// off-block-context (nil) caller re-upserts it (LEAST ignores NULL).
+// TestGetOrCreateTokens_NilBlockPreservesExisting is the core clobber fix: a
+// token seeded with a real on-chain block keeps it when an off-block-context
+// (nil) caller re-upserts it (LEAST ignores NULL).
 func TestGetOrCreateTokens_NilBlockPreservesExisting(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
@@ -766,8 +766,8 @@ func TestGetOrCreateTokens_DecimalsDriftFails(t *testing.T) {
 	}
 }
 
-// TestTokenCreatedAtBlockCheckConstraint verifies the VEC-353 migration guard:
-// a literal created_at_block of 0 is rejected at the column level so a future
+// TestTokenCreatedAtBlockCheckConstraint verifies the migration guard: a
+// literal created_at_block of 0 is rejected at the column level so a future
 // "unknown masquerading as genesis" write fails loudly instead of clobbering.
 func TestTokenCreatedAtBlockCheckConstraint(t *testing.T) {
 	truncateToken(t, context.Background())
