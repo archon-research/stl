@@ -50,10 +50,10 @@ func IsCanonicalDecimal(s string) bool {
 
 // IsZeroDecimal reports whether s is a canonical decimal equal to zero (e.g. "0",
 // "0.0", "0.00000000"). A zero size is the exchange convention for "remove this
-// level". Callers gate on IsCanonicalDecimal first; a string of only '0' and '.'
-// characters is zero.
+// level". Non-canonical input (incl. ".") is not zero; a canonical decimal of
+// only '0' and '.' characters is.
 func IsZeroDecimal(s string) bool {
-	if s == "" {
+	if !IsCanonicalDecimal(s) {
 		return false
 	}
 	for i := 0; i < len(s); i++ {

@@ -51,6 +51,9 @@ func TestIsZeroDecimal(t *testing.T) {
 		{"0.0001", false},
 		{"100", false},
 		{"", false},
+		{".", false},  // non-canonical: no integer digit
+		{"0.", false}, // non-canonical: trailing dot
+		{".0", false}, // non-canonical: leading dot
 	}
 	for _, tt := range tests {
 		if got := IsZeroDecimal(tt.in); got != tt.want {
