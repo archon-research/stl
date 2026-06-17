@@ -1,4 +1,5 @@
 import {
+  Grid,
   XYChart,
   LineSeries,
   AreaSeries,
@@ -116,6 +117,31 @@ const compactNumberFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 1,
 });
 
+const chartTooltipSurfaceClassName = css({
+  borderColor: 'border.subtle',
+  borderStyle: 'solid',
+  borderWidth: '1px',
+  borderRadius: 'md',
+  background: 'surface.default',
+  boxShadow: 'sm',
+  px: '3',
+  py: '2.5',
+  fontSize: 'sm',
+  width: 'fit-content',
+  minW: '8rem',
+});
+
+const chartTooltipTitleClassName = css({
+  fontWeight: 'semibold',
+  color: 'text.default',
+  mb: '1',
+});
+
+const chartTooltipValueClassName = css({
+  fontSize: 'sm',
+  fontWeight: 'medium',
+});
+
 function formatYAxisTick(value: unknown, chart: MetricChartSpec): string {
   const numericValue = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(numericValue)) {
@@ -231,6 +257,7 @@ function MetricCardTrend({
         xScale={{ type: 'band', paddingInner: 0.2 }}
         yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
       >
+        <Grid columns={false} numTicks={3} />
         <Axis
           orientation="left"
           numTicks={3}
@@ -276,6 +303,7 @@ function MetricCardTrend({
           snapTooltipToDatumX
           snapTooltipToDatumY
           showVerticalCrosshair
+          showSeriesGlyphs
           renderTooltip={({
             tooltipData,
           }: {
@@ -286,9 +314,14 @@ function MetricCardTrend({
               | undefined;
             if (!datum) return null;
             return (
-              <div style={{ fontSize: 11, padding: '2px 4px' }}>
-                <div style={{ fontWeight: 600 }}>{datum.label}</div>
-                <div>{chart.formatValue(datum.value)}</div>
+              <div className={chartTooltipSurfaceClassName}>
+                <div className={chartTooltipTitleClassName}>{datum.label}</div>
+                <div
+                  className={chartTooltipValueClassName}
+                  style={{ color: chart.stroke }}
+                >
+                  {chart.formatValue(datum.value)}
+                </div>
               </div>
             );
           }}
