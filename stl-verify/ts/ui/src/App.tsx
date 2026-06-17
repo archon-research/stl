@@ -994,7 +994,6 @@ function App() {
                 selectedAllocationKey={selectedAllocationKey}
                 selectedPrime={selectedPrime}
                 sorting={sorting as SortingState}
-                chartResolution={chartResolution}
                 metricCharts={metricCharts}
                 isChartsLoading={isChartsLoading}
                 chartsErrorMessage={chartsErrorMessage}

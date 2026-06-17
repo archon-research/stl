@@ -10,6 +10,7 @@ import {
 import {
   XYChart,
   LineSeries,
+  AreaSeries,
   Tooltip,
   Axis,
   chartTheme,
@@ -73,7 +74,6 @@ type AllocationGridProps = {
   selectedAllocationKey: string | null;
   selectedPrime: Prime | null;
   sorting: SortingState;
-  chartResolution: ChartResolution;
   metricCharts: MetricChartSpec[];
   isChartsLoading: boolean;
   chartsErrorMessage: string | null;
@@ -111,14 +111,30 @@ function findMetricChart(
   return charts.find((chart) => chart.key === key) ?? null;
 }
 
+const compactNumberFormatter = new Intl.NumberFormat('en-US', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+
+function formatYAxisTick(value: unknown, chart: MetricChartSpec): string {
+  const numericValue = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return '';
+  }
+
+  if (chart.key === 'prime-debt-exposure') {
+    return `${compactNumberFormatter.format(numericValue)} DAI`;
+  }
+
+  return chart.formatValue(numericValue);
+}
+
 function MetricCardTrend({
   chart,
-  chartResolution,
   isLoading,
   errorMessage,
 }: {
   chart: MetricChartSpec | null;
-  chartResolution: ChartResolution;
   isLoading: boolean;
   errorMessage: string | null;
 }) {
@@ -157,115 +173,91 @@ function MetricCardTrend({
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
-  const firstPoint = chart.data[0];
-  const lastPoint = chart.data[chart.data.length - 1];
-  const yRange = Math.max(maxValue - minValue, 0);
-  const midValue = minValue + yRange / 2;
-  const chartHeight = 200;
+  const chartHeight = 236;
 
   return (
-    <div className={css({ mt: '2', display: 'grid', gap: '1.5' })}>
-      <div
-        className={css({
-          display: 'grid',
-          gridTemplateColumns: 'auto 1fr',
-          alignItems: 'stretch',
-          gap: '2',
-        })}
+    <div className={css({ mt: '2', width: 'full' })}>
+      <XYChart
+        theme={chartTheme}
+        height={chartHeight}
+        margin={{ top: 8, right: 12, bottom: 62, left: 84 }}
+        xScale={{ type: 'band', paddingInner: 0.2 }}
+        yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
       >
-        <div
-          className={css({
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            alignItems: 'flex-end',
-            py: '1',
-            minW: '3.5rem',
+        <Axis
+          orientation="left"
+          numTicks={3}
+          hideTicks
+          tickFormat={(value) => formatYAxisTick(value, chart)}
+          tickLabelProps={() => ({
+            fontSize: 10,
+            textAnchor: 'end',
+            dx: '-0.35em',
+            fill: 'var(--colors-text-muted)',
           })}
-        >
-          <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
-            {chart.formatValue(maxValue)}
-          </span>
-          <span className={css({ fontSize: '2xs', color: 'text.subtle' })}>
-            {chart.formatValue(midValue)}
-          </span>
-          <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
-            {chart.formatValue(minValue)}
-          </span>
-        </div>
-
-        <div
-          className={css({
-            borderWidth: '1px',
-            borderStyle: 'solid',
-            borderColor: 'border.subtle',
-            borderRadius: 'sm',
-            bg: 'surface.subtle',
-            overflow: 'hidden',
-            width: 'full',
+        />
+        <Axis
+          orientation="bottom"
+          numTicks={5}
+          hideTicks
+          tickLabelProps={() => ({
+            fontSize: 10,
+            textAnchor: 'start',
+            angle: 30,
+            dx: '0.15em',
+            dy: '0.35em',
+            fill: 'var(--colors-text-muted)',
           })}
-        >
-          <XYChart
-            theme={chartTheme}
-            height={chartHeight}
-            xScale={{ type: 'band', paddingInner: 0.2 }}
-            yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
-          >
-            <Axis
-              orientation="bottom"
-              numTicks={4}
-              tickLabelProps={{ fontSize: 9, dy: '0.5em' }}
-              hideTicks
-            />
-            <LineSeries
-              dataKey={chart.key}
-              data={chart.data as ChartDatum[]}
-              xAccessor={(d: ChartDatum) => d.label}
-              yAccessor={(d: ChartDatum) => d.value}
-              stroke={chart.stroke}
-            />
-            <Tooltip
-              snapTooltipToDatumX
-              snapTooltipToDatumY
-              showVerticalCrosshair
-              renderTooltip={({ tooltipData }: { tooltipData?: { nearestDatum?: { datum: unknown } } }) => {
-                const datum = tooltipData?.nearestDatum?.datum as ChartDatum | undefined;
-                if (!datum) return null;
-                return (
-                  <div style={{ fontSize: 11, padding: '2px 4px' }}>
-                    <div style={{ fontWeight: 600 }}>{datum.label}</div>
-                    <div>{chart.formatValue(datum.value)}</div>
-                  </div>
-                );
-              }}
-            />
-          </XYChart>
-        </div>
-      </div>
-
-      <div
-        className={css({
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '2',
-          px: '1',
-        })}
-      >
-        <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
-          {firstPoint.label}
-        </span>
-        <span className={css({ fontSize: '2xs', color: 'text.subtle' })}>
-          {chartResolution}
-        </span>
-        <span className={css({ fontSize: '2xs', color: 'text.muted' })}>
-          {lastPoint.label}
-        </span>
-      </div>
-
+        />
+        <AreaSeries
+          dataKey={`${chart.key}-area`}
+          data={chart.data as ChartDatum[]}
+          xAccessor={(d: ChartDatum) => d.label}
+          yAccessor={(d: ChartDatum) => d.value}
+          fill={chart.stroke}
+          fillOpacity={0.18}
+          lineProps={{ stroke: 'none' }}
+        />
+        <LineSeries
+          dataKey={chart.key}
+          data={chart.data as ChartDatum[]}
+          xAccessor={(d: ChartDatum) => d.label}
+          yAccessor={(d: ChartDatum) => d.value}
+          stroke={chart.stroke}
+        />
+        <Tooltip
+          snapTooltipToDatumX
+          snapTooltipToDatumY
+          showVerticalCrosshair
+          renderTooltip={({ tooltipData }: { tooltipData?: { nearestDatum?: { datum: unknown } } }) => {
+            const datum = tooltipData?.nearestDatum?.datum as ChartDatum | undefined;
+            if (!datum) return null;
+            return (
+              <div style={{ fontSize: 11, padding: '2px 4px' }}>
+                <div style={{ fontWeight: 600 }}>{datum.label}</div>
+                <div>{chart.formatValue(datum.value)}</div>
+              </div>
+            );
+          }}
+        />
+      </XYChart>
     </div>
   );
 }
+
+const metricDetailMetaClassName = css({
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  borderRadius: 'sm',
+  bg: 'surface.subtle',
+  px: '2.5',
+  py: '2',
+  width: 'fit-content',
+  maxW: 'full',
+  fontSize: 'sm',
+  color: 'text.muted',
+});
 
 const tableHeaderTypographyClassName = css({
   '& thead th': {
@@ -598,7 +590,6 @@ export function AllocationGrid({
   selectedAllocationKey,
   selectedPrime,
   sorting,
-  chartResolution,
   metricCharts,
   isChartsLoading,
   chartsErrorMessage,
@@ -898,21 +889,19 @@ export function AllocationGrid({
                 detail={
                   <div
                     className={css({
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between',
-                      gap: '3',
-                      minHeight: '15rem',
+                      display: 'grid',
+                      gridTemplateRows: 'auto 1fr',
+                      gap: '2',
+                      minHeight: '17rem',
                     })}
                   >
-                    <span>
+                    <div className={metricDetailMetaClassName}>
                       {hasSearchQuery && overallSummary
                         ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
                         : `${summary.allocationCount} allocations`}
-                    </span>
+                    </div>
                     <MetricCardTrend
                       chart={allocationActivityChart}
-                      chartResolution={chartResolution}
                       isLoading={isChartsLoading}
                       errorMessage={chartsErrorMessage}
                     />
@@ -930,24 +919,22 @@ export function AllocationGrid({
                   detail={
                     <div
                       className={css({
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'space-between',
-                        gap: '3',
-                        minHeight: '15rem',
+                        display: 'grid',
+                        gridTemplateRows: 'auto 1fr',
+                        gap: '2',
+                        minHeight: '17rem',
                       })}
                     >
                       {parseNumericValue(
                         capitalMetrics.risk_to_capital_ratio,
                       ) !== null ? (
-                        <span>
+                        <div className={metricDetailMetaClassName}>
                           Risk-to-capital{' '}
                           {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
-                        </span>
+                        </div>
                       ) : null}
                       <MetricCardTrend
                         chart={riskCapitalChart}
-                        chartResolution={chartResolution}
                         isLoading={isChartsLoading}
                         errorMessage={chartsErrorMessage}
                       />
@@ -965,21 +952,19 @@ export function AllocationGrid({
                 detail={
                   <div
                     className={css({
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between',
-                      gap: '3',
-                      minHeight: '15rem',
+                      display: 'grid',
+                      gridTemplateRows: 'auto 1fr',
+                      gap: '2',
+                      minHeight: '17rem',
                     })}
                   >
-                    <span>
+                    <div className={metricDetailMetaClassName}>
                       Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·
                       {' '}First loss{' '}
                       {formatUsdValue(capitalMetrics.first_loss_capital)}
-                    </span>
+                    </div>
                     <MetricCardTrend
                       chart={totalCapitalChart}
-                      chartResolution={chartResolution}
                       isLoading={isChartsLoading}
                       errorMessage={chartsErrorMessage}
                     />
@@ -1004,52 +989,54 @@ export function AllocationGrid({
                     ) : (
                       <div
                         className={css({
-                          display: 'flex',
-                          flexDirection: 'column',
-                          justifyContent: 'space-between',
-                          gap: '3',
-                          minHeight: '15rem',
+                          display: 'grid',
+                          gridTemplateRows: 'auto 1fr',
+                          gap: '2',
+                          minHeight: '17rem',
                         })}
                       >
                         <div
-                          className={css({
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            alignItems: 'center',
-                            gap: '1',
-                          })}
+                          className={`${metricDetailMetaClassName} ${css({ width: 'full' })}`}
                         >
-                          <span>
-                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <AppTooltip
-                            ariaLabel={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
-                                : 'Raw WAD unavailable'
-                            }
-                            trigger={
-                              <span
-                                className={css({
-                                  textDecoration: 'underline',
-                                  textDecorationStyle: 'dotted',
-                                  textUnderlineOffset: '2px',
-                                })}
-                              >
-                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
-                              </span>
-                            }
-                            content={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
-                                : 'Raw WAD unavailable'
-                            }
-                          />
+                          <div
+                            className={css({
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              alignItems: 'center',
+                              gap: '1',
+                            })}
+                          >
+                            <span>
+                              Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <AppTooltip
+                              ariaLabel={
+                                primeDebtSnapshot?.debt_wad
+                                  ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                  : 'Raw WAD unavailable'
+                              }
+                              trigger={
+                                <span
+                                  className={css({
+                                    textDecoration: 'underline',
+                                    textDecorationStyle: 'dotted',
+                                    textUnderlineOffset: '2px',
+                                  })}
+                                >
+                                  {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                                </span>
+                              }
+                              content={
+                                primeDebtSnapshot?.debt_wad
+                                  ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                  : 'Raw WAD unavailable'
+                              }
+                            />
+                          </div>
                         </div>
                         <MetricCardTrend
                           chart={primeDebtChart}
-                          chartResolution={chartResolution}
                           isLoading={isChartsLoading}
                           errorMessage={chartsErrorMessage}
                         />
