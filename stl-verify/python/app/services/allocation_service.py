@@ -10,6 +10,7 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.time_series_bucket import AllocationActivityBucket
 from app.ports.allocation_repository import AllocationRepositoryPort
 
 
@@ -60,5 +61,32 @@ class AllocationService:
             tx_hash=tx_hash,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
+            limit=limit,
+        )
+
+    async def list_activity_buckets(
+        self,
+        *,
+        prime_id: EthAddress | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[AllocationActivityBucket]:
+        return await self._repository.list_activity_buckets(
+            prime_id=prime_id,
+            chain_id=chain_id,
+            protocol_name=protocol_name,
+            action_type=action_type,
+            token_symbol=token_symbol,
+            tx_hash=tx_hash,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            bucket_seconds=bucket_seconds,
             limit=limit,
         )
