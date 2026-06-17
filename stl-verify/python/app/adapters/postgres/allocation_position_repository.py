@@ -261,6 +261,11 @@ class AllocationRepository:
                         token_address="0x" + row.token_address,
                         symbol=row.symbol,
                         balance=_safe_decimal(row.balance, "balance", row.token_id),
+                        amount_usd=(
+                            _safe_decimal(row.amount_usd, "amount_usd", row.token_id)
+                            if row.amount_usd is not None
+                            else None
+                        ),
                         latest_activity_at=row.latest_activity_at,
                     )
                     for row in result
@@ -531,6 +536,12 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # receipt_token table — i.e. the prime holds the token itself rather than
 # a registered protocol wrapper for it. Receipt-token positions are returned
 # by ``_RECEIPT_TOKEN_POSITIONS_SQL``; this query is the complementary set.
+#
+# Pricing has no protocol context here (the token is held bare), so the latest
+# oracle price for the token across any oracle is used rather than the
+# protocol-bound oracle that ``_RECEIPT_TOKEN_POSITIONS_SQL`` resolves through
+# ``protocol_oracle``. Tokens with no oracle price (e.g. LP/curve shares) yield
+# a null ``amount_usd`` rather than being dropped.
 _DIRECT_ASSET_HOLDINGS_SQL = text("""
     WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
@@ -550,11 +561,22 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         encode(t.address, 'hex') AS token_address,
         t.symbol                 AS symbol,
         lp.balance,
+        (lp.balance * px.price_usd) AS amount_usd,
         lp.latest_activity_at
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
+    LEFT JOIN LATERAL (
+        SELECT otp.price_usd
+        FROM onchain_token_price otp
+        WHERE otp.token_id = lp.token_id
+        -- oracle_id breaks ties when multiple oracles price the same token at the
+        -- same block, keeping the chosen price deterministic across calls.
+        ORDER BY otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
+        LIMIT 1
+    ) px ON TRUE
     WHERE rt.id IS NULL AND lp.balance > 0
     ORDER BY lp.balance DESC
 """)

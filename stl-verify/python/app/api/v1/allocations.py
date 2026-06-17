@@ -60,10 +60,11 @@ class AllocationResponse(BaseModel):
     Two row shapes share this model:
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
-      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
-      ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
-      the held asset; ``underlying_token_id`` / ``underlying_token_address``
-      point at it.
+      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
+      null; ``symbol`` and ``underlying_symbol`` both name the held asset;
+      ``underlying_token_id`` / ``underlying_token_address`` point at it.
+      ``amount_usd`` is populated when an oracle price exists for the token and
+      null otherwise (e.g. LP/curve shares with no oracle feed).
     """
 
     chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
@@ -472,8 +473,9 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "Return every current allocation held by the given prime — both receipt-token "
         "positions (enriched with USD value when a price is available) and direct asset "
         "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
-        "surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and "
-        "`amount_usd` set to `null`). Each row includes the latest on-chain activity "
+        "surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` "
+        "set to `null`, and `amount_usd` valued from the token's oracle price when one "
+        "exists). Each row includes the latest on-chain activity "
         "timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`)."
     ),
 )
@@ -487,7 +489,8 @@ async def list_allocations(
     - Receipt-token positions (e.g. spUSDT wrapping USDT).
     - Direct asset holdings — tokens held in the proxy that are not
       registered as receipt-token wrappers (e.g. PYUSD, syrupUSDT). These
-      rows have null ``receipt_token_*`` / ``protocol_name`` / ``amount_usd``.
+      rows have null ``receipt_token_*`` / ``protocol_name``; ``amount_usd``
+      is valued from the token's oracle price when one exists, else null.
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -531,7 +534,7 @@ async def list_allocations(
             underlying_symbol=h.symbol,
             protocol_name=None,
             balance=h.balance,
-            amount_usd=None,
+            amount_usd=h.amount_usd,
             latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
             category=category_service.classify(None, h.symbol),
         )

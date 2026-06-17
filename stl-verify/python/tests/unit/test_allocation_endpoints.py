@@ -106,9 +106,9 @@ def test_list_allocations_returns_200_with_enriched_holdings():
 
 def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     """Direct holdings (e.g. raw PYUSD in a proxy) surface as their own rows.
-    receipt_token_id / receipt_token_address / protocol_name / amount_usd
-    are null; symbol and underlying_symbol both name the held asset; category
-    defaults to ASSET.
+    receipt_token_id / receipt_token_address / protocol_name are null; symbol
+    and underlying_symbol both name the held asset; category defaults to ASSET.
+    A holding with no oracle price carries a null amount_usd.
     """
     from app.api.v1 import allocations
 
@@ -137,6 +137,23 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
         }
     ]
     service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_prices_direct_asset_holding_from_oracle():
+    """A direct holding with an oracle price surfaces its USD value rather than null."""
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding(balance=Decimal("250.0"), amount_usd=Decimal("249.5"))
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert rows[0]["symbol"] == "PYUSD"
+    assert rows[0]["amount_usd"] == "249.5"
 
 
 def test_list_allocations_combines_receipt_and_direct_rows():

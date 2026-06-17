@@ -6,6 +6,7 @@ per test module.  Migrations are applied by the ``module_db`` fixture from
 """
 
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 
 import asyncpg
@@ -170,6 +171,19 @@ async def _seed(db_url: str) -> None:
                 tx=_TX5_HEX,
                 direction="in",
             )
+
+            # USDC has an oracle price, so obex's direct holding is valued in USD.
+            # GNO (grove's direct holding) is deliberately left unpriced to assert
+            # the null-amount_usd path for tokens with no oracle feed.
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+            await conn.execute(
+                "INSERT INTO onchain_token_price "
+                "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                "VALUES ($1, $2, 1500, 0, NOW(), $3)",
+                usdc_id,
+                oracle_id,
+                Decimal(1),
+            )
     finally:
         await conn.close()
 
@@ -256,7 +270,8 @@ def test_direct_underlying_holdings_surface_as_their_own_rows(
     """A prime holds raw USDC directly. It must not be attributed to any
     USDC-wrapping receipt token (that would double-count and fan out), but
     it should appear as a direct-asset row with null receipt_token fields
-    and ASSET category.
+    and ASSET category. USDC has an oracle price, so amount_usd is valued
+    (balance 250 × 1 USD).
     """
     response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
 
@@ -271,6 +286,7 @@ def test_direct_underlying_holdings_surface_as_their_own_rows(
     assert row["protocol_name"] is None
     assert row["underlying_token_address"] == f"0x{_USDC_HEX}"
     assert row["balance"] == "250"
+    assert Decimal(row["amount_usd"]) == Decimal("250")
     assert row["category"] == "asset"
 
 
@@ -279,6 +295,8 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
 ) -> None:
     """A prime holds only GNO. There is no receipt_token wrapping GNO, so the
     response contains exactly one direct-asset row and no receipt-token rows.
+    GNO has no oracle price, so amount_usd is null rather than the row being
+    dropped.
     """
     response = client.get(f"/v1/primes/0x{_GROVE_PROXY_HEX}/allocations")
 
@@ -289,6 +307,7 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     assert row["symbol"] == "GNO"
     assert row["receipt_token_id"] is None
     assert row["protocol_name"] is None
+    assert row["amount_usd"] is None
     assert row["category"] == "asset"
 
 
