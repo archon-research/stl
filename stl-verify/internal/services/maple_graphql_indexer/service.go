@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -40,6 +41,8 @@ type Service struct {
 	config    ServiceConfig
 	client    outbound.MapleGraphQLClient
 	repo      outbound.MapleGraphQLRepository
+	tokenRepo outbound.TokenRepository
+	userRepo  outbound.UserRepository
 	txManager outbound.TxManager
 	telemetry *Telemetry
 	logger    *slog.Logger
@@ -49,13 +52,21 @@ type Service struct {
 }
 
 // NewService creates a new Maple GraphQL indexer service. telemetry may be
-// nil (all telemetry methods are nil-receiver-safe).
-func NewService(config ServiceConfig, client outbound.MapleGraphQLClient, repo outbound.MapleGraphQLRepository, txManager outbound.TxManager, telemetry *Telemetry) (*Service, error) {
+// nil (all telemetry methods are nil-receiver-safe). The shared token and user
+// registries are upserted via tokenRepo/userRepo with a nil block (GraphQL data
+// has no block context), so an existing on-chain block is preserved (VEC-353).
+func NewService(config ServiceConfig, client outbound.MapleGraphQLClient, repo outbound.MapleGraphQLRepository, tokenRepo outbound.TokenRepository, userRepo outbound.UserRepository, txManager outbound.TxManager, telemetry *Telemetry) (*Service, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client cannot be nil")
 	}
 	if repo == nil {
 		return nil, fmt.Errorf("repo cannot be nil")
+	}
+	if tokenRepo == nil {
+		return nil, fmt.Errorf("tokenRepo cannot be nil")
+	}
+	if userRepo == nil {
+		return nil, fmt.Errorf("userRepo cannot be nil")
 	}
 	if txManager == nil {
 		return nil, fmt.Errorf("txManager cannot be nil")
@@ -73,6 +84,8 @@ func NewService(config ServiceConfig, client outbound.MapleGraphQLClient, repo o
 		config:    config,
 		client:    client,
 		repo:      repo,
+		tokenRepo: tokenRepo,
+		userRepo:  userRepo,
 		txManager: txManager,
 		telemetry: telemetry,
 		logger:    logger.With("component", "maple-graphql-indexer"),
@@ -224,14 +237,14 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 		}
 	}
 
-	assets, err := distinctAssetTokens(pools)
+	assets, err := distinctAssetTokens(s.config.ChainID, pools)
 	if err != nil {
 		return nil, err
 	}
 
 	var poolIDs map[common.Address]int64
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		assetTokenIDs, err := s.repo.GetOrCreateAssetTokens(ctx, tx, s.config.ChainID, assets)
+		assetTokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, assets)
 		if err != nil {
 			return fmt.Errorf("resolving asset tokens: %w", err)
 		}
@@ -293,24 +306,28 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 	return poolIDs, nil
 }
 
-// distinctAssetTokens extracts the unique pool asset tokens, validating each
-// asset's metadata and failing when two pools report the same asset address
-// with conflicting symbol or decimals (an inconsistency the token table
-// cannot represent and must not silently first-write-wins).
-func distinctAssetTokens(pools []outbound.MaplePool) ([]outbound.MapleAssetToken, error) {
-	seen := make(map[common.Address]outbound.MapleAssetToken, len(pools))
-	assets := make([]outbound.MapleAssetToken, 0, len(pools))
+// distinctAssetTokens extracts the unique pool asset tokens as token-registry
+// upsert inputs, validating each asset's metadata and failing when two pools
+// report the same asset address with conflicting symbol or decimals (an
+// inconsistency the token table cannot represent and must not silently
+// first-write-wins). CreatedAtBlock is left nil: GraphQL data has no block
+// context, and a nil block preserves any existing on-chain block (VEC-353).
+func distinctAssetTokens(chainID int64, pools []outbound.MaplePool) ([]outbound.TokenInput, error) {
+	seen := make(map[common.Address]outbound.TokenInput, len(pools))
+	assets := make([]outbound.TokenInput, 0, len(pools))
 	for _, p := range pools {
 		if p.AssetSymbol == "" {
 			return nil, fmt.Errorf("pool %s: asset %s: symbol must not be empty", lowerHex(p.Address), lowerHex(p.AssetAddress))
 		}
+		// SMALLINT range guard: an API bug returning e.g. 65542 must not be
+		// stored as a wrapped, smaller decimals value.
 		decimals, err := toInt16(p.AssetDecimals)
 		if err != nil {
 			return nil, fmt.Errorf("pool %s: asset decimals: %w", lowerHex(p.Address), err)
 		}
-		asset := outbound.MapleAssetToken{Address: p.AssetAddress, Symbol: p.AssetSymbol, Decimals: decimals}
+		asset := outbound.TokenInput{ChainID: chainID, Address: p.AssetAddress, Symbol: p.AssetSymbol, Decimals: int(decimals)}
 		if prev, ok := seen[p.AssetAddress]; ok {
-			if prev != asset {
+			if prev.Symbol != asset.Symbol || prev.Decimals != asset.Decimals {
 				return nil, fmt.Errorf("asset %s reported with conflicting metadata: %s/%d vs %s/%d",
 					lowerHex(p.AssetAddress), prev.Symbol, prev.Decimals, asset.Symbol, asset.Decimals)
 			}
@@ -405,7 +422,13 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 
 	collateralCount := 0
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		borrowerIDs, err := s.repo.GetOrCreateBorrowerUsers(ctx, tx, s.config.ChainID, borrowers)
+		// FirstSeenBlock left nil: GraphQL data has no block context, and a nil
+		// block preserves any existing on-chain first-seen block (VEC-353).
+		borrowerUsers := make([]entity.User, len(borrowers))
+		for i, addr := range borrowers {
+			borrowerUsers[i] = entity.User{ChainID: s.config.ChainID, Address: addr}
+		}
+		borrowerIDs, err := s.userRepo.GetOrCreateUsers(ctx, tx, borrowerUsers)
 		if err != nil {
 			return fmt.Errorf("resolving borrowers: %w", err)
 		}

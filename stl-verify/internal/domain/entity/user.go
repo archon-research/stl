@@ -7,16 +7,22 @@ import (
 )
 
 // User represents a wallet address that interacts with protocols.
+//
+// FirstSeenBlock is a pointer so "no block context" (nil) is distinct from
+// "genesis block" (0). Off-block-context sources (e.g. GraphQL indexers) set
+// nil, which inserts NULL and lets the LEAST() merge preserve any existing
+// block; a 0 would clobber it (VEC-353).
 type User struct {
 	ID             int64
 	ChainID        int64
 	Address        common.Address
-	FirstSeenBlock int64
+	FirstSeenBlock *int64
 	Metadata       map[string]any
 }
 
-// NewUser creates a new User entity with validation.
-func NewUser(id, chainID int64, address common.Address, firstSeenBlock int64) (*User, error) {
+// NewUser creates a new User entity with validation. firstSeenBlock is nil when
+// the caller has no block context.
+func NewUser(id, chainID int64, address common.Address, firstSeenBlock *int64) (*User, error) {
 	u := &User{
 		ID:             id,
 		ChainID:        chainID,
@@ -41,8 +47,11 @@ func (u *User) Validate() error {
 	if u.Address == (common.Address{}) {
 		return fmt.Errorf("address cannot be empty")
 	}
-	if u.FirstSeenBlock <= 0 {
-		return fmt.Errorf("firstSeenBlock must be positive, got %d", u.FirstSeenBlock)
+	// nil means "no block context" (a valid state for off-chain sources); a
+	// supplied block must be a real, positive block; 0 would clobber the
+	// stored value via the LEAST() merge (VEC-353).
+	if u.FirstSeenBlock != nil && *u.FirstSeenBlock <= 0 {
+		return fmt.Errorf("firstSeenBlock must be positive when set, got %d", *u.FirstSeenBlock)
 	}
 	return nil
 }

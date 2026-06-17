@@ -51,20 +51,6 @@ func toNullableNumeric(raw *big.Int, decimals int) pgtype.Numeric {
 	return pgtype.Numeric{Int: new(big.Int).Set(raw), Exp: int32(-decimals), Valid: true}
 }
 
-// collectBatchIDs sends a batch of single-row `RETURNING id` upserts and
-// collects the ids keyed per row. The batch must be queued in the same order
-// as rows. kind names the entity in error messages.
-func collectBatchIDs[T any, K comparable](ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows []T, kind string, key func(T) K) (map[K]int64, error) {
-	return collectBatchRows(ctx, tx, batch, rows, kind, func(row pgx.Row, item T) (K, int64, error) {
-		var id int64
-		if err := row.Scan(&id); err != nil {
-			var zero K
-			return zero, 0, fmt.Errorf("upserting %s %v: %w", kind, key(item), err)
-		}
-		return key(item), id, nil
-	})
-}
-
 // collectBatchRows sends a batch of single-row upserts and collects
 // (key, id) per row via scan, which may also reject a row with an error.
 // The batch must be queued in the same order as rows; kind names the entity

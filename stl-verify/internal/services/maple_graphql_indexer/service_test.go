@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -51,21 +52,24 @@ func (m *mockClient) GetSyrupGlobals(ctx context.Context) (*outbound.MapleSyrupG
 }
 
 type mockRepo struct {
-	GetMapleProtocolIDFn       func(ctx context.Context, chainID int64) (int64, error)
-	GetOrCreateBorrowerUsersFn func(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error)
-	GetOrCreateAssetTokensFn   func(ctx context.Context, tx pgx.Tx, chainID int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error)
-	UpsertPoolsFn              func(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
-	SavePoolStatesFn           func(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
-	UpsertLoansFn              func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
-	SaveLoanStatesFn           func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
-	SaveLoanCollateralsFn      func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
-	UpsertSkyStrategiesFn      func(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
-	SaveSkyStrategyStatesFn    func(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error
-	SaveSyrupGlobalStateFn     func(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error
+	GetMapleProtocolIDFn    func(ctx context.Context, chainID int64) (int64, error)
+	UpsertPoolsFn           func(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
+	SavePoolStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
+	UpsertLoansFn           func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
+	SaveLoanStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
+	SaveLoanCollateralsFn   func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
+	UpsertSkyStrategiesFn   func(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
+	SaveSkyStrategyStatesFn func(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error
+	SaveSyrupGlobalStateFn  func(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error
+
+	// Token and user registries live behind their own ports; the maple repo no
+	// longer resolves them. newMockRepo wires these to capture and id behavior.
+	tokenRepo *testutil.MockTokenRepository
+	userRepo  *testutil.MockUserRepository
 
 	// Captured arguments for assertions.
-	borrowerCalls   [][]common.Address
-	assetTokenCalls [][]outbound.MapleAssetToken
+	borrowerCalls   [][]entity.User
+	assetTokenCalls [][]outbound.TokenInput
 	upsertedPools   []*maple.Pool
 	upsertedLoans   []*maple.Loan
 	savedPoolStates []*maple.PoolState
@@ -80,21 +84,25 @@ type mockRepo struct {
 func newMockRepo() *mockRepo {
 	r := &mockRepo{}
 	r.GetMapleProtocolIDFn = func(context.Context, int64) (int64, error) { return 7, nil }
-	r.GetOrCreateBorrowerUsersFn = func(_ context.Context, _ pgx.Tx, _ int64, borrowers []common.Address) (map[common.Address]int64, error) {
-		r.borrowerCalls = append(r.borrowerCalls, borrowers)
-		ids := make(map[common.Address]int64, len(borrowers))
-		for i, b := range borrowers {
-			ids[b] = int64(100 + i)
-		}
-		return ids, nil
+	r.userRepo = &testutil.MockUserRepository{
+		GetOrCreateUsersFn: func(_ context.Context, _ pgx.Tx, users []entity.User) (map[common.Address]int64, error) {
+			r.borrowerCalls = append(r.borrowerCalls, users)
+			ids := make(map[common.Address]int64, len(users))
+			for i, u := range users {
+				ids[u.Address] = int64(100 + i)
+			}
+			return ids, nil
+		},
 	}
-	r.GetOrCreateAssetTokensFn = func(_ context.Context, _ pgx.Tx, _ int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
-		r.assetTokenCalls = append(r.assetTokenCalls, assets)
-		ids := make(map[common.Address]int64, len(assets))
-		for i, a := range assets {
-			ids[a.Address] = int64(500 + i)
-		}
-		return ids, nil
+	r.tokenRepo = &testutil.MockTokenRepository{
+		GetOrCreateTokensFn: func(_ context.Context, _ pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error) {
+			r.assetTokenCalls = append(r.assetTokenCalls, tokens)
+			ids := make(map[common.Address]int64, len(tokens))
+			for i, t := range tokens {
+				ids[t.Address] = int64(500 + i)
+			}
+			return ids, nil
+		},
 	}
 	r.UpsertPoolsFn = func(_ context.Context, _ pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
 		r.upsertedPools = append(r.upsertedPools, pools...)
@@ -144,14 +152,6 @@ func newMockRepo() *mockRepo {
 
 func (m *mockRepo) GetMapleProtocolID(ctx context.Context, chainID int64) (int64, error) {
 	return m.GetMapleProtocolIDFn(ctx, chainID)
-}
-
-func (m *mockRepo) GetOrCreateBorrowerUsers(ctx context.Context, tx pgx.Tx, chainID int64, borrowers []common.Address) (map[common.Address]int64, error) {
-	return m.GetOrCreateBorrowerUsersFn(ctx, tx, chainID, borrowers)
-}
-
-func (m *mockRepo) GetOrCreateAssetTokens(ctx context.Context, tx pgx.Tx, chainID int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
-	return m.GetOrCreateAssetTokensFn(ctx, tx, chainID, assets)
 }
 
 func (m *mockRepo) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
@@ -274,7 +274,7 @@ func happyClient() *mockClient {
 
 func newTestService(t *testing.T, client *mockClient, repo *mockRepo) *Service {
 	t.Helper()
-	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, &testutil.MockTxManager{}, nil)
+	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, repo.tokenRepo, repo.userRepo, &testutil.MockTxManager{}, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -292,6 +292,8 @@ func newTestService(t *testing.T, client *mockClient, repo *mockRepo) *Service {
 func TestNewService_Validation(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
+	tokenRepo := repo.tokenRepo
+	userRepo := repo.userRepo
 	txm := &testutil.MockTxManager{}
 
 	tests := []struct {
@@ -300,28 +302,52 @@ func TestNewService_Validation(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "nil client",
-			run:     func() (*Service, error) { return NewService(ServiceConfig{ChainID: 1}, nil, repo, txm, nil) },
+			name: "nil client",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 1}, nil, repo, tokenRepo, userRepo, txm, nil)
+			},
 			wantErr: "client cannot be nil",
 		},
 		{
-			name:    "nil repo",
-			run:     func() (*Service, error) { return NewService(ServiceConfig{ChainID: 1}, client, nil, txm, nil) },
+			name: "nil repo",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 1}, client, nil, tokenRepo, userRepo, txm, nil)
+			},
 			wantErr: "repo cannot be nil",
 		},
 		{
-			name:    "nil tx manager",
-			run:     func() (*Service, error) { return NewService(ServiceConfig{ChainID: 1}, client, repo, nil, nil) },
+			name: "nil token repo",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 1}, client, repo, nil, userRepo, txm, nil)
+			},
+			wantErr: "tokenRepo cannot be nil",
+		},
+		{
+			name: "nil user repo",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 1}, client, repo, tokenRepo, nil, txm, nil)
+			},
+			wantErr: "userRepo cannot be nil",
+		},
+		{
+			name: "nil tx manager",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 1}, client, repo, tokenRepo, userRepo, nil, nil)
+			},
 			wantErr: "txManager cannot be nil",
 		},
 		{
-			name:    "zero chain id",
-			run:     func() (*Service, error) { return NewService(ServiceConfig{ChainID: 0}, client, repo, txm, nil) },
+			name: "zero chain id",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 0}, client, repo, tokenRepo, userRepo, txm, nil)
+			},
 			wantErr: "chainID must be 1",
 		},
 		{
-			name:    "non-mainnet chain id",
-			run:     func() (*Service, error) { return NewService(ServiceConfig{ChainID: 137}, client, repo, txm, nil) },
+			name: "non-mainnet chain id",
+			run: func() (*Service, error) {
+				return NewService(ServiceConfig{ChainID: 137}, client, repo, tokenRepo, userRepo, txm, nil)
+			},
 			wantErr: "chainID must be 1",
 		},
 	}
@@ -338,7 +364,7 @@ func TestNewService_Validation(t *testing.T) {
 		})
 	}
 
-	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, txm, nil)
+	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, tokenRepo, userRepo, txm, nil)
 	if err != nil {
 		t.Fatalf("valid config: %v", err)
 	}
@@ -444,6 +470,11 @@ func TestSync_HappyPath(t *testing.T) {
 	if gotAssets[0].Symbol != "USDC" || gotAssets[0].Decimals != 6 {
 		t.Errorf("asset 0 = %+v, want USDC/6", gotAssets[0])
 	}
+	// GraphQL data has no block context: the block must be nil so the shared
+	// upsert preserves any existing on-chain block (VEC-353).
+	if gotAssets[0].CreatedAtBlock != nil || gotAssets[1].CreatedAtBlock != nil {
+		t.Errorf("asset CreatedAtBlock = %v/%v, want nil/nil", gotAssets[0].CreatedAtBlock, gotAssets[1].CreatedAtBlock)
+	}
 	if len(repo.upsertedPools) != 2 {
 		t.Fatalf("upserted pools = %d, want 2", len(repo.upsertedPools))
 	}
@@ -456,8 +487,12 @@ func TestSync_HappyPath(t *testing.T) {
 	if len(repo.borrowerCalls) != 1 {
 		t.Fatalf("borrower calls = %d, want 1", len(repo.borrowerCalls))
 	}
-	if got := repo.borrowerCalls[0]; len(got) != 2 || got[0] != addr(0xa0) || got[1] != addr(0xa1) {
+	if got := repo.borrowerCalls[0]; len(got) != 2 || got[0].Address != addr(0xa0) || got[1].Address != addr(0xa1) {
 		t.Errorf("borrowers = %v, want [0xa0..., 0xa1...]", got)
+	}
+	// Borrowers carry no block context: FirstSeenBlock must be nil (VEC-353).
+	if got := repo.borrowerCalls[0]; got[0].FirstSeenBlock != nil || got[1].FirstSeenBlock != nil {
+		t.Errorf("borrower FirstSeenBlock = %v/%v, want nil/nil", got[0].FirstSeenBlock, got[1].FirstSeenBlock)
 	}
 
 	if len(repo.savedStrategies) != 1 {
@@ -815,7 +850,7 @@ func TestSync_EmptyStrategiesIsNotAnError(t *testing.T) {
 func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.GetOrCreateBorrowerUsersFn = func(context.Context, pgx.Tx, int64, []common.Address) (map[common.Address]int64, error) {
+	repo.userRepo.GetOrCreateUsersFn = func(context.Context, pgx.Tx, []entity.User) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -955,10 +990,10 @@ func TestSync_InvalidPoolEntityFailsPhase(t *testing.T) {
 	// A zero token id resolves from the map but fails pool entity validation.
 	client := happyClient()
 	repo := newMockRepo()
-	repo.GetOrCreateAssetTokensFn = func(_ context.Context, _ pgx.Tx, _ int64, assets []outbound.MapleAssetToken) (map[common.Address]int64, error) {
-		ids := make(map[common.Address]int64, len(assets))
-		for _, a := range assets {
-			ids[a.Address] = 0
+	repo.tokenRepo.GetOrCreateTokensFn = func(_ context.Context, _ pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error) {
+		ids := make(map[common.Address]int64, len(tokens))
+		for _, t := range tokens {
+			ids[t.Address] = 0
 		}
 		return ids, nil
 	}
@@ -976,7 +1011,7 @@ func TestSync_InvalidPoolEntityFailsPhase(t *testing.T) {
 func TestSync_AssetTokenMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.GetOrCreateAssetTokensFn = func(context.Context, pgx.Tx, int64, []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+	repo.tokenRepo.GetOrCreateTokensFn = func(context.Context, pgx.Tx, []outbound.TokenInput) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -1089,7 +1124,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "asset token upsert fails",
 			mutate: func(r *mockRepo) {
-				r.GetOrCreateAssetTokensFn = func(context.Context, pgx.Tx, int64, []outbound.MapleAssetToken) (map[common.Address]int64, error) {
+				r.tokenRepo.GetOrCreateTokensFn = func(context.Context, pgx.Tx, []outbound.TokenInput) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},
@@ -1097,7 +1132,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "borrower upsert fails",
 			mutate: func(r *mockRepo) {
-				r.GetOrCreateBorrowerUsersFn = func(context.Context, pgx.Tx, int64, []common.Address) (map[common.Address]int64, error) {
+				r.userRepo.GetOrCreateUsersFn = func(context.Context, pgx.Tx, []entity.User) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},
@@ -1298,10 +1333,10 @@ func TestSync_InvalidLoanEntityFailsPhase(t *testing.T) {
 	repo := newMockRepo()
 	// A zero borrower user id resolves from the map but fails loan entity
 	// validation.
-	repo.GetOrCreateBorrowerUsersFn = func(_ context.Context, _ pgx.Tx, _ int64, borrowers []common.Address) (map[common.Address]int64, error) {
-		ids := make(map[common.Address]int64, len(borrowers))
-		for _, b := range borrowers {
-			ids[b] = 0
+	repo.userRepo.GetOrCreateUsersFn = func(_ context.Context, _ pgx.Tx, users []entity.User) (map[common.Address]int64, error) {
+		ids := make(map[common.Address]int64, len(users))
+		for _, u := range users {
+			ids[u.Address] = 0
 		}
 		return ids, nil
 	}

@@ -1,7 +1,6 @@
 package postgres
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -52,14 +51,20 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 		return make(map[common.Address]int64), nil
 	}
 
-	// Sort by address to ensure all concurrent transactions lock rows in the
-	// same order, preventing deadlocks when multiple batches upsert the same tokens.
-	slices.SortFunc(tokens, func(a, b outbound.TokenInput) int {
-		return bytes.Compare(a.Address.Bytes(), b.Address.Bytes())
-	})
+	// Sort by address (and dedupe) so concurrent transactions lock rows in the
+	// same order, preventing deadlocks when multiple batches upsert the same
+	// tokens (ADR-0002). Operates on a copy; the caller's slice is untouched.
+	// Dedup is address-only: callers must resolve any per-address symbol/decimals
+	// conflicts before calling (the survivor is arbitrary on collision).
+	sorted := sortedByBytesKey(tokens, func(t outbound.TokenInput) []byte { return t.Address.Bytes() })
+	sorted = slices.CompactFunc(sorted, func(a, b outbound.TokenInput) bool { return a.Address == b.Address })
 
 	batch := &pgx.Batch{}
-	for _, t := range tokens {
+	for _, t := range sorted {
+		// created_at_block merges with LEAST(); a NULL incoming block (no block
+		// context) is ignored by LEAST and preserves the stored block (VEC-353).
+		// symbol/decimals are never refreshed on conflict, so RETURNING yields
+		// the stored values, which the scan checks against the incoming ones.
 		batch.Queue(
 			`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
 			 VALUES ($1, $2, $3, $4, $5, '{}', NOW())
@@ -69,28 +74,46 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 			         WHEN EXCLUDED.created_at_block < token.created_at_block THEN NOW()
 			         ELSE token.updated_at
 			     END
-			 RETURNING id`,
+			 RETURNING id, symbol, decimals`,
 			t.ChainID, t.Address.Bytes(), t.Symbol, t.Decimals, t.CreatedAtBlock,
 		)
 	}
 
-	br := tx.SendBatch(ctx, batch)
+	return collectBatchRows(ctx, tx, batch, sorted, "token",
+		func(row pgx.Row, t outbound.TokenInput) (common.Address, int64, error) {
+			id, err := r.scanTokenDrift(row, t)
+			if err != nil {
+				return common.Address{}, 0, err
+			}
+			return t.Address, id, nil
+		})
+}
 
-	result := make(map[common.Address]int64, len(tokens))
-	for i, t := range tokens {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			br.Close()
-			return nil, fmt.Errorf("failed to get or create token %d (%s): %w", i, t.Address.Hex(), err)
-		}
-		result[t.Address] = id
+// scanTokenDrift scans an upsert row and rejects token-registry drift. The
+// upsert deliberately never refreshes symbol/decimals, so a stored value
+// differing from the incoming one means the registry and the caller disagree.
+// Decimals drift would silently mis-scale every downstream amount, so it fails
+// the call loudly; symbol drift only warns, because the registry may
+// legitimately hold a canonical symbol that differs from a caller's label.
+func (r *TokenRepository) scanTokenDrift(row pgx.Row, t outbound.TokenInput) (int64, error) {
+	var id int64
+	var storedSymbol string
+	var storedDecimals int
+	if err := row.Scan(&id, &storedSymbol, &storedDecimals); err != nil {
+		return 0, fmt.Errorf("upserting token %s: %w", t.Address.Hex(), err)
 	}
-
-	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("closing token batch: %w", err)
+	if storedDecimals != t.Decimals {
+		return 0, fmt.Errorf("token %s decimals changed: stored %d, caller reported %d (token decimals are immutable; refusing the write)", t.Address.Hex(), storedDecimals, t.Decimals)
 	}
-
-	return result, nil
+	if storedSymbol != t.Symbol {
+		r.logger.Warn("token symbol differs from registry; keeping the stored symbol",
+			"chainID", t.ChainID,
+			"address", t.Address.Hex(),
+			"storedSymbol", storedSymbol,
+			"callerSymbol", t.Symbol,
+		)
+	}
+	return id, nil
 }
 
 // ListTokensMissingSymbol returns addresses of tokens with an empty symbol
@@ -157,7 +180,7 @@ func (r *TokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64,
 
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
-func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock int64) (int64, error) {
+func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock *int64) (int64, error) {
 	var tokenID int64
 
 	// Upsert: on conflict preserve the earliest created_at_block via LEAST().

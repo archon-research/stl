@@ -712,7 +712,7 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 			return fmt.Errorf("fetching asset token metadata: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting asset token: %w", err)
 		}
@@ -896,12 +896,12 @@ func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, 
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.LoanToken, loanMetadata.Symbol, loanMetadata.Decimals, blockNumber)
+		loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.LoanToken, loanMetadata.Symbol, loanMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting loan token: %w", err)
 		}
 
-		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, blockNumber)
+		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting collateral token: %w", err)
 		}
@@ -1177,12 +1177,12 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 		return 0, fmt.Errorf("getting protocol: %w", err)
 	}
 
-	loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.LoanToken, loanMd.Symbol, loanMd.Decimals, blockNumber)
+	loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.LoanToken, loanMd.Symbol, loanMd.Decimals, &blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("getting loan token: %w", err)
 	}
 
-	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, blockNumber)
+	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, &blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("getting collateral token: %w", err)
 	}
@@ -1246,7 +1246,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, tx pgx.Tx, user comm
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("ensuring user: %w", err)
@@ -1280,7 +1280,7 @@ func (s *Service) saveVaultPositionInTx(ctx context.Context, tx pgx.Tx, user com
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("ensuring user: %w", err)

@@ -56,5 +56,10 @@ func (p *AllocationPosition) Validate() error {
 	if p.BlockNumber == 0 {
 		return fmt.Errorf("block_number is required")
 	}
+	// created_at_block feeds the registry's LEAST() merge; a 0 ("unknown"
+	// masquerading as genesis) would clobber the stored block (VEC-353).
+	if p.CreatedAtBlock <= 0 {
+		return fmt.Errorf("created_at_block must be positive, got %d", p.CreatedAtBlock)
+	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -52,8 +53,16 @@ func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users 
 		return make(map[common.Address]int64), nil
 	}
 
+	// Sort by address (and dedupe) so concurrent transactions lock rows in the
+	// same order, preventing deadlocks when multiple batches upsert the same
+	// users (ADR-0002). Operates on a copy; the caller's slice is untouched.
+	// Dedup is address-only: callers must resolve any per-address metadata
+	// conflicts before calling (the survivor is arbitrary on collision).
+	sorted := sortedByBytesKey(users, func(u entity.User) []byte { return u.Address.Bytes() })
+	sorted = slices.CompactFunc(sorted, func(a, b entity.User) bool { return a.Address == b.Address })
+
 	batch := &pgx.Batch{}
-	for _, u := range users {
+	for _, u := range sorted {
 		batch.Queue(
 			`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
 			 VALUES ($1, $2, $3, NOW(), NOW(), $4)
@@ -68,23 +77,14 @@ func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users 
 		)
 	}
 
-	br := tx.SendBatch(ctx, batch)
-
-	result := make(map[common.Address]int64, len(users))
-	for i, u := range users {
-		var id int64
-		if err := br.QueryRow().Scan(&id); err != nil {
-			br.Close()
-			return nil, fmt.Errorf("failed to get or create user %d (%s): %w", i, u.Address.Hex(), err)
-		}
-		result[u.Address] = id
-	}
-
-	if err := br.Close(); err != nil {
-		return nil, fmt.Errorf("closing user batch: %w", err)
-	}
-
-	return result, nil
+	return collectBatchRows(ctx, tx, batch, sorted, "user",
+		func(row pgx.Row, u entity.User) (common.Address, int64, error) {
+			var id int64
+			if err := row.Scan(&id); err != nil {
+				return common.Address{}, 0, fmt.Errorf("failed to get or create user %s: %w", u.Address.Hex(), err)
+			}
+			return u.Address, id, nil
+		})
 }
 
 func (r *UserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error) {
