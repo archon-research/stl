@@ -23,6 +23,24 @@
 # `namespace` is set as a static rule label since every rule here filters to
 # `k8s_namespace_name="vector"`. The mimir-rules-sync lint forbids `cluster`
 # and `env` as static rule labels (FORBIDDEN_LABELS) but allows `namespace`.
+#
+# Severity → routing (per the alerting routing spec):
+#   critical       → pages (Grafana IRM), prod #at_vector_prod_alerts /
+#                    staging #at_vector_staging_alerts, [CRITICAL], 1h repeat.
+#   warning / info → no page, prod #at_vector_alerts / staging
+#                    #at_vector_staging_alerts, [WARNING]/[INFO], 4h repeat.
+# Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
+# `alert_env` label is needed here — every rule reads objects in its own
+# cluster/tenant (including the kube-state-metrics Down alert), so none cross
+# the env boundary that `alert_env` exists for (ORB-192).
+#
+# Inhibition is keyed by (alertname, namespace, cluster) and only critical→
+# warning. All rules below have distinct alertnames, so there is NO cross-
+# suppression: during an outage the warning channel lights up alongside the
+# critical page, and MapleIndexerStalled + MapleIndexerDown (both critical, by
+# design — see VEC-360) page together on a clean process death. Accepted: Down
+# is the diagnostic confirmation, and Stalled alone catches the alive-but-
+# wedged and OTLP-broke cases that Down misses.
 # =============================================================================
 groups:
   - name: vector-indexers
@@ -163,3 +181,211 @@ groups:
             `oracle-price-worker` on chain `{{ $labels.chain }}` p99 RPC
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
+
+      # =====================================================================
+      # maple-graphql-indexer (VEC-320)
+      # =====================================================================
+      # Unlike morpho/oracle (continuous block consumers), this is a Temporal
+      # cron firing once per MAPLE_SYNC_INTERVAL (10m). It snapshots the public
+      # Maple GraphQL API into TimescaleDB; there are no blocks and no RPC.
+      #
+      # Cadence drives the window sizing below: a healthy cron leaves
+      # rate()/increase() at 0 for most of each 10m gap, so the morpho-style
+      # `[5m]` window would false-alarm every cycle. Every window here spans
+      # >=2 cycles (20m+) so the metric only reads 0 on a genuine stall.
+      #
+      # Series carry chain="ethereum" (mainnet-only API), phase
+      # (pools|loans|sky_strategies|syrup_globals), table, and field.
+      # =====================================================================
+
+      - alert: VectorMapleIndexerStalled
+        # No sync cycle completed in 2 intervals. RecordCycle fires on both
+        # success and error, so any completed cycle resets this; 20m = 2
+        # missed 10m cycles. Keystone freshness signal.
+        #
+        # NB (VEC-360): this rate()==0 shape false-fired once when the OTLP
+        # export broke while the indexer was healthy. It is PAIRED with
+        # VectorMapleIndexerDown below: Stalled + Down => process dead;
+        # Stalled WITHOUT Down => suspect the metrics pipeline, not the cron.
+        expr: |
+          sum by (chain, cluster) (
+            rate(maple_sync_cycles_total{k8s_namespace_name="vector"}[20m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer stalled (no cycle >20m)"
+          description: |
+            `maple-graphql-indexer` has not completed a sync cycle for >20m
+            (interval is 10m). Maple pool/loan/strategy state in TimescaleDB
+            will go stale. Check VectorMapleIndexerDown: if also firing the
+            process is down; if not, suspect the OTLP/metrics pipeline.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleindexerstalled
+
+      - alert: VectorMapleIndexerDown
+        # Deployment-availability companion to Stalled (VEC-360). Sourced from
+        # kube-state-metrics (labels: deployment/namespace, NOT the OTel
+        # k8s_namespace_name), so it is independent of the indexer's own OTLP
+        # export — it still fires when the metrics pipeline is the thing that
+        # broke. < 1 available replica = no pod actually running.
+        expr: |
+          max by (cluster) (
+            kube_deployment_status_replicas_available{
+              deployment="maple-graphql-indexer", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer has no available replica"
+          description: |
+            `maple-graphql-indexer` Deployment has <1 available replica for
+            >10m. The cron worker is not running; no snapshots are being
+            taken. If VectorMapleIndexerStalled is firing too, this is the
+            root cause (process down, not a metrics-pipeline issue).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleindexerdown
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorMapleIndexerCycleErrors
+        # Cycles are running but returning errors. Per-phase transactions mean
+        # surviving phases still commit, so data is partial, not absent —
+        # warn, don't page.
+        expr: |
+          sum by (chain, cluster) (
+            increase(maple_sync_cycles_total{status="error", k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer cycle failures"
+          description: |
+            `maple-graphql-indexer` recorded `{{ $value | printf "%.0f" }}`
+            failed cycle(s) in 30m. Check which phase is failing via
+            `maple_sync_phases_total{status="error"}` and the pod logs.
+
+      - alert: VectorMaplePhaseErrors
+        expr: |
+          sum by (chain, cluster, phase) (
+            increase(maple_sync_phases_total{status="error", k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer phase `{{ $labels.phase }}` failing"
+          description: |
+            Phase `{{ $labels.phase }}` failed `{{ $value | printf "%.0f" }}`
+            time(s) in 30m. A failing `pools` phase also skips `loans` and
+            `sky_strategies` (registry dependency).
+
+      - alert: VectorMaplePoolWritesZero
+        # Cycling but the pools phase wrote 0 rows. ~21 PoolV2 pools (and
+        # syrup_globals=1) always write when healthy, so 0 means Maple's
+        # poolV2S query returned an empty 200/no-error collection — a silent
+        # upstream regression the error alerts above will NOT catch.
+        #
+        # Gated on "cycling AND zero" so it does not just duplicate Stalled
+        # when the cron is down. Do NOT mirror this on maple_loan_state: the
+        # service deliberately records 0 loan rows when there are no active
+        # loans (currently zero active FTLs), so that would fire constantly.
+        expr: |
+          (
+            sum by (chain, cluster) (
+              rate(maple_sync_cycles_total{k8s_namespace_name="vector"}[20m])
+            ) > 0
+          )
+          and
+          (
+            sum by (chain, cluster) (
+              increase(maple_sync_rows_written_total{table="maple_pool_state", k8s_namespace_name="vector"}[20m])
+            ) == 0
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer wrote 0 pool rows"
+          description: |
+            `maple_pool_state` received 0 rows over 20m while cycles ran.
+            Maple's `poolV2S` query likely returned empty. Verify the API
+            and the pools phase before pool state goes stale.
+
+      - alert: VectorMapleSchemaDrift
+        # null-downgrade canary. Rather than firing on ANY null (acmRatio, tvl
+        # and collateral_value_usd are legitimately null on many loans/pools —
+        # documented schema-nullable), this uses a POSITIVE allowlist of fields
+        # Maple normally populates: pool APYs and Sky-strategy fee fields. A
+        # sustained count here = a contractually-populated field went null =
+        # API schema regression.
+        #
+        # Excluded pending baseline (ORB-145): loan_acm_ratio, pool_tvl,
+        # pool_collateral_value_usd (known-nullable) and syrup_drips_yield_boost
+        # (TBD). Threshold >5/1h (~1 per cycle) = sustained, not a single blip.
+        # Tune the allowlist + threshold off a few days of baseline.
+        expr: |
+          sum by (chain, cluster, field) (
+            increase(maple_sync_null_downgrades_total{
+              field=~"pool_monthly_apy|pool_spot_apy|strategy_fee_rate|strategy_total_fees_collected",
+              k8s_namespace_name="vector"
+            }[1h])
+          ) > 5
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer null-downgrade on `{{ $labels.field }}`"
+          description: |
+            Field `{{ $labels.field }}` was null-downgraded
+            `{{ $value | printf "%.0f" }}` time(s) in 1h. This field is
+            normally populated; a sustained count signals a Maple GraphQL API
+            schema change. Cross-check the published SDL.
+
+      - alert: VectorMaplePhaseLatencyHigh
+        # Phase p95 duration. Normal p95 is seconds (loans ~4s, others <1s).
+        # >30s means the Maple API is degraded; alert well before a phase
+        # risks overrunning the 10m interval.
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (chain, cluster, phase, le) (
+              rate(maple_sync_phase_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[15m])
+            )
+          ) > 30
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer phase `{{ $labels.phase }}` p95 >30s"
+          description: |
+            Phase `{{ $labels.phase }}` p95 duration is
+            `{{ $value | printf "%.1fs" }}` over 15m. The Maple GraphQL API is
+            likely degraded; expect lag and possible cycle timeouts.
