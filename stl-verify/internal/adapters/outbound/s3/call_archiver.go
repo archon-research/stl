@@ -105,8 +105,7 @@ func (a *CallArchiver) Archive(ctx context.Context, record outbound.CallBatchRec
 }
 
 // recordObjectSize observes the compressed object size in bytes. A nil histogram
-// (construction failed) is a no-op. Labelled by chain (fixed per archiver) and
-// the batch's source.
+// (construction failed) is a no-op.
 func (a *CallArchiver) recordObjectSize(ctx context.Context, source string, size int) {
 	if a.objectSize == nil {
 		return
