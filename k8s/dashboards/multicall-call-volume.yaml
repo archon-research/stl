@@ -1,5 +1,5 @@
 # =============================================================================
-# Multicall call volume
+# Multicall volume & raw SC call S3 archiving
 # =============================================================================
 # Observes the `multicall_batch_size` histogram emitted by the indexers'
 # multicall batching (PR #399):
@@ -38,7 +38,7 @@ spec:
   resyncPeriod: 5m
   json: |
     {
-      "title": "Multicall Call Volume",
+      "title": "Multicall Volume & Raw SC Call Archiving (S3)",
       "uid": "multicall-call-volume",
       "description": "Multicall volume (multicall_batch_size) and raw SC call S3 archiving (archive_writes_total, archive_object_size_bytes). PR #399 / VEC-364.",
       "tags": ["vector", "multicall", "indexers"],
@@ -83,10 +83,18 @@ spec:
       },
       "panels": [
         {
+          "type": "row",
+          "title": "Multicall Call Volume",
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 11,
+          "panels": []
+        },
+        {
           "type": "timeseries",
           "title": "Multicalls / sec",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
           "id": 1,
           "fieldConfig": {
             "defaults": {
@@ -112,7 +120,7 @@ spec:
           "type": "timeseries",
           "title": "Individual SC calls / sec",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
           "id": 2,
           "fieldConfig": {
             "defaults": {
@@ -138,7 +146,7 @@ spec:
           "type": "timeseries",
           "title": "Avg calls per Execute",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
           "id": 3,
           "fieldConfig": {
             "defaults": {
@@ -164,7 +172,7 @@ spec:
           "type": "timeseries",
           "title": "Burst size per Execute (p50 / p99 / p99.9)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
           "id": 4,
           "fieldConfig": {
             "defaults": {
@@ -202,7 +210,7 @@ spec:
           "type": "heatmap",
           "title": "Burst size distribution (heatmap)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 17 },
           "id": 5,
           "options": {
             "calculate": false,
@@ -224,7 +232,7 @@ spec:
           "type": "row",
           "title": "Raw SC Call Archiving (S3)",
           "collapsed": false,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
           "id": 6,
           "panels": []
         },
@@ -232,7 +240,7 @@ spec:
           "type": "timeseries",
           "title": "S3 archive writes / sec (success)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
           "id": 7,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "reqps" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -249,7 +257,7 @@ spec:
           "type": "timeseries",
           "title": "S3 archive write error ratio",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
           "id": 8,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "percentunit" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -266,7 +274,7 @@ spec:
           "type": "timeseries",
           "title": "S3 archived object size (p50 / p99 / p99.9)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
           "id": 9,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "decbytes" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -295,7 +303,7 @@ spec:
           "type": "timeseries",
           "title": "Near-empty objects (<=64B) / sec",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
           "id": 10,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "reqps" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -325,7 +333,7 @@ spec:
   resyncPeriod: 5m
   json: |
     {
-      "title": "Multicall Call Volume",
+      "title": "Multicall Volume & Raw SC Call Archiving (S3)",
       "uid": "multicall-call-volume",
       "description": "Multicall volume (multicall_batch_size) and raw SC call S3 archiving (archive_writes_total, archive_object_size_bytes). PR #399 / VEC-364.",
       "tags": ["vector", "multicall", "indexers"],
@@ -370,10 +378,18 @@ spec:
       },
       "panels": [
         {
+          "type": "row",
+          "title": "Multicall Call Volume",
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 11,
+          "panels": []
+        },
+        {
           "type": "timeseries",
           "title": "Multicalls / sec",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
           "id": 1,
           "fieldConfig": {
             "defaults": {
@@ -399,7 +415,7 @@ spec:
           "type": "timeseries",
           "title": "Individual SC calls / sec",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
           "id": 2,
           "fieldConfig": {
             "defaults": {
@@ -425,7 +441,7 @@ spec:
           "type": "timeseries",
           "title": "Avg calls per Execute",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
           "id": 3,
           "fieldConfig": {
             "defaults": {
@@ -451,7 +467,7 @@ spec:
           "type": "timeseries",
           "title": "Burst size per Execute (p50 / p99 / p99.9)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
           "id": 4,
           "fieldConfig": {
             "defaults": {
@@ -489,7 +505,7 @@ spec:
           "type": "heatmap",
           "title": "Burst size distribution (heatmap)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+          "gridPos": { "h": 9, "w": 24, "x": 0, "y": 17 },
           "id": 5,
           "options": {
             "calculate": false,
@@ -511,7 +527,7 @@ spec:
           "type": "row",
           "title": "Raw SC Call Archiving (S3)",
           "collapsed": false,
-          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
           "id": 6,
           "panels": []
         },
@@ -519,7 +535,7 @@ spec:
           "type": "timeseries",
           "title": "S3 archive writes / sec (success)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
           "id": 7,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "reqps" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -536,7 +552,7 @@ spec:
           "type": "timeseries",
           "title": "S3 archive write error ratio",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
           "id": 8,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "percentunit" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -553,7 +569,7 @@ spec:
           "type": "timeseries",
           "title": "S3 archived object size (p50 / p99 / p99.9)",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
           "id": 9,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "decbytes" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
@@ -582,7 +598,7 @@ spec:
           "type": "timeseries",
           "title": "Near-empty objects (<=64B) / sec",
           "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
-          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
           "id": 10,
           "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" }, "unit": "reqps" }, "overrides": [] },
           "options": { "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
