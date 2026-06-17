@@ -691,21 +691,30 @@ function App() {
     [searchFilteredAllocations],
   );
 
-  const activityVolumeSeries = useMemo<ChartDatum[]>(
-    () =>
-      activityBuckets
-        .map((bucket) => ({
+  const activityVolumeSeries = useMemo<ChartDatum[]>(() => {
+    let runningTotal = 0;
+
+    return activityBuckets
+      .map((bucket) => {
+        const bucketAmount = parseNumericValue(bucket.total_tx_amount) ?? Number.NaN;
+        if (!Number.isFinite(bucketAmount)) {
+          return null;
+        }
+
+        runningTotal += bucketAmount;
+
+        return {
           label: new Date(bucket.bucket_start).toLocaleString([], {
             month: 'short',
             day: 'numeric',
             hour: '2-digit',
             minute: '2-digit',
           }),
-          value: parseNumericValue(bucket.total_tx_amount) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
-    [activityBuckets],
-  );
+          value: runningTotal,
+        };
+      })
+      .filter((point): point is ChartDatum => point !== null);
+  }, [activityBuckets]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
@@ -777,7 +786,7 @@ function App() {
       {
         key: 'allocation-activity-volume',
         title: 'Allocation activity volume',
-        subtitle: 'Bucketed tx amount from allocation activity',
+        subtitle: 'Cumulative tx amount from allocation activity',
         data:
           activityVolumeSeries.length > 0
             ? activityVolumeSeries
