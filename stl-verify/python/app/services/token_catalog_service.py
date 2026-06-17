@@ -1,10 +1,10 @@
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
-from app.ports.token_catalog_repository import TokenCatalogRepository
+from app.ports.token_catalog_repository import TokenCatalogRepositoryPort
 
 
 class TokenCatalogService:
-    def __init__(self, repository: TokenCatalogRepository) -> None:
+    def __init__(self, repository: TokenCatalogRepositoryPort) -> None:
         self._repository = repository
 
     async def list_tokens(

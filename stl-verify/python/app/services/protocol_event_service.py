@@ -1,11 +1,11 @@
 from app.domain.entities.protocol_event import ProtocolEvent
-from app.ports.protocol_event_repository import ProtocolEventRepository
+from app.ports.protocol_event_repository import ProtocolEventRepositoryPort
 
 
 class ProtocolEventService:
     """Service for protocol event operations."""
 
-    def __init__(self, repository: ProtocolEventRepository) -> None:
+    def __init__(self, repository: ProtocolEventRepositoryPort) -> None:
         self._repository = repository
 
     async def list_events(

@@ -4,7 +4,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
 
 
-class PrimeDebtRepository(Protocol):
+class PrimeDebtRepositoryPort(Protocol):
     """Repository interface for prime debt snapshot queries."""
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:

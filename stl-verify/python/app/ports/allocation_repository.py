@@ -13,7 +13,7 @@ from app.domain.entities.allocation import (
 from app.domain.entities.allocation_activity import AllocationActivityEvent
 
 
-class AllocationRepository(Protocol):
+class AllocationRepositoryPort(Protocol):
     async def list_chains(self) -> list[ChainMetadata]:
         """Return chain metadata used by the UI."""
         ...

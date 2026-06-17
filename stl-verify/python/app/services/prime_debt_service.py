@@ -1,12 +1,12 @@
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_debt import PrimeDebtSnapshot
-from app.ports.prime_debt_repository import PrimeDebtRepository
+from app.ports.prime_debt_repository import PrimeDebtRepositoryPort
 
 
 class PrimeDebtService:
     """Service for prime debt snapshot retrieval."""
 
-    def __init__(self, repository: PrimeDebtRepository) -> None:
+    def __init__(self, repository: PrimeDebtRepositoryPort) -> None:
         self._repository = repository
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:

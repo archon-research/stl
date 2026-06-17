@@ -7,7 +7,7 @@ import asyncpg
 
 
 async def insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, address: bytes) -> int:
-    """Insert a token or return the existing ID."""
+    """Insert a chain_id=1 token or return the existing ID."""
     return cast(
         int,
         await conn.fetchval(
@@ -25,7 +25,7 @@ async def insert_token(conn: asyncpg.Connection, symbol: str, decimals: int, add
 
 
 async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
-    """Insert a user or return the existing ID (upsert on chain_id + address)."""
+    """Insert a chain_id=1 user or return the existing ID."""
     return cast(
         int,
         await conn.fetchval(
@@ -99,7 +99,15 @@ async def store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:
         """
     )
     for key, val in ids.items():
-        await conn.execute("INSERT INTO _test_ids (key, val) VALUES ($1, $2)", key, val)
+        await conn.execute(
+            """
+            INSERT INTO _test_ids (key, val)
+            VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET val = EXCLUDED.val
+            """,
+            key,
+            val,
+        )
 
 
 async def insert_allocation_position(

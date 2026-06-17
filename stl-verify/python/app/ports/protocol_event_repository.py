@@ -3,7 +3,7 @@ from typing import Protocol
 from app.domain.entities.protocol_event import ProtocolEvent
 
 
-class ProtocolEventRepository(Protocol):
+class ProtocolEventRepositoryPort(Protocol):
     """Repository interface for protocol event queries."""
 
     async def list_events(

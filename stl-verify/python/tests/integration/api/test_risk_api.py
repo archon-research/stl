@@ -25,12 +25,12 @@ async def _seed(db_url: str) -> int:
     """Insert a SparkLend receipt_token row without creating its token row."""
     conn = await asyncpg.connect(db_url)
     try:
-        protocol_id = await conn.fetchval(
-            "SELECT id FROM protocol WHERE name = 'SparkLend' AND chain_id = 1"
-        )
-        underlying_token_id = await conn.fetchval(
-            "SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"
-        )
+        protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'SparkLend' AND chain_id = 1")
+        if protocol_id is None:
+            raise RuntimeError("no SparkLend protocol seed found for chain_id=1")
+        underlying_token_id = await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1")
+        if underlying_token_id is None:
+            raise RuntimeError("no WETH token seed found for chain_id=1")
         receipt_token_id = await conn.fetchval(
             """
             INSERT INTO receipt_token
