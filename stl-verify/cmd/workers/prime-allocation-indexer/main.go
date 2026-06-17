@@ -26,6 +26,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -266,6 +267,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {

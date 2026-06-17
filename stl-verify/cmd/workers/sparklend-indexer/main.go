@@ -23,9 +23,14 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/aavelike_position_tracker"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -238,6 +243,40 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	// Initialize OpenTelemetry before constructing any telemetry instruments, so
+	// they bind to the configured meter provider rather than the global no-op one.
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "sparklend-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	// Multicall client with batch-size telemetry, optionally wrapped for raw SC
+	// call archiving (VEC-81). Archiving is off unless ARCHIVE_SC_CALLS=true.
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("creating multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "sparklend")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
 	// Service
 	service, err := aavelike_position_tracker.NewService(
 		shared.SQSConsumerConfig{
@@ -248,6 +287,7 @@ func run(ctx context.Context, args []string) error {
 		sqsConsumer,
 		cacheReader,
 		ethClient,
+		mc,
 		txManager,
 		userRepo,
 		protocolRepo,

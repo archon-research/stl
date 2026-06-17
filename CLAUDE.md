@@ -185,6 +185,7 @@ git commit  # Hooks auto-fix, may stage changes
     - Never ignore errors.
     - Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
     - **Fail hard and early on unexpected errors.**
+    - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`.
 - **Testing**:
     - Table-driven tests, mock outbound ports for unit tests.
     - Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission-critical that code is correct and robust.
