@@ -566,6 +566,12 @@ export interface components {
        */
       event_count: number;
       /**
+       * Net Flow Usd
+       * @description Signed net flow valued in USD (inflows positive, outflows negative) at the receipt token's latest underlying oracle price. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
+       * @example 1234567.89
+       */
+      net_flow_usd: string;
+      /**
        * Total Tx Amount
        * @description Sum of `tx_amount` across the bucket's events, serialized as a JSON string.
        * @example 1234567890000000000000

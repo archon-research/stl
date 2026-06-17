@@ -466,6 +466,7 @@ class AllocationRepository:
                 bucket_start=row.bucket_start,
                 event_count=row.event_count,
                 total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
+                net_flow_usd=_safe_decimal(row.net_flow_usd, "net_flow_usd", "aggregate"),
             )
             for row in rows
         ]
@@ -683,11 +684,45 @@ LIMIT :limit
 # to ``>= 0`` because outflows are stored as negative ``tx_amount`` values and a
 # bucket dominated by outflows would otherwise violate the non-negativity
 # invariant on ``AllocationActivityBucket`` and surface as a 500.
+#
+# ``net_flow_usd`` is the SIGNED net flow valued in USD at the receipt token's
+# latest underlying oracle price — the same valuation basis as the current
+# exposure query. The sign comes from ``direction`` (tx_amount is a magnitude):
+# inflows add, outflows subtract, and sweeps are internal position moves that
+# net to zero and are excluded. It lets the UI reconstruct a total-allocation
+# balance series by anchoring at the current total and cumulating net flows
+# backwards. Unpriced flows (e.g. direct assets with no receipt token)
+# contribute 0, matching the exposure total.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
+WITH receipt_token_price AS (
+    -- Latest underlying oracle price per receipt token, computed ONCE per token
+    -- (a few dozen rows) rather than once per activity event (~100k+). The
+    -- main query then hash-joins this by token address.
+    SELECT
+        rt.chain_id,
+        rt.receipt_token_address,
+        (
+            SELECT otp.price_usd
+            FROM onchain_token_price otp
+            JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+            WHERE po.protocol_id = rt.protocol_id
+              AND otp.token_id = rt.underlying_token_id
+            ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+            LIMIT 1
+        ) AS price_usd
+    FROM receipt_token rt
+)
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
     COUNT(*) AS event_count,
-    GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount
+    GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount,
+    COALESCE(SUM(
+        CASE ap.direction
+            WHEN 'in' THEN ap.tx_amount
+            WHEN 'out' THEN -ap.tx_amount
+            ELSE 0
+        END * COALESCE(price.price_usd, 0)
+    ), 0) AS net_flow_usd
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token t ON t.id = ap.token_id
@@ -708,6 +743,9 @@ LEFT JOIN LATERAL (
     ORDER BY match_priority
     LIMIT 1
 ) AS protocol_match ON TRUE
+LEFT JOIN receipt_token_price price
+    ON price.receipt_token_address = t.address
+    AND price.chain_id = ap.chain_id
 WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL

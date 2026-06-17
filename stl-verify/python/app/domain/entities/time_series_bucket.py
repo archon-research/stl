@@ -13,11 +13,16 @@ from decimal import Decimal
 
 @dataclass(frozen=True)
 class AllocationActivityBucket:
-    """Allocation activity aggregated into a single time bucket."""
+    """Allocation activity aggregated into a single time bucket.
+
+    ``net_flow_usd`` is the signed net flow valued in USD (inflows positive,
+    outflows negative); it may be negative, unlike ``total_tx_amount``.
+    """
 
     bucket_start: datetime
     event_count: int
     total_tx_amount: Decimal
+    net_flow_usd: Decimal
 
     def __post_init__(self) -> None:
         if self.event_count < 0:

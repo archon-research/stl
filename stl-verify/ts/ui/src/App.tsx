@@ -29,6 +29,7 @@ import {
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import {
+  getAllocationActivityEnvelope,
   getAllocations,
   getCapitalMetrics,
   getCapitalMetricsEnvelope,
@@ -68,6 +69,7 @@ import {
 } from './lib/url-params';
 import type {
   Allocation,
+  AllocationActivityBucket,
   CapitalMetrics,
   CapitalMetricsBucket,
   DataSource,
@@ -165,6 +167,9 @@ function App() {
     string | null
   >(null);
   const [debtBuckets, setDebtBuckets] = useState<PrimeDebtBucket[]>([]);
+  const [activityBuckets, setActivityBuckets] = useState<
+    AllocationActivityBucket[]
+  >([]);
   const [capitalMetricsBuckets, setCapitalMetricsBuckets] = useState<
     CapitalMetricsBucket[]
   >([]);
@@ -525,6 +530,7 @@ function App() {
   useEffect(() => {
     if (!selectedPrimeId) {
       setDebtBuckets([]);
+      setActivityBuckets([]);
       setCapitalMetricsBuckets([]);
       setChartsErrorMessage(null);
       setIsChartsLoading(false);
@@ -581,6 +587,40 @@ function App() {
         if (!controller.signal.aborted) {
           setIsChartsLoading(false);
         }
+      });
+
+    // Allocation-activity is supplementary: it drives the reconstructed
+    // total-allocation balance series, and on failure that card degrades to the
+    // current-value fallback rather than failing the whole view.
+    void getAllocationActivityEnvelope(
+      { prime_id: selectedPrimeId, ...bucketFilters },
+      controller.signal,
+    )
+      .then((activityEnvelope) => {
+        const nextActivityBuckets =
+          activityEnvelope.mode === 'aggregated'
+            ? (activityEnvelope.data as AllocationActivityBucket[])
+            : [];
+        setActivityBuckets(
+          [...nextActivityBuckets].sort(
+            (a, b) =>
+              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+          ),
+        );
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.warn(
+          'Allocation activity history unavailable; using current value',
+          {
+            error,
+            primeId: selectedPrimeId,
+          },
+        );
+        setActivityBuckets([]);
       });
 
     // Capital-metrics history is supplementary: a failure (e.g. the endpoint not
@@ -742,6 +782,29 @@ function App() {
     [searchFilteredAllocations],
   );
 
+  // Reconstruct the total-allocation balance over time: anchor at the current
+  // total and walk backwards, undoing each bucket's signed USD net flow. The
+  // newest bucket therefore lands exactly on the current total. Flow-based, so
+  // it captures deposits/withdrawals but not price moves; clamped at 0 since a
+  // negative balance is meaningless.
+  const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
+    if (activityBuckets.length === 0) {
+      return [];
+    }
+
+    const series = new Array<ChartDatum>(activityBuckets.length);
+    let balance = allocationSummaryTotalUsd;
+    for (let index = activityBuckets.length - 1; index >= 0; index -= 1) {
+      const bucket = activityBuckets[index];
+      series[index] = {
+        label: formatChartTimestampLabel(bucket.bucket_start),
+        value: Math.max(balance, 0),
+      };
+      balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
+    }
+    return series;
+  }, [activityBuckets, allocationSummaryTotalUsd]);
+
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
       debtBuckets
@@ -825,12 +888,15 @@ function App() {
 
     return [
       {
-        // No allocation-balance time series exists, so this shows the current
-        // total as a flat line rather than a cumulative activity-volume sum
-        // (which climbed unbounded and never matched the headline total).
+        // Balance reconstructed from signed USD net flows, anchored at the
+        // current total. Falls back to the flat current value when no activity
+        // history is available.
         key: 'allocation-activity-volume',
-        data: fallbackChart(allocationSummaryTotalUsd),
-        isFallback: true,
+        data:
+          allocationBalanceSeries.length > 0
+            ? allocationBalanceSeries
+            : fallbackChart(allocationSummaryTotalUsd),
+        isFallback: allocationBalanceSeries.length === 0,
         stroke: 'var(--colors-chart-series-primary, #60a5fa)',
         formatValue: formatCompactUsd,
       },
@@ -857,6 +923,7 @@ function App() {
       },
     ].filter((chart) => chart.data.length > 0);
   }, [
+    allocationBalanceSeries,
     allocationSummaryTotalUsd,
     capitalMetrics?.risk_capital,
     capitalMetrics?.total_capital,

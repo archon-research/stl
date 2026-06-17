@@ -18,6 +18,15 @@
             "title": "Event Count",
             "type": "integer"
           },
+          "net_flow_usd": {
+            "description": "Signed net flow valued in USD (inflows positive, outflows negative) at the receipt token's latest underlying oracle price. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.",
+            "examples": [
+              "1234567.89"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Net Flow Usd",
+            "type": "string"
+          },
           "total_tx_amount": {
             "description": "Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
             "examples": [
@@ -31,7 +40,8 @@
         "required": [
           "bucket_start",
           "event_count",
-          "total_tx_amount"
+          "total_tx_amount",
+          "net_flow_usd"
         ],
         "title": "AllocationActivityBucketResponse",
         "type": "object"

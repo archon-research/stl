@@ -318,6 +318,7 @@ def test_list_allocation_activity_returns_aggregated_buckets():
             bucket_start=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
             event_count=3,
             total_tx_amount=Decimal("450.5"),
+            net_flow_usd=Decimal("-120.25"),
         )
     ]
     app.dependency_overrides[allocations._get_service] = _override_service(service)
@@ -335,7 +336,14 @@ def test_list_allocation_activity_returns_aggregated_buckets():
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "aggregated"
-    assert payload["data"] == [{"bucket_start": "2026-01-01T12:00:00Z", "event_count": 3, "total_tx_amount": "450.5"}]
+    assert payload["data"] == [
+        {
+            "bucket_start": "2026-01-01T12:00:00Z",
+            "event_count": 3,
+            "total_tx_amount": "450.5",
+            "net_flow_usd": "-120.25",
+        }
+    ]
     kwargs = service.list_activity_buckets.await_args.kwargs
     assert kwargs["bucket_seconds"] == 5 * 60  # 24h window -> PT5M default
     service.list_allocation_activity.assert_not_awaited()
