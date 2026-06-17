@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from opentelemetry import trace
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -254,7 +255,7 @@ class AllocationRepository:
                     _DIRECT_ASSET_HOLDINGS_SQL,
                     {"proxy_hex": prime_id.hex},
                 )
-                return [
+                holdings = [
                     DirectAssetHolding(
                         chain_id=row.chain_id,
                         token_id=row.token_id,
@@ -270,6 +271,8 @@ class AllocationRepository:
                     )
                     for row in result
                 ]
+            self._record_unpriced_holdings(prime_id, holdings)
+            return holdings
         except asyncio.CancelledError:
             raise
         except ValueError:
@@ -285,6 +288,31 @@ class AllocationRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching direct asset holdings: {exc}") from exc
+
+    @staticmethod
+    def _record_unpriced_holdings(prime_id: EthAddress, holdings: list[DirectAssetHolding]) -> None:
+        """Surface direct holdings that resolved to no oracle price.
+
+        A null ``amount_usd`` is legitimate for assets with no oracle feed (LP/
+        curve shares), but it is indistinguishable at the row level from a
+        coverage regression — a token that should price but silently stopped
+        (oracle disabled, reorg, backfill gap). Recording the unpriced count as
+        a span attribute lets that be alerted on in the tracing backend instead
+        of being discovered by a user noticing a missing USD value.
+        """
+        unpriced = [h for h in holdings if h.amount_usd is None]
+        if not unpriced:
+            return
+        trace.get_current_span().set_attribute("allocations.direct_holdings.unpriced", len(unpriced))
+        logger.debug(
+            "Direct asset holdings without an oracle price",
+            extra={
+                "prime_id": str(prime_id),
+                "unpriced_count": len(unpriced),
+                "total_count": len(holdings),
+                "unpriced_symbols": [h.symbol for h in unpriced],
+            },
+        )
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
