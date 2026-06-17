@@ -5,8 +5,10 @@ import pytest
 from app.domain.time_series import (
     DEFAULT_WINDOW,
     MAX_WINDOW,
+    UNFILTERED_MAX_WINDOW,
     TimeSeriesQuery,
     TimeSeriesResolution,
+    enforce_filter_for_window,
     minimum_resolution,
     resolve_time_series_query,
 )
@@ -191,3 +193,55 @@ def test_query_derives_interval_and_bucket_from_resolution() -> None:
     )
     assert query.interval_ms == 5 * 60 * 1000
     assert query.bucket == timedelta(minutes=5)
+
+
+# --- bounds_pinned ---------------------------------------------------------
+
+
+def test_bounds_pinned_true_when_both_bounds_supplied() -> None:
+    query = _resolve(from_timestamp=_NOW - timedelta(hours=3), to_timestamp=_NOW)
+    assert query.bounds_pinned is True
+
+
+def test_bounds_pinned_false_when_to_defaulted_to_now() -> None:
+    query = _resolve(from_timestamp=_NOW - timedelta(hours=3), to_timestamp=None)
+    assert query.bounds_pinned is False
+
+
+def test_bounds_pinned_false_when_from_defaulted() -> None:
+    query = _resolve(from_timestamp=None, to_timestamp=_NOW)
+    assert query.bounds_pinned is False
+
+
+def test_bounds_pinned_false_when_both_defaulted() -> None:
+    assert _resolve().bounds_pinned is False
+
+
+# --- enforce_filter_for_window --------------------------------------------
+
+
+def test_enforce_filter_allows_any_window_with_selective_filter() -> None:
+    # Even a window larger than UNFILTERED_MAX_WINDOW is fine when filtered.
+    query = _resolve(from_timestamp=_NOW - (UNFILTERED_MAX_WINDOW + timedelta(days=30)), to_timestamp=_NOW)
+    enforce_filter_for_window(query, has_selective_filter=True)
+
+
+def test_enforce_filter_allows_unfiltered_window_within_cap() -> None:
+    query = _resolve(from_timestamp=_NOW - UNFILTERED_MAX_WINDOW, to_timestamp=_NOW)
+    enforce_filter_for_window(query, has_selective_filter=False)
+
+
+def test_enforce_filter_rejects_unfiltered_window_beyond_cap() -> None:
+    query = _resolve(from_timestamp=_NOW - (UNFILTERED_MAX_WINDOW + timedelta(days=1)), to_timestamp=_NOW)
+    with pytest.raises(ValueError, match="selective filter"):
+        enforce_filter_for_window(query, has_selective_filter=False)
+
+
+def test_enforce_filter_honors_custom_cap_override() -> None:
+    query = _resolve(from_timestamp=_NOW - timedelta(hours=2), to_timestamp=_NOW)
+    with pytest.raises(ValueError, match="selective filter"):
+        enforce_filter_for_window(
+            query,
+            has_selective_filter=False,
+            unfiltered_max_window=timedelta(hours=1),
+        )

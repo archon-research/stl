@@ -8,7 +8,7 @@ types live here too, since they are an HTTP-contract concern.
 
 from datetime import UTC, datetime
 
-from fastapi import HTTPException, Query
+from fastapi import HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.domain.time_series import (
@@ -16,6 +16,11 @@ from app.domain.time_series import (
     TimeSeriesResolution,
     resolve_time_series_query,
 )
+
+# Public cache lifetime for responses with a pinned window. Pinned-window
+# responses cannot change going forward (the underlying rows are immutable once
+# observed), so a long TTL is safe and dramatically reduces hypertable load.
+_PINNED_WINDOW_CACHE_MAX_AGE_SECONDS = 300
 
 
 def get_time_series_query_params(
@@ -72,3 +77,17 @@ def build_window(query: TimeSeriesQuery) -> TimeSeriesWindow:
         resolution=query.resolution,
         interval_ms=query.interval_ms,
     )
+
+
+def apply_cache_control(response: Response, query: TimeSeriesQuery) -> None:
+    """Set ``Cache-Control`` on responses whose window is fully pinned by the caller.
+
+    When ``to_timestamp`` is defaulted to ``now``, two requests one second apart
+    return different windows, so the response must not be cached. When both
+    bounds are supplied explicitly the window is deterministic and the response
+    is safe to cache publicly for a short period.
+    """
+    if query.bounds_pinned:
+        response.headers["Cache-Control"] = f"public, max-age={_PINNED_WINDOW_CACHE_MAX_AGE_SECONDS}"
+    else:
+        response.headers["Cache-Control"] = "no-store"

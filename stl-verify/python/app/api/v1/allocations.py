@@ -5,18 +5,18 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
-from app.api._validators import EthAddressParam, OptionalEthAddressParam
+from app.api._validators import EthAddressParam, OptionalEthAddressParam, OptionalTxHashParam
 from app.api.deps import get_engine
-from app.api.time_series import TimeSeriesWindow, build_window, get_time_series_query_params
+from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
-from app.domain.time_series import TimeSeriesQuery
+from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
 
@@ -575,6 +575,7 @@ class AllocationActivityEnvelope(BaseModel):
     ),
 )
 async def list_allocation_activity(
+    response: Response,
     prime_id: Annotated[
         OptionalEthAddressParam,
         Query(
@@ -598,11 +599,13 @@ async def list_allocation_activity(
         description="Filter by token symbol (case-insensitive substring).",
         examples=["USDC"],
     ),
-    tx_hash: str | None = Query(
-        default=None,
-        description="Filter by transaction hash (0x-prefixed).",
-        examples=["0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"],
-    ),
+    tx_hash: Annotated[
+        OptionalTxHashParam,
+        Query(
+            description="Filter by transaction hash (0x-prefixed).",
+            examples=["0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"],
+        ),
+    ] = None,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
@@ -615,7 +618,17 @@ async def list_allocation_activity(
       a filter here, not a path resource.
     """
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
+    # Selective = an index-seekable exact filter. Substring filters
+    # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
+    # action_type) do not qualify because they cannot prune chunks.
+    has_selective_filter = parsed_prime_id is not None or tx_hash is not None
+    try:
+        enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     window = build_window(time_series)
+    apply_cache_control(response, time_series)
 
     try:
         if time_series.aggregate:

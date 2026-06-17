@@ -38,6 +38,20 @@ def _escape_like_pattern(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _strip_hex_prefix(tx_hash: str | None) -> str | None:
+    """Strip a leading ``0x``/``0X`` prefix so the hex can be decoded by Postgres.
+
+    Defense in depth: API validators already canonicalize uppercase ``0X`` to
+    lowercase ``0x``, but this repository is also reachable from non-HTTP
+    callers (jobs, ad-hoc scripts) that may not normalize first.
+    """
+    if tx_hash is None:
+        return None
+    if tx_hash.startswith(("0x", "0X")):
+        return tx_hash[2:]
+    return tx_hash
+
+
 def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
     """Convert value to Decimal with error context for debugging.
 
@@ -349,7 +363,7 @@ class PostgresAllocationRepository:
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
             "token_symbol": _escape_like_pattern(token_symbol) if token_symbol else None,
-            "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
+            "tx_hash": _strip_hex_prefix(tx_hash),
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
@@ -423,7 +437,7 @@ class PostgresAllocationRepository:
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
             "token_symbol": _escape_like_pattern(token_symbol) if token_symbol else None,
-            "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
+            "tx_hash": _strip_hex_prefix(tx_hash),
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
@@ -665,12 +679,15 @@ LIMIT :limit
 
 # Aggregated counterpart of _ALLOCATION_ACTIVITY_SQL: same filters, bucketed by
 # time. Reuses the shared window/bucket SQL helpers. Bounds are required so the
-# JOIN/filter set matches the raw query exactly.
+# JOIN/filter set matches the raw query exactly. ``total_tx_amount`` is clamped
+# to ``>= 0`` because outflows are stored as negative ``tx_amount`` values and a
+# bucket dominated by outflows would otherwise violate the non-negativity
+# invariant on ``AllocationActivityBucket`` and surface as a 500.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
     COUNT(*) AS event_count,
-    COALESCE(SUM(ap.tx_amount), 0) AS total_tx_amount
+    GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token t ON t.id = ap.token_id

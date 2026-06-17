@@ -441,6 +441,111 @@ def test_list_allocation_activity_returns_500_when_service_raises_value_error():
     assert response.json() == {"detail": "Failed to retrieve allocation activity"}
 
 
+def test_list_allocation_activity_returns_422_for_wide_window_without_filter():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-03-15T00:00:00Z",  # > 30d, no selective filter
+        },
+    )
+
+    assert response.status_code == 422
+    assert "selective filter" in response.json()["detail"]
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_allows_wide_window_with_prime_id_filter():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": _VALID_ADDR,
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-03-15T00:00:00Z",
+            "resolution": "PT6H",
+        },
+    )
+
+    assert response.status_code == 200
+    service.list_allocation_activity.assert_awaited_once()
+
+
+def test_list_allocation_activity_returns_422_for_invalid_tx_hash():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity", params={"tx_hash": "not-a-hash"})
+
+    assert response.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_accepts_uppercase_0x_tx_hash():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity", params={"tx_hash": "0X" + "AB" * 32})
+
+    assert response.status_code == 200
+    assert service.list_allocation_activity.await_args.kwargs["tx_hash"] == "0x" + "AB" * 32
+
+
+def test_list_allocation_activity_sets_public_cache_control_on_pinned_window():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "from_timestamp": "2026-03-05T00:00:00Z",
+            "to_timestamp": "2026-03-05T12:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=300"
+
+
+def test_list_allocation_activity_sets_no_store_when_bounds_not_pinned():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
 # --- capital-metrics endpoint ---
 
 

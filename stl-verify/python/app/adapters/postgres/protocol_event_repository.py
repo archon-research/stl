@@ -45,7 +45,9 @@ class PostgresProtocolEventRepository:
     def _normalize_tx_hash(tx_hash: str | None) -> str | None:
         if tx_hash is None:
             return None
-        return tx_hash[2:] if tx_hash.startswith("0x") else tx_hash
+        if tx_hash.startswith(("0x", "0X")):
+            return tx_hash[2:]
+        return tx_hash
 
     @staticmethod
     def _to_entity(row: Row[Any]) -> ProtocolEvent:

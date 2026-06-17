@@ -251,3 +251,104 @@ def test_get_tx_events_returns_500_when_service_errors():
         assert response.status_code == 500
     finally:
         app.dependency_overrides.pop(protocol_events._get_protocol_event_service, None)
+
+
+def test_list_protocol_events_returns_422_for_wide_window_without_filter():
+    from app.api.v1 import protocol_events
+
+    service = _make_service()
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/protocol-events",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-03-15T00:00:00Z",  # > 30d, no filter
+        },
+    )
+
+    assert response.status_code == 422
+    assert "selective filter" in response.json()["detail"]
+    service.list_events.assert_not_awaited()
+
+
+def test_list_protocol_events_allows_wide_window_with_tx_hash_filter():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/protocol-events",
+        params={
+            "tx_hash": _VALID_TX_HASH,
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-03-15T00:00:00Z",
+            "resolution": "PT6H",
+        },
+    )
+
+    assert response.status_code == 200
+    service.list_events.assert_awaited_once()
+
+
+def test_list_protocol_events_sets_public_cache_control_on_pinned_window():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/protocol-events",
+        params={
+            "protocol_name": "spark",
+            "from_timestamp": "2026-03-05T00:00:00Z",
+            "to_timestamp": "2026-03-05T12:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=300"
+
+
+def test_list_protocol_events_sets_no_store_when_bounds_not_pinned():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/protocol-events", params={"protocol_name": "spark"})
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_list_protocol_events_accepts_uppercase_0x_tx_hash():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/protocol-events", params={"tx_hash": "0X" + "AB" * 32})
+
+    assert response.status_code == 200
+    # Validator canonicalizes 0X -> 0x before passing to the service.
+    assert service.list_events.await_args.kwargs["tx_hash"] == "0x" + "AB" * 32
+
+
+def test_get_tx_events_accepts_uppercase_0x_tx_hash():
+    from app.api.v1 import protocol_events
+
+    service = _make_service(tx_events=[])
+    app.dependency_overrides[protocol_events._get_protocol_event_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/tx/" + "0X" + "AB" * 32 + "/events")
+
+    assert response.status_code == 200
+    service.get_events_by_tx.assert_awaited_once_with("0x" + "AB" * 32)

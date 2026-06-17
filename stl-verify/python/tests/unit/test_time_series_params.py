@@ -1,9 +1,9 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
-from app.api.time_series import build_window, get_time_series_query_params
+from app.api.time_series import apply_cache_control, build_window, get_time_series_query_params
 from app.domain.time_series import TimeSeriesResolution
 
 
@@ -85,3 +85,32 @@ def test_build_window_reflects_resolved_query() -> None:
     assert window.to_timestamp == query.to_timestamp
     assert window.resolution == query.resolution
     assert window.interval_ms == query.interval_ms
+
+
+def test_apply_cache_control_sets_public_max_age_for_pinned_window() -> None:
+    query = get_time_series_query_params(
+        from_timestamp=datetime(2026, 3, 5, 6, 0, tzinfo=UTC),
+        to_timestamp=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
+        resolution=None,
+    )
+    response = Response()
+    apply_cache_control(response, query)
+    assert response.headers["Cache-Control"] == "public, max-age=300"
+
+
+def test_apply_cache_control_sets_no_store_when_to_defaulted() -> None:
+    query = get_time_series_query_params(
+        from_timestamp=datetime(2026, 3, 5, 6, 0, tzinfo=UTC),
+        to_timestamp=None,
+        resolution=None,
+    )
+    response = Response()
+    apply_cache_control(response, query)
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_apply_cache_control_sets_no_store_when_both_defaulted() -> None:
+    query = get_time_series_query_params(from_timestamp=None, to_timestamp=None, resolution=None)
+    response = Response()
+    apply_cache_control(response, query)
+    assert response.headers["Cache-Control"] == "no-store"

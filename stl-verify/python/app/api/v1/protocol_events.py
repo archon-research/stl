@@ -1,16 +1,16 @@
 import logging
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.protocol_event_repository import PostgresProtocolEventRepository
-from app.api._validators import TX_HASH_PATTERN
+from app.api._validators import OptionalTxHashParam, TxHashParam
 from app.api.deps import get_engine
-from app.api.time_series import TimeSeriesWindow, build_window, get_time_series_query_params
-from app.domain.time_series import TimeSeriesQuery
+from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
+from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.protocol_event_service import ProtocolEventService
 
 logger = logging.getLogger(__name__)
@@ -95,17 +95,26 @@ async def _get_protocol_event_service(engine: AsyncEngine = Depends(get_engine))
     ),
 )
 async def list_protocol_events(
-    tx_hash: str | None = Query(
-        None,
-        pattern=TX_HASH_PATTERN,
-        description="Filter by transaction hash (0x-prefixed, 32 bytes).",
-    ),
+    response: Response,
+    tx_hash: Annotated[
+        OptionalTxHashParam,
+        Query(description="Filter by transaction hash (0x-prefixed, 32 bytes)."),
+    ] = None,
     protocol_name: str | None = Query(None, description="Filter by protocol name."),
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max events returned (default 100, max 500)."),
     service: ProtocolEventService = Depends(_get_protocol_event_service),
 ) -> ProtocolEventsEnvelope:
+    # A selective filter is one the index can seek to: tx_hash (exact byte
+    # match) or protocol_name (exact equality, joins to indexed protocol_id).
+    has_selective_filter = tx_hash is not None or protocol_name is not None
+    try:
+        enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     window = build_window(time_series)
+    apply_cache_control(response, time_series)
     try:
         if time_series.aggregate:
             buckets = await service.list_event_buckets(
@@ -159,7 +168,10 @@ async def list_protocol_events(
     ),
 )
 async def get_tx_events(
-    tx_hash: str = Path(..., pattern=TX_HASH_PATTERN, description="0x-prefixed 32-byte transaction hash."),
+    tx_hash: Annotated[
+        TxHashParam,
+        Path(description="0x-prefixed 32-byte transaction hash."),
+    ],
     service: ProtocolEventService = Depends(_get_protocol_event_service),
 ) -> list[ProtocolEventResponse]:
     try:
