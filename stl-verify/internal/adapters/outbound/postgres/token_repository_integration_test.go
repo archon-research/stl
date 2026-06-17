@@ -546,12 +546,9 @@ func TestResolveTokenSymbol_RejectsEmptySymbol(t *testing.T) {
 	}
 }
 
-// TestGetOrCreateTokens_NilBlockPreservesAndDedupes covers the VEC-353 batch
-// path: a nil incoming block inserts NULL and preserves an existing on-chain
-// block (LEAST ignores NULL), and a duplicate address in the input is
-// deduplicated. A differing symbol only warns, so the call still succeeds and
-// the stored symbol wins.
-func TestGetOrCreateTokens_NilBlockPreservesAndDedupes(t *testing.T) {
+// TestGetOrCreateTokens_DedupesBatch verifies the batch path deduplicates a
+// duplicate address in the input: usdc appears twice but yields one row.
+func TestGetOrCreateTokens_DedupesBatch(t *testing.T) {
 	truncateToken(t, context.Background())
 	ctx := context.Background()
 
@@ -566,7 +563,6 @@ func TestGetOrCreateTokens_NilBlockPreservesAndDedupes(t *testing.T) {
 	var first map[common.Address]int64
 	inTokenTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
-		// usdc appears twice: the batch must deduplicate it.
 		first, err = repo.GetOrCreateTokens(ctx, tx, []outbound.TokenInput{
 			{ChainID: 1, Address: usdc, Symbol: "USDC", Decimals: 6},
 			{ChainID: 1, Address: usdt, Symbol: "USDT", Decimals: 6},
@@ -577,8 +573,28 @@ func TestGetOrCreateTokens_NilBlockPreservesAndDedupes(t *testing.T) {
 	if len(first) != 2 {
 		t.Fatalf("len(first) = %d, want 2", len(first))
 	}
+}
 
-	// A nil-block insert stores NULL created_at_block.
+// TestGetOrCreateTokens_NilBlockInsertsNull verifies a nil incoming block
+// inserts a NULL created_at_block rather than a sentinel.
+func TestGetOrCreateTokens_NilBlockInsertsNull(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	usdc := common.HexToAddress("0xE1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1")
+
+	inTokenTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateTokens(ctx, tx, []outbound.TokenInput{
+			{ChainID: 1, Address: usdc, Symbol: "USDC", Decimals: 6},
+		})
+		return err
+	})
+
 	var cab *int64
 	if err := tokenPool.QueryRow(ctx,
 		`SELECT created_at_block FROM token WHERE chain_id = 1 AND address = $1`,
@@ -588,9 +604,20 @@ func TestGetOrCreateTokens_NilBlockPreservesAndDedupes(t *testing.T) {
 	if cab != nil {
 		t.Errorf("created_at_block = %v, want NULL", *cab)
 	}
+}
 
-	// A token previously seeded with a real on-chain block must keep it when an
-	// off-block-context (nil) caller re-upserts it.
+// TestGetOrCreateTokens_NilBlockPreservesExisting is the core VEC-353 clobber
+// fix: a token seeded with a real on-chain block keeps it when an
+// off-block-context (nil) caller re-upserts it (LEAST ignores NULL).
+func TestGetOrCreateTokens_NilBlockPreservesExisting(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
 	existing := common.HexToAddress("0xE3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3")
 	var existingID int64
 	if err := tokenPool.QueryRow(ctx,
@@ -603,7 +630,49 @@ func TestGetOrCreateTokens_NilBlockPreservesAndDedupes(t *testing.T) {
 	var second map[common.Address]int64
 	inTokenTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
-		// nil block, and a differing symbol that must only warn.
+		second, err = repo.GetOrCreateTokens(ctx, tx, []outbound.TokenInput{
+			{ChainID: 1, Address: existing, Symbol: "WETH", Decimals: 18},
+		})
+		return err
+	})
+	if second[existing] != existingID {
+		t.Errorf("existing token id = %d, want %d", second[existing], existingID)
+	}
+	var preservedCAB int64
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT created_at_block FROM token WHERE id = $1`,
+		existingID).Scan(&preservedCAB); err != nil {
+		t.Fatalf("querying preserved token: %v", err)
+	}
+	if preservedCAB != 12345 {
+		t.Errorf("created_at_block = %d, want 12345 (must not be clobbered)", preservedCAB)
+	}
+}
+
+// TestGetOrCreateTokens_SymbolDriftWarns verifies a differing symbol only
+// warns: the call still succeeds, returns the existing id, and the stored
+// symbol wins.
+func TestGetOrCreateTokens_SymbolDriftWarns(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	existing := common.HexToAddress("0xE3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3E3")
+	var existingID int64
+	if err := tokenPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, $1, 'WETH', 18, '{}'::jsonb, NOW()) RETURNING id`,
+		existing.Bytes()).Scan(&existingID); err != nil {
+		t.Fatalf("seeding existing token: %v", err)
+	}
+
+	var second map[common.Address]int64
+	inTokenTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
 		second, err = repo.GetOrCreateTokens(ctx, tx, []outbound.TokenInput{
 			{ChainID: 1, Address: existing, Symbol: "DIFFERENT", Decimals: 18},
 		})
@@ -612,15 +681,14 @@ func TestGetOrCreateTokens_NilBlockPreservesAndDedupes(t *testing.T) {
 	if second[existing] != existingID {
 		t.Errorf("existing token id = %d, want %d", second[existing], existingID)
 	}
-	var preservedCAB int64
 	var preservedSymbol string
 	if err := tokenPool.QueryRow(ctx,
-		`SELECT created_at_block, symbol FROM token WHERE id = $1`,
-		existingID).Scan(&preservedCAB, &preservedSymbol); err != nil {
+		`SELECT symbol FROM token WHERE id = $1`,
+		existingID).Scan(&preservedSymbol); err != nil {
 		t.Fatalf("querying preserved token: %v", err)
 	}
-	if preservedCAB != 12345 || preservedSymbol != "WETH" {
-		t.Errorf("token = %d/%s, want 12345/WETH (must not be clobbered)", preservedCAB, preservedSymbol)
+	if preservedSymbol != "WETH" {
+		t.Errorf("symbol = %s, want WETH (drift must warn, not clobber)", preservedSymbol)
 	}
 }
 

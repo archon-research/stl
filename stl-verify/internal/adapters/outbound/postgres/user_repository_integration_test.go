@@ -254,11 +254,9 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 	}
 }
 
-// TestGetOrCreateUsers_NilBlockPreservesAndDedupes covers the VEC-353 batch
-// path: a nil incoming block inserts NULL and preserves an existing on-chain
-// block (LEAST ignores NULL), and a duplicate address in the input is
-// deduplicated.
-func TestGetOrCreateUsers_NilBlockPreservesAndDedupes(t *testing.T) {
+// TestGetOrCreateUsers_DedupesBatch verifies the batch path deduplicates a
+// duplicate address in the input: a appears twice but yields one row.
+func TestGetOrCreateUsers_DedupesBatch(t *testing.T) {
 	truncateUser(t, context.Background())
 	ctx := context.Background()
 
@@ -273,7 +271,6 @@ func TestGetOrCreateUsers_NilBlockPreservesAndDedupes(t *testing.T) {
 	var first map[common.Address]int64
 	inUserTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
-		// a appears twice (nil block): the batch must deduplicate it.
 		first, err = repo.GetOrCreateUsers(ctx, tx, []entity.User{
 			{ChainID: 1, Address: a},
 			{ChainID: 1, Address: b},
@@ -284,8 +281,26 @@ func TestGetOrCreateUsers_NilBlockPreservesAndDedupes(t *testing.T) {
 	if len(first) != 2 {
 		t.Fatalf("len(first) = %d, want 2", len(first))
 	}
+}
 
-	// A nil-block insert stores NULL first_seen_block.
+// TestGetOrCreateUsers_NilBlockInsertsNull verifies a nil incoming block
+// inserts a NULL first_seen_block rather than a sentinel.
+func TestGetOrCreateUsers_NilBlockInsertsNull(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	a := common.HexToAddress("0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1")
+
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateUsers(ctx, tx, []entity.User{{ChainID: 1, Address: a}})
+		return err
+	})
+
 	var fsb *int64
 	if err := userPool.QueryRow(ctx,
 		`SELECT first_seen_block FROM "user" WHERE chain_id = 1 AND address = $1`,
@@ -295,9 +310,20 @@ func TestGetOrCreateUsers_NilBlockPreservesAndDedupes(t *testing.T) {
 	if fsb != nil {
 		t.Errorf("first_seen_block = %v, want NULL", *fsb)
 	}
+}
 
-	// A user previously seen on-chain at a real block must keep it when an
-	// off-block-context (nil) caller re-upserts it.
+// TestGetOrCreateUsers_NilBlockPreservesExisting is the core VEC-353 clobber
+// fix: a user seen on-chain at a real block keeps it when an off-block-context
+// (nil) caller re-upserts it (LEAST ignores NULL).
+func TestGetOrCreateUsers_NilBlockPreservesExisting(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
 	existing := common.HexToAddress("0xC3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3")
 	var existingID int64
 	if err := userPool.QueryRow(ctx,
