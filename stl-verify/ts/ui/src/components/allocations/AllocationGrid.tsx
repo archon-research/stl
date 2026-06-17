@@ -5,7 +5,8 @@ import {
   AreaSeries,
   Tooltip,
   Axis,
-  chartTheme,
+  buildChartTheme,
+  chartTokens,
 } from '@archon-research/charting';
 import {
   type ColumnDef,
@@ -155,6 +156,22 @@ function formatYAxisTick(value: unknown, chart: MetricChartSpec): string {
   return chart.formatValue(numericValue);
 }
 
+function buildSingleSeriesTheme(stroke: string) {
+  return buildChartTheme({
+    backgroundColor: 'transparent',
+    colors: [stroke],
+    gridColor: chartTokens.grid,
+    gridColorDark: chartTokens.grid,
+    tickLength: 6,
+    svgLabelSmall: { fill: chartTokens.label, fontSize: 11 },
+    svgLabelBig: { fill: chartTokens.axis, fontSize: 12 },
+    xAxisLineStyles: { stroke: chartTokens.axis },
+    yAxisLineStyles: { stroke: chartTokens.axis },
+    xTickLineStyles: { stroke: chartTokens.axis },
+    yTickLineStyles: { stroke: chartTokens.axis },
+  });
+}
+
 function MetricCardTrend({
   chart,
   isLoading,
@@ -210,6 +227,7 @@ function MetricCardTrend({
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
+  const chartTheme = useMemo(() => buildSingleSeriesTheme(chart.stroke), [chart.stroke]);
   const chartHeight = 236;
   const chartHostRef = useRef<HTMLDivElement | null>(null);
   const [chartWidth, setChartWidth] = useState<number | null>(null);
