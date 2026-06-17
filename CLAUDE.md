@@ -209,6 +209,7 @@ git commit  # Hooks auto-fix, may stage changes
     - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
     - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
     - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+    - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
     - When unsure, leave it out: a stale or redundant comment is worse than none.
 - **Libraries**:
     - Use the standard library as much as possible.
