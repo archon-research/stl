@@ -61,11 +61,9 @@ export type TxProtocolEventsResponse = NonNullable<
   paths['/v1/tx/{tx_hash}/events']['get']['responses']['200']['content']['application/json']
 >;
 
-export type PrimeDebtEnvelope =
-  components['schemas']['PrimeDebtEnvelope'];
+export type PrimeDebtEnvelope = components['schemas']['PrimeDebtEnvelope'];
 
-export type PrimeDebtBucket =
-  components['schemas']['PrimeDebtBucketResponse'];
+export type PrimeDebtBucket = components['schemas']['PrimeDebtBucketResponse'];
 
 export type TokensResponse = NonNullable<
   paths['/v1/tokens']['get']['responses']['200']['content']['application/json']

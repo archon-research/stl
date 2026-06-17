@@ -1,4 +1,12 @@
 import {
+  XYChart,
+  LineSeries,
+  AreaSeries,
+  Tooltip,
+  Axis,
+  chartTheme,
+} from '@archon-research/charting';
+import {
   type ColumnDef,
   DataTable,
   EmptyState,
@@ -7,14 +15,6 @@ import {
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
-import {
-  XYChart,
-  LineSeries,
-  AreaSeries,
-  Tooltip,
-  Axis,
-  chartTheme,
-} from '@archon-research/charting';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
@@ -158,7 +158,14 @@ function MetricCardTrend({
 
   if (errorMessage) {
     return (
-      <p className={css({ m: 0, mt: '2', fontSize: 'xs', color: 'text.warning' })}>
+      <p
+        className={css({
+          m: 0,
+          mt: '2',
+          fontSize: 'xs',
+          color: 'text.warning',
+        })}
+      >
         Chart unavailable for this range.
       </p>
     );
@@ -166,7 +173,9 @@ function MetricCardTrend({
 
   if (!chart || chart.data.length === 0) {
     return (
-      <p className={css({ m: 0, mt: '2', fontSize: 'xs', color: 'text.subtle' })}>
+      <p
+        className={css({ m: 0, mt: '2', fontSize: 'xs', color: 'text.subtle' })}
+      >
         No trend data in this window.
       </p>
     );
@@ -257,8 +266,14 @@ function MetricCardTrend({
           snapTooltipToDatumX
           snapTooltipToDatumY
           showVerticalCrosshair
-          renderTooltip={({ tooltipData }: { tooltipData?: { nearestDatum?: { datum: unknown } } }) => {
-            const datum = tooltipData?.nearestDatum?.datum as ChartDatum | undefined;
+          renderTooltip={({
+            tooltipData,
+          }: {
+            tooltipData?: { nearestDatum?: { datum: unknown } };
+          }) => {
+            const datum = tooltipData?.nearestDatum?.datum as
+              | ChartDatum
+              | undefined;
             if (!datum) return null;
             return (
               <div style={{ fontSize: 11, padding: '2px 4px' }}>
@@ -839,9 +854,9 @@ export function AllocationGrid({
                       ? 'Loading...'
                       : primeDebtErrorMessage
                         ? 'Error'
-                      : primeDebtSnapshot?.synced_at
-                        ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
-                        : '—'}
+                        : primeDebtSnapshot?.synced_at
+                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                          : '—'}
                   </span>
                   <span
                     className={css({
@@ -854,9 +869,9 @@ export function AllocationGrid({
                       ? 'Waiting for sync timestamp'
                       : primeDebtErrorMessage
                         ? primeDebtErrorMessage
-                      : primeDebtSnapshot?.synced_at
-                        ? formatDateTime(primeDebtSnapshot.synced_at)
-                        : 'No debt sync timestamp'}
+                        : primeDebtSnapshot?.synced_at
+                          ? formatDateTime(primeDebtSnapshot.synced_at)
+                          : 'No debt sync timestamp'}
                   </span>
                 </div>
               ) : null}
@@ -939,9 +954,16 @@ export function AllocationGrid({
                       {parseNumericValue(
                         capitalMetrics.risk_to_capital_ratio,
                       ) !== null ? (
-                        <div className={css({ fontSize: 'sm', color: 'text.muted' })}>
+                        <div
+                          className={css({
+                            fontSize: 'sm',
+                            color: 'text.muted',
+                          })}
+                        >
                           Risk-to-capital{' '}
-                          {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
+                          {formatRatioPercent(
+                            capitalMetrics.risk_to_capital_ratio,
+                          )}
                         </div>
                       ) : null}
                       <MetricCardTrend

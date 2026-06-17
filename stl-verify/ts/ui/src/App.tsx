@@ -4,11 +4,11 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
-import type { ChartDatum } from './components/allocations/AllocationGrid';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
+import type { ChartDatum } from './components/allocations/AllocationGrid';
 import {
   AllocationGrid,
   type ChartResolution,
@@ -19,11 +19,11 @@ import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
-import { TopBar } from './components/shared/TopBar';
 import {
   type RangePreset,
   type TimeRange,
 } from './components/shared/RangePicker';
+import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import {
   getAllocationActivityEnvelope,
@@ -75,14 +75,13 @@ function getResolutionForRange(
   preset: RangePreset,
   range: TimeRange,
 ): ChartResolution {
-  const presetMap: Record<Exclude<RangePreset, 'custom'>, ChartResolution> =
-    {
-      '1h': 'PT1M',
-      '6h': 'PT5M',
-      '24h': 'PT15M',
-      '7d': 'PT1H',
-      '30d': 'PT6H',
-    };
+  const presetMap: Record<Exclude<RangePreset, 'custom'>, ChartResolution> = {
+    '1h': 'PT1M',
+    '6h': 'PT5M',
+    '24h': 'PT15M',
+    '7d': 'PT1H',
+    '30d': 'PT6H',
+  };
 
   if (preset !== 'custom') {
     return presetMap[preset];
@@ -142,15 +141,15 @@ function App() {
   const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
-  const [capitalMetricsList, setCapitalMetricsList] = useState<CapitalMetrics[]>(
-    [],
-  );
+  const [capitalMetricsList, setCapitalMetricsList] = useState<
+    CapitalMetrics[]
+  >([]);
   const [primeDebtSnapshot, setPrimeDebtSnapshot] =
     useState<PrimeDebtSnapshot | null>(null);
   const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
-  const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<string | null>(
-    null,
-  );
+  const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
+    string | null
+  >(null);
   const [activityBuckets, setActivityBuckets] = useState<
     AllocationActivityBucket[]
   >([]);
@@ -537,12 +536,14 @@ function App() {
 
         setActivityBuckets(
           [...nextActivityBuckets].sort(
-            (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+            (a, b) =>
+              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
           ),
         );
         setDebtBuckets(
           [...nextDebtBuckets].sort(
-            (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+            (a, b) =>
+              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
           ),
         );
       })
@@ -567,7 +568,12 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [chartResolution, selectedPrimeId, timeRange.from_timestamp, timeRange.to_timestamp]);
+  }, [
+    chartResolution,
+    selectedPrimeId,
+    timeRange.from_timestamp,
+    timeRange.to_timestamp,
+  ]);
 
   const chainLabels = useMemo(
     () => buildChainLabelLookup(localChains),
@@ -802,7 +808,10 @@ function App() {
         key: 'prime-debt-exposure',
         title: 'Prime debt exposure',
         subtitle: 'Aggregated debt buckets in debt units',
-        data: primeDebtSeries.length > 0 ? primeDebtSeries : fallbackChart(primeDebtValue),
+        data:
+          primeDebtSeries.length > 0
+            ? primeDebtSeries
+            : fallbackChart(primeDebtValue),
         stroke: '#f97316',
         fill: 'color-mix(in srgb, #f97316 20%, transparent)',
         formatValue: (value: number) => `${value.toLocaleString()} DAI`,

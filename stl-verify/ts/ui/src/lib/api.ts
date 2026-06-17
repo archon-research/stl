@@ -347,10 +347,9 @@ export async function getPrimeDebtEnvelope(
   },
   signal?: AbortSignal,
 ): Promise<PrimeDebtEnvelope> {
-  const query =
-    filters as
-      | paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query']
-      | undefined;
+  const query = filters as
+    | paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query']
+    | undefined;
 
   const envelope = await requestData(
     apiClient.GET('/v1/primes/{prime_id}/debt', {

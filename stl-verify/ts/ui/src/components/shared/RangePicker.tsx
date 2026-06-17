@@ -152,8 +152,7 @@ const modalActionButtonClassName = (variant: 'ghost' | 'solid') =>
     borderRadius: 'md',
     borderWidth: '1px',
     borderStyle: 'solid',
-    borderColor:
-      variant === 'solid' ? 'interactive.accent' : 'border.default',
+    borderColor: variant === 'solid' ? 'interactive.accent' : 'border.default',
     bg: variant === 'solid' ? 'interactive.default' : 'surface.default',
     color: variant === 'solid' ? 'text.inverted' : 'text.default',
     cursor: 'pointer',
@@ -174,25 +173,19 @@ export function RangePicker({ preset, range, onChange }: RangePickerProps) {
     setIsCustomModalOpen(false);
   }, []);
 
-  const handleFromChange = useCallback(
-    (e: ChangeEvent<HTMLInputElement>) => {
-      setDraftRange((previous) => ({
-        ...previous,
-        from_timestamp: fromDateTimeLocalValue(e.target.value),
-      }));
-    },
-    [],
-  );
+  const handleFromChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setDraftRange((previous) => ({
+      ...previous,
+      from_timestamp: fromDateTimeLocalValue(e.target.value),
+    }));
+  }, []);
 
-  const handleToChange = useCallback(
-    (e: ChangeEvent<HTMLInputElement>) => {
-      setDraftRange((previous) => ({
-        ...previous,
-        to_timestamp: fromDateTimeLocalValue(e.target.value),
-      }));
-    },
-    [],
-  );
+  const handleToChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setDraftRange((previous) => ({
+      ...previous,
+      to_timestamp: fromDateTimeLocalValue(e.target.value),
+    }));
+  }, []);
 
   const handlePresetChange = useCallback(
     (event: ChangeEvent<HTMLSelectElement>) => {
@@ -296,7 +289,9 @@ export function RangePicker({ preset, range, onChange }: RangePickerProps) {
             <div className={flex({ align: 'center', gap: '2', wrap: 'wrap' })}>
               <div className={css({ minW: '12rem', flex: '1 1 12rem' })}>
                 <label className={css({ display: 'grid', gap: '1' })}>
-                  <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
+                  <span
+                    className={css({ fontSize: 'xs', color: 'text.muted' })}
+                  >
                     From
                   </span>
                   <input
@@ -311,7 +306,9 @@ export function RangePicker({ preset, range, onChange }: RangePickerProps) {
 
               <div className={css({ minW: '12rem', flex: '1 1 12rem' })}>
                 <label className={css({ display: 'grid', gap: '1' })}>
-                  <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
+                  <span
+                    className={css({ fontSize: 'xs', color: 'text.muted' })}
+                  >
                     To
                   </span>
                   <input
