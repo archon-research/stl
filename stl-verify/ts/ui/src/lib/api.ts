@@ -5,6 +5,7 @@ import type {
   AllocationActivityEnvelope,
   AllocationActivityResponse,
   AllocationsResponse,
+  CapitalMetricsEnvelope,
   CapitalMetricsListResponse,
   DataSourcesResponse,
   PrimeDebtEnvelope,
@@ -364,6 +365,36 @@ export async function getPrimeDebtEnvelope(
     'GET /v1/primes/{prime_id}/debt',
   );
   return envelope as PrimeDebtEnvelope;
+}
+
+export async function getCapitalMetricsEnvelope(
+  primeId: string,
+  filters?: {
+    from_timestamp?: string;
+    to_timestamp?: string;
+    resolution?: TimeSeriesResolution;
+    aggregate?: boolean;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<CapitalMetricsEnvelope> {
+  const query = filters as
+    | paths['/v1/primes/{prime_id}/capital-metrics']['get']['parameters']['query']
+    | undefined;
+
+  const envelope = await requestData(
+    apiClient.GET('/v1/primes/{prime_id}/capital-metrics', {
+      params: {
+        path: {
+          prime_id: primeId,
+        },
+        query,
+      },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/capital-metrics',
+  );
+  return envelope as CapitalMetricsEnvelope;
 }
 
 export async function getLatestPrimeDebtSnapshot(

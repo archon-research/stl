@@ -124,6 +124,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/primes/{prime_id}/capital-metrics': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List prime capital-metrics snapshots
+     * @description Return stored capital-metrics snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Set `aggregate=true` for the last value per time bucket (gap-filled). This is the historical series; the latest live values remain at `/v1/capital-metrics`.
+     */
+    get: operations['list_prime_capital_metrics_v1_primes__prime_id__capital_metrics_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/primes/{prime_id}/debt': {
     parameters: {
       query?: never;
@@ -794,6 +814,64 @@ export interface components {
       receipt_token_id: number;
     };
     /**
+     * CapitalMetricsBucketResponse
+     * @description Last observed capital metrics within a single time bucket (LOCF gap-filled).
+     */
+    CapitalMetricsBucketResponse: {
+      /**
+       * Bucket Start
+       * Format: date-time
+       * @description Inclusive start of the time bucket (UTC).
+       */
+      bucket_start: string;
+      /**
+       * Capital Buffer
+       * @description Derived `max(total_capital - first_loss_capital, 0)`; `null` for leading gap-filled buckets.
+       */
+      capital_buffer?: string | null;
+      /**
+       * First Loss Capital
+       * @description Carried-forward first-loss capital (USD).
+       */
+      first_loss_capital?: string | null;
+      /**
+       * Risk Capital
+       * @description Carried-forward risk capital (USD).
+       */
+      risk_capital?: string | null;
+      /**
+       * Risk To Capital Ratio
+       * @description Carried-forward risk-to-capital ratio.
+       */
+      risk_to_capital_ratio?: string | null;
+      /**
+       * Total Capital
+       * @description Carried-forward total capital (USD).
+       */
+      total_capital?: string | null;
+    };
+    /**
+     * CapitalMetricsEnvelope
+     * @description Capital-metrics response: raw snapshots or aggregated time buckets.
+     */
+    CapitalMetricsEnvelope: {
+      /**
+       * Data
+       * @description Snapshots when `mode=raw`, value buckets when `mode=aggregated`.
+       */
+      data:
+        | components['schemas']['CapitalMetricsSnapshotResponse'][]
+        | components['schemas']['CapitalMetricsBucketResponse'][];
+      /**
+       * Mode
+       * @description `raw` for snapshots, `aggregated` for time buckets.
+       * @enum {string}
+       */
+      mode: 'raw' | 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
+    /**
      * CapitalMetricsResponse
      * @description Prime-level capital metrics for risk and alert management.
      * @example {
@@ -875,6 +953,65 @@ export interface components {
        * @description Human-readable note about validation, e.g. why a row is missing or unmatched.
        */
       validation_note?: string | null;
+    };
+    /**
+     * CapitalMetricsSnapshotResponse
+     * @description A single observed capital-metrics position at a point in time.
+     */
+    CapitalMetricsSnapshotResponse: {
+      /**
+       * Benchmark Source
+       * @description Upstream source the snapshot was sourced from.
+       */
+      benchmark_source: string;
+      /**
+       * Capital Buffer
+       * @description Derived `max(total_capital - first_loss_capital, 0)` (USD).
+       * @example 2500000
+       */
+      capital_buffer: string;
+      /**
+       * First Loss Capital
+       * @description First-loss capital (USD).
+       * @example 7500000
+       */
+      first_loss_capital: string;
+      /**
+       * Prime Address
+       * @description Prime's 0x-prefixed Ethereum address.
+       * @example 0x1234567890abcdef1234567890abcdef12345678
+       */
+      prime_address: string;
+      /**
+       * Prime Name
+       * @description Human-readable prime name.
+       * @example Acme Prime
+       */
+      prime_name: string;
+      /**
+       * Risk Capital
+       * @description Risk capital exposure (USD).
+       * @example 10000000
+       */
+      risk_capital: string;
+      /**
+       * Risk To Capital Ratio
+       * @description Upstream risk-tolerance ratio. `null` when not reported.
+       * @example 0.85
+       */
+      risk_to_capital_ratio?: string | null;
+      /**
+       * Synced At
+       * Format: date-time
+       * @description Server-side time the snapshot was persisted.
+       */
+      synced_at: string;
+      /**
+       * Total Capital
+       * @description Total RRC reported upstream (USD).
+       * @example 10000000
+       */
+      total_capital: string;
     };
     /**
      * ChainResponse
@@ -1862,6 +1999,48 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['AllocationResponse'][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_prime_capital_metrics_v1_primes__prime_id__capital_metrics_get: {
+    parameters: {
+      query?: {
+        /** @description Max snapshots returned (default 100, max 500). */
+        limit?: number;
+        /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+        from_timestamp?: string | null;
+        /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+        to_timestamp?: string | null;
+        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+        resolution?: components['schemas']['TimeSeriesResolution'] | null;
+        /** @description When true, return time-bucketed aggregates instead of raw rows. */
+        aggregate?: boolean;
+      };
+      header?: never;
+      path: {
+        prime_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CapitalMetricsEnvelope'];
         };
       };
       /** @description Validation Error */
