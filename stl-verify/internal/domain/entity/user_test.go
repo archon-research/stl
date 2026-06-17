@@ -7,8 +7,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func i64(n int64) *int64 { return &n }
-
 func TestNewUser(t *testing.T) {
 	validAddr := common.HexToAddress("0x0102030405060708090a0b0c0d0e0f1011121314")
 
@@ -26,7 +24,7 @@ func TestNewUser(t *testing.T) {
 			id:             1,
 			chainID:        1,
 			address:        validAddr,
-			firstSeenBlock: i64(1000),
+			firstSeenBlock: new(int64(1000)),
 			wantErr:        false,
 		},
 		{
@@ -34,7 +32,7 @@ func TestNewUser(t *testing.T) {
 			id:             0,
 			chainID:        1,
 			address:        validAddr,
-			firstSeenBlock: i64(1000),
+			firstSeenBlock: new(int64(1000)),
 			wantErr:        true,
 			errContains:    "id must be positive",
 		},
@@ -43,7 +41,7 @@ func TestNewUser(t *testing.T) {
 			id:             -1,
 			chainID:        1,
 			address:        validAddr,
-			firstSeenBlock: i64(1000),
+			firstSeenBlock: new(int64(1000)),
 			wantErr:        true,
 			errContains:    "id must be positive",
 		},
@@ -52,7 +50,7 @@ func TestNewUser(t *testing.T) {
 			id:             1,
 			chainID:        0,
 			address:        validAddr,
-			firstSeenBlock: i64(1000),
+			firstSeenBlock: new(int64(1000)),
 			wantErr:        true,
 			errContains:    "chainID must be positive",
 		},
@@ -61,7 +59,7 @@ func TestNewUser(t *testing.T) {
 			id:             1,
 			chainID:        1,
 			address:        validAddr,
-			firstSeenBlock: i64(0),
+			firstSeenBlock: new(int64(0)),
 			wantErr:        true,
 			errContains:    "firstSeenBlock must be positive",
 		},
@@ -70,7 +68,7 @@ func TestNewUser(t *testing.T) {
 			id:             1,
 			chainID:        1,
 			address:        validAddr,
-			firstSeenBlock: i64(-1),
+			firstSeenBlock: new(int64(-1)),
 			wantErr:        true,
 			errContains:    "firstSeenBlock must be positive",
 		},
@@ -79,7 +77,7 @@ func TestNewUser(t *testing.T) {
 			id:             2,
 			chainID:        137,
 			address:        validAddr,
-			firstSeenBlock: i64(5000),
+			firstSeenBlock: new(int64(5000)),
 			wantErr:        false,
 		},
 		{
@@ -95,7 +93,7 @@ func TestNewUser(t *testing.T) {
 			id:             1,
 			chainID:        1,
 			address:        common.Address{},
-			firstSeenBlock: i64(1000),
+			firstSeenBlock: new(int64(1000)),
 			wantErr:        true,
 			errContains:    "address cannot be empty",
 		},

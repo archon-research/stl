@@ -29,8 +29,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-func i64(n int64) *int64 { return &n }
-
 func TestEventExtractor_NewEventExtractor(t *testing.T) {
 	extractor, err := NewEventExtractor()
 	if err != nil {
@@ -2097,7 +2095,7 @@ func TestResolvePositionTokens_DedupesAcrossCollateralsDebtsAndExtras(t *testing
 		{Asset: tokenA, Symbol: "USDC", Decimals: 6}, // overlaps with collateral
 	}
 	extras := []outbound.TokenInput{
-		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: i64(100)}, // overlaps with collateral
+		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: new(int64(100))}, // overlaps with collateral
 	}
 
 	var captured []outbound.TokenInput
@@ -2127,7 +2125,7 @@ func TestResolvePositionTokens_IncludesBorrowReserveExtras(t *testing.T) {
 		{Asset: collateralToken, Symbol: "WETH", Decimals: 18},
 	}
 	extras := []outbound.TokenInput{
-		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: i64(100)},
+		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: new(int64(100))},
 	}
 
 	var captured []outbound.TokenInput
