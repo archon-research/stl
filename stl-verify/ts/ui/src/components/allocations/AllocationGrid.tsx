@@ -15,7 +15,7 @@ import {
   Axis,
   chartTheme,
 } from '@archon-research/charting';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -139,11 +139,13 @@ function MetricCardTrend({
   errorMessage: string | null;
 }) {
   if (isLoading) {
+    // Match the chart's footprint so the placeholder fills the same space and
+    // there's no jump (or floating box) when the real chart loads in.
     return (
       <div
+        style={{ height: CHART_HEIGHT }}
         className={css({
           mt: '2',
-          h: '20',
           borderRadius: 'sm',
           borderWidth: '1px',
           borderStyle: 'solid',
@@ -174,11 +176,37 @@ function MetricCardTrend({
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
   const chartHeight = 236;
+  const chartHostRef = useRef<HTMLDivElement | null>(null);
+  const [chartWidth, setChartWidth] = useState(0);
+
+  useEffect(() => {
+    const host = chartHostRef.current;
+    if (!host) {
+      return;
+    }
+
+    const updateWidth = () => {
+      setChartWidth(Math.max(Math.floor(host.clientWidth), 0));
+    };
+
+    updateWidth();
+
+    const observer = new ResizeObserver(() => {
+      updateWidth();
+    });
+
+    observer.observe(host);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
 
   return (
-    <div className={css({ mt: '2', width: 'full' })}>
+    <div ref={chartHostRef} className={css({ mt: '2', width: 'full' })}>
       <XYChart
         theme={chartTheme}
+        width={Math.max(chartWidth, 280)}
         height={chartHeight}
         margin={{ top: 8, right: 12, bottom: 62, left: 84 }}
         xScale={{ type: 'band', paddingInner: 0.2 }}
@@ -244,20 +272,6 @@ function MetricCardTrend({
     </div>
   );
 }
-
-const metricDetailMetaClassName = css({
-  borderWidth: '1px',
-  borderStyle: 'solid',
-  borderColor: 'border.subtle',
-  borderRadius: 'sm',
-  bg: 'surface.subtle',
-  px: '2.5',
-  py: '2',
-  width: 'fit-content',
-  maxW: 'full',
-  fontSize: 'sm',
-  color: 'text.muted',
-});
 
 const tableHeaderTypographyClassName = css({
   '& thead th': {
@@ -695,8 +709,17 @@ export function AllocationGrid({
     boxShadow: 'none',
     display: 'flex',
     flexDirection: 'column',
-    justifyContent: 'space-between',
-    minHeight: '24rem',
+    // Uniform gap between label, value, and detail. Avoids `space-between`,
+    // which stretched the slack between the value and the subtitle unevenly
+    // across cards. The detail's fixed min-height keeps the chart row aligned.
+    gap: '2',
+  });
+
+  const metricDetailClassName = css({
+    display: 'grid',
+    gridTemplateRows: 'auto 1fr',
+    gap: '2',
+    minHeight: '17rem',
   });
 
   const allocationActivityChart = findMetricChart(
@@ -887,15 +910,10 @@ export function AllocationGrid({
                     : formatUsdValue(summary.totalUsd)
                 }
                 detail={
-                  <div
-                    className={css({
-                      display: 'grid',
-                      gridTemplateRows: 'auto 1fr',
-                      gap: '2',
-                      minHeight: '17rem',
-                    })}
-                  >
-                    <div className={metricDetailMetaClassName}>
+                  <div className={metricDetailClassName}>
+                    <div
+                      className={css({ fontSize: 'sm', color: 'text.muted' })}
+                    >
                       {hasSearchQuery && overallSummary
                         ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
                         : `${summary.allocationCount} allocations`}
@@ -917,18 +935,11 @@ export function AllocationGrid({
                   label="Risk capital"
                   value={formatUsdValue(capitalMetrics.risk_capital)}
                   detail={
-                    <div
-                      className={css({
-                        display: 'grid',
-                        gridTemplateRows: 'auto 1fr',
-                        gap: '2',
-                        minHeight: '17rem',
-                      })}
-                    >
+                    <div className={metricDetailClassName}>
                       {parseNumericValue(
                         capitalMetrics.risk_to_capital_ratio,
                       ) !== null ? (
-                        <div className={metricDetailMetaClassName}>
+                        <div className={css({ fontSize: 'sm', color: 'text.muted' })}>
                           Risk-to-capital{' '}
                           {formatRatioPercent(capitalMetrics.risk_to_capital_ratio)}
                         </div>
@@ -950,17 +961,12 @@ export function AllocationGrid({
                 label="Total capital"
                 value={formatUsdValue(capitalMetrics.total_capital)}
                 detail={
-                  <div
-                    className={css({
-                      display: 'grid',
-                      gridTemplateRows: 'auto 1fr',
-                      gap: '2',
-                      minHeight: '17rem',
-                    })}
-                  >
-                    <div className={metricDetailMetaClassName}>
-                      Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·
-                      {' '}First loss{' '}
+                  <div className={metricDetailClassName}>
+                    <div
+                      className={css({ fontSize: 'sm', color: 'text.muted' })}
+                    >
+                      Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·{' '}
+                      First loss{' '}
                       {formatUsdValue(capitalMetrics.first_loss_capital)}
                     </div>
                     <MetricCardTrend
@@ -987,53 +993,49 @@ export function AllocationGrid({
                     isPrimeDebtLoading ? (
                       'Fetching latest debt snapshot'
                     ) : (
-                      <div
-                        className={css({
-                          display: 'grid',
-                          gridTemplateRows: 'auto 1fr',
-                          gap: '2',
-                          minHeight: '17rem',
-                        })}
-                      >
+                      <div className={metricDetailClassName}>
                         <div
-                          className={`${metricDetailMetaClassName} ${css({ width: 'full' })}`}
+                          className={css({
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'baseline',
+                            gap: '1',
+                            fontSize: 'sm',
+                            color: 'text.muted',
+                            // The tooltip trigger is a 44px-min tap target; inline
+                            // here it would inflate the row and drop the text below
+                            // the other cards' single-line subtitles. Collapse it to
+                            // the text line height so the baselines align.
+                            '& button': { minHeight: 'auto', py: '0' },
+                          })}
                         >
-                          <div
-                            className={css({
-                              display: 'flex',
-                              flexWrap: 'wrap',
-                              alignItems: 'center',
-                              gap: '1',
-                            })}
-                          >
-                            <span>
-                              Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
-                            </span>
-                            <span aria-hidden="true">·</span>
-                            <AppTooltip
-                              ariaLabel={
-                                primeDebtSnapshot?.debt_wad
-                                  ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
-                                  : 'Raw WAD unavailable'
-                              }
-                              trigger={
-                                <span
-                                  className={css({
-                                    textDecoration: 'underline',
-                                    textDecorationStyle: 'dotted',
-                                    textUnderlineOffset: '2px',
-                                  })}
-                                >
-                                  {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
-                                </span>
-                              }
-                              content={
-                                primeDebtSnapshot?.debt_wad
-                                  ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
-                                  : 'Raw WAD unavailable'
-                              }
-                            />
-                          </div>
+                          <span>
+                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <AppTooltip
+                            ariaLabel={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                            trigger={
+                              <span
+                                className={css({
+                                  textDecoration: 'underline',
+                                  textDecorationStyle: 'dotted',
+                                  textUnderlineOffset: '2px',
+                                })}
+                              >
+                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                              </span>
+                            }
+                            content={
+                              primeDebtSnapshot?.debt_wad
+                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                                : 'Raw WAD unavailable'
+                            }
+                          />
                         </div>
                         <MetricCardTrend
                           chart={primeDebtChart}
