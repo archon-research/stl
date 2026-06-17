@@ -11,6 +11,7 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.time_series_bucket import AllocationActivityBucket
 
 
 class AllocationRepository(Protocol):
@@ -87,4 +88,21 @@ class AllocationRepository(Protocol):
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
         """Return allocation activity events with optional filters."""
+        ...
+
+    async def list_activity_buckets(
+        self,
+        *,
+        prime_id: EthAddress | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[AllocationActivityBucket]:
+        """Return allocation activity aggregated into time buckets."""
         ...
