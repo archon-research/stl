@@ -1,9 +1,10 @@
 import { StyledSelect } from '@archon-research/design-system';
 import {
   type ChangeEvent,
-  type MouseEvent,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 
@@ -122,14 +123,18 @@ const dateInputClassName = css({
   width: 'full',
 });
 
-const customModalBackdropClassName = css({
-  position: 'fixed',
-  inset: 0,
-  bg: 'rgba(0, 0, 0, 0.55)',
-  zIndex: 70,
-  display: 'grid',
-  placeItems: 'center',
-  p: '4',
+const customDialogClassName = css({
+  border: 'none',
+  padding: '0',
+  background: 'transparent',
+  maxWidth: '100%',
+  maxHeight: '100%',
+  // The CSS reset zeroes margins, which clobbers the UA stylesheet's
+  // `margin: auto` that centers a modal <dialog>; restore it explicitly.
+  margin: 'auto',
+  '&::backdrop': {
+    background: 'rgba(0, 0, 0, 0.55)',
+  },
 });
 
 const customModalClassName = css({
@@ -163,6 +168,20 @@ const modalActionButtonClassName = (variant: 'ghost' | 'solid') =>
 export function RangePicker({ preset, range, onChange }: RangePickerProps) {
   const [isCustomModalOpen, setIsCustomModalOpen] = useState(false);
   const [draftRange, setDraftRange] = useState<TimeRange>(range);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+
+    if (isCustomModalOpen && !dialog.open) {
+      dialog.showModal();
+    } else if (!isCustomModalOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [isCustomModalOpen]);
 
   const selectedValue = useMemo(
     () => (preset === 'custom' ? CUSTOM_ACTIVE_VALUE : preset),
@@ -233,15 +252,6 @@ export function RangePicker({ preset, range, onChange }: RangePickerProps) {
 
   const modalDescriptionId = 'range-picker-custom-modal-description';
 
-  const handleModalBackdropClick = useCallback(
-    (event: MouseEvent<HTMLDivElement>) => {
-      if (event.target === event.currentTarget) {
-        handleCancelCustomRange();
-      }
-    },
-    [handleCancelCustomRange],
-  );
-
   return (
     <div className={css({ display: 'grid', gap: '1' })}>
       <StyledSelect
@@ -262,13 +272,12 @@ export function RangePicker({ preset, range, onChange }: RangePickerProps) {
       </StyledSelect>
 
       {isCustomModalOpen ? (
-        <div
-          className={customModalBackdropClassName}
-          role="dialog"
-          aria-modal="true"
+        <dialog
+          ref={dialogRef}
+          className={customDialogClassName}
           aria-labelledby={modalTitleId}
           aria-describedby={modalDescriptionId}
-          onClick={handleModalBackdropClick}
+          onCancel={handleCancelCustomRange}
         >
           <div className={customModalClassName}>
             <div className={css({ display: 'grid', gap: '1' })}>
@@ -350,7 +359,7 @@ export function RangePicker({ preset, range, onChange }: RangePickerProps) {
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       ) : null}
     </div>
   );

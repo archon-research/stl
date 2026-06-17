@@ -35,6 +35,8 @@ import type {
 } from '../../../types/allocation';
 import {
   ChainLogo,
+  DEFAULT_RANGE_PRESET,
+  defaultTimeRange,
   PageShell,
   ProtocolLogo,
   RangePicker,
@@ -460,12 +462,19 @@ export function ActivityFeed({
   const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
     Record<string, boolean>
   >({});
-  const [filters, setFilters] = useState<ActivityFilters>({
-    limit: 50,
-    rangePreset: '24h',
-    from_timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    to_timestamp: new Date().toISOString(),
+  const [filters, setFilters] = useState<ActivityFilters>(() => {
+    const initialRange = defaultTimeRange();
+    return {
+      limit: 50,
+      rangePreset: DEFAULT_RANGE_PRESET,
+      from_timestamp: initialRange.from_timestamp,
+      to_timestamp: initialRange.to_timestamp,
+    };
   });
+  // The parent (page mode) owns the range and passes it via props; the local
+  // `filters` range is only the source of truth in standalone/drawer mode.
+  const isRangeControlled =
+    externalTimeRange !== undefined && onExternalRangeChange !== undefined;
   const uniqueTokenOptions = useMemo(() => {
     const symbols = new Set(tokenOptions);
     // Keep a deep-linked token selectable even if it isn't in the catalog list.
@@ -505,31 +514,51 @@ export function ActivityFeed({
   };
 
   const updateRangePreset = (preset: RangePreset, range: TimeRange) => {
-    setFilters((previous) => ({
-      ...previous,
-      rangePreset: preset,
-      from_timestamp: range.from_timestamp,
-      to_timestamp: range.to_timestamp,
-    }));
-    onExternalRangeChange?.(preset, range);
+    if (isRangeControlled) {
+      onExternalRangeChange?.(preset, range);
+    } else {
+      setFilters((previous) => ({
+        ...previous,
+        rangePreset: preset,
+        from_timestamp: range.from_timestamp,
+        to_timestamp: range.to_timestamp,
+      }));
+    }
     resetTxInspectionState();
   };
 
   // When the parent drives range via props, use those values over local state.
-  const effectivePreset = externalRangePreset ?? filters.rangePreset;
-  const effectiveRange: TimeRange = externalTimeRange ?? {
-    from_timestamp: filters.from_timestamp,
-    to_timestamp: filters.to_timestamp,
-  };
+  const effectivePreset = isRangeControlled
+    ? (externalRangePreset ?? DEFAULT_RANGE_PRESET)
+    : filters.rangePreset;
+  const effectiveRange = useMemo<TimeRange>(
+    () =>
+      isRangeControlled && externalTimeRange
+        ? externalTimeRange
+        : {
+            from_timestamp: filters.from_timestamp,
+            to_timestamp: filters.to_timestamp,
+          },
+    [
+      isRangeControlled,
+      externalTimeRange,
+      filters.from_timestamp,
+      filters.to_timestamp,
+    ],
+  );
 
   const clearFilters = () => {
     onActionFilterChange?.(null);
     onTokenFilterChange?.(null);
+    const nextRange = defaultTimeRange();
+    if (isRangeControlled) {
+      onExternalRangeChange?.(DEFAULT_RANGE_PRESET, nextRange);
+    }
     setFilters({
       limit: filters.limit ?? 50,
-      rangePreset: '24h',
-      from_timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-      to_timestamp: new Date().toISOString(),
+      rangePreset: DEFAULT_RANGE_PRESET,
+      from_timestamp: nextRange.from_timestamp,
+      to_timestamp: nextRange.to_timestamp,
     });
     resetTxInspectionState();
   };

@@ -17,7 +17,7 @@ import {
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -90,21 +90,14 @@ export type ChartDatum = {
 
 export type MetricChartSpec = {
   key: string;
-  title: string;
-  subtitle: string;
   data: ChartDatum[];
   stroke: string;
-  fill: string;
   formatValue: (value: number) => string;
+  // True when `data` is a synthetic constant placeholder (current value
+  // repeated) rather than a real time series, so the card can show a "no
+  // history yet" message instead of a flat block.
+  isFallback: boolean;
 };
-
-export type ChartResolution =
-  | 'PT1M'
-  | 'PT5M'
-  | 'PT15M'
-  | 'PT1H'
-  | 'PT6H'
-  | 'P1D';
 
 function findMetricChart(
   charts: MetricChartSpec[],
@@ -172,6 +165,47 @@ function buildSingleSeriesTheme(stroke: string) {
   });
 }
 
+// Callback-ref based width measurement: a stable ref that wires up a
+// ResizeObserver when the node mounts and tears it down on unmount. A bare
+// useEffect+useRef would miss the mount because the measured node only renders
+// after the loading/empty guards below resolve.
+function useMeasuredWidth(): [
+  (node: HTMLDivElement | null) => void,
+  number | null,
+] {
+  const [width, setWidth] = useState<number | null>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
+
+  const measureRef = useCallback((node: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+
+    if (!node) {
+      return;
+    }
+
+    const measure = () => {
+      const nextWidth = Math.floor(node.getBoundingClientRect().width);
+      setWidth(nextWidth > 0 ? nextWidth : null);
+    };
+
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    observerRef.current = observer;
+  }, []);
+
+  return [measureRef, width];
+}
+
+const chartEmptyMessageClassName = css({
+  m: 0,
+  mt: '2',
+  fontSize: 'xs',
+  color: 'text.subtle',
+});
+
+const CHART_HEIGHT = 236;
+
 function MetricCardTrend({
   chart,
   isLoading,
@@ -181,6 +215,12 @@ function MetricCardTrend({
   isLoading: boolean;
   errorMessage: string | null;
 }) {
+  const [measureRef, chartWidth] = useMeasuredWidth();
+  const chartTheme = useMemo(
+    () => buildSingleSeriesTheme(chart?.stroke ?? chartTokens.axis),
+    [chart?.stroke],
+  );
+
   if (isLoading) {
     // Match the chart's footprint so the placeholder fills the same space and
     // there's no jump (or floating box) when the real chart loads in.
@@ -216,10 +256,16 @@ function MetricCardTrend({
 
   if (!chart || chart.data.length === 0) {
     return (
-      <p
-        className={css({ m: 0, mt: '2', fontSize: 'xs', color: 'text.subtle' })}
-      >
+      <p className={chartEmptyMessageClassName}>
         No trend data in this window.
+      </p>
+    );
+  }
+
+  if (chart.isFallback) {
+    return (
+      <p className={chartEmptyMessageClassName}>
+        Awaiting historical series for this range.
       </p>
     );
   }
@@ -227,37 +273,13 @@ function MetricCardTrend({
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
-  const chartTheme = useMemo(() => buildSingleSeriesTheme(chart.stroke), [chart.stroke]);
-  const chartHeight = 236;
-  const chartHostRef = useRef<HTMLDivElement | null>(null);
-  const [chartWidth, setChartWidth] = useState<number | null>(null);
-
-  useEffect(() => {
-    const host = chartHostRef.current;
-    if (!host) {
-      return;
-    }
-
-    const updateWidth = () => {
-      const nextWidth = Math.floor(host.getBoundingClientRect().width);
-      setChartWidth(nextWidth > 0 ? nextWidth : null);
-    };
-
-    updateWidth();
-
-    const observer = new ResizeObserver(() => {
-      updateWidth();
-    });
-
-    observer.observe(host);
-
-    return () => {
-      observer.disconnect();
-    };
-  }, []);
+  const chartHeight = CHART_HEIGHT;
 
   return (
-    <div ref={chartHostRef} className={css({ mt: '2', width: 'full' })}>
+    <div
+      ref={measureRef}
+      className={css({ mt: '2', width: 'full', minWidth: 0 })}
+    >
       {chartWidth === null ? (
         <div
           className={css({
@@ -267,84 +289,88 @@ function MetricCardTrend({
         />
       ) : null}
       {chartWidth !== null ? (
-      <XYChart
-        theme={chartTheme}
-        width={chartWidth}
-        height={chartHeight}
-        margin={{ top: 8, right: 16, bottom: 74, left: 56 }}
-        xScale={{ type: 'band', paddingInner: 0.2 }}
-        yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
-      >
-        <Grid columns={false} numTicks={3} />
-        <Axis
-          orientation="left"
-          numTicks={3}
-          hideTicks
-          tickFormat={(value) => formatYAxisTick(value, chart)}
-          tickLabelProps={() => ({
-            fontSize: 10,
-            textAnchor: 'end',
-            dx: '-0.35em',
-            fill: 'var(--colors-text-muted)',
-          })}
-        />
-        <Axis
-          orientation="bottom"
-          numTicks={4}
-          hideTicks
-          tickLabelProps={() => ({
-            fontSize: 10,
-            textAnchor: 'end',
-            angle: -30,
-            dx: '-0.1em',
-            dy: '0.9em',
-            fill: 'var(--colors-text-muted)',
-          })}
-        />
-        <AreaSeries
-          dataKey={`${chart.key}-area`}
-          data={chart.data as ChartDatum[]}
-          xAccessor={(d: ChartDatum) => d.label}
-          yAccessor={(d: ChartDatum) => d.value}
-          fill={chart.stroke}
-          fillOpacity={0.18}
-          lineProps={{ stroke: 'none' }}
-        />
-        <LineSeries
-          dataKey={chart.key}
-          data={chart.data as ChartDatum[]}
-          xAccessor={(d: ChartDatum) => d.label}
-          yAccessor={(d: ChartDatum) => d.value}
-          stroke={chart.stroke}
-        />
-        <Tooltip
-          snapTooltipToDatumX
-          snapTooltipToDatumY
-          showVerticalCrosshair
-          showSeriesGlyphs
-          renderTooltip={({
-            tooltipData,
-          }: {
-            tooltipData?: { nearestDatum?: { datum: unknown } };
-          }) => {
-            const datum = tooltipData?.nearestDatum?.datum as
-              | ChartDatum
-              | undefined;
-            if (!datum) return null;
-            return (
-              <div className={chartTooltipSurfaceClassName}>
-                <div className={chartTooltipTitleClassName}>{datum.label}</div>
-                <div
-                  className={chartTooltipValueClassName}
-                  style={{ color: chart.stroke }}
-                >
-                  {chart.formatValue(datum.value)}
+        <XYChart
+          theme={chartTheme}
+          width={chartWidth}
+          height={chartHeight}
+          margin={{ top: 8, right: 16, bottom: 74, left: 56 }}
+          xScale={{ type: 'band', paddingInner: 0.2 }}
+          yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
+        >
+          <Grid columns={false} numTicks={3} />
+          <Axis
+            orientation="left"
+            numTicks={3}
+            hideTicks
+            tickFormat={(value) => formatYAxisTick(value, chart)}
+            tickLabelProps={() => ({
+              fontSize: 10,
+              textAnchor: 'end',
+              dx: '-0.35em',
+              fill: 'var(--colors-text-muted)',
+            })}
+          />
+          <Axis
+            orientation="bottom"
+            numTicks={4}
+            hideTicks
+            tickLabelProps={(_value, index) => ({
+              fontSize: 10,
+              // The first tick sits at the y-axis, so anchor its rotated label
+              // to the start (extends right) to avoid clipping at the left edge.
+              textAnchor: index === 0 ? 'start' : 'end',
+              angle: -30,
+              dx: index === 0 ? '0.1em' : '-0.1em',
+              dy: '0.9em',
+              fill: 'var(--colors-text-muted)',
+            })}
+          />
+          <AreaSeries
+            dataKey={`${chart.key}-area`}
+            data={chart.data as ChartDatum[]}
+            xAccessor={(d: ChartDatum) => d.label}
+            yAccessor={(d: ChartDatum) => d.value}
+            fill={chart.stroke}
+            fillOpacity={0.18}
+            lineProps={{ stroke: 'none' }}
+          />
+          <LineSeries
+            dataKey={chart.key}
+            data={chart.data as ChartDatum[]}
+            xAccessor={(d: ChartDatum) => d.label}
+            yAccessor={(d: ChartDatum) => d.value}
+            stroke={chart.stroke}
+          />
+          <Tooltip
+            snapTooltipToDatumX
+            snapTooltipToDatumY
+            showVerticalCrosshair
+            showSeriesGlyphs
+            renderTooltip={({
+              tooltipData,
+            }: {
+              tooltipData?: { nearestDatum?: { datum: unknown } };
+            }) => {
+              const datum = tooltipData?.nearestDatum?.datum as
+                | ChartDatum
+                | undefined;
+              if (!datum) return null;
+              return (
+                <div className={chartTooltipSurfaceClassName}>
+                  <div className={chartTooltipTitleClassName}>
+                    {datum.label}
+                  </div>
+                  <div
+                    className={chartTooltipValueClassName}
+                    style={{ color: chart.stroke }}
+                  >
+                    {chart.formatValue(datum.value)}
+                  </div>
                 </div>
-              </div>
-            );
-          }}
-        />
-      </XYChart>
+              );
+            }}
+          />
+        </XYChart>
       ) : null}
     </div>
   );

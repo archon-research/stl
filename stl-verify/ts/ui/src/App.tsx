@@ -11,7 +11,6 @@ import { css } from '#styled-system/css';
 import type { ChartDatum } from './components/allocations/AllocationGrid';
 import {
   AllocationGrid,
-  type ChartResolution,
   type MetricChartSpec,
 } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
@@ -20,6 +19,8 @@ import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import {
+  DEFAULT_RANGE_PRESET,
+  defaultTimeRange,
   type RangePreset,
   type TimeRange,
 } from './components/shared/RangePicker';
@@ -44,12 +45,14 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
+  formatChartTimestampLabel,
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
   parseNumericValue,
+  wadToUnits,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
@@ -67,6 +70,7 @@ import type {
   Prime,
   PrimeDebtBucket,
   PrimeDebtSnapshot,
+  TimeSeriesResolution,
   TokensResponse,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
@@ -74,8 +78,11 @@ import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 function getResolutionForRange(
   preset: RangePreset,
   range: TimeRange,
-): ChartResolution {
-  const presetMap: Record<Exclude<RangePreset, 'custom'>, ChartResolution> = {
+): TimeSeriesResolution {
+  const presetMap: Record<
+    Exclude<RangePreset, 'custom'>,
+    TimeSeriesResolution
+  > = {
     '1h': 'PT1M',
     '6h': 'PT5M',
     '24h': 'PT15M',
@@ -180,11 +187,9 @@ function App() {
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
 
   // Shared range state: drives ActivityFeed and TopBar RangePicker in sync.
-  const [rangePreset, setRangePreset] = useState<RangePreset>('24h');
-  const [timeRange, setTimeRange] = useState<TimeRange>({
-    from_timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    to_timestamp: new Date().toISOString(),
-  });
+  const [rangePreset, setRangePreset] =
+    useState<RangePreset>(DEFAULT_RANGE_PRESET);
+  const [timeRange, setTimeRange] = useState<TimeRange>(defaultTimeRange);
 
   const handleRangeChange = (preset: RangePreset, range: TimeRange) => {
     setRangePreset(preset);
@@ -525,14 +530,23 @@ function App() {
       ),
     ])
       .then(([activityEnvelope, debtEnvelope]) => {
+        // We request aggregate=true, so a non-aggregated envelope is a backend
+        // contract violation, not "no data" — surface it instead of silently
+        // rendering an empty chart.
+        if (activityEnvelope.mode !== 'aggregated') {
+          throw new Error(
+            `Activity envelope returned unexpected mode "${activityEnvelope.mode}" (expected "aggregated")`,
+          );
+        }
+        if (debtEnvelope.mode !== 'aggregated') {
+          throw new Error(
+            `Prime debt envelope returned unexpected mode "${debtEnvelope.mode}" (expected "aggregated")`,
+          );
+        }
+
         const nextActivityBuckets =
-          activityEnvelope.mode === 'aggregated'
-            ? (activityEnvelope.data as AllocationActivityBucket[])
-            : [];
-        const nextDebtBuckets =
-          debtEnvelope.mode === 'aggregated'
-            ? (debtEnvelope.data as PrimeDebtBucket[])
-            : [];
+          activityEnvelope.data as AllocationActivityBucket[];
+        const nextDebtBuckets = debtEnvelope.data as PrimeDebtBucket[];
 
         setActivityBuckets(
           [...nextActivityBuckets].sort(
@@ -696,20 +710,15 @@ function App() {
 
     return activityBuckets
       .map((bucket) => {
-        const bucketAmount = parseNumericValue(bucket.total_tx_amount) ?? Number.NaN;
-        if (!Number.isFinite(bucketAmount)) {
+        const bucketAmount = parseNumericValue(bucket.total_tx_amount);
+        if (bucketAmount === null) {
           return null;
         }
 
         runningTotal += bucketAmount;
 
         return {
-          label: new Date(bucket.bucket_start).toLocaleString([], {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
+          label: formatChartTimestampLabel(bucket.bucket_start),
           value: runningTotal,
         };
       })
@@ -720,37 +729,19 @@ function App() {
     () =>
       debtBuckets
         .map((bucket) => ({
-          label: new Date(bucket.bucket_start).toLocaleString([], {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
-          value:
-            bucket.debt_wad === null || bucket.debt_wad === undefined
-              ? Number.NaN
-              : (parseNumericValue(bucket.debt_wad) ?? Number.NaN) / 1e18,
+          label: formatChartTimestampLabel(bucket.bucket_start),
+          value: wadToUnits(bucket.debt_wad) ?? Number.NaN,
         }))
         .filter((point) => Number.isFinite(point.value)),
     [debtBuckets],
   );
 
   const chartFromLabel = timeRange.from_timestamp
-    ? new Date(timeRange.from_timestamp).toLocaleString([], {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
+    ? formatChartTimestampLabel(timeRange.from_timestamp)
     : 'Range start';
 
   const chartToLabel = timeRange.to_timestamp
-    ? new Date(timeRange.to_timestamp).toLocaleString([], {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      })
+    ? formatChartTimestampLabel(timeRange.to_timestamp)
     : 'Range end';
 
   const metricCharts = useMemo<MetricChartSpec[]>(() => {
@@ -776,53 +767,45 @@ function App() {
         ? null
         : parseNumericValue(capitalMetrics.total_capital);
 
-    const primeDebtValue =
-      primeDebtSnapshot?.debt_wad === undefined ||
-      primeDebtSnapshot?.debt_wad === null
-        ? null
-        : (parseNumericValue(primeDebtSnapshot.debt_wad) ?? Number.NaN) / 1e18;
+    const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
+
+    const activityVolumeData =
+      activityVolumeSeries.length > 0
+        ? activityVolumeSeries
+        : fallbackChart(allocationSummaryTotalUsd);
+
+    const primeDebtData =
+      primeDebtSeries.length > 0
+        ? primeDebtSeries
+        : fallbackChart(primeDebtValue);
 
     return [
       {
         key: 'allocation-activity-volume',
-        title: 'Allocation activity volume',
-        subtitle: 'Cumulative tx amount from allocation activity',
-        data:
-          activityVolumeSeries.length > 0
-            ? activityVolumeSeries
-            : fallbackChart(allocationSummaryTotalUsd),
+        data: activityVolumeData,
+        isFallback: activityVolumeSeries.length === 0,
         stroke: 'var(--colors-chart-series-primary, #60a5fa)',
-        fill: 'color-mix(in srgb, var(--colors-chart-area-primary, #60a5fa) 24%, transparent)',
         formatValue: (value: number) => formatUsdValue(value),
       },
       {
         key: 'risk-capital',
-        title: 'Risk capital trend',
-        subtitle: 'Current value repeated until historical series lands',
         data: fallbackChart(riskCapitalValue),
+        isFallback: true,
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
-        fill: 'color-mix(in srgb, var(--colors-chart-series-secondary, #14b8a6) 22%, transparent)',
         formatValue: (value: number) => formatUsdValue(value),
       },
       {
         key: 'total-capital',
-        title: 'Total capital trend',
-        subtitle: 'Current value repeated until historical series lands',
         data: fallbackChart(totalCapitalValue),
+        isFallback: true,
         stroke: 'var(--colors-chart-series-primary, #f59e0b)',
-        fill: 'color-mix(in srgb, #f59e0b 20%, transparent)',
         formatValue: (value: number) => formatUsdValue(value),
       },
       {
         key: 'prime-debt-exposure',
-        title: 'Prime debt exposure',
-        subtitle: 'Aggregated debt buckets in debt units',
-        data:
-          primeDebtSeries.length > 0
-            ? primeDebtSeries
-            : fallbackChart(primeDebtValue),
+        data: primeDebtData,
+        isFallback: primeDebtSeries.length === 0,
         stroke: '#f97316',
-        fill: 'color-mix(in srgb, #f97316 20%, transparent)',
         formatValue: (value: number) => `${value.toLocaleString()} DAI`,
       },
     ].filter((chart) => chart.data.length > 0);

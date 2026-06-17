@@ -477,6 +477,24 @@ export function formatRawWadLabel(
   return `Raw WAD ${truncateMiddle(String(value))}`;
 }
 
+// Float conversion for charting only; use formatWadValue for displayed amounts,
+// which keeps full precision via BigInt.
+export function wadToUnits(
+  value: number | string | null | undefined,
+): number | null {
+  const numeric = parseNumericValue(value, 'wadToUnits');
+  return numeric === null ? null : numeric / 1e18;
+}
+
+export function formatChartTimestampLabel(value: string): string {
+  return new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 /**
  * Get human-readable label for allocation category.
  */

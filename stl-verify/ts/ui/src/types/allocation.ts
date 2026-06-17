@@ -65,6 +65,9 @@ export type PrimeDebtEnvelope = components['schemas']['PrimeDebtEnvelope'];
 
 export type PrimeDebtBucket = components['schemas']['PrimeDebtBucketResponse'];
 
+export type TimeSeriesResolution =
+  components['schemas']['TimeSeriesResolution'];
+
 export type TokensResponse = NonNullable<
   paths['/v1/tokens']['get']['responses']['200']['content']['application/json']
 >;
