@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.prime_debt_repository import PostgresPrimeDebtRepository
+from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.api._validators import EthAddressParam
 from app.api.deps import get_engine
 from app.domain.entities.allocation import EthAddress
@@ -56,7 +56,7 @@ class PrimeDebtSnapshotResponse(BaseModel):
 
 
 async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> PrimeDebtService:
-    return PrimeDebtService(PostgresPrimeDebtRepository(engine))
+    return PrimeDebtService(PrimeDebtRepository(engine))
 
 
 @router.get(

@@ -9,7 +9,7 @@ from app.domain.entities.prime_debt import PrimeDebtSnapshot
 logger = logging.getLogger(__name__)
 
 
-class PostgresPrimeDebtRepository:
+class PrimeDebtRepository:
     """PostgreSQL adapter for prime debt snapshot queries."""
 
     def __init__(self, engine: AsyncEngine) -> None:

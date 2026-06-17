@@ -25,7 +25,7 @@ _EVENT_SELECT_COLUMNS = """
 """
 
 
-class PostgresProtocolEventRepository:
+class ProtocolEventRepository:
     """PostgreSQL adapter for protocol event and related snapshot queries."""
 
     def __init__(self, engine: AsyncEngine) -> None:

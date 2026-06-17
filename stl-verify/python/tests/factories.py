@@ -1,3 +1,5 @@
+"""Domain-entity factories for the unit test suite."""
+
 from decimal import Decimal
 from typing import Any
 
