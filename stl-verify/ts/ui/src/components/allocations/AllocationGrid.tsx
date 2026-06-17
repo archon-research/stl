@@ -186,7 +186,7 @@ function MetricCardTrend({
   const maxValue = Math.max(...values);
   const chartHeight = 236;
   const chartHostRef = useRef<HTMLDivElement | null>(null);
-  const [chartWidth, setChartWidth] = useState(0);
+  const [chartWidth, setChartWidth] = useState<number | null>(null);
 
   useEffect(() => {
     const host = chartHostRef.current;
@@ -195,7 +195,8 @@ function MetricCardTrend({
     }
 
     const updateWidth = () => {
-      setChartWidth(Math.max(Math.floor(host.clientWidth), 0));
+      const nextWidth = Math.floor(host.getBoundingClientRect().width);
+      setChartWidth(nextWidth > 0 ? nextWidth : null);
     };
 
     updateWidth();
@@ -213,11 +214,20 @@ function MetricCardTrend({
 
   return (
     <div ref={chartHostRef} className={css({ mt: '2', width: 'full' })}>
+      {chartWidth === null ? (
+        <div
+          className={css({
+            height: `${chartHeight}px`,
+            width: 'full',
+          })}
+        />
+      ) : null}
+      {chartWidth !== null ? (
       <XYChart
         theme={chartTheme}
-        width={Math.max(chartWidth, 280)}
+        width={chartWidth}
         height={chartHeight}
-        margin={{ top: 8, right: 12, bottom: 62, left: 84 }}
+        margin={{ top: 8, right: 16, bottom: 74, left: 56 }}
         xScale={{ type: 'band', paddingInner: 0.2 }}
         yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
       >
@@ -235,14 +245,14 @@ function MetricCardTrend({
         />
         <Axis
           orientation="bottom"
-          numTicks={5}
+          numTicks={4}
           hideTicks
           tickLabelProps={() => ({
             fontSize: 10,
-            textAnchor: 'start',
-            angle: 30,
-            dx: '0.15em',
-            dy: '0.35em',
+            textAnchor: 'end',
+            angle: -30,
+            dx: '-0.1em',
+            dy: '0.9em',
             fill: 'var(--colors-text-muted)',
           })}
         />
@@ -284,6 +294,7 @@ function MetricCardTrend({
           }}
         />
       </XYChart>
+      ) : null}
     </div>
   );
 }
@@ -884,7 +895,8 @@ export function AllocationGrid({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                md: 'repeat(auto-fit, minmax(22rem, 1fr))',
+                lg: 'repeat(2, minmax(0, 1fr))',
+                '2xl': 'repeat(4, minmax(0, 1fr))',
               },
               gap: '3',
             })}
@@ -910,7 +922,8 @@ export function AllocationGrid({
               display: 'grid',
               gridTemplateColumns: {
                 base: '1fr',
-                md: 'repeat(auto-fit, minmax(22rem, 1fr))',
+                lg: 'repeat(2, minmax(0, 1fr))',
+                '2xl': 'repeat(4, minmax(0, 1fr))',
               },
               gap: '3',
             })}
