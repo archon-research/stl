@@ -262,18 +262,19 @@ function MetricCardTrend({
     );
   }
 
-  if (chart.isFallback) {
-    return (
-      <p className={chartEmptyMessageClassName}>
-        Awaiting historical series for this range.
-      </p>
-    );
-  }
-
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
   const chartHeight = CHART_HEIGHT;
+
+  // A constant series (the current-value fallback) has a degenerate [v, v]
+  // domain whose area would fill the whole plot as a solid block; pad it so the
+  // line sits centered, and drop the area fill so it reads as a flat baseline.
+  const isFlat = minValue === maxValue;
+  const flatPad = Math.max(Math.abs(minValue) * 0.5, 1);
+  const yDomain: [number, number] = isFlat
+    ? [minValue - flatPad, maxValue + flatPad]
+    : [minValue, maxValue];
 
   return (
     <div
@@ -293,9 +294,9 @@ function MetricCardTrend({
           theme={chartTheme}
           width={chartWidth}
           height={chartHeight}
-          margin={{ top: 8, right: 16, bottom: 74, left: 56 }}
+          margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
           xScale={{ type: 'band', paddingInner: 0.2 }}
-          yScale={{ type: 'linear', domain: [minValue, maxValue], nice: true }}
+          yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
         >
           <Grid columns={false} numTicks={3} />
           <Axis
@@ -314,26 +315,26 @@ function MetricCardTrend({
             orientation="bottom"
             numTicks={4}
             hideTicks
-            tickLabelProps={(_value, index) => ({
+            tickLabelProps={() => ({
               fontSize: 10,
-              // The first tick sits at the y-axis, so anchor its rotated label
-              // to the start (extends right) to avoid clipping at the left edge.
-              textAnchor: index === 0 ? 'start' : 'end',
-              angle: -30,
-              dx: index === 0 ? '0.1em' : '-0.1em',
-              dy: '0.9em',
+              textAnchor: 'end',
+              angle: -35,
+              dx: '-0.25em',
+              dy: '0.25em',
               fill: 'var(--colors-text-muted)',
             })}
           />
-          <AreaSeries
-            dataKey={`${chart.key}-area`}
-            data={chart.data as ChartDatum[]}
-            xAccessor={(d: ChartDatum) => d.label}
-            yAccessor={(d: ChartDatum) => d.value}
-            fill={chart.stroke}
-            fillOpacity={0.18}
-            lineProps={{ stroke: 'none' }}
-          />
+          {chart.isFallback ? null : (
+            <AreaSeries
+              dataKey={`${chart.key}-area`}
+              data={chart.data as ChartDatum[]}
+              xAccessor={(d: ChartDatum) => d.label}
+              yAccessor={(d: ChartDatum) => d.value}
+              fill={chart.stroke}
+              fillOpacity={0.18}
+              lineProps={{ stroke: 'none' }}
+            />
+          )}
           <LineSeries
             dataKey={chart.key}
             data={chart.data as ChartDatum[]}
