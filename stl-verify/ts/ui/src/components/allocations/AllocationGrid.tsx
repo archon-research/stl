@@ -106,11 +106,6 @@ function findMetricChart(
   return charts.find((chart) => chart.key === key) ?? null;
 }
 
-const compactNumberFormatter = new Intl.NumberFormat('en-US', {
-  notation: 'compact',
-  maximumFractionDigits: 1,
-});
-
 const chartTooltipSurfaceClassName = css({
   borderColor: 'border.subtle',
   borderStyle: 'solid',
@@ -142,10 +137,7 @@ function formatYAxisTick(value: unknown, chart: MetricChartSpec): string {
     return '';
   }
 
-  if (chart.key === 'prime-debt-exposure') {
-    return `${compactNumberFormatter.format(numericValue)} DAI`;
-  }
-
+  // Axes and tooltips share the chart's compact formatter for consistency.
   return chart.formatValue(numericValue);
 }
 

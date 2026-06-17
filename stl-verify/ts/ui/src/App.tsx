@@ -21,13 +21,14 @@ import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import {
   DEFAULT_RANGE_PRESET,
   defaultTimeRange,
+  isRangePreset,
+  presetToRange,
   type RangePreset,
   type TimeRange,
 } from './components/shared/RangePicker';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import {
-  getAllocationActivityEnvelope,
   getAllocations,
   getCapitalMetrics,
   getCapitalMetricsEnvelope,
@@ -47,6 +48,8 @@ import {
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
   formatChartTimestampLabel,
+  formatCompactNumber,
+  formatCompactUsd,
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
@@ -65,7 +68,6 @@ import {
 } from './lib/url-params';
 import type {
   Allocation,
-  AllocationActivityBucket,
   CapitalMetrics,
   CapitalMetricsBucket,
   DataSource,
@@ -90,6 +92,9 @@ function getResolutionForRange(
     '24h': 'PT15M',
     '7d': 'PT1H',
     '30d': 'PT6H',
+    '90d': 'P1D',
+    '180d': 'P1D',
+    '365d': 'P1D',
   };
 
   if (preset !== 'custom') {
@@ -159,9 +164,6 @@ function App() {
   const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
     string | null
   >(null);
-  const [activityBuckets, setActivityBuckets] = useState<
-    AllocationActivityBucket[]
-  >([]);
   const [debtBuckets, setDebtBuckets] = useState<PrimeDebtBucket[]>([]);
   const [capitalMetricsBuckets, setCapitalMetricsBuckets] = useState<
     CapitalMetricsBucket[]
@@ -191,14 +193,35 @@ function App() {
     useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
 
-  // Shared range state: drives ActivityFeed and TopBar RangePicker in sync.
-  const [rangePreset, setRangePreset] =
-    useState<RangePreset>(DEFAULT_RANGE_PRESET);
-  const [timeRange, setTimeRange] = useState<TimeRange>(defaultTimeRange);
+  // Range selection persisted in the URL so it survives reloads and is
+  // shareable: a preset key, plus from/to timestamps for custom ranges.
+  const [rangeParam, setRangeParam] = useUrlParam(PARAMS.range);
+  const [rangeFromParam, setRangeFromParam] = useUrlParam(PARAMS.rangeFrom);
+  const [rangeToParam, setRangeToParam] = useUrlParam(PARAMS.rangeTo);
+
+  const rangePreset: RangePreset = isRangePreset(rangeParam)
+    ? rangeParam
+    : DEFAULT_RANGE_PRESET;
+
+  const timeRange = useMemo<TimeRange>(() => {
+    if (rangePreset === 'custom') {
+      return rangeFromParam && rangeToParam
+        ? { from_timestamp: rangeFromParam, to_timestamp: rangeToParam }
+        : defaultTimeRange();
+    }
+    return presetToRange(rangePreset);
+  }, [rangePreset, rangeFromParam, rangeToParam]);
 
   const handleRangeChange = (preset: RangePreset, range: TimeRange) => {
-    setRangePreset(preset);
-    setTimeRange(range);
+    // The default preset stays out of the URL to keep it clean.
+    setRangeParam(preset === DEFAULT_RANGE_PRESET ? null : preset);
+    if (preset === 'custom') {
+      setRangeFromParam(range.from_timestamp ?? null);
+      setRangeToParam(range.to_timestamp ?? null);
+    } else {
+      setRangeFromParam(null);
+      setRangeToParam(null);
+    }
   };
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
@@ -501,7 +524,6 @@ function App() {
 
   useEffect(() => {
     if (!selectedPrimeId) {
-      setActivityBuckets([]);
       setDebtBuckets([]);
       setCapitalMetricsBuckets([]);
       setChartsErrorMessage(null);
@@ -513,45 +535,28 @@ function App() {
     setIsChartsLoading(true);
     setChartsErrorMessage(null);
 
+    // limit 500 (the per-prime max) so the longest ranges (e.g. 365d at P1D)
+    // return every bucket rather than being truncated to the default page.
     const bucketFilters = {
       from_timestamp: timeRange.from_timestamp,
       to_timestamp: timeRange.to_timestamp,
       resolution: chartResolution,
       aggregate: true,
+      limit: 500,
     };
 
-    void Promise.all([
-      getAllocationActivityEnvelope(
-        { prime_id: selectedPrimeId, ...bucketFilters },
-        controller.signal,
-      ),
-      getPrimeDebtEnvelope(selectedPrimeId, bucketFilters, controller.signal),
-    ])
-      .then(([activityEnvelope, debtEnvelope]) => {
+    void getPrimeDebtEnvelope(selectedPrimeId, bucketFilters, controller.signal)
+      .then((debtEnvelope) => {
         // We request aggregate=true, so a non-aggregated envelope is a backend
         // contract violation, not "no data" — surface it instead of silently
         // rendering an empty chart.
-        if (activityEnvelope.mode !== 'aggregated') {
-          throw new Error(
-            `Activity envelope returned unexpected mode "${activityEnvelope.mode}" (expected "aggregated")`,
-          );
-        }
         if (debtEnvelope.mode !== 'aggregated') {
           throw new Error(
             `Prime debt envelope returned unexpected mode "${debtEnvelope.mode}" (expected "aggregated")`,
           );
         }
 
-        const nextActivityBuckets =
-          activityEnvelope.data as AllocationActivityBucket[];
         const nextDebtBuckets = debtEnvelope.data as PrimeDebtBucket[];
-
-        setActivityBuckets(
-          [...nextActivityBuckets].sort(
-            (a, b) =>
-              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
-          ),
-        );
         setDebtBuckets(
           [...nextDebtBuckets].sort(
             (a, b) =>
@@ -569,7 +574,6 @@ function App() {
           primeId: selectedPrimeId,
           chartResolution,
         });
-        setActivityBuckets([]);
         setDebtBuckets([]);
         setChartsErrorMessage(toErrorMessage(error));
       })
@@ -738,26 +742,6 @@ function App() {
     [searchFilteredAllocations],
   );
 
-  const activityVolumeSeries = useMemo<ChartDatum[]>(() => {
-    let runningTotal = 0;
-
-    return activityBuckets
-      .map((bucket) => {
-        const bucketAmount = parseNumericValue(bucket.total_tx_amount);
-        if (bucketAmount === null) {
-          return null;
-        }
-
-        runningTotal += bucketAmount;
-
-        return {
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: runningTotal,
-        };
-      })
-      .filter((point): point is ChartDatum => point !== null);
-  }, [activityBuckets]);
-
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
       debtBuckets
@@ -824,11 +808,6 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
-    const activityVolumeData =
-      activityVolumeSeries.length > 0
-        ? activityVolumeSeries
-        : fallbackChart(allocationSummaryTotalUsd);
-
     const primeDebtData =
       primeDebtSeries.length > 0
         ? primeDebtSeries
@@ -846,36 +825,38 @@ function App() {
 
     return [
       {
+        // No allocation-balance time series exists, so this shows the current
+        // total as a flat line rather than a cumulative activity-volume sum
+        // (which climbed unbounded and never matched the headline total).
         key: 'allocation-activity-volume',
-        data: activityVolumeData,
-        isFallback: activityVolumeSeries.length === 0,
+        data: fallbackChart(allocationSummaryTotalUsd),
+        isFallback: true,
         stroke: 'var(--colors-chart-series-primary, #60a5fa)',
-        formatValue: (value: number) => formatUsdValue(value),
+        formatValue: formatCompactUsd,
       },
       {
         key: 'risk-capital',
         data: riskCapitalData,
         isFallback: riskCapitalSeries.length === 0,
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
-        formatValue: (value: number) => formatUsdValue(value),
+        formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
         data: totalCapitalData,
         isFallback: totalCapitalSeries.length === 0,
         stroke: 'var(--colors-chart-series-primary, #f59e0b)',
-        formatValue: (value: number) => formatUsdValue(value),
+        formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
         data: primeDebtData,
         isFallback: primeDebtSeries.length === 0,
         stroke: '#f97316',
-        formatValue: (value: number) => `${value.toLocaleString()} DAI`,
+        formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
     ].filter((chart) => chart.data.length > 0);
   }, [
-    activityVolumeSeries,
     allocationSummaryTotalUsd,
     capitalMetrics?.risk_capital,
     capitalMetrics?.total_capital,

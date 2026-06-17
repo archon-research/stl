@@ -28,6 +28,20 @@ const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
   notation: 'compact',
 });
 
+// Compact with 2 significant digits, for chart axes and tooltips (e.g. "1.5B",
+// "36M"). Significant digits keep the precision consistent across magnitudes.
+const COMPACT_SIGNIFICANT_FORMAT = new Intl.NumberFormat('en-US', {
+  maximumSignificantDigits: 2,
+  notation: 'compact',
+});
+
+const COMPACT_SIGNIFICANT_CURRENCY_FORMAT = new Intl.NumberFormat('en-US', {
+  currency: 'USD',
+  maximumSignificantDigits: 2,
+  notation: 'compact',
+  style: 'currency',
+});
+
 const TOKEN_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
 });
@@ -307,6 +321,23 @@ export function formatUsdValue(
   return Math.abs(numeric) >= 1_000_000
     ? COMPACT_CURRENCY_FORMAT.format(numeric)
     : CURRENCY_FORMAT.format(numeric);
+}
+
+// Compact, 2-significant-digit formatters for chart axes and tooltips.
+export function formatCompactUsd(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null
+    ? '—'
+    : COMPACT_SIGNIFICANT_CURRENCY_FORMAT.format(numeric);
+}
+
+export function formatCompactNumber(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null ? '—' : COMPACT_SIGNIFICANT_FORMAT.format(numeric);
 }
 
 export function formatPercentValue(

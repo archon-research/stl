@@ -11,7 +11,16 @@ import {
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-export type RangePreset = '1h' | '6h' | '24h' | '7d' | '30d' | 'custom';
+export type RangePreset =
+  | '1h'
+  | '6h'
+  | '24h'
+  | '7d'
+  | '30d'
+  | '90d'
+  | '180d'
+  | '365d'
+  | 'custom';
 
 export type TimeRange = {
   from_timestamp: string | undefined;
@@ -25,11 +34,14 @@ export type RangePickerProps = {
 };
 
 const PRESETS: { label: string; value: RangePreset }[] = [
-  { label: '1h', value: '1h' },
-  { label: '6h', value: '6h' },
-  { label: '24h', value: '24h' },
-  { label: '7d', value: '7d' },
-  { label: '30d', value: '30d' },
+  { label: '1 hour', value: '1h' },
+  { label: '6 hours', value: '6h' },
+  { label: '24 hours', value: '24h' },
+  { label: '7 days', value: '7d' },
+  { label: '30 days', value: '30d' },
+  { label: '90 days', value: '90d' },
+  { label: '180 days', value: '180d' },
+  { label: '365 days', value: '365d' },
   { label: 'Custom', value: 'custom' },
 ];
 
@@ -38,16 +50,29 @@ const PRESETS: { label: string; value: RangePreset }[] = [
 // user can choose a different range.
 const CUSTOM_ACTIVE_VALUE = 'custom-active';
 
+export function isRangePreset(
+  value: string | null | undefined,
+): value is RangePreset {
+  return (
+    value != null &&
+    PRESETS.some((presetOption) => presetOption.value === value)
+  );
+}
+
 export function presetToRange(
   preset: Exclude<RangePreset, 'custom'>,
 ): TimeRange {
   const now = new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
   const offsetMs: Record<typeof preset, number> = {
     '1h': 60 * 60 * 1000,
     '6h': 6 * 60 * 60 * 1000,
-    '24h': 24 * 60 * 60 * 1000,
-    '7d': 7 * 24 * 60 * 60 * 1000,
-    '30d': 30 * 24 * 60 * 60 * 1000,
+    '24h': dayMs,
+    '7d': 7 * dayMs,
+    '30d': 30 * dayMs,
+    '90d': 90 * dayMs,
+    '180d': 180 * dayMs,
+    '365d': 365 * dayMs,
   };
   return {
     from_timestamp: new Date(now.getTime() - offsetMs[preset]).toISOString(),
@@ -55,10 +80,10 @@ export function presetToRange(
   };
 }
 
-export const DEFAULT_RANGE_PRESET: RangePreset = '24h';
+export const DEFAULT_RANGE_PRESET = '30d' as const;
 
 export function defaultTimeRange(): TimeRange {
-  return presetToRange('24h');
+  return presetToRange(DEFAULT_RANGE_PRESET);
 }
 
 // Human-readable span of a range, e.g. "1 day", "1 day 6 hours", "30 minutes".
