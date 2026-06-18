@@ -5,7 +5,7 @@ from app.domain.entities.protocol_event import ProtocolEvent
 from app.domain.entities.time_series_bucket import ProtocolEventBucket
 
 
-class ProtocolEventRepository(Protocol):
+class ProtocolEventRepositoryPort(Protocol):
     """Repository interface for protocol event queries."""
 
     async def list_events(

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
-from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
@@ -165,7 +165,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            allocation_repo = PostgresAllocationRepository(engine)
+            allocation_repo = AllocationRepository(engine)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             receipt_token_repo = ReceiptTokenRepository(engine)
