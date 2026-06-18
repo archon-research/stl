@@ -174,6 +174,14 @@ export async function getAllocationActivity(
   signal?: AbortSignal,
 ): Promise<AllocationActivityResponse> {
   const envelope = await getAllocationActivityEnvelope(filters, signal);
+  // This helper returns raw rows; an aggregated envelope (aggregate=true) holds
+  // bucket rows of an incompatible shape, so surface the misuse rather than
+  // handing back mis-typed data.
+  if (envelope.mode !== 'raw') {
+    throw new Error(
+      `GET /v1/allocations/activity returned "${envelope.mode}" for a raw activity request`,
+    );
+  }
   return (envelope.data ?? []) as AllocationActivityResponse;
 }
 
@@ -323,6 +331,13 @@ export async function getPrimeDebtSnapshots(
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot[]> {
   const envelope = await getPrimeDebtEnvelope(primeId, filters, signal);
+  // Raw snapshots only; an aggregated envelope holds bucket rows, so reject it
+  // rather than returning mis-typed data.
+  if (envelope.mode !== 'raw') {
+    throw new Error(
+      `GET /v1/primes/{prime_id}/debt returned "${envelope.mode}" for a snapshot request`,
+    );
+  }
   return (envelope.data ?? []) as PrimeDebtSnapshot[];
 }
 

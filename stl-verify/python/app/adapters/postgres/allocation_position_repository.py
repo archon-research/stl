@@ -892,6 +892,8 @@ direct_token_price AS (
     -- token set and computed ONCE per token, mirroring receipt_token_price.
     -- No protocol context here (the token is held bare), so the latest price
     -- across any oracle is used, with oracle_id breaking ties deterministically.
+    -- The token set mirrors the outer query's prime/chain/time-window filters so
+    -- an all-primes ("no prime_hex") query does not scan every token ever held.
     SELECT
         ft.token_id,
         (
@@ -907,7 +909,10 @@ direct_token_price AS (
         FROM allocation_position ap
         WHERE (CAST(:prime_hex AS TEXT) IS NULL
                OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+          AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
           AND ap.token_id IS NOT NULL
+          AND ap.created_at IS NOT NULL
+          {required_time_window_clause("ap.created_at")}
     ) AS ft
 )
 SELECT

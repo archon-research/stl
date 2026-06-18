@@ -199,9 +199,16 @@ function App() {
 
   const timeRange = useMemo<TimeRange>(() => {
     if (rangePreset === 'custom') {
-      return rangeFromParam && rangeToParam
-        ? { from_timestamp: rangeFromParam, to_timestamp: rangeToParam }
-        : defaultTimeRange();
+      // A hand-edited URL can carry unparsable or reversed custom timestamps;
+      // fall back to the default rather than sending a bad range downstream.
+      if (rangeFromParam && rangeToParam) {
+        const fromMs = new Date(rangeFromParam).getTime();
+        const toMs = new Date(rangeToParam).getTime();
+        if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs) {
+          return { from_timestamp: rangeFromParam, to_timestamp: rangeToParam };
+        }
+      }
+      return defaultTimeRange();
     }
     return presetToRange(rangePreset);
   }, [rangePreset, rangeFromParam, rangeToParam]);
@@ -659,8 +666,14 @@ function App() {
   // flow. The newest bucket therefore lands exactly on the current total.
   // Flow-based, so it captures deposits/withdrawals but not price moves;
   // clamped at 0 since a negative balance is meaningless.
+  //
+  // This is only valid when the window ends at "now" so the newest bucket truly
+  // is the current total. Presets always end now; a custom range is a fixed
+  // window whose end drifts into the past, so anchoring its newest (past) bucket
+  // at the current total would misstate every point. Suppress it for custom
+  // ranges until a range-end anchor is available.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
-    if (activityBuckets.length === 0) {
+    if (rangePreset === 'custom' || activityBuckets.length === 0) {
       return [];
     }
 
@@ -675,7 +688,7 @@ function App() {
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
     return series;
-  }, [activityBuckets, primeTotalAllocationUsd]);
+  }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>

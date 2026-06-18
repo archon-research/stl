@@ -1006,7 +1006,9 @@ export function AllocationGrid({
                     <MetricCardTrend
                       chart={allocationActivityChart}
                       isLoading={isChartsLoading}
-                      errorMessage={chartsErrorMessage}
+                      // chartsErrorMessage tracks the primary (prime-debt) series
+                      // only; supplementary cards degrade to their own fallback.
+                      errorMessage={null}
                     />
                   </div>
                 }
@@ -1039,7 +1041,7 @@ export function AllocationGrid({
                       <MetricCardTrend
                         chart={riskCapitalChart}
                         isLoading={isChartsLoading}
-                        errorMessage={chartsErrorMessage}
+                        errorMessage={null}
                       />
                     </div>
                   }
@@ -1064,7 +1066,7 @@ export function AllocationGrid({
                     <MetricCardTrend
                       chart={totalCapitalChart}
                       isLoading={isChartsLoading}
-                      errorMessage={chartsErrorMessage}
+                      errorMessage={null}
                     />
                   </div>
                 }

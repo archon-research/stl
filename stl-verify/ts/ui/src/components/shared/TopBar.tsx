@@ -22,7 +22,7 @@ type TopBarProps = {
   selectedNetwork: string | null;
   selectedProtocol: string | null;
   selectedView: 'allocation' | 'activities';
-  // Range picker (shown in Activities view only)
+  // Range picker (rendered whenever all three props are provided)
   rangePreset?: RangePreset;
   timeRange?: TimeRange;
   onRangeChange?: (preset: RangePreset, range: TimeRange) => void;

@@ -80,7 +80,11 @@ export function usePrimeChartData(
       limit: 500,
     };
 
-    void getPrimeDebtEnvelope(primeId, bucketFilters, controller.signal)
+    const debtRequest = getPrimeDebtEnvelope(
+      primeId,
+      bucketFilters,
+      controller.signal,
+    )
       .then((debtEnvelope) => {
         // We request aggregate=true, so a non-aggregated envelope is a backend
         // contract violation, not "no data" — surface it instead of silently
@@ -107,11 +111,6 @@ export function usePrimeChartData(
         });
         setDebtBuckets([]);
         setErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsLoading(false);
-        }
       });
 
     // Supplementary series degrade independently: on failure the card falls
@@ -121,8 +120,8 @@ export function usePrimeChartData(
       buckets: Promise<T[]>,
       setBuckets: (next: T[]) => void,
       unavailableMessage: string,
-    ): void => {
-      void buckets
+    ): Promise<void> =>
+      buckets
         .then((next) => setBuckets(sortByBucketStart(next)))
         .catch((error: unknown) => {
           if (isAbortError(error)) {
@@ -132,11 +131,10 @@ export function usePrimeChartData(
           logging.warn(unavailableMessage, { error, primeId });
           setBuckets([]);
         });
-    };
 
     // Allocation activity drives the reconstructed total-allocation balance
     // series. A non-aggregated envelope means "no data", so coerce to empty.
-    loadSupplementarySeries(
+    const activityRequest = loadSupplementarySeries(
       getAllocationActivityEnvelope(
         { prime_id: primeId, ...bucketFilters },
         controller.signal,
@@ -151,13 +149,26 @@ export function usePrimeChartData(
 
     // Total-capital history drives the total-capital chart from the on-chain
     // SubProxy treasury balance.
-    loadSupplementarySeries(
+    const capitalRequest = loadSupplementarySeries(
       getTotalCapitalEnvelope(primeId, bucketFilters, controller.signal).then(
         (capitalEnvelope) => capitalEnvelope.data as TotalCapitalBucket[],
       ),
       setTotalCapitalBuckets,
       'Total capital history unavailable; using current value',
     );
+
+    // Clear loading only once all three series settle, so a card never flashes
+    // its empty/fallback state while a slower supplementary request is still in
+    // flight.
+    void Promise.allSettled([
+      debtRequest,
+      activityRequest,
+      capitalRequest,
+    ]).then(() => {
+      if (!controller.signal.aborted) {
+        setIsLoading(false);
+      }
+    });
 
     return () => controller.abort();
   }, [primeId, fromTimestamp, toTimestamp, resolution]);
