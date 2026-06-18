@@ -392,3 +392,36 @@ func TestProcessMessages_CancelsSlowHandlerAndKeepsMessage(t *testing.T) {
 		t.Errorf("expected message kept (not deleted) on handler timeout, got deletes: %v", consumer.deletedHandles)
 	}
 }
+
+// TestProcessMessages_LogsWhenHandlerIgnoresDeadline covers a handler that does
+// not honour its context: it runs past the budget but returns nil. The work
+// completed, so the message is still deleted, but the budget breach is logged
+// so the misbehaving handler is visible.
+func TestProcessMessages_LogsWhenHandlerIgnoresDeadline(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	handler := func(_ context.Context, _ outbound.BlockEvent) error {
+		time.Sleep(40 * time.Millisecond) // ignores ctx, runs past the budget
+		return nil
+	}
+
+	cfg := testConfig(consumer)
+	cfg.Logger = logger
+	cfg.HandlerTimeout = 10 * time.Millisecond
+
+	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(consumer.deletedHandles) != 1 {
+		t.Errorf("expected message deleted when handler returns nil, got deletes: %v", consumer.deletedHandles)
+	}
+	if !strings.Contains(buf.String(), "exceeding its timeout budget") {
+		t.Errorf("expected budget-exceeded warning, got logs: %q", buf.String())
+	}
+}

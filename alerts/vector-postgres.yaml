@@ -69,3 +69,4 @@ groups:
             precondition for the indexer lock-convoy stall. Terminate the
             offending backend (pg_terminate_backend) once identified, and
             confirm idle_in_transaction_session_timeout is set on its role.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-postgres.md#postgreslongidleintransactioncritical

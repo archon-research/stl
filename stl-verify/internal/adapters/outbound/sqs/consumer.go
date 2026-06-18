@@ -32,8 +32,9 @@ type Config struct {
 	WaitTimeSeconds int32
 
 	// VisibilityTimeout is how long a message is hidden from other consumers
-	// after being received. Should exceed the maximum expected processing time.
-	// Defaults to 30 seconds.
+	// after being received. It must exceed the worker per-message handler budget
+	// so a message is not redelivered while it is still being processed.
+	// Defaults to 180 seconds (see ConfigDefaults).
 	VisibilityTimeout int32
 
 	// BaseEndpoint is an optional override for the SQS endpoint.
@@ -45,9 +46,9 @@ type Config struct {
 func ConfigDefaults() Config {
 	return Config{
 		WaitTimeSeconds: 20,
-		// Must exceed the worker per-message handler budget (sqsutil
-		// defaultHandlerTimeout = 120s) so a message is not redelivered while
-		// its handler is still running.
+		// Must exceed the worker per-message handler budget
+		// (sqsutil.DefaultHandlerTimeout = 120s) so a message is not redelivered
+		// while its handler is still running.
 		VisibilityTimeout: 180,
 	}
 }

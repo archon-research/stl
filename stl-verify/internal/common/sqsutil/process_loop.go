@@ -163,6 +163,7 @@ func ProcessMessages(
 		// and SQS redelivers it.
 		hctx, cancel := context.WithTimeout(ctx, cfg.handlerTimeout())
 		err := handler(hctx, event)
+		budgetExceeded := errors.Is(hctx.Err(), context.DeadlineExceeded)
 		cancel()
 		if err != nil {
 			cfg.Logger.Error("failed to process message",
@@ -170,6 +171,13 @@ func ProcessMessages(
 				"error", err)
 			errs = append(errs, err)
 			continue
+		}
+		if budgetExceeded {
+			// Handler returned nil but ran past its budget — it ignored ctx
+			// cancellation. The work completed, so we still delete; log it so a
+			// handler that does not honour its deadline is visible.
+			cfg.Logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
+				"messageID", msg.MessageID)
 		}
 
 		if deleteErr := cfg.Consumer.DeleteMessage(ctx, msg.ReceiptHandle); deleteErr != nil {
