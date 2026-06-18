@@ -61,18 +61,18 @@ class PrimeDebtBucket:
 
 
 @dataclass(frozen=True)
-class CapitalMetricsBucket:
-    """Per-prime capital metrics for a single time bucket (LOCF gap-filled).
+class TotalCapitalBucket:
+    """A prime's total capital (treasury) for a single time bucket (LOCF gap-filled).
 
-    Each value is the last observation carried forward into the bucket, or
-    ``None`` for leading buckets before the first observation. ``capital_buffer``
-    is derived as ``max(total_capital - first_loss_capital, 0)`` and is ``None``
-    when either input is missing.
+    ``total_capital_usd`` is the last observed SubProxy treasury USDS balance
+    carried forward into the bucket, or ``None`` for leading buckets before the
+    first observation. USDS is dollar-pegged, so the raw balance is the USD
+    figure (it matches the upstream Star ``total_capital`` exactly).
     """
 
     bucket_start: datetime
-    risk_capital: Decimal | None
-    total_capital: Decimal | None
-    first_loss_capital: Decimal | None
-    capital_buffer: Decimal | None
-    risk_to_capital_ratio: Decimal | None
+    total_capital_usd: Decimal | None
+
+    def __post_init__(self) -> None:
+        if self.total_capital_usd is not None and self.total_capital_usd < 0:
+            raise ValueError(f"total_capital_usd must be non-negative, got {self.total_capital_usd}")

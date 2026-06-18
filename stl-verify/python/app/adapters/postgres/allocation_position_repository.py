@@ -5,7 +5,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from opentelemetry import trace
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._time_window import (
@@ -22,8 +22,12 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
-from app.domain.entities.time_series_bucket import AllocationActivityBucket
-from app.domain.proxy_kind import ProxyKind, classify_proxy
+from app.domain.entities.time_series_bucket import AllocationActivityBucket, TotalCapitalBucket
+from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
+
+# USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
+# total capital; this isolates that token from any other SubProxy holding.
+_USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 
 logger = logging.getLogger(__name__)
 
@@ -500,6 +504,97 @@ class AllocationRepository:
                 event_count=row.event_count,
                 total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
                 net_flow_usd=_safe_decimal(row.net_flow_usd, "net_flow_usd", "aggregate"),
+            )
+            for row in rows
+        ]
+
+    async def list_total_capital_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[TotalCapitalBucket]:
+        """Return the last observed treasury USDS balance per time bucket (LOCF).
+
+        A prime's total capital is the USDS held in its SubProxy wallet, which
+        shares the prime's ``prime_id`` but a distinct ``proxy_address``. The
+        prime is identified by its ALM ``proxy_address``; the matching SubProxy
+        is the one sharing that ``prime_id``. USDS is dollar-pegged, so the raw
+        balance is the USD figure. Buckets with no observation carry the prior
+        value forward; leading buckets before the first observation are ``None``.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text(
+            """
+            WITH target AS (
+                SELECT prime_id
+                FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+            SELECT
+                time_bucket_gapfill(
+                    make_interval(secs => :bucket_seconds),
+                    ap.created_at,
+                    CAST(:from_timestamp AS TIMESTAMPTZ),
+                    CAST(:to_timestamp AS TIMESTAMPTZ)
+                ) AS bucket_start,
+                locf(last(ap.balance, ap.created_at)) AS total_capital_usd
+            FROM allocation_position ap
+            JOIN token t ON t.id = ap.token_id
+            WHERE ap.prime_id = (SELECT prime_id FROM target)
+              AND ap.proxy_address IN :subproxy_addrs
+              AND t.address = decode(:usds_hex, 'hex')
+            """
+            + required_time_window_clause("ap.created_at")
+            + """
+            GROUP BY bucket_start
+            ORDER BY bucket_start DESC
+            LIMIT :limit
+            """
+        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+
+        params = {
+            "address_hex": prime_address.hex,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "bucket_seconds": bucket_seconds,
+            "subproxy_addrs": subproxies,
+            "usds_hex": _USDS_ADDRESS_HEX,
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, params)
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch total capital buckets from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching total capital buckets for prime {prime_address}: {exc}"
+            ) from exc
+
+        return [
+            TotalCapitalBucket(
+                bucket_start=row.bucket_start,
+                total_capital_usd=(
+                    _safe_decimal(row.total_capital_usd, "total_capital_usd", "aggregate")
+                    if row.total_capital_usd is not None
+                    else None
+                ),
             )
             for row in rows
         ]

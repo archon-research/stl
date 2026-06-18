@@ -64,9 +64,10 @@ _FLOW_TX_SWEEP = "1c" * 32
 # All three events fall in the single 00:00 PT1H bucket.
 _FLOW_BUCKET_TS = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
 
-# Capital-metrics LOCF fixture: a dedicated prime with two snapshots two hours
-# apart, so gap-fill carry-forward and the leading-gap null are observable.
-_CAP_PRIME_VAULT_HEX = "ca" * 20
+# Total-capital LOCF fixture: the Spark SubProxy holds treasury USDS, observed
+# at two timestamps two hours apart, so gap-fill carry-forward and the
+# leading-gap null are observable.
+_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 _CAP_SNAP1_TS = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
 _CAP_SNAP2_TS = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
 
@@ -232,28 +233,27 @@ async def _seed(db_url: str) -> None:
                     _FLOW_BUCKET_TS,
                 )
 
-            # Capital-metrics LOCF fixture: two snapshots two hours apart so the
-            # gap bucket between them carries the earlier value forward and a
-            # bucket before the first snapshot gap-fills to null.
-            cap_prime_id = await conn.fetchval(
-                "INSERT INTO prime (name, vault_address) VALUES ('cap_test', $1) RETURNING id",
-                bytes.fromhex(_CAP_PRIME_VAULT_HEX),
-            )
-            for synced_at, risk, total, first_loss, ratio in [
-                (_CAP_SNAP1_TS, 1_000_000, 2_000_000, 1_500_000, Decimal("0.80")),
-                (_CAP_SNAP2_TS, 1_200_000, 2_100_000, 1_600_000, Decimal("0.85")),
+            # Total-capital LOCF fixture: the Spark SubProxy holds treasury USDS,
+            # observed at two timestamps two hours apart (and sharing spark's
+            # prime_id), so the gap bucket carries the earlier value forward and a
+            # bucket before the first observation gap-fills to null.
+            usds_id = await insert_token(conn, "USDS", 18, bytes.fromhex(_USDS_HEX))
+            for created_at, balance, tx, block in [
+                (_CAP_SNAP1_TS, 2_000_000, "a1" * 32, 6000),
+                (_CAP_SNAP2_TS, 2_100_000, "a2" * 32, 6001),
             ]:
                 await conn.execute(
-                    "INSERT INTO capital_metrics_snapshot "
-                    "(prime_id, risk_capital, total_capital, first_loss_capital, "
-                    "risk_to_capital_ratio, benchmark_source, synced_at) "
-                    "VALUES ($1, $2, $3, $4, $5, 'star-test', $6)",
-                    cap_prime_id,
-                    Decimal(risk),
-                    Decimal(total),
-                    Decimal(first_loss),
-                    ratio,
-                    synced_at,
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction, created_at) "
+                    "VALUES (1, $1, $2, $3, $4, $5, 0, $6, 0, $4, 'in', $7)",
+                    usds_id,
+                    spark_id,
+                    bytes.fromhex(_SPARK_SUB_PROXY_HEX),
+                    Decimal(balance),
+                    block,
+                    bytes.fromhex(tx),
+                    created_at,
                 )
     finally:
         await conn.close()
@@ -502,15 +502,17 @@ def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestCli
 
 
 # ---------------------------------------------------------------------------
-# Capital-metrics aggregation: time_bucket_gapfill + locf. A bucket with no
-# snapshot carries the previous value forward; buckets before the first
-# snapshot gap-fill to null. capital_buffer is derived from the carried values.
+# Total-capital aggregation: time_bucket_gapfill + locf over the SubProxy
+# treasury USDS balance. A bucket with no observation carries the previous
+# value forward; buckets before the first observation gap-fill to null. The
+# prime is addressed by its ALM proxy; the SubProxy is matched by shared
+# prime_id.
 # ---------------------------------------------------------------------------
 
 
-def test_capital_metrics_buckets_locf_carry_forward_and_leading_gap(client: TestClient) -> None:
+def test_total_capital_buckets_locf_carry_forward_and_leading_gap(client: TestClient) -> None:
     response = client.get(
-        f"/v1/primes/0x{_CAP_PRIME_VAULT_HEX}/capital-metrics",
+        f"/v1/primes/0x{_SPARK_PROXY_HEX}/total-capital",
         params={
             "from_timestamp": "2025-12-31T23:00:00Z",
             "to_timestamp": "2026-01-01T03:30:00Z",
@@ -525,19 +527,39 @@ def test_capital_metrics_buckets_locf_carry_forward_and_leading_gap(client: Test
     by_start = {datetime.fromisoformat(b["bucket_start"]): b for b in envelope["data"]}
 
     leading = by_start[datetime(2025, 12, 31, 23, 0, tzinfo=UTC)]
-    assert leading["risk_capital"] is None, "bucket before the first snapshot must gap-fill to null"
-    assert leading["capital_buffer"] is None
+    assert leading["total_capital_usd"] is None, "bucket before the first observation must gap-fill to null"
 
     first = by_start[datetime(2026, 1, 1, 0, 0, tzinfo=UTC)]
-    assert Decimal(first["risk_capital"]) == Decimal("1000000")
+    assert Decimal(first["total_capital_usd"]) == Decimal("2000000")
 
     carried = by_start[datetime(2026, 1, 1, 1, 0, tzinfo=UTC)]
-    assert Decimal(carried["risk_capital"]) == Decimal("1000000"), "LOCF must carry the prior value into the gap"
+    assert Decimal(carried["total_capital_usd"]) == Decimal("2000000"), "LOCF must carry the prior value into the gap"
 
     second = by_start[datetime(2026, 1, 1, 2, 0, tzinfo=UTC)]
-    assert Decimal(second["risk_capital"]) == Decimal("1200000")
+    assert Decimal(second["total_capital_usd"]) == Decimal("2100000")
 
     trailing = by_start[datetime(2026, 1, 1, 3, 0, tzinfo=UTC)]
-    assert Decimal(trailing["risk_capital"]) == Decimal("1200000")
-    # capital_buffer = max(total_capital - first_loss_capital, 0) on carried values.
-    assert Decimal(trailing["capital_buffer"]) == Decimal("500000")
+    assert Decimal(trailing["total_capital_usd"]) == Decimal("2100000")
+
+
+def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestClient) -> None:
+    """Grove is a known prime (it holds GNO) but has no seeded SubProxy USDS, so
+    its total-capital series is a 200 with every bucket gap-filled to null —
+    not a 404 and not an error.
+    """
+    response = client.get(
+        f"/v1/primes/0x{_GROVE_PROXY_HEX}/total-capital",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-01T03:00:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    # No treasury observations -> every bucket is null (gap-filled) or the series
+    # is empty; either way no real value is surfaced, and it is not a 404/500.
+    assert all(b["total_capital_usd"] is None for b in envelope["data"])

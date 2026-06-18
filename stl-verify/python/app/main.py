@@ -20,13 +20,13 @@ from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiq
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.api.v1 import (
     allocations,
-    capital_metrics_history,
     data_sources,
     prime_debts,
     protocol_events,
     risk,
     status,
     tokens,
+    total_capital,
 )
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
@@ -273,7 +273,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.include_router(tokens.router, prefix="/v1")
     application.include_router(protocol_events.router, prefix="/v1")
     application.include_router(prime_debts.router, prefix="/v1")
-    application.include_router(capital_metrics_history.router, prefix="/v1")
+    application.include_router(total_capital.router, prefix="/v1")
     application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
 

@@ -40,3 +40,13 @@ _SUB_PROXY_HEX: frozenset[str] = frozenset(
 def classify_proxy(address: str) -> ProxyKind:
     """Return the :class:`ProxyKind` for a 0x-prefixed proxy address."""
     return ProxyKind.SUB_PROXY if address.lower() in _SUB_PROXY_HEX else ProxyKind.ALM
+
+
+def subproxy_addresses() -> frozenset[str]:
+    """Return the known SubProxy addresses (lowercase, 0x-prefixed).
+
+    These hold a prime's treasury USDS (its total capital), tracked in
+    ``allocation_position`` under the prime's ``prime_id`` but a distinct
+    ``proxy_address``. Consumers scope to these to read the treasury series.
+    """
+    return _SUB_PROXY_HEX

@@ -1,9 +1,9 @@
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.domain.entities.allocation import EthAddress
-from tests.conftest import make_direct_asset_holding
+from tests.factories import make_direct_asset_holding
 
 _PRIME = EthAddress("0x" + "ab" * 20)
 
@@ -18,7 +18,7 @@ def test_record_unpriced_holdings_sets_span_attribute_for_unpriced():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        PostgresAllocationRepository._record_unpriced_holdings(_PRIME, [priced, unpriced_a, unpriced_b])
+        AllocationRepository._record_unpriced_holdings(_PRIME, [priced, unpriced_a, unpriced_b])
 
     span.set_attribute.assert_called_once_with("allocations.direct_holdings.unpriced", 2)
 
@@ -31,6 +31,6 @@ def test_record_unpriced_holdings_noop_when_all_priced():
         "app.adapters.postgres.allocation_position_repository.trace.get_current_span",
         return_value=span,
     ):
-        PostgresAllocationRepository._record_unpriced_holdings(_PRIME, [priced])
+        AllocationRepository._record_unpriced_holdings(_PRIME, [priced])
 
     span.set_attribute.assert_not_called()
