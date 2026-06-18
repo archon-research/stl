@@ -53,6 +53,7 @@ groups:
             SELECT pid, usename, client_addr, state, now()-xact_start AS age,
             left(query,120) FROM pg_stat_activity
             WHERE state LIKE 'idle in transaction%' ORDER BY xact_start;
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-postgres.md#postgreslongidleintransaction
 
       # ---------------------------------------------------------------------
       # CRITICAL — sustained long enough that indexer impact is imminent.
