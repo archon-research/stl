@@ -147,6 +147,23 @@ func sortedByBytesKey[T any](items []T, key func(T) []byte) []T {
 	return sortedCopy(items, func(a, b T) int { return bytes.Compare(key(a), key(b)) })
 }
 
+// requireSingleChain errors if items span more than one chain ID. The batch
+// upserts dedupe by address alone and key their result by address, so a batch
+// mixing chains would silently drop the colliding address; kind names the
+// entity in the error.
+func requireSingleChain[T any](items []T, chainID func(T) int64, kind string) error {
+	if len(items) == 0 {
+		return nil
+	}
+	want := chainID(items[0])
+	for _, item := range items[1:] {
+		if chainID(item) != want {
+			return fmt.Errorf("upserting %s: mixed chain IDs in one batch are not supported", kind)
+		}
+	}
+	return nil
+}
+
 // writeValuesPlaceholders appends "($n, $n+1, ...)" for row i with the given
 // column count, comma-separated from the previous row.
 func writeValuesPlaceholders(sb *strings.Builder, row, cols int) {

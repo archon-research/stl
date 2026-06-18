@@ -575,6 +575,34 @@ func TestGetOrCreateTokens_DedupesBatch(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateTokens_MixedChainBatchRejected verifies the batch refuses a
+// mixed-chain input rather than silently dropping the address-colliding row.
+func TestGetOrCreateTokens_MixedChainBatchRejected(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	usdc := common.HexToAddress("0xE1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1E1")
+
+	inTokenTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateTokens(ctx, tx, []outbound.TokenInput{
+			{ChainID: 1, Address: usdc, Symbol: "USDC", Decimals: 6},
+			{ChainID: 137, Address: usdc, Symbol: "USDC", Decimals: 6},
+		})
+		if err == nil {
+			t.Fatal("expected error for mixed-chain batch, got nil")
+		}
+		if !strings.Contains(err.Error(), "mixed chain IDs") {
+			t.Errorf("error = %q, want it to mention mixed chain IDs", err)
+		}
+		return nil
+	})
+}
+
 // TestGetOrCreateTokens_NilBlockInsertsNull verifies a nil incoming block
 // inserts a NULL created_at_block rather than a sentinel.
 func TestGetOrCreateTokens_NilBlockInsertsNull(t *testing.T) {

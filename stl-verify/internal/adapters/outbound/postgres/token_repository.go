@@ -51,6 +51,12 @@ func (r *TokenRepository) GetOrCreateTokens(ctx context.Context, tx pgx.Tx, toke
 		return make(map[common.Address]int64), nil
 	}
 
+	// Dedup below is address-only and the result map is keyed by address, so a
+	// mixed-chain batch would silently drop a colliding address. Reject it first.
+	if err := requireSingleChain(tokens, func(t outbound.TokenInput) int64 { return t.ChainID }, "tokens"); err != nil {
+		return nil, err
+	}
+
 	// Sort by address (and dedupe) so concurrent transactions lock rows in the
 	// same order, preventing deadlocks when multiple batches upsert the same
 	// tokens (ADR-0002). Operates on a copy; the caller's slice is untouched.

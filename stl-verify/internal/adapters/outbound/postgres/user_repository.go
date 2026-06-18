@@ -53,6 +53,12 @@ func (r *UserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users 
 		return make(map[common.Address]int64), nil
 	}
 
+	// Dedup below is address-only and the result map is keyed by address, so a
+	// mixed-chain batch would silently drop a colliding address. Reject it first.
+	if err := requireSingleChain(users, func(u entity.User) int64 { return u.ChainID }, "users"); err != nil {
+		return nil, err
+	}
+
 	// Sort by address (and dedupe) so concurrent transactions lock rows in the
 	// same order, preventing deadlocks when multiple batches upsert the same
 	// users (ADR-0002). Operates on a copy; the caller's slice is untouched.

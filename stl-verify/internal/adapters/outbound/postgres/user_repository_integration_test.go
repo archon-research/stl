@@ -283,6 +283,34 @@ func TestGetOrCreateUsers_DedupesBatch(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateUsers_MixedChainBatchRejected verifies the batch refuses a
+// mixed-chain input rather than silently dropping the address-colliding row.
+func TestGetOrCreateUsers_MixedChainBatchRejected(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	a := common.HexToAddress("0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1")
+
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateUsers(ctx, tx, []entity.User{
+			{ChainID: 1, Address: a},
+			{ChainID: 137, Address: a},
+		})
+		if err == nil {
+			t.Fatal("expected error for mixed-chain batch, got nil")
+		}
+		if !strings.Contains(err.Error(), "mixed chain IDs") {
+			t.Errorf("error = %q, want it to mention mixed chain IDs", err)
+		}
+		return nil
+	})
+}
+
 // TestGetOrCreateUsers_NilBlockInsertsNull verifies a nil incoming block
 // inserts a NULL first_seen_block rather than a sentinel.
 func TestGetOrCreateUsers_NilBlockInsertsNull(t *testing.T) {
