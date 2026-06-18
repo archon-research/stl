@@ -1,6 +1,9 @@
 package outbound
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // SQSMessage represents a message received from SQS.
 type SQSMessage struct {
@@ -31,6 +34,11 @@ type SQSConsumer interface {
 
 	// DeleteMessage removes a successfully processed message from the queue.
 	DeleteMessage(ctx context.Context, receiptHandle string) error
+
+	// VisibilityTimeout reports the per-receive visibility timeout configured on
+	// the consumer. The consume loop validates it exceeds the handler budget so a
+	// message is never redelivered while its handler is still running.
+	VisibilityTimeout() time.Duration
 
 	// Close closes the consumer and releases resources.
 	Close() error
