@@ -1,11 +1,16 @@
-import { StyledSelect, Tabs } from '@archon-research/design-system';
+import {
+  RangePicker,
+  type RangePreset,
+  StyledSelect,
+  Tabs,
+  type TimeRange,
+} from '@archon-research/design-system';
 import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import type { FilterOption } from '../../lib/dashboard';
-import { RangePicker, type RangePreset, type TimeRange } from './RangePicker';
 
 type TopBarProps = {
   hasSelectedPrime: boolean;

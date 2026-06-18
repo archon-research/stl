@@ -1,8 +1,14 @@
 import {
   buildRowSearchString,
+  DEFAULT_RANGE_PRESET,
+  defaultTimeRange,
+  isRangePreset,
   matchesSearchQuery,
+  presetToRange,
+  type RangePreset,
   SidebarLayout,
   type SortingState,
+  type TimeRange,
 } from '@archon-research/design-system';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
@@ -18,14 +24,6 @@ import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
-import {
-  DEFAULT_RANGE_PRESET,
-  defaultTimeRange,
-  isRangePreset,
-  presetToRange,
-  type RangePreset,
-  type TimeRange,
-} from './components/shared/RangePicker';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import {

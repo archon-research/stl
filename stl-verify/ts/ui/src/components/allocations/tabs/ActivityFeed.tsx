@@ -531,21 +531,23 @@ export function ActivityFeed({
   const effectivePreset = isRangeControlled
     ? (externalRangePreset ?? DEFAULT_RANGE_PRESET)
     : filters.rangePreset;
-  const effectiveRange = useMemo<TimeRange>(
-    () =>
-      isRangeControlled && externalTimeRange
-        ? externalTimeRange
-        : {
-            from_timestamp: filters.from_timestamp,
-            to_timestamp: filters.to_timestamp,
-          },
-    [
-      isRangeControlled,
-      externalTimeRange,
-      filters.from_timestamp,
-      filters.to_timestamp,
-    ],
-  );
+  const effectiveRange = useMemo<TimeRange>(() => {
+    if (isRangeControlled && externalTimeRange) {
+      return externalTimeRange;
+    }
+    // filters is always seeded with a range; fall back defensively so the
+    // strict TimeRange (non-optional timestamps) always holds.
+    const fallback = defaultTimeRange();
+    return {
+      from_timestamp: filters.from_timestamp ?? fallback.from_timestamp,
+      to_timestamp: filters.to_timestamp ?? fallback.to_timestamp,
+    };
+  }, [
+    isRangeControlled,
+    externalTimeRange,
+    filters.from_timestamp,
+    filters.to_timestamp,
+  ]);
 
   const clearFilters = () => {
     onActionFilterChange?.(null);

@@ -9,7 +9,7 @@ export {
   RangePicker,
   type RangePreset,
   type TimeRange,
-} from './RangePicker';
+} from '@archon-research/design-system';
 export { StatusBadge } from './StatusBadge';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
