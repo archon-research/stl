@@ -125,14 +125,19 @@ export function getRiskBreakdown(
 }
 
 export function getRrc(
-  assetId: number,
+  chainId: number,
+  tokenAddress: string,
   primeAddress: string,
   signal?: AbortSignal,
 ): Promise<Rrc> {
   return requestData(
     apiClient.GET('/v1/risk/rrc', {
       params: {
-        query: { asset_id: assetId, prime_id: primeAddress },
+        query: {
+          chain_id: chainId,
+          prime_id: primeAddress,
+          token_address: tokenAddress,
+        },
       },
       signal,
     }),
@@ -140,7 +145,7 @@ export function getRrc(
   );
 }
 
-export function getAllocationActivity(
+export async function getAllocationActivity(
   filters?: {
     prime_id?: string;
     chain_id?: number;
@@ -154,13 +159,14 @@ export function getAllocationActivity(
   },
   signal?: AbortSignal,
 ): Promise<AllocationActivityResponse> {
-  return requestData(
+  const envelope = await requestData(
     apiClient.GET('/v1/allocations/activity', {
       params: { query: filters },
       signal,
     }),
     'GET /v1/allocations/activity',
   );
+  return (envelope.data ?? []) as AllocationActivityResponse;
 }
 
 export function getCapitalMetrics(
@@ -199,7 +205,7 @@ export function getDataSources(
   );
 }
 
-export function getProtocolEvents(
+export async function getProtocolEvents(
   filters?: {
     tx_hash?: string;
     protocol_name?: string;
@@ -207,13 +213,14 @@ export function getProtocolEvents(
   },
   signal?: AbortSignal,
 ): Promise<ProtocolEventsResponse> {
-  return requestData(
+  const envelope = await requestData(
     apiClient.GET('/v1/protocol-events', {
       params: { query: filters },
       signal,
     }),
     'GET /v1/protocol-events',
   );
+  return (envelope.data ?? []) as ProtocolEventsResponse;
 }
 
 export function getTxProtocolEvents(
@@ -300,7 +307,7 @@ export async function getPrimeDebtSnapshots(
         } as paths['/v1/primes/{prime_id}/debt']['get']['parameters']['query'])
       : undefined;
 
-  return requestData(
+  const envelope = await requestData(
     apiClient.GET('/v1/primes/{prime_id}/debt', {
       params: {
         path: {
@@ -312,6 +319,7 @@ export async function getPrimeDebtSnapshots(
     }),
     'GET /v1/primes/{prime_id}/debt',
   );
+  return (envelope.data ?? []) as PrimeDebtSnapshot[];
 }
 
 export async function getLatestPrimeDebtSnapshot(

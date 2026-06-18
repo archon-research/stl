@@ -23,8 +23,10 @@ import (
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -219,27 +221,6 @@ func run(ctx context.Context, args []string) error {
 	defer rawClient.Close()
 	logger.Info("Ethereum node connected")
 
-	defaultEntries, err := at.LoadDefaultTokenEntries()
-	if err != nil {
-		return fmt.Errorf("load default token entries: %w", err)
-	}
-
-	// Token entries filtered by chain
-	entries := at.EntriesForChainID(defaultEntries, cfg.chainID)
-	if len(entries) == 0 {
-		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
-	}
-
-	defaultProxies, err := at.LoadDefaultProxies()
-	if err != nil {
-		return fmt.Errorf("load default proxies: %w", err)
-	}
-
-	proxies := at.ProxiesForChainID(defaultProxies, cfg.chainID)
-	if len(proxies) == 0 {
-		return fmt.Errorf("no proxies for chain ID %d", cfg.chainID)
-	}
-
 	// Database
 	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
 	if err != nil {
@@ -287,44 +268,36 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("multicall client: %w", err)
 	}
 
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		return fmt.Errorf("erc20 abi: %w", err)
 	}
-	atokenReadABI, err := abis.GetATokenReadABI()
+
+	// Build source registry. Assembly lives in the allocation_tracker package so the
+	// routing guardrail test and the worker share one definition (see registry_build.go).
+	registry, err := at.BuildSourceRegistry(mc, logger)
 	if err != nil {
-		return fmt.Errorf("atoken read abi: %w", err)
+		return fmt.Errorf("build source registry: %w", err)
 	}
 
-	// Build source registry
-	registry := at.NewSourceRegistry(logger)
-
-	for _, s := range at.DefaultSkipSources(logger) {
-		registry.Register(s)
-	}
-
-	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, atokenReadABI, logger))
-
-	erc4626, err := at.NewERC4626Source(mc, logger)
+	// Load the contract once and derive both entries and proxies for this chain from
+	// the same read.
+	contract, err := axis_synome_contract.LoadDefaultContract()
 	if err != nil {
-		return fmt.Errorf("erc4626 source: %w", err)
+		return fmt.Errorf("load axis-synome contract: %w", err)
 	}
-	registry.Register(erc4626)
 
-	curveABI, err := abis.GetCurvePoolABI()
+	entries, proxies, err := at.EntriesAndProxiesForChainID(contract, cfg.chainID)
 	if err != nil {
-		return fmt.Errorf("curve abi: %w", err)
-	}
-	registry.Register(at.NewCurveSource(mc, curveABI, logger))
-
-	uniV3, err := at.NewUniV3Source(mc, logger)
-	if err != nil {
-		return fmt.Errorf("univ3 source: %w", err)
-	}
-	registry.Register(uniV3)
-
-	for _, s := range at.DefaultStubSources(logger) {
-		registry.Register(s)
+		return fmt.Errorf("derive entries/proxies for contract %s chain %d: %w", contract.Version, cfg.chainID, err)
 	}
 
 	txm, err := postgres.NewTxManager(dbPool, logger)

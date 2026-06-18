@@ -272,3 +272,269 @@ func TestGetOrCreateToken_ConcurrentRaceReturnsSameID(t *testing.T) {
 		}
 	}
 }
+
+// TestListTokensMissingSymbol verifies that tokens with an empty symbol are
+// returned by ListTokensMissingSymbol, while tokens with a non-empty symbol and
+// the zero-address sentinel are excluded.
+func TestListTokensMissingSymbol(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	chainID := int64(1)
+	emptyAddr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	resolvedAddr := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	zeroAddr := common.Address{}
+
+	// Insert token with empty symbol (pending).
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, emptyAddr, "", 18, 100); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken(empty): %v", err)
+	}
+	// Insert token with resolved symbol (must be excluded).
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, resolvedAddr, "USDC", 6, 200); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken(resolved): %v", err)
+	}
+	// Insert zero-address sentinel (must always be excluded).
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, zeroAddr, "", 0, 0); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken(zero): %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	missing, err := repo.ListTokensMissingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensMissingSymbol: %v", err)
+	}
+	if len(missing) != 1 {
+		t.Fatalf("expected 1 missing-symbol token, got %d: %v", len(missing), missing)
+	}
+	if missing[0] != emptyAddr {
+		t.Errorf("address = %s, want %s", missing[0].Hex(), emptyAddr.Hex())
+	}
+}
+
+// TestListTokensMissingSymbol_RespectsLimit verifies that the limit parameter is
+// honoured and that a zero or negative limit returns an error.
+func TestListTokensMissingSymbol_RespectsLimit(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	chainID := int64(1)
+	addr1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	addr2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr1, "", 18, 100); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken(addr1): %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr2, "", 18, 200); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken(addr2): %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Limit of 1 must return only one row.
+	missing, err := repo.ListTokensMissingSymbol(ctx, chainID, 1)
+	if err != nil {
+		t.Fatalf("ListTokensMissingSymbol(limit=1): %v", err)
+	}
+	if len(missing) != 1 {
+		t.Errorf("limit=1: got %d rows, want 1", len(missing))
+	}
+
+	// Limit <= 0 must return an error.
+	if _, err := repo.ListTokensMissingSymbol(ctx, chainID, 0); err == nil {
+		t.Error("expected error for limit=0, got nil")
+	}
+}
+
+// TestResolveTokenSymbol_FillsEmptyAndRefusesClobber verifies that
+// ResolveTokenSymbol fills an empty-symbol row and returns an error (without
+// clobbering) when called for a token that already has a symbol.
+func TestResolveTokenSymbol_FillsEmptyAndRefusesClobber(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	chainID := int64(1)
+	addr := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+
+	// Insert token with empty symbol.
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, 100); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Resolve fills the empty symbol.
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, "frxUSD"); err != nil {
+		t.Fatalf("ResolveTokenSymbol: %v", err)
+	}
+
+	// Confirm the symbol is set in the database.
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "frxUSD" {
+		t.Errorf("symbol = %q, want frxUSD", symbol)
+	}
+
+	// Token no longer has an empty symbol, so it must no longer appear in the missing list.
+	missing, err := repo.ListTokensMissingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensMissingSymbol: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Errorf("expected 0 missing-symbol tokens after resolve, got %d", len(missing))
+	}
+
+	// Attempting to resolve again (already-set symbol) must return an error and
+	// leave the existing symbol unchanged.
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, "EVIL"); err == nil {
+		t.Error("expected error from ResolveTokenSymbol when symbol is already set, got nil")
+	}
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes(),
+	).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol after clobber attempt: %v", err)
+	}
+	if symbol != "frxUSD" {
+		t.Errorf("symbol = %q after clobber attempt, want frxUSD", symbol)
+	}
+}
+
+// TestListTokensMissingSymbol_NullSymbolIsMissing verifies that a token row with
+// a NULL symbol (the column is nullable; legacy/manual rows may omit it) is
+// treated the same as an empty symbol: listed by the sweep and resolvable.
+func TestListTokensMissingSymbol_NullSymbolIsMissing(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	chainID := int64(1)
+	addr := common.HexToAddress("0xABABABABABABABABABABABABABABABABABABABAB")
+
+	// Insert directly with symbol omitted so the column is SQL NULL.
+	if _, err := tokenPool.Exec(ctx,
+		`INSERT INTO token (chain_id, address, decimals, created_at_block, updated_at)
+		 VALUES ($1, $2, 18, 100, NOW())`,
+		chainID, addr.Bytes()); err != nil {
+		t.Fatalf("insert NULL-symbol token: %v", err)
+	}
+	var isNull bool
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol IS NULL FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes()).Scan(&isNull); err != nil {
+		t.Fatalf("verify NULL precondition: %v", err)
+	}
+	if !isNull {
+		t.Fatal("precondition failed: symbol is not NULL")
+	}
+
+	missing, err := repo.ListTokensMissingSymbol(ctx, chainID, 100)
+	if err != nil {
+		t.Fatalf("ListTokensMissingSymbol: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != addr {
+		t.Fatalf("missing = %v, want exactly the NULL-symbol token %s", missing, addr.Hex())
+	}
+
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, "FIXED"); err != nil {
+		t.Fatalf("ResolveTokenSymbol on NULL-symbol row: %v", err)
+	}
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes()).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "FIXED" {
+		t.Errorf("symbol = %q, want FIXED", symbol)
+	}
+}
+
+// TestResolveTokenSymbol_RejectsEmptySymbol verifies the contract guard: an
+// empty resolution would match the missing-symbol predicate, report success,
+// and leave the row pending, so it must be rejected outright. A pending token
+// is seeded first so the failure can only come from the empty-symbol guard —
+// without it, the UPDATE would match the seeded row and report success.
+func TestResolveTokenSymbol_RejectsEmptySymbol(t *testing.T) {
+	truncateToken(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewTokenRepository(tokenPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	chainID := int64(1)
+	addr := common.HexToAddress("0xCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCDCD")
+	tx, err := tokenPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := repo.GetOrCreateToken(ctx, tx, chainID, addr, "", 18, 100); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("GetOrCreateToken: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := repo.ResolveTokenSymbol(ctx, chainID, addr, ""); err == nil {
+		t.Fatal("expected error when resolving with an empty symbol")
+	}
+
+	// The seeded row must be untouched: still empty, still listed as missing.
+	var symbol string
+	if err := tokenPool.QueryRow(ctx,
+		`SELECT symbol FROM token WHERE chain_id = $1 AND address = $2`,
+		chainID, addr.Bytes()).Scan(&symbol); err != nil {
+		t.Fatalf("query symbol: %v", err)
+	}
+	if symbol != "" {
+		t.Errorf("symbol = %q, want empty (rejected resolve must not write)", symbol)
+	}
+}
