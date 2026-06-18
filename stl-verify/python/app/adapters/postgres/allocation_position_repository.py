@@ -625,6 +625,61 @@ class AllocationRepository:
         self._record_empty_total_capital(prime_address, buckets)
         return buckets
 
+    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
+        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.
+
+        The treasury is the USDS held in the prime's SubProxy wallet (shares the
+        prime's ``prime_id``, distinct ``proxy_address``). USDS is dollar-pegged,
+        so the balance is the USD figure. Returns ``None`` when the prime has no
+        SubProxy treasury position.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text(
+            """
+            SELECT ap.balance
+            FROM allocation_position ap
+            JOIN token t ON t.id = ap.token_id
+            WHERE ap.prime_id = (
+                SELECT prime_id FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+              AND ap.proxy_address IN :subproxy_addrs
+              AND t.address = decode(:usds_hex, 'hex')
+            ORDER BY ap.block_number DESC, ap.block_version DESC,
+                     ap.processing_version DESC, ap.log_index DESC
+            LIMIT 1
+            """
+        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+        params = {
+            "address_hex": prime_address.hex,
+            "subproxy_addrs": subproxies,
+            "usds_hex": _USDS_ADDRESS_HEX,
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(query, params)).fetchone()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch latest total capital from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching latest total capital for prime {prime_address}: {exc}"
+            ) from exc
+
+        if row is None or row.balance is None:
+            return None
+        return _safe_decimal(row.balance, "balance", f"prime_id={prime_address}")
+
 
 # Match positions to receipt tokens only by receipt_token_address: a prime's
 # direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)

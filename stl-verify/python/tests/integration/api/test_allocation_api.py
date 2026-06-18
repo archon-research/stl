@@ -625,3 +625,25 @@ def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestC
     # No treasury observations -> every bucket is null (gap-filled) or the series
     # is empty; either way no real value is surfaced, and it is not a 404/500.
     assert all(b["total_capital_usd"] is None for b in envelope["data"])
+
+
+def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient) -> None:
+    """The self-computed risk-capital endpoint reports Total Risk Capital from the
+    latest on-chain SubProxy USDS balance (the 2.1M observation wins over 2.0M),
+    independent of the Star feed. The default model (gap_sweep) is reported and a
+    per-allocation breakdown is present; required RRC depends on model coverage
+    which the fixture does not seed, so it is not asserted here.
+    """
+    response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/risk-capital")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "gap_sweep"
+    assert Decimal(body["total_risk_capital_usd"]) == Decimal("2100000")
+    assert isinstance(body["per_allocation"], list)
+
+
+def test_risk_capital_returns_404_for_unknown_prime(client: TestClient) -> None:
+    response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/risk-capital")
+
+    assert response.status_code == 404

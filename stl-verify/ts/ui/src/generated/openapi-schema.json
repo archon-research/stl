@@ -411,6 +411,84 @@
         "title": "AllocationResponse",
         "type": "object"
       },
+      "AllocationRiskCapitalResponse": {
+        "description": "Per-allocation risk capital from the default model.",
+        "properties": {
+          "applied": {
+            "description": "Whether the default model could price this allocation.",
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "crr_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Comparable capital-risk ratio (0-100). `null` when the model does not apply.",
+            "title": "Crr Pct"
+          },
+          "exposure_usd": {
+            "description": "On-chain USD exposure of the allocation.",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Exposure Usd",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model that produced the figure, or `null`.",
+            "title": "Model"
+          },
+          "protocol_name": {
+            "description": "Protocol the allocation sits in.",
+            "title": "Protocol Name",
+            "type": "string"
+          },
+          "receipt_token_id": {
+            "description": "Surrogate id of the receipt token.",
+            "title": "Receipt Token Id",
+            "type": "integer"
+          },
+          "required_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-allocation RRC (USD). `null` when the model does not apply.",
+            "title": "Required Risk Capital Usd"
+          },
+          "symbol": {
+            "description": "Receipt-token symbol.",
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_token_id",
+          "symbol",
+          "protocol_name",
+          "exposure_usd",
+          "applied"
+        ],
+        "title": "AllocationRiskCapitalResponse",
+        "type": "object"
+      },
       "BadDebtResponse": {
         "description": "Estimated bad debt for a receipt-token position at a given collateral gap.",
         "example": {
@@ -926,6 +1004,99 @@
           "address"
         ],
         "title": "PrimeResponse",
+        "type": "object"
+      },
+      "PrimeRiskCapitalResponse": {
+        "description": "Self-computed, model-derived capital metrics for a prime.\n\nIndependent of the upstream Star feed. `required_risk_capital_usd` is the\nsum of per-allocation RRC from the default model (`model`); it is **partial**\n(only allocations the model can price contribute) and **will not** match\nSky's dashboard. `modeled_pct` reports the priced share of exposure.",
+        "properties": {
+          "encumbrance_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required / Total Risk Capital. `null` when total is absent or zero.",
+            "title": "Encumbrance Ratio"
+          },
+          "exposure_usd": {
+            "description": "\u03a3 priced receipt-token allocation exposure (USD).",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Exposure Usd",
+            "type": "string"
+          },
+          "model": {
+            "description": "Default RRC model used (e.g. `gap_sweep`).",
+            "examples": [
+              "gap_sweep"
+            ],
+            "title": "Model",
+            "type": "string"
+          },
+          "modeled_exposure_usd": {
+            "description": "Exposure the default model could price (USD).",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Modeled Exposure Usd",
+            "type": "string"
+          },
+          "modeled_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero.",
+            "title": "Modeled Pct"
+          },
+          "per_allocation": {
+            "description": "Per-allocation breakdown, newest-exposure first.",
+            "items": {
+              "$ref": "#/components/schemas/AllocationRiskCapitalResponse"
+            },
+            "title": "Per Allocation",
+            "type": "array"
+          },
+          "prime_id": {
+            "description": "Prime's 0x-prefixed ALM proxy address.",
+            "title": "Prime Id",
+            "type": "string"
+          },
+          "required_risk_capital_usd": {
+            "description": "\u03a3 per-allocation RRC from the default model (USD).",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required Risk Capital Usd",
+            "type": "string"
+          },
+          "total_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On-chain SubProxy treasury balance (USD). `null` when absent.",
+            "title": "Total Risk Capital Usd"
+          }
+        },
+        "required": [
+          "prime_id",
+          "model",
+          "exposure_usd",
+          "required_risk_capital_usd",
+          "modeled_exposure_usd",
+          "per_allocation"
+        ],
+        "title": "PrimeRiskCapitalResponse",
         "type": "object"
       },
       "ProtocolEventBucketResponse": {
@@ -2486,6 +2657,52 @@
         "summary": "List prime debt snapshots",
         "tags": [
           "primes"
+        ]
+      }
+    },
+    "/v1/primes/{prime_id}/risk-capital": {
+      "get": {
+        "description": "Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. Returns `404` if the prime is unknown.",
+        "operationId": "get_prime_risk_capital_v1_primes__prime_id__risk_capital_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrimeRiskCapitalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Self-computed prime risk capital",
+        "tags": [
+          "primes",
+          "capital",
+          "primes",
+          "capital"
         ]
       }
     },

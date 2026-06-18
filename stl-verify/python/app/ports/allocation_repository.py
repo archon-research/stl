@@ -118,3 +118,7 @@ class AllocationRepositoryPort(Protocol):
     ) -> list[TotalCapitalBucket]:
         """Return the prime's treasury USDS balance aggregated into time buckets."""
         ...
+
+    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
+        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
+        ...
