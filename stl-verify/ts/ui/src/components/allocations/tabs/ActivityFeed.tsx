@@ -483,15 +483,6 @@ export function ActivityFeed({
     }
     return Array.from(symbols).sort((a, b) => a.localeCompare(b));
   }, [tokenOptions, tokenFilter]);
-  // Page mode: action/token come from controlled props (URL-backed); the date
-  // range stays local. hasActiveFilters drives the "clear" affordance.
-  const hasActiveFilters = Boolean(
-    actionFilter ||
-    tokenFilter ||
-    filters.from_timestamp ||
-    filters.to_timestamp,
-  );
-
   const resetTxInspectionState = () => {
     Object.values(txRequestControllersRef.current).forEach((controller) => {
       controller.abort();
@@ -548,6 +539,14 @@ export function ActivityFeed({
     filters.from_timestamp,
     filters.to_timestamp,
   ]);
+
+  // Page mode: action/token come from controlled props (URL-backed); the date
+  // range stays local. The range is always seeded with a default, so a
+  // non-default preset — not the mere presence of timestamps — is what marks
+  // the range as an active filter for the "clear" affordance.
+  const hasActiveFilters = Boolean(
+    actionFilter || tokenFilter || effectivePreset !== DEFAULT_RANGE_PRESET,
+  );
 
   const clearFilters = () => {
     onActionFilterChange?.(null);

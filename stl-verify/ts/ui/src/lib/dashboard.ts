@@ -527,6 +527,22 @@ export function formatChartTimestampLabel(value: string): string {
   });
 }
 
+function toTimestampMs(timestamp: string): number {
+  const value = new Date(timestamp).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+// Returns a new array of time-series buckets sorted oldest-first by
+// `bucket_start`. The backend does not guarantee bucket order, and the charts
+// assume ascending time, so callers must sort before rendering.
+export function sortByBucketStart<T extends { bucket_start: string }>(
+  buckets: readonly T[],
+): T[] {
+  return [...buckets].sort(
+    (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+  );
+}
+
 /**
  * Get human-readable label for allocation category.
  */

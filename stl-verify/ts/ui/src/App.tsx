@@ -26,15 +26,13 @@ import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
+import { usePrimeChartData } from './hooks/usePrimeChartData';
 import {
-  getAllocationActivityEnvelope,
   getAllocations,
   getCapitalMetrics,
-  getCapitalMetricsEnvelope,
   getChains,
   getDataSources,
   getLatestPrimeDebtSnapshot,
-  getPrimeDebtEnvelope,
   getPrimes,
   getProtocols,
   getTokens,
@@ -67,18 +65,24 @@ import {
 } from './lib/url-params';
 import type {
   Allocation,
-  AllocationActivityBucket,
   CapitalMetrics,
-  CapitalMetricsBucket,
   DataSource,
   Prime,
-  PrimeDebtBucket,
   PrimeDebtSnapshot,
   TimeSeriesResolution,
   TokensResponse,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
+// Picks the chart's downsampling resolution for a range. This is deliberately
+// NOT the server's window-to-resolution policy (`time_series.minimum_resolution`),
+// which is only a *floor* — the finest resolution the backend will allow for a
+// window. This instead picks a *display* resolution that (1) is always at least
+// as coarse as that floor (so the request never 422s) and (2) keeps the bucket
+// count under the 500 per-prime page cap. Letting the server default would pick
+// its floor and silently truncate long ranges (365d at the PT6H floor is ~1460
+// buckets, well over 500). Each value below must stay >= the server floor for
+// its window; if the server's policy tightens, these must be revisited.
 function getResolutionForRange(
   preset: RangePreset,
   range: TimeRange,
@@ -132,11 +136,6 @@ function getResolutionForRange(
   return 'P1D';
 }
 
-function toTimestampMs(timestamp: string): number {
-  const value = new Date(timestamp).getTime();
-  return Number.isFinite(value) ? value : 0;
-}
-
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
   const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
@@ -164,17 +163,6 @@ function App() {
   const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
     string | null
   >(null);
-  const [debtBuckets, setDebtBuckets] = useState<PrimeDebtBucket[]>([]);
-  const [activityBuckets, setActivityBuckets] = useState<
-    AllocationActivityBucket[]
-  >([]);
-  const [capitalMetricsBuckets, setCapitalMetricsBuckets] = useState<
-    CapitalMetricsBucket[]
-  >([]);
-  const [isChartsLoading, setIsChartsLoading] = useState(false);
-  const [chartsErrorMessage, setChartsErrorMessage] = useState<string | null>(
-    null,
-  );
   const [selectedAllocationKey, setSelectedAllocationKey] = useState<
     string | null
   >(null);
@@ -525,144 +513,18 @@ function App() {
     [rangePreset, timeRange],
   );
 
-  useEffect(() => {
-    if (!selectedPrimeId) {
-      setDebtBuckets([]);
-      setActivityBuckets([]);
-      setCapitalMetricsBuckets([]);
-      setChartsErrorMessage(null);
-      setIsChartsLoading(false);
-      return;
-    }
-
-    const controller = new AbortController();
-    setIsChartsLoading(true);
-    setChartsErrorMessage(null);
-
-    // limit 500 (the per-prime max) so the longest ranges (e.g. 365d at P1D)
-    // return every bucket rather than being truncated to the default page.
-    const bucketFilters = {
-      from_timestamp: timeRange.from_timestamp,
-      to_timestamp: timeRange.to_timestamp,
-      resolution: chartResolution,
-      aggregate: true,
-      limit: 500,
-    };
-
-    void getPrimeDebtEnvelope(selectedPrimeId, bucketFilters, controller.signal)
-      .then((debtEnvelope) => {
-        // We request aggregate=true, so a non-aggregated envelope is a backend
-        // contract violation, not "no data" — surface it instead of silently
-        // rendering an empty chart.
-        if (debtEnvelope.mode !== 'aggregated') {
-          throw new Error(
-            `Prime debt envelope returned unexpected mode "${debtEnvelope.mode}" (expected "aggregated")`,
-          );
-        }
-
-        const nextDebtBuckets = debtEnvelope.data as PrimeDebtBucket[];
-        setDebtBuckets(
-          [...nextDebtBuckets].sort(
-            (a, b) =>
-              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
-          ),
-        );
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.error('Failed to load chart buckets', {
-          error,
-          primeId: selectedPrimeId,
-          chartResolution,
-        });
-        setDebtBuckets([]);
-        setChartsErrorMessage(toErrorMessage(error));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsChartsLoading(false);
-        }
-      });
-
-    // Allocation-activity is supplementary: it drives the reconstructed
-    // total-allocation balance series, and on failure that card degrades to the
-    // current-value fallback rather than failing the whole view.
-    void getAllocationActivityEnvelope(
-      { prime_id: selectedPrimeId, ...bucketFilters },
-      controller.signal,
-    )
-      .then((activityEnvelope) => {
-        const nextActivityBuckets =
-          activityEnvelope.mode === 'aggregated'
-            ? (activityEnvelope.data as AllocationActivityBucket[])
-            : [];
-        setActivityBuckets(
-          [...nextActivityBuckets].sort(
-            (a, b) =>
-              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
-          ),
-        );
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.warn(
-          'Allocation activity history unavailable; using current value',
-          {
-            error,
-            primeId: selectedPrimeId,
-          },
-        );
-        setActivityBuckets([]);
-      });
-
-    // Capital-metrics history is supplementary: a failure (e.g. the endpoint not
-    // yet deployed, or no snapshots ingested) degrades the risk/total-capital
-    // charts to their current-value fallback rather than failing the whole view.
-    void getCapitalMetricsEnvelope(
-      selectedPrimeId,
-      bucketFilters,
-      controller.signal,
-    )
-      .then((capitalEnvelope) => {
-        const nextCapitalBuckets =
-          capitalEnvelope.mode === 'aggregated'
-            ? (capitalEnvelope.data as CapitalMetricsBucket[])
-            : [];
-        setCapitalMetricsBuckets(
-          [...nextCapitalBuckets].sort(
-            (a, b) =>
-              toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
-          ),
-        );
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.warn(
-          'Capital metrics history unavailable; using current value',
-          {
-            error,
-            primeId: selectedPrimeId,
-          },
-        );
-        setCapitalMetricsBuckets([]);
-      });
-
-    return () => controller.abort();
-  }, [
-    chartResolution,
+  const {
+    debtBuckets,
+    activityBuckets,
+    capitalMetricsBuckets,
+    isLoading: isChartsLoading,
+    errorMessage: chartsErrorMessage,
+  } = usePrimeChartData(
     selectedPrimeId,
     timeRange.from_timestamp,
     timeRange.to_timestamp,
-  ]);
+    chartResolution,
+  );
 
   const chainLabels = useMemo(
     () => buildChainLabelLookup(localChains),
@@ -771,27 +633,33 @@ function App() {
     [searchFilteredAllocations, selectedNetwork, selectedProtocol],
   );
 
-  const allocationSummaryTotalUsd = useMemo(
+  // Anchor for the reconstructed balance series. The activity buckets driving
+  // the reconstruction are fetched per-prime (no network/protocol/search
+  // filter), so the anchor must be the whole-prime total too — anchoring on a
+  // filtered subset total while subtracting whole-prime flows would yield a
+  // silently wrong series. The chart is therefore intentionally unaffected by
+  // the table filters.
+  const primeTotalAllocationUsd = useMemo(
     () =>
-      searchFilteredAllocations.reduce((sum, allocation) => {
+      allocations.reduce((sum, allocation) => {
         const numericAmount = parseNumericValue(allocation.amount_usd);
         return numericAmount === null ? sum : sum + numericAmount;
       }, 0),
-    [searchFilteredAllocations],
+    [allocations],
   );
 
   // Reconstruct the total-allocation balance over time: anchor at the current
-  // total and walk backwards, undoing each bucket's signed USD net flow. The
-  // newest bucket therefore lands exactly on the current total. Flow-based, so
-  // it captures deposits/withdrawals but not price moves; clamped at 0 since a
-  // negative balance is meaningless.
+  // whole-prime total and walk backwards, undoing each bucket's signed USD net
+  // flow. The newest bucket therefore lands exactly on the current total.
+  // Flow-based, so it captures deposits/withdrawals but not price moves;
+  // clamped at 0 since a negative balance is meaningless.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
     if (activityBuckets.length === 0) {
       return [];
     }
 
     const series = new Array<ChartDatum>(activityBuckets.length);
-    let balance = allocationSummaryTotalUsd;
+    let balance = primeTotalAllocationUsd;
     for (let index = activityBuckets.length - 1; index >= 0; index -= 1) {
       const bucket = activityBuckets[index];
       series[index] = {
@@ -801,7 +669,7 @@ function App() {
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
     return series;
-  }, [activityBuckets, allocationSummaryTotalUsd]);
+  }, [activityBuckets, primeTotalAllocationUsd]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
