@@ -39,7 +39,10 @@ groups:
           ) > 300
         for: 2m
         labels:
+          team: vector
           severity: warning
+          component: timescaledb
+          namespace: vector
         annotations:
           summary: "Idle-in-transaction > 5m on {{ $labels.cluster }} DB ({{ $labels.service_id }}/{{ $labels.role }})"
           description: >
@@ -61,7 +64,10 @@ groups:
           ) > 900
         for: 1m
         labels:
+          team: vector
           severity: critical
+          component: timescaledb
+          namespace: vector
         annotations:
           summary: "Idle-in-transaction > 15m on {{ $labels.cluster }} DB ({{ $labels.service_id }}/{{ $labels.role }})"
           description: >
