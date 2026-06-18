@@ -277,6 +277,7 @@ groups:
             `maple-graphql-indexer` recorded `{{ $value | printf "%.0f" }}`
             failed cycle(s) in 30m. Check which phase is failing via
             `maple_sync_phases_total{status="error"}` and the pod logs.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleindexercycleerrors--vectormaplephaseerrors
 
       - alert: VectorMaplePhaseErrors
         expr: |
@@ -295,6 +296,7 @@ groups:
             Phase `{{ $labels.phase }}` failed `{{ $value | printf "%.0f" }}`
             time(s) in 30m. A failing `pools` phase also skips `loans` and
             `sky_strategies` (registry dependency).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleindexercycleerrors--vectormaplephaseerrors
 
       - alert: VectorMaplePoolWritesZero
         # Cycling but the pools phase wrote 0 rows. ~21 PoolV2 pools (and
@@ -330,6 +332,7 @@ groups:
             `maple_pool_state` received 0 rows over 20m while cycles ran.
             Maple's `poolV2S` query likely returned empty. Verify the API
             and the pools phase before pool state goes stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplepoolwriteszero
 
       - alert: VectorMapleSchemaDrift
         # null-downgrade canary. Rather than firing on ANY null (acmRatio, tvl
@@ -363,6 +366,7 @@ groups:
             `{{ $value | printf "%.0f" }}` time(s) in 1h. This field is
             normally populated; a sustained count signals a Maple GraphQL API
             schema change. Cross-check the published SDL.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleschemadrift
 
       - alert: VectorMaplePhaseLatencyHigh
         # Phase p95 duration. Normal p95 is seconds (loans ~4s, others <1s).
@@ -389,3 +393,4 @@ groups:
             Phase `{{ $labels.phase }}` p95 duration is
             `{{ $value | printf "%.1fs" }}` over 15m. The Maple GraphQL API is
             likely degraded; expect lag and possible cycle timeouts.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
