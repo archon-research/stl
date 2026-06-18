@@ -14,7 +14,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
-import type { ChartDatum } from './components/allocations/AllocationGrid';
+import type {
+  ChartDatum,
+  MetricChartKind,
+} from './components/allocations/AllocationGrid';
 import {
   AllocationGrid,
   type MetricChartSpec,
@@ -633,12 +636,15 @@ function App() {
     [searchFilteredAllocations, selectedNetwork, selectedProtocol],
   );
 
-  // Anchor for the reconstructed balance series. The activity buckets driving
-  // the reconstruction are fetched per-prime (no network/protocol/search
-  // filter), so the anchor must be the whole-prime total too — anchoring on a
-  // filtered subset total while subtracting whole-prime flows would yield a
-  // silently wrong series. The chart is therefore intentionally unaffected by
-  // the table filters.
+  // Anchor for the reconstructed balance series. Two bases must line up with
+  // the flows driving the reconstruction:
+  //   - Scope: activity buckets are fetched per-prime (no network/protocol/
+  //     search filter), so the anchor is the whole-prime total; anchoring on a
+  //     filtered subset while subtracting whole-prime flows would be wrong. The
+  //     chart is therefore intentionally unaffected by the table filters.
+  //   - Valuation: net_flow_usd values both receipt-token and direct-asset
+  //     flows, so the anchor sums amount_usd across all allocations (receipt
+  //     positions and direct holdings alike) rather than receipt positions only.
   const primeTotalAllocationUsd = useMemo(
     () =>
       allocations.reduce((sum, allocation) => {
@@ -715,6 +721,17 @@ function App() {
       ];
     };
 
+    // Pick the real time series when present, else the flat current-value
+    // placeholder — returning data and kind together so the two can never
+    // disagree about whether the chart is real.
+    const seriesOrFallback = (
+      series: ChartDatum[],
+      currentValue: number | null,
+    ): { data: ChartDatum[]; kind: MetricChartKind } =>
+      series.length > 0
+        ? { data: series, kind: 'series' }
+        : { data: fallbackChart(currentValue), kind: 'fallback' };
+
     const riskCapitalValue =
       capitalMetrics?.risk_capital === undefined ||
       capitalMetrics?.risk_capital === null
@@ -729,53 +746,40 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
-    const primeDebtData =
-      primeDebtSeries.length > 0
-        ? primeDebtSeries
-        : fallbackChart(primeDebtValue);
-
-    // Risk capital has no on-chain history; always show its current value as a
-    // flat line.
-    const riskCapitalData = fallbackChart(riskCapitalValue);
-
-    const totalCapitalData =
-      totalCapitalSeries.length > 0
-        ? totalCapitalSeries
-        : fallbackChart(totalCapitalValue);
-
-    return [
+    const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
         // current total. When no activity history is available the card shows
         // an empty state rather than a flat current-value line.
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
-        isFallback: false,
+        kind: 'series',
         stroke: 'var(--colors-chart-series-primary, #60a5fa)',
         formatValue: formatCompactUsd,
       },
       {
+        // Risk capital has no on-chain history; always show its current value
+        // as a flat line.
         key: 'risk-capital',
-        data: riskCapitalData,
-        isFallback: true,
+        data: fallbackChart(riskCapitalValue),
+        kind: 'fallback',
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        data: totalCapitalData,
-        isFallback: totalCapitalSeries.length === 0,
+        ...seriesOrFallback(totalCapitalSeries, totalCapitalValue),
         stroke: 'var(--colors-chart-series-primary, #f59e0b)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
-        data: primeDebtData,
-        isFallback: primeDebtSeries.length === 0,
+        ...seriesOrFallback(primeDebtSeries, primeDebtValue),
         stroke: '#f97316',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
-    ].filter((chart) => chart.data.length > 0);
+    ];
+    return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
     capitalMetrics?.risk_capital,

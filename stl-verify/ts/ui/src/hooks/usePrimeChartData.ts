@@ -114,55 +114,50 @@ export function usePrimeChartData(
         }
       });
 
-    // Allocation-activity is supplementary: it drives the reconstructed
-    // total-allocation balance series, and on failure that card degrades to the
-    // current-value fallback rather than failing the whole view.
-    void getAllocationActivityEnvelope(
-      { prime_id: primeId, ...bucketFilters },
-      controller.signal,
-    )
-      .then((activityEnvelope) => {
-        const nextActivityBuckets =
-          activityEnvelope.mode === 'aggregated'
-            ? (activityEnvelope.data as AllocationActivityBucket[])
-            : [];
-        setActivityBuckets(sortByBucketStart(nextActivityBuckets));
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
+    // Supplementary series degrade independently: on failure the card falls
+    // back to its current value (cleared buckets + a warn) rather than
+    // surfacing an error and blanking the view like the primary debt series.
+    const loadSupplementarySeries = <T extends { bucket_start: string }>(
+      buckets: Promise<T[]>,
+      setBuckets: (next: T[]) => void,
+      unavailableMessage: string,
+    ): void => {
+      void buckets
+        .then((next) => setBuckets(sortByBucketStart(next)))
+        .catch((error: unknown) => {
+          if (isAbortError(error)) {
+            return;
+          }
 
-        logging.warn(
-          'Allocation activity history unavailable; using current value',
-          {
-            error,
-            primeId,
-          },
-        );
-        setActivityBuckets([]);
-      });
-
-    // Total-capital history is supplementary: it drives the total-capital chart
-    // from the on-chain SubProxy treasury balance, and on failure that card
-    // degrades to the current-value fallback rather than failing the whole view.
-    void getTotalCapitalEnvelope(primeId, bucketFilters, controller.signal)
-      .then((capitalEnvelope) => {
-        setTotalCapitalBuckets(
-          sortByBucketStart(capitalEnvelope.data as TotalCapitalBucket[]),
-        );
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error)) {
-          return;
-        }
-
-        logging.warn('Total capital history unavailable; using current value', {
-          error,
-          primeId,
+          logging.warn(unavailableMessage, { error, primeId });
+          setBuckets([]);
         });
-        setTotalCapitalBuckets([]);
-      });
+    };
+
+    // Allocation activity drives the reconstructed total-allocation balance
+    // series. A non-aggregated envelope means "no data", so coerce to empty.
+    loadSupplementarySeries(
+      getAllocationActivityEnvelope(
+        { prime_id: primeId, ...bucketFilters },
+        controller.signal,
+      ).then((activityEnvelope) =>
+        activityEnvelope.mode === 'aggregated'
+          ? (activityEnvelope.data as AllocationActivityBucket[])
+          : [],
+      ),
+      setActivityBuckets,
+      'Allocation activity history unavailable; using current value',
+    );
+
+    // Total-capital history drives the total-capital chart from the on-chain
+    // SubProxy treasury balance.
+    loadSupplementarySeries(
+      getTotalCapitalEnvelope(primeId, bucketFilters, controller.signal).then(
+        (capitalEnvelope) => capitalEnvelope.data as TotalCapitalBucket[],
+      ),
+      setTotalCapitalBuckets,
+      'Total capital history unavailable; using current value',
+    );
 
     return () => controller.abort();
   }, [primeId, fromTimestamp, toTimestamp, resolution]);

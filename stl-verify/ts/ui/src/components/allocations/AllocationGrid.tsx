@@ -88,20 +88,29 @@ export type ChartDatum = {
   value: number;
 };
 
+export type MetricChartKey =
+  | 'allocation-activity-volume'
+  | 'risk-capital'
+  | 'total-capital'
+  | 'prime-debt-exposure';
+
+// 'fallback' is a synthetic constant placeholder (current value repeated)
+// shown when no real history is available; 'series' is a real time series.
+// The card drops the area fill for fallbacks so they read as a flat baseline
+// rather than a filled block.
+export type MetricChartKind = 'series' | 'fallback';
+
 export type MetricChartSpec = {
-  key: string;
+  key: MetricChartKey;
   data: ChartDatum[];
   stroke: string;
   formatValue: (value: number) => string;
-  // True when `data` is a synthetic constant placeholder (current value
-  // repeated) rather than a real time series, so the card can show a "no
-  // history yet" message instead of a flat block.
-  isFallback: boolean;
+  kind: MetricChartKind;
 };
 
 function findMetricChart(
   charts: MetricChartSpec[],
-  key: MetricChartSpec['key'],
+  key: MetricChartKey,
 ): MetricChartSpec | null {
   return charts.find((chart) => chart.key === key) ?? null;
 }
@@ -294,7 +303,7 @@ function MetricCardTrend({
               fill: 'var(--colors-text-muted)',
             })}
           />
-          {chart.isFallback ? null : (
+          {chart.kind === 'fallback' ? null : (
             <AreaSeries
               dataKey={`${chart.key}-area`}
               data={chart.data as ChartDatum[]}

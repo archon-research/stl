@@ -28,6 +28,16 @@ const apiClient = createApiClient<paths>(API_BASE_URL);
 
 type TimeSeriesResolution = components['schemas']['TimeSeriesResolution'];
 
+// Shared query shape for the bucketed time-series endpoints (allocation
+// activity, prime debt, total capital).
+type TimeSeriesFilters = {
+  from_timestamp?: string;
+  to_timestamp?: string;
+  resolution?: TimeSeriesResolution;
+  aggregate?: boolean;
+  limit?: number;
+};
+
 type ApiResult<TData, TError> = Promise<{
   data?: TData;
   error?: TError;
@@ -150,20 +160,17 @@ export function getRrc(
   );
 }
 
+type AllocationActivityFilters = TimeSeriesFilters & {
+  prime_id?: string;
+  chain_id?: number;
+  protocol_name?: string;
+  action_type?: string;
+  token_symbol?: string;
+  tx_hash?: string;
+};
+
 export async function getAllocationActivity(
-  filters?: {
-    prime_id?: string;
-    chain_id?: number;
-    protocol_name?: string;
-    action_type?: string;
-    token_symbol?: string;
-    tx_hash?: string;
-    from_timestamp?: string;
-    to_timestamp?: string;
-    resolution?: TimeSeriesResolution;
-    aggregate?: boolean;
-    limit?: number;
-  },
+  filters?: AllocationActivityFilters,
   signal?: AbortSignal,
 ): Promise<AllocationActivityResponse> {
   const envelope = await getAllocationActivityEnvelope(filters, signal);
@@ -171,19 +178,7 @@ export async function getAllocationActivity(
 }
 
 export async function getAllocationActivityEnvelope(
-  filters?: {
-    prime_id?: string;
-    chain_id?: number;
-    protocol_name?: string;
-    action_type?: string;
-    token_symbol?: string;
-    tx_hash?: string;
-    from_timestamp?: string;
-    to_timestamp?: string;
-    resolution?: TimeSeriesResolution;
-    aggregate?: boolean;
-    limit?: number;
-  },
+  filters?: AllocationActivityFilters,
   signal?: AbortSignal,
 ): Promise<AllocationActivityEnvelope> {
   const envelope = await requestData(
@@ -324,13 +319,7 @@ export function getTokenPrice(
 
 export async function getPrimeDebtSnapshots(
   primeId: string,
-  filters?: {
-    from_timestamp?: string;
-    to_timestamp?: string;
-    resolution?: TimeSeriesResolution;
-    aggregate?: boolean;
-    limit?: number;
-  },
+  filters?: TimeSeriesFilters,
   signal?: AbortSignal,
 ): Promise<PrimeDebtSnapshot[]> {
   const envelope = await getPrimeDebtEnvelope(primeId, filters, signal);
@@ -339,13 +328,7 @@ export async function getPrimeDebtSnapshots(
 
 export async function getPrimeDebtEnvelope(
   primeId: string,
-  filters?: {
-    from_timestamp?: string;
-    to_timestamp?: string;
-    resolution?: TimeSeriesResolution;
-    aggregate?: boolean;
-    limit?: number;
-  },
+  filters?: TimeSeriesFilters,
   signal?: AbortSignal,
 ): Promise<PrimeDebtEnvelope> {
   const query = filters as
@@ -369,13 +352,7 @@ export async function getPrimeDebtEnvelope(
 
 export async function getTotalCapitalEnvelope(
   primeId: string,
-  filters?: {
-    from_timestamp?: string;
-    to_timestamp?: string;
-    resolution?: TimeSeriesResolution;
-    aggregate?: boolean;
-    limit?: number;
-  },
+  filters?: TimeSeriesFilters,
   signal?: AbortSignal,
 ): Promise<TotalCapitalEnvelope> {
   const query = filters as
