@@ -239,6 +239,42 @@ groups:
             more archived objects <=64 bytes in the last 10m. Inspect the object
             and the encode path; the file is likely missing call/response data.
 
+      - alert: VectorArchivingErrorRatioHigh
+        # Companion to VectorArchivingStalled, which keys on the status="success"
+        # series and is therefore BLIND to a 100%-from-cold-start failure: if every
+        # write errors from deploy, the success series is never created, so its
+        # ==0 guard matches nothing and never fires. This ratio is denominated on
+        # total attempts (success + error), so all-errors reads 1.0 and fires.
+        # clamp_min avoids a divide-by-zero when a source has no writes (ratio → 0,
+        # never fires), so no multicall guard is needed: archive_writes_total only
+        # exists for sources actively attempting writes.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            rate(archive_writes_total{status="error", k8s_namespace_name="vector"}[10m])
+          )
+          /
+          clamp_min(
+            sum by (service_name, chain, cluster) (
+              rate(archive_writes_total{k8s_namespace_name="vector"}[10m])
+            ),
+            0.001
+          )
+          > 0.5
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archiving error ratio >50% for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is failing
+            `{{ $value | humanizePercentage }}` of raw SC call archive writes to S3
+            over 10m. Replay data is being lost (Alchemy remains the fallback).
+            Unlike VectorArchivingStalled, this fires even on a 100%-from-deploy
+            failure where the success series never appears.
+
       # =====================================================================
       # maple-graphql-indexer (VEC-320)
       # =====================================================================
