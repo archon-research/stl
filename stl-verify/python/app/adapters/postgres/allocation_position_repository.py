@@ -318,6 +318,30 @@ class AllocationRepository:
             },
         )
 
+    @staticmethod
+    def _record_empty_total_capital(prime_address: EthAddress, buckets: list[TotalCapitalBucket]) -> None:
+        """Surface a total-capital series that gapfilled to all-``None``.
+
+        A prime passes the ``prime_exists`` check on its ALM ``proxy_address``,
+        but total capital is read from a *different* row set — the SubProxy
+        treasury USDS scoped by ``_USDS_ADDRESS_HEX``. If that set is empty (no
+        SubProxy configured for the prime, treasury not yet indexed, or the USDS
+        address drifting out of the ``token`` registry) the gapfill still returns
+        a full window of buckets, every one ``None``. That is a valid 200 for a
+        brand-new prime but is indistinguishable from a coverage regression, so
+        record it for alerting rather than letting it surface as a blank chart.
+        """
+        if not buckets or any(b.total_capital_usd is not None for b in buckets):
+            return
+        trace.get_current_span().set_attribute("allocations.total_capital.all_null", True)
+        logger.warning(
+            "Total capital series is entirely empty for a known prime",
+            extra={
+                "prime_address": str(prime_address),
+                "bucket_count": len(buckets),
+            },
+        )
+
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
         try:
@@ -587,7 +611,7 @@ class AllocationRepository:
                 f"Database query failed while fetching total capital buckets for prime {prime_address}: {exc}"
             ) from exc
 
-        return [
+        buckets = [
             TotalCapitalBucket(
                 bucket_start=row.bucket_start,
                 total_capital_usd=(
@@ -598,6 +622,8 @@ class AllocationRepository:
             )
             for row in rows
         ]
+        self._record_empty_total_capital(prime_address, buckets)
+        return buckets
 
 
 # Match positions to receipt tokens only by receipt_token_address: a prime's
@@ -825,19 +851,22 @@ LIMIT :limit
 
 # Aggregated counterpart of _ALLOCATION_ACTIVITY_SQL: same filters, bucketed by
 # time. Reuses the shared window/bucket SQL helpers. Bounds are required so the
-# JOIN/filter set matches the raw query exactly. ``total_tx_amount`` is clamped
-# to ``>= 0`` because outflows are stored as negative ``tx_amount`` values and a
-# bucket dominated by outflows would otherwise violate the non-negativity
-# invariant on ``AllocationActivityBucket`` and surface as a 500.
+# JOIN/filter set matches the raw query exactly. ``tx_amount`` is an unsigned
+# magnitude (direction carries the sign), so ``SUM`` is already ``>= 0``; the
+# ``GREATEST(..., 0)`` clamp on ``total_tx_amount`` is defensive only, guarding
+# the non-negativity invariant on ``AllocationActivityBucket`` against any stray
+# negative row rather than letting it surface as a 500.
 #
-# ``net_flow_usd`` is the SIGNED net flow valued in USD at the receipt token's
-# latest underlying oracle price — the same valuation basis as the current
-# exposure query. The sign comes from ``direction`` (tx_amount is a magnitude):
-# inflows add, outflows subtract, and sweeps are internal position moves that
-# net to zero and are excluded. It lets the UI reconstruct a total-allocation
-# balance series by anchoring at the current total and cumulating net flows
-# backwards. Unpriced flows (e.g. direct assets with no receipt token)
-# contribute 0, matching the exposure total.
+# ``net_flow_usd`` is the SIGNED net flow valued in USD. The sign comes from
+# ``direction`` (tx_amount is a magnitude): inflows add, outflows subtract, and
+# sweeps are internal position moves that net to zero and are excluded. It lets
+# the UI reconstruct a total-allocation balance series by anchoring at the
+# current total and cumulating net flows backwards — so the valuation basis must
+# match the anchor, which sums BOTH receipt-token positions and direct holdings.
+# Each flow is therefore priced by its receipt token's underlying oracle price
+# when wrapped, falling back to the token's own latest oracle price when held
+# directly (no receipt token). Flows whose token has no oracle price at all
+# (e.g. LP/curve shares) still contribute 0.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH receipt_token_price AS (
     -- Latest underlying oracle price per receipt token, computed ONCE per token
@@ -856,6 +885,30 @@ WITH receipt_token_price AS (
             LIMIT 1
         ) AS price_usd
     FROM receipt_token rt
+),
+direct_token_price AS (
+    -- Latest oracle price per token actually involved in these flows, used to
+    -- value direct-asset flows (no receipt-token wrapper). Bounded to the flow
+    -- token set and computed ONCE per token, mirroring receipt_token_price.
+    -- No protocol context here (the token is held bare), so the latest price
+    -- across any oracle is used, with oracle_id breaking ties deterministically.
+    SELECT
+        ft.token_id,
+        (
+            SELECT otp.price_usd
+            FROM onchain_token_price otp
+            WHERE otp.token_id = ft.token_id
+            ORDER BY otp.block_number DESC, otp.block_version DESC,
+                     otp.processing_version DESC, otp.oracle_id DESC
+            LIMIT 1
+        ) AS price_usd
+    FROM (
+        SELECT DISTINCT ap.token_id
+        FROM allocation_position ap
+        WHERE (CAST(:prime_hex AS TEXT) IS NULL
+               OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+          AND ap.token_id IS NOT NULL
+    ) AS ft
 )
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
@@ -866,7 +919,7 @@ SELECT
             WHEN 'in' THEN ap.tx_amount
             WHEN 'out' THEN -ap.tx_amount
             ELSE 0
-        END * COALESCE(price.price_usd, 0)
+        END * COALESCE(price.price_usd, direct_price.price_usd, 0)
     ), 0) AS net_flow_usd
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
@@ -891,6 +944,8 @@ LEFT JOIN LATERAL (
 LEFT JOIN receipt_token_price price
     ON price.receipt_token_address = t.address
     AND price.chain_id = ap.chain_id
+LEFT JOIN direct_token_price direct_price
+    ON direct_price.token_id = ap.token_id
 WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL

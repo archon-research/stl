@@ -64,6 +64,14 @@ _FLOW_TX_SWEEP = "1c" * 32
 # All three events fall in the single 00:00 PT1H bucket.
 _FLOW_BUCKET_TS = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
 
+# Direct-asset flow fixture: a prime that holds raw USDC (no receipt-token
+# wrapper). USDC is priced at 1 USD, so net_flow_usd must value the direct flow
+# via the token's own oracle price rather than dropping it to 0.
+_DIRECT_FLOW_PRIME_VAULT_HEX = "f2" * 20
+_DIRECT_FLOW_PROXY_HEX = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+_DIRECT_FLOW_TX_IN = "2a" * 32
+_DIRECT_FLOW_TX_OUT = "2b" * 32
+
 # Total-capital LOCF fixture: the Spark SubProxy holds treasury USDS, observed
 # at two timestamps two hours apart, so gap-fill carry-forward and the
 # leading-gap null are observable.
@@ -228,6 +236,36 @@ async def _seed(db_url: str) -> None:
                     bytes.fromhex(_FLOW_PROXY_HEX),
                     Decimal(amount),
                     5000 + offset,
+                    bytes.fromhex(tx),
+                    direction,
+                    _FLOW_BUCKET_TS,
+                )
+
+            # Direct-asset flow fixture: a prime holding raw USDC (no receipt
+            # token). +250 in, −50 out in one bucket, valued at USDC = 1 USD, so
+            # net_flow_usd == 200 — exercising the direct-token price fallback
+            # for flows whose token has no receipt-token wrapper (these were
+            # silently valued at 0 before).
+            direct_flow_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('direct_flow_test', $1) RETURNING id",
+                bytes.fromhex(_DIRECT_FLOW_PRIME_VAULT_HEX),
+            )
+            for offset, (tx, direction, amount) in enumerate(
+                [
+                    (_DIRECT_FLOW_TX_IN, "in", 250),
+                    (_DIRECT_FLOW_TX_OUT, "out", 50),
+                ]
+            ):
+                await conn.execute(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction, created_at) "
+                    "VALUES (1, $1, $2, $3, $4, $5, 0, $6, 0, $4, $7, $8)",
+                    usdc_id,
+                    direct_flow_prime_id,
+                    bytes.fromhex(_DIRECT_FLOW_PROXY_HEX),
+                    Decimal(amount),
+                    7000 + offset,
                     bytes.fromhex(tx),
                     direction,
                     _FLOW_BUCKET_TS,
@@ -499,6 +537,30 @@ def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestCli
     assert Decimal(str(bucket["net_flow_usd"])) == Decimal("60")
     # total_tx_amount is the unsigned magnitude sum and DOES include the sweep.
     assert Decimal(str(bucket["total_tx_amount"])) == Decimal("1140")
+
+
+def test_activity_buckets_value_direct_asset_flows(client: TestClient) -> None:
+    """A flow whose token is held directly (no receipt-token wrapper) is valued
+    by the token's own oracle price, not silently dropped to 0."""
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": f"0x{_DIRECT_FLOW_PROXY_HEX}",
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-01T01:00:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    buckets = envelope["data"]
+    assert len(buckets) == 1
+    # +250 (in) − 50 (out), valued at USDC = 1 USD. The old query dropped this to
+    # 0 because USDC has no receipt-token wrapper.
+    assert Decimal(str(buckets[0]["net_flow_usd"])) == Decimal("200")
 
 
 # ---------------------------------------------------------------------------

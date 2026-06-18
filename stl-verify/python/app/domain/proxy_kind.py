@@ -1,8 +1,8 @@
 """Classification of allocation proxies by role.
 
-PR #310 introduced SubProxy wallets that hold risk capital separately from
-the main ALM proxy of each prime. Both wallet kinds end up in
-``allocation_position`` under the same ``prime_id``, so a naive listing of
+PR #310 introduced SubProxy wallets that hold a prime's treasury capital
+separately from the main ALM proxy of each prime. Both wallet kinds end up
+in ``allocation_position`` under the same ``prime_id``, so a naive listing of
 distinct proxy addresses surfaces them as duplicate primes.
 
 This module centralises the address → kind mapping so ``/v1/primes`` can
