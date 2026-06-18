@@ -182,6 +182,117 @@ groups:
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
 
+      # ---------------------------------------------------------------------
+      # Raw SC call archiving (VEC-364 / PR #399)
+      # ---------------------------------------------------------------------
+      # archive_writes_total{status,source,chain,service_name} is emitted by the
+      # archiving decorator; archive_object_size_bytes is the S3 adapter's
+      # compressed-object-size histogram. Both only exist for binaries with
+      # ARCHIVE_SC_CALLS=true, so a disabled source has no series and never fires.
+
+      - alert: VectorArchivingStalled
+        # No successful S3 archive writes for 10m while the indexer is still
+        # executing multicalls. multicall_batch_size_count increments on the same
+        # Execute path that archives, so success==0 with multicalls>0 is a genuine
+        # archiving failure, not an idle/disabled source (those have no multicalls,
+        # so the guard excludes them).
+        #
+        # The `or (… * 0)` synthesises a zero-valued success series for a source
+        # that has attempted writes but never emitted a success sample; without it
+        # a 100%-from-cold-start failure (success series never created) would make
+        # `== 0` match nothing and the alert would stay silent. The zero-fill is
+        # denominated on archive_writes_total (any status), NOT multicall count: a
+        # worker with archiving disabled still emits multicall_batch_size_count but
+        # has no archive_writes_total series, so filling from the multicall counter
+        # would falsely fire on every non-archiving multicall worker. Filling from
+        # archive_writes_total only synthesises a 0 once a write has been attempted.
+        # VectorArchivingErrorRatioHigh covers the partial-failure case (some writes
+        # succeed) that `== 0` misses.
+        expr: |
+          (
+            sum by (service_name, chain, cluster) (
+              increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[10m])
+            )
+            or
+            sum by (service_name, chain, cluster) (
+              increase(archive_writes_total{k8s_namespace_name="vector"}[10m])
+            ) * 0
+          ) == 0
+          and on (service_name, chain, cluster)
+          sum by (service_name, chain, cluster) (
+            increase(multicall_batch_size_count{k8s_namespace_name="vector"}[10m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archiving stalled for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is still
+            executing multicalls but has written no raw SC call archives to S3 for
+            >10m. Replay data is being lost (Alchemy remains the fallback).
+
+      - alert: VectorArchivingEmptyObjects
+        # Any archived object lands in the smallest size bucket (<=64B). A real
+        # one-call zstd object is comfortably larger, so this signals degenerate
+        # / near-empty writes. Depends on archive_object_size_bytes (sibling task),
+        # so it stays dormant until that metric is deployed.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            increase(archive_object_size_bytes_bucket{le="64", k8s_namespace_name="vector"}[10m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archiving wrote near-empty objects for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` wrote one or
+            more archived objects <=64 bytes in the last 10m. Inspect the object
+            and the encode path; the file is likely missing call/response data.
+
+      - alert: VectorArchivingErrorRatioHigh
+        # Catches PARTIAL failure: a meaningful fraction of writes erroring while
+        # some still succeed. VectorArchivingStalled keys on success==0 and so
+        # cannot see this (successes > 0 means it never fires). Denominated on total
+        # attempts (success + error) from the same counter, so it is immune to the
+        # multicall/RPC faults that would distort a multicall-count denominator
+        # (failed/empty Executes inflate multicall_batch_size_count but never
+        # archive). clamp_min avoids a divide-by-zero when a source has no writes
+        # (ratio → 0, never fires), so no multicall guard is needed.
+        expr: |
+          sum by (service_name, chain, cluster) (
+            rate(archive_writes_total{status="error", k8s_namespace_name="vector"}[10m])
+          )
+          /
+          clamp_min(
+            sum by (service_name, chain, cluster) (
+              rate(archive_writes_total{k8s_namespace_name="vector"}[10m])
+            ),
+            0.001
+          )
+          > 0.5
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: archiving
+          namespace: vector
+        annotations:
+          summary: "Vector archiving error ratio >50% for {{ $labels.service_name }} on {{ $labels.chain }}"
+          description: |
+            `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is failing
+            `{{ $value | humanizePercentage }}` of raw SC call archive writes to S3
+            over 10m while some still succeed. Replay data is being partially lost
+            (Alchemy remains the fallback). A total stall is covered separately by
+            VectorArchivingStalled.
+
       # =====================================================================
       # maple-graphql-indexer (VEC-320)
       # =====================================================================

@@ -113,7 +113,7 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 		writer = s3adapter.NewWriter(awsCfg, logger)
 	}
 
-	archiver, err := s3adapter.NewCallArchiver(writer, bucket, logger)
+	archiver, err := s3adapter.NewCallArchiver(writer, bucket, chainName, logger, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating call archiver: %w", err)
 	}
