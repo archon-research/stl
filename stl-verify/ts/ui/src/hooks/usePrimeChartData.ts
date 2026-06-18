@@ -2,26 +2,26 @@ import { useEffect, useState } from 'react';
 
 import {
   getAllocationActivityEnvelope,
-  getCapitalMetricsEnvelope,
   getPrimeDebtEnvelope,
+  getTotalCapitalEnvelope,
 } from '../lib/api';
 import { sortByBucketStart } from '../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../lib/errors';
 import { logging } from '../lib/logging';
 import type {
   AllocationActivityBucket,
-  CapitalMetricsBucket,
   PrimeDebtBucket,
   TimeSeriesResolution,
+  TotalCapitalBucket,
 } from '../types/allocation';
 
 export interface PrimeChartData {
   debtBuckets: PrimeDebtBucket[];
   activityBuckets: AllocationActivityBucket[];
-  capitalMetricsBuckets: CapitalMetricsBucket[];
+  totalCapitalBuckets: TotalCapitalBucket[];
   isLoading: boolean;
   // Set only for the prime-debt chart, which is the primary series; the
-  // activity and capital-metrics series are supplementary and degrade to their
+  // activity and total-capital series are supplementary and degrade to their
   // current-value fallbacks on failure rather than surfacing an error.
   errorMessage: string | null;
 }
@@ -29,7 +29,7 @@ export interface PrimeChartData {
 const EMPTY: PrimeChartData = {
   debtBuckets: [],
   activityBuckets: [],
-  capitalMetricsBuckets: [],
+  totalCapitalBuckets: [],
   isLoading: false,
   errorMessage: null,
 };
@@ -50,8 +50,8 @@ export function usePrimeChartData(
   const [activityBuckets, setActivityBuckets] = useState<
     AllocationActivityBucket[]
   >([]);
-  const [capitalMetricsBuckets, setCapitalMetricsBuckets] = useState<
-    CapitalMetricsBucket[]
+  const [totalCapitalBuckets, setTotalCapitalBuckets] = useState<
+    TotalCapitalBucket[]
   >([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -60,7 +60,7 @@ export function usePrimeChartData(
     if (!primeId) {
       setDebtBuckets([]);
       setActivityBuckets([]);
-      setCapitalMetricsBuckets([]);
+      setTotalCapitalBuckets([]);
       setErrorMessage(null);
       setIsLoading(false);
       return;
@@ -143,30 +143,25 @@ export function usePrimeChartData(
         setActivityBuckets([]);
       });
 
-    // Capital-metrics history is supplementary: a failure (e.g. the endpoint not
-    // yet deployed, or no snapshots ingested) degrades the risk/total-capital
-    // charts to their current-value fallback rather than failing the whole view.
-    void getCapitalMetricsEnvelope(primeId, bucketFilters, controller.signal)
+    // Total-capital history is supplementary: it drives the total-capital chart
+    // from the on-chain SubProxy treasury balance, and on failure that card
+    // degrades to the current-value fallback rather than failing the whole view.
+    void getTotalCapitalEnvelope(primeId, bucketFilters, controller.signal)
       .then((capitalEnvelope) => {
-        const nextCapitalBuckets =
-          capitalEnvelope.mode === 'aggregated'
-            ? (capitalEnvelope.data as CapitalMetricsBucket[])
-            : [];
-        setCapitalMetricsBuckets(sortByBucketStart(nextCapitalBuckets));
+        setTotalCapitalBuckets(
+          sortByBucketStart(capitalEnvelope.data as TotalCapitalBucket[]),
+        );
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        logging.warn(
-          'Capital metrics history unavailable; using current value',
-          {
-            error,
-            primeId,
-          },
-        );
-        setCapitalMetricsBuckets([]);
+        logging.warn('Total capital history unavailable; using current value', {
+          error,
+          primeId,
+        });
+        setTotalCapitalBuckets([]);
       });
 
     return () => controller.abort();
@@ -179,7 +174,7 @@ export function usePrimeChartData(
   return {
     debtBuckets,
     activityBuckets,
-    capitalMetricsBuckets,
+    totalCapitalBuckets,
     isLoading,
     errorMessage,
   };

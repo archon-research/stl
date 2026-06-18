@@ -113,29 +113,9 @@ export interface paths {
     };
     /**
      * List a prime's current allocations
-     * @description Return every current allocation held by the given prime — both receipt-token positions (enriched with USD value when a price is available) and direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and `amount_usd` set to `null`). Each row includes the latest on-chain activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`).
+     * @description Return every current allocation held by the given prime — both receipt-token positions (enriched with USD value when a price is available) and direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists). Each row includes the latest on-chain activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`).
      */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/primes/{prime_id}/capital-metrics': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * List prime capital-metrics snapshots
-     * @description Return stored capital-metrics snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Set `aggregate=true` for the last value per time bucket (gap-filled). This is the historical series; the latest live values remain at `/v1/capital-metrics`.
-     */
-    get: operations['list_prime_capital_metrics_v1_primes__prime_id__capital_metrics_get'];
     put?: never;
     post?: never;
     delete?: never;
@@ -156,6 +136,26 @@ export interface paths {
      * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled).
      */
     get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/v1/primes/{prime_id}/total-capital': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Prime total-capital (treasury) time series
+     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+     */
+    get: operations['list_prime_total_capital_v1_primes__prime_id__total_capital_get'];
     put?: never;
     post?: never;
     delete?: never;
@@ -701,10 +701,11 @@ export interface components {
      *     Two row shapes share this model:
      *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
      *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
-     *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
-     *       ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
-     *       the held asset; ``underlying_token_id`` / ``underlying_token_address``
-     *       point at it.
+     *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
+     *       null; ``symbol`` and ``underlying_symbol`` both name the held asset;
+     *       ``underlying_token_id`` / ``underlying_token_address`` point at it.
+     *       ``amount_usd`` is populated when an oracle price exists for the token and
+     *       null otherwise (e.g. LP/curve shares with no oracle feed).
      * @example {
      *       "amount_usd": "1234567.89",
      *       "balance": "1234567.89",
@@ -820,64 +821,6 @@ export interface components {
       receipt_token_id: number;
     };
     /**
-     * CapitalMetricsBucketResponse
-     * @description Last observed capital metrics within a single time bucket (LOCF gap-filled).
-     */
-    CapitalMetricsBucketResponse: {
-      /**
-       * Bucket Start
-       * Format: date-time
-       * @description Inclusive start of the time bucket (UTC).
-       */
-      bucket_start: string;
-      /**
-       * Capital Buffer
-       * @description Derived `max(total_capital - first_loss_capital, 0)`; `null` for leading gap-filled buckets.
-       */
-      capital_buffer?: string | null;
-      /**
-       * First Loss Capital
-       * @description Carried-forward first-loss capital (USD).
-       */
-      first_loss_capital?: string | null;
-      /**
-       * Risk Capital
-       * @description Carried-forward risk capital (USD).
-       */
-      risk_capital?: string | null;
-      /**
-       * Risk To Capital Ratio
-       * @description Carried-forward risk-to-capital ratio.
-       */
-      risk_to_capital_ratio?: string | null;
-      /**
-       * Total Capital
-       * @description Carried-forward total capital (USD).
-       */
-      total_capital?: string | null;
-    };
-    /**
-     * CapitalMetricsEnvelope
-     * @description Capital-metrics response: raw snapshots or aggregated time buckets.
-     */
-    CapitalMetricsEnvelope: {
-      /**
-       * Data
-       * @description Snapshots when `mode=raw`, value buckets when `mode=aggregated`.
-       */
-      data:
-        | components['schemas']['CapitalMetricsSnapshotResponse'][]
-        | components['schemas']['CapitalMetricsBucketResponse'][];
-      /**
-       * Mode
-       * @description `raw` for snapshots, `aggregated` for time buckets.
-       * @enum {string}
-       */
-      mode: 'raw' | 'aggregated';
-      /** @description The window and resolution applied to this response. */
-      window: components['schemas']['TimeSeriesWindow'];
-    };
-    /**
      * CapitalMetricsResponse
      * @description Prime-level capital metrics for risk and alert management.
      * @example {
@@ -959,65 +902,6 @@ export interface components {
        * @description Human-readable note about validation, e.g. why a row is missing or unmatched.
        */
       validation_note?: string | null;
-    };
-    /**
-     * CapitalMetricsSnapshotResponse
-     * @description A single observed capital-metrics position at a point in time.
-     */
-    CapitalMetricsSnapshotResponse: {
-      /**
-       * Benchmark Source
-       * @description Upstream source the snapshot was sourced from.
-       */
-      benchmark_source: string;
-      /**
-       * Capital Buffer
-       * @description Derived `max(total_capital - first_loss_capital, 0)` (USD).
-       * @example 2500000
-       */
-      capital_buffer: string;
-      /**
-       * First Loss Capital
-       * @description First-loss capital (USD).
-       * @example 7500000
-       */
-      first_loss_capital: string;
-      /**
-       * Prime Address
-       * @description Prime's 0x-prefixed Ethereum address.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      prime_address: string;
-      /**
-       * Prime Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      prime_name: string;
-      /**
-       * Risk Capital
-       * @description Risk capital exposure (USD).
-       * @example 10000000
-       */
-      risk_capital: string;
-      /**
-       * Risk To Capital Ratio
-       * @description Upstream risk-tolerance ratio. `null` when not reported.
-       * @example 0.85
-       */
-      risk_to_capital_ratio?: string | null;
-      /**
-       * Synced At
-       * Format: date-time
-       * @description Server-side time the snapshot was persisted.
-       */
-      synced_at: string;
-      /**
-       * Total Capital
-       * @description Total RRC reported upstream (USD).
-       * @example 10000000
-       */
-      total_capital: string;
     };
     /**
      * ChainResponse
@@ -1833,6 +1717,43 @@ export interface components {
        */
       updated_at: string;
     };
+    /**
+     * TotalCapitalBucketResponse
+     * @description Last observed treasury balance within a single time bucket (LOCF gap-filled).
+     */
+    TotalCapitalBucketResponse: {
+      /**
+       * Bucket Start
+       * Format: date-time
+       * @description Inclusive start of the time bucket (UTC).
+       */
+      bucket_start: string;
+      /**
+       * Total Capital Usd
+       * @description Last observed SubProxy treasury USDS balance carried forward into the bucket (USD; USDS is dollar-pegged), serialized as a JSON string. `null` for leading buckets before the first observation.
+       * @example 36359440.25
+       */
+      total_capital_usd?: string | null;
+    };
+    /**
+     * TotalCapitalEnvelope
+     * @description Per-prime total-capital time series, gap-filled into buckets.
+     */
+    TotalCapitalEnvelope: {
+      /**
+       * Data
+       * @description Last treasury balance per time bucket.
+       */
+      data: components['schemas']['TotalCapitalBucketResponse'][];
+      /**
+       * Mode
+       * @description Always `aggregated`: a gap-filled time series.
+       * @constant
+       */
+      mode: 'aggregated';
+      /** @description The window and resolution applied to this response. */
+      window: components['schemas']['TimeSeriesWindow'];
+    };
     /** ValidationError */
     ValidationError: {
       /** Context */
@@ -2018,48 +1939,6 @@ export interface operations {
       };
     };
   };
-  list_prime_capital_metrics_v1_primes__prime_id__capital_metrics_get: {
-    parameters: {
-      query?: {
-        /** @description Max snapshots returned (default 100, max 500). */
-        limit?: number;
-        /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
-        from_timestamp?: string | null;
-        /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
-        to_timestamp?: string | null;
-        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
-        resolution?: components['schemas']['TimeSeriesResolution'] | null;
-        /** @description When true, return time-bucketed aggregates instead of raw rows. */
-        aggregate?: boolean;
-      };
-      header?: never;
-      path: {
-        prime_id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CapitalMetricsEnvelope'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
   list_prime_debt_snapshots_v1_primes__prime_id__debt_get: {
     parameters: {
       query?: {
@@ -2089,6 +1968,48 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['PrimeDebtEnvelope'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  list_prime_total_capital_v1_primes__prime_id__total_capital_get: {
+    parameters: {
+      query?: {
+        /** @description Max buckets returned (default 100, max 500). */
+        limit?: number;
+        /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+        from_timestamp?: string | null;
+        /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+        to_timestamp?: string | null;
+        /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+        resolution?: components['schemas']['TimeSeriesResolution'] | null;
+        /** @description When true, return time-bucketed aggregates instead of raw rows. */
+        aggregate?: boolean;
+      };
+      header?: never;
+      path: {
+        prime_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['TotalCapitalEnvelope'];
         };
       };
       /** @description Validation Error */

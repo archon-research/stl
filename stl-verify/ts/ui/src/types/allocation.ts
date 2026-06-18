@@ -68,11 +68,11 @@ export type PrimeDebtBucket = components['schemas']['PrimeDebtBucketResponse'];
 export type TimeSeriesResolution =
   components['schemas']['TimeSeriesResolution'];
 
-export type CapitalMetricsEnvelope =
-  components['schemas']['CapitalMetricsEnvelope'];
+export type TotalCapitalEnvelope =
+  components['schemas']['TotalCapitalEnvelope'];
 
-export type CapitalMetricsBucket =
-  components['schemas']['CapitalMetricsBucketResponse'];
+export type TotalCapitalBucket =
+  components['schemas']['TotalCapitalBucketResponse'];
 
 export type TokensResponse = NonNullable<
   paths['/v1/tokens']['get']['responses']['200']['content']['application/json']

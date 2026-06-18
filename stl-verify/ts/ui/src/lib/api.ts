@@ -5,7 +5,6 @@ import type {
   AllocationActivityEnvelope,
   AllocationActivityResponse,
   AllocationsResponse,
-  CapitalMetricsEnvelope,
   CapitalMetricsListResponse,
   DataSourcesResponse,
   PrimeDebtEnvelope,
@@ -17,6 +16,7 @@ import type {
   Token,
   TokenPrice,
   TokensResponse,
+  TotalCapitalEnvelope,
   TxProtocolEventsResponse,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
@@ -367,7 +367,7 @@ export async function getPrimeDebtEnvelope(
   return envelope as PrimeDebtEnvelope;
 }
 
-export async function getCapitalMetricsEnvelope(
+export async function getTotalCapitalEnvelope(
   primeId: string,
   filters?: {
     from_timestamp?: string;
@@ -377,13 +377,13 @@ export async function getCapitalMetricsEnvelope(
     limit?: number;
   },
   signal?: AbortSignal,
-): Promise<CapitalMetricsEnvelope> {
+): Promise<TotalCapitalEnvelope> {
   const query = filters as
-    | paths['/v1/primes/{prime_id}/capital-metrics']['get']['parameters']['query']
+    | paths['/v1/primes/{prime_id}/total-capital']['get']['parameters']['query']
     | undefined;
 
   const envelope = await requestData(
-    apiClient.GET('/v1/primes/{prime_id}/capital-metrics', {
+    apiClient.GET('/v1/primes/{prime_id}/total-capital', {
       params: {
         path: {
           prime_id: primeId,
@@ -392,9 +392,9 @@ export async function getCapitalMetricsEnvelope(
       },
       signal,
     }),
-    'GET /v1/primes/{prime_id}/capital-metrics',
+    'GET /v1/primes/{prime_id}/total-capital',
   );
-  return envelope as CapitalMetricsEnvelope;
+  return envelope as TotalCapitalEnvelope;
 }
 
 export async function getLatestPrimeDebtSnapshot(

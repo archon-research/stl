@@ -516,7 +516,7 @@ function App() {
   const {
     debtBuckets,
     activityBuckets,
-    capitalMetricsBuckets,
+    totalCapitalBuckets,
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
@@ -682,26 +682,18 @@ function App() {
     [debtBuckets],
   );
 
-  const riskCapitalSeries = useMemo<ChartDatum[]>(
-    () =>
-      capitalMetricsBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.risk_capital) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
-    [capitalMetricsBuckets],
-  );
-
+  // Risk capital has no on-chain time series (it is Star's exposure model
+  // output), so its card shows the current value as a flat line via the
+  // fallback below. Total capital is the on-chain SubProxy treasury balance.
   const totalCapitalSeries = useMemo<ChartDatum[]>(
     () =>
-      capitalMetricsBuckets
+      totalCapitalBuckets
         .map((bucket) => ({
           label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.total_capital) ?? Number.NaN,
+          value: parseNumericValue(bucket.total_capital_usd) ?? Number.NaN,
         }))
         .filter((point) => Number.isFinite(point.value)),
-    [capitalMetricsBuckets],
+    [totalCapitalBuckets],
   );
 
   const chartFromLabel = timeRange.from_timestamp
@@ -742,10 +734,9 @@ function App() {
         ? primeDebtSeries
         : fallbackChart(primeDebtValue);
 
-    const riskCapitalData =
-      riskCapitalSeries.length > 0
-        ? riskCapitalSeries
-        : fallbackChart(riskCapitalValue);
+    // Risk capital has no on-chain history; always show its current value as a
+    // flat line.
+    const riskCapitalData = fallbackChart(riskCapitalValue);
 
     const totalCapitalData =
       totalCapitalSeries.length > 0
@@ -766,7 +757,7 @@ function App() {
       {
         key: 'risk-capital',
         data: riskCapitalData,
-        isFallback: riskCapitalSeries.length === 0,
+        isFallback: true,
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
         formatValue: formatCompactUsd,
       },
@@ -793,7 +784,6 @@ function App() {
     chartToLabel,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
-    riskCapitalSeries,
     totalCapitalSeries,
   ]);
 
