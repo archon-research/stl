@@ -1,4 +1,4 @@
-"""Integration tests for ``PostgresTokenCatalogRepository`` chain+address lookups.
+"""Integration tests for ``TokenCatalogRepository`` chain+address lookups.
 
 Exercises the SQL path that backs the
 ``/v1/tokens/{chain_id}/{token_address}`` endpoint. Reuses the shared seed
@@ -9,7 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.token_catalog_repository import PostgresTokenCatalogRepository
+from app.adapters.postgres.token_catalog_repository import TokenCatalogRepository
 from app.domain.entities.allocation import EthAddress
 
 
@@ -17,7 +17,7 @@ from app.domain.entities.allocation import EthAddress
 async def repository(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
-        yield PostgresTokenCatalogRepository(engine)
+        yield TokenCatalogRepository(engine)
     finally:
         await engine.dispose()
 

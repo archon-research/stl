@@ -220,6 +220,20 @@ git commit  # Hooks auto-fix, may stage changes
 - **External API adapters**:
     - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
 
+## Observability — alerts & runbooks (required for new indexers)
+
+A new indexer / data service that emits metrics ships its alert rules **and**
+runbook sections in the same PR — same definition-of-done as tests.
+
+- Rules → a group in `alerts/vector-<service>.yaml`; runbooks → matching
+  `## AlertName` sections in `docs/runbooks/vector-<service>.md`. Copy an
+  existing pair (`vector-indexers.yaml` + `.md`) — their header comments carry
+  the label, severity→routing, and window conventions; follow them.
+- Cover at minimum: liveness/stall, error rate, silent-empty / data-quality
+  holes the error path won't catch, and latency.
+- `critical` must have a `runbook_url` + runbook section; `warning`/`info` must
+  have a runbook section.
+
 ### Do NOT
 
 - Import adapters in domain or application layer

@@ -18,9 +18,9 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.domain.entities.allocation import EthAddress
-from tests.integration.conftest import (
+from tests.integration.seed import (
     GHOST_CLOSED_PROXY_HEX,
     GHOST_OPEN_PROXY_HEX,
     GHOST_RECEIPT_SYRUP_HEX,
@@ -37,10 +37,10 @@ def async_db_url(module_db):
 
 @pytest_asyncio.fixture()
 async def repo(async_db_url: str):
-    """Bare PostgresAllocationRepository for direct method tests."""
+    """Bare AllocationRepository for direct method tests."""
     engine = create_async_engine(async_db_url)
     try:
-        yield PostgresAllocationRepository(engine)
+        yield AllocationRepository(engine)
     finally:
         await engine.dispose()
 

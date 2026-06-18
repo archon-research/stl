@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.token_catalog_repository import PostgresTokenCatalogRepository
+from app.adapters.postgres.token_catalog_repository import TokenCatalogRepository
 from app.api._validators import ChainIdPath, TokenAddressPath
 from app.api.deps import get_engine
 from app.api.v1._resolvers import resolve_token
@@ -125,7 +125,7 @@ def _to_token_response(row) -> TokenResponse:
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> TokenCatalogService:
-    return TokenCatalogService(PostgresTokenCatalogRepository(engine))
+    return TokenCatalogService(TokenCatalogRepository(engine))
 
 
 @router.get(

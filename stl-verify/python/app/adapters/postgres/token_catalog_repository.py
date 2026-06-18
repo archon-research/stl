@@ -61,7 +61,7 @@ def _normalize_symbol(value: str | None) -> str | None:
     return stripped or None
 
 
-class PostgresTokenCatalogRepository:
+class TokenCatalogRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 

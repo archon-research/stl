@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.adapters.postgres.protocol_event_repository import PostgresProtocolEventRepository
+from app.adapters.postgres.protocol_event_repository import ProtocolEventRepository
 
 
 def _engine_with_rows(rows):
@@ -33,15 +33,15 @@ def _row(tx_hash: str = "ab" * 32) -> SimpleNamespace:
 
 
 def test_normalize_tx_hash_handles_prefix() -> None:
-    assert PostgresProtocolEventRepository._normalize_tx_hash("0x" + "ab" * 32) == "ab" * 32
-    assert PostgresProtocolEventRepository._normalize_tx_hash("ab" * 32) == "ab" * 32
-    assert PostgresProtocolEventRepository._normalize_tx_hash(None) is None
+    assert ProtocolEventRepository._normalize_tx_hash("0x" + "ab" * 32) == "ab" * 32
+    assert ProtocolEventRepository._normalize_tx_hash("ab" * 32) == "ab" * 32
+    assert ProtocolEventRepository._normalize_tx_hash(None) is None
 
 
 @pytest.mark.asyncio
 async def test_list_events_normalizes_tx_hash_and_clamps_limit() -> None:
     engine, conn = _engine_with_rows([_row()])
-    repo = PostgresProtocolEventRepository(engine)
+    repo = ProtocolEventRepository(engine)
 
     result = await repo.list_events(tx_hash="0x" + "ab" * 32, protocol_name="spark", limit=9999)
 
@@ -55,7 +55,7 @@ async def test_list_events_normalizes_tx_hash_and_clamps_limit() -> None:
 @pytest.mark.asyncio
 async def test_list_events_by_tx_maps_entities() -> None:
     engine, conn = _engine_with_rows([_row("ef" * 32)])
-    repo = PostgresProtocolEventRepository(engine)
+    repo = ProtocolEventRepository(engine)
 
     result = await repo.list_events_by_tx("0x" + "ef" * 32)
 
@@ -73,7 +73,7 @@ async def test_list_events_wraps_database_errors() -> None:
     conn.__aexit__ = AsyncMock(return_value=False)
     conn.execute = AsyncMock(side_effect=RuntimeError("boom"))
     engine.connect.return_value = conn
-    repo = PostgresProtocolEventRepository(engine)
+    repo = ProtocolEventRepository(engine)
 
     with pytest.raises(ValueError, match="fetching protocol events"):
         await repo.list_events()
