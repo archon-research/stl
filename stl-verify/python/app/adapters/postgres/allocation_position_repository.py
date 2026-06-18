@@ -7,6 +7,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres._time_window import (
+    clamp_limit,
+    required_time_window_clause,
+    time_bucket_expr,
+)
 from app.domain.entities.allocation import (
     ChainMetadata,
     DirectAssetHolding,
@@ -16,9 +21,12 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.time_series_bucket import AllocationActivityBucket
 from app.domain.proxy_kind import ProxyKind, classify_proxy
 
 logger = logging.getLogger(__name__)
+
+_ALLOCATION_ACTIVITY_LIMIT = 1000
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -28,6 +36,20 @@ def _escape_like_pattern(value: str) -> str:
     User input must be escaped to prevent unintended wildcard matching.
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _strip_hex_prefix(tx_hash: str | None) -> str | None:
+    """Strip a leading ``0x``/``0X`` prefix so the hex can be decoded by Postgres.
+
+    Defense in depth: API validators already canonicalize uppercase ``0X`` to
+    lowercase ``0x``, but this repository is also reachable from non-HTTP
+    callers (jobs, ad-hoc scripts) that may not normalize first.
+    """
+    if tx_hash is None:
+        return None
+    if tx_hash.startswith(("0x", "0X")):
+        return tx_hash[2:]
+    return tx_hash
 
 
 def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> Decimal:
@@ -53,7 +75,7 @@ def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> De
         raise ValueError(f"Database contains invalid numeric value for {field_name}: {value}") from exc
 
 
-class PostgresAllocationRepository:
+class AllocationRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
@@ -341,10 +363,10 @@ class PostgresAllocationRepository:
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
             "token_symbol": _escape_like_pattern(token_symbol) if token_symbol else None,
-            "tx_hash": tx_hash.removeprefix("0x") if tx_hash else None,
+            "tx_hash": _strip_hex_prefix(tx_hash),
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
-            "limit": min(max(limit, 1), 1000),
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
         }
 
         logger.debug(
@@ -394,6 +416,60 @@ class PostgresAllocationRepository:
             for row in rows
         ]
 
+    async def list_activity_buckets(
+        self,
+        *,
+        prime_id: EthAddress | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[AllocationActivityBucket]:
+        """Return allocation activity counts and tx-amount sums per time bucket."""
+        params = {
+            "prime_hex": prime_id.hex if prime_id else None,
+            "chain_id": chain_id,
+            "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
+            "action_type": action_type,
+            "token_symbol": _escape_like_pattern(token_symbol) if token_symbol else None,
+            "tx_hash": _strip_hex_prefix(tx_hash),
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "bucket_seconds": bucket_seconds,
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_ALLOCATION_ACTIVITY_BUCKETS_SQL, params)
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Allocation activity bucket query failed",
+                extra={
+                    "params": {k: str(v) if v is not None else None for k, v in params.items()},
+                    "error_type": type(exc).__name__,
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while aggregating allocation activity: {exc}") from exc
+
+        return [
+            AllocationActivityBucket(
+                bucket_start=row.bucket_start,
+                event_count=row.event_count,
+                total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
+            )
+            for row in rows
+        ]
+
 
 # Match positions to receipt tokens only by receipt_token_address: a prime's
 # direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)
@@ -419,7 +495,6 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-          AND ap.balance > 0
         ORDER BY rt.id,
                  ap.block_number DESC, ap.block_version DESC,
                  ap.processing_version DESC, ap.log_index DESC
@@ -446,6 +521,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
         LIMIT 1
     ) lp ON TRUE
+    WHERE p.balance > 0
     ORDER BY p.balance DESC
 """)
 
@@ -463,7 +539,6 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             ap.created_at AS latest_activity_at
         FROM allocation_position ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-          AND ap.balance > 0
         ORDER BY ap.token_id,
                  ap.block_number DESC, ap.block_version DESC,
                  ap.processing_version DESC, ap.log_index DESC
@@ -479,7 +554,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
     JOIN token t ON t.id = lp.token_id
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
-    WHERE rt.id IS NULL
+    WHERE rt.id IS NULL AND lp.balance > 0
     ORDER BY lp.balance DESC
 """)
 
@@ -492,7 +567,6 @@ WITH latest_balance AS (
     JOIN token t ON t.id = ap.token_id AND t.address = rt.receipt_token_address
     JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-      AND ap.balance > 0
     ORDER BY ap.block_number DESC, ap.block_version DESC,
              ap.processing_version DESC, ap.log_index DESC
     LIMIT 1
@@ -509,6 +583,7 @@ latest_price AS (
 SELECT lb.balance, lp.price_usd
 FROM latest_balance lb
 CROSS JOIN latest_price lp
+WHERE lb.balance > 0
 """)
 
 
@@ -524,7 +599,6 @@ WITH latest_receipt_positions AS (
     JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
     JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
     WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-      AND ap.balance > 0
     ORDER BY rt.id,
              ap.block_number DESC, ap.block_version DESC,
              ap.processing_version DESC, ap.log_index DESC
@@ -540,6 +614,7 @@ LEFT JOIN LATERAL (
     ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
     LIMIT 1
 ) lp ON TRUE
+WHERE p.balance > 0
 """)
 
 
@@ -595,8 +670,58 @@ WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime
     AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
          LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\')
     AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
-    AND (CAST(:from_timestamp AS TIMESTAMP) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMP))
-    AND (CAST(:to_timestamp AS TIMESTAMP) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMP))
+    AND (CAST(:from_timestamp AS TIMESTAMPTZ) IS NULL OR ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ))
+    AND (CAST(:to_timestamp AS TIMESTAMPTZ) IS NULL OR ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ))
 ORDER BY ap.created_at DESC, ap.block_number DESC, ap.block_version DESC, ap.log_index DESC
+LIMIT :limit
+""")
+
+
+# Aggregated counterpart of _ALLOCATION_ACTIVITY_SQL: same filters, bucketed by
+# time. Reuses the shared window/bucket SQL helpers. Bounds are required so the
+# JOIN/filter set matches the raw query exactly. ``total_tx_amount`` is clamped
+# to ``>= 0`` because outflows are stored as negative ``tx_amount`` values and a
+# bucket dominated by outflows would otherwise violate the non-negativity
+# invariant on ``AllocationActivityBucket`` and surface as a 500.
+_ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
+SELECT
+    {time_bucket_expr("ap.created_at")} AS bucket_start,
+    COUNT(*) AS event_count,
+    GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount
+FROM allocation_position ap
+JOIN prime p ON p.id = ap.prime_id
+JOIN token t ON t.id = ap.token_id
+LEFT JOIN LATERAL (
+    SELECT pr.name AS protocol_name, 1 AS match_priority
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id
+    WHERE pr.chain_id = ap.chain_id
+      AND rt.receipt_token_address = t.address
+
+    UNION ALL
+
+    SELECT pr.name AS protocol_name, 2 AS match_priority
+    FROM receipt_token rt
+    JOIN protocol pr ON pr.id = rt.protocol_id
+    WHERE pr.chain_id = ap.chain_id
+      AND rt.underlying_token_id = t.id
+    ORDER BY match_priority
+    LIMIT 1
+) AS protocol_match ON TRUE
+WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+    AND ap.direction IS NOT NULL
+    AND ap.tx_amount IS NOT NULL
+    AND ap.created_at IS NOT NULL
+    AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
+    AND (CAST(:protocol_name AS TEXT) IS NULL OR LOWER(COALESCE(protocol_match.protocol_name, ''))
+         LIKE '%' || LOWER(CAST(:protocol_name AS TEXT)) || '%' ESCAPE '\\')
+    AND (CAST(:action_type AS TEXT) IS NULL OR LOWER(COALESCE(ap.direction::text, '')) =
+         LOWER(CAST(:action_type AS TEXT)))
+    AND (CAST(:token_symbol AS TEXT) IS NULL OR LOWER(COALESCE(t.symbol, ''))
+         LIKE '%' || LOWER(CAST(:token_symbol AS TEXT)) || '%' ESCAPE '\\')
+    AND (CAST(:tx_hash AS TEXT) IS NULL OR encode(ap.tx_hash, 'hex') = LOWER(CAST(:tx_hash AS TEXT)))
+    {required_time_window_clause("ap.created_at")}
+GROUP BY bucket_start
+ORDER BY bucket_start DESC
 LIMIT :limit
 """)

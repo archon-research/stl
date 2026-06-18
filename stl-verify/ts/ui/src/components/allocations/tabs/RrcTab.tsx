@@ -65,10 +65,18 @@ export function RrcTab({
   const [isLoading, setIsLoading] = useState(false);
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+  const chainId = selectedReceiptToken?.chain_id ?? null;
+  const receiptTokenAddress =
+    selectedReceiptToken?.receipt_token_address ?? null;
   const primeAddress = selectedPrime?.address ?? null;
 
   useEffect(() => {
-    if (!isEnabled || receiptTokenId === null || primeAddress === null) {
+    if (
+      !isEnabled ||
+      chainId === null ||
+      receiptTokenAddress === null ||
+      primeAddress === null
+    ) {
       setRrc(null);
       setErrorMessage(null);
       setIsLoading(false);
@@ -81,7 +89,7 @@ export function RrcTab({
     setErrorMessage(null);
     setRrc(null);
 
-    void getRrc(receiptTokenId, primeAddress, controller.signal)
+    void getRrc(chainId, receiptTokenAddress, primeAddress, controller.signal)
       .then((response) => {
         setRrc(response);
       })
@@ -92,7 +100,9 @@ export function RrcTab({
 
         logging.error('Failed to load required risk capital (RRC)', {
           error,
+          chainId,
           receiptTokenId,
+          receiptTokenAddress,
           primeAddress,
         });
         setErrorMessage(toErrorMessage(error));
@@ -105,7 +115,7 @@ export function RrcTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, primeAddress, receiptTokenId]);
+  }, [chainId, isEnabled, primeAddress, receiptTokenAddress, receiptTokenId]);
 
   const tone = getUsdTone(rrc?.max_rrc_usd);
   const toneStyles = getToneStyles(tone);

@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -19,6 +20,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -75,6 +78,7 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger *slog.Logger
 }
 
@@ -150,13 +154,15 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("loading vault registry: %w", err)
 	}
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlockEvent)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.consumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlockEvent)
+	})
 
 	s.logger.Info("morpho indexer started",
 		"maxMessages", s.config.MaxMessages,
@@ -164,16 +170,24 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the service.
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("morpho indexer stopped")
 	return nil
 }
 
 func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
+	// Stamp the reorg-aware block version once, here, so both receipt processing
+	// and the symbol-reconciliation sweep below archive raw SC calls under the
+	// block's actual version. Setting it only inside fetchAndProcessReceipts would
+	// leave reconcilePendingSymbols' multicalls keyed as version 0.
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	if err := s.fetchAndProcessReceipts(ctx, event); err != nil {
 		return err
 	}
@@ -238,6 +252,8 @@ func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNum
 }
 
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	// Block version is stamped by the caller (processBlockEvent) so the symbol
+	// sweep shares it; see the comment there.
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 
@@ -246,7 +262,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		duration := time.Since(start)
 		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "block processing failed")
+			telemetry.SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "fetchAndProcessReceipts", retErr)
 		}
 		s.logger.Debug("fetchAndProcessReceipts completed",
@@ -350,7 +366,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		attribute.String("tx.hash", receipt.TransactionHash))
 	defer func() {
 		if retErr != nil {
-			SetSpanError(span, retErr, "receipt processing failed")
+			telemetry.SetSpanError(span, retErr, "receipt processing failed")
 		}
 		span.End()
 	}()
