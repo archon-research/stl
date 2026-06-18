@@ -52,7 +52,7 @@ func newArchiverOnLocalStack(t *testing.T, ctx context.Context) (*s3adapter.Call
 
 	logger := slog.Default()
 	writer := s3adapter.NewWriterWithOptions(awsCfg, logger, endpointFn)
-	archiver, err := s3adapter.NewCallArchiver(writer, archiveTestBucket, logger)
+	archiver, err := s3adapter.NewCallArchiver(writer, archiveTestBucket, "mainnet", logger, nil)
 	if err != nil {
 		t.Fatalf("NewCallArchiver: %v", err)
 	}
