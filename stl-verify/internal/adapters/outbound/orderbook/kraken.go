@@ -111,7 +111,10 @@ func (h *krakenHandler) handle(raw []byte) ([]bookChange, error) {
 	case '[':
 		return h.handleBook(trimmed)
 	default:
-		return nil, nil
+		// Kraken v1 only sends JSON objects (events) or arrays (book data). Anything
+		// else is malformed or a protocol change; since this adapter has no sequence
+		// numbers, dropping it silently could mask drift, so fail fast and reconnect.
+		return nil, fmt.Errorf("unexpected kraken frame, starts with %q", trimmed[0])
 	}
 }
 
@@ -268,6 +271,13 @@ func parseKrakenLevelTime(s string) time.Time {
 	}
 	var nsec int64
 	if fracStr != "" {
+		// Validate before truncating: parsing only the first 9 chars would otherwise
+		// accept trailing garbage (e.g. "123456789abc").
+		for i := 0; i < len(fracStr); i++ {
+			if fracStr[i] < '0' || fracStr[i] > '9' {
+				return time.Time{}
+			}
+		}
 		// Pad/truncate the fraction to nanosecond precision (9 digits).
 		n, err := strconv.ParseInt((fracStr + "000000000")[:9], 10, 64)
 		if err != nil {

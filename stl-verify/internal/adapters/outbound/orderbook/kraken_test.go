@@ -148,6 +148,19 @@ func TestKrakenHandlerMalformedDataIsFatal(t *testing.T) {
 	}
 }
 
+func TestKrakenHandlerRejectsUnknownFrameShape(t *testing.T) {
+	h := newTestKrakenHandler()
+	// Kraken only sends JSON objects or arrays; anything else must fail fast so the
+	// connection reconnects rather than running on a possibly-stale book. An empty
+	// frame is benign (keepalive artifact) and stays a no-op.
+	if _, err := h.handle([]byte("garbage")); err == nil {
+		t.Error("expected an error for a non-object/array frame")
+	}
+	if sigs, err := h.handle([]byte("   ")); err != nil || sigs != nil {
+		t.Errorf("blank frame should be a no-op, got sigs=%v err=%v", sigs, err)
+	}
+}
+
 func TestKrakenChecksumToken(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"101.5", "1015"},
@@ -360,7 +373,8 @@ func TestParseKrakenLevelTime(t *testing.T) {
 		{"", time.Time{}},
 		{"t", time.Time{}},
 		{"abc.def", time.Time{}},
-		{"100.xyz", time.Time{}}, // valid seconds, unparseable fraction -> zero
+		{"100.xyz", time.Time{}},                 // valid seconds, unparseable fraction -> zero
+		{"1700000000.123456789abc", time.Time{}}, // trailing garbage past 9 digits -> zero
 	}
 	for _, tt := range tests {
 		if got := parseKrakenLevelTime(tt.in); !got.Equal(tt.want) {
