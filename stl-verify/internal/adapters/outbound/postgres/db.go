@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"time"
 
@@ -132,9 +133,7 @@ func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 	if poolConfig.ConnConfig.RuntimeParams == nil {
 		poolConfig.ConnConfig.RuntimeParams = map[string]string{}
 	}
-	for name, value := range cfg.connRuntimeParams() {
-		poolConfig.ConnConfig.RuntimeParams[name] = value
-	}
+	maps.Copy(poolConfig.ConnConfig.RuntimeParams, cfg.connRuntimeParams())
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
