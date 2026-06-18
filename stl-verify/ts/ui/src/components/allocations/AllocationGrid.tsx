@@ -131,16 +131,6 @@ const chartTooltipValueClassName = css({
   fontWeight: 'medium',
 });
 
-function formatYAxisTick(value: unknown, chart: MetricChartSpec): string {
-  const numericValue = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(numericValue)) {
-    return '';
-  }
-
-  // Axes and tooltips share the chart's compact formatter for consistency.
-  return chart.formatValue(numericValue);
-}
-
 function buildSingleSeriesTheme(stroke: string) {
   return buildChartTheme({
     backgroundColor: 'transparent',
@@ -291,18 +281,6 @@ function MetricCardTrend({
           yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
         >
           <Grid columns={false} numTicks={3} />
-          <Axis
-            orientation="left"
-            numTicks={3}
-            hideTicks
-            tickFormat={(value) => formatYAxisTick(value, chart)}
-            tickLabelProps={() => ({
-              fontSize: 10,
-              textAnchor: 'end',
-              dx: '-0.35em',
-              fill: 'var(--colors-text-muted)',
-            })}
-          />
           <Axis
             orientation="bottom"
             numTicks={4}
