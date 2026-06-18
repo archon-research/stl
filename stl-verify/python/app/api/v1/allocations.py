@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.api._validators import EthAddressParam, OptionalEthAddressParam, OptionalTxHashParam
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
@@ -253,7 +253,7 @@ class StarRiskCapitalResponse(BaseModel):
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(PostgresAllocationRepository(engine))
+    return AllocationService(AllocationRepository(engine))
 
 
 async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:

@@ -5,7 +5,7 @@ import pytest
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_direct_asset_holding, make_receipt_token_position
+from tests.factories import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
 

@@ -20,13 +20,13 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.token_catalog import TokenMetadata
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
-from app.ports.token_catalog_repository import TokenCatalogRepository
+from app.ports.token_catalog_repository import TokenCatalogRepositoryPort
 
 
 async def resolve_token(
     chain_id: int,
     token_address: str,
-    repo: TokenCatalogRepository,
+    repo: TokenCatalogRepositoryPort,
 ) -> TokenMetadata:
     """Return the token row at ``(chain_id, token_address)`` or raise 404.
 
