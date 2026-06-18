@@ -319,6 +319,19 @@ func TestStartAppPingTearsDownOnWriteFailure(t *testing.T) {
 	}
 }
 
+type zeroPinger struct{}
+
+func (zeroPinger) appPing() ([]byte, time.Duration) { return nil, 0 }
+
+// TestStartAppPingNoOpOnNonPositiveInterval: a pinger returning a non-positive
+// interval must disable the keepalive, not panic time.NewTicker(0). nil ws is
+// safe because the guard returns before touching the connection; without it,
+// time.NewTicker(0) would panic.
+func TestStartAppPingNoOpOnNonPositiveInterval(t *testing.T) {
+	p := newFeedProvider(testConfig(), &fakeExchange{}, 10)
+	p.startAppPing(context.Background(), nil, zeroPinger{})
+}
+
 // TestFeedProviderNoGoroutineLeakAfterShutdown drives repeated reconnects (each
 // spawning a read pump and app-ping goroutine) and asserts that, once Watch is
 // cancelled and the channel drains, the goroutine count returns to baseline — the
