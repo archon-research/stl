@@ -197,11 +197,17 @@ groups:
         # archiving failure, not an idle/disabled source (those have no multicalls,
         # so the guard excludes them).
         #
-        # The `or (… * 0)` synthesises a zero-valued success series for an active
-        # source that has never emitted a success sample; without it a 100%-from-
-        # cold-start failure (success series never created) would make `== 0` match
-        # nothing and the alert would stay silent. VectorArchivingErrorRatioHigh
-        # covers the partial-failure case (some writes succeed) that `== 0` misses.
+        # The `or (… * 0)` synthesises a zero-valued success series for a source
+        # that has attempted writes but never emitted a success sample; without it
+        # a 100%-from-cold-start failure (success series never created) would make
+        # `== 0` match nothing and the alert would stay silent. The zero-fill is
+        # denominated on archive_writes_total (any status), NOT multicall count: a
+        # worker with archiving disabled still emits multicall_batch_size_count but
+        # has no archive_writes_total series, so filling from the multicall counter
+        # would falsely fire on every non-archiving multicall worker. Filling from
+        # archive_writes_total only synthesises a 0 once a write has been attempted.
+        # VectorArchivingErrorRatioHigh covers the partial-failure case (some writes
+        # succeed) that `== 0` misses.
         expr: |
           (
             sum by (service_name, chain, cluster) (
@@ -209,7 +215,7 @@ groups:
             )
             or
             sum by (service_name, chain, cluster) (
-              increase(multicall_batch_size_count{k8s_namespace_name="vector"}[10m])
+              increase(archive_writes_total{k8s_namespace_name="vector"}[10m])
             ) * 0
           ) == 0
           and on (service_name, chain, cluster)
