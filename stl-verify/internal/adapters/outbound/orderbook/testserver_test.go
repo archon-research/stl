@@ -67,6 +67,7 @@ func newWSTestServer(t *testing.T, onConn func(conn *websocket.Conn)) *wsTestSer
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			t.Errorf("websocket upgrade failed: %v", err)
 			return
 		}
 		defer func() { _ = conn.Close() }()
