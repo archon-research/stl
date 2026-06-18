@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 _PRIME_DEBT_LIMIT = 500
 
 
-class PostgresPrimeDebtRepository:
+class PrimeDebtRepository:
     """PostgreSQL adapter for prime debt snapshot queries."""
 
     def __init__(self, engine: AsyncEngine) -> None:

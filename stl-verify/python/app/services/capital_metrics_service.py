@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.capital_metrics import CapitalMetrics
-from app.ports.allocation_repository import AllocationRepository
+from app.ports.allocation_repository import AllocationRepositoryPort
 
 
 class CapitalMetricsService:
@@ -16,7 +16,7 @@ class CapitalMetricsService:
     pending accounting-layer inputs.
     """
 
-    def __init__(self, repository: AllocationRepository) -> None:
+    def __init__(self, repository: AllocationRepositoryPort) -> None:
         self._repository = repository
 
     async def get_capital_metrics(self, prime_id: EthAddress) -> CapitalMetrics | None:
