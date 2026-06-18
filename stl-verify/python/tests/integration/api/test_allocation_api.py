@@ -15,7 +15,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.main import create_app
-from tests.integration.conftest import (
+from tests.integration.seed import (
     GHOST_CLOSED_PROXY_HEX,
     GHOST_MIXED_PROXY_HEX,
     GHOST_OPEN_PROXY_HEX,

@@ -214,6 +214,11 @@ func (p *feedProvider) runConnection(ctx context.Context, group []string, out ch
 // its interval until the connection closes or ctx is cancelled.
 func (p *feedProvider) startAppPing(ctx context.Context, ws *wsclient.Conn, pinger appPinger) {
 	frame, interval := pinger.appPing()
+	// A non-positive interval would panic time.NewTicker; guard so a misconfigured
+	// pinger disables the keepalive instead of crashing the process.
+	if interval <= 0 || len(frame) == 0 {
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

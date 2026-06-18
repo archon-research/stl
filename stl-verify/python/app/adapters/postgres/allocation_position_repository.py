@@ -75,7 +75,7 @@ def _safe_decimal(value: Any, field_name: str, row_identifier: Any = None) -> De
         raise ValueError(f"Database contains invalid numeric value for {field_name}: {value}") from exc
 
 
-class PostgresAllocationRepository:
+class AllocationRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 

@@ -2,7 +2,7 @@
 (``/v1/tokens/{chain_id}/{token_address}{,/price}``).
 
 Exercises the FastAPI handlers through ``TokenCatalogService`` to
-``PostgresTokenCatalogRepository`` against a real Postgres.
+``TokenCatalogRepository`` against a real Postgres.
 """
 
 from datetime import UTC, datetime
