@@ -11,7 +11,7 @@
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'om_read_only') THEN
-        CREATE USER om_read_only WITH PASSWORD 'PLACEHOLDER_SET_VIA_TERRAFORM';
+        CREATE USER om_read_only WITH PASSWORD NULL;
     END IF;
 END
 $$;
