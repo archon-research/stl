@@ -826,14 +826,14 @@ export interface components {
      * @example {
      *       "benchmark_source": "https://example.com/star-rrc",
      *       "capital_buffer": "2500000",
-     *       "first_loss_capital": "7500000",
+     *       "encumbrance_ratio": "0.85",
+     *       "exposure": "1900000000",
      *       "is_validated": false,
      *       "prime_id": "prime-acme",
      *       "prime_name": "Acme Prime",
-     *       "risk_capital": "10000000",
-     *       "risk_to_capital_ratio": "0.85",
+     *       "required_risk_capital": "7500000",
      *       "timestamp": "2026-05-07T12:00:00Z",
-     *       "total_capital": "10000000",
+     *       "total_risk_capital": "10000000",
      *       "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
      *     }
      */
@@ -845,16 +845,22 @@ export interface components {
       benchmark_source?: string | null;
       /**
        * Capital Buffer
-       * @description `max(total_capital - first_loss_capital, 0)` — distance to first-loss exhaustion (USD).
+       * @description `max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).
        * @example 2500000
        */
       capital_buffer: string;
       /**
-       * First Loss Capital
-       * @description Financial RRC (first-loss capital) reported by upstream (USD).
-       * @example 7500000
+       * Encumbrance Ratio
+       * @description Required Risk Capital as a share of Total Risk Capital (upstream `risk_tolerance_ratio`). `null` when not validated.
+       * @example 0.85
        */
-      first_loss_capital: string;
+      encumbrance_ratio?: string | null;
+      /**
+       * Exposure
+       * @description Total USD exposure across the prime's allocations (upstream `exposure`).
+       * @example 1900000000
+       */
+      exposure: string;
       /**
        * Is Validated
        * @description Whether the row was validated against on-chain state.
@@ -874,17 +880,11 @@ export interface components {
        */
       prime_name: string;
       /**
-       * Risk Capital
-       * @description Risk capital exposure (USD) sourced from the upstream Star monitor.
-       * @example 10000000
+       * Required Risk Capital
+       * @description Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).
+       * @example 7500000
        */
-      risk_capital: string;
-      /**
-       * Risk To Capital Ratio
-       * @description Upstream `risk_tolerance_ratio`. `null` when not validated.
-       * @example 0.85
-       */
-      risk_to_capital_ratio?: string | null;
+      required_risk_capital: string;
       /**
        * Timestamp
        * @description ISO-8601 timestamp the snapshot was assembled.
@@ -892,11 +892,11 @@ export interface components {
        */
       timestamp: string;
       /**
-       * Total Capital
-       * @description Total RRC reported by upstream (USD).
+       * Total Risk Capital
+       * @description Total Risk Capital reported by upstream `total_rc` (USD).
        * @example 10000000
        */
-      total_capital: string;
+      total_risk_capital: string;
       /**
        * Validation Note
        * @description Human-readable note about validation, e.g. why a row is missing or unmatched.

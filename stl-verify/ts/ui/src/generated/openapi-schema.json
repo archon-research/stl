@@ -459,14 +459,14 @@
         "example": {
           "benchmark_source": "https://example.com/star-rrc",
           "capital_buffer": "2500000",
-          "first_loss_capital": "7500000",
+          "encumbrance_ratio": "0.85",
+          "exposure": "1900000000",
           "is_validated": false,
           "prime_id": "prime-acme",
           "prime_name": "Acme Prime",
-          "risk_capital": "10000000",
-          "risk_to_capital_ratio": "0.85",
+          "required_risk_capital": "7500000",
           "timestamp": "2026-05-07T12:00:00Z",
-          "total_capital": "10000000",
+          "total_risk_capital": "10000000",
           "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
         },
         "properties": {
@@ -483,7 +483,7 @@
             "title": "Benchmark Source"
           },
           "capital_buffer": {
-            "description": "`max(total_capital - first_loss_capital, 0)` \u2014 distance to first-loss exhaustion (USD).",
+            "description": "`max(total_risk_capital - required_risk_capital, 0)` \u2014 unencumbered risk capital (USD).",
             "examples": [
               "2500000"
             ],
@@ -491,13 +491,29 @@
             "title": "Capital Buffer",
             "type": "string"
           },
-          "first_loss_capital": {
-            "description": "Financial RRC (first-loss capital) reported by upstream (USD).",
+          "encumbrance_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required Risk Capital as a share of Total Risk Capital (upstream `risk_tolerance_ratio`). `null` when not validated.",
             "examples": [
-              "7500000"
+              "0.85"
+            ],
+            "title": "Encumbrance Ratio"
+          },
+          "exposure": {
+            "description": "Total USD exposure across the prime's allocations (upstream `exposure`).",
+            "examples": [
+              "1900000000"
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "First Loss Capital",
+            "title": "Exposure",
             "type": "string"
           },
           "is_validated": {
@@ -522,30 +538,14 @@
             "title": "Prime Name",
             "type": "string"
           },
-          "risk_capital": {
-            "description": "Risk capital exposure (USD) sourced from the upstream Star monitor.",
+          "required_risk_capital": {
+            "description": "Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
             "examples": [
-              "10000000"
+              "7500000"
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Risk Capital",
+            "title": "Required Risk Capital",
             "type": "string"
-          },
-          "risk_to_capital_ratio": {
-            "anyOf": [
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Upstream `risk_tolerance_ratio`. `null` when not validated.",
-            "examples": [
-              "0.85"
-            ],
-            "title": "Risk To Capital Ratio"
           },
           "timestamp": {
             "description": "ISO-8601 timestamp the snapshot was assembled.",
@@ -555,13 +555,13 @@
             "title": "Timestamp",
             "type": "string"
           },
-          "total_capital": {
-            "description": "Total RRC reported by upstream (USD).",
+          "total_risk_capital": {
+            "description": "Total Risk Capital reported by upstream `total_rc` (USD).",
             "examples": [
               "10000000"
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Capital",
+            "title": "Total Risk Capital",
             "type": "string"
           },
           "validation_note": {
@@ -580,10 +580,10 @@
         "required": [
           "prime_id",
           "prime_name",
-          "risk_capital",
+          "exposure",
           "capital_buffer",
-          "first_loss_capital",
-          "total_capital",
+          "required_risk_capital",
+          "total_risk_capital",
           "timestamp"
         ],
         "title": "CapitalMetricsResponse",

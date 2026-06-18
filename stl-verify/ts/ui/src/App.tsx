@@ -745,17 +745,17 @@ function App() {
         ? { data: series, kind: 'series' }
         : { data: fallbackChart(currentValue), kind: 'fallback' };
 
-    const riskCapitalValue =
-      capitalMetrics?.risk_capital === undefined ||
-      capitalMetrics?.risk_capital === null
+    const exposureValue =
+      capitalMetrics?.exposure === undefined ||
+      capitalMetrics?.exposure === null
         ? null
-        : parseNumericValue(capitalMetrics.risk_capital);
+        : parseNumericValue(capitalMetrics.exposure);
 
-    const totalCapitalValue =
-      capitalMetrics?.total_capital === undefined ||
-      capitalMetrics?.total_capital === null
+    const totalRiskCapitalValue =
+      capitalMetrics?.total_risk_capital === undefined ||
+      capitalMetrics?.total_risk_capital === null
         ? null
-        : parseNumericValue(capitalMetrics.total_capital);
+        : parseNumericValue(capitalMetrics.total_risk_capital);
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
@@ -774,14 +774,14 @@ function App() {
         // Risk capital has no on-chain history; always show its current value
         // as a flat line.
         key: 'risk-capital',
-        data: fallbackChart(riskCapitalValue),
+        data: fallbackChart(exposureValue),
         kind: 'fallback',
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        ...seriesOrFallback(totalCapitalSeries, totalCapitalValue),
+        ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
         stroke: 'var(--colors-chart-series-primary, #f59e0b)',
         formatValue: formatCompactUsd,
       },
@@ -795,8 +795,8 @@ function App() {
     return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
-    capitalMetrics?.risk_capital,
-    capitalMetrics?.total_capital,
+    capitalMetrics?.exposure,
+    capitalMetrics?.total_risk_capital,
     chartFromLabel,
     chartToLabel,
     primeDebtSeries,

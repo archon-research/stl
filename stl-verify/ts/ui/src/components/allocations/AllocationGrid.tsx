@@ -1019,25 +1019,10 @@ export function AllocationGrid({
               <>
                 <SummaryMetric
                   className={metricsCardClassName}
-                  label="Risk capital"
-                  value={formatUsdValue(capitalMetrics.risk_capital)}
+                  label="Exposure"
+                  value={formatUsdValue(capitalMetrics.exposure)}
                   detail={
                     <div className={metricDetailClassName}>
-                      {parseNumericValue(
-                        capitalMetrics.risk_to_capital_ratio,
-                      ) !== null ? (
-                        <div
-                          className={css({
-                            fontSize: 'sm',
-                            color: 'text.muted',
-                          })}
-                        >
-                          Risk-to-capital{' '}
-                          {formatRatioPercent(
-                            capitalMetrics.risk_to_capital_ratio,
-                          )}
-                        </div>
-                      ) : null}
                       <MetricCardTrend
                         chart={riskCapitalChart}
                         isLoading={isChartsLoading}
@@ -1052,16 +1037,19 @@ export function AllocationGrid({
             {capitalMetrics ? (
               <SummaryMetric
                 className={metricsCardClassName}
-                label="Total capital"
-                value={formatUsdValue(capitalMetrics.total_capital)}
+                label="Total risk capital"
+                value={formatUsdValue(capitalMetrics.total_risk_capital)}
                 detail={
                   <div className={metricDetailClassName}>
                     <div
                       className={css({ fontSize: 'sm', color: 'text.muted' })}
                     >
-                      Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·{' '}
-                      First loss{' '}
-                      {formatUsdValue(capitalMetrics.first_loss_capital)}
+                      Required{' '}
+                      {formatUsdValue(capitalMetrics.required_risk_capital)}
+                      {parseNumericValue(capitalMetrics.encumbrance_ratio) !==
+                      null
+                        ? ` · Encumbrance ${formatRatioPercent(capitalMetrics.encumbrance_ratio)}`
+                        : ''}
                     </div>
                     <MetricCardTrend
                       chart={totalCapitalChart}
