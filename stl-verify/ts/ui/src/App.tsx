@@ -887,14 +887,11 @@ function App() {
     return [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
-        // current total. Falls back to the flat current value when no activity
-        // history is available.
+        // current total. When no activity history is available the card shows
+        // an empty state rather than a flat current-value line.
         key: 'allocation-activity-volume',
-        data:
-          allocationBalanceSeries.length > 0
-            ? allocationBalanceSeries
-            : fallbackChart(allocationSummaryTotalUsd),
-        isFallback: allocationBalanceSeries.length === 0,
+        data: allocationBalanceSeries,
+        isFallback: false,
         stroke: 'var(--colors-chart-series-primary, #60a5fa)',
         formatValue: formatCompactUsd,
       },
@@ -922,7 +919,6 @@ function App() {
     ].filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
-    allocationSummaryTotalUsd,
     capitalMetrics?.risk_capital,
     capitalMetrics?.total_capital,
     chartFromLabel,
