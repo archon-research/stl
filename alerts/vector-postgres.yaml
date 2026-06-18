@@ -1,0 +1,71 @@
+# =============================================================================
+# Vector — Postgres / TimescaleDB health alerts
+# =============================================================================
+# Lead-indicator alerts for the database the indexers write to. The 2026-06-18
+# staging incident was a lock convoy: an external tool (OpenMetadata data-quality
+# workflow) left transactions `idle in transaction` for hours, holding
+# AccessShareLock on hypertable chunks. TimescaleDB columnstore/compression jobs
+# then queued AccessExclusiveLock behind them, and Postgres lock-queue semantics
+# made every later request (including the indexers' reads) wait behind the
+# pending strong lock. The indexers had no statement/lock/context timeout, so
+# they hung indefinitely and the SQS queues backed up.
+#
+# A long-lived `idle in transaction` session is the earliest detectable signal
+# of that failure mode — it fires hours before the downstream indexer-stall
+# alert (VectorMorphoIndexerStalled / VectorOracleIndexerStalled) and points
+# straight at the cause.
+#
+# Metric source: Timescale Cloud exporter (job="tigerdata"). Series carry:
+#   - cluster="archon-prod" | "archon-staging"
+#   - service_id  (Timescale service; maps to the prod/staging DB)
+#   - role="primary" | "replica"
+#   - state  (pg_stat_activity backend state)
+# `cluster` is preserved through `max by (...)` so the Alertmanager Slack
+# template's `Cluster:` header is populated. No static `cluster`/`env` labels
+# (FORBIDDEN_LABELS in the mimir-rules-sync lint).
+# =============================================================================
+groups:
+  - name: vector-postgres
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # WARNING — a transaction has been idle-in-transaction long enough to
+      # threaten compression and writers. Catch it before indexers stall.
+      # ---------------------------------------------------------------------
+      - alert: PostgresLongIdleInTransaction
+        expr: |
+          max by (cluster, service_id, role) (
+            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*"}
+          ) > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Idle-in-transaction > 5m on {{ $labels.cluster }} DB ({{ $labels.service_id }}/{{ $labels.role }})"
+          description: >
+            A session has held a transaction open and idle for over 5 minutes.
+            Idle-in-transaction sessions hold locks that block TimescaleDB
+            compression and, transitively, indexer reads/writes (2026-06-18
+            lock-convoy incident). Identify it:
+            SELECT pid, usename, client_addr, state, now()-xact_start AS age,
+            left(query,120) FROM pg_stat_activity
+            WHERE state LIKE 'idle in transaction%' ORDER BY xact_start;
+
+      # ---------------------------------------------------------------------
+      # CRITICAL — sustained long enough that indexer impact is imminent.
+      # ---------------------------------------------------------------------
+      - alert: PostgresLongIdleInTransactionCritical
+        expr: |
+          max by (cluster, service_id, role) (
+            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*"}
+          ) > 900
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Idle-in-transaction > 15m on {{ $labels.cluster }} DB ({{ $labels.service_id }}/{{ $labels.role }})"
+          description: >
+            An idle-in-transaction session has persisted 15m+. This is the
+            precondition for the indexer lock-convoy stall. Terminate the
+            offending backend (pg_terminate_backend) once identified, and
+            confirm idle_in_transaction_session_timeout is set on its role.
