@@ -6,6 +6,7 @@ per test module.  Migrations are applied by the ``module_db`` fixture from
 """
 
 import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -51,6 +52,23 @@ _TX2_HEX = "bb" * 32
 _TX3_HEX = "cc" * 32
 _TX4_HEX = "dd" * 32
 _TX5_HEX = "ee" * 32
+
+# Flow-reconstruction (net_flow_usd) fixture: a dedicated prime whose aUSDC
+# activity exercises the signed-flow valuation. USDC is priced at 1 USD (seeded
+# in ``_seed``), so net_flow_usd equals the signed token magnitude.
+_FLOW_PRIME_VAULT_HEX = "f1" * 20
+_FLOW_PROXY_HEX = "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+_FLOW_TX_IN = "1a" * 32
+_FLOW_TX_OUT = "1b" * 32
+_FLOW_TX_SWEEP = "1c" * 32
+# All three events fall in the single 00:00 PT1H bucket.
+_FLOW_BUCKET_TS = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
+
+# Capital-metrics LOCF fixture: a dedicated prime with two snapshots two hours
+# apart, so gap-fill carry-forward and the leading-gap null are observable.
+_CAP_PRIME_VAULT_HEX = "ca" * 20
+_CAP_SNAP1_TS = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+_CAP_SNAP2_TS = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
 
 
 async def _token_id_by_address(conn: asyncpg.Connection, addr_hex: str) -> int:
@@ -184,6 +202,59 @@ async def _seed(db_url: str) -> None:
                 oracle_id,
                 Decimal(1),
             )
+
+            # net_flow_usd flow-reconstruction fixture: three aUSDC events in one
+            # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
+            # aUSDC's underlying USDC is priced at 1 USD, so net_flow_usd == 60.
+            flow_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('flow_test', $1) RETURNING id",
+                bytes.fromhex(_FLOW_PRIME_VAULT_HEX),
+            )
+            for offset, (tx, direction, amount) in enumerate(
+                [
+                    (_FLOW_TX_IN, "in", 100),
+                    (_FLOW_TX_OUT, "out", 40),
+                    (_FLOW_TX_SWEEP, "sweep", 1000),
+                ]
+            ):
+                await conn.execute(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction, created_at) "
+                    "VALUES (1, $1, $2, $3, $4, $5, 0, $6, 0, $4, $7, $8)",
+                    ausdc_token_id,
+                    flow_prime_id,
+                    bytes.fromhex(_FLOW_PROXY_HEX),
+                    Decimal(amount),
+                    5000 + offset,
+                    bytes.fromhex(tx),
+                    direction,
+                    _FLOW_BUCKET_TS,
+                )
+
+            # Capital-metrics LOCF fixture: two snapshots two hours apart so the
+            # gap bucket between them carries the earlier value forward and a
+            # bucket before the first snapshot gap-fills to null.
+            cap_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('cap_test', $1) RETURNING id",
+                bytes.fromhex(_CAP_PRIME_VAULT_HEX),
+            )
+            for synced_at, risk, total, first_loss, ratio in [
+                (_CAP_SNAP1_TS, 1_000_000, 2_000_000, 1_500_000, Decimal("0.80")),
+                (_CAP_SNAP2_TS, 1_200_000, 2_100_000, 1_600_000, Decimal("0.85")),
+            ]:
+                await conn.execute(
+                    "INSERT INTO capital_metrics_snapshot "
+                    "(prime_id, risk_capital, total_capital, first_loss_capital, "
+                    "risk_to_capital_ratio, benchmark_source, synced_at) "
+                    "VALUES ($1, $2, $3, $4, $5, 'star-test', $6)",
+                    cap_prime_id,
+                    Decimal(risk),
+                    Decimal(total),
+                    Decimal(first_loss),
+                    ratio,
+                    synced_at,
+                )
     finally:
         await conn.close()
 
@@ -395,3 +466,78 @@ def test_same_block_log_index_tiebreak_decides_latest_row(client: TestClient) ->
     assert "aSyrupUSDT" not in by_symbol, "position zeroed within its final block surfaced"
     assert "USDS" in by_symbol, "position opened within the same block incorrectly filtered out"
     assert by_symbol["USDS"]["balance"] == "400"
+
+
+# ---------------------------------------------------------------------------
+# net_flow_usd: the signed flow valuation that drives the UI's reconstructed
+# total-allocation balance series. Inflows add, outflows subtract, and sweeps
+# (internal position moves) net to zero — a flipped sign here would silently
+# invert every reconstructed balance chart.
+# ---------------------------------------------------------------------------
+
+
+def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestClient) -> None:
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": f"0x{_FLOW_PROXY_HEX}",
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-01T01:00:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    buckets = envelope["data"]
+    assert len(buckets) == 1
+    bucket = buckets[0]
+    assert bucket["event_count"] == 3
+    # +100 (in) − 40 (out) + 0 (the 1000 sweep is excluded), valued at USDC = 1 USD.
+    assert Decimal(str(bucket["net_flow_usd"])) == Decimal("60")
+    # total_tx_amount is the unsigned magnitude sum and DOES include the sweep.
+    assert Decimal(str(bucket["total_tx_amount"])) == Decimal("1140")
+
+
+# ---------------------------------------------------------------------------
+# Capital-metrics aggregation: time_bucket_gapfill + locf. A bucket with no
+# snapshot carries the previous value forward; buckets before the first
+# snapshot gap-fill to null. capital_buffer is derived from the carried values.
+# ---------------------------------------------------------------------------
+
+
+def test_capital_metrics_buckets_locf_carry_forward_and_leading_gap(client: TestClient) -> None:
+    response = client.get(
+        f"/v1/primes/0x{_CAP_PRIME_VAULT_HEX}/capital-metrics",
+        params={
+            "from_timestamp": "2025-12-31T23:00:00Z",
+            "to_timestamp": "2026-01-01T03:30:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    by_start = {datetime.fromisoformat(b["bucket_start"]): b for b in envelope["data"]}
+
+    leading = by_start[datetime(2025, 12, 31, 23, 0, tzinfo=UTC)]
+    assert leading["risk_capital"] is None, "bucket before the first snapshot must gap-fill to null"
+    assert leading["capital_buffer"] is None
+
+    first = by_start[datetime(2026, 1, 1, 0, 0, tzinfo=UTC)]
+    assert Decimal(first["risk_capital"]) == Decimal("1000000")
+
+    carried = by_start[datetime(2026, 1, 1, 1, 0, tzinfo=UTC)]
+    assert Decimal(carried["risk_capital"]) == Decimal("1000000"), "LOCF must carry the prior value into the gap"
+
+    second = by_start[datetime(2026, 1, 1, 2, 0, tzinfo=UTC)]
+    assert Decimal(second["risk_capital"]) == Decimal("1200000")
+
+    trailing = by_start[datetime(2026, 1, 1, 3, 0, tzinfo=UTC)]
+    assert Decimal(trailing["risk_capital"]) == Decimal("1200000")
+    # capital_buffer = max(total_capital - first_loss_capital, 0) on carried values.
+    assert Decimal(trailing["capital_buffer"]) == Decimal("500000")
