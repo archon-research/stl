@@ -11,11 +11,13 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/klauspost/compress/zstd"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func mustArchiver(t *testing.T, w outbound.S3Writer, bucket string) *CallArchiver {
 	t.Helper()
-	a, err := NewCallArchiver(w, bucket, nil)
+	a, err := NewCallArchiver(w, bucket, "mainnet", nil, nil)
 	if err != nil {
 		t.Fatalf("NewCallArchiver: %v", err)
 	}
@@ -224,4 +226,78 @@ func TestArchivePropagatesWriterError(t *testing.T) {
 	if err := a.Archive(context.Background(), sampleBatch()); err == nil {
 		t.Fatal("expected error from writer to propagate")
 	}
+}
+
+func TestArchiveRecordsObjectSize(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	fw := &fakeWriter{}
+	a, err := NewCallArchiver(fw, "bucket", "mainnet", nil, mp)
+	if err != nil {
+		t.Fatalf("NewCallArchiver: %v", err)
+	}
+	if err := a.Archive(context.Background(), sampleBatch()); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+
+	count, sum := histogramCountSum(t, reader, "archive.object_size")
+	if count != 1 {
+		t.Fatalf("object size histogram count = %d, want 1", count)
+	}
+	if sum != int64(len(fw.body)) {
+		t.Fatalf("object size sum = %d, want %d (compressed payload length)", sum, len(fw.body))
+	}
+}
+
+func TestArchiveEmptyBatchRecordsNoObjectSize(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	fw := &fakeWriter{}
+	a, err := NewCallArchiver(fw, "bucket", "mainnet", nil, mp)
+	if err != nil {
+		t.Fatalf("NewCallArchiver: %v", err)
+	}
+	empty := sampleBatch()
+	empty.Calls = nil
+	if err := a.Archive(context.Background(), empty); err != nil {
+		t.Fatalf("Archive empty: %v", err)
+	}
+	if count, _ := histogramCountSum(t, reader, "archive.object_size"); count != 0 {
+		t.Fatalf("empty batch recorded %d size observations, want 0", count)
+	}
+}
+
+// histogramCountSum returns the aggregated count and sum of the named Int64
+// histogram, asserting the chain and source labels are present on the data point.
+func histogramCountSum(t *testing.T, reader sdkmetric.Reader, name string) (uint64, int64) {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			h, ok := m.Data.(metricdata.Histogram[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Histogram[int64]", name, m.Data)
+			}
+			var count uint64
+			var sum int64
+			for _, dp := range h.DataPoints {
+				if c, _ := dp.Attributes.Value("chain"); c.AsString() != "mainnet" {
+					t.Errorf("chain label = %q, want mainnet", c.AsString())
+				}
+				if s, _ := dp.Attributes.Value("source"); s.AsString() != "oracle-price" {
+					t.Errorf("source label = %q, want oracle-price", s.AsString())
+				}
+				count += dp.Count
+				sum += dp.Sum
+			}
+			return count, sum
+		}
+	}
+	return 0, 0
 }
