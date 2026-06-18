@@ -93,6 +93,44 @@ def test_list_prime_total_capital_returns_empty_when_no_buckets():
         app.dependency_overrides.pop(total_capital._get_service, None)
 
 
+def test_list_prime_total_capital_sets_public_cache_control_on_pinned_window():
+    from app.api.v1 import total_capital
+
+    service = _make_service(buckets=[])
+    app.dependency_overrides[total_capital._get_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(
+            f"/v1/primes/{_VALID_ADDR}/total-capital",
+            params={
+                "from_timestamp": "2026-05-19T00:00:00Z",
+                "to_timestamp": "2026-06-18T00:00:00Z",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "public, max-age=300"
+    finally:
+        app.dependency_overrides.pop(total_capital._get_service, None)
+
+
+def test_list_prime_total_capital_sets_no_store_when_bounds_not_pinned():
+    from app.api.v1 import total_capital
+
+    service = _make_service(buckets=[])
+    app.dependency_overrides[total_capital._get_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/total-capital")
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+    finally:
+        app.dependency_overrides.pop(total_capital._get_service, None)
+
+
 def test_list_prime_total_capital_returns_404_when_prime_missing():
     from app.api.v1 import total_capital
 
