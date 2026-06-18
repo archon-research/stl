@@ -186,6 +186,12 @@ func (r *TokenRepository) ResolveTokenSymbol(ctx context.Context, chainID int64,
 
 // GetOrCreateToken retrieves a token by address or creates it if it doesn't exist.
 // This method participates in an external transaction.
+//
+// Unlike the batch GetOrCreateTokens, this single-row path does not run the
+// decimals-drift guard (scanTokenDrift): its callers are on-chain indexers that
+// read decimals fresh from the chain per event, where a stored-vs-incoming
+// mismatch carries no signal. Keep the guard on the batch path only — its
+// multi-source callers reconcile against an external API.
 func (r *TokenRepository) GetOrCreateToken(ctx context.Context, tx pgx.Tx, chainID int64, address common.Address, symbol string, decimals int, createdAtBlock *int64) (int64, error) {
 	var tokenID int64
 

@@ -370,13 +370,13 @@ func TestGetOrCreateUsers_NilBlockPreservesExisting(t *testing.T) {
 	if second[existing] != existingID {
 		t.Errorf("existing user id = %d, want %d", second[existing], existingID)
 	}
-	var preserved int64
+	var preserved *int64
 	if err := userPool.QueryRow(ctx,
 		`SELECT first_seen_block FROM "user" WHERE id = $1`, existingID).Scan(&preserved); err != nil {
 		t.Fatalf("querying preserved user: %v", err)
 	}
-	if preserved != 12345 {
-		t.Errorf("first_seen_block = %d, want 12345 (must not be clobbered)", preserved)
+	if preserved == nil || *preserved != 12345 {
+		t.Errorf("first_seen_block = %v, want 12345 (must not be clobbered)", preserved)
 	}
 }
 

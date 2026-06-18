@@ -157,8 +157,8 @@ func requireSingleChain[T any](items []T, chainID func(T) int64, kind string) er
 	}
 	want := chainID(items[0])
 	for _, item := range items[1:] {
-		if chainID(item) != want {
-			return fmt.Errorf("upserting %s: mixed chain IDs in one batch are not supported", kind)
+		if got := chainID(item); got != want {
+			return fmt.Errorf("upserting %s: mixed chain IDs in one batch are not supported (%d and %d)", kind, want, got)
 		}
 	}
 	return nil
