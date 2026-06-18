@@ -106,6 +106,9 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 			continue
 		}
 		if res == nil {
+			// A source must return a non-nil result or an error; a bare (nil, nil)
+			// would silently drop its whole group, so surface it as a fetch failure.
+			errs = append(errs, fmt.Errorf("%s: returned nil result without error", source.Name()))
 			continue
 		}
 		maps.Copy(aggregate.Balances, res.Balances)

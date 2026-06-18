@@ -47,7 +47,21 @@ def _normalize_metadata(value: Any) -> dict[str, Any] | None:
     return None
 
 
-class PostgresTokenCatalogRepository:
+def _normalize_symbol(value: str | None) -> str | None:
+    """Map the catalog's empty/whitespace symbols to the domain's "absent".
+
+    The token table stores ``''`` for rows whose symbol is unknown, but the
+    domain models an unknown symbol as ``None`` (a present symbol must be
+    non-empty). Translating here keeps that invariant intact and prevents a
+    single blank-symbol row from failing the whole listing.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+class TokenCatalogRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
@@ -57,7 +71,7 @@ class PostgresTokenCatalogRepository:
             id=row.id,
             chain_id=row.chain_id,
             address="0x" + row.address,
-            symbol=row.symbol,
+            symbol=_normalize_symbol(row.symbol),
             decimals=row.decimals,
             updated_at=row.updated_at,
             metadata=_normalize_metadata(row.metadata),

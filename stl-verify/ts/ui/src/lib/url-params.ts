@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 const URL_PARAMS_EVENT = 'stl:url-params-change';
+const URL_PATH_EVENT = 'stl:url-path-change';
 
 export const PARAMS = {
   prime: 'prime',
@@ -9,6 +10,9 @@ export const PARAMS = {
   category: 'category',
   tab: 'tab',
   receiptToken: 'rt',
+  token: 'token',
+  activityAction: 'aa',
+  showAllPrimes: 'allp',
   // Data table params (shared across tables)
   sort: 'sort',
   search: 'q',
@@ -48,6 +52,60 @@ export function setParam(key: string, value: string | null): void {
   window.dispatchEvent(new Event(URL_PARAMS_EVENT));
 }
 
+export function setPathname(
+  pathname: string,
+  mode: 'push' | 'replace' = 'push',
+): void {
+  if (!isBrowser()) {
+    return;
+  }
+
+  const normalizedPathname = pathname.startsWith('/')
+    ? pathname
+    : `/${pathname}`;
+  const nextUrl = `${normalizedPathname}${window.location.search}${window.location.hash}`;
+
+  if (mode === 'replace') {
+    window.history.replaceState(window.history.state, '', nextUrl);
+  } else {
+    window.history.pushState(window.history.state, '', nextUrl);
+  }
+
+  window.dispatchEvent(new Event(URL_PATH_EVENT));
+}
+
+/**
+ * Navigate to `pathname` with a fresh query string built from exactly the
+ * provided params (null/empty values are omitted, everything else is dropped).
+ * Use this for cross-view deep links that should not inherit unrelated state
+ * from the current URL.
+ */
+export function navigateWithParams(
+  pathname: string,
+  params: Record<string, string | null>,
+): void {
+  if (!isBrowser()) {
+    return;
+  }
+
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== null && value !== '') {
+      search.set(key, value);
+    }
+  }
+
+  const normalizedPathname = pathname.startsWith('/')
+    ? pathname
+    : `/${pathname}`;
+  const query = search.toString();
+  const nextUrl = `${normalizedPathname}${query ? `?${query}` : ''}`;
+
+  window.history.pushState(window.history.state, '', nextUrl);
+  window.dispatchEvent(new Event(URL_PATH_EVENT));
+  window.dispatchEvent(new Event(URL_PARAMS_EVENT));
+}
+
 export function useUrlParam(
   key: string,
 ): [string | null, (value: string | null) => void] {
@@ -82,4 +140,39 @@ export function useUrlParam(
   }, [key]);
 
   return [value, updateValue];
+}
+
+export function usePathname(): [string, (pathname: string) => void] {
+  const [pathname, setPathnameState] = useState<string>(() =>
+    isBrowser() ? window.location.pathname : '/',
+  );
+
+  const updatePathname = useCallback((nextPathname: string) => {
+    setPathname(nextPathname, 'push');
+    setPathnameState(
+      nextPathname.startsWith('/') ? nextPathname : `/${nextPathname}`,
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!isBrowser()) {
+      return;
+    }
+
+    const syncFromLocation = () => {
+      setPathnameState(window.location.pathname);
+    };
+
+    syncFromLocation();
+
+    window.addEventListener('popstate', syncFromLocation);
+    window.addEventListener(URL_PATH_EVENT, syncFromLocation);
+
+    return () => {
+      window.removeEventListener('popstate', syncFromLocation);
+      window.removeEventListener(URL_PATH_EVENT, syncFromLocation);
+    };
+  }, []);
+
+  return [pathname, updatePathname];
 }

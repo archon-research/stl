@@ -27,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -290,6 +291,14 @@ func run(args []string) error {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
 
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "aave-like-snapshot")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		return fmt.Errorf("loading ERC20 ABI: %w", err)
@@ -305,6 +314,7 @@ func run(args []string) error {
 		nil, // no SQS consumer
 		nil, // no cache reader
 		ethClient,
+		mc,
 		txManager,
 		userRepo,
 		protocolRepo,

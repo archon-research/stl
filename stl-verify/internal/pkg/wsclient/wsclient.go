@@ -254,10 +254,31 @@ func (c *Conn) terminalResult() (Frame, error) {
 	return Frame{}, ErrClosed
 }
 
+// teardownErr reports a non-nil error once teardown has begun (done closed),
+// returning the terminal cause when known and ErrClosed otherwise. Writes check
+// this so they fail deterministically as soon as Next can observe the drop —
+// shutdown closes done before it closes the socket, and a write racing into that
+// window would otherwise buffer into the dropped TCP connection and appear to
+// succeed.
+func (c *Conn) teardownErr() error {
+	select {
+	case <-c.done:
+		if errp := c.termErr.Load(); errp != nil {
+			return fmt.Errorf("write on closed connection: %w", *errp)
+		}
+		return ErrClosed
+	default:
+		return nil
+	}
+}
+
 // WriteJSON marshals and sends v as a single text frame.
 func (c *Conn) WriteJSON(v any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := c.teardownErr(); err != nil {
+		return err
+	}
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
@@ -280,6 +301,9 @@ func (c *Conn) WriteBinary(data []byte) error {
 func (c *Conn) writeMessage(messageType int, data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if err := c.teardownErr(); err != nil {
+		return err
+	}
 	if err := c.conn.SetWriteDeadline(time.Now().Add(c.cfg.WriteTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
