@@ -193,12 +193,24 @@ groups:
       - alert: VectorArchivingStalled
         # No successful S3 archive writes for 10m while the indexer is still
         # executing multicalls. multicall_batch_size_count increments on the same
-        # Execute path that archives, so writes==0 with multicalls>0 is a genuine
-        # archiving failure, not an idle/disabled source (those have no archive
-        # series, or no multicalls, so the guard or the ==0 match excludes them).
+        # Execute path that archives, so success==0 with multicalls>0 is a genuine
+        # archiving failure, not an idle/disabled source (those have no multicalls,
+        # so the guard excludes them).
+        #
+        # The `or (… * 0)` synthesises a zero-valued success series for an active
+        # source that has never emitted a success sample; without it a 100%-from-
+        # cold-start failure (success series never created) would make `== 0` match
+        # nothing and the alert would stay silent. VectorArchivingErrorRatioHigh
+        # covers the partial-failure case (some writes succeed) that `== 0` misses.
         expr: |
-          sum by (service_name, chain, cluster) (
-            increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[10m])
+          (
+            sum by (service_name, chain, cluster) (
+              increase(archive_writes_total{status="success", k8s_namespace_name="vector"}[10m])
+            )
+            or
+            sum by (service_name, chain, cluster) (
+              increase(multicall_batch_size_count{k8s_namespace_name="vector"}[10m])
+            ) * 0
           ) == 0
           and on (service_name, chain, cluster)
           sum by (service_name, chain, cluster) (
@@ -240,14 +252,14 @@ groups:
             and the encode path; the file is likely missing call/response data.
 
       - alert: VectorArchivingErrorRatioHigh
-        # Companion to VectorArchivingStalled, which keys on the status="success"
-        # series and is therefore BLIND to a 100%-from-cold-start failure: if every
-        # write errors from deploy, the success series is never created, so its
-        # ==0 guard matches nothing and never fires. This ratio is denominated on
-        # total attempts (success + error), so all-errors reads 1.0 and fires.
-        # clamp_min avoids a divide-by-zero when a source has no writes (ratio → 0,
-        # never fires), so no multicall guard is needed: archive_writes_total only
-        # exists for sources actively attempting writes.
+        # Catches PARTIAL failure: a meaningful fraction of writes erroring while
+        # some still succeed. VectorArchivingStalled keys on success==0 and so
+        # cannot see this (successes > 0 means it never fires). Denominated on total
+        # attempts (success + error) from the same counter, so it is immune to the
+        # multicall/RPC faults that would distort a multicall-count denominator
+        # (failed/empty Executes inflate multicall_batch_size_count but never
+        # archive). clamp_min avoids a divide-by-zero when a source has no writes
+        # (ratio → 0, never fires), so no multicall guard is needed.
         expr: |
           sum by (service_name, chain, cluster) (
             rate(archive_writes_total{status="error", k8s_namespace_name="vector"}[10m])
@@ -260,7 +272,7 @@ groups:
             0.001
           )
           > 0.5
-        for: 10m
+        for: 5m
         labels:
           team: vector
           severity: warning
@@ -271,9 +283,9 @@ groups:
           description: |
             `{{ $labels.service_name }}` on chain `{{ $labels.chain }}` is failing
             `{{ $value | humanizePercentage }}` of raw SC call archive writes to S3
-            over 10m. Replay data is being lost (Alchemy remains the fallback).
-            Unlike VectorArchivingStalled, this fires even on a 100%-from-deploy
-            failure where the success series never appears.
+            over 10m while some still succeed. Replay data is being partially lost
+            (Alchemy remains the fallback). A total stall is covered separately by
+            VectorArchivingStalled.
 
       # =====================================================================
       # maple-graphql-indexer (VEC-320)
