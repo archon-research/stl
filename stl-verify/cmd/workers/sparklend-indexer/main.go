@@ -192,7 +192,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("Ethereum node connected")
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}

@@ -353,6 +353,10 @@ func (c *eventSinkConsumer) DeleteCount() int {
 	return len(c.deleted)
 }
 
+func (c *eventSinkConsumer) VisibilityTimeout() time.Duration {
+	return 300 * time.Second
+}
+
 func (c *eventSinkConsumer) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

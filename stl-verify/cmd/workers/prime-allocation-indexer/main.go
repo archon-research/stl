@@ -13,7 +13,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -222,7 +221,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("Ethereum node connected")
 
 	// Database
-	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
+	dbPool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
