@@ -1,11 +1,13 @@
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.domain.entities.allocation import EthAddress
 from app.ports.allocation_repository import AllocationRepositoryPort
+from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 from tests.factories import make_receipt_token_position
 
@@ -18,11 +20,13 @@ class _FakeModel:
         self._ids = applies_ids
         self._rrc = rrc
         self._crr = crr
+        self.computed_ids: list[int] = []
 
     def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool:
         return asset_id in self._ids
 
     async def compute(self, asset_id, prime_id, overrides):
+        self.computed_ids.append(asset_id)
         return SimpleNamespace(rrc_usd=self._rrc, comparable_crr_pct=self._crr, risk_model=self.risk_model)
 
 
@@ -41,6 +45,12 @@ def _repo(positions, total_rc):
     return repo
 
 
+def _service(repo: AllocationRepositoryPort, registry: _FakeRegistry) -> PrimeRiskCapitalService:
+    # _FakeRegistry / _FakeModel are structural stand-ins for the concrete
+    # ModelRegistry / RiskModel; the service only reads registry.applicable().
+    return PrimeRiskCapitalService(repo, cast(ModelRegistry, registry))
+
+
 @pytest.mark.asyncio
 async def test_compute_mixes_modeled_and_unmodeled_allocations():
     positions = [
@@ -49,7 +59,7 @@ async def test_compute_mixes_modeled_and_unmodeled_allocations():
     ]
     # gap_sweep applies only to asset 1.
     registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
-    service = PrimeRiskCapitalService(_repo(positions, Decimal("100")), registry)
+    service = _service(_repo(positions, Decimal("100")), registry)
 
     result = await service.compute(_PRIME)
 
@@ -76,7 +86,7 @@ async def test_compute_mixes_modeled_and_unmodeled_allocations():
 async def test_compute_encumbrance_none_when_no_total_risk_capital():
     positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("600"))]
     registry = _FakeRegistry([_FakeModel("gap_sweep", {1}, rrc=Decimal("30"), crr=Decimal("5"))])
-    service = PrimeRiskCapitalService(_repo(positions, None), registry)
+    service = _service(_repo(positions, None), registry)
 
     result = await service.compute(_PRIME)
 
@@ -88,7 +98,7 @@ async def test_compute_encumbrance_none_when_no_total_risk_capital():
 @pytest.mark.asyncio
 async def test_compute_empty_positions_yields_zeroes_and_null_ratios():
     registry = _FakeRegistry([_FakeModel("gap_sweep", set(), rrc=Decimal("0"), crr=Decimal("0"))])
-    service = PrimeRiskCapitalService(_repo([], Decimal("100")), registry)
+    service = _service(_repo([], Decimal("100")), registry)
 
     result = await service.compute(_PRIME)
 
@@ -107,17 +117,14 @@ async def test_compute_skips_zero_exposure_positions():
         make_receipt_token_position(receipt_token_id=1, symbol="aEthUSDT", amount_usd=Decimal("0")),
         make_receipt_token_position(receipt_token_id=2, symbol="spUSDT", amount_usd=Decimal("600")),
     ]
-    boom = _FakeModel("gap_sweep", {1, 2}, rrc=Decimal("30"), crr=Decimal("5"))
-
-    async def _fail_on_zero(asset_id, prime_id, overrides):
-        assert asset_id != 1, "must not compute a zero-exposure position"
-        return SimpleNamespace(rrc_usd=Decimal("30"), comparable_crr_pct=Decimal("5"), risk_model="gap_sweep")
-
-    boom.compute = _fail_on_zero  # type: ignore[method-assign]
-    service = PrimeRiskCapitalService(_repo(positions, Decimal("100")), _FakeRegistry([boom]))
+    model = _FakeModel("gap_sweep", {1, 2}, rrc=Decimal("30"), crr=Decimal("5"))
+    service = _service(_repo(positions, Decimal("100")), _FakeRegistry([model]))
 
     result = await service.compute(_PRIME)
 
+    # The zero-exposure position must be reported as not modeled and, crucially,
+    # must never trigger a (costly) model compute.
+    assert model.computed_ids == [2]
     by_id = {a.receipt_token_id: a for a in result.per_allocation}
     assert by_id[1].applied is False
     assert by_id[2].applied is True
@@ -130,7 +137,7 @@ async def test_compute_ignores_non_default_models():
     positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("600"))]
     # Only a non-default model applies; the default (gap_sweep) does not.
     registry = _FakeRegistry([_FakeModel("suraf", {1}, rrc=Decimal("99"), crr=Decimal("9"))])
-    service = PrimeRiskCapitalService(_repo(positions, Decimal("100")), registry)
+    service = _service(_repo(positions, Decimal("100")), registry)
 
     result = await service.compute(_PRIME)
 
