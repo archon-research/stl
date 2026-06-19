@@ -99,6 +99,10 @@ func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 	return nil
 }
 
+func (m *mockSQSConsumer) VisibilityTimeout() time.Duration {
+	return 300 * time.Second
+}
+
 func (m *mockSQSConsumer) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
