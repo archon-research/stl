@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
@@ -173,6 +174,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 receipt_token_repo=receipt_token_repo,
                 aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
                 morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
                 engine=engine,
