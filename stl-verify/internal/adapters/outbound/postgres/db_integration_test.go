@@ -10,12 +10,20 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestOpenPool_RuntimeParamTimeouts verifies the lock_timeout/statement_timeout
-// runtime params actually reach Postgres. The connRuntimeParams unit test only
-// covers the string building; this proves a) the values are valid GUCs Postgres
-// accepts at startup, and b) WorkerDBConfig opts in while DefaultDBConfig does
-// not. A malformed value would fail pool creation here rather than ship green.
-func TestOpenPool_RuntimeParamTimeouts(t *testing.T) {
+// TestOpenPool_TimeoutsApplied verifies the lock_timeout/statement_timeout GUCs
+// are actually applied to pooled connections via the AfterConnect SET. The
+// timeoutGUCs unit test only covers the string building; this proves a) the
+// SET statements are valid and applied to every connection, and b) WorkerDBConfig
+// opts in while DefaultDBConfig does not. A malformed GUC would fail the
+// AfterConnect hook, surfaced here by OpenPool's connectivity Ping (which
+// acquires a connection and runs the hook synchronously) rather than ship green.
+// pgxpool's background warm-up ignores AfterConnect errors, so the Ping is what
+// guards this test.
+//
+// Note: this connects directly to Postgres, so it does not exercise the pooler
+// that rejected the old startup-parameter form; TestBuildPoolConfig_TimeoutsNotStartupParams
+// guards that the timeouts never ride the startup packet again.
+func TestOpenPool_TimeoutsApplied(t *testing.T) {
 	dsn, cleanup := testutil.StartTimescaleDB(t)
 	defer cleanup()
 	ctx := context.Background()
