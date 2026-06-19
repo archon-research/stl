@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func TestDBConfig_ConnRuntimeParams(t *testing.T) {
+func TestDBConfig_TimeoutGUCs(t *testing.T) {
 	tests := []struct {
 		name string
 		cfg  DBConfig
@@ -23,8 +23,8 @@ func TestDBConfig_ConnRuntimeParams(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.connRuntimeParams(); !maps.Equal(got, tt.want) {
-				t.Errorf("connRuntimeParams() = %v, want %v", got, tt.want)
+			if got := tt.cfg.timeoutGUCs(); !maps.Equal(got, tt.want) {
+				t.Errorf("timeoutGUCs() = %v, want %v", got, tt.want)
 			}
 		})
 	}
