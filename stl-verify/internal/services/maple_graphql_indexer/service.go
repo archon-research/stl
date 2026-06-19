@@ -154,7 +154,7 @@ func (s *Service) runPhases(ctx context.Context, syncedAt time.Time) error {
 		return errors.Join(poolsErr, fmt.Errorf("aborting sync cycle after pools phase: %w", ctxErr))
 	}
 
-	var loansErr, strategiesErr error
+	var loansErr, ftlErr, strategiesErr error
 	if poolsErr == nil {
 		loansErr = s.runPhase(ctx, "loans", func(ctx context.Context) error {
 			return s.syncLoans(ctx, syncedAt, poolIDs, protocolID)
@@ -162,19 +162,27 @@ func (s *Service) runPhases(ctx context.Context, syncedAt time.Time) error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return errors.Join(poolsErr, loansErr, fmt.Errorf("aborting sync cycle after loans phase: %w", ctxErr))
 		}
+		ftlErr = s.runPhase(ctx, "fixed_term_loans", func(ctx context.Context) error {
+			return s.syncFixedTermLoans(ctx, syncedAt, poolIDs, protocolID)
+		})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return errors.Join(poolsErr, loansErr, ftlErr, fmt.Errorf("aborting sync cycle after fixed-term loans phase: %w", ctxErr))
+		}
 		strategiesErr = s.runPhase(ctx, "sky_strategies", func(ctx context.Context) error {
 			return s.syncSkyStrategies(ctx, syncedAt, poolIDs)
 		})
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return errors.Join(poolsErr, loansErr, strategiesErr, fmt.Errorf("aborting sync cycle after sky strategies phase: %w", ctxErr))
+			return errors.Join(poolsErr, loansErr, ftlErr, strategiesErr, fmt.Errorf("aborting sync cycle after sky strategies phase: %w", ctxErr))
 		}
 	} else {
 		// The pool error joins once below; the skip errors deliberately do
 		// not wrap it again. Record the skipped phases so per-phase error
 		// metrics see them.
 		loansErr = errors.New("skipping loans: pool phase failed")
+		ftlErr = errors.New("skipping fixed-term loans: pool phase failed")
 		strategiesErr = errors.New("skipping sky strategies: pool phase failed")
 		s.telemetry.RecordPhase(ctx, "loans", 0, loansErr)
+		s.telemetry.RecordPhase(ctx, "fixed_term_loans", 0, ftlErr)
 		s.telemetry.RecordPhase(ctx, "sky_strategies", 0, strategiesErr)
 	}
 
@@ -182,7 +190,7 @@ func (s *Service) runPhases(ctx context.Context, syncedAt time.Time) error {
 		return s.syncSyrupGlobals(ctx, syncedAt)
 	})
 
-	return errors.Join(poolsErr, loansErr, strategiesErr, globalsErr)
+	return errors.Join(poolsErr, loansErr, ftlErr, strategiesErr, globalsErr)
 }
 
 // runPhase wraps a phase with a span, duration metric, and error logging.
@@ -559,6 +567,225 @@ func toEntityLoanMeta(meta *outbound.MapleLoanMeta) *maple.LoanMeta {
 		WalletType:    meta.WalletType,
 		Location:      meta.Location,
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2b: fixed-term loans
+// ---------------------------------------------------------------------------
+
+// syncFixedTermLoans fetches all live fixed-term loans and persists borrowers,
+// asset tokens, registry rows and state snapshots in a single transaction, so a
+// loan snapshot is all-or-nothing. Unlike the OTL loans phase, an empty result
+// is the expected steady state today (the FTL product is dormant, not retired):
+// it info-logs, writes zero rows, and succeeds. A nonzero result is the signal
+// the book woke up.
+func (s *Service) syncFixedTermLoans(ctx context.Context, syncedAt time.Time, poolIDs map[common.Address]int64, protocolID int64) error {
+	loans, err := s.client.GetActiveFixedTermLoans(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching fixed-term loans: %w", err)
+	}
+	if len(loans) == 0 {
+		// Emit an explicit zero so the dormant book is distinguishable from a
+		// broken metric pipeline (metric absence). Zero is expected here, so
+		// unlike the OTL phase this is info, not warn.
+		s.telemetry.RecordRowsWritten(ctx, "maple_ftl_loan_state", 0)
+		s.logger.Info("no live fixed-term loans returned by the API (expected while the FTL product is dormant)")
+		return nil
+	}
+	if err := requireUniqueIDs("fixed-term loan", len(loans), func(i int) common.Address { return loans[i].LoanID }); err != nil {
+		return err
+	}
+
+	for _, l := range loans {
+		if _, ok := poolIDs[l.PoolAddress]; !ok {
+			return fmt.Errorf("fixed-term loan %s references unknown pool %s", lowerHex(l.LoanID), lowerHex(l.PoolAddress))
+		}
+		if l.AcmRatio == nil {
+			s.telemetry.RecordNullDowngrade(ctx, "ftl_acm_ratio")
+		}
+		if l.StateDetail == "" {
+			s.telemetry.RecordNullDowngrade(ctx, "ftl_state_detail")
+		}
+	}
+
+	assets, err := distinctFTLAssetTokens(s.config.ChainID, loans)
+	if err != nil {
+		return err
+	}
+	borrowers := distinctFTLBorrowers(loans)
+
+	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		assetTokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, assets)
+		if err != nil {
+			return fmt.Errorf("resolving fixed-term loan asset tokens: %w", err)
+		}
+
+		borrowerUsers := make([]entity.User, len(borrowers))
+		for i, addr := range borrowers {
+			borrowerUsers[i] = entity.User{ChainID: s.config.ChainID, Address: addr}
+		}
+		borrowerIDs, err := s.userRepo.GetOrCreateUsers(ctx, tx, borrowerUsers)
+		if err != nil {
+			return fmt.Errorf("resolving fixed-term loan borrowers: %w", err)
+		}
+
+		loanEntities, err := s.buildFTLLoanEntities(loans, poolIDs, borrowerIDs, assetTokenIDs, protocolID)
+		if err != nil {
+			return err
+		}
+
+		loanIDs, err := s.repo.UpsertFixedTermLoans(ctx, tx, loanEntities)
+		if err != nil {
+			return fmt.Errorf("upserting fixed-term loans: %w", err)
+		}
+
+		states, err := buildFTLLoanStates(loans, loanIDs, syncedAt)
+		if err != nil {
+			return err
+		}
+		if err := s.repo.SaveFixedTermLoanStates(ctx, tx, states); err != nil {
+			return fmt.Errorf("saving fixed-term loan states: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	s.telemetry.RecordRowsWritten(ctx, "maple_ftl_loan_state", len(loans))
+	s.logger.Info("fixed-term loans synced", "count", len(loans), "borrowers", len(borrowers))
+	return nil
+}
+
+// buildFTLLoanEntities maps API fixed-term loans to registry entities with
+// resolved pool, borrower, and asset-token ids.
+func (s *Service) buildFTLLoanEntities(loans []outbound.MapleFixedTermLoan, poolIDs, borrowerIDs, assetTokenIDs map[common.Address]int64, protocolID int64) ([]*maple.FTLLoan, error) {
+	loanEntities := make([]*maple.FTLLoan, 0, len(loans))
+	for _, l := range loans {
+		borrowerUserID, ok := borrowerIDs[l.Borrower]
+		if !ok {
+			return nil, fmt.Errorf("fixed-term loan %s: borrower %s missing from upsert result", lowerHex(l.LoanID), lowerHex(l.Borrower))
+		}
+		collateralTokenID, ok := assetTokenIDs[l.Collateral.Address]
+		if !ok {
+			return nil, fmt.Errorf("fixed-term loan %s: collateral token %s missing from upsert result", lowerHex(l.LoanID), lowerHex(l.Collateral.Address))
+		}
+		fundsTokenID, ok := assetTokenIDs[l.Funds.Address]
+		if !ok {
+			return nil, fmt.Errorf("fixed-term loan %s: funds token %s missing from upsert result", lowerHex(l.LoanID), lowerHex(l.Funds.Address))
+		}
+		loanEntity, err := maple.NewFTLLoan(
+			s.config.ChainID, protocolID, l.LoanID.Bytes(),
+			poolIDs[l.PoolAddress], borrowerUserID, collateralTokenID, fundsTokenID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("fixed-term loan %s: %w", lowerHex(l.LoanID), err)
+		}
+		loanEntities = append(loanEntities, loanEntity)
+	}
+	return loanEntities, nil
+}
+
+// buildFTLLoanStates maps API fixed-term loans to state snapshot entities,
+// converting the API epoch-second sentinel 0 to a nil timestamp (SQL NULL).
+func buildFTLLoanStates(loans []outbound.MapleFixedTermLoan, loanIDs map[common.Address]int64, syncedAt time.Time) ([]*maple.FTLLoanState, error) {
+	states := make([]*maple.FTLLoanState, 0, len(loans))
+	for _, l := range loans {
+		loanID, ok := loanIDs[l.LoanID]
+		if !ok {
+			return nil, fmt.Errorf("fixed-term loan %s missing from upsert result", lowerHex(l.LoanID))
+		}
+		state, err := maple.NewFTLLoanState(maple.FTLLoanStateParams{
+			LoanID:              loanID,
+			SyncedAt:            syncedAt,
+			State:               l.State,
+			StateDetail:         l.StateDetail,
+			PrincipalOwed:       l.PrincipalOwed,
+			InterestRate:        l.InterestRate,
+			InterestPaid:        l.InterestPaid,
+			PaymentsRemaining:   l.PaymentsRemaining,
+			PaymentIntervalDays: l.PaymentIntervalDays,
+			TermDays:            l.TermDays,
+			MaturityDate:        epochToTime(l.MaturityDate),
+			NextPaymentDue:      epochToTime(l.NextPaymentDue),
+			CollateralAmount:    l.CollateralAmount,
+			CollateralRequired:  l.CollateralRequired,
+			CollateralRatio:     l.CollateralRatio,
+			DrawdownAmount:      l.DrawdownAmount,
+			ClaimableAmount:     l.ClaimableAmount,
+			AcmRatio:            l.AcmRatio,
+			IsImpaired:          l.IsImpaired,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fixed-term loan state %s: %w", lowerHex(l.LoanID), err)
+		}
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+// epochToTime converts an API epoch-second timestamp to a *time.Time, mapping
+// the sentinel 0 (pre-funding / none due) to nil so it persists as SQL NULL
+// rather than 1970-01-01.
+func epochToTime(secs int64) *time.Time {
+	if secs == 0 {
+		return nil
+	}
+	t := time.Unix(secs, 0).UTC()
+	return &t
+}
+
+// distinctFTLAssetTokens extracts the unique collateral and funds tokens across
+// all loans as token-registry upsert inputs, validating each asset's metadata
+// and failing when the same address is reported with conflicting symbol or
+// decimals. CreatedAtBlock is left nil: GraphQL data has no block context.
+func distinctFTLAssetTokens(chainID int64, loans []outbound.MapleFixedTermLoan) ([]outbound.TokenInput, error) {
+	seen := make(map[common.Address]outbound.TokenInput, len(loans)*2)
+	assets := make([]outbound.TokenInput, 0, len(loans)*2)
+	add := func(loanID common.Address, a outbound.MapleAssetToken) error {
+		if a.Symbol == "" {
+			return fmt.Errorf("fixed-term loan %s: asset %s: symbol must not be empty", lowerHex(loanID), lowerHex(a.Address))
+		}
+		decimals, err := toInt16(a.Decimals)
+		if err != nil {
+			return fmt.Errorf("fixed-term loan %s: asset %s decimals: %w", lowerHex(loanID), lowerHex(a.Address), err)
+		}
+		asset := outbound.TokenInput{ChainID: chainID, Address: a.Address, Symbol: a.Symbol, Decimals: int(decimals)}
+		if prev, ok := seen[a.Address]; ok {
+			if prev.Symbol != asset.Symbol || prev.Decimals != asset.Decimals {
+				return fmt.Errorf("asset %s reported with conflicting metadata: %s/%d vs %s/%d",
+					lowerHex(a.Address), prev.Symbol, prev.Decimals, asset.Symbol, asset.Decimals)
+			}
+			return nil
+		}
+		seen[a.Address] = asset
+		assets = append(assets, asset)
+		return nil
+	}
+	for _, l := range loans {
+		if err := add(l.LoanID, l.Collateral); err != nil {
+			return nil, err
+		}
+		if err := add(l.LoanID, l.Funds); err != nil {
+			return nil, err
+		}
+	}
+	return assets, nil
+}
+
+// distinctFTLBorrowers extracts the unique borrower addresses, preserving first
+// appearance order.
+func distinctFTLBorrowers(loans []outbound.MapleFixedTermLoan) []common.Address {
+	seen := make(map[common.Address]struct{}, len(loans))
+	borrowers := make([]common.Address, 0, len(loans))
+	for _, l := range loans {
+		if _, ok := seen[l.Borrower]; ok {
+			continue
+		}
+		seen[l.Borrower] = struct{}{}
+		borrowers = append(borrowers, l.Borrower)
+	}
+	return borrowers
 }
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -207,6 +209,44 @@ const activeLoansQuery = `query GetActiveLoans($first: Int!, $skip: Int!) {
   }
 }`
 
+// ftlLiveStates are the non-terminal fixed-term loan states the indexer
+// snapshots. A loan leaving this set has gone terminal (matured/liquidated) and
+// drops out of the snapshot, mirroring the OTL absence=inactive convention.
+// Restricting to live states also sidesteps the V1-era matured book, whose
+// loans carry a null fundingPool (PoolV2) and a different interest-rate scale.
+var ftlLiveStates = []string{"Active", "DrawdownFunds", "WaitingForAcceptance", "RemoveCollateral"}
+
+// fixedTermLoansQuery fetches live fixed-term loans. The `loans` root query IS
+// the FTL entity (Loan type); parseFixedTermLoan re-checks each returned state
+// against ftlLiveStates so a filter-semantics drift cannot push a terminal loan
+// into the snapshot.
+const fixedTermLoansQuery = `query GetFixedTermLoans($first: Int!, $skip: Int!) {
+  loans(first: $first, skip: $skip, where: { state_in: [Active, DrawdownFunds, WaitingForAcceptance, RemoveCollateral] }) {
+    id
+    borrower { id }
+    fundingPool { id }
+    collateralAsset { id symbol decimals }
+    liquidityAsset { id symbol decimals }
+    state
+    stateDetail
+    principalOwed
+    interestRate
+    interestPaid
+    paymentsRemaining
+    paymentIntervalDays
+    termDays
+    maturityDate
+    nextPaymentDue
+    collateralAmount
+    collateralRequired
+    collateralRatio
+    drawdownAmount
+    claimableAmount
+    acmRatio
+    isImpaired
+  }
+}`
+
 const skyStrategiesQuery = `query GetSkyStrategies($first: Int!, $skip: Int!) {
   skyStrategies(first: $first, skip: $skip) {
     id
@@ -282,6 +322,35 @@ type loanWire struct {
 	FundingPool   struct {
 		ID string `json:"id"`
 	} `json:"fundingPool"`
+}
+
+type ftlLoanWire struct {
+	ID       string `json:"id"`
+	Borrower struct {
+		ID string `json:"id"`
+	} `json:"borrower"`
+	FundingPool *struct { // nullable: V1-era loans carry null here (excluded by the live-states filter)
+		ID string `json:"id"`
+	} `json:"fundingPool"`
+	CollateralAsset     assetWire `json:"collateralAsset"`
+	LiquidityAsset      assetWire `json:"liquidityAsset"`
+	State               string    `json:"state"`
+	StateDetail         *string   `json:"stateDetail"` // nullable in schema
+	PrincipalOwed       string    `json:"principalOwed"`
+	InterestRate        string    `json:"interestRate"`
+	InterestPaid        string    `json:"interestPaid"`
+	PaymentsRemaining   string    `json:"paymentsRemaining"`
+	PaymentIntervalDays string    `json:"paymentIntervalDays"`
+	TermDays            string    `json:"termDays"`
+	MaturityDate        string    `json:"maturityDate"`   // epoch seconds; "0" = none
+	NextPaymentDue      string    `json:"nextPaymentDue"` // epoch seconds; "0" = none
+	CollateralAmount    string    `json:"collateralAmount"`
+	CollateralRequired  string    `json:"collateralRequired"`
+	CollateralRatio     string    `json:"collateralRatio"`
+	DrawdownAmount      string    `json:"drawdownAmount"`
+	ClaimableAmount     string    `json:"claimableAmount"`
+	AcmRatio            *string   `json:"acmRatio"` // nullable in schema
+	IsImpaired          bool      `json:"isImpaired"`
 }
 
 type skyStrategyWire struct {
@@ -387,6 +456,49 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 				"collateralState", deref(w.Collateral.State),
 				"assetAmountNull", w.Collateral.AssetAmount == nil,
 				"assetValueUsdNull", w.Collateral.AssetValueUSD == nil,
+			)
+		}
+		loans = append(loans, loan)
+	}
+	return loans, nil
+}
+
+// GetActiveFixedTermLoans fetches all fixed-term loans in a live (non-terminal)
+// state, paginating transparently. An empty result is a valid snapshot (the FTL
+// product is dormant today), so it is returned without error; the service
+// decides how to treat zero.
+func (c *Client) GetActiveFixedTermLoans(ctx context.Context) ([]outbound.MapleFixedTermLoan, error) {
+	wires, err := fetchAll(c.logger, "fixed-term loans", loanBatchSize, func(first, skip int) ([]ftlLoanWire, error) {
+		// Pointer decode: a null collection must fail hard, not look like an
+		// empty (dormant) loan book (see GetPools).
+		var resp struct {
+			Data struct {
+				Loans *[]ftlLoanWire `json:"loans"`
+			} `json:"data"`
+		}
+		if err := c.execute(ctx, fixedTermLoansQuery, pageVariables(first, skip), &resp); err != nil {
+			return nil, fmt.Errorf("querying fixed-term loans (skip=%d): %w", skip, err)
+		}
+		if resp.Data.Loans == nil {
+			return nil, fmt.Errorf("querying fixed-term loans (skip=%d): API returned null loans collection", skip)
+		}
+		return *resp.Data.Loans, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	loans := make([]outbound.MapleFixedTermLoan, 0, len(wires))
+	for _, w := range wires {
+		loan, err := parseFixedTermLoan(w)
+		if err != nil {
+			return nil, err
+		}
+		if loan.AcmRatio == nil || loan.StateDetail == "" {
+			c.logger.Warn("fixed-term loan has null acmRatio or stateDetail; storing as NULL",
+				"loan", w.ID,
+				"acmRatioNull", loan.AcmRatio == nil,
+				"stateDetailNull", loan.StateDetail == "",
 			)
 		}
 		loans = append(loans, loan)
@@ -600,6 +712,139 @@ func parseCollateral(w *collateralWire, loanID string) (*outbound.MapleLoanColla
 	}, nil
 }
 
+func parseFixedTermLoan(w ftlLoanWire) (outbound.MapleFixedTermLoan, error) {
+	if !slices.Contains(ftlLiveStates, w.State) {
+		return outbound.MapleFixedTermLoan{}, fmt.Errorf("fixed-term loan %s: unexpected state %q, want one of %v", w.ID, w.State, ftlLiveStates)
+	}
+	loanID, err := parseAddress(w.ID, "loan id", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	borrower, err := parseAddress(w.Borrower.ID, "borrower id", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	// A live FTL is always PoolV2-funded; a null fundingPool here means the
+	// live-states filter let a V1-era loan through (upstream surprise), so fail
+	// hard rather than snapshot a loan with no resolvable pool.
+	if w.FundingPool == nil {
+		return outbound.MapleFixedTermLoan{}, fmt.Errorf("fixed-term loan %s: null fundingPool on a live loan", w.ID)
+	}
+	poolAddress, err := parseAddress(w.FundingPool.ID, "funding pool id", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateral, err := parseAssetToken(w.CollateralAsset, "collateralAsset", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	funds, err := parseAssetToken(w.LiquidityAsset, "liquidityAsset", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	principalOwed, err := parseBigInt(w.PrincipalOwed, "principalOwed", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	interestRate, err := parseBigInt(w.InterestRate, "interestRate", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	interestPaid, err := parseBigInt(w.InterestPaid, "interestPaid", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateralAmount, err := parseBigInt(w.CollateralAmount, "collateralAmount", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateralRequired, err := parseBigInt(w.CollateralRequired, "collateralRequired", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateralRatio, err := parseBigInt(w.CollateralRatio, "collateralRatio", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	drawdownAmount, err := parseBigInt(w.DrawdownAmount, "drawdownAmount", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	claimableAmount, err := parseBigInt(w.ClaimableAmount, "claimableAmount", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	acmRatio, err := parseOptionalBigInt(w.AcmRatio, "acmRatio", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	paymentsRemaining, err := parseInt64(w.PaymentsRemaining, "paymentsRemaining", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	paymentIntervalDays, err := parseInt64(w.PaymentIntervalDays, "paymentIntervalDays", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	termDays, err := parseInt64(w.TermDays, "termDays", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	maturityDate, err := parseInt64(w.MaturityDate, "maturityDate", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	nextPaymentDue, err := parseInt64(w.NextPaymentDue, "nextPaymentDue", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	return outbound.MapleFixedTermLoan{
+		LoanID:              loanID,
+		Borrower:            borrower,
+		PoolAddress:         poolAddress,
+		Collateral:          collateral,
+		Funds:               funds,
+		State:               w.State,
+		StateDetail:         deref(w.StateDetail),
+		PrincipalOwed:       principalOwed,
+		InterestRate:        interestRate,
+		InterestPaid:        interestPaid,
+		PaymentsRemaining:   paymentsRemaining,
+		PaymentIntervalDays: paymentIntervalDays,
+		TermDays:            termDays,
+		MaturityDate:        maturityDate,
+		NextPaymentDue:      nextPaymentDue,
+		CollateralAmount:    collateralAmount,
+		CollateralRequired:  collateralRequired,
+		CollateralRatio:     collateralRatio,
+		DrawdownAmount:      drawdownAmount,
+		ClaimableAmount:     claimableAmount,
+		AcmRatio:            acmRatio,
+		IsImpaired:          w.IsImpaired,
+	}, nil
+}
+
+// parseAssetToken validates a fixed-term loan's collateral/funds Asset (always
+// non-null per the schema), failing on a bad address or zero/missing decimals.
+func parseAssetToken(w assetWire, field, id string) (outbound.MapleAssetToken, error) {
+	address, err := parseAddress(w.ID, field+".id", id)
+	if err != nil {
+		return outbound.MapleAssetToken{}, err
+	}
+	decimals, err := requireDecimals(w.Decimals, field+".decimals", id)
+	if err != nil {
+		return outbound.MapleAssetToken{}, err
+	}
+	if w.Symbol == "" {
+		return outbound.MapleAssetToken{}, fmt.Errorf("%s.symbol is empty for %s", field, id)
+	}
+	return outbound.MapleAssetToken{Address: address, Symbol: w.Symbol, Decimals: decimals}, nil
+}
+
 func parseSkyStrategy(w skyStrategyWire) (outbound.MapleSkyStrategy, error) {
 	address, err := parseAddress(w.ID, "strategy id", w.ID)
 	if err != nil {
@@ -695,6 +940,18 @@ func parseOptionalBigInt(s *string, field, id string) (*big.Int, error) {
 		return nil, nil
 	}
 	return parseBigInt(*s, field, id)
+}
+
+// parseInt64 parses a string-encoded integer the API returns for counts
+// (paymentsRemaining, termDays, ...) and epoch-second timestamps
+// (maturityDate, nextPaymentDue). These are BigInt! on the wire but fit int64;
+// a value that overflows int64 fails the whole call rather than wrapping.
+func parseInt64(s, field, id string) (int64, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %s for %s: invalid integer string %q: %w", field, id, s, err)
+	}
+	return n, nil
 }
 
 // parseAddress validates with IsHexAddress before converting:

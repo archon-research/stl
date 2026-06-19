@@ -351,6 +351,139 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	return r.execInsert(ctx, tx, "maple_loan_collateral", sb.String(), args)
 }
 
+// UpsertFixedTermLoans upserts fixed-term loan registry rows and returns loan
+// address -> maple_ftl_loan.id. maple_pool_id, borrower_user_id,
+// collateral_token_id and funds_token_id are immutable per loan (fundingPool
+// and the underlying assets are fixed at origination), so the upsert refreshes
+// nothing on conflict (the no-op DO UPDATE keeps RETURNING yielding the stored
+// row) and the scan fails the run if any stored value differs from the incoming
+// one. Refinance-mutable terms live in maple_ftl_loan_state, not here.
+func (r *MapleGraphQLRepository) UpsertFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
+	if len(loans) == 0 {
+		return make(map[common.Address]int64), nil
+	}
+
+	sorted := sortedByBytesKey(loans, func(l *maple.FTLLoan) []byte { return l.LoanAddress })
+
+	batch := &pgx.Batch{}
+	for _, l := range sorted {
+		batch.Queue(
+			`INSERT INTO maple_ftl_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id,
+			                             collateral_token_id, funds_token_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
+			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET id = maple_ftl_loan.id
+			 RETURNING id, maple_pool_id, borrower_user_id, collateral_token_id, funds_token_id`,
+			l.ChainID, l.ProtocolID, l.LoanAddress, l.PoolID, l.BorrowerUserID,
+			l.CollateralTokenID, l.FundsTokenID,
+		)
+	}
+
+	return collectBatchRows(ctx, tx, batch, sorted, "maple ftl loan",
+		func(row pgx.Row, l *maple.FTLLoan) (common.Address, int64, error) {
+			addr := common.BytesToAddress(l.LoanAddress)
+			var id, storedPoolID, storedBorrower, storedCollateralToken, storedFundsToken int64
+			if err := row.Scan(&id, &storedPoolID, &storedBorrower, &storedCollateralToken, &storedFundsToken); err != nil {
+				return common.Address{}, 0, fmt.Errorf("upserting maple ftl loan %s: %w", addr, err)
+			}
+			var mismatches []string
+			for _, c := range []struct {
+				field            string
+				stored, incoming int64
+			}{
+				{"maple_pool_id", storedPoolID, l.PoolID},
+				{"borrower_user_id", storedBorrower, l.BorrowerUserID},
+				{"collateral_token_id", storedCollateralToken, l.CollateralTokenID},
+				{"funds_token_id", storedFundsToken, l.FundsTokenID},
+			} {
+				if c.stored != c.incoming {
+					mismatches = append(mismatches, fmt.Sprintf("%s (stored %d, incoming %d)", c.field, c.stored, c.incoming))
+				}
+			}
+			if err := registryMismatchError("maple ftl loan", addr, mismatches); err != nil {
+				return common.Address{}, 0, err
+			}
+			return addr, id, nil
+		})
+}
+
+// SaveFixedTermLoanStates inserts fixed-term loan state snapshots (same
+// trigger/conflict semantics as SavePoolStates).
+func (r *MapleGraphQLRepository) SaveFixedTermLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) error {
+	if len(states) == 0 {
+		return nil
+	}
+
+	sorted := sortedCopy(states, func(a, b *maple.FTLLoanState) int {
+		return cmp.Or(
+			cmp.Compare(a.LoanID, b.LoanID),
+			a.SyncedAt.Compare(b.SyncedAt),
+		)
+	})
+
+	var inserted int64
+	for chunk := range slices.Chunk(sorted, r.batchSize) {
+		n, err := r.saveFixedTermLoanStateBatch(ctx, tx, chunk)
+		if err != nil {
+			return err
+		}
+		inserted += n
+	}
+	return r.checkDedupedRows("maple_ftl_loan_state", inserted, len(states))
+}
+
+func (r *MapleGraphQLRepository) saveFixedTermLoanStateBatch(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) (int64, error) {
+	const cols = 20
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO maple_ftl_loan_state (maple_ftl_loan_id, synced_at, state, state_detail, principal_owed, interest_rate, interest_paid, payments_remaining, payment_interval_days, term_days, maturity_date, next_payment_due, collateral_amount, collateral_required, collateral_ratio, drawdown_amount, claimable_amount, acm_ratio, is_impaired, build_id) VALUES `)
+
+	args := make([]any, 0, len(states)*cols)
+	for i, s := range states {
+		principalOwed, err := bigIntToNumeric(s.PrincipalOwed)
+		if err != nil {
+			return 0, fmt.Errorf("converting principal_owed for ftl loan %d: %w", s.LoanID, err)
+		}
+		interestRate, err := bigIntToNumeric(s.InterestRate)
+		if err != nil {
+			return 0, fmt.Errorf("converting interest_rate for ftl loan %d: %w", s.LoanID, err)
+		}
+		interestPaid, err := bigIntToNumeric(s.InterestPaid)
+		if err != nil {
+			return 0, fmt.Errorf("converting interest_paid for ftl loan %d: %w", s.LoanID, err)
+		}
+		collateralAmount, err := bigIntToNumeric(s.CollateralAmount)
+		if err != nil {
+			return 0, fmt.Errorf("converting collateral_amount for ftl loan %d: %w", s.LoanID, err)
+		}
+		collateralRequired, err := bigIntToNumeric(s.CollateralRequired)
+		if err != nil {
+			return 0, fmt.Errorf("converting collateral_required for ftl loan %d: %w", s.LoanID, err)
+		}
+		collateralRatio, err := bigIntToNumeric(s.CollateralRatio)
+		if err != nil {
+			return 0, fmt.Errorf("converting collateral_ratio for ftl loan %d: %w", s.LoanID, err)
+		}
+		drawdownAmount, err := bigIntToNumeric(s.DrawdownAmount)
+		if err != nil {
+			return 0, fmt.Errorf("converting drawdown_amount for ftl loan %d: %w", s.LoanID, err)
+		}
+		claimableAmount, err := bigIntToNumeric(s.ClaimableAmount)
+		if err != nil {
+			return 0, fmt.Errorf("converting claimable_amount for ftl loan %d: %w", s.LoanID, err)
+		}
+
+		writeValuesPlaceholders(&sb, i, cols)
+		args = append(args, s.LoanID, s.SyncedAt, s.State, nullIfEmpty(s.StateDetail),
+			principalOwed, interestRate, interestPaid,
+			s.PaymentsRemaining, s.PaymentIntervalDays, s.TermDays,
+			s.MaturityDate, s.NextPaymentDue,
+			collateralAmount, collateralRequired, collateralRatio,
+			drawdownAmount, claimableAmount, optionalNumeric(s.AcmRatio), s.IsImpaired, int(r.buildID))
+	}
+	sb.WriteString(` ON CONFLICT (maple_ftl_loan_id, synced_at, processing_version) DO NOTHING`)
+
+	return r.execInsert(ctx, tx, "maple_ftl_loan_state", sb.String(), args)
+}
+
 // UpsertSkyStrategies upserts strategy registry rows and returns strategy
 // address -> maple_sky_strategy.id. maple_pool_id and version are immutable
 // per strategy, so the upsert refreshes nothing on conflict (the no-op DO

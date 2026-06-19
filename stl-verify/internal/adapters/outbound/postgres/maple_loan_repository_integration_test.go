@@ -38,10 +38,12 @@ func truncateMaple(t *testing.T, ctx context.Context) {
 	tables := []string{
 		`maple_loan_collateral`,
 		`maple_loan_state`,
+		`maple_ftl_loan_state`,
 		`maple_pool_state`,
 		`maple_sky_strategy_state`,
 		`maple_syrup_global_state`,
 		`maple_loan`,
+		`maple_ftl_loan`,
 		`maple_sky_strategy`,
 		`maple_pool`,
 	}
@@ -1041,6 +1043,292 @@ func TestMapleStates_IdempotencyAndReprocessing(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// upsertTestTokenWithDecimals seeds a token row with explicit decimals and
+// returns its id (the FTL collateral/funds FKs need two distinct tokens).
+func upsertTestTokenWithDecimals(t *testing.T, ctx context.Context, tx pgx.Tx, addrByte byte, symbol string, decimals int) int64 {
+	t.Helper()
+	var id int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, $1, $2, $3, '{}'::jsonb, NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`,
+		mapleAddr(addrByte), symbol, decimals).Scan(&id); err != nil {
+		t.Fatalf("seeding token %s: %v", symbol, err)
+	}
+	return id
+}
+
+// upsertTestFTLLoan seeds an FTL registry row and returns its id, resolving the
+// pool, borrower, and the two asset tokens it needs.
+func upsertTestFTLLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, poolID int64, addrByte byte) (loanID, collateralTokenID, fundsTokenID int64) {
+	t.Helper()
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		borrowerID := upsertTestBorrowerUser(t, ctx, tx, 0xac)
+		collateralTokenID = upsertTestTokenWithDecimals(t, ctx, tx, 0xc0, "WBTC", 8)
+		fundsTokenID = upsertTestTokenWithDecimals(t, ctx, tx, 0xf0, "USDC", 6)
+		loan, err := maple.NewFTLLoan(1, protocolID, mapleAddr(addrByte), poolID, borrowerID, collateralTokenID, fundsTokenID)
+		if err != nil {
+			return err
+		}
+		ids, err := repo.UpsertFixedTermLoans(ctx, tx, []*maple.FTLLoan{loan})
+		if err != nil {
+			return err
+		}
+		loanID = ids[common.BytesToAddress(loan.LoanAddress)]
+		return nil
+	})
+	if loanID == 0 {
+		t.Fatal("ftl loan id not resolved")
+	}
+	return loanID, collateralTokenID, fundsTokenID
+}
+
+func TestMapleFTLLoans_FullRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x50)
+	loanID, collateralTokenID, fundsTokenID := upsertTestFTLLoan(t, ctx, repo, poolID, 0x60)
+
+	// Registry FK columns round-trip.
+	var gotCollateral, gotFunds int64
+	if err := maplePool.QueryRow(ctx,
+		`SELECT collateral_token_id, funds_token_id FROM maple_ftl_loan WHERE id = $1`,
+		loanID).Scan(&gotCollateral, &gotFunds); err != nil {
+		t.Fatalf("querying ftl loan: %v", err)
+	}
+	if gotCollateral != collateralTokenID || gotFunds != fundsTokenID {
+		t.Errorf("token FKs = %d/%d, want %d/%d", gotCollateral, gotFunds, collateralTokenID, fundsTokenID)
+	}
+
+	// A funded loan: full field set, with stateDetail/acmRatio set and both
+	// epoch dates present.
+	maturity := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	nextDue := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	funded, err := maple.NewFTLLoanState(maple.FTLLoanStateParams{
+		LoanID: loanID, SyncedAt: mapleSyncedAt(), State: "Active", StateDetail: "ActiveInArrears",
+		PrincipalOwed: big.NewInt(10000000000000), InterestRate: big.NewInt(182000), InterestPaid: big.NewInt(5000),
+		PaymentsRemaining: 6, PaymentIntervalDays: 30, TermDays: 180,
+		MaturityDate: &maturity, NextPaymentDue: &nextDue,
+		CollateralAmount: big.NewInt(21510), CollateralRequired: big.NewInt(20000), CollateralRatio: big.NewInt(1500000),
+		DrawdownAmount: big.NewInt(16917002739727), ClaimableAmount: big.NewInt(0),
+		AcmRatio: big.NewInt(1445731), IsImpaired: true,
+	})
+	if err != nil {
+		t.Fatalf("NewFTLLoanState (funded): %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SaveFixedTermLoanStates(ctx, tx, []*maple.FTLLoanState{funded})
+	})
+
+	var state, stateDetail string
+	var interestRate, collateralRatio, acmRatio string
+	var paymentsRemaining, termDays int64
+	var maturityDate, nextPaymentDue *time.Time
+	var isImpaired bool
+	if err := maplePool.QueryRow(ctx,
+		`SELECT state, state_detail, interest_rate::text, collateral_ratio::text, acm_ratio::text,
+		        payments_remaining, term_days, maturity_date, next_payment_due, is_impaired
+		 FROM maple_ftl_loan_state WHERE maple_ftl_loan_id = $1`,
+		loanID).Scan(&state, &stateDetail, &interestRate, &collateralRatio, &acmRatio,
+		&paymentsRemaining, &termDays, &maturityDate, &nextPaymentDue, &isImpaired); err != nil {
+		t.Fatalf("querying ftl loan state: %v", err)
+	}
+	if state != "Active" || stateDetail != "ActiveInArrears" {
+		t.Errorf("state/detail = %s/%s", state, stateDetail)
+	}
+	if interestRate != "182000" || collateralRatio != "1500000" || acmRatio != "1445731" {
+		t.Errorf("rates = %s/%s/%s", interestRate, collateralRatio, acmRatio)
+	}
+	if paymentsRemaining != 6 || termDays != 180 {
+		t.Errorf("counts = %d/%d, want 6/180", paymentsRemaining, termDays)
+	}
+	if maturityDate == nil || !maturityDate.Equal(maturity) || nextPaymentDue == nil || !nextPaymentDue.Equal(nextDue) {
+		t.Errorf("dates = %v/%v, want %v/%v", maturityDate, nextPaymentDue, maturity, nextDue)
+	}
+	if !isImpaired {
+		t.Error("is_impaired = false, want true")
+	}
+}
+
+func TestMapleFTLLoanStates_PreFundingNullsRoundTrip(t *testing.T) {
+	// A pre-funding state (WaitingForAcceptance) reports zero amounts, null
+	// stateDetail/acmRatio, and zero epoch dates that map to SQL NULL.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x51)
+	loanID, _, _ := upsertTestFTLLoan(t, ctx, repo, poolID, 0x61)
+
+	pending, err := maple.NewFTLLoanState(maple.FTLLoanStateParams{
+		LoanID: loanID, SyncedAt: mapleSyncedAt(), State: "WaitingForAcceptance", StateDetail: "",
+		PrincipalOwed: big.NewInt(0), InterestRate: big.NewInt(0), InterestPaid: big.NewInt(0),
+		PaymentsRemaining: 0, PaymentIntervalDays: 0, TermDays: 0,
+		MaturityDate: nil, NextPaymentDue: nil,
+		CollateralAmount: big.NewInt(0), CollateralRequired: big.NewInt(0), CollateralRatio: big.NewInt(0),
+		DrawdownAmount: big.NewInt(0), ClaimableAmount: big.NewInt(0),
+		AcmRatio: nil, IsImpaired: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFTLLoanState (pending): %v", err)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repo.SaveFixedTermLoanStates(ctx, tx, []*maple.FTLLoanState{pending})
+	})
+
+	var stateDetail, acmRatio *string
+	var maturityDate, nextPaymentDue *time.Time
+	var principalOwed string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT state_detail, acm_ratio::text, maturity_date, next_payment_due, principal_owed::text
+		 FROM maple_ftl_loan_state WHERE maple_ftl_loan_id = $1`,
+		loanID).Scan(&stateDetail, &acmRatio, &maturityDate, &nextPaymentDue, &principalOwed); err != nil {
+		t.Fatalf("querying ftl loan state: %v", err)
+	}
+	if stateDetail != nil || acmRatio != nil {
+		t.Errorf("state_detail/acm_ratio = %v/%v, want NULL/NULL", stateDetail, acmRatio)
+	}
+	if maturityDate != nil || nextPaymentDue != nil {
+		t.Errorf("dates = %v/%v, want NULL/NULL", maturityDate, nextPaymentDue)
+	}
+	if principalOwed != "0" {
+		t.Errorf("principal_owed = %s, want 0 (zero is a valid pre-funding value)", principalOwed)
+	}
+}
+
+func TestMapleUpsertFTLLoans_NoOpOnUnchanged(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x52)
+
+	loanID, _, _ := upsertTestFTLLoan(t, ctx, repo, poolID, 0x62)
+	sameID, _, _ := upsertTestFTLLoan(t, ctx, repo, poolID, 0x62)
+	if sameID != loanID {
+		t.Fatalf("ftl loan id changed on unchanged re-upsert: %d vs %d", sameID, loanID)
+	}
+}
+
+func TestMapleUpsertFTLLoans_RejectsFieldChange(t *testing.T) {
+	// maple_pool_id, borrower_user_id, collateral_token_id and funds_token_id
+	// are immutable; a re-upsert with any changed value must fail naming the
+	// field instead of refreshing the row.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+	poolA := upsertTestPool(t, ctx, repo, 0x53)
+	poolB := upsertTestPool(t, ctx, repo, 0x54)
+
+	var borrowerA, borrowerB, wbtc, usdc, weth int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		borrowerA = upsertTestBorrowerUser(t, ctx, tx, 0xa1)
+		borrowerB = upsertTestBorrowerUser(t, ctx, tx, 0xa2)
+		wbtc = upsertTestTokenWithDecimals(t, ctx, tx, 0xc0, "WBTC", 8)
+		usdc = upsertTestTokenWithDecimals(t, ctx, tx, 0xf0, "USDC", 6)
+		weth = upsertTestTokenWithDecimals(t, ctx, tx, 0xf1, "WETH", 18)
+		return nil
+	})
+
+	loanAddr := mapleAddr(0x63)
+	upsert := func(poolID, borrowerID, collateralToken, fundsToken int64) error {
+		tx, err := maplePool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		loan, err := maple.NewFTLLoan(1, protocolID, loanAddr, poolID, borrowerID, collateralToken, fundsToken)
+		if err != nil {
+			t.Fatalf("NewFTLLoan: %v", err)
+		}
+		if _, err := repo.UpsertFixedTermLoans(ctx, tx, []*maple.FTLLoan{loan}); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := upsert(poolA, borrowerA, wbtc, usdc); err != nil {
+		t.Fatalf("baseline upsert: %v", err)
+	}
+	if err := upsert(poolA, borrowerA, wbtc, usdc); err != nil {
+		t.Fatalf("unchanged re-upsert: %v", err)
+	}
+
+	cases := []struct {
+		name                                            string
+		poolID, borrowerID, collateralToken, fundsToken int64
+		wantField                                       string
+	}{
+		{"pool reassignment", poolB, borrowerA, wbtc, usdc, "maple_pool_id"},
+		{"borrower change", poolA, borrowerB, wbtc, usdc, "borrower_user_id"},
+		{"collateral token change", poolA, borrowerA, weth, usdc, "collateral_token_id"},
+		{"funds token change", poolA, borrowerA, wbtc, weth, "funds_token_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := upsert(tc.poolID, tc.borrowerID, tc.collateralToken, tc.fundsToken)
+			if err == nil {
+				t.Fatal("expected mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) || !strings.Contains(err.Error(), "registry fields changed") {
+				t.Errorf("error %q should report a registry mismatch naming %q", err.Error(), tc.wantField)
+			}
+		})
+	}
+}
+
+func TestMapleFTLLoanStates_IdempotencyAndReprocessing(t *testing.T) {
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repoBuild0 := newMapleRepo(t, 0)
+	repoBuild9 := newMapleRepo(t, 9)
+	poolID := upsertTestPool(t, ctx, repoBuild0, 0x55)
+	loanID, _, _ := upsertTestFTLLoan(t, ctx, repoBuild0, poolID, 0x64)
+
+	newState := func(principal int64) *maple.FTLLoanState {
+		s, err := maple.NewFTLLoanState(maple.FTLLoanStateParams{
+			LoanID: loanID, SyncedAt: mapleSyncedAt(), State: "Active",
+			PrincipalOwed: big.NewInt(principal), InterestRate: big.NewInt(1), InterestPaid: big.NewInt(0),
+			CollateralAmount: big.NewInt(0), CollateralRequired: big.NewInt(0), CollateralRatio: big.NewInt(0),
+			DrawdownAmount: big.NewInt(0), ClaimableAmount: big.NewInt(0),
+		})
+		if err != nil {
+			t.Fatalf("NewFTLLoanState: %v", err)
+		}
+		return s
+	}
+
+	for range 2 {
+		inMapleTx(t, ctx, func(tx pgx.Tx) error {
+			return repoBuild0.SaveFixedTermLoanStates(ctx, tx, []*maple.FTLLoanState{newState(100)})
+		})
+	}
+	var count int
+	if err := maplePool.QueryRow(ctx, `SELECT COUNT(*) FROM maple_ftl_loan_state`).Scan(&count); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("count after same-build retry = %d, want 1", count)
+	}
+
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		return repoBuild9.SaveFixedTermLoanStates(ctx, tx, []*maple.FTLLoanState{newState(200)})
+	})
+
+	var maxVersion int
+	if err := maplePool.QueryRow(ctx, `SELECT MAX(processing_version) FROM maple_ftl_loan_state`).Scan(&maxVersion); err != nil {
+		t.Fatalf("max processing_version: %v", err)
+	}
+	if maxVersion != 1 {
+		t.Errorf("max processing_version = %d, want 1 (new build bumps)", maxVersion)
 	}
 }
 

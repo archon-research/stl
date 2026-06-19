@@ -22,12 +22,14 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockClient struct {
-	GetPoolsFn         func(ctx context.Context) ([]outbound.MaplePool, error)
-	GetActiveLoansFn   func(ctx context.Context) ([]outbound.MapleActiveLoan, error)
-	GetSkyStrategiesFn func(ctx context.Context) ([]outbound.MapleSkyStrategy, error)
-	GetSyrupGlobalsFn  func(ctx context.Context) (*outbound.MapleSyrupGlobals, error)
+	GetPoolsFn                func(ctx context.Context) ([]outbound.MaplePool, error)
+	GetActiveLoansFn          func(ctx context.Context) ([]outbound.MapleActiveLoan, error)
+	GetActiveFixedTermLoansFn func(ctx context.Context) ([]outbound.MapleFixedTermLoan, error)
+	GetSkyStrategiesFn        func(ctx context.Context) ([]outbound.MapleSkyStrategy, error)
+	GetSyrupGlobalsFn         func(ctx context.Context) (*outbound.MapleSyrupGlobals, error)
 
 	activeLoansCalled bool
+	ftlLoansCalled    bool
 	strategiesCalled  bool
 	globalsCalled     bool
 }
@@ -39,6 +41,11 @@ func (m *mockClient) GetPools(ctx context.Context) ([]outbound.MaplePool, error)
 func (m *mockClient) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan, error) {
 	m.activeLoansCalled = true
 	return m.GetActiveLoansFn(ctx)
+}
+
+func (m *mockClient) GetActiveFixedTermLoans(ctx context.Context) ([]outbound.MapleFixedTermLoan, error) {
+	m.ftlLoansCalled = true
+	return m.GetActiveFixedTermLoansFn(ctx)
 }
 
 func (m *mockClient) GetSkyStrategies(ctx context.Context) ([]outbound.MapleSkyStrategy, error) {
@@ -58,6 +65,8 @@ type mockRepo struct {
 	UpsertLoansFn           func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
 	SaveLoanStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
 	SaveLoanCollateralsFn   func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
+	UpsertFixedTermLoansFn  func(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error)
+	SaveFTLLoanStatesFn     func(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) error
 	UpsertSkyStrategiesFn   func(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
 	SaveSkyStrategyStatesFn func(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error
 	SaveSyrupGlobalStateFn  func(ctx context.Context, tx pgx.Tx, state *maple.SyrupGlobalState) error
@@ -68,15 +77,17 @@ type mockRepo struct {
 	userRepo  *testutil.MockUserRepository
 
 	// Captured arguments for assertions.
-	borrowerCalls   [][]entity.User
-	assetTokenCalls [][]outbound.TokenInput
-	upsertedPools   []*maple.Pool
-	upsertedLoans   []*maple.Loan
-	savedPoolStates []*maple.PoolState
-	savedLoanStates []*maple.LoanState
-	savedCollats    []*maple.LoanCollateral
-	savedStrategies []*maple.SkyStrategyState
-	savedGlobals    []*maple.SyrupGlobalState
+	borrowerCalls    [][]entity.User
+	assetTokenCalls  [][]outbound.TokenInput
+	upsertedPools    []*maple.Pool
+	upsertedLoans    []*maple.Loan
+	upsertedFTLLoans []*maple.FTLLoan
+	savedPoolStates  []*maple.PoolState
+	savedLoanStates  []*maple.LoanState
+	savedFTLStates   []*maple.FTLLoanState
+	savedCollats     []*maple.LoanCollateral
+	savedStrategies  []*maple.SkyStrategyState
+	savedGlobals     []*maple.SyrupGlobalState
 }
 
 // newMockRepo returns a repo whose registry upserts assign sequential ids
@@ -132,6 +143,18 @@ func newMockRepo() *mockRepo {
 		r.savedCollats = append(r.savedCollats, collaterals...)
 		return nil
 	}
+	r.UpsertFixedTermLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
+		r.upsertedFTLLoans = append(r.upsertedFTLLoans, loans...)
+		ids := make(map[common.Address]int64, len(loans))
+		for i, l := range loans {
+			ids[common.BytesToAddress(l.LoanAddress)] = int64(40 + i)
+		}
+		return ids, nil
+	}
+	r.SaveFTLLoanStatesFn = func(_ context.Context, _ pgx.Tx, states []*maple.FTLLoanState) error {
+		r.savedFTLStates = append(r.savedFTLStates, states...)
+		return nil
+	}
 	r.UpsertSkyStrategiesFn = func(_ context.Context, _ pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 		ids := make(map[common.Address]int64, len(strategies))
 		for i, s := range strategies {
@@ -172,6 +195,14 @@ func (m *mockRepo) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*mapl
 
 func (m *mockRepo) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error {
 	return m.SaveLoanCollateralsFn(ctx, tx, collaterals)
+}
+
+func (m *mockRepo) UpsertFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
+	return m.UpsertFixedTermLoansFn(ctx, tx, loans)
+}
+
+func (m *mockRepo) SaveFixedTermLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) error {
+	return m.SaveFTLLoanStatesFn(ctx, tx, states)
 }
 
 func (m *mockRepo) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
@@ -263,12 +294,47 @@ func fixtureGlobals() *outbound.MapleSyrupGlobals {
 	}
 }
 
+// fixtureFTLLoans returns two live fixed-term loans sharing one borrower (to
+// exercise dedup) and one funded in the same asset it is collateralized in.
+func fixtureFTLLoans() []outbound.MapleFixedTermLoan {
+	wbtc := outbound.MapleAssetToken{Address: addr(0xc0), Symbol: "WBTC", Decimals: 8}
+	usdc := outbound.MapleAssetToken{Address: addr(0xf0), Symbol: "USDC", Decimals: 6}
+	return []outbound.MapleFixedTermLoan{
+		{
+			LoanID: addr(0x70), Borrower: addr(0xb0), PoolAddress: addr(0x10),
+			Collateral: wbtc, Funds: usdc, State: "Active", StateDetail: "ActiveInArrears",
+			PrincipalOwed: big.NewInt(10000000000000), InterestRate: big.NewInt(182000), InterestPaid: big.NewInt(5000),
+			PaymentsRemaining: 6, PaymentIntervalDays: 30, TermDays: 180,
+			MaturityDate: 1662393177, NextPaymentDue: 1659801177,
+			CollateralAmount: big.NewInt(21510), CollateralRequired: big.NewInt(20000), CollateralRatio: big.NewInt(1500000),
+			DrawdownAmount: big.NewInt(16917002739727), ClaimableAmount: big.NewInt(0),
+			AcmRatio: big.NewInt(1445731), IsImpaired: false,
+		},
+		{
+			// Pre-funding loan: same borrower (deduped), zero amounts/dates,
+			// null acmRatio and empty stateDetail.
+			LoanID: addr(0x71), Borrower: addr(0xb0), PoolAddress: addr(0x11),
+			Collateral: usdc, Funds: usdc, State: "WaitingForAcceptance", StateDetail: "",
+			PrincipalOwed: big.NewInt(0), InterestRate: big.NewInt(0), InterestPaid: big.NewInt(0),
+			PaymentsRemaining: 0, PaymentIntervalDays: 0, TermDays: 0,
+			MaturityDate: 0, NextPaymentDue: 0,
+			CollateralAmount: big.NewInt(0), CollateralRequired: big.NewInt(0), CollateralRatio: big.NewInt(0),
+			DrawdownAmount: big.NewInt(0), ClaimableAmount: big.NewInt(0),
+			AcmRatio: nil, IsImpaired: false,
+		},
+	}
+}
+
 func happyClient() *mockClient {
 	return &mockClient{
-		GetPoolsFn:         func(context.Context) ([]outbound.MaplePool, error) { return fixturePools(), nil },
-		GetActiveLoansFn:   func(context.Context) ([]outbound.MapleActiveLoan, error) { return fixtureLoans(), nil },
-		GetSkyStrategiesFn: func(context.Context) ([]outbound.MapleSkyStrategy, error) { return fixtureStrategies(), nil },
-		GetSyrupGlobalsFn:  func(context.Context) (*outbound.MapleSyrupGlobals, error) { return fixtureGlobals(), nil },
+		GetPoolsFn:       func(context.Context) ([]outbound.MaplePool, error) { return fixturePools(), nil },
+		GetActiveLoansFn: func(context.Context) ([]outbound.MapleActiveLoan, error) { return fixtureLoans(), nil },
+		// The FTL book is dormant by default; FTL-specific tests opt in to
+		// fixtureFTLLoans. This keeps the shared token/borrower mock-call
+		// assertions of the OTL tests unaffected.
+		GetActiveFixedTermLoansFn: func(context.Context) ([]outbound.MapleFixedTermLoan, error) { return nil, nil },
+		GetSkyStrategiesFn:        func(context.Context) ([]outbound.MapleSkyStrategy, error) { return fixtureStrategies(), nil },
+		GetSyrupGlobalsFn:         func(context.Context) (*outbound.MapleSyrupGlobals, error) { return fixtureGlobals(), nil },
 	}
 }
 
@@ -1424,5 +1490,364 @@ func TestSync_InvalidGlobalsFailsPhase(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "tvl must not be nil") {
 		t.Errorf("error = %q", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fixed-term loans phase
+// ---------------------------------------------------------------------------
+
+// ftlHappyClient is happyClient with a live (non-dormant) FTL book.
+func ftlHappyClient() *mockClient {
+	c := happyClient()
+	c.GetActiveFixedTermLoansFn = func(context.Context) ([]outbound.MapleFixedTermLoan, error) {
+		return fixtureFTLLoans(), nil
+	}
+	return c
+}
+
+func TestSync_FixedTermLoansHappyPath(t *testing.T) {
+	client := ftlHappyClient()
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	if len(repo.upsertedFTLLoans) != 2 {
+		t.Fatalf("upserted ftl loans = %d, want 2", len(repo.upsertedFTLLoans))
+	}
+	if len(repo.savedFTLStates) != 2 {
+		t.Fatalf("ftl states = %d, want 2", len(repo.savedFTLStates))
+	}
+
+	// Token resolution: the FTL phase resolves WBTC (0xc0) and USDC (0xf0); the
+	// second loan reuses USDC for both collateral and funds, so only two distinct
+	// tokens are requested. The FTL call is the second GetOrCreateTokens call
+	// (the pools phase made the first).
+	if len(repo.assetTokenCalls) != 2 {
+		t.Fatalf("asset token calls = %d, want 2 (pools + ftl)", len(repo.assetTokenCalls))
+	}
+	ftlAssets := repo.assetTokenCalls[1]
+	if len(ftlAssets) != 2 || ftlAssets[0].Address != addr(0xc0) || ftlAssets[1].Address != addr(0xf0) {
+		t.Errorf("ftl assets = %v, want [0xc0..., 0xf0...]", ftlAssets)
+	}
+	if ftlAssets[0].Symbol != "WBTC" || ftlAssets[0].Decimals != 8 || ftlAssets[0].CreatedAtBlock != nil {
+		t.Errorf("ftl collateral asset = %+v, want WBTC/8 with nil block", ftlAssets[0])
+	}
+
+	// Borrower resolution: both loans share borrower 0xb0, deduped to one. The
+	// FTL call is the second GetOrCreateUsers call (loans phase made the first).
+	if len(repo.borrowerCalls) != 2 {
+		t.Fatalf("borrower calls = %d, want 2 (loans + ftl)", len(repo.borrowerCalls))
+	}
+	if ftlBorrowers := repo.borrowerCalls[1]; len(ftlBorrowers) != 1 || ftlBorrowers[0].Address != addr(0xb0) {
+		t.Errorf("ftl borrowers = %v, want [0xb0...]", repo.borrowerCalls[1])
+	}
+
+	// Each registry entity carries the ids mapped from ITS pool/borrower/tokens.
+	entByAddr := map[common.Address]*maple.FTLLoan{}
+	for _, l := range repo.upsertedFTLLoans {
+		entByAddr[common.BytesToAddress(l.LoanAddress)] = l
+	}
+	first := entByAddr[addr(0x70)]
+	if first == nil || first.CollateralTokenID != 500 || first.FundsTokenID != 501 || first.BorrowerUserID != 100 {
+		t.Errorf("loan 0x70 entity = %+v, want collateral 500 funds 501 borrower 100", first)
+	}
+	second := entByAddr[addr(0x71)]
+	// fundsAsset == collateralAsset (USDC) for the second loan: same token id is valid.
+	if second == nil || second.CollateralTokenID != 501 || second.FundsTokenID != 501 {
+		t.Errorf("loan 0x71 entity = %+v, want collateral 501 funds 501", second)
+	}
+
+	// State rows: epoch 0 maps to nil dates, null acmRatio/empty stateDetail stay
+	// null; non-zero epochs convert to UTC instants.
+	stateByID := map[int64]*maple.FTLLoanState{}
+	for _, s := range repo.savedFTLStates {
+		stateByID[s.LoanID] = s
+	}
+	funded := stateByID[40] // loan 0x70 -> id 40
+	if funded == nil || funded.MaturityDate == nil || !funded.MaturityDate.Equal(time.Unix(1662393177, 0).UTC()) {
+		t.Errorf("funded loan maturity = %v, want %v", funded.MaturityDate, time.Unix(1662393177, 0).UTC())
+	}
+	if funded.AcmRatio == nil || funded.AcmRatio.Int64() != 1445731 || funded.StateDetail != "ActiveInArrears" {
+		t.Errorf("funded loan acm/detail = %v/%q", funded.AcmRatio, funded.StateDetail)
+	}
+	pending := stateByID[41] // loan 0x71 -> id 41
+	if pending == nil || pending.MaturityDate != nil || pending.NextPaymentDue != nil {
+		t.Errorf("pending loan dates = %v/%v, want nil/nil", pending.MaturityDate, pending.NextPaymentDue)
+	}
+	if pending.AcmRatio != nil || pending.StateDetail != "" {
+		t.Errorf("pending loan acm/detail = %v/%q, want nil/empty", pending.AcmRatio, pending.StateDetail)
+	}
+
+	// synced_at is shared (and second-truncated) with the rest of the cycle.
+	wantSyncedAt := time.Date(2026, 6, 10, 10, 0, 0, 0, time.UTC)
+	for _, s := range repo.savedFTLStates {
+		if !s.SyncedAt.Equal(wantSyncedAt) {
+			t.Errorf("ftl state syncedAt = %v, want %v", s.SyncedAt, wantSyncedAt)
+		}
+	}
+}
+
+func TestSync_FixedTermLoansEmptyIsInfoNotError(t *testing.T) {
+	// The dormant FTL book (empty) must succeed without resolving any borrowers
+	// or tokens for the FTL phase.
+	client := happyClient() // FTL empty by default
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	if err := service.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if !client.ftlLoansCalled {
+		t.Error("FTL fetch must still run")
+	}
+	if len(repo.upsertedFTLLoans) != 0 || len(repo.savedFTLStates) != 0 {
+		t.Errorf("ftl writes = %d/%d, want 0/0 for the dormant book", len(repo.upsertedFTLLoans), len(repo.savedFTLStates))
+	}
+	// Only the pools and loans phases resolve tokens/borrowers; the empty FTL
+	// phase adds no calls.
+	if len(repo.assetTokenCalls) != 1 || len(repo.borrowerCalls) != 1 {
+		t.Errorf("token/borrower calls = %d/%d, want 1/1 (FTL empty adds none)", len(repo.assetTokenCalls), len(repo.borrowerCalls))
+	}
+}
+
+func TestSync_FixedTermLoanReferencingUnknownPool(t *testing.T) {
+	client := ftlHappyClient()
+	client.GetActiveFixedTermLoansFn = func(context.Context) ([]outbound.MapleFixedTermLoan, error) {
+		loans := fixtureFTLLoans()
+		loans[0].PoolAddress = addr(0x99) // not in the pool registry
+		return loans, nil
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "references unknown pool") {
+		t.Errorf("error %q should name the unknown pool", err.Error())
+	}
+	if len(repo.savedFTLStates) != 0 {
+		t.Errorf("ftl states = %d, want 0 (snapshot is all-or-nothing)", len(repo.savedFTLStates))
+	}
+}
+
+func TestSync_FixedTermLoansFailAlone(t *testing.T) {
+	client := ftlHappyClient()
+	client.GetActiveFixedTermLoansFn = func(context.Context) ([]outbound.MapleFixedTermLoan, error) {
+		return nil, errors.New("ftl exploded")
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "ftl exploded") {
+		t.Errorf("error %q should contain the ftl failure", err.Error())
+	}
+	// Every other phase still ran.
+	if len(repo.savedPoolStates) != 2 || len(repo.savedLoanStates) != 3 ||
+		len(repo.savedStrategies) != 1 || len(repo.savedGlobals) != 1 {
+		t.Errorf("other phases must run: pools=%d loans=%d strategies=%d globals=%d",
+			len(repo.savedPoolStates), len(repo.savedLoanStates), len(repo.savedStrategies), len(repo.savedGlobals))
+	}
+}
+
+func TestSync_FixedTermLoansSkippedWhenPoolsFail(t *testing.T) {
+	client := ftlHappyClient()
+	client.GetPoolsFn = func(context.Context) ([]outbound.MaplePool, error) {
+		return nil, errors.New("pools exploded")
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(context.Background())
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "skipping fixed-term loans") {
+		t.Errorf("error %q should mark fixed-term loans as skipped", err.Error())
+	}
+	if client.ftlLoansCalled {
+		t.Error("FTL must not be fetched when pools fail")
+	}
+}
+
+func TestSync_CtxCancelledDuringFTLAbortsCycle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := ftlHappyClient()
+	client.GetActiveFixedTermLoansFn = func(ctx context.Context) ([]outbound.MapleFixedTermLoan, error) {
+		cancel()
+		return nil, ctx.Err()
+	}
+	repo := newMockRepo()
+	service := newTestService(t, client, repo)
+
+	err := service.Sync(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v should be context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "aborting sync cycle after fixed-term loans phase") {
+		t.Errorf("error %q should mark the cycle as aborted after fixed-term loans", err.Error())
+	}
+	if client.strategiesCalled || client.globalsCalled {
+		t.Error("strategies/globals must not run against a cancelled context")
+	}
+}
+
+func TestSync_FixedTermLoanErrorsPropagate(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(r *mockRepo)
+	}{
+		{
+			name: "ftl upsert fails",
+			mutate: func(r *mockRepo) {
+				r.UpsertFixedTermLoansFn = func(context.Context, pgx.Tx, []*maple.FTLLoan) (map[common.Address]int64, error) {
+					return nil, errors.New("ftl upsert failed")
+				}
+			},
+		},
+		{
+			name: "ftl state save fails",
+			mutate: func(r *mockRepo) {
+				r.SaveFTLLoanStatesFn = func(context.Context, pgx.Tx, []*maple.FTLLoanState) error {
+					return errors.New("ftl save failed")
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMockRepo()
+			tt.mutate(repo)
+			service := newTestService(t, ftlHappyClient(), repo)
+
+			err := service.Sync(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "failed") {
+				t.Errorf("error = %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestSync_FixedTermLoanResolutionFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(r *mockRepo)
+		wantErr string
+	}{
+		{
+			name: "asset token missing from upsert result",
+			mutate: func(r *mockRepo) {
+				r.tokenRepo.GetOrCreateTokensFn = func(context.Context, pgx.Tx, []outbound.TokenInput) (map[common.Address]int64, error) {
+					return map[common.Address]int64{}, nil
+				}
+			},
+			wantErr: "missing from upsert result",
+		},
+		{
+			name: "borrower missing from upsert result",
+			mutate: func(r *mockRepo) {
+				r.userRepo.GetOrCreateUsersFn = func(context.Context, pgx.Tx, []entity.User) (map[common.Address]int64, error) {
+					return map[common.Address]int64{}, nil
+				}
+			},
+			wantErr: "missing from upsert result",
+		},
+		{
+			name: "zero token id fails entity validation",
+			mutate: func(r *mockRepo) {
+				r.tokenRepo.GetOrCreateTokensFn = func(_ context.Context, _ pgx.Tx, tokens []outbound.TokenInput) (map[common.Address]int64, error) {
+					ids := make(map[common.Address]int64, len(tokens))
+					for _, tok := range tokens {
+						ids[tok.Address] = 0
+					}
+					return ids, nil
+				}
+			},
+			wantErr: "must be positive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := newMockRepo()
+			tt.mutate(repo)
+			service := newTestService(t, ftlHappyClient(), repo)
+
+			err := service.Sync(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q should contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSync_FixedTermLoanInputValidationFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(loans []outbound.MapleFixedTermLoan)
+		wantErr string
+	}{
+		{
+			name:    "duplicate loan id",
+			mutate:  func(loans []outbound.MapleFixedTermLoan) { loans[1].LoanID = loans[0].LoanID },
+			wantErr: "duplicate",
+		},
+		{
+			name:    "empty asset symbol",
+			mutate:  func(loans []outbound.MapleFixedTermLoan) { loans[0].Collateral.Symbol = "" },
+			wantErr: "symbol must not be empty",
+		},
+		{
+			name:    "decimals overflow",
+			mutate:  func(loans []outbound.MapleFixedTermLoan) { loans[0].Collateral.Decimals = 65542 },
+			wantErr: "out of int16 range",
+		},
+		{
+			name: "conflicting asset metadata",
+			mutate: func(loans []outbound.MapleFixedTermLoan) {
+				// Same address as loan0's funds (USDC) but a different symbol.
+				loans[1].Funds = outbound.MapleAssetToken{Address: addr(0xf0), Symbol: "USDT", Decimals: 6}
+			},
+			wantErr: "conflicting metadata",
+		},
+		{
+			name:    "invalid loan state value",
+			mutate:  func(loans []outbound.MapleFixedTermLoan) { loans[0].PrincipalOwed = nil },
+			wantErr: "principalOwed must not be nil",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := ftlHappyClient()
+			client.GetActiveFixedTermLoansFn = func(context.Context) ([]outbound.MapleFixedTermLoan, error) {
+				loans := fixtureFTLLoans()
+				tt.mutate(loans)
+				return loans, nil
+			}
+			repo := newMockRepo()
+			service := newTestService(t, client, repo)
+
+			err := service.Sync(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q should contain %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
