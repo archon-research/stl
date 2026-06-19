@@ -3,6 +3,7 @@ package orderbook
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -58,25 +59,25 @@ func newMetrics(mp metric.MeterProvider, exchange string) (*metrics, error) {
 		"orderbook.updates.emitted.total",
 		metric.WithDescription("Total orderbook updates delivered to the consumer"),
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating emitted counter: %w", err)
 	}
 	if m.droppedTotal, err = meter.Int64Counter(
 		"orderbook.updates.dropped.total",
 		metric.WithDescription("Total orderbook updates dropped because the output buffer was full"),
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating dropped counter: %w", err)
 	}
 	if m.reconnectsTotal, err = meter.Int64Counter(
 		"orderbook.reconnections.total",
 		metric.WithDescription("Total orderbook WebSocket connection drops, by reason"),
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating reconnections counter: %w", err)
 	}
 	if m.connectionState, err = meter.Int64UpDownCounter(
 		"orderbook.connection.state",
 		metric.WithDescription("Number of currently open orderbook WebSocket connections"),
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating connection-state counter: %w", err)
 	}
 	if m.resyncDuration, err = meter.Float64Histogram(
 		"orderbook.resync.duration",
@@ -84,7 +85,7 @@ func newMetrics(mp metric.MeterProvider, exchange string) (*metrics, error) {
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating resync-duration histogram: %w", err)
 	}
 
 	lastUpdateAge, err := meter.Float64ObservableGauge(
@@ -93,7 +94,7 @@ func newMetrics(mp metric.MeterProvider, exchange string) (*metrics, error) {
 		metric.WithUnit("s"),
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("creating last-update-age gauge: %w", err)
 	}
 	if _, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		m.mu.Lock()
@@ -104,7 +105,7 @@ func newMetrics(mp metric.MeterProvider, exchange string) (*metrics, error) {
 		}
 		return nil
 	}, lastUpdateAge); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("registering last-update-age callback: %w", err)
 	}
 	return m, nil
 }
