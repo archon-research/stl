@@ -523,6 +523,7 @@ function App() {
     debtBuckets,
     activityBuckets,
     totalCapitalBuckets,
+    exposureBuckets,
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
@@ -697,9 +698,7 @@ function App() {
     [debtBuckets],
   );
 
-  // Risk capital has no on-chain time series (it is Star's exposure model
-  // output), so its card shows the current value as a flat line via the
-  // fallback below. Total capital is the on-chain SubProxy treasury balance.
+  // Total capital is the on-chain SubProxy treasury balance over time.
   const totalCapitalSeries = useMemo<ChartDatum[]>(
     () =>
       totalCapitalBuckets
@@ -709,6 +708,19 @@ function App() {
         }))
         .filter((point) => Number.isFinite(point.value)),
     [totalCapitalBuckets],
+  );
+
+  // Priced receipt-token exposure over time; drives the Exposure card trend
+  // (falls back to the flat current value below when no history is available).
+  const exposureSeries = useMemo<ChartDatum[]>(
+    () =>
+      exposureBuckets
+        .map((bucket) => ({
+          label: formatChartTimestampLabel(bucket.bucket_start),
+          value: parseNumericValue(bucket.exposure_usd) ?? Number.NaN,
+        }))
+        .filter((point) => Number.isFinite(point.value)),
+    [exposureBuckets],
   );
 
   const chartFromLabel = timeRange.from_timestamp
@@ -767,11 +779,10 @@ function App() {
         formatValue: formatCompactUsd,
       },
       {
-        // Risk capital has no on-chain history; always show its current value
-        // as a flat line.
+        // Exposure trend from priced receipt-token balances over time; falls
+        // back to the flat current value when no history is available.
         key: 'risk-capital',
-        data: fallbackChart(exposureValue),
-        kind: 'fallback',
+        ...seriesOrFallback(exposureSeries, exposureValue),
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
         formatValue: formatCompactUsd,
       },
@@ -795,6 +806,7 @@ function App() {
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
+    exposureSeries,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,

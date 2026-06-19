@@ -78,6 +78,10 @@ export type TotalCapitalEnvelope =
 export type TotalCapitalBucket =
   components['schemas']['TotalCapitalBucketResponse'];
 
+export type ExposureEnvelope = components['schemas']['ExposureEnvelope'];
+
+export type ExposureBucket = components['schemas']['ExposureBucketResponse'];
+
 export type TokensResponse = NonNullable<
   paths['/v1/tokens']['get']['responses']['200']['content']['application/json']
 >;
