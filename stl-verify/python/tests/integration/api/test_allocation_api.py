@@ -65,8 +65,10 @@ _FLOW_TX_SWEEP = "1c" * 32
 _FLOW_BUCKET_TS = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
 
 # Direct-asset flow fixture: a prime that holds raw USDC (no receipt-token
-# wrapper). USDC is priced at 1 USD, so net_flow_usd must value the direct flow
-# via the token's own oracle price rather than dropping it to 0.
+# wrapper). Its flow must NOT contribute to net_flow_usd: direct underlying
+# tokens record outflows mostly as sweeps (excluded) while inflows are 'in', so
+# valuing them overstates net flow as gross inflow throughput. Only receipt-token
+# flows drive the reconstructed balance series.
 _DIRECT_FLOW_PRIME_VAULT_HEX = "f2" * 20
 _DIRECT_FLOW_PROXY_HEX = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
 _DIRECT_FLOW_TX_IN = "2a" * 32
@@ -242,10 +244,9 @@ async def _seed(db_url: str) -> None:
                 )
 
             # Direct-asset flow fixture: a prime holding raw USDC (no receipt
-            # token). +250 in, −50 out in one bucket, valued at USDC = 1 USD, so
-            # net_flow_usd == 200 — exercising the direct-token price fallback
-            # for flows whose token has no receipt-token wrapper (these were
-            # silently valued at 0 before).
+            # token). +250 in, -50 out in one bucket. USDC has no receipt-token
+            # wrapper, so the flow is excluded from net_flow_usd (== 0) even
+            # though the events are still counted.
             direct_flow_prime_id = await conn.fetchval(
                 "INSERT INTO prime (name, vault_address) VALUES ('direct_flow_test', $1) RETURNING id",
                 bytes.fromhex(_DIRECT_FLOW_PRIME_VAULT_HEX),
@@ -539,9 +540,12 @@ def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestCli
     assert Decimal(str(bucket["total_tx_amount"])) == Decimal("1140")
 
 
-def test_activity_buckets_value_direct_asset_flows(client: TestClient) -> None:
-    """A flow whose token is held directly (no receipt-token wrapper) is valued
-    by the token's own oracle price, not silently dropped to 0."""
+def test_activity_buckets_exclude_direct_asset_flows(client: TestClient) -> None:
+    """A flow whose token is held directly (no receipt-token wrapper) contributes
+    0 to net_flow_usd. Direct underlying tokens record outflows mostly as sweeps
+    (excluded) while inflows are 'in', so pricing them overstates net flow as
+    gross inflow throughput and makes the reconstructed balance ramp from zero;
+    only receipt-token flows drive the series. The events are still counted."""
     response = client.get(
         "/v1/allocations/activity",
         params={
@@ -558,9 +562,10 @@ def test_activity_buckets_value_direct_asset_flows(client: TestClient) -> None:
     assert envelope["mode"] == "aggregated"
     buckets = envelope["data"]
     assert len(buckets) == 1
-    # +250 (in) − 50 (out), valued at USDC = 1 USD. The old query dropped this to
-    # 0 because USDC has no receipt-token wrapper.
-    assert Decimal(str(buckets[0]["net_flow_usd"])) == Decimal("200")
+    # +250 (in) / -50 (out) on USDC, which is held directly (no receipt-token
+    # wrapper): not valued, so net_flow_usd is 0 though both events are counted.
+    assert buckets[0]["event_count"] == 2
+    assert Decimal(str(buckets[0]["net_flow_usd"])) == Decimal("0")
 
 
 # ---------------------------------------------------------------------------

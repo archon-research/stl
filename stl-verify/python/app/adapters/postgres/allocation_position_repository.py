@@ -861,12 +861,19 @@ LIMIT :limit
 # ``direction`` (tx_amount is a magnitude): inflows add, outflows subtract, and
 # sweeps are internal position moves that net to zero and are excluded. It lets
 # the UI reconstruct a total-allocation balance series by anchoring at the
-# current total and cumulating net flows backwards — so the valuation basis must
-# match the anchor, which sums BOTH receipt-token positions and direct holdings.
-# Each flow is therefore priced by its receipt token's underlying oracle price
-# when wrapped, falling back to the token's own latest oracle price when held
-# directly (no receipt token). Flows whose token has no oracle price at all
-# (e.g. LP/curve shares) still contribute 0.
+# current total and cumulating net flows backwards.
+#
+# Only RECEIPT-TOKEN flows are valued. Directly-held underlying tokens (treasury
+# USDS/USDC/DAI/...) are excluded on purpose: their outflows are recorded mostly
+# as ``sweep`` (excluded above) while their inflows are ``in``, so pricing them
+# yields gross inflow throughput with the offsetting legs dropped — net-positive
+# every bucket and orders of magnitude larger than the true balance change. That
+# made the reconstructed curve ramp up from zero instead of tracking the roughly
+# flat real balance. The anchor still sums BOTH receipt and direct holdings, so
+# the series sits at the full current total and moves only with receipt-token
+# flows; direct-holding moves are not reflected until their in/out/sweep
+# classification is trustworthy. Flows with no receipt-token oracle price
+# contribute 0.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH receipt_token_price AS (
     -- Latest underlying oracle price per receipt token, computed ONCE per token
@@ -885,35 +892,6 @@ WITH receipt_token_price AS (
             LIMIT 1
         ) AS price_usd
     FROM receipt_token rt
-),
-direct_token_price AS (
-    -- Latest oracle price per token actually involved in these flows, used to
-    -- value direct-asset flows (no receipt-token wrapper). Bounded to the flow
-    -- token set and computed ONCE per token, mirroring receipt_token_price.
-    -- No protocol context here (the token is held bare), so the latest price
-    -- across any oracle is used, with oracle_id breaking ties deterministically.
-    -- The token set mirrors the outer query's prime/chain/time-window filters so
-    -- an all-primes ("no prime_hex") query does not scan every token ever held.
-    SELECT
-        ft.token_id,
-        (
-            SELECT otp.price_usd
-            FROM onchain_token_price otp
-            WHERE otp.token_id = ft.token_id
-            ORDER BY otp.block_number DESC, otp.block_version DESC,
-                     otp.processing_version DESC, otp.oracle_id DESC
-            LIMIT 1
-        ) AS price_usd
-    FROM (
-        SELECT DISTINCT ap.token_id
-        FROM allocation_position ap
-        WHERE (CAST(:prime_hex AS TEXT) IS NULL
-               OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
-          AND (CAST(:chain_id AS INTEGER) IS NULL OR ap.chain_id = CAST(:chain_id AS INTEGER))
-          AND ap.token_id IS NOT NULL
-          AND ap.created_at IS NOT NULL
-          {required_time_window_clause("ap.created_at")}
-    ) AS ft
 )
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
@@ -924,7 +902,7 @@ SELECT
             WHEN 'in' THEN ap.tx_amount
             WHEN 'out' THEN -ap.tx_amount
             ELSE 0
-        END * COALESCE(price.price_usd, direct_price.price_usd, 0)
+        END * COALESCE(price.price_usd, 0)
     ), 0) AS net_flow_usd
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
@@ -949,8 +927,6 @@ LEFT JOIN LATERAL (
 LEFT JOIN receipt_token_price price
     ON price.receipt_token_address = t.address
     AND price.chain_id = ap.chain_id
-LEFT JOIN direct_token_price direct_price
-    ON direct_price.token_id = ap.token_id
 WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
