@@ -16,7 +16,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -104,17 +103,34 @@ func mapleProtocolID(t *testing.T, ctx context.Context, repo *MapleGraphQLReposi
 }
 
 // upsertTestAssetToken resolves a token id for a pool asset, creating the
-// token row if needed.
-func upsertTestAssetToken(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, tx pgx.Tx, addrByte byte, symbol string) int64 {
+// token row if needed. Pool asset tokens carry no block context, so the row
+// is inserted with a NULL created_at_block (matching the maple service path).
+func upsertTestAssetToken(t *testing.T, ctx context.Context, tx pgx.Tx, addrByte byte, symbol string) int64 {
 	t.Helper()
-	asset := outbound.MapleAssetToken{Address: common.BytesToAddress(mapleAddr(addrByte)), Symbol: symbol, Decimals: 6}
-	ids, err := repo.GetOrCreateAssetTokens(ctx, tx, 1, []outbound.MapleAssetToken{asset})
-	if err != nil {
-		t.Fatalf("GetOrCreateAssetTokens: %v", err)
+	var id int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, $1, $2, 6, '{}'::jsonb, NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`,
+		mapleAddr(addrByte), symbol).Scan(&id); err != nil {
+		t.Fatalf("seeding asset token: %v", err)
 	}
-	id, ok := ids[asset.Address]
-	if !ok {
-		t.Fatalf("asset token id missing from map: %v", ids)
+	return id
+}
+
+// upsertTestBorrowerUser resolves a user id for a borrower, creating the row
+// (with a NULL first_seen_block) if needed.
+func upsertTestBorrowerUser(t *testing.T, ctx context.Context, tx pgx.Tx, addrByte byte) int64 {
+	t.Helper()
+	var id int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO "user" (chain_id, address, created_at, updated_at, metadata)
+		 VALUES (1, $1, NOW(), NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = "user".id
+		 RETURNING id`,
+		mapleAddr(addrByte)).Scan(&id); err != nil {
+		t.Fatalf("seeding borrower user: %v", err)
 	}
 	return id
 }
@@ -126,7 +142,7 @@ func upsertTestPool(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 	var ids map[common.Address]int64
 	var poolAddr common.Address
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		assetTokenID := upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		assetTokenID := upsertTestAssetToken(t, ctx, tx, 0xee, "USDC")
 		pool, err := maple.NewPool(1, protocolID, mapleAddr(addrByte), "Test Pool", assetTokenID, true)
 		if err != nil {
 			t.Fatalf("NewPool: %v", err)
@@ -148,11 +164,8 @@ func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 
 	var loanID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{common.BytesToAddress(mapleAddr(0xab))})
-		if err != nil {
-			return err
-		}
-		loan, err := maple.NewLoan(1, protocolID, mapleAddr(addrByte), poolID, users[common.BytesToAddress(mapleAddr(0xab))], meta)
+		borrowerID := upsertTestBorrowerUser(t, ctx, tx, 0xab)
+		loan, err := maple.NewLoan(1, protocolID, mapleAddr(addrByte), poolID, borrowerID, meta)
 		if err != nil {
 			return err
 		}
@@ -186,193 +199,6 @@ func TestMapleGetMapleProtocolID(t *testing.T) {
 	}
 }
 
-func TestMapleGetOrCreateBorrowerUsers(t *testing.T) {
-	ctx := context.Background()
-	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
-
-	borrowerA := common.BytesToAddress(mapleAddr(0x01))
-	borrowerB := common.BytesToAddress(mapleAddr(0x02))
-
-	var first map[common.Address]int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
-		// Duplicate input must be deduplicated.
-		first, err = repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{borrowerA, borrowerB, borrowerA})
-		return err
-	})
-	if len(first) != 2 {
-		t.Fatalf("len(first) = %d, want 2", len(first))
-	}
-
-	// New borrower users must have NULL first_seen_block.
-	var fsb *int64
-	if err := maplePool.QueryRow(ctx,
-		`SELECT first_seen_block FROM "user" WHERE chain_id = 1 AND address = $1`,
-		borrowerA.Bytes()).Scan(&fsb); err != nil {
-		t.Fatalf("querying user: %v", err)
-	}
-	if fsb != nil {
-		t.Errorf("first_seen_block = %v, want NULL", *fsb)
-	}
-
-	// Re-upserting returns the same ids.
-	var second map[common.Address]int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
-		second, err = repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{borrowerA, borrowerB})
-		return err
-	})
-	if second[borrowerA] != first[borrowerA] || second[borrowerB] != first[borrowerB] {
-		t.Errorf("ids changed across upserts: %v vs %v", first, second)
-	}
-
-	// An existing user created by an on-chain indexer keeps its
-	// first_seen_block (the shared GetOrCreateUser LEAST() merge would have
-	// clobbered it to 0).
-	existing := common.BytesToAddress(mapleAddr(0x03))
-	var existingID int64
-	if err := maplePool.QueryRow(ctx,
-		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
-		 VALUES (1, $1, 12345, NOW(), NOW(), '{}'::jsonb) RETURNING id`,
-		existing.Bytes()).Scan(&existingID); err != nil {
-		t.Fatalf("seeding existing user: %v", err)
-	}
-
-	var third map[common.Address]int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
-		third, err = repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{existing})
-		return err
-	})
-	if third[existing] != existingID {
-		t.Errorf("existing user id = %d, want %d", third[existing], existingID)
-	}
-	var preserved int64
-	if err := maplePool.QueryRow(ctx,
-		`SELECT first_seen_block FROM "user" WHERE id = $1`, existingID).Scan(&preserved); err != nil {
-		t.Fatalf("querying preserved user: %v", err)
-	}
-	if preserved != 12345 {
-		t.Errorf("first_seen_block = %d, want 12345 (must not be clobbered)", preserved)
-	}
-}
-
-func TestMapleGetOrCreateAssetTokens(t *testing.T) {
-	ctx := context.Background()
-	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
-
-	usdc := outbound.MapleAssetToken{Address: common.BytesToAddress(mapleAddr(0xe1)), Symbol: "USDC", Decimals: 6}
-	usdt := outbound.MapleAssetToken{Address: common.BytesToAddress(mapleAddr(0xe2)), Symbol: "USDT", Decimals: 6}
-
-	var first map[common.Address]int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
-		// Duplicate input must be deduplicated.
-		first, err = repo.GetOrCreateAssetTokens(ctx, tx, 1, []outbound.MapleAssetToken{usdc, usdt, usdc})
-		return err
-	})
-	if len(first) != 2 {
-		t.Fatalf("len(first) = %d, want 2", len(first))
-	}
-
-	// New asset tokens must have NULL created_at_block and the API metadata.
-	var cab *int64
-	var symbol string
-	var decimals int16
-	if err := maplePool.QueryRow(ctx,
-		`SELECT created_at_block, symbol, decimals FROM token WHERE chain_id = 1 AND address = $1`,
-		usdc.Address.Bytes()).Scan(&cab, &symbol, &decimals); err != nil {
-		t.Fatalf("querying token: %v", err)
-	}
-	if cab != nil {
-		t.Errorf("created_at_block = %v, want NULL", *cab)
-	}
-	if symbol != "USDC" || decimals != 6 {
-		t.Errorf("symbol/decimals = %s/%d, want USDC/6", symbol, decimals)
-	}
-
-	// Re-upserting returns the same ids.
-	var second map[common.Address]int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
-		second, err = repo.GetOrCreateAssetTokens(ctx, tx, 1, []outbound.MapleAssetToken{usdc, usdt})
-		return err
-	})
-	if second[usdc.Address] != first[usdc.Address] || second[usdt.Address] != first[usdt.Address] {
-		t.Errorf("ids changed across upserts: %v vs %v", first, second)
-	}
-
-	// An existing token created by a migration or on-chain indexer keeps its
-	// created_at_block, symbol, and decimals (the shared GetOrCreateTokens
-	// LEAST() merge would have clobbered created_at_block to 0). A differing
-	// API symbol only warns (the registry may hold a canonical symbol), so the
-	// upsert still succeeds and the stored symbol wins.
-	existing := common.BytesToAddress(mapleAddr(0xe3))
-	var existingID int64
-	if err := maplePool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals, created_at_block, metadata, updated_at)
-		 VALUES (1, $1, 'WETH', 18, 12345, '{}'::jsonb, NOW()) RETURNING id`,
-		existing.Bytes()).Scan(&existingID); err != nil {
-		t.Fatalf("seeding existing token: %v", err)
-	}
-
-	var third map[common.Address]int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		var err error
-		third, err = repo.GetOrCreateAssetTokens(ctx, tx, 1,
-			[]outbound.MapleAssetToken{{Address: existing, Symbol: "DIFFERENT", Decimals: 18}})
-		return err
-	})
-	if third[existing] != existingID {
-		t.Errorf("existing token id = %d, want %d", third[existing], existingID)
-	}
-	var preservedCAB int64
-	var preservedSymbol string
-	var preservedDecimals int16
-	if err := maplePool.QueryRow(ctx,
-		`SELECT created_at_block, symbol, decimals FROM token WHERE id = $1`,
-		existingID).Scan(&preservedCAB, &preservedSymbol, &preservedDecimals); err != nil {
-		t.Fatalf("querying preserved token: %v", err)
-	}
-	if preservedCAB != 12345 || preservedSymbol != "WETH" || preservedDecimals != 18 {
-		t.Errorf("token = %d/%s/%d, want 12345/WETH/18 (must not be clobbered)",
-			preservedCAB, preservedSymbol, preservedDecimals)
-	}
-}
-
-func TestMapleGetOrCreateAssetTokens_DecimalsDriftFails(t *testing.T) {
-	// Decimals are immutable and safety-critical (they scale every USD
-	// computation), so a stored value differing from the API's must fail the
-	// call instead of returning an id keyed to stale scaling.
-	ctx := context.Background()
-	truncateMaple(t, ctx)
-	repo := newMapleRepo(t, 0)
-
-	existing := common.BytesToAddress(mapleAddr(0xe4))
-	if _, err := maplePool.Exec(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
-		 VALUES (1, $1, 'USDC', 6, '{}'::jsonb, NOW())`,
-		existing.Bytes()); err != nil {
-		t.Fatalf("seeding existing token: %v", err)
-	}
-
-	tx, err := maplePool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	_, driftErr := repo.GetOrCreateAssetTokens(ctx, tx, 1,
-		[]outbound.MapleAssetToken{{Address: existing, Symbol: "USDC", Decimals: 18}})
-	if driftErr == nil {
-		t.Fatal("expected decimals-drift error, got nil")
-	}
-	if !strings.Contains(driftErr.Error(), "decimals changed") {
-		t.Errorf("error %q should report the decimals drift", driftErr.Error())
-	}
-}
-
 func TestMapleUpsertPools_RoundTripAndNoOp(t *testing.T) {
 	ctx := context.Background()
 	truncateMaple(t, ctx)
@@ -382,7 +208,7 @@ func TestMapleUpsertPools_RoundTripAndNoOp(t *testing.T) {
 	var ids map[common.Address]int64
 	var poolA *maple.Pool
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		usdcTokenID := upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		usdcTokenID := upsertTestAssetToken(t, ctx, tx, 0xee, "USDC")
 
 		var err error
 		poolA, err = maple.NewPool(1, protocolID, mapleAddr(0x10), "Pool A", usdcTokenID, false)
@@ -434,8 +260,8 @@ func TestMapleUpsertPools_RejectsFieldChange(t *testing.T) {
 
 	var usdcID, usdtID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		usdcID = upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
-		usdtID = upsertTestAssetToken(t, ctx, repo, tx, 0xef, "USDT")
+		usdcID = upsertTestAssetToken(t, ctx, tx, 0xee, "USDC")
+		usdtID = upsertTestAssetToken(t, ctx, tx, 0xef, "USDT")
 		return nil
 	})
 
@@ -899,11 +725,7 @@ func TestMapleUpsertLoans_RejectsFieldChange(t *testing.T) {
 
 	var borrowerID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{common.BytesToAddress(mapleAddr(0xab))})
-		if err != nil {
-			return err
-		}
-		borrowerID = users[common.BytesToAddress(mapleAddr(0xab))]
+		borrowerID = upsertTestBorrowerUser(t, ctx, tx, 0xab)
 		return nil
 	})
 
@@ -972,11 +794,7 @@ func TestMapleUpsertLoans_RejectsMetaClear(t *testing.T) {
 
 	var borrowerID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{common.BytesToAddress(mapleAddr(0xab))})
-		if err != nil {
-			return err
-		}
-		borrowerID = users[common.BytesToAddress(mapleAddr(0xab))]
+		borrowerID = upsertTestBorrowerUser(t, ctx, tx, 0xab)
 		return nil
 	})
 
@@ -1021,7 +839,7 @@ func TestMapleUpsertPools_RejectsNullStoredName(t *testing.T) {
 
 	var assetID int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		assetID = upsertTestAssetToken(t, ctx, repo, tx, 0xee, "USDC")
+		assetID = upsertTestAssetToken(t, ctx, tx, 0xee, "USDC")
 		return nil
 	})
 	if _, err := maplePool.Exec(ctx,
@@ -1129,12 +947,8 @@ func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
 
-		borrower := common.BytesToAddress(mapleAddr(borrowerByte))
-		users, err := repo.GetOrCreateBorrowerUsers(ctx, tx, 1, []common.Address{borrower})
-		if err != nil {
-			t.Fatalf("GetOrCreateBorrowerUsers: %v", err)
-		}
-		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, users[borrower], nil)
+		borrowerID := upsertTestBorrowerUser(t, ctx, tx, borrowerByte)
+		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, borrowerID, nil)
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}

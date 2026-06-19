@@ -5,8 +5,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,6 +33,24 @@ type DBConfig struct {
 	// MaxConnIdleTime is the maximum amount of time a connection may be idle.
 	// Default: 1 minute
 	MaxConnIdleTime time.Duration
+
+	// LockTimeout, if > 0, is applied as `SET lock_timeout` on every pooled
+	// connection. It bounds how long a statement waits to ACQUIRE a lock before
+	// failing, so a lock convoy (e.g. an idle-in-transaction holder blocking a
+	// TimescaleDB compression policy) surfaces as a fast, retryable error
+	// instead of an indefinite hang.
+	//
+	// Unset by DefaultDBConfig and set by WorkerDBConfig (10s): only the
+	// latency-bounded SQS consumers opt in. Backfillers/validators/crons that
+	// share DefaultDBConfig may legitimately wait on a lock, so they are left
+	// uncapped.
+	LockTimeout time.Duration
+
+	// StatementTimeout, if > 0, is applied as `SET statement_timeout` on every
+	// pooled connection. Unset by default: backfillers and validators sharing
+	// this pool builder run legitimately long statements. Set it only on
+	// latency-bounded services that should never run a long single statement.
+	StatementTimeout time.Duration
 }
 
 // LogValue implements slog.LogValuer to redact the URL (which contains credentials).
@@ -55,16 +75,68 @@ func DefaultDBConfig(url string) DBConfig {
 	}
 }
 
-// OpenPool creates and configures a PostgreSQL connection pool using pgxpool.
-// It verifies connectivity by pinging the database before returning.
-// The caller is responsible for closing the returned *pgxpool.Pool.
-func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
+// WorkerDBConfig is the pool config for latency-bounded SQS consumers (the block
+// indexers). It is DefaultDBConfig plus a lock_timeout, so a lock convoy surfaces
+// as a fast, retryable error instead of an indefinite hang. Backfillers,
+// validators, and crons keep DefaultDBConfig (no lock_timeout) so their
+// legitimately long lock waits are not aborted.
+func WorkerDBConfig(url string) DBConfig {
+	cfg := DefaultDBConfig(url)
+	cfg.LockTimeout = 10 * time.Second
+	return cfg
+}
+
+// timeoutGUCs returns the Postgres timeout GUCs to apply on every pooled
+// connection, keyed by GUC name with integer-millisecond values, or nil when no
+// per-connection timeouts are configured.
+//
+// These are applied with a post-connect SET (see afterConnect), NOT sent as
+// startup parameters: the indexers connect through a pgbouncer-style pooler,
+// which rejects unknown startup parameters ("FATAL: unsupported startup
+// parameter: lock_timeout") and crashlooped every indexer on 2026-06-19.
+func (c DBConfig) timeoutGUCs() map[string]string {
+	gucs := map[string]string{}
+	if c.LockTimeout > 0 {
+		gucs["lock_timeout"] = strconv.FormatInt(c.LockTimeout.Milliseconds(), 10)
+	}
+	if c.StatementTimeout > 0 {
+		gucs["statement_timeout"] = strconv.FormatInt(c.StatementTimeout.Milliseconds(), 10)
+	}
+	if len(gucs) == 0 {
+		return nil
+	}
+	return gucs
+}
+
+// afterConnect returns a pgxpool AfterConnect hook that applies the configured
+// timeout GUCs with SET on each new pooled connection, or nil when none are
+// configured. SET runs as a regular query rather than a startup parameter, so
+// it survives a connection pooler (which rejects unknown startup parameters).
+func (c DBConfig) afterConnect() func(context.Context, *pgx.Conn) error {
+	gucs := c.timeoutGUCs()
+	if len(gucs) == 0 {
+		return nil
+	}
+	return func(ctx context.Context, conn *pgx.Conn) error {
+		for name, ms := range gucs {
+			// name is a fixed GUC identifier from timeoutGUCs (not user input)
+			// and ms is an integer string; SET takes no bind parameters.
+			if _, err := conn.Exec(ctx, fmt.Sprintf("SET %s = %s", name, ms)); err != nil {
+				return fmt.Errorf("setting %s: %w", name, err)
+			}
+		}
+		return nil
+	}
+}
+
+// buildPoolConfig parses cfg.URL and applies the pool settings and
+// per-connection timeouts, without opening any connection.
+func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse database URL: %w", err)
 	}
 
-	// Apply connection pool settings
 	if cfg.MaxConns > 0 {
 		poolConfig.MaxConns = cfg.MaxConns
 	}
@@ -76,6 +148,22 @@ func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 	}
 	if cfg.MaxConnIdleTime > 0 {
 		poolConfig.MaxConnIdleTime = cfg.MaxConnIdleTime
+	}
+
+	if ac := cfg.afterConnect(); ac != nil {
+		poolConfig.AfterConnect = ac
+	}
+
+	return poolConfig, nil
+}
+
+// OpenPool creates and configures a PostgreSQL connection pool using pgxpool.
+// It verifies connectivity by pinging the database before returning.
+// The caller is responsible for closing the returned *pgxpool.Pool.
+func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
+	poolConfig, err := buildPoolConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("building pool config: %w", err)
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)

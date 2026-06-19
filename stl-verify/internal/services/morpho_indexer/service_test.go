@@ -2989,7 +2989,7 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 		}
 	}
 
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ *int64) (int64, error) {
 		return 0, errors.New("token creation failed")
 	}
 
@@ -3027,7 +3027,7 @@ func TestProcessBlockEvent_CreateMarket_LoanTokenError(t *testing.T) {
 		}
 	}
 
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, _ string, _ int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, _ string, _ int, _ *int64) (int64, error) {
 		if addr == testLoanToken {
 			return 0, errors.New("loan token creation error")
 		}
@@ -3143,7 +3143,7 @@ func TestProcessBlockEvent_EnsureMarket_IdleMarket(t *testing.T) {
 	tokenAddrs := []common.Address{}
 	tokenSymbols := []string{}
 	tokenDecimals := []int{}
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, dec int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, dec int, _ *int64) (int64, error) {
 		tokenAddrs = append(tokenAddrs, addr)
 		tokenSymbols = append(tokenSymbols, sym)
 		tokenDecimals = append(tokenDecimals, dec)
@@ -3379,7 +3379,7 @@ func TestCreateMarket_SymbolRevert_StoresEmptySymbol(t *testing.T) {
 		symbol  string
 	}
 	var tokenCalls []tokenCall
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ *int64) (int64, error) {
 		tokenCalls = append(tokenCalls, tokenCall{addr, sym})
 		return int64(len(tokenCalls)), nil
 	}
@@ -3662,7 +3662,7 @@ func TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol(t *testing.T) {
 		symbol  string
 	}
 	var tokenCalls []tokenCall
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ *int64) (int64, error) {
 		tokenCalls = append(tokenCalls, tokenCall{addr, sym})
 		return int64(len(tokenCalls)), nil
 	}
