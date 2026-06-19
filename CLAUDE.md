@@ -152,11 +152,8 @@ Quality is enforced at three levels:
 - Hooks: oxlint, oxfmt
 - CI: `npm run lint`, `npm run format:check`, `npm run build`
 - Tools: `npm ci` (includes oxlint, oxfmt, etc.)
-- Regenerating `src/generated/openapi-types.ts` (`npm run generate:openapi-types`)
-  emits double-quoted, differently-wrapped output; run `npm run format` right
-  after or the diff is thousands of pure-style lines instead of the real schema
-  change. `npm run type:check`/`build` also need `npm run prepare` (panda
-  codegen) first on a fresh `npm ci`, else `#styled-system/*` imports fail.
+- `npm run type:check`/`build` need `npm run prepare` (panda codegen) first on a
+  fresh `npm ci`, else `#styled-system/*` imports fail.
 
 #### Running Manually
 
