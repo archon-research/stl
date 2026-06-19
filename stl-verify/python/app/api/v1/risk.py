@@ -65,7 +65,9 @@ class RiskBreakdownItemResponse(BaseModel):
 
     token_id: int | None = Field(
         default=None,
-        description="Surrogate token id of the backing token. Null for symbol-keyed collateral (e.g. Maple custody assets).",
+        description=(
+            "Surrogate token id of the backing token. Null for symbol-keyed collateral (e.g. Maple custody assets)."
+        ),
         examples=[101],
     )
     symbol: str = Field(description="Backing-token symbol.", examples=["WETH"])

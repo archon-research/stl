@@ -19,6 +19,11 @@ def bad_debt_at_gap(item: RiskEnrichedCollateral, gap_pct: Decimal) -> Decimal:
 
     Returns ≤ 0. Zero = fully covered; negative = bad debt in USD.
     """
+    if item.liquidation_threshold is None or item.liquidation_bonus is None:
+        # Symbol-keyed collateral without per-asset liquidation params (e.g. Maple
+        # custody assets) is not modellable by gap-sweep, so it contributes no
+        # modelled bad debt rather than raising on float(None).
+        return Decimal("0")
     bonus = float(item.liquidation_bonus)
     liquidation_penalty = 1 - 1 / bonus
     lgd = loss_given_default(
