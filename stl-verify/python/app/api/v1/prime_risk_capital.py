@@ -91,33 +91,32 @@ async def get_prime_risk_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    if not settings.risk_capital_endpoint_enabled:
-        # Disabled by default: the per-allocation RRC fan-out bulk-decompresses
-        # the allocation_position columnstore and OOMs the DB backend (500s).
-        # Return an empty/zero envelope so the UI renders empty metrics instead
-        # of erroring. Flip RISK_CAPITAL_ENDPOINT_ENABLED=true to re-enable once
-        # the query is made cheap.
+    if settings.risk_capital_endpoint_enabled:
+        result = await service.compute(prime_address)
         return PrimeRiskCapitalResponse(
-            prime_id=str(prime_address),
-            model=DEFAULT_RISK_MODEL,
-            exposure_usd=Decimal("0"),
-            total_risk_capital_usd=None,
-            required_risk_capital_usd=Decimal("0"),
-            encumbrance_ratio=None,
-            modeled_exposure_usd=Decimal("0"),
-            modeled_pct=None,
-            per_allocation=[],
+            prime_id=result.prime_id,
+            model=result.model,
+            exposure_usd=result.exposure_usd,
+            total_risk_capital_usd=result.total_risk_capital_usd,
+            required_risk_capital_usd=result.required_risk_capital_usd,
+            encumbrance_ratio=result.encumbrance_ratio,
+            modeled_exposure_usd=result.modeled_exposure_usd,
+            modeled_pct=result.modeled_pct,
+            per_allocation=[AllocationRiskCapitalResponse(**alloc.__dict__) for alloc in result.per_allocation],
         )
 
-    result = await service.compute(prime_address)
+    # Disabled by default: the per-allocation RRC fan-out bulk-decompresses the
+    # allocation_position columnstore and OOMs the DB backend (500s). Return an
+    # empty/zero envelope so the UI renders empty metrics instead of erroring.
+    # Flip RISK_CAPITAL_ENDPOINT_ENABLED=true to re-enable once the query is cheap.
     return PrimeRiskCapitalResponse(
-        prime_id=result.prime_id,
-        model=result.model,
-        exposure_usd=result.exposure_usd,
-        total_risk_capital_usd=result.total_risk_capital_usd,
-        required_risk_capital_usd=result.required_risk_capital_usd,
-        encumbrance_ratio=result.encumbrance_ratio,
-        modeled_exposure_usd=result.modeled_exposure_usd,
-        modeled_pct=result.modeled_pct,
-        per_allocation=[AllocationRiskCapitalResponse(**alloc.__dict__) for alloc in result.per_allocation],
+        prime_id=str(prime_address),
+        model=DEFAULT_RISK_MODEL,
+        exposure_usd=Decimal("0"),
+        total_risk_capital_usd=None,
+        required_risk_capital_usd=Decimal("0"),
+        encumbrance_ratio=None,
+        modeled_exposure_usd=Decimal("0"),
+        modeled_pct=None,
+        per_allocation=[],
     )

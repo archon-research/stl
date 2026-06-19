@@ -648,31 +648,32 @@ async def list_allocation_activity(
 
     try:
         if time_series.aggregate:
-            if not settings.allocation_activity_aggregation_enabled:
-                # Disabled by default: bucket aggregation bulk-decompresses the
-                # allocation_position columnstore over the whole window and OOMs
-                # the DB backend (500s). Return an empty aggregated payload so the
-                # UI renders an empty chart instead of erroring. Flip
-                # ALLOCATION_ACTIVITY_AGGREGATION_ENABLED=true to re-enable once
-                # the query is made cheap (continuous aggregate).
-                return AllocationActivityEnvelope(mode="aggregated", window=window, data=[])
-            buckets = await service.list_activity_buckets(
-                prime_id=parsed_prime_id,
-                chain_id=chain_id,
-                protocol_name=protocol_name,
-                action_type=action_type,
-                token_symbol=token_symbol,
-                tx_hash=tx_hash,
-                from_timestamp=time_series.from_timestamp,
-                to_timestamp=time_series.to_timestamp,
-                bucket_seconds=time_series.bucket.total_seconds(),
-                limit=limit,
-            )
-            return AllocationActivityEnvelope(
-                mode="aggregated",
-                window=window,
-                data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
-            )
+            if settings.allocation_activity_aggregation_enabled:
+                buckets = await service.list_activity_buckets(
+                    prime_id=parsed_prime_id,
+                    chain_id=chain_id,
+                    protocol_name=protocol_name,
+                    action_type=action_type,
+                    token_symbol=token_symbol,
+                    tx_hash=tx_hash,
+                    from_timestamp=time_series.from_timestamp,
+                    to_timestamp=time_series.to_timestamp,
+                    bucket_seconds=time_series.bucket.total_seconds(),
+                    limit=limit,
+                )
+                return AllocationActivityEnvelope(
+                    mode="aggregated",
+                    window=window,
+                    data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
+                )
+
+            # Disabled by default: bucket aggregation bulk-decompresses the
+            # allocation_position columnstore over the whole window and OOMs the
+            # DB backend (500s). Return an empty aggregated payload so the UI
+            # renders an empty chart instead of erroring. Flip
+            # ALLOCATION_ACTIVITY_AGGREGATION_ENABLED=true to re-enable once the
+            # query is made cheap (continuous aggregate).
+            return AllocationActivityEnvelope(mode="aggregated", window=window, data=[])
 
         events = await service.list_allocation_activity(
             prime_id=parsed_prime_id,
