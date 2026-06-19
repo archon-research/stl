@@ -13,7 +13,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -26,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -221,7 +221,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("Ethereum node connected")
 
 	// Database
-	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
+	dbPool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
@@ -266,6 +266,14 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {

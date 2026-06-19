@@ -23,6 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -224,7 +225,7 @@ func run(ctx context.Context, args []string) error {
 	logger.Info("Ethereum node connected")
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
@@ -263,6 +264,15 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "morpho")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
 	morphoTelemetry, err := morpho_indexer.NewTelemetry(cfg.chainName)
 	if err != nil {
 		return fmt.Errorf("creating morpho telemetry: %w", err)

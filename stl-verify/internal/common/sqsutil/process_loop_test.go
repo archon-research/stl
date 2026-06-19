@@ -1,10 +1,12 @@
 package sqsutil
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,10 +16,18 @@ import (
 
 // mockConsumer implements outbound.SQSConsumer for testing.
 type mockConsumer struct {
-	mu             sync.Mutex
-	batches        [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
-	deletedHandles []string
-	deleteErr      error
+	mu                sync.Mutex
+	batches           [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
+	deletedHandles    []string
+	deleteErr         error
+	visibilityTimeout time.Duration // 0 -> a safe default well above the handler budget
+}
+
+func (m *mockConsumer) VisibilityTimeout() time.Duration {
+	if m.visibilityTimeout > 0 {
+		return m.visibilityTimeout
+	}
+	return 300 * time.Second
 }
 
 func (m *mockConsumer) ReceiveMessages(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
@@ -244,12 +254,174 @@ func TestRunLoop_StopsOnCancel(t *testing.T) {
 
 	handler := func(_ context.Context, e outbound.BlockEvent) error { return nil }
 
-	// Should return quickly without blocking
+	// Should return quickly without blocking.
 	RunLoop(ctx, Config{
 		Consumer:     consumer,
 		MaxMessages:  10,
 		PollInterval: 50 * time.Millisecond,
 		Logger:       slog.Default(),
+		ChainID:      1,
 	}, handler)
-	// If we get here without hanging, test passes
+	// If we get here without hanging, test passes.
+}
+
+func TestRunLoop_LogsBadVisibilityTimeout(t *testing.T) {
+	// Visibility (60s) below the default handler budget (120s) is logged as an
+	// error at startup but does not stop the loop.
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError}))
+	consumer := &mockConsumer{visibilityTimeout: 60 * time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // exit the loop immediately after the startup check
+
+	RunLoop(ctx, Config{
+		Consumer:     consumer,
+		MaxMessages:  10,
+		PollInterval: 50 * time.Millisecond,
+		Logger:       logger,
+		ChainID:      1,
+	}, func(_ context.Context, _ outbound.BlockEvent) error { return nil })
+
+	if !strings.Contains(buf.String(), "visibility") {
+		t.Errorf("expected a visibility-misconfiguration error to be logged, got: %q", buf.String())
+	}
+}
+
+func TestValidateVisibilityTimeout(t *testing.T) {
+	tests := []struct {
+		name       string
+		visibility time.Duration
+		handler    time.Duration
+		wantErr    bool
+	}{
+		{"above default budget", 180 * time.Second, 0, false},
+		{"equal to default budget rejected", DefaultHandlerTimeout, 0, true},
+		{"below default budget rejected", 60 * time.Second, 0, true},
+		{"above explicit budget", 90 * time.Second, 60 * time.Second, false},
+		{"below explicit budget rejected", 30 * time.Second, 60 * time.Second, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateVisibilityTimeout(tt.visibility, tt.handler)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateVisibilityTimeout(%v, %v) error = %v, wantErr %v",
+					tt.visibility, tt.handler, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProcessMessages_AppliesHandlerDeadline(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	var deadline time.Time
+	var hadDeadline bool
+	handler := func(ctx context.Context, _ outbound.BlockEvent) error {
+		deadline, hadDeadline = ctx.Deadline()
+		return nil
+	}
+
+	cfg := testConfig(consumer)
+	cfg.HandlerTimeout = time.Second
+
+	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hadDeadline {
+		t.Fatal("expected handler context to carry a deadline when HandlerTimeout is set")
+	}
+	// The deadline must reflect the configured HandlerTimeout, not the default
+	// or a leaked parent deadline.
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > time.Second {
+		t.Fatalf("expected deadline within ~1s (HandlerTimeout), got %v remaining", remaining)
+	}
+}
+
+func TestProcessMessages_DefaultHandlerDeadlineApplied(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	var hadDeadline bool
+	handler := func(ctx context.Context, _ outbound.BlockEvent) error {
+		_, hadDeadline = ctx.Deadline()
+		return nil
+	}
+
+	// testConfig leaves HandlerTimeout unset (0): the loop must still bound the
+	// handler with the package default, never run it unbounded.
+	if err := ProcessMessages(context.Background(), testConfig(consumer), handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hadDeadline {
+		t.Fatal("expected default handler deadline to be applied when HandlerTimeout is 0")
+	}
+}
+
+// TestProcessMessages_CancelsSlowHandlerAndKeepsMessage is the core resilience
+// invariant from the 2026-06-18 lock-convoy incident: a handler that exceeds
+// its budget is cancelled and its message is left undeleted so SQS redelivers
+// it, instead of the goroutine parking forever and silently stalling the queue.
+func TestProcessMessages_CancelsSlowHandlerAndKeepsMessage(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	handler := func(ctx context.Context, _ outbound.BlockEvent) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil
+		}
+	}
+
+	cfg := testConfig(consumer)
+	cfg.HandlerTimeout = 20 * time.Millisecond
+
+	err := ProcessMessages(context.Background(), cfg, handler)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded when handler exceeds HandlerTimeout, got %v", err)
+	}
+	if len(consumer.deletedHandles) != 0 {
+		t.Errorf("expected message kept (not deleted) on handler timeout, got deletes: %v", consumer.deletedHandles)
+	}
+}
+
+// TestProcessMessages_LogsWhenHandlerIgnoresDeadline covers a handler that does
+// not honour its context: it runs past the budget but returns nil. The work
+// completed, so the message is still deleted, but the budget breach is logged
+// so the misbehaving handler is visible.
+func TestProcessMessages_LogsWhenHandlerIgnoresDeadline(t *testing.T) {
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "0xabc"}
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", event)}},
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	handler := func(_ context.Context, _ outbound.BlockEvent) error {
+		time.Sleep(40 * time.Millisecond) // ignores ctx, runs past the budget
+		return nil
+	}
+
+	cfg := testConfig(consumer)
+	cfg.Logger = logger
+	cfg.HandlerTimeout = 10 * time.Millisecond
+
+	if err := ProcessMessages(context.Background(), cfg, handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(consumer.deletedHandles) != 1 {
+		t.Errorf("expected message deleted when handler returns nil, got deletes: %v", consumer.deletedHandles)
+	}
+	if !strings.Contains(buf.String(), "exceeding its timeout budget") {
+		t.Errorf("expected budget-exceeded warning, got logs: %q", buf.String())
+	}
 }

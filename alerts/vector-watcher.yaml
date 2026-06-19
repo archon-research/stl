@@ -145,6 +145,7 @@ groups:
             p99 Alchemy RPC latency for watcher
             `{{ $labels.service_name }}` is `{{ $value | printf "%.2fs" }}`
             sustained over 15m. Pipeline is degraded; expect block lag.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheralchemylatencyhigh
 
       - alert: VectorWatcherAlchemyRetriesHigh
         # Retry ratio >20% for 15m — Alchemy is intermittently failing and
@@ -181,6 +182,7 @@ groups:
             `{{ $value | humanizePercentage }}` of Alchemy calls over 15m.
             Upstream is flaky; if this escalates we'll see
             VectorWatcherAlchemyErrorsHigh.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-watcher.md#vectorwatcheralchemyretrieshigh
 
       # ---------------------------------------------------------------------
       # VEC-277: backfill silent-failure surface (2026-06-02 arbitrum incident)
