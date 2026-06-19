@@ -25,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 )
 
 // BootstrapOptions specifies the worker-identity bits Bootstrap can't infer.
@@ -67,6 +68,23 @@ type Deps struct {
 func (d *Deps) Close() {
 	for i := len(d.cleanups) - 1; i >= 0; i-- {
 		d.cleanups[i]()
+	}
+}
+
+// CommonDeps projects the shared outbound ports into the service-layer
+// dexconsumer.CommonDeps each DEX worker validates at startup. Mapping them here
+// (rather than in each worker) keeps it the single, compiler-checked source of
+// truth: a port added to Deps surfaces as a build error here, not a silently
+// unmapped field at three call sites.
+func (d *Deps) CommonDeps() dexconsumer.CommonDeps {
+	return dexconsumer.CommonDeps{
+		SQSConsumer:  d.SQSConsumer,
+		CacheReader:  d.CacheReader,
+		Multicaller:  d.Multicaller,
+		TxManager:    d.TxManager,
+		TokenRepo:    d.TokenRepo,
+		ProtocolRepo: d.ProtocolRepo,
+		EventRepo:    d.EventRepo,
 	}
 }
 
