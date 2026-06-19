@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.main import create_app
 from tests.integration.seed import (
     GHOST_CLOSED_PROXY_HEX,
@@ -312,11 +312,23 @@ def async_db_url(module_db):
 
 @pytest.fixture()
 def client(async_db_url: str, tmp_path: Path):
-    """Return a TestClient wired to the testcontainer database."""
+    """Return a TestClient wired to the testcontainer database.
+
+    The risk-capital and activity-aggregation endpoints are flag-gated off by
+    default (their production queries OOM the columnstore). These integration
+    tests exercise the real queries against the small uncompressed test dataset,
+    so the flags are forced on here.
+    """
     empty_mapping = tmp_path / "empty_mapping.json"
     empty_mapping.write_text("{}")
     test_app = create_app(
         Settings.model_validate({"database_url": SecretStr(async_db_url), "suraf_mappings_file": empty_mapping})
+    )
+    test_app.dependency_overrides[get_settings] = lambda: get_settings().model_copy(
+        update={
+            "risk_capital_endpoint_enabled": True,
+            "allocation_activity_aggregation_enabled": True,
+        }
     )
     with TestClient(test_app) as c:
         yield c

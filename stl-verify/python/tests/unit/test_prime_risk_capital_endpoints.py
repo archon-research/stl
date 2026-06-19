@@ -60,11 +60,43 @@ def _result() -> PrimeRiskCapital:
     )
 
 
-def test_get_prime_risk_capital_returns_self_computed_envelope():
+def test_get_prime_risk_capital_returns_zero_while_disabled():
+    """RRC compute is temporarily disabled (it OOMs the DB backend); the endpoint
+    returns an empty/zero envelope without invoking the model fan-out."""
     from app.api.v1 import prime_risk_capital
 
     service = _make_service(result=_result())
     app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["model"] == "gap_sweep"
+        assert body["exposure_usd"] == "0"
+        assert body["total_risk_capital_usd"] is None
+        assert body["required_risk_capital_usd"] == "0"
+        assert body["encumbrance_ratio"] is None
+        assert body["modeled_exposure_usd"] == "0"
+        assert body["modeled_pct"] is None
+        assert body["per_allocation"] == []
+        service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+        service.compute.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
+def test_get_prime_risk_capital_returns_self_computed_envelope_when_enabled():
+    from app.api.v1 import prime_risk_capital
+    from app.config import get_settings
+
+    service = _make_service(result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    app.dependency_overrides[get_settings] = lambda: get_settings().model_copy(
+        update={"risk_capital_endpoint_enabled": True}
+    )
     try:
         client = TestClient(app)
 
@@ -85,9 +117,10 @@ def test_get_prime_risk_capital_returns_self_computed_envelope():
         unmodeled = body["per_allocation"][1]
         assert unmodeled["applied"] is False
         assert unmodeled["required_risk_capital_usd"] is None
-        service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+        service.compute.assert_awaited_once_with(EthAddress(_VALID_ADDR))
     finally:
         app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+        app.dependency_overrides.pop(get_settings, None)
 
 
 def test_get_prime_risk_capital_returns_404_when_prime_missing():

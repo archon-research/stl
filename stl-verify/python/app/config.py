@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
     star_risk_capital_upstream_url: str = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
+    # Feature flags for the two endpoints whose queries bulk-decompress the
+    # allocation_position columnstore and OOM the DB backend. Default off: the
+    # endpoints return empty/zero payloads (UI stays alive) until the queries are
+    # made cheap. Flip to true via env to re-enable the real compute.
+    risk_capital_endpoint_enabled: bool = False
+    allocation_activity_aggregation_enabled: bool = False
 
     @property
     def async_database_url(self) -> str:

@@ -7,9 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.api._validators import EthAddressParam
 from app.api.deps import get_engine, get_model_registry
+from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress
 from app.services.model_registry import ModelRegistry
-from app.services.prime_risk_capital_service import PrimeRiskCapitalService
+from app.services.prime_risk_capital_service import DEFAULT_RISK_MODEL, PrimeRiskCapitalService
 
 router = APIRouter(tags=["primes", "capital"])
 
@@ -84,10 +85,29 @@ async def _get_service(
 async def get_prime_risk_capital(
     prime_id: EthAddressParam,
     service: PrimeRiskCapitalService = Depends(_get_service),
+    settings: Settings = Depends(get_settings),
 ) -> PrimeRiskCapitalResponse:
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
+
+    if not settings.risk_capital_endpoint_enabled:
+        # Disabled by default: the per-allocation RRC fan-out bulk-decompresses
+        # the allocation_position columnstore and OOMs the DB backend (500s).
+        # Return an empty/zero envelope so the UI renders empty metrics instead
+        # of erroring. Flip RISK_CAPITAL_ENDPOINT_ENABLED=true to re-enable once
+        # the query is made cheap.
+        return PrimeRiskCapitalResponse(
+            prime_id=str(prime_address),
+            model=DEFAULT_RISK_MODEL,
+            exposure_usd=Decimal("0"),
+            total_risk_capital_usd=None,
+            required_risk_capital_usd=Decimal("0"),
+            encumbrance_ratio=None,
+            modeled_exposure_usd=Decimal("0"),
+            modeled_pct=None,
+            per_allocation=[],
+        )
 
     result = await service.compute(prime_address)
     return PrimeRiskCapitalResponse(

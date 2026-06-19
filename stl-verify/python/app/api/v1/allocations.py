@@ -13,7 +13,7 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.api._validators import EthAddressParam, OptionalEthAddressParam, OptionalTxHashParam
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
@@ -624,6 +624,7 @@ async def list_allocation_activity(
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
+    settings: Settings = Depends(get_settings),
 ) -> AllocationActivityEnvelope:
     """Errors:
 
@@ -647,6 +648,14 @@ async def list_allocation_activity(
 
     try:
         if time_series.aggregate:
+            if not settings.allocation_activity_aggregation_enabled:
+                # Disabled by default: bucket aggregation bulk-decompresses the
+                # allocation_position columnstore over the whole window and OOMs
+                # the DB backend (500s). Return an empty aggregated payload so the
+                # UI renders an empty chart instead of erroring. Flip
+                # ALLOCATION_ACTIVITY_AGGREGATION_ENABLED=true to re-enable once
+                # the query is made cheap (continuous aggregate).
+                return AllocationActivityEnvelope(mode="aggregated", window=window, data=[])
             buckets = await service.list_activity_buckets(
                 prime_id=parsed_prime_id,
                 chain_id=chain_id,

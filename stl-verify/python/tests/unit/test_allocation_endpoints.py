@@ -326,7 +326,9 @@ def test_list_allocation_activity_returns_rows_and_forwards_filters():
     assert kwargs["limit"] == 50
 
 
-def test_list_allocation_activity_returns_aggregated_buckets():
+def test_list_allocation_activity_aggregate_returns_empty_while_disabled():
+    """Bucket aggregation is temporarily disabled (it OOMs the DB backend); the
+    endpoint returns an empty aggregated payload without invoking the query."""
     from app.api.v1 import allocations
 
     service = _make_service()
@@ -339,6 +341,42 @@ def test_list_allocation_activity_returns_aggregated_buckets():
         )
     ]
     app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-02T00:00:00Z",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "aggregated"
+    assert payload["data"] == []
+    service.list_activity_buckets.assert_not_awaited()
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_returns_aggregated_buckets_when_enabled():
+    from app.api.v1 import allocations
+    from app.config import get_settings
+
+    service = _make_service()
+    service.list_activity_buckets.return_value = [
+        AllocationActivityBucket(
+            bucket_start=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            event_count=3,
+            total_tx_amount=Decimal("450.5"),
+            net_flow_usd=Decimal("-120.25"),
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    app.dependency_overrides[get_settings] = lambda: get_settings().model_copy(
+        update={"allocation_activity_aggregation_enabled": True}
+    )
     client = TestClient(app)
 
     response = client.get(
