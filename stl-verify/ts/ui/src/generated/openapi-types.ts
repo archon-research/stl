@@ -144,6 +144,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/primes/{prime_id}/exposure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Prime exposure time series
+         * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+         */
+        get: operations["list_prime_exposure_v1_primes__prime_id__exposure_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/primes/{prime_id}/risk-capital": {
         parameters: {
             query?: never;
@@ -1033,6 +1053,43 @@ export interface components {
              * @description All registered upstream data sources.
              */
             sources: components["schemas"]["DataSourceResponse"][];
+        };
+        /**
+         * ExposureBucketResponse
+         * @description Priced receipt-token exposure within a single time bucket (LOCF gap-filled).
+         */
+        ExposureBucketResponse: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             * @description Inclusive start of the time bucket (UTC).
+             */
+            bucket_start: string;
+            /**
+             * Exposure Usd
+             * @description Sum across the prime's receipt-token positions of the carried-forward balance valued at the latest underlying oracle price (USD), serialized as a JSON string. `null` for leading buckets before the first observation.
+             * @example 1459014561.88
+             */
+            exposure_usd?: string | null;
+        };
+        /**
+         * ExposureEnvelope
+         * @description Per-prime exposure time series, gap-filled into buckets.
+         */
+        ExposureEnvelope: {
+            /**
+             * Data
+             * @description Priced exposure per time bucket.
+             */
+            data: components["schemas"]["ExposureBucketResponse"][];
+            /**
+             * Mode
+             * @description Always `aggregated`: a gap-filled time series.
+             * @constant
+             */
+            mode: "aggregated";
+            /** @description The window and resolution applied to this response. */
+            window: components["schemas"]["TimeSeriesWindow"];
         };
         /**
          * GapSweepDetails
@@ -2083,6 +2140,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PrimeDebtEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_prime_exposure_v1_primes__prime_id__exposure_get: {
+        parameters: {
+            query?: {
+                /** @description Max buckets returned (default 100, max 500). */
+                limit?: number;
+                /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+                from_timestamp?: string | null;
+                /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+                to_timestamp?: string | null;
+                /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+                resolution?: components["schemas"]["TimeSeriesResolution"] | null;
+                /** @description When true, return time-bucketed aggregates instead of raw rows. */
+                aggregate?: boolean;
+            };
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExposureEnvelope"];
                 };
             };
             /** @description Validation Error */

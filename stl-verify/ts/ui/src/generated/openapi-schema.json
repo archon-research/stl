@@ -774,6 +774,68 @@
         "title": "DataSourcesResponse",
         "type": "object"
       },
+      "ExposureBucketResponse": {
+        "description": "Priced receipt-token exposure within a single time bucket (LOCF gap-filled).",
+        "properties": {
+          "bucket_start": {
+            "description": "Inclusive start of the time bucket (UTC).",
+            "format": "date-time",
+            "title": "Bucket Start",
+            "type": "string"
+          },
+          "exposure_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sum across the prime's receipt-token positions of the carried-forward balance valued at the latest underlying oracle price (USD), serialized as a JSON string. `null` for leading buckets before the first observation.",
+            "examples": [
+              "1459014561.88"
+            ],
+            "title": "Exposure Usd"
+          }
+        },
+        "required": [
+          "bucket_start"
+        ],
+        "title": "ExposureBucketResponse",
+        "type": "object"
+      },
+      "ExposureEnvelope": {
+        "description": "Per-prime exposure time series, gap-filled into buckets.",
+        "properties": {
+          "data": {
+            "description": "Priced exposure per time bucket.",
+            "items": {
+              "$ref": "#/components/schemas/ExposureBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated`: a gap-filled time series.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "ExposureEnvelope",
+        "type": "object"
+      },
       "GapSweepDetails": {
         "additionalProperties": false,
         "description": "Gap-sweep model-specific output embedded in an RrcResult.\n\n``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal(\"0.15\")``\nmeans a 15% collateral price drop) \u2014 note this is a different scale\nfrom ``SurafDetails.crr_pct`` which is on 0\u2013100. ``loss_usd`` is the\nengine-native expected loss in USD under that price drop; equal in\nmagnitude to the envelope-level ``rrc_usd`` for this model and rounded\nto USD cents. The cross-model comparable capital ratio is exposed on\n``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure\nbasis, not the collateral backing basis.",
@@ -2657,6 +2719,132 @@
         "summary": "List prime debt snapshots",
         "tags": [
           "primes"
+        ]
+      }
+    },
+    "/v1/primes/{prime_id}/exposure": {
+      "get": {
+        "description": "Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "operationId": "list_prime_exposure_v1_primes__prime_id__exposure_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max buckets returned (default 100, max 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Max buckets returned (default 100, max 500).",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+            "in": "query",
+            "name": "from_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+              "title": "From Timestamp"
+            }
+          },
+          {
+            "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+            "in": "query",
+            "name": "to_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+              "title": "To Timestamp"
+            }
+          },
+          {
+            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+              "title": "Resolution"
+            }
+          },
+          {
+            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "in": "query",
+            "name": "aggregate",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "When true, return time-bucketed aggregates instead of raw rows.",
+              "title": "Aggregate",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExposureEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Prime exposure time series",
+        "tags": [
+          "primes",
+          "capital"
         ]
       }
     },
