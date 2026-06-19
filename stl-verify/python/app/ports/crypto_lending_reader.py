@@ -18,6 +18,15 @@ class CryptoLendingReader(Protocol):
         """Return receipt-token routing metadata, or ``None`` if unknown."""
         ...
 
+    def is_maple(self, info: ReceiptTokenInfo) -> bool:
+        """Return whether this receipt token is a Maple Syrup vault.
+
+        Maple takes a distinct enrichment path: its breakdown is pool-level,
+        USD-valued and symbol-keyed, with no prime-share scaling and no
+        per-asset liquidation params.
+        """
+        ...
+
     async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
         """Return the resolved backed breakdown for the receipt token's protocol."""
         ...

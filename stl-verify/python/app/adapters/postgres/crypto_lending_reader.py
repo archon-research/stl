@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
 from app.adapters.postgres.allocation_share_repository import PostgresAllocationShare
+from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
@@ -22,6 +23,11 @@ logger = get_logger(__name__)
 
 _AAVE_LIKE = frozenset({"sparklend", "aave_v2", "aave_v3", "aave_v3_lido", "aave_v3_rwa"})
 _MORPHO = frozenset({"morpho_blue"})
+_MAPLE = frozenset({"maple"})
+# Protocols eligible for the gap-sweep RRC model (feeds ``list_supported_asset_ids`` →
+# ``CryptoLendingRiskService.applies_to``). Maple is deliberately excluded: it has no
+# quantitative risk model yet, so RRC degrades to "no model applies" (a 404), while its
+# backed-breakdown still resolves via the dedicated ``_MAPLE`` dispatch branch below.
 _SUPPORTED_PROTOCOLS = _AAVE_LIKE | _MORPHO
 _NORMALIZE_RE = re.compile(r"[\s\-_]+")
 
@@ -79,6 +85,7 @@ class PostgresCryptoLendingReader:
         receipt_token_repo: ReceiptTokenRepository,
         aave_breakdown_repo: AaveLikeBackedBreakdownRepository,
         morpho_breakdown_repo: MorphoBackedBreakdownRepository,
+        maple_breakdown_repo: MapleBackedBreakdownRepository,
         aave_liq_repo: AaveLikeLiquidationParamsRepository,
         morpho_liq_repo: MorphoLiquidationParamsRepository,
         engine: AsyncEngine,
@@ -87,6 +94,7 @@ class PostgresCryptoLendingReader:
         self._receipt_token_repo = receipt_token_repo
         self._aave_breakdown_repo = aave_breakdown_repo
         self._morpho_breakdown_repo = morpho_breakdown_repo
+        self._maple_breakdown_repo = maple_breakdown_repo
         self._aave_liq_repo = aave_liq_repo
         self._morpho_liq_repo = morpho_liq_repo
         self._engine = engine
@@ -102,6 +110,9 @@ class PostgresCryptoLendingReader:
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)
 
+    def is_maple(self, info: ReceiptTokenInfo) -> bool:
+        return _normalize_protocol_name(info.protocol_name) in _MAPLE
+
     async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
         normalized = _normalize_protocol_name(info.protocol_name)
 
@@ -115,6 +126,9 @@ class PostgresCryptoLendingReader:
             if backed_asset_id is None:
                 raise ValueError(f"morpho vault not found for receipt token {info.receipt_token_id}")
             return await self._morpho_breakdown_repo.get_backed_breakdown(backed_asset_id)
+
+        if normalized in _MAPLE:
+            return await self._maple_breakdown_repo.get_backed_breakdown(info.receipt_token_address, info.chain_id)
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
@@ -131,6 +145,11 @@ class PostgresCryptoLendingReader:
 
         if normalized in _MORPHO:
             return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
+
+        if normalized in _MAPLE:
+            # Maple has no per-asset liquidation params; the service's maple path
+            # never calls this, but stay consistent with get_breakdown's support.
+            return {}
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 

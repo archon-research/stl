@@ -65,6 +65,7 @@ def _morpho_info() -> ReceiptTokenInfo:
 @pytest.fixture
 def reader() -> MagicMock:
     reader = MagicMock()
+    reader.is_maple = MagicMock(return_value=False)
     reader.get_receipt_token = AsyncMock(return_value=_aave_like_info())
     reader.get_breakdown = AsyncMock(
         return_value=_breakdown((_contrib(10, "WETH", "10000", "2000"),), backed_asset_id=UNDERLYING_TOKEN_ID)
@@ -392,3 +393,101 @@ class TestLegacyMethods:
         reader.get_receipt_token.return_value = None
 
         assert await service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID) is None
+
+
+def _maple_info() -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=RECEIPT_TOKEN_ID,
+        protocol_id=3,
+        underlying_token_id=UNDERLYING_TOKEN_ID,
+        receipt_token_address=bytes.fromhex("80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
+        chain_id=1,
+        protocol_name="maple",
+        receipt_token_token_id=None,
+    )
+
+
+class TestMaplePath:
+    @pytest.fixture
+    def maple_reader(self, reader: MagicMock) -> MagicMock:
+        reader.is_maple = MagicMock(return_value=True)
+        reader.get_receipt_token = AsyncMock(return_value=_maple_info())
+        reader.get_breakdown = AsyncMock(
+            return_value=_breakdown(
+                (
+                    CollateralContribution(
+                        token_id=None,
+                        symbol="BTC",
+                        backing_value=Decimal("130000"),
+                        backing_pct=Decimal("67"),
+                        price_usd=Decimal("65000"),
+                    ),
+                    CollateralContribution(
+                        token_id=None,
+                        symbol="USDC",
+                        backing_value=Decimal("1000000"),
+                        backing_pct=Decimal("33"),
+                        price_usd=Decimal("1"),
+                    ),
+                ),
+                backed_asset_id=7,
+            )
+        )
+        return reader
+
+    @pytest.fixture
+    def maple_service(self, maple_reader: MagicMock) -> CryptoLendingRiskService:
+        return CryptoLendingRiskService(
+            reader=maple_reader,
+            default_gap_pct=Decimal("0.1"),
+            supported_asset_ids={RECEIPT_TOKEN_ID},
+        )
+
+    @pytest.mark.asyncio
+    async def test_breakdown_enriches_without_liq_params_or_share(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        result = await maple_service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID)
+
+        assert isinstance(result, RiskBreakdown)
+        assert result.backed_asset_id == 7
+        by_symbol = {i.symbol: i for i in result.items}
+        assert by_symbol["BTC"].token_id is None
+        assert by_symbol["BTC"].liquidation_threshold is None
+        assert by_symbol["BTC"].liquidation_bonus is None
+        assert by_symbol["BTC"].amount_usd == Decimal("130000")
+        assert by_symbol["BTC"].amount == Decimal("2")  # 130000 / 65000
+        # Maple skips both prime-share scaling and liquidation-param enrichment.
+        maple_reader.get_share.assert_not_awaited()
+        maple_reader.get_legacy_share.assert_not_awaited()
+        maple_reader.get_liquidation_params.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_zero_price_yields_zero_amount(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        maple_reader.get_breakdown = AsyncMock(
+            return_value=_breakdown(
+                (
+                    CollateralContribution(
+                        token_id=None,
+                        symbol="MYSTERY",
+                        backing_value=Decimal("500"),
+                        backing_pct=Decimal("100"),
+                        price_usd=None,
+                    ),
+                ),
+                backed_asset_id=7,
+            )
+        )
+
+        result = await maple_service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID)
+
+        assert result is not None
+        assert result.items[0].amount == Decimal("0")
+        assert result.items[0].price_usd == Decimal("0")
+        assert result.items[0].amount_usd == Decimal("500")

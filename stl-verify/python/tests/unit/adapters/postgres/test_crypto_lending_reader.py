@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader, _normalize_protocol_name
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.backed_breakdown import BackedBreakdown
+from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo, ReceiptTokenProtocolPair
 from app.domain.entities.risk import LiquidationParams
 from app.domain.exceptions import MissingShareError
@@ -34,6 +34,18 @@ def _morpho_info() -> ReceiptTokenInfo:
         receipt_token_address=bytes.fromhex("a7df13b8e3d6740fe17cbe928c7334243d86c92f"),
         chain_id=1,
         protocol_name="Morpho Blue",
+        receipt_token_token_id=None,
+    )
+
+
+def _maple_info() -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=99,
+        protocol_id=3,
+        underlying_token_id=42,
+        receipt_token_address=bytes.fromhex("80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
+        chain_id=1,
+        protocol_name="maple",
         receipt_token_token_id=None,
     )
 
@@ -66,6 +78,26 @@ def morpho_breakdown_repo() -> MagicMock:
 
 
 @pytest.fixture
+def maple_breakdown_repo() -> MagicMock:
+    repo = MagicMock()
+    repo.get_backed_breakdown = AsyncMock(
+        return_value=BackedBreakdown(
+            backed_asset_id=7,
+            items=(
+                CollateralContribution(
+                    token_id=None,
+                    symbol="BTC",
+                    backing_value=Decimal("130000"),
+                    backing_pct=Decimal("67"),
+                    price_usd=Decimal("65000"),
+                ),
+            ),
+        )
+    )
+    return repo
+
+
+@pytest.fixture
 def aave_liq_repo() -> MagicMock:
     repo = MagicMock()
     repo.get_params = AsyncMock(return_value={1: LiquidationParams(1, Decimal("0.8"), Decimal("1.05"))})
@@ -85,6 +117,7 @@ def reader(
     receipt_token_repo: MagicMock,
     aave_breakdown_repo: MagicMock,
     morpho_breakdown_repo: MagicMock,
+    maple_breakdown_repo: MagicMock,
     aave_liq_repo: MagicMock,
     morpho_liq_repo: MagicMock,
 ) -> PostgresCryptoLendingReader:
@@ -92,6 +125,7 @@ def reader(
         receipt_token_repo=receipt_token_repo,
         aave_breakdown_repo=aave_breakdown_repo,
         morpho_breakdown_repo=morpho_breakdown_repo,
+        maple_breakdown_repo=maple_breakdown_repo,
         aave_liq_repo=aave_liq_repo,
         morpho_liq_repo=morpho_liq_repo,
         engine=engine,
@@ -305,3 +339,50 @@ async def test_get_legacy_share_looks_up_wallet_then_loads_share(
     )
     mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.5")
+
+
+def test_normalize_maple() -> None:
+    assert _normalize_protocol_name("maple") == "maple"
+
+
+def test_is_maple_true_for_maple(reader: PostgresCryptoLendingReader) -> None:
+    assert reader.is_maple(_maple_info()) is True
+
+
+def test_is_maple_false_for_aave(reader: PostgresCryptoLendingReader) -> None:
+    assert reader.is_maple(_aave_like_info()) is False
+
+
+@pytest.mark.asyncio
+async def test_get_breakdown_uses_maple_repository(
+    reader: PostgresCryptoLendingReader,
+    maple_breakdown_repo: MagicMock,
+) -> None:
+    info = _maple_info()
+
+    result = await reader.get_breakdown(info)
+
+    maple_breakdown_repo.get_backed_breakdown.assert_awaited_once_with(info.receipt_token_address, info.chain_id)
+    assert result.items[0].symbol == "BTC"
+    assert result.items[0].token_id is None
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_empty_for_maple(reader: PostgresCryptoLendingReader) -> None:
+    assert await reader.get_liquidation_params(_maple_info(), 7, []) == {}
+
+
+@pytest.mark.asyncio
+async def test_list_supported_asset_ids_excludes_maple(
+    reader: PostgresCryptoLendingReader,
+    receipt_token_repo: MagicMock,
+) -> None:
+    receipt_token_repo.list_protocol_pairs = AsyncMock(
+        return_value=[
+            ReceiptTokenProtocolPair(receipt_token_id=1, protocol_name="Aave V3"),
+            ReceiptTokenProtocolPair(receipt_token_id=2, protocol_name="maple"),
+        ]
+    )
+
+    # Maple has no RRC model yet, so it must not be RRC-eligible.
+    assert await reader.list_supported_asset_ids() == {1}

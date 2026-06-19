@@ -168,6 +168,12 @@ class CryptoLendingRiskService:
         info: ReceiptTokenInfo,
         prime_id: EthAddress | None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
+        if self._reader.is_maple(info):
+            # Maple breakdown is pool-level, USD-valued and symbol-keyed: no prime
+            # share to scale by and no per-asset liquidation params to enrich with.
+            breakdown = await self._reader.get_breakdown(info)
+            return breakdown.backed_asset_id, self._build_maple_items(breakdown)
+
         # Legacy endpoints must validate share availability before returning an
         # empty breakdown so warm-up windows still surface as
         # ``503 share_data_missing`` instead of ``200``.
@@ -184,6 +190,28 @@ class CryptoLendingRiskService:
         token_ids = [item.token_id for item in breakdown.items if item.token_id is not None]
         liq_params = await self._reader.get_liquidation_params(info, breakdown.backed_asset_id, token_ids)
         return breakdown.backed_asset_id, self._build_enriched_items(breakdown, share, liq_params)
+
+    @staticmethod
+    def _build_maple_items(breakdown: BackedBreakdown) -> list[RiskEnrichedCollateral]:
+        # Maple collateral is USD-valued upstream and symbol-keyed (token_id is None);
+        # there are no liquidation params. Derive token amount from value / price.
+        enriched: list[RiskEnrichedCollateral] = []
+        for item in breakdown.items:
+            price = item.price_usd
+            amount = (item.backing_value / price) if price else Decimal("0")
+            enriched.append(
+                RiskEnrichedCollateral(
+                    token_id=item.token_id,
+                    symbol=item.symbol,
+                    amount=amount,
+                    backing_pct=item.backing_pct,
+                    amount_usd=item.backing_value,
+                    price_usd=price if price is not None else Decimal("0"),
+                    liquidation_threshold=None,
+                    liquidation_bonus=None,
+                )
+            )
+        return enriched
 
     def _build_enriched_items(
         self,
