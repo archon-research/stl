@@ -38,8 +38,9 @@ func main() {
 	}, temporal.CronjobConfig{
 		// SERVICE_NAME is injected per deployment from the pod's app label so each
 		// per-chain validator registers its own Temporal schedule and task queue.
-		// Defaults to "watcher-data-validator" so the Ethereum mainnet deployment
-		// (which sets no SERVICE_NAME) keeps its existing schedule ID unchanged.
+		// The mainnet deployment's app label resolves to "watcher-data-validator",
+		// matching this default, so its existing schedule ID is preserved. The
+		// default only applies to local/non-k8s runs that set no SERVICE_NAME.
 		Name:            env.Get("SERVICE_NAME", "watcher-data-validator"),
 		IntervalEnv:     "DATA_VALIDATION_INTERVAL",
 		IntervalDefault: "1h",

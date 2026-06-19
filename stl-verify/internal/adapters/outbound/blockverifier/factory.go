@@ -14,57 +14,56 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Kind identifies which canonical-source adapter backs a chain.
-type Kind string
+// kind identifies which canonical-source adapter backs a chain.
+type kind string
 
 const (
-	// KindEtherscan uses the Etherscan V2 multichain API: one endpoint, one key,
+	// kindEtherscan uses the Etherscan V2 multichain API: one endpoint, one key,
 	// chain selected via the chainid query parameter.
-	KindEtherscan Kind = "etherscan"
+	kindEtherscan kind = "etherscan"
 )
 
 // chainKind maps each chain we ingest to the adapter kind that verifies it.
 // A chain not present here is rejected at startup so a misconfigured deployment
 // fails loudly rather than silently validating nothing.
-var chainKind = map[int64]Kind{
-	1:     KindEtherscan, // Ethereum mainnet
-	10:    KindEtherscan, // Optimism
-	130:   KindEtherscan, // Unichain
-	8453:  KindEtherscan, // Base
-	42161: KindEtherscan, // Arbitrum One
-	43114: KindEtherscan, // Avalanche C-Chain
+var chainKind = map[int64]kind{
+	1:     kindEtherscan, // Ethereum mainnet
+	10:    kindEtherscan, // Optimism
+	130:   kindEtherscan, // Unichain
+	8453:  kindEtherscan, // Base
+	42161: kindEtherscan, // Arbitrum One
+	43114: kindEtherscan, // Avalanche C-Chain
 }
 
 // Options carries the credentials and overrides the factory needs to build a
 // verifier. A field is used only by the adapter kinds that require it.
 type Options struct {
-	// EtherscanAPIKey is the Etherscan V2 API key (shared across all chains).
+	// Shared across all chains — Etherscan V2 selects the chain per request.
 	EtherscanAPIKey string
 
 	// EtherscanBaseURL overrides the Etherscan V2 endpoint. Empty uses the
 	// adapter default. Tests set this to a mock server URL.
 	EtherscanBaseURL string
 
-	// Logger is the structured logger passed to the adapter.
 	Logger *slog.Logger
 }
 
 // New returns the BlockVerifier for chainID, or an error if the chain is not
 // configured or required credentials are missing.
 func New(chainID int64, opts Options) (outbound.BlockVerifier, error) {
-	kind, ok := chainKind[chainID]
+	k, ok := chainKind[chainID]
 	if !ok {
 		return nil, fmt.Errorf("no block verifier configured for chain ID %d", chainID)
 	}
 
-	switch kind {
-	case KindEtherscan:
+	switch k {
+	case kindEtherscan:
 		return newEtherscanVerifier(chainID, opts)
 	default:
-		// Unreachable while every chainKind entry uses a declared Kind constant.
-		// Kept so a future Kind added to the registry without a matching switch
+		// Unreachable while every chainKind entry uses a declared kind constant.
+		// Kept so a future kind added to the registry without a matching switch
 		// arm fails loudly instead of silently.
-		return nil, fmt.Errorf("unsupported verifier kind %q for chain ID %d", kind, chainID)
+		return nil, fmt.Errorf("unsupported verifier kind %q for chain ID %d", k, chainID)
 	}
 }
 

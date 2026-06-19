@@ -14,7 +14,7 @@ type CanonicalBlock struct {
 	Timestamp int64
 }
 
-// BlockVerifier verifies block data against authoritative sources like Etherscan.
+// BlockVerifier fetches canonical block data from an authoritative chain source.
 type BlockVerifier interface {
 	// Name returns the verifier name (e.g., "etherscan").
 	Name() string
