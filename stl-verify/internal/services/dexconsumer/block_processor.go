@@ -47,7 +47,8 @@ func NewBlockProcessor(cache outbound.BlockCacheReader, telemetry *dextelemetry.
 // ProcessBlockEvent is the sqsutil.BlockEventHandler for a DEX worker. Per-receipt
 // errors are collected, not short-circuited, so one undecodable receipt does not
 // hide work in the rest of the block; a non-nil return leaves the SQS message
-// undeleted for redelivery.
+// undeleted for redelivery. A cancelled ctx (handler-timeout budget or shutdown)
+// stops the loop early.
 func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.BlockEvent) (retErr error) {
 	start := time.Now()
 	defer func() {
@@ -77,6 +78,13 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 
 	var errs []error
 	for _, r := range receipts {
+		// Stop early if the handler budget (sqsutil bounds each message) or a
+		// shutdown cancelled ctx, rather than churning through the rest of the
+		// block; the non-nil return leaves the message for redelivery.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errs = append(errs, ctxErr)
+			break
+		}
 		if err := p.processReceipt(ctx, r, event.ChainID, event.BlockNumber, event.Version, blockTimestamp); err != nil {
 			errs = append(errs, err)
 		}

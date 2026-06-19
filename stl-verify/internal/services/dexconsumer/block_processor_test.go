@@ -163,6 +163,28 @@ func TestBlockProcessor_AggregatesReceiptErrorsAndProcessesAll(t *testing.T) {
 	}
 }
 
+func TestBlockProcessor_StopsOnContextCancellation(t *testing.T) {
+	cache := &fakeCache{receipts: receiptsJSON(t, 5)}
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int
+	bp := NewBlockProcessor(cache, nil, func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error {
+		calls++
+		cancel() // a deadline/shutdown fires after the first receipt
+		return nil
+	})
+
+	err := bp.ProcessBlockEvent(ctx, outbound.BlockEvent{ChainID: 1, BlockNumber: 1})
+	if err == nil {
+		t.Fatal("expected an error when the context is cancelled mid-block")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %v should wrap context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Errorf("processReceipt called %d times, want 1 (loop must stop once ctx is cancelled)", calls)
+	}
+}
+
 func TestBlockProcessor_RecordsTelemetryByStatus(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
