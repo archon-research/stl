@@ -6,6 +6,10 @@ export type AllocationActivity =
   components['schemas']['AllocationActivityResponse'];
 export type ProtocolEvent = components['schemas']['ProtocolEventResponse'];
 export type CapitalMetrics = components['schemas']['CapitalMetricsResponse'];
+export type PrimeRiskCapital =
+  components['schemas']['PrimeRiskCapitalResponse'];
+export type AllocationRiskCapital =
+  components['schemas']['AllocationRiskCapitalResponse'];
 export type DataSources = components['schemas']['DataSourcesResponse'];
 export type DataSource = components['schemas']['DataSourceResponse'];
 export type AllocationCategory = components['schemas']['AllocationCategory'];

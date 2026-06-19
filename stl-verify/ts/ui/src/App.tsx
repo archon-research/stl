@@ -32,10 +32,10 @@ import { useUrlSyncedTableState } from './data-table/hooks';
 import { usePrimeChartData } from './hooks/usePrimeChartData';
 import {
   getAllocations,
-  getCapitalMetrics,
   getChains,
   getDataSources,
   getLatestPrimeDebtSnapshot,
+  getPrimeRiskCapital,
   getPrimes,
   getProtocols,
   getTokens,
@@ -68,10 +68,10 @@ import {
 } from './lib/url-params';
 import type {
   Allocation,
-  CapitalMetrics,
   DataSource,
   Prime,
   PrimeDebtSnapshot,
+  PrimeRiskCapital,
   TimeSeriesResolution,
   TokensResponse,
 } from './types/allocation';
@@ -150,16 +150,14 @@ function App() {
     string | null
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
-  const [isCapitalMetricsLoading, setIsCapitalMetricsLoading] = useState(false);
-  const [capitalMetricsErrorMessage, setCapitalMetricsErrorMessage] = useState<
+  const [isRiskCapitalLoading, setIsRiskCapitalLoading] = useState(false);
+  const [riskCapitalErrorMessage, setRiskCapitalErrorMessage] = useState<
     string | null
   >(null);
   const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
-  const [capitalMetricsList, setCapitalMetricsList] = useState<
-    CapitalMetrics[]
-  >([]);
+  const [riskCapital, setRiskCapital] = useState<PrimeRiskCapital | null>(null);
   const [primeDebtSnapshot, setPrimeDebtSnapshot] =
     useState<PrimeDebtSnapshot | null>(null);
   const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
@@ -430,33 +428,45 @@ function App() {
   }, [selectedPrimeId]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    setIsCapitalMetricsLoading(true);
-    setCapitalMetricsErrorMessage(null);
+    if (!selectedPrimeId) {
+      setRiskCapital(null);
+      setIsRiskCapitalLoading(false);
+      setRiskCapitalErrorMessage(null);
+      return;
+    }
 
-    void getCapitalMetrics(controller.signal)
-      .then((metrics) => {
-        setCapitalMetricsList(metrics);
+    const controller = new AbortController();
+
+    setIsRiskCapitalLoading(true);
+    setRiskCapital(null);
+    setRiskCapitalErrorMessage(null);
+
+    void getPrimeRiskCapital(selectedPrimeId, controller.signal)
+      .then((response) => {
+        if (!controller.signal.aborted) {
+          setRiskCapital(response);
+        }
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
           return;
         }
 
-        logging.error('Failed to load capital metrics', {
+        logging.warn('Risk capital unavailable for selected prime', {
           error,
+          primeId: selectedPrimeId,
         });
-        setCapitalMetricsList([]);
-        setCapitalMetricsErrorMessage(toErrorMessage(error));
+        setRiskCapital(null);
+        setRiskCapitalErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) {
-          setIsCapitalMetricsLoading(false);
+          setIsRiskCapitalLoading(false);
         }
       });
 
     return () => controller.abort();
-  }, []);
+  }, [selectedPrimeId]);
 
   useEffect(() => {
     if (!selectedPrimeId) {
@@ -503,20 +513,6 @@ function App() {
     () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
     [selectedPrimeId, primes],
   );
-
-  const capitalMetrics = useMemo(() => {
-    if (!selectedPrimeId) {
-      return null;
-    }
-
-    return (
-      capitalMetricsList.find(
-        (metric) =>
-          metric.prime_id.trim().toLowerCase() ===
-          selectedPrimeId.trim().toLowerCase(),
-      ) ?? null
-    );
-  }, [capitalMetricsList, selectedPrimeId]);
 
   const chartResolution = useMemo(
     () => getResolutionForRange(rangePreset, timeRange),
@@ -746,16 +742,16 @@ function App() {
         : { data: fallbackChart(currentValue), kind: 'fallback' };
 
     const exposureValue =
-      capitalMetrics?.exposure === undefined ||
-      capitalMetrics?.exposure === null
+      riskCapital?.exposure_usd === undefined ||
+      riskCapital?.exposure_usd === null
         ? null
-        : parseNumericValue(capitalMetrics.exposure);
+        : parseNumericValue(riskCapital.exposure_usd);
 
     const totalRiskCapitalValue =
-      capitalMetrics?.total_risk_capital === undefined ||
-      capitalMetrics?.total_risk_capital === null
+      riskCapital?.total_risk_capital_usd === undefined ||
+      riskCapital?.total_risk_capital_usd === null
         ? null
-        : parseNumericValue(capitalMetrics.total_risk_capital);
+        : parseNumericValue(riskCapital.total_risk_capital_usd);
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
@@ -795,8 +791,8 @@ function App() {
     return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
-    capitalMetrics?.exposure,
-    capitalMetrics?.total_risk_capital,
+    riskCapital?.exposure_usd,
+    riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
     primeDebtSeries,
@@ -959,13 +955,13 @@ function App() {
             selectedView === 'allocation' ? (
               <AllocationGrid
                 allocations={allocations}
-                capitalMetrics={capitalMetrics}
+                riskCapital={riskCapital}
                 chainLabels={chainLabels}
                 errorMessage={allocationsErrorMessage}
                 filteredAllocations={filteredAllocations}
                 topMetricsAllocations={searchFilteredAllocations}
                 isLoading={isAllocationsLoading}
-                isCapitalMetricsLoading={isCapitalMetricsLoading}
+                isRiskCapitalLoading={isRiskCapitalLoading}
                 isPrimeDebtLoading={isPrimeDebtLoading}
                 localProtocols={localProtocols}
                 onSelectAllocation={(allocationKey) => {
@@ -982,7 +978,7 @@ function App() {
                 metricCharts={metricCharts}
                 isChartsLoading={isChartsLoading}
                 chartsErrorMessage={chartsErrorMessage}
-                capitalMetricsErrorMessage={capitalMetricsErrorMessage}
+                riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
               />
             ) : (

@@ -8,6 +8,7 @@ import type {
   CapitalMetricsListResponse,
   DataSourcesResponse,
   PrimeDebtEnvelope,
+  PrimeRiskCapital,
   PrimeDebtSnapshot,
   PrimesResponse,
   ProtocolEventsResponse,
@@ -120,6 +121,19 @@ export function getAllocations(
       signal,
     }),
     'GET /v1/primes/{prime_id}/allocations',
+  );
+}
+
+export function getPrimeRiskCapital(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeRiskCapital> {
+  return requestData(
+    apiClient.GET('/v1/primes/{prime_id}/risk-capital', {
+      params: { path: { prime_id: primeId } },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/risk-capital',
   );
 }
 
