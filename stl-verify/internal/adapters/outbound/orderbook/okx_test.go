@@ -387,7 +387,10 @@ func TestOKXMaxSymbolsRespectsVenueLimit(t *testing.T) {
 }
 
 func TestOKXProviderNameAndValidation(t *testing.T) {
-	p := NewOKXProvider(testConfig())
+	p, err := NewOKXProvider(testConfig())
+	if err != nil {
+		t.Fatalf("NewOKXProvider: %v", err)
+	}
 	if p.Name() != "okx" {
 		t.Errorf("Name = %q", p.Name())
 	}

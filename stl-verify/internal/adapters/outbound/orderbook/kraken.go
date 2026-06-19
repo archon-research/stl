@@ -43,7 +43,7 @@ const (
 //
 // Docs: https://docs.kraken.com/api/docs/guides/spot-ws-book-v1/ and
 // https://support.kraken.com/articles/360027821131
-func NewKrakenProvider(cfg Config) outbound.OrderbookProvider {
+func NewKrakenProvider(cfg Config) (outbound.OrderbookProvider, error) {
 	return newFeedProvider(cfg, &krakenExchange{}, krakenMaxSymbols)
 }
 
