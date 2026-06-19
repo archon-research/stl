@@ -578,6 +578,28 @@ export function RiskBreakdownTab({
         />
       ) : null}
 
+      {!errorMessage &&
+      selectedReceiptToken.protocol_name?.toLowerCase() === 'maple' ? (
+        <div
+          className={css({
+            borderRadius: 'md',
+            borderStyle: 'solid',
+            borderWidth: '1px',
+            borderColor: 'border.subtle',
+            bg: 'surface.subtle',
+            p: '4',
+          })}
+        >
+          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+            Source: Maple Finance GraphQL API. Collateral amounts and USD values
+            are attested by Maple/custodians and are not independently verified
+            on-chain. Internal (AMM/strategy) loans are excluded; the breakdown
+            reflects external-loan collateral plus available pool liquidity, so
+            it is less than total supply.
+          </p>
+        </div>
+      ) : null}
+
       {/* Data Sources & Methodology Footer */}
       <MethodologyPanel
         isOpen={isMethodologyOpen}
