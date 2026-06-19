@@ -15,7 +15,7 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.main import create_app
 
 _SPARK_VAULT_ADDR = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
@@ -111,6 +111,12 @@ def client(async_db_url: str, tmp_path: Path):
     empty_mapping.write_text("{}")
     test_app = create_app(
         Settings.model_validate({"database_url": SecretStr(async_db_url), "suraf_mappings_file": empty_mapping})
+    )
+    # The activity-aggregation endpoint is flag-gated off by default (its
+    # production query OOMs the columnstore); enable it here so the aggregate
+    # test exercises the real query against the small test dataset.
+    test_app.dependency_overrides[get_settings] = lambda: get_settings().model_copy(
+        update={"allocation_activity_aggregation_enabled": True}
     )
     with TestClient(test_app) as c:
         yield c
