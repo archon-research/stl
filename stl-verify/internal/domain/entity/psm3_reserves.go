@@ -17,8 +17,8 @@ type PSM3State struct {
 	ConversionRate *big.Int // rateProvider().getConversionRate(), raw 1e27
 }
 
-// PSM3Snapshot is a single append-only psm3_snapshot row.
-type PSM3Snapshot struct {
+// PSM3Reserves is a single append-only psm3_reserves row.
+type PSM3Reserves struct {
 	ChainID        int64
 	Address        common.Address // PSM3 contract
 	State          PSM3State
@@ -29,7 +29,7 @@ type PSM3Snapshot struct {
 }
 
 // Validate checks that the snapshot is well-formed before persistence.
-func (s *PSM3Snapshot) Validate() error {
+func (s *PSM3Reserves) Validate() error {
 	if s.ChainID <= 0 {
 		return fmt.Errorf("chain_id must be positive")
 	}

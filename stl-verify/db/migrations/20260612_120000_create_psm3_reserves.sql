@@ -1,4 +1,4 @@
--- Spark PSM3 reserve snapshots, one row per (chain, block) sweep.
+-- Spark PSM3 reserve state, one row per (chain, block).
 --
 -- Populated by the psm3-indexer: every N blocks it reads the PSM3 deployment's
 -- reserve composition (USDS/sUSDS balances at the PSM3, USDC balance at the
@@ -13,11 +13,11 @@
 --
 -- Auditability follows the repo+trigger pattern used by token_total_supply:
 --   - Repository supplies build_id at construction.
---   - assign_processing_version_psm3_snapshot BEFORE INSERT trigger assigns
+--   - assign_processing_version_psm3_reserves BEFORE INSERT trigger assigns
 --     processing_version so same-build replays are idempotent and cross-build
 --     reprocesses append a new version.
 
-CREATE TABLE IF NOT EXISTS psm3_snapshot (
+CREATE TABLE IF NOT EXISTS psm3_reserves (
     chain_id           INT         NOT NULL REFERENCES chain (chain_id),
     address            BYTEA       NOT NULL,            -- PSM3 contract
     usds_balance       NUMERIC     NOT NULL,            -- raw 1e18
@@ -35,12 +35,12 @@ CREATE TABLE IF NOT EXISTS psm3_snapshot (
     PRIMARY KEY (chain_id, block_number, block_version, processing_version, block_timestamp)
 );
 
-SELECT create_hypertable('psm3_snapshot', by_range('block_timestamp', INTERVAL '7 days'));
+SELECT create_hypertable('psm3_reserves', by_range('block_timestamp', INTERVAL '7 days'));
 
-CREATE INDEX idx_psm3_snapshot_current
-    ON psm3_snapshot (chain_id, block_number DESC, block_version DESC, processing_version DESC);
+CREATE INDEX idx_psm3_reserves_current
+    ON psm3_reserves (chain_id, block_number DESC, block_version DESC, processing_version DESC);
 
-CREATE OR REPLACE FUNCTION assign_processing_version_psm3_snapshot()
+CREATE OR REPLACE FUNCTION assign_processing_version_psm3_reserves()
 RETURNS TRIGGER AS $$
 DECLARE
     existing_ver INT;
@@ -55,7 +55,7 @@ BEGIN
         0));
 
     SELECT processing_version INTO existing_ver
-    FROM psm3_snapshot
+    FROM psm3_reserves
     WHERE chain_id        = NEW.chain_id
       AND block_number    = NEW.block_number
       AND block_version   = NEW.block_version
@@ -67,7 +67,7 @@ BEGIN
         NEW.processing_version := existing_ver;
     ELSE
         SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
-        FROM psm3_snapshot
+        FROM psm3_reserves
         WHERE chain_id        = NEW.chain_id
           AND block_number    = NEW.block_number
           AND block_version   = NEW.block_version
@@ -80,15 +80,15 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trigger_assign_processing_version
-    BEFORE INSERT ON psm3_snapshot
+    BEFORE INSERT ON psm3_reserves
     FOR EACH ROW
-EXECUTE FUNCTION assign_processing_version_psm3_snapshot();
+EXECUTE FUNCTION assign_processing_version_psm3_reserves();
 
-GRANT SELECT ON psm3_snapshot TO stl_readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON psm3_snapshot TO stl_readwrite;
+GRANT SELECT ON psm3_reserves TO stl_readonly;
+GRANT SELECT, INSERT, UPDATE, DELETE ON psm3_reserves TO stl_readwrite;
 
 -- Columnstore/tiering deliberately skipped: ~600 rows/day across 4 chains is not worth the policy overhead.
 
 INSERT INTO migrations (filename)
-VALUES ('20260612_120000_create_psm3_snapshot.sql')
+VALUES ('20260612_120000_create_psm3_reserves.sql')
 ON CONFLICT (filename) DO NOTHING;

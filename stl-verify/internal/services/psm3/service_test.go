@@ -111,11 +111,11 @@ func (f *fakePSM3Caller) attemptCount() int {
 // fakePSM3Repo is a controllable in-memory snapshot repository.
 type fakePSM3Repo struct {
 	mu      sync.Mutex
-	saved   []*entity.PSM3Snapshot
+	saved   []*entity.PSM3Reserves
 	saveErr error
 }
 
-func (r *fakePSM3Repo) SaveSnapshot(_ context.Context, snap *entity.PSM3Snapshot) error {
+func (r *fakePSM3Repo) SaveReserves(_ context.Context, snap *entity.PSM3Reserves) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.saveErr != nil {
@@ -131,10 +131,10 @@ func (r *fakePSM3Repo) savedCount() int {
 	return len(r.saved)
 }
 
-func (r *fakePSM3Repo) allSaved() []*entity.PSM3Snapshot {
+func (r *fakePSM3Repo) allSaved() []*entity.PSM3Reserves {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]*entity.PSM3Snapshot(nil), r.saved...)
+	return append([]*entity.PSM3Reserves(nil), r.saved...)
 }
 
 // fakeSQSConsumer is a controllable in-memory SQS consumer.
@@ -559,7 +559,7 @@ func TestSweep_ReadStateError_NoSaveACKsAndSkips(t *testing.T) {
 	}
 }
 
-func TestSweep_SaveSnapshotError_ACKsAndSkips(t *testing.T) {
+func TestSweep_SaveReservesError_ACKsAndSkips(t *testing.T) {
 	caller := newFakePSM3Caller()
 	repo := &fakePSM3Repo{saveErr: errors.New("database write failed")}
 	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, 1, 0))

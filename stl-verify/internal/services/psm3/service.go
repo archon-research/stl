@@ -7,7 +7,7 @@
 //  2. Consume block events from SQS via sqsutil.RunLoop.
 //  3. Every SweepEveryNBlocks, read the reserve state pinned to the event's
 //     block via PSM3Caller.ReadState.
-//  4. Write one snapshot row via PSM3SnapshotRepository.SaveSnapshot. Any
+//  4. Write one snapshot row via PSM3ReservesRepository.SaveReserves. Any
 //     failed call aborts the whole sweep — no partial rows.
 package psm3
 
@@ -55,7 +55,7 @@ type Config struct {
 type Service struct {
 	config           Config
 	caller           outbound.PSM3Caller
-	repo             outbound.PSM3SnapshotRepository
+	repo             outbound.PSM3ReservesRepository
 	sqsConsumer      outbound.SQSConsumer
 	blockQuerier     entity.BlockQuerier
 	logger           *slog.Logger
@@ -69,7 +69,7 @@ type Service struct {
 func NewService(
 	config Config,
 	caller outbound.PSM3Caller,
-	repo outbound.PSM3SnapshotRepository,
+	repo outbound.PSM3ReservesRepository,
 	sqsConsumer outbound.SQSConsumer,
 	blockQuerier entity.BlockQuerier,
 ) (*Service, error) {
@@ -77,7 +77,7 @@ func NewService(
 		return nil, fmt.Errorf("psm3 caller is required")
 	}
 	if repo == nil {
-		return nil, fmt.Errorf("psm3 snapshot repository is required")
+		return nil, fmt.Errorf("psm3 reserves repository is required")
 	}
 	if sqsConsumer == nil {
 		return nil, fmt.Errorf("sqs consumer is required")
@@ -202,7 +202,7 @@ func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 		return fmt.Errorf("read psm3 state at block %d: %w", event.BlockNumber, err)
 	}
 
-	snap := &entity.PSM3Snapshot{
+	snap := &entity.PSM3Reserves{
 		ChainID:        s.config.ChainID,
 		Address:        s.config.PSM3Address,
 		State:          *state,
@@ -212,11 +212,11 @@ func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 		Source:         "sweep",
 	}
 	if err := snap.Validate(); err != nil {
-		return fmt.Errorf("psm3 snapshot at block %d: %w", event.BlockNumber, err)
+		return fmt.Errorf("psm3 reserves at block %d: %w", event.BlockNumber, err)
 	}
 
-	if err := s.repo.SaveSnapshot(ctx, snap); err != nil {
-		return fmt.Errorf("save psm3 snapshot at block %d: %w", event.BlockNumber, err)
+	if err := s.repo.SaveReserves(ctx, snap); err != nil {
+		return fmt.Errorf("save psm3 reserves at block %d: %w", event.BlockNumber, err)
 	}
 
 	s.logger.Info("psm3 sweep complete",

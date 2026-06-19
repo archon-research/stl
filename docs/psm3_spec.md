@@ -105,7 +105,7 @@ event PocketSet(address indexed oldPocket, address indexed newPocket, uint256 am
 
 ## Notes for This Repo
 
-- Ingested by the **psm3-indexer** (`cmd/workers/psm3-indexer`, service `internal/services/psm3`): per-chain SQS block events → sweep every N blocks → append-only `psm3_snapshot` rows (raw integers + `conversion_rate`). USD math lives in the Python API.
+- Ingested by the **psm3-indexer** (`cmd/workers/psm3-indexer`, service `internal/services/psm3`): per-chain SQS block events → sweep every N blocks → append-only `psm3_reserves` rows (raw integers + `conversion_rate`). USD math lives in the Python API.
 - USD pricing reuses the existing coingecko table (`offchain_token_price`) — `usds`, `susds`, `usd-coin` are already seeded; see [prices_oracles_reference.md](prices_oracles_reference.md).
 - Append-only and pinned-per-block by design (see [data_entities.md](data_entities.md)); an external reference API samples the same fields but is ~10 min stale and not block-pinned.
 

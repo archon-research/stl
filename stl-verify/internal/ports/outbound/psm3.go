@@ -23,8 +23,8 @@ type PSM3Caller interface {
 	ReadState(ctx context.Context, blockNumber *big.Int) (*entity.PSM3State, error)
 }
 
-// PSM3SnapshotRepository persists PSM3 reserve snapshots.
-type PSM3SnapshotRepository interface {
-	// SaveSnapshot appends one snapshot row.
-	SaveSnapshot(ctx context.Context, snap *entity.PSM3Snapshot) error
+// PSM3ReservesRepository persists PSM3 reserve snapshots.
+type PSM3ReservesRepository interface {
+	// SaveReserves appends one snapshot row.
+	SaveReserves(ctx context.Context, snap *entity.PSM3Reserves) error
 }

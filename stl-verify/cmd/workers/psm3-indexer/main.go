@@ -211,12 +211,12 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("psm3 caller: %w", err)
 	}
 
-	// Snapshot repository
+	// Reserves repository
 	txm, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
 		return fmt.Errorf("tx manager: %w", err)
 	}
-	snapshotRepo := postgres.NewPSM3SnapshotRepository(txm, logger, buildReg.BuildID())
+	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID())
 
 	// PSM3 service
 	svc, err := psm3.NewService(
@@ -229,7 +229,7 @@ func run(ctx context.Context, args []string) error {
 			Logger:            logger,
 		},
 		psm3Caller,
-		snapshotRepo,
+		reservesRepo,
 		sqsConsumer,
 		ethClient,
 	)

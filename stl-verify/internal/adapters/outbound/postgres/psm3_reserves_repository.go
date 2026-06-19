@@ -12,37 +12,37 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Compile-time check that PSM3SnapshotRepository implements the port interface.
-var _ outbound.PSM3SnapshotRepository = (*PSM3SnapshotRepository)(nil)
+// Compile-time check that PSM3ReservesRepository implements the port interface.
+var _ outbound.PSM3ReservesRepository = (*PSM3ReservesRepository)(nil)
 
-// PSM3SnapshotRepository persists PSM3 reserve snapshots to Postgres.
+// PSM3ReservesRepository persists PSM3 reserve snapshots to Postgres.
 // processing_version is assigned by a DB trigger; build_id is supplied at
 // construction and passed into every INSERT for idempotent replay.
-type PSM3SnapshotRepository struct {
+type PSM3ReservesRepository struct {
 	txm     *TxManager
 	logger  *slog.Logger
 	buildID buildregistry.BuildID
 }
 
-// NewPSM3SnapshotRepository creates a new PSM3SnapshotRepository.
-func NewPSM3SnapshotRepository(txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *PSM3SnapshotRepository {
+// NewPSM3ReservesRepository creates a new PSM3ReservesRepository.
+func NewPSM3ReservesRepository(txm *TxManager, logger *slog.Logger, buildID buildregistry.BuildID) *PSM3ReservesRepository {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &PSM3SnapshotRepository{
+	return &PSM3ReservesRepository{
 		txm:     txm,
-		logger:  logger.With("component", "psm3-snapshot-repo"),
+		logger:  logger.With("component", "psm3-reserves-repo"),
 		buildID: buildID,
 	}
 }
 
-// SaveSnapshot appends one snapshot row. Raw balances are stored as NUMERIC
+// SaveReserves appends one snapshot row. Raw balances are stored as NUMERIC
 // via big.Int's decimal string representation. Duplicate snapshots (same
 // natural key) are silently skipped via ON CONFLICT DO NOTHING.
-func (r *PSM3SnapshotRepository) SaveSnapshot(ctx context.Context, snap *entity.PSM3Snapshot) error {
+func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.PSM3Reserves) error {
 	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
-			INSERT INTO psm3_snapshot (
+			INSERT INTO psm3_reserves (
 				chain_id, address,
 				usds_balance, susds_balance, usdc_balance,
 				total_assets, conversion_rate,
@@ -67,10 +67,10 @@ func (r *PSM3SnapshotRepository) SaveSnapshot(ctx context.Context, snap *entity.
 			int(r.buildID),
 		)
 		if err != nil {
-			return fmt.Errorf("insert psm3 snapshot (chain=%d block=%d): %w", snap.ChainID, snap.BlockNumber, err)
+			return fmt.Errorf("insert psm3 reserves (chain=%d block=%d): %w", snap.ChainID, snap.BlockNumber, err)
 		}
 
-		r.logger.Debug("psm3 snapshot saved", "chain", snap.ChainID, "block", snap.BlockNumber)
+		r.logger.Debug("psm3 reserves saved", "chain", snap.ChainID, "block", snap.BlockNumber)
 		return nil
 	})
 }

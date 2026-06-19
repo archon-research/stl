@@ -330,7 +330,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_snapshot`).Scan(&count)
+		err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_reserves`).Scan(&count)
 		if err == nil && count >= 1 {
 			break
 		}
@@ -350,7 +350,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	err := pool.QueryRow(ctx, `
 		SELECT address, usds_balance::text, susds_balance::text, usdc_balance::text,
 		       total_assets::text, conversion_rate::text, block_number, block_version, source
-		FROM psm3_snapshot ORDER BY block_number LIMIT 1
+		FROM psm3_reserves ORDER BY block_number LIMIT 1
 	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate, &blockNumber, &blockVer, &source)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
@@ -432,14 +432,14 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	deadline := time.After(15 * time.Second)
 	for {
 		var count int
-		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT block_number) FROM psm3_snapshot`).Scan(&count)
+		err := pool.QueryRow(ctx, `SELECT COUNT(DISTINCT block_number) FROM psm3_reserves`).Scan(&count)
 		if err == nil && count >= wantRows {
 			break
 		}
 		select {
 		case <-deadline:
 			var got int
-			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_snapshot`).Scan(&got); err != nil {
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_reserves`).Scan(&got); err != nil {
 				t.Fatalf("timed out and failed to query count: %v", err)
 			}
 			t.Fatalf("timed out: want %d rows, have %d", wantRows, got)
@@ -450,7 +450,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	// Events are processed in order, so once the last distinct block landed
 	// the earlier duplicate has been handled too — it must not add a row.
 	var total int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_snapshot`).Scan(&total); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM psm3_reserves`).Scan(&total); err != nil {
 		t.Fatalf("query total rows: %v", err)
 	}
 	if total != wantRows {
