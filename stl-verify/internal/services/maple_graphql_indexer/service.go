@@ -1,7 +1,8 @@
 // Package maple_graphql_indexer orchestrates one Maple GraphQL snapshot
-// cycle: pools, active loans (+collateral), Sky strategies, and Syrup
-// globals are fetched from the Maple API and persisted into the maple_*
-// tables, all stamped with a single synced_at timestamp.
+// cycle: pools, active open-term loans (+collateral), live fixed-term loans,
+// Sky strategies, and Syrup globals are fetched from the Maple API and
+// persisted into the maple_* tables, all stamped with a single synced_at
+// timestamp.
 package maple_graphql_indexer
 
 import (
@@ -132,7 +133,7 @@ func (s *Service) SyncAt(ctx context.Context, syncedAt time.Time) error {
 	return err
 }
 
-// runPhases runs the four sync phases in order, joining their errors. A
+// runPhases runs the five sync phases in order, joining their errors. A
 // context cancelled during a phase aborts the cycle there: later phases
 // would only fail against the dead context, adding error-metric noise for
 // every routine shutdown.
@@ -426,7 +427,7 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 		}
 	}
 
-	borrowers := distinctBorrowers(loans)
+	borrowers := distinctAddresses(loans, func(l outbound.MapleActiveLoan) common.Address { return l.Borrower })
 
 	collateralCount := 0
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
@@ -539,19 +540,20 @@ func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[common.Add
 	return states, collaterals, nil
 }
 
-// distinctBorrowers extracts the unique borrower addresses, preserving first
-// appearance order.
-func distinctBorrowers(loans []outbound.MapleActiveLoan) []common.Address {
-	seen := make(map[common.Address]struct{}, len(loans))
-	borrowers := make([]common.Address, 0, len(loans))
-	for _, l := range loans {
-		if _, ok := seen[l.Borrower]; ok {
+// distinctAddresses returns the unique addresses produced by key over items,
+// preserving first-appearance order.
+func distinctAddresses[T any](items []T, key func(T) common.Address) []common.Address {
+	seen := make(map[common.Address]struct{}, len(items))
+	out := make([]common.Address, 0, len(items))
+	for _, it := range items {
+		addr := key(it)
+		if _, ok := seen[addr]; ok {
 			continue
 		}
-		seen[l.Borrower] = struct{}{}
-		borrowers = append(borrowers, l.Borrower)
+		seen[addr] = struct{}{}
+		out = append(out, addr)
 	}
-	return borrowers
+	return out
 }
 
 // toEntityLoanMeta maps the client DTO meta to the entity meta.
@@ -612,7 +614,7 @@ func (s *Service) syncFixedTermLoans(ctx context.Context, syncedAt time.Time, po
 	if err != nil {
 		return err
 	}
-	borrowers := distinctFTLBorrowers(loans)
+	borrowers := distinctAddresses(loans, func(l outbound.MapleFixedTermLoan) common.Address { return l.Borrower })
 
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		assetTokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, assets)
@@ -674,9 +676,16 @@ func (s *Service) buildFTLLoanEntities(loans []outbound.MapleFixedTermLoan, pool
 		if !ok {
 			return nil, fmt.Errorf("fixed-term loan %s: funds token %s missing from upsert result", lowerHex(l.LoanID), lowerHex(l.Funds.Address))
 		}
+		// poolIDs membership is also checked up front in syncFixedTermLoans;
+		// resolve with the ok guard here too so a future refactor can never
+		// silently write maple_pool_id = 0.
+		poolID, ok := poolIDs[l.PoolAddress]
+		if !ok {
+			return nil, fmt.Errorf("fixed-term loan %s references unknown pool %s", lowerHex(l.LoanID), lowerHex(l.PoolAddress))
+		}
 		loanEntity, err := maple.NewFTLLoan(
 			s.config.ChainID, protocolID, l.LoanID.Bytes(),
-			poolIDs[l.PoolAddress], borrowerUserID, collateralTokenID, fundsTokenID,
+			poolID, borrowerUserID, collateralTokenID, fundsTokenID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("fixed-term loan %s: %w", lowerHex(l.LoanID), err)
@@ -771,21 +780,6 @@ func distinctFTLAssetTokens(chainID int64, loans []outbound.MapleFixedTermLoan) 
 		}
 	}
 	return assets, nil
-}
-
-// distinctFTLBorrowers extracts the unique borrower addresses, preserving first
-// appearance order.
-func distinctFTLBorrowers(loans []outbound.MapleFixedTermLoan) []common.Address {
-	seen := make(map[common.Address]struct{}, len(loans))
-	borrowers := make([]common.Address, 0, len(loans))
-	for _, l := range loans {
-		if _, ok := seen[l.Borrower]; ok {
-			continue
-		}
-		seen[l.Borrower] = struct{}{}
-		borrowers = append(borrowers, l.Borrower)
-	}
-	return borrowers
 }
 
 // ---------------------------------------------------------------------------

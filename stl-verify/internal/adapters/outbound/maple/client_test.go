@@ -878,6 +878,7 @@ func TestGetActiveFixedTermLoans_MalformedValuesFailHard(t *testing.T) {
 		{name: "malformed interestRate", overrides: map[string]string{"interestRate": `"abc"`}, wantField: "interestRate"},
 		{name: "malformed termDays", overrides: map[string]string{"termDays": `"x"`}, wantField: "termDays"},
 		{name: "malformed maturityDate", overrides: map[string]string{"maturityDate": `"later"`}, wantField: "maturityDate"},
+		{name: "negative maturityDate", overrides: map[string]string{"maturityDate": `"-5"`}, wantField: "maturityDate"},
 		{name: "zero collateral decimals", overrides: map[string]string{"colDecimals": "0"}, wantField: "collateralAsset.decimals"},
 		{name: "null funds decimals", overrides: map[string]string{"fundsDecimals": "null"}, wantField: "liquidityAsset.decimals"},
 		{name: "bad collateral address", overrides: map[string]string{"colAddr": `"garbage"`}, wantField: "collateralAsset.id"},

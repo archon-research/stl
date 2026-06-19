@@ -793,11 +793,11 @@ func parseFixedTermLoan(w ftlLoanWire) (outbound.MapleFixedTermLoan, error) {
 	if err != nil {
 		return outbound.MapleFixedTermLoan{}, err
 	}
-	maturityDate, err := parseInt64(w.MaturityDate, "maturityDate", w.ID)
+	maturityDate, err := parseEpochSeconds(w.MaturityDate, "maturityDate", w.ID)
 	if err != nil {
 		return outbound.MapleFixedTermLoan{}, err
 	}
-	nextPaymentDue, err := parseInt64(w.NextPaymentDue, "nextPaymentDue", w.ID)
+	nextPaymentDue, err := parseEpochSeconds(w.NextPaymentDue, "nextPaymentDue", w.ID)
 	if err != nil {
 		return outbound.MapleFixedTermLoan{}, err
 	}
@@ -943,13 +943,27 @@ func parseOptionalBigInt(s *string, field, id string) (*big.Int, error) {
 }
 
 // parseInt64 parses a string-encoded integer the API returns for counts
-// (paymentsRemaining, termDays, ...) and epoch-second timestamps
-// (maturityDate, nextPaymentDue). These are BigInt! on the wire but fit int64;
-// a value that overflows int64 fails the whole call rather than wrapping.
+// (paymentsRemaining, termDays, ...). These are BigInt! on the wire but fit
+// int64; a value that overflows int64 fails the whole call rather than wrapping.
 func parseInt64(s, field, id string) (int64, error) {
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("parsing %s for %s: invalid integer string %q: %w", field, id, s, err)
+	}
+	return n, nil
+}
+
+// parseEpochSeconds parses a string-encoded epoch-second timestamp
+// (maturityDate, nextPaymentDue), where 0 means "none". A negative value is an
+// upstream bug (it would otherwise persist a pre-1970 timestamp), so it fails
+// the whole call rather than being silently stored.
+func parseEpochSeconds(s, field, id string) (int64, error) {
+	n, err := parseInt64(s, field, id)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("parsing %s for %s: negative epoch seconds %d", field, id, n)
 	}
 	return n, nil
 }
