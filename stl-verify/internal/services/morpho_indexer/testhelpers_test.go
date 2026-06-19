@@ -62,7 +62,7 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 
 	// Set up sequential token IDs for GetOrCreateToken.
 	var tokenCounter int64
-	tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ int64) (int64, error) {
+	tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ *int64) (int64, error) {
 		tokenCounter++
 		return tokenCounter, nil
 	}

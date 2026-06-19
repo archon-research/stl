@@ -51,20 +51,6 @@ func toNullableNumeric(raw *big.Int, decimals int) pgtype.Numeric {
 	return pgtype.Numeric{Int: new(big.Int).Set(raw), Exp: int32(-decimals), Valid: true}
 }
 
-// collectBatchIDs sends a batch of single-row `RETURNING id` upserts and
-// collects the ids keyed per row. The batch must be queued in the same order
-// as rows. kind names the entity in error messages.
-func collectBatchIDs[T any, K comparable](ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows []T, kind string, key func(T) K) (map[K]int64, error) {
-	return collectBatchRows(ctx, tx, batch, rows, kind, func(row pgx.Row, item T) (K, int64, error) {
-		var id int64
-		if err := row.Scan(&id); err != nil {
-			var zero K
-			return zero, 0, fmt.Errorf("upserting %s %v: %w", kind, key(item), err)
-		}
-		return key(item), id, nil
-	})
-}
-
 // collectBatchRows sends a batch of single-row upserts and collects
 // (key, id) per row via scan, which may also reject a row with an error.
 // The batch must be queued in the same order as rows; kind names the entity
@@ -159,6 +145,23 @@ func sortedCopy[T any](items []T, cmpFn func(a, b T) int) []T {
 // sortedByBytesKey returns a copy of items sorted by a bytes key.
 func sortedByBytesKey[T any](items []T, key func(T) []byte) []T {
 	return sortedCopy(items, func(a, b T) int { return bytes.Compare(key(a), key(b)) })
+}
+
+// requireSingleChain errors if items span more than one chain ID. The batch
+// upserts dedupe by address alone and key their result by address, so a batch
+// mixing chains would silently drop the colliding address; kind names the
+// entity in the error.
+func requireSingleChain[T any](items []T, chainID func(T) int64, kind string) error {
+	if len(items) == 0 {
+		return nil
+	}
+	want := chainID(items[0])
+	for _, item := range items[1:] {
+		if got := chainID(item); got != want {
+			return fmt.Errorf("upserting %s: mixed chain IDs in one batch are not supported (%d and %d)", kind, want, got)
+		}
+	}
+	return nil
 }
 
 // writeValuesPlaceholders appends "($n, $n+1, ...)" for row i with the given
