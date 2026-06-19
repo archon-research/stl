@@ -31,7 +31,8 @@ type ProtocolDescriptor struct {
 // ProtocolIDResolver resolves a worker's protocol_id once and caches it for the
 // process lifetime. The first caller creates/loads the row under a mutex; the
 // atomic fast-path then serves every subsequent call without locking. A worker
-// handles a single chain, so one cached id is correct.
+// handles a single chain, so one cached id is correct — Resolve enforces this by
+// rejecting a call for a different chain than the one it first resolved.
 //
 // Correctness depends on the descriptor naming a pre-seeded, committed row (see
 // ProtocolDescriptor): Resolve caches the id while still inside the caller's
@@ -44,8 +45,9 @@ type ProtocolIDResolver struct {
 	repo outbound.ProtocolRepository
 	desc ProtocolDescriptor
 
-	id atomic.Int64
-	mu sync.Mutex
+	id      atomic.Int64
+	chainID atomic.Int64
+	mu      sync.Mutex
 }
 
 func NewProtocolIDResolver(repo outbound.ProtocolRepository, desc ProtocolDescriptor) *ProtocolIDResolver {
@@ -53,21 +55,33 @@ func NewProtocolIDResolver(repo outbound.ProtocolRepository, desc ProtocolDescri
 }
 
 // Resolve returns the cached protocol_id, loading it via GetOrCreateProtocol
-// within tx on first use.
+// within tx on first use. It rejects a chainID different from the one it first
+// resolved: the cached id belongs to a single chain, and persisting events under
+// a mismatched protocol_id would be silent cross-chain data corruption.
 func (r *ProtocolIDResolver) Resolve(ctx context.Context, tx pgx.Tx, chainID int64) (int64, error) {
 	if id := r.id.Load(); id != 0 {
-		return id, nil
+		return r.cachedFor(chainID, id)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if id := r.id.Load(); id != 0 {
-		return id, nil
+		return r.cachedFor(chainID, id)
 	}
 	id, err := r.repo.GetOrCreateProtocol(ctx, tx, chainID, r.desc.Address, r.desc.Name, r.desc.ProtocolType, r.desc.DeployBlock)
 	if err != nil {
 		return 0, fmt.Errorf("getting %s protocol_id: %w", r.desc.Name, err)
 	}
+	// Store chainID before id so any reader that sees a non-zero id also sees the
+	// chain it was resolved for.
+	r.chainID.Store(chainID)
 	r.id.Store(id)
+	return id, nil
+}
+
+func (r *ProtocolIDResolver) cachedFor(chainID, id int64) (int64, error) {
+	if stored := r.chainID.Load(); stored != chainID {
+		return 0, fmt.Errorf("%s resolver bound to chain %d but called for chain %d", r.desc.Name, stored, chainID)
+	}
 	return id, nil
 }
 
@@ -121,5 +135,8 @@ func (w *ProtocolEventWriter) Save(ctx context.Context, tx pgx.Tx, in ProtocolEv
 	if err != nil {
 		return fmt.Errorf("building protocol_event: %w", err)
 	}
-	return w.eventRepo.SaveEvent(ctx, tx, evt)
+	if err := w.eventRepo.SaveEvent(ctx, tx, evt); err != nil {
+		return fmt.Errorf("saving protocol_event: %w", err)
+	}
+	return nil
 }

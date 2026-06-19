@@ -99,7 +99,7 @@ func UnpackUint(a *abi.ABI, method string, r outbound.Result) (*big.Int, error) 
 	}
 	unpacked, err := a.Unpack(method, r.ReturnData)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unpacking %s: %w", method, err)
 	}
 	if len(unpacked) == 0 {
 		return nil, fmt.Errorf("%s returned no values", method)
@@ -128,9 +128,12 @@ func BigIntCopy(b *big.Int) *big.Int {
 }
 
 // BigIntToTimePtr converts a Unix-seconds big.Int to a *time.Time in UTC,
-// returning nil for a nil or zero value (the on-chain "unset" sentinel).
+// returning nil for a nil or zero value (the on-chain "unset" sentinel), or for
+// a value outside int64 range — that is not a real timestamp (it would be year
+// >2.9e11), and returning nil avoids Int64() silently truncating it to a
+// plausible-looking wrong date.
 func BigIntToTimePtr(b *big.Int) *time.Time {
-	if b == nil || b.Sign() == 0 {
+	if b == nil || b.Sign() == 0 || !b.IsInt64() {
 		return nil
 	}
 	t := time.Unix(b.Int64(), 0).UTC()

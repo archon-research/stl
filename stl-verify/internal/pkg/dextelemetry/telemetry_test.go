@@ -18,8 +18,12 @@ import (
 func TestRecordBlockProcessed_AttachesChainLabel(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
 
 	tel, err := NewTelemetry("curve", 8453) // base
 	if err != nil {
@@ -80,8 +84,12 @@ func readChainAttr(t *testing.T, rm *metricdata.ResourceMetrics, name string) st
 func TestRecordBlockProcessed_EmitsDurationHistogram(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
 
 	tel, err := NewTelemetry("curve", 1)
 	if err != nil {
@@ -149,8 +157,12 @@ func TestNewTelemetry_RejectsNonPositiveChainID(t *testing.T) {
 func TestRecordBlockProcessed_LabelsStatusByError(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
 
 	tel, err := NewTelemetry("curve", 1)
 	if err != nil {
@@ -179,8 +191,12 @@ func TestRecordBlockProcessed_LabelsStatusByError(t *testing.T) {
 func TestRecordError_NoOpOnNilError(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
 
 	tel, err := NewTelemetry("balancer", 1)
 	if err != nil {

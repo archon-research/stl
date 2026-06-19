@@ -106,6 +106,26 @@ func TestProtocolIDResolver_PropagatesRepoError(t *testing.T) {
 	}
 }
 
+func TestProtocolIDResolver_RejectsDifferentChain(t *testing.T) {
+	repo := &fakeProtocolRepo{id: 7}
+	r := NewProtocolIDResolver(repo, curveDescriptor())
+
+	if _, err := r.Resolve(context.Background(), nil, 1); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+
+	_, err := r.Resolve(context.Background(), nil, 2)
+	if err == nil {
+		t.Fatal("expected error resolving for a different chain than first cached")
+	}
+	if !strings.Contains(err.Error(), "chain") {
+		t.Errorf("error %q should describe the chain mismatch", err)
+	}
+	if calls := repo.calls.Load(); calls != 1 {
+		t.Errorf("GetOrCreateProtocol called %d times, want 1 (must not re-resolve for the wrong chain)", calls)
+	}
+}
+
 func TestProtocolIDResolver_ResolvesOnceUnderConcurrency(t *testing.T) {
 	repo := &fakeProtocolRepo{id: 42}
 	r := NewProtocolIDResolver(repo, curveDescriptor())

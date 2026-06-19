@@ -194,6 +194,23 @@ func TestParseConfig_RejectsMalformedTimingEnvVars(t *testing.T) {
 	}
 }
 
+func TestParseConfig_ExplicitTimingFlagsBeatEnv(t *testing.T) {
+	vars := happyEnv()
+	vars["SQS_WAIT_TIME"] = "10"
+	vars["SQS_VISIBILITY_TIMEOUT"] = "200"
+	envSet(t, vars)
+	cfg, err := ParseConfig("test", []string{"-wait", "5", "-visibility-timeout", "120"})
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.WaitTime != 5 {
+		t.Errorf("WaitTime = %d, want 5 (explicit flag must beat env)", cfg.WaitTime)
+	}
+	if cfg.VisibilityTimeout != 120 {
+		t.Errorf("VisibilityTimeout = %d, want 120 (explicit flag must beat env)", cfg.VisibilityTimeout)
+	}
+}
+
 func TestParseConfig_FlagOverridesEnvVar(t *testing.T) {
 	vars := happyEnv()
 	vars["AWS_SQS_QUEUE_URL"] = "env-queue"

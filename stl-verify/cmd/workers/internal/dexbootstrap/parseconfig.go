@@ -54,6 +54,12 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("parsing %s flags: %w", flagSetName, err)
 	}
 
+	// Track which timing flags were explicitly passed so the env vars below act
+	// only as a fallback (matching queue/db/redis) and never override an
+	// explicit flag.
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
 	cfg := Config{
 		QueueURL:          *queueURL,
 		RedisAddr:         *redisAddr,
@@ -91,19 +97,23 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
-		v, err := strconv.Atoi(waitTimeStr)
-		if err != nil {
-			return Config{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+	if !explicit["wait"] {
+		if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+			v, err := strconv.Atoi(waitTimeStr)
+			if err != nil {
+				return Config{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+			}
+			cfg.WaitTime = v
 		}
-		cfg.WaitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
-		v, err := strconv.Atoi(visTimeStr)
-		if err != nil {
-			return Config{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+	if !explicit["visibility-timeout"] {
+		if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+			v, err := strconv.Atoi(visTimeStr)
+			if err != nil {
+				return Config{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+			}
+			cfg.VisibilityTimeout = v
 		}
-		cfg.VisibilityTimeout = v
 	}
 
 	// Range-validate the SQS timings (from flag OR env). AWS rejects these at

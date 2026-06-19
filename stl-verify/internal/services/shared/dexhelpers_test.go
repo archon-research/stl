@@ -51,9 +51,13 @@ func TestUnpackUint(t *testing.T) {
 		}
 	})
 
-	t.Run("undecodable payload errors", func(t *testing.T) {
-		if _, err := UnpackUint(a, "v", outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02}}); err == nil {
+	t.Run("undecodable payload errors with method context", func(t *testing.T) {
+		_, err := UnpackUint(a, "v", outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02}})
+		if err == nil {
 			t.Fatal("expected decode error on truncated payload")
+		}
+		if !strings.Contains(err.Error(), "unpacking v") {
+			t.Errorf("error %q should name the method so multicall decode failures are triageable", err)
 		}
 	})
 
@@ -105,6 +109,9 @@ func TestBigIntToTimePtr(t *testing.T) {
 	}
 	if BigIntToTimePtr(big.NewInt(0)) != nil {
 		t.Error("zero (unset sentinel) should map to nil time")
+	}
+	if got := BigIntToTimePtr(new(big.Int).Lsh(big.NewInt(1), 64)); got != nil {
+		t.Errorf("out-of-int64-range value should map to nil (not a truncated date), got %v", got)
 	}
 	got := BigIntToTimePtr(big.NewInt(1_700_000_000))
 	if got == nil {

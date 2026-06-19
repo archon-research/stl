@@ -188,8 +188,12 @@ func TestBlockProcessor_StopsOnContextCancellation(t *testing.T) {
 func TestBlockProcessor_RecordsTelemetryByStatus(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
 	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
 
 	tel, err := dextelemetry.NewTelemetry("curve", 1)
 	if err != nil {
