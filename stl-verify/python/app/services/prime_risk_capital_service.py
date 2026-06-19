@@ -11,6 +11,7 @@ The result is model-derived and partial by design (see
 ``app/domain/entities/prime_risk_capital.py``).
 """
 
+import asyncio
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from app.domain.entities.allocation import EthAddress
@@ -34,19 +35,42 @@ class PrimeRiskCapitalService:
         return await self._repository.prime_exists(prime_id)
 
     async def compute(self, prime_id: EthAddress) -> PrimeRiskCapital:
-        positions = await self._repository.list_receipt_token_positions(prime_id)
-        total_rc = await self._repository.get_latest_total_capital_usd(prime_id)
+        positions, total_rc = await asyncio.gather(
+            self._repository.list_receipt_token_positions(prime_id),
+            self._repository.get_latest_total_capital_usd(prime_id),
+        )
+
+        # A zero-balance position contributes no required risk capital, so skip
+        # its model compute entirely (each compute is several DB round trips).
+        models = [
+            self._default_model_for(position.receipt_token_id, prime_id)
+            if (position.amount_usd or Decimal("0")) > 0
+            else None
+            for position in positions
+        ]
+
+        # Run the per-allocation model computes concurrently: each is an
+        # independent DB round trip (~seconds), so a sequential loop made the
+        # endpoint scale linearly with the position count (tens of seconds).
+        results = iter(
+            await asyncio.gather(
+                *(
+                    model.compute(position.receipt_token_id, prime_id, {})
+                    for position, model in zip(positions, models)
+                    if model is not None
+                )
+            )
+        )
 
         exposure = Decimal("0")
         modeled_exposure = Decimal("0")
         required = Decimal("0")
         per_allocation: list[AllocationRiskCapital] = []
 
-        for position in positions:
+        for position, model in zip(positions, models):
             position_exposure = position.amount_usd or Decimal("0")
             exposure += position_exposure
 
-            model = self._default_model_for(position.receipt_token_id, prime_id)
             if model is None:
                 per_allocation.append(
                     AllocationRiskCapital(
@@ -62,7 +86,7 @@ class PrimeRiskCapitalService:
                 )
                 continue
 
-            result = await model.compute(position.receipt_token_id, prime_id, {})
+            result = next(results)
             required += result.rrc_usd
             modeled_exposure += position_exposure
             per_allocation.append(

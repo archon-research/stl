@@ -100,6 +100,32 @@ async def test_compute_empty_positions_yields_zeroes_and_null_ratios():
 
 
 @pytest.mark.asyncio
+async def test_compute_skips_zero_exposure_positions():
+    # Asset 1 has zero balance: the model applies, but we must not run a compute
+    # for it (it contributes nothing) and it is reported as not modeled.
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aEthUSDT", amount_usd=Decimal("0")),
+        make_receipt_token_position(receipt_token_id=2, symbol="spUSDT", amount_usd=Decimal("600")),
+    ]
+    boom = _FakeModel("gap_sweep", {1, 2}, rrc=Decimal("30"), crr=Decimal("5"))
+
+    async def _fail_on_zero(asset_id, prime_id, overrides):
+        assert asset_id != 1, "must not compute a zero-exposure position"
+        return SimpleNamespace(rrc_usd=Decimal("30"), comparable_crr_pct=Decimal("5"), risk_model="gap_sweep")
+
+    boom.compute = _fail_on_zero  # type: ignore[method-assign]
+    service = PrimeRiskCapitalService(_repo(positions, Decimal("100")), _FakeRegistry([boom]))
+
+    result = await service.compute(_PRIME)
+
+    by_id = {a.receipt_token_id: a for a in result.per_allocation}
+    assert by_id[1].applied is False
+    assert by_id[2].applied is True
+    assert result.required_risk_capital_usd == Decimal("30")
+    assert result.modeled_exposure_usd == Decimal("600")
+
+
+@pytest.mark.asyncio
 async def test_compute_ignores_non_default_models():
     positions = [make_receipt_token_position(receipt_token_id=1, symbol="spUSDT", amount_usd=Decimal("600"))]
     # Only a non-default model applies; the default (gap_sweep) does not.
