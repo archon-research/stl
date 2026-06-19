@@ -57,6 +57,15 @@ func (r *TokenTotalSupplyRepository) SaveSupplies(
 		return nil
 	}
 
+	// Validate before the token upsert so an invalid created_at_block (e.g. 0,
+	// which would clobber the registry block via LEAST) fails with a legible
+	// domain error rather than a raw CHECK-constraint violation.
+	for i, s := range supplies {
+		if err := s.Validate(); err != nil {
+			return fmt.Errorf("supply %d: %w", i, err)
+		}
+	}
+
 	// Keep token upserts and trigger advisory-lock acquisition in a stable order
 	// across concurrent transactions to avoid deadlocks on overlapping batches.
 	sortedSupplies := sortSuppliesByNaturalKey(supplies)
@@ -163,7 +172,7 @@ func (r *TokenTotalSupplyRepository) resolveTokenIDs(
 			s.TokenAddress,
 			s.TokenSymbol,
 			s.TokenDecimals,
-			s.CreatedAtBlock,
+			&s.CreatedAtBlock,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(
