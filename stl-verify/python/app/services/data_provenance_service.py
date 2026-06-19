@@ -73,9 +73,21 @@ class DataProvenanceService:
                 role="Multi-chain token oracle prices and confidence intervals",
             ),
             DataSource(
+                name="Self-computed Risk Capital (gap_sweep)",
+                host="onchain + model",
+                access_model=SourceAccessModel.OPEN,
+                role=(
+                    "Required and Total Risk Capital and encumbrance shown on the dashboard, "
+                    "computed from on-chain allocations (gap_sweep stress) and the on-chain "
+                    "SubProxy treasury"
+                ),
+                caveat="Model-derived and partial; covers on-chain lending positions only.",
+            ),
+            DataSource(
                 name="Star Agents Risk Capital & Requirements Monitor",
                 host="https://info.skyeco.com/required-risk-capital",
                 access_model=SourceAccessModel.PUBLIC,
-                role="Risk capital requirements and monitor metrics by star",
+                role="Risk capital requirements and monitor metrics by star (reference/parity)",
+                caveat="Kept for parity checks; no longer the source of the dashboard's risk-capital figures.",
             ),
         ]
