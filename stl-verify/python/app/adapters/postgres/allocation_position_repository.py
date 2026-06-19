@@ -4,7 +4,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import text
+from opentelemetry import trace
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres._time_window import (
@@ -21,8 +22,16 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
-from app.domain.entities.time_series_bucket import AllocationActivityBucket
-from app.domain.proxy_kind import ProxyKind, classify_proxy
+from app.domain.entities.time_series_bucket import (
+    AllocationActivityBucket,
+    ExposureBucket,
+    TotalCapitalBucket,
+)
+from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
+
+# USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
+# total capital; this isolates that token from any other SubProxy holding.
+_USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 
 logger = logging.getLogger(__name__)
 
@@ -254,17 +263,24 @@ class AllocationRepository:
                     _DIRECT_ASSET_HOLDINGS_SQL,
                     {"proxy_hex": prime_id.hex},
                 )
-                return [
+                holdings = [
                     DirectAssetHolding(
                         chain_id=row.chain_id,
                         token_id=row.token_id,
                         token_address="0x" + row.token_address,
                         symbol=row.symbol,
                         balance=_safe_decimal(row.balance, "balance", row.token_id),
+                        amount_usd=(
+                            _safe_decimal(row.amount_usd, "amount_usd", row.token_id)
+                            if row.amount_usd is not None
+                            else None
+                        ),
                         latest_activity_at=row.latest_activity_at,
                     )
                     for row in result
                 ]
+            self._record_unpriced_holdings(prime_id, holdings)
+            return holdings
         except asyncio.CancelledError:
             raise
         except ValueError:
@@ -280,6 +296,55 @@ class AllocationRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching direct asset holdings: {exc}") from exc
+
+    @staticmethod
+    def _record_unpriced_holdings(prime_id: EthAddress, holdings: list[DirectAssetHolding]) -> None:
+        """Surface direct holdings that resolved to no oracle price.
+
+        A null ``amount_usd`` is legitimate for assets with no oracle feed (LP/
+        curve shares), but it is indistinguishable at the row level from a
+        coverage regression — a token that should price but silently stopped
+        (oracle disabled, reorg, backfill gap). Recording the unpriced count as
+        a span attribute lets that be alerted on in the tracing backend instead
+        of being discovered by a user noticing a missing USD value.
+        """
+        unpriced = [h for h in holdings if h.amount_usd is None]
+        if not unpriced:
+            return
+        trace.get_current_span().set_attribute("allocations.direct_holdings.unpriced", len(unpriced))
+        logger.debug(
+            "Direct asset holdings without an oracle price",
+            extra={
+                "prime_id": str(prime_id),
+                "unpriced_count": len(unpriced),
+                "total_count": len(holdings),
+                "unpriced_symbols": [h.symbol for h in unpriced],
+            },
+        )
+
+    @staticmethod
+    def _record_empty_total_capital(prime_address: EthAddress, buckets: list[TotalCapitalBucket]) -> None:
+        """Surface a total-capital series that gapfilled to all-``None``.
+
+        A prime passes the ``prime_exists`` check on its ALM ``proxy_address``,
+        but total capital is read from a *different* row set — the SubProxy
+        treasury USDS scoped by ``_USDS_ADDRESS_HEX``. If that set is empty (no
+        SubProxy configured for the prime, treasury not yet indexed, or the USDS
+        address drifting out of the ``token`` registry) the gapfill still returns
+        a full window of buckets, every one ``None``. That is a valid 200 for a
+        brand-new prime but is indistinguishable from a coverage regression, so
+        record it for alerting rather than letting it surface as a blank chart.
+        """
+        if not buckets or any(b.total_capital_usd is not None for b in buckets):
+            return
+        trace.get_current_span().set_attribute("allocations.total_capital.all_null", True)
+        logger.warning(
+            "Total capital series is entirely empty for a known prime",
+            extra={
+                "prime_address": str(prime_address),
+                "bucket_count": len(buckets),
+            },
+        )
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
         """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
@@ -466,6 +531,260 @@ class AllocationRepository:
                 bucket_start=row.bucket_start,
                 event_count=row.event_count,
                 total_tx_amount=_safe_decimal(row.total_tx_amount, "total_tx_amount", "aggregate"),
+                net_flow_usd=_safe_decimal(row.net_flow_usd, "net_flow_usd", "aggregate"),
+            )
+            for row in rows
+        ]
+
+    async def list_total_capital_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[TotalCapitalBucket]:
+        """Return the last observed treasury USDS balance per time bucket (LOCF).
+
+        A prime's total capital is the USDS held in its SubProxy wallet, which
+        shares the prime's ``prime_id`` but a distinct ``proxy_address``. The
+        prime is identified by its ALM ``proxy_address``; the matching SubProxy
+        is the one sharing that ``prime_id``. USDS is dollar-pegged, so the raw
+        balance is the USD figure. Buckets with no observation carry the prior
+        value forward; leading buckets before the first observation are ``None``.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text(
+            """
+            WITH target AS (
+                SELECT prime_id
+                FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+            SELECT
+                time_bucket_gapfill(
+                    make_interval(secs => :bucket_seconds),
+                    ap.created_at,
+                    CAST(:from_timestamp AS TIMESTAMPTZ),
+                    CAST(:to_timestamp AS TIMESTAMPTZ)
+                ) AS bucket_start,
+                locf(last(ap.balance, ap.created_at)) AS total_capital_usd
+            FROM allocation_position ap
+            JOIN token t ON t.id = ap.token_id
+            WHERE ap.prime_id = (SELECT prime_id FROM target)
+              AND ap.proxy_address IN :subproxy_addrs
+              AND t.address = decode(:usds_hex, 'hex')
+            """
+            + required_time_window_clause("ap.created_at")
+            + """
+            GROUP BY bucket_start
+            ORDER BY bucket_start DESC
+            LIMIT :limit
+            """
+        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+
+        params = {
+            "address_hex": prime_address.hex,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "bucket_seconds": bucket_seconds,
+            "subproxy_addrs": subproxies,
+            "usds_hex": _USDS_ADDRESS_HEX,
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, params)
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch total capital buckets from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching total capital buckets for prime {prime_address}: {exc}"
+            ) from exc
+
+        buckets = [
+            TotalCapitalBucket(
+                bucket_start=row.bucket_start,
+                total_capital_usd=(
+                    _safe_decimal(row.total_capital_usd, "total_capital_usd", "aggregate")
+                    if row.total_capital_usd is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]
+        self._record_empty_total_capital(prime_address, buckets)
+        return buckets
+
+    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
+        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.
+
+        The treasury is the USDS held in the prime's SubProxy wallet (shares the
+        prime's ``prime_id``, distinct ``proxy_address``). USDS is dollar-pegged,
+        so the balance is the USD figure. Returns ``None`` when the prime has no
+        SubProxy treasury position.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text(
+            """
+            SELECT ap.balance
+            FROM allocation_position ap
+            JOIN token t ON t.id = ap.token_id
+            WHERE ap.prime_id = (
+                SELECT prime_id FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+              AND ap.proxy_address IN :subproxy_addrs
+              AND t.address = decode(:usds_hex, 'hex')
+            ORDER BY ap.block_number DESC, ap.block_version DESC,
+                     ap.processing_version DESC, ap.log_index DESC
+            LIMIT 1
+            """
+        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+        params = {
+            "address_hex": prime_address.hex,
+            "subproxy_addrs": subproxies,
+            "usds_hex": _USDS_ADDRESS_HEX,
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(query, params)).fetchone()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch latest total capital from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching latest total capital for prime {prime_address}: {exc}"
+            ) from exc
+
+        if row is None or row.balance is None:
+            return None
+        return _safe_decimal(row.balance, "balance", f"prime_id={prime_address}")
+
+    async def list_exposure_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[ExposureBucket]:
+        """Return priced receipt-token exposure per time bucket (LOCF gap-filled).
+
+        Per bucket and receipt-token position, the last observed balance is
+        carried forward and valued at the *latest* underlying oracle price (via
+        the protocol-bound oracle), then summed across positions. The balance is
+        the historical driver; the price is held at its latest value because
+        ``onchain_token_price`` is change-only, so a bucketed price-LOCF would
+        drop stable assets whose last price change predates the window. This is
+        exact for the dollar-pegged positions that dominate the book; for
+        volatile underlyings (e.g. WETH) historical buckets use the current
+        price (a bounded approximation). Leading buckets before the first
+        balance observation are ``None``. Direct holdings (no receipt token) are
+        excluded, matching the exposure basis of the risk-capital endpoint.
+        """
+        query = text(
+            """
+            WITH balance_buckets AS (
+                SELECT
+                    rt.id AS receipt_token_id,
+                    rt.underlying_token_id,
+                    rt.protocol_id,
+                    time_bucket_gapfill(
+                        make_interval(secs => :bucket_seconds),
+                        ap.created_at,
+                        CAST(:from_timestamp AS TIMESTAMPTZ),
+                        CAST(:to_timestamp AS TIMESTAMPTZ)
+                    ) AS bucket,
+                    locf(last(ap.balance, ap.created_at)) AS balance
+                FROM allocation_position ap
+                JOIN token t ON t.id = ap.token_id
+                JOIN receipt_token rt
+                    ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
+                WHERE ap.proxy_address = decode(:address_hex, 'hex')
+                  AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
+                  AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
+                GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
+            )
+            SELECT
+                b.bucket AS bucket_start,
+                SUM(b.balance * COALESCE(px.price_usd, 0)) AS exposure_usd
+            FROM balance_buckets b
+            LEFT JOIN LATERAL (
+                SELECT otp.price_usd
+                FROM onchain_token_price otp
+                JOIN protocol_oracle po
+                    ON po.oracle_id = otp.oracle_id AND po.protocol_id = b.protocol_id
+                WHERE otp.token_id = b.underlying_token_id
+                ORDER BY otp.block_number DESC, otp.block_version DESC,
+                         otp.processing_version DESC, otp.oracle_id DESC
+                LIMIT 1
+            ) px ON TRUE
+            GROUP BY b.bucket
+            ORDER BY b.bucket DESC
+            LIMIT :limit
+            """
+        )
+        params = {
+            "address_hex": prime_address.hex,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "bucket_seconds": bucket_seconds,
+            "limit": clamp_limit(limit, _ALLOCATION_ACTIVITY_LIMIT),
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, params)
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch exposure buckets from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching exposure buckets for prime {prime_address}: {exc}"
+            ) from exc
+
+        return [
+            ExposureBucket(
+                bucket_start=row.bucket_start,
+                exposure_usd=(
+                    _safe_decimal(row.exposure_usd, "exposure_usd", "aggregate")
+                    if row.exposure_usd is not None
+                    else None
+                ),
             )
             for row in rows
         ]
@@ -530,6 +849,12 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # receipt_token table — i.e. the prime holds the token itself rather than
 # a registered protocol wrapper for it. Receipt-token positions are returned
 # by ``_RECEIPT_TOKEN_POSITIONS_SQL``; this query is the complementary set.
+#
+# Pricing has no protocol context here (the token is held bare), so the latest
+# oracle price for the token across any oracle is used rather than the
+# protocol-bound oracle that ``_RECEIPT_TOKEN_POSITIONS_SQL`` resolves through
+# ``protocol_oracle``. Tokens with no oracle price (e.g. LP/curve shares) yield
+# a null ``amount_usd`` rather than being dropped.
 _DIRECT_ASSET_HOLDINGS_SQL = text("""
     WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
@@ -549,11 +874,22 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         encode(t.address, 'hex') AS token_address,
         t.symbol                 AS symbol,
         lp.balance,
+        (lp.balance * px.price_usd) AS amount_usd,
         lp.latest_activity_at
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
+    LEFT JOIN LATERAL (
+        SELECT otp.price_usd
+        FROM onchain_token_price otp
+        WHERE otp.token_id = lp.token_id
+        -- oracle_id breaks ties when multiple oracles price the same token at the
+        -- same block, keeping the chosen price deterministic across calls.
+        ORDER BY otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
+        LIMIT 1
+    ) px ON TRUE
     WHERE rt.id IS NULL AND lp.balance > 0
     ORDER BY lp.balance DESC
 """)
@@ -679,15 +1015,59 @@ LIMIT :limit
 
 # Aggregated counterpart of _ALLOCATION_ACTIVITY_SQL: same filters, bucketed by
 # time. Reuses the shared window/bucket SQL helpers. Bounds are required so the
-# JOIN/filter set matches the raw query exactly. ``total_tx_amount`` is clamped
-# to ``>= 0`` because outflows are stored as negative ``tx_amount`` values and a
-# bucket dominated by outflows would otherwise violate the non-negativity
-# invariant on ``AllocationActivityBucket`` and surface as a 500.
+# JOIN/filter set matches the raw query exactly. ``tx_amount`` is an unsigned
+# magnitude (direction carries the sign), so ``SUM`` is already ``>= 0``; the
+# ``GREATEST(..., 0)`` clamp on ``total_tx_amount`` is defensive only, guarding
+# the non-negativity invariant on ``AllocationActivityBucket`` against any stray
+# negative row rather than letting it surface as a 500.
+#
+# ``net_flow_usd`` is the SIGNED net flow valued in USD. The sign comes from
+# ``direction`` (tx_amount is a magnitude): inflows add, outflows subtract, and
+# sweeps are internal position moves that net to zero and are excluded. It lets
+# the UI reconstruct a total-allocation balance series by anchoring at the
+# current total and cumulating net flows backwards.
+#
+# Only RECEIPT-TOKEN flows are valued. Directly-held underlying tokens (treasury
+# USDS/USDC/DAI/...) are excluded on purpose: their outflows are recorded mostly
+# as ``sweep`` (excluded above) while their inflows are ``in``, so pricing them
+# yields gross inflow throughput with the offsetting legs dropped — net-positive
+# every bucket and orders of magnitude larger than the true balance change. That
+# made the reconstructed curve ramp up from zero instead of tracking the roughly
+# flat real balance. The anchor still sums BOTH receipt and direct holdings, so
+# the series sits at the full current total and moves only with receipt-token
+# flows; direct-holding moves are not reflected until their in/out/sweep
+# classification is trustworthy. Flows with no receipt-token oracle price
+# contribute 0.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
+WITH receipt_token_price AS (
+    -- Latest underlying oracle price per receipt token, computed ONCE per token
+    -- (a few dozen rows) rather than once per activity event (~100k+). The
+    -- main query then hash-joins this by token address.
+    SELECT
+        rt.chain_id,
+        rt.receipt_token_address,
+        (
+            SELECT otp.price_usd
+            FROM onchain_token_price otp
+            JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+            WHERE po.protocol_id = rt.protocol_id
+              AND otp.token_id = rt.underlying_token_id
+            ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+            LIMIT 1
+        ) AS price_usd
+    FROM receipt_token rt
+)
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
     COUNT(*) AS event_count,
-    GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount
+    GREATEST(COALESCE(SUM(ap.tx_amount), 0), 0) AS total_tx_amount,
+    COALESCE(SUM(
+        CASE ap.direction
+            WHEN 'in' THEN ap.tx_amount
+            WHEN 'out' THEN -ap.tx_amount
+            ELSE 0
+        END * COALESCE(price.price_usd, 0)
+    ), 0) AS net_flow_usd
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
 JOIN token t ON t.id = ap.token_id
@@ -708,6 +1088,9 @@ LEFT JOIN LATERAL (
     ORDER BY match_priority
     LIMIT 1
 ) AS protocol_match ON TRUE
+LEFT JOIN receipt_token_price price
+    ON price.receipt_token_address = t.address
+    AND price.chain_id = ap.chain_id
 WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL

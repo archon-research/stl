@@ -76,6 +76,7 @@ class DirectAssetHolding:
     token_address: str
     symbol: str
     balance: Decimal
+    amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
 
 
