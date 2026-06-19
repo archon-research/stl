@@ -190,7 +190,7 @@ function RiskTable({
       <DataTable
         table={table}
         isLoading={isLoading}
-        getRowKey={(item) => String(item.token_id)}
+        getRowKey={(item) => String(item.token_id ?? item.symbol)}
         skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
         minWidth="76rem"
         renderCell={(children) => (
@@ -354,6 +354,11 @@ export function RiskBreakdownTab({
 
     let weightedThreshold = 0;
     let weightedBonus = 0;
+    // Track whether any item carried liquidation params; protocols without
+    // per-asset params (e.g. Maple) leave these null so the summary shows "—"
+    // rather than a misleading 0%/0x.
+    let thresholdCount = 0;
+    let bonusCount = 0;
     let largestItem = breakdown.items[0] ?? null;
     let largestItemUsd = largestItem
       ? (parseNumericValue(largestItem.amount_usd) ?? 0)
@@ -373,18 +378,24 @@ export function RiskBreakdownTab({
 
       if (liquidationThreshold !== null) {
         weightedThreshold += liquidationThreshold * amountUsd;
+        thresholdCount += 1;
       }
 
       if (liquidationBonus !== null) {
         weightedBonus += liquidationBonus * amountUsd;
+        bonusCount += 1;
       }
     }
 
     return {
       assetCount: breakdown.items.length,
       largestItem,
-      weightedBonus: totalUsd > 0 ? weightedBonus / totalUsd : null,
-      weightedThreshold: totalUsd > 0 ? weightedThreshold / totalUsd : null,
+      weightedBonus:
+        totalUsd > 0 && bonusCount > 0 ? weightedBonus / totalUsd : null,
+      weightedThreshold:
+        totalUsd > 0 && thresholdCount > 0
+          ? weightedThreshold / totalUsd
+          : null,
     };
   }, [breakdown, totalUsd]);
 
