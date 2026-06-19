@@ -61,3 +61,32 @@ func TestIsZeroDecimal(t *testing.T) {
 		}
 	}
 }
+
+func TestCompareDecimal(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"100", "100", 0},
+		{"100", "99", 1},
+		{"99", "100", -1},
+		{"100.0", "100", 0},    // trailing fractional zeros don't matter
+		{"100.50", "100.5", 0}, // 100.50 == 100.5
+		{"0.5", "0.49", 1},     // 0.5 > 0.49
+		{"0.5", "0.50", 0},     // 0.5 == 0.50
+		{"0.49", "0.5", -1},
+		{"0010", "10", 0}, // leading zeros don't matter
+		{"9", "10", -1},   // length-aware integer compare (not lexical)
+		{"10", "9", 1},
+		{"1.0001", "1.001", -1}, // fractional precision past float-ish boundaries
+		// Two prices differing only in the 17th significant digit: float64 would
+		// treat these as equal, decimal comparison must not.
+		{"100000.00000000001", "100000.00000000002", -1},
+		{"100000.00000000002", "100000.00000000001", 1},
+	}
+	for _, tt := range tests {
+		if got := CompareDecimal(tt.a, tt.b); got != tt.want {
+			t.Errorf("CompareDecimal(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}

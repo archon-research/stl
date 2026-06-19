@@ -133,6 +133,7 @@ func TestTokenTotalSupply_Validate(t *testing.T) {
 		{"missing block number", func(s *entity.TokenTotalSupply) { s.BlockNumber = 0 }, true},
 		{"missing timestamp", func(s *entity.TokenTotalSupply) { s.BlockTimestamp = time.Time{} }, true},
 		{"bad source", func(s *entity.TokenTotalSupply) { s.Source = "other" }, true},
+		{"zero created_at_block", func(s *entity.TokenTotalSupply) { s.CreatedAtBlock = 0 }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,6 +144,7 @@ func TestTokenTotalSupply_Validate(t *testing.T) {
 				BlockNumber:    1,
 				BlockTimestamp: time.Unix(1, 0).UTC(),
 				Source:         "sweep",
+				CreatedAtBlock: 1,
 			}
 			tc.mut(s)
 			err := s.Validate()

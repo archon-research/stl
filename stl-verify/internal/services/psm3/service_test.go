@@ -179,6 +179,8 @@ func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string)
 
 func (f *fakeSQSConsumer) Close() error { return nil }
 
+func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 30 * time.Second }
+
 func (f *fakeSQSConsumer) deleteCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

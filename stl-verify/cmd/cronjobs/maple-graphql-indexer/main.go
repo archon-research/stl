@@ -78,6 +78,16 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating maple repository: %w", err)
 	}
 
+	tokenRepo, err := postgres.NewTokenRepository(deps.Pool, logger, 0)
+	if err != nil {
+		return nil, fmt.Errorf("creating token repository: %w", err)
+	}
+
+	userRepo, err := postgres.NewUserRepository(deps.Pool, logger, 0)
+	if err != nil {
+		return nil, fmt.Errorf("creating user repository: %w", err)
+	}
+
 	txManager, err := postgres.NewTxManager(deps.Pool, logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating tx manager: %w", err)
@@ -91,7 +101,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 	service, err := maple_graphql_indexer.NewService(maple_graphql_indexer.ServiceConfig{
 		ChainID: int64(chainID),
 		Logger:  logger,
-	}, client, repo, txManager, telemetry)
+	}, client, repo, tokenRepo, userRepo, txManager, telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating maple graphql indexer service: %w", err)
 	}

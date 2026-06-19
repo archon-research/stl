@@ -164,7 +164,8 @@ func TestSync_NullDowngradesRecorded(t *testing.T) {
 		return globals, nil
 	}
 
-	service, err := NewService(ServiceConfig{ChainID: 1}, client, newMockRepo(), &testutil.MockTxManager{}, tel)
+	repo := newMockRepo()
+	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, repo.tokenRepo, repo.userRepo, &testutil.MockTxManager{}, tel)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

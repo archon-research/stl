@@ -87,7 +87,7 @@ func TestFeedProviderStreamsAndCloses(t *testing.T) {
 		keepOpen(conn)
 	})
 
-	p := newFeedProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
 	if p.Name() != "fake" {
 		t.Errorf("Name = %q", p.Name())
 	}
@@ -158,7 +158,7 @@ func TestFeedProviderReadyNotCalledWithoutBook(t *testing.T) {
 		keepOpen(conn)
 	})
 
-	p := newFeedProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
 	ctx := t.Context()
 
 	rec := &readyRecorder{}
@@ -186,7 +186,7 @@ func TestFeedProviderReadyCalledOnceOnFirstBook(t *testing.T) {
 		keepOpen(conn)
 	})
 
-	p := newFeedProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -212,7 +212,7 @@ func TestFeedProviderReadyNotCalledOnPartialGroupSnapshot(t *testing.T) {
 		sendText(t, conn, `{"symbol":"X","snapshot":true,"price":100,"size":1}`) // only X, never Y
 		keepOpen(conn)
 	})
-	p := newFeedProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
 	ctx := t.Context()
 
 	rec := &readyRecorder{}
@@ -233,7 +233,7 @@ func TestFeedProviderReadyCalledOnceAfterFullGroupSnapshot(t *testing.T) {
 		sendText(t, conn, `{"symbol":"Y","snapshot":true,"price":200,"size":1}`)
 		keepOpen(conn)
 	})
-	p := newFeedProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -255,7 +255,7 @@ func TestFeedProviderReadyCalledOnceAfterFullGroupSnapshot(t *testing.T) {
 func TestWatchDedupsNormalizedSymbols(t *testing.T) {
 	srv := newWSTestServer(t, keepOpen)
 	ex := &fakeExchange{url: srv.url}
-	p := newFeedProvider(testConfig(), ex, 10)
+	p := newTestFeedProvider(t, testConfig(), ex, 10)
 	ctx := t.Context()
 
 	if _, err := p.Watch(ctx, []string{"btc-usd", "BTC-USD"}); err != nil {
@@ -298,7 +298,7 @@ func TestStartAppPingTearsDownOnWriteFailure(t *testing.T) {
 	cfg := testConfig()
 	cfg.Logger = logger
 	ex := &fakeExchange{}
-	p := newFeedProvider(cfg, ex, 10)
+	p := newTestFeedProvider(t, cfg, ex, 10)
 
 	srv := newWSTestServer(t, keepOpen)
 	ws, err := wsclient.Dial(context.Background(), srv.url, p.cfg.Config)
@@ -328,7 +328,7 @@ func (zeroPinger) appPing() ([]byte, time.Duration) { return nil, 0 }
 // safe because the guard returns before touching the connection; without it,
 // time.NewTicker(0) would panic.
 func TestStartAppPingNoOpOnNonPositiveInterval(t *testing.T) {
-	p := newFeedProvider(testConfig(), &fakeExchange{}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{}, 10)
 	p.startAppPing(context.Background(), nil, zeroPinger{})
 }
 
@@ -345,7 +345,7 @@ func TestFeedProviderNoGoroutineLeakAfterShutdown(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // let earlier tests' goroutines settle
 	base := runtime.NumGoroutine()
 
-	p := newFeedProvider(testConfig(), &fakeExchange{url: srv.url}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
 	ctx, cancel := context.WithCancel(context.Background())
 	ch, err := p.Watch(ctx, []string{"X"})
 	if err != nil {
@@ -378,7 +378,7 @@ func waitForGoroutines(max int, timeout time.Duration) bool {
 
 func TestRunConnectionReturnsDialError(t *testing.T) {
 	// An unroutable endpoint: Dial fails and runConnection surfaces the error.
-	p := newFeedProvider(testConfig(), &fakeExchange{url: "ws://127.0.0.1:1"}, 10)
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: "ws://127.0.0.1:1"}, 10)
 	out := make(chan entity.OrderbookUpdate, 1)
 	if err := p.runConnection(context.Background(), []string{"X"}, out, func() {}); err == nil {
 		t.Fatal("expected a dial error for an unroutable endpoint")
@@ -387,7 +387,7 @@ func TestRunConnectionReturnsDialError(t *testing.T) {
 
 func TestEmitterDeliversCloneAndDropsWhenFull(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate, 1)
-	em := newEmitter(out, testLogger())
+	em := newEmitter(out, testLogger(), testMetrics(t))
 
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
@@ -419,7 +419,7 @@ func TestEmitterDeliversCloneAndDropsWhenFull(t *testing.T) {
 // loop, which then stops draining the socket and never reconnects.
 func TestEmitterDoesNotBlockOnFullBuffer(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate) // no reader, no capacity
-	em := newEmitter(out, testLogger())
+	em := newEmitter(out, testLogger(), testMetrics(t))
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
 
@@ -440,7 +440,7 @@ func TestEmitterDoesNotBlockOnFullBuffer(t *testing.T) {
 // so the consumer still learns of the (re)sync.
 func TestEmitterDefersDroppedSnapshot(t *testing.T) {
 	out := make(chan entity.OrderbookUpdate, 1)
-	em := newEmitter(out, testLogger())
+	em := newEmitter(out, testLogger(), testMetrics(t))
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
 
@@ -466,7 +466,7 @@ func TestEmitterDefersDroppedSnapshot(t *testing.T) {
 func TestEmitterLogsDroppedUpdates(t *testing.T) {
 	logger, sb := captureLogger()
 	out := make(chan entity.OrderbookUpdate, 1)
-	em := newEmitter(out, logger)
+	em := newEmitter(out, logger, testMetrics(t))
 	book := entity.NewOrderbook("test", "X")
 	book.ApplyLevel(entity.Bid, "100", "1")
 
@@ -491,9 +491,10 @@ func TestReconnectLoopRetriesAndStops(t *testing.T) {
 	cfg.MaxBackoff = 2 * time.Millisecond
 
 	var calls atomic.Int32
+	m := testMetrics(t) // built here: t.Fatalf must not run on the loop goroutine
 	loopDone := make(chan struct{})
 	go func() {
-		reconnectLoop(ctx, cfg, cfg.Logger, func(ctx context.Context, ready func()) error {
+		reconnectLoop(ctx, cfg, cfg.Logger, m, func(ctx context.Context, ready func()) error {
 			ready()
 			if calls.Add(1) >= 3 {
 				cancel()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -31,8 +32,9 @@ type Config struct {
 	WaitTimeSeconds int32
 
 	// VisibilityTimeout is how long a message is hidden from other consumers
-	// after being received. Should exceed the maximum expected processing time.
-	// Defaults to 30 seconds.
+	// after being received. It must exceed the worker per-message handler budget
+	// so a message is not redelivered while it is still being processed.
+	// Defaults to 180 seconds (see ConfigDefaults).
 	VisibilityTimeout int32
 
 	// BaseEndpoint is an optional override for the SQS endpoint.
@@ -43,8 +45,11 @@ type Config struct {
 // ConfigDefaults returns sensible defaults for SQS consumer configuration.
 func ConfigDefaults() Config {
 	return Config{
-		WaitTimeSeconds:   20,
-		VisibilityTimeout: 30,
+		WaitTimeSeconds: 20,
+		// Must exceed the worker per-message handler budget
+		// (sqsutil.DefaultHandlerTimeout = 120s) so a message is not redelivered
+		// while its handler is still running.
+		VisibilityTimeout: 180,
 	}
 }
 
@@ -96,6 +101,11 @@ func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logge
 		config:   sqsConfig,
 		logger:   logger,
 	}, nil
+}
+
+// VisibilityTimeout reports the configured per-receive visibility timeout.
+func (c *Consumer) VisibilityTimeout() time.Duration {
+	return time.Duration(c.config.VisibilityTimeout) * time.Second
 }
 
 // ReceiveMessages fetches up to maxMessages from the queue.

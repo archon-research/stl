@@ -133,7 +133,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(*dbURL))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
