@@ -187,6 +187,8 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  # Enabled: Ethereum is covered by our Etherscan plan.
+  DATA_VALIDATION_ENABLED: "true"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -196,6 +198,9 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "10"
+  # Disabled: our Etherscan plan does not cover Optimism yet. Flip to "true"
+  # once the key's plan includes this chain.
+  DATA_VALIDATION_ENABLED: "false"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -205,6 +210,8 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "130"
+  # Enabled: Unichain is covered by our Etherscan plan.
+  DATA_VALIDATION_ENABLED: "true"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -214,6 +221,9 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "8453"
+  # Disabled: our Etherscan plan does not cover Base yet. Flip to "true"
+  # once the key's plan includes this chain.
+  DATA_VALIDATION_ENABLED: "false"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -223,6 +233,8 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "42161"
+  # Enabled: Arbitrum is covered by our Etherscan plan.
+  DATA_VALIDATION_ENABLED: "true"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -232,6 +244,9 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "43114"
+  # Disabled: our Etherscan plan does not cover Avalanche yet. Flip to "true"
+  # once the key's plan includes this chain.
+  DATA_VALIDATION_ENABLED: "false"
 ---
 apiVersion: v1
 kind: ConfigMap

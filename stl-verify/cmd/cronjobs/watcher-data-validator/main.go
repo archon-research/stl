@@ -58,6 +58,26 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 		return nil, err
 	}
 
+	// DATA_VALIDATION_ENABLED lets us deploy a validator per chain uniformly while
+	// keeping it off for chains our Etherscan plan does not cover yet. A disabled
+	// chain returns a no-op success runner here, before requiring the API key or
+	// touching the canonical source, so it makes zero Etherscan calls and never
+	// reports a false failure. Re-enabling is a configmap flip, not a code change.
+	enabled, err := env.GetBool("DATA_VALIDATION_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		deps.Logger.Info("data validation disabled for chain", "chain_id", chainID)
+		return temporal.RunnerFunc(func(context.Context) error {
+			// Logged on every scheduled run (not just at worker startup) so a
+			// chain left disabled is visibly skipping rather than looking
+			// identical to a successful validation in run history.
+			deps.Logger.Info("data validation skipped: disabled for chain", "chain_id", chainID)
+			return nil
+		}), nil
+	}
+
 	etherscanAPIKey, err := env.Require("ETHERSCAN_API_KEY")
 	if err != nil {
 		return nil, err
