@@ -20,13 +20,13 @@ from app.main import create_app
 _PSM3_ADDRESS = bytes.fromhex("ab" * 20)
 _BLOCK_TS = datetime(2026, 6, 12, 12, 0, tzinfo=UTC)
 
-# Contract DDL for psm3_snapshot, copied from the sibling Go indexer PR's
+# Contract DDL for psm3_reserves, copied from the sibling Go indexer PR's
 # migration (db/migrations/). That migration is not on this branch, so the
 # table is created here; keep this in sync with it. The DROP keeps this
 # fixture working once that migration lands and creates the table first.
 _PSM3_SNAPSHOT_DDL = """
-DROP TABLE IF EXISTS psm3_snapshot;
-CREATE TABLE psm3_snapshot (
+DROP TABLE IF EXISTS psm3_reserves;
+CREATE TABLE psm3_reserves (
     chain_id           INT         NOT NULL REFERENCES chain (chain_id),
     address            BYTEA       NOT NULL,
     usds_balance       NUMERIC     NOT NULL,
@@ -58,7 +58,7 @@ async def _insert_snapshot(
 ) -> None:
     await conn.execute(
         """
-        INSERT INTO psm3_snapshot
+        INSERT INTO psm3_reserves
             (chain_id, address, usds_balance, susds_balance, usdc_balance, total_assets,
              conversion_rate, block_number, block_version, block_timestamp, source, processing_version)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'sweep', $11)

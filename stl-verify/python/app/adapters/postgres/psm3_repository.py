@@ -28,7 +28,7 @@ _VERSION_ORDER = "block_number DESC, block_version DESC, processing_version DESC
 _HISTORY_SQL = text(
     f"""
     SELECT {_SNAPSHOT_COLUMNS}
-    FROM psm3_snapshot
+    FROM psm3_reserves
     WHERE chain_id = :chain_id
     ORDER BY {_VERSION_ORDER}
     LIMIT :limit
@@ -60,7 +60,7 @@ class PostgresPsm3Repository:
         query = text(
             f"""
             SELECT DISTINCT ON (chain_id) {_SNAPSHOT_COLUMNS}
-            FROM psm3_snapshot
+            FROM psm3_reserves
             {where}
             ORDER BY chain_id, {_VERSION_ORDER}
             """
