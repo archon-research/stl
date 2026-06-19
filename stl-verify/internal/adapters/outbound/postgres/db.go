@@ -163,7 +163,7 @@ func buildPoolConfig(cfg DBConfig) (*pgxpool.Config, error) {
 func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 	poolConfig, err := buildPoolConfig(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("building pool config: %w", err)
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
