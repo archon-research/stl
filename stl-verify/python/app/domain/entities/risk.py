@@ -138,16 +138,20 @@ class LiquidationParams:
 
 @dataclass(frozen=True)
 class RiskEnrichedCollateral:
-    """A single collateral contribution enriched with USD value and liquidation params."""
+    """A single collateral contribution enriched with USD value and liquidation params.
 
-    token_id: int
+    token_id and the liquidation params are None for symbol-keyed collateral whose
+    protocol has no per-asset risk parameters (e.g. Maple custody assets).
+    """
+
+    token_id: int | None
     symbol: str
     amount: Decimal  # human-readable token units
     backing_pct: Decimal  # 0..100
     amount_usd: Decimal  # amount × price_usd
     price_usd: Decimal  # USD spot price used
-    liquidation_threshold: Decimal
-    liquidation_bonus: Decimal
+    liquidation_threshold: Decimal | None
+    liquidation_bonus: Decimal | None
 
 
 @dataclass(frozen=True)

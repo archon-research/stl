@@ -10,9 +10,12 @@ class CollateralContribution:
     backing, expressed in debt-token units (not necessarily USD).
     It is computed as: (collateral_usd / total_collateral_usd_for_user) * target_debt,
     summed across all borrowers. This ensures SUM(backing_value) == total backed asset debt.
+
+    token_id is None for symbol-keyed collateral (e.g. Maple custody assets such as
+    BTC/SOL that have no on-chain Ethereum token).
     """
 
-    token_id: int
+    token_id: int | None
     symbol: str
     backing_value: Decimal
     backing_pct: Decimal

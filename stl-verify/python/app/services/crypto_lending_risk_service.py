@@ -181,7 +181,7 @@ class CryptoLendingRiskService:
         if prime_id is not None:
             share = await self._reader.get_share(info, prime_id)
 
-        token_ids = [item.token_id for item in breakdown.items]
+        token_ids = [item.token_id for item in breakdown.items if item.token_id is not None]
         liq_params = await self._reader.get_liquidation_params(info, breakdown.backed_asset_id, token_ids)
         return breakdown.backed_asset_id, self._build_enriched_items(breakdown, share, liq_params)
 

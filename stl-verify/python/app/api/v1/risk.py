@@ -63,7 +63,11 @@ class BadDebtResponse(BaseModel):
 class RiskBreakdownItemResponse(BaseModel):
     """One backing-token row in a receipt-token's risk-enriched breakdown."""
 
-    token_id: int = Field(description="Surrogate token id of the backing token.", examples=[101])
+    token_id: int | None = Field(
+        default=None,
+        description="Surrogate token id of the backing token. Null for symbol-keyed collateral (e.g. Maple custody assets).",
+        examples=[101],
+    )
     symbol: str = Field(description="Backing-token symbol.", examples=["WETH"])
     amount: Decimal = Field(
         description="Backing-token amount, expressed in token units. Decimal serialized as a JSON string.",
@@ -78,14 +82,20 @@ class RiskBreakdownItemResponse(BaseModel):
         examples=["41234.56"],
     )
     price_usd: Decimal = Field(description="Latest USD price for the backing token.", examples=["3340.55"])
-    liquidation_threshold: Decimal = Field(
-        description="Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`.",
+    liquidation_threshold: Decimal | None = Field(
+        default=None,
+        description=(
+            "Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`. "
+            "Null when the protocol has no per-asset threshold (e.g. Maple)."
+        ),
         examples=["0.83"],
     )
-    liquidation_bonus: Decimal = Field(
+    liquidation_bonus: Decimal | None = Field(
+        default=None,
         description=(
             "Liquidation bonus expressed as a multiplier (e.g. `1.05` for a 5% bonus). "
-            "Stored as basis points upstream and normalised by dividing by 10000."
+            "Stored as basis points upstream and normalised by dividing by 10000. "
+            "Null when the protocol has no per-asset bonus (e.g. Maple)."
         ),
         examples=["1.05"],
     )
