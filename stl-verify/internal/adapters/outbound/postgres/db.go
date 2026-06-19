@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +33,24 @@ type DBConfig struct {
 	// MaxConnIdleTime is the maximum amount of time a connection may be idle.
 	// Default: 1 minute
 	MaxConnIdleTime time.Duration
+
+	// LockTimeout, if > 0, is applied as `SET lock_timeout` on every pooled
+	// connection. It bounds how long a statement waits to ACQUIRE a lock before
+	// failing, so a lock convoy (e.g. an idle-in-transaction holder blocking a
+	// TimescaleDB compression policy) surfaces as a fast, retryable error
+	// instead of an indefinite hang.
+	//
+	// Unset by DefaultDBConfig and set by WorkerDBConfig (10s): only the
+	// latency-bounded SQS consumers opt in. Backfillers/validators/crons that
+	// share DefaultDBConfig may legitimately wait on a lock, so they are left
+	// uncapped.
+	LockTimeout time.Duration
+
+	// StatementTimeout, if > 0, is applied as `SET statement_timeout` on every
+	// pooled connection. Unset by default: backfillers and validators sharing
+	// this pool builder run legitimately long statements. Set it only on
+	// latency-bounded services that should never run a long single statement.
+	StatementTimeout time.Duration
 }
 
 // LogValue implements slog.LogValuer to redact the URL (which contains credentials).
@@ -55,6 +75,35 @@ func DefaultDBConfig(url string) DBConfig {
 	}
 }
 
+// WorkerDBConfig is the pool config for latency-bounded SQS consumers (the block
+// indexers). It is DefaultDBConfig plus a lock_timeout, so a lock convoy surfaces
+// as a fast, retryable error instead of an indefinite hang. Backfillers,
+// validators, and crons keep DefaultDBConfig (no lock_timeout) so their
+// legitimately long lock waits are not aborted.
+func WorkerDBConfig(url string) DBConfig {
+	cfg := DefaultDBConfig(url)
+	cfg.LockTimeout = 10 * time.Second
+	return cfg
+}
+
+// connRuntimeParams returns the Postgres runtime parameters (GUCs) to set at
+// connection startup, or nil when no per-connection timeouts are configured.
+// Values are integer milliseconds. These ride the startup packet (no extra
+// round-trip) rather than a SET query on every new connection.
+func (c DBConfig) connRuntimeParams() map[string]string {
+	params := map[string]string{}
+	if c.LockTimeout > 0 {
+		params["lock_timeout"] = strconv.FormatInt(c.LockTimeout.Milliseconds(), 10)
+	}
+	if c.StatementTimeout > 0 {
+		params["statement_timeout"] = strconv.FormatInt(c.StatementTimeout.Milliseconds(), 10)
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
+
 // OpenPool creates and configures a PostgreSQL connection pool using pgxpool.
 // It verifies connectivity by pinging the database before returning.
 // The caller is responsible for closing the returned *pgxpool.Pool.
@@ -77,6 +126,14 @@ func OpenPool(ctx context.Context, cfg DBConfig) (*pgxpool.Pool, error) {
 	if cfg.MaxConnIdleTime > 0 {
 		poolConfig.MaxConnIdleTime = cfg.MaxConnIdleTime
 	}
+
+	// Apply per-connection timeouts (lock_timeout/statement_timeout) as startup
+	// runtime parameters so a stuck lock wait fails fast instead of hanging the
+	// caller. Sent in the startup packet — no extra round-trip per connection.
+	if poolConfig.ConnConfig.RuntimeParams == nil {
+		poolConfig.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	maps.Copy(poolConfig.ConnConfig.RuntimeParams, cfg.connRuntimeParams())
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
