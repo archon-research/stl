@@ -23,8 +23,8 @@ All endpoints follow these semantics for identifier handling:
   result is a valid answer to a filter query.
 
 Use :data:`EthAddressParam` and :data:`TxHashParam` for required fields
-and :data:`OptionalEthAddressParam` for optional query filters so
-malformed-ID rejection is uniform across the API.
+and :data:`OptionalEthAddressParam` / :data:`OptionalTxHashParam` for
+optional query filters so malformed-ID rejection is uniform across the API.
 """
 
 import re
@@ -77,6 +77,13 @@ def _validate_tx_hash(value: str) -> str:
     return value
 
 
+def _validate_optional_tx_hash(value: str | None) -> str | None:
+    """Validate an optional transaction hash; ``None`` passes through unchanged."""
+    if value is None:
+        return None
+    return _validate_tx_hash(value)
+
+
 EthAddressParam = Annotated[str, AfterValidator(_validate_eth_address)]
 """Use as the type for any path/query/body field that holds an EVM address."""
 
@@ -85,6 +92,9 @@ OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optiona
 
 TxHashParam = Annotated[str, AfterValidator(_validate_tx_hash)]
 """Use as the type for any path/query/body field that holds a transaction hash."""
+
+OptionalTxHashParam = Annotated[str | None, AfterValidator(_validate_optional_tx_hash)]
+"""Use as the type for optional query filters that hold a transaction hash."""
 
 
 ChainIdPath = Annotated[

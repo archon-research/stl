@@ -11,6 +11,7 @@ import { css } from '#styled-system/css';
 import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
+import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
@@ -23,11 +24,14 @@ import {
   getLatestPrimeDebtSnapshot,
   getPrimes,
   getProtocols,
+  getTokens,
 } from './lib/api';
 import {
   buildChainLabelLookup,
   buildNetworkOptions,
+  buildNetworkOptionsFromMetadata,
   buildProtocolOptions,
+  buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
   formatTokenAmount,
   formatUsdValue,
@@ -37,13 +41,19 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import { PARAMS, useUrlParam } from './lib/url-params';
+import {
+  PARAMS,
+  setPathname as replacePathname,
+  usePathname,
+  useUrlParam,
+} from './lib/url-params';
 import type {
   Allocation,
   CapitalMetrics,
   DataSource,
   Prime,
   PrimeDebtSnapshot,
+  TokensResponse,
 } from './types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from './types/local-data';
 
@@ -77,11 +87,40 @@ function App() {
   const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
   const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
   const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
+  const [activityTokenParam, setActivityTokenParam] = useUrlParam(PARAMS.token);
+  const [activityActionParam, setActivityActionParam] = useUrlParam(
+    PARAMS.activityAction,
+  );
+  const [showAllPrimesParam, setShowAllPrimesParam] = useUrlParam(
+    PARAMS.showAllPrimes,
+  );
+  const [pathname, setPathname] = usePathname();
   const { globalFilter, setGlobalFilter, setSorting, sorting } =
     useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
+  const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
   const isDrawerOpen = isDrawerOpenParam === '1';
+  // Trim trailing slashes so "/activities/" links resolve the same as
+  // "/activities" on hosts that append one.
+  const normalizedPathname = pathname.replace(/\/+$/, '') || '/';
+  const selectedView: 'allocation' | 'activities' =
+    normalizedPathname === '/activities' ? 'activities' : 'allocation';
+  const showAllPrimesInActivities =
+    selectedView === 'activities' ? showAllPrimesParam !== '0' : false;
+
+  useEffect(() => {
+    if (
+      normalizedPathname === '/allocation' ||
+      normalizedPathname === '/activities'
+    ) {
+      return;
+    }
+
+    // Redirect unknown paths (e.g. "/") to the default view, preserving query
+    // params. `replace` so the bare path never lands in the back-history.
+    replacePathname('/allocation', 'replace');
+  }, [normalizedPathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -99,6 +138,35 @@ function App() {
           error,
         });
         setDataSources([]);
+      });
+
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    void getTokens({ limit: 500 }, controller.signal)
+      .then((response: TokensResponse) => {
+        const symbols = Array.from(
+          new Set(
+            response
+              .map((token) => token.symbol?.trim().toUpperCase() ?? '')
+              .filter((symbol) => symbol.length > 0),
+          ),
+        ).sort((a, b) => a.localeCompare(b));
+
+        setTokenSymbolOptions(symbols);
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.warn('Failed to load token options for activities view', {
+          error,
+        });
+        setTokenSymbolOptions([]);
       });
 
     return () => controller.abort();
@@ -334,18 +402,38 @@ function App() {
     [localChains],
   );
 
+  // Activities spans every prime, so its filter options come from the global
+  // registries; allocations scope to the selected prime's holdings.
+  const isActivitiesView = selectedView === 'activities';
+
   const networkOptions = useMemo(
-    () => buildNetworkOptions(allocations, chainLabels),
-    [allocations, chainLabels],
+    () =>
+      isActivitiesView
+        ? buildNetworkOptionsFromMetadata(localChains)
+        : buildNetworkOptions(allocations, chainLabels),
+    [allocations, chainLabels, isActivitiesView, localChains],
   );
 
   const protocolOptions = useMemo(
-    () => buildProtocolOptions(allocations, localProtocols),
-    [allocations, localProtocols],
+    () =>
+      isActivitiesView
+        ? buildProtocolOptionsFromMetadata(localProtocols)
+        : buildProtocolOptions(allocations, localProtocols),
+    [allocations, isActivitiesView, localProtocols],
   );
 
+  // Drop a stale filter only once its option source is ready — otherwise a
+  // valid deep link (e.g. ?network=/?protocol=) is cleared on first render
+  // before chains/protocols metadata has loaded.
+  const networkOptionsLoading = isActivitiesView
+    ? localChains.length === 0
+    : isAllocationsLoading;
+  const protocolOptionsLoading = isActivitiesView
+    ? localProtocols.length === 0
+    : isAllocationsLoading;
+
   useEffect(() => {
-    if (isAllocationsLoading || !selectedNetwork) {
+    if (networkOptionsLoading || !selectedNetwork) {
       return;
     }
 
@@ -353,14 +441,14 @@ function App() {
       setSelectedNetwork(null);
     }
   }, [
-    isAllocationsLoading,
+    networkOptionsLoading,
     networkOptions,
     selectedNetwork,
     setSelectedNetwork,
   ]);
 
   useEffect(() => {
-    if (isAllocationsLoading || !selectedProtocol) {
+    if (protocolOptionsLoading || !selectedProtocol) {
       return;
     }
 
@@ -368,7 +456,7 @@ function App() {
       setSelectedProtocol(null);
     }
   }, [
-    isAllocationsLoading,
+    protocolOptionsLoading,
     protocolOptions,
     selectedProtocol,
     setSelectedProtocol,
@@ -540,6 +628,11 @@ function App() {
               isLoading={isPrimesLoading}
               errorMessage={primesErrorMessage}
               onSelectPrime={setSelectedPrimeId}
+              showAllPrimes={showAllPrimesInActivities}
+              canShowAllPrimes={selectedView === 'activities'}
+              onShowAllPrimesChange={(value) =>
+                setShowAllPrimesParam(value ? '1' : '0')
+              }
             />
           }
           topBar={
@@ -551,32 +644,55 @@ function App() {
               protocolOptions={protocolOptions}
               selectedNetwork={selectedNetwork}
               selectedProtocol={selectedProtocol}
+              selectedView={selectedView}
+              onViewChange={(view) =>
+                setPathname(
+                  view === 'activities' ? '/activities' : '/allocation',
+                )
+              }
             />
           }
           main={
-            <AllocationGrid
-              allocations={allocations}
-              capitalMetrics={capitalMetrics}
-              chainLabels={chainLabels}
-              errorMessage={allocationsErrorMessage}
-              filteredAllocations={filteredAllocations}
-              topMetricsAllocations={searchFilteredAllocations}
-              isLoading={isAllocationsLoading}
-              isCapitalMetricsLoading={isCapitalMetricsLoading}
-              isPrimeDebtLoading={isPrimeDebtLoading}
-              localProtocols={localProtocols}
-              onSelectAllocation={(allocationKey) => {
-                setSelectedAllocationKey(allocationKey);
-                setIsDrawerOpenParam('1');
-              }}
-              primeDebtSnapshot={primeDebtSnapshot}
-              onSearchChange={setGlobalFilter}
-              onSortingChange={setSorting}
-              searchValue={globalFilter}
-              selectedAllocationKey={selectedAllocationKey}
-              selectedPrime={selectedPrime}
-              sorting={sorting as SortingState}
-            />
+            selectedView === 'allocation' ? (
+              <AllocationGrid
+                allocations={allocations}
+                capitalMetrics={capitalMetrics}
+                chainLabels={chainLabels}
+                errorMessage={allocationsErrorMessage}
+                filteredAllocations={filteredAllocations}
+                topMetricsAllocations={searchFilteredAllocations}
+                isLoading={isAllocationsLoading}
+                isCapitalMetricsLoading={isCapitalMetricsLoading}
+                isPrimeDebtLoading={isPrimeDebtLoading}
+                localProtocols={localProtocols}
+                onSelectAllocation={(allocationKey) => {
+                  setSelectedAllocationKey(allocationKey);
+                  setIsDrawerOpenParam('1');
+                }}
+                primeDebtSnapshot={primeDebtSnapshot}
+                onSearchChange={setGlobalFilter}
+                onSortingChange={setSorting}
+                searchValue={globalFilter}
+                selectedAllocationKey={selectedAllocationKey}
+                selectedPrime={selectedPrime}
+                sorting={sorting as SortingState}
+              />
+            ) : (
+              <ActivityFeed
+                isEnabled
+                mode="page"
+                chainLabels={chainLabels}
+                selectedNetwork={selectedNetwork}
+                selectedProtocol={selectedProtocol}
+                showAllPrimes={showAllPrimesInActivities}
+                selectedPrime={selectedPrime}
+                tokenOptions={tokenSymbolOptions}
+                tokenFilter={activityTokenParam}
+                onTokenFilterChange={setActivityTokenParam}
+                actionFilter={activityActionParam ?? undefined}
+                onActionFilterChange={setActivityActionParam}
+              />
+            )
           }
         />
       </div>
@@ -587,7 +703,7 @@ function App() {
             ? `${formatTokenAmount(selectedAllocation.balance)} ${selectedAllocation.symbol} · ${formatUsdValue(selectedAllocation.amount_usd ?? null)}`
             : undefined
         }
-        isOpen={isDrawerOpen}
+        isOpen={selectedView === 'allocation' && isDrawerOpen}
         onClose={() => setIsDrawerOpenParam(null)}
         subtitle={
           selectedAllocation ? (
@@ -665,6 +781,7 @@ function App() {
       >
         <BottomPanel
           allocations={allocations}
+          chainLabels={chainLabels}
           errorMessage={allocationsErrorMessage}
           isDrawerOpen={isDrawerOpen}
           isLoading={isAllocationsLoading}

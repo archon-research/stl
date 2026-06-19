@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -183,23 +182,43 @@ func (r *AllocationRepository) buildInsertArgs(
 	return query, args, nil
 }
 
+// encodeTxHash returns the on-chain transaction hash for a position, or the
+// zero-hash sentinel for sweeps.
+//
+// Sweep (reconciliation) snapshots have no originating transaction. tx_hash is
+// part of the primary key so it cannot be NULL, but the rest of the key
+// — (chain_id, token_id, prime_id, proxy_address, block_number, block_version,
+// log_index, direction, processing_version, created_at) — already uniquely
+// identifies a sweep observation, so the hash carries no dedup information for
+// them. We therefore store the zero hash as an explicit "no transaction"
+// sentinel: no real transaction hash takes that value in practice (a collision
+// is cryptographically negligible), and it no longer masquerades as a genuine
+// on-chain tx the way the previous content-addressed synthetic hash did
+// (VEC-340).
+//
+// The sentinel is only valid for sweeps. A transaction-driven position without
+// a hash signals an upstream bug, so we reject it rather than silently persist
+// it as "no transaction"; and a present hash must be a full 32-byte value
+// (common.FromHex decodes truncated hex, which we must not store).
 func encodeTxHash(pos *entity.AllocationPosition) ([]byte, error) {
-	if pos.TxHash != "" {
-		b := common.FromHex(pos.TxHash)
-		if len(b) == 0 {
-			return nil, fmt.Errorf("invalid hex tx_hash: %s", pos.TxHash)
+	if pos.TxHash == "" {
+		if pos.Direction != "sweep" {
+			return nil, fmt.Errorf(
+				"missing tx_hash for non-sweep position (direction=%q)",
+				pos.Direction,
+			)
 		}
-		return b, nil
+		return common.Hash{}.Bytes(), nil
 	}
 
-	input := fmt.Sprintf("sweep:%d:%d:%s:%s",
-		pos.ChainID,
-		pos.BlockNumber,
-		pos.TokenAddress.Hex(),
-		pos.ProxyAddress.Hex(),
-	)
-	h := sha256.Sum256([]byte(input))
-	return h[:], nil
+	b := common.FromHex(pos.TxHash)
+	if len(b) != common.HashLength {
+		return nil, fmt.Errorf(
+			"tx_hash must be %d bytes, got %d: %s",
+			common.HashLength, len(b), pos.TxHash,
+		)
+	}
+	return b, nil
 }
 
 func (r *AllocationRepository) resolveTokenIDs(

@@ -8,12 +8,11 @@ import (
 	"testing"
 )
 
-func TestLoad_OK(t *testing.T) {
+func TestLoadContract_OK(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	contractPath := filepath.Join(dir, "contract.json")
-	schemaPath := filepath.Join(dir, "contract.schema.json")
 
 	contract := map[string]any{
 		"version":                "v1",
@@ -34,7 +33,6 @@ func TestLoad_OK(t *testing.T) {
 										"protocol":         "aave-v3",
 										"allocation_type":  "allocation",
 										"token_type":       "atoken",
-										"created_at_block": nil,
 									},
 								},
 							},
@@ -42,10 +40,19 @@ func TestLoad_OK(t *testing.T) {
 						"alm_proxies": map[string]any{
 							"AlmProxy": map[string]any{
 								"spark": map[string]any{
-									"mainnet": map[string]any{
-										"star":    "spark",
-										"chain":   "mainnet",
-										"address": "0x3333333333333333333333333333333333333333",
+									"mainnet": []map[string]any{
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x3333333333333333333333333333333333333333",
+											"role":    "alm",
+										},
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x4444444444444444444444444444444444444444",
+											"role":    "subproxy",
+										},
 									},
 								},
 							},
@@ -56,26 +63,29 @@ func TestLoad_OK(t *testing.T) {
 		},
 	}
 
-	schema := map[string]any{"type": "object", "$defs": map[string]any{}}
-
 	mustWriteJSON(t, contractPath, contract)
-	mustWriteJSON(t, schemaPath, schema)
 
-	bundle, err := Load(contractPath, schemaPath)
+	loaded, err := LoadContract(contractPath)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadContract() error = %v", err)
 	}
 
-	if bundle.Contract.Version != "v1" {
-		t.Fatalf("version = %q, want %q", bundle.Contract.Version, "v1")
+	if loaded.Version != "v1" {
+		t.Fatalf("version = %q, want %q", loaded.Version, "v1")
 	}
-	if bundle.Contract.AxisSynomeGitCommit != "deadbeef" {
-		t.Fatalf("axis_synome_git_commit = %q, want %q", bundle.Contract.AxisSynomeGitCommit, "deadbeef")
+	if loaded.AxisSynomeGitCommit != "deadbeef" {
+		t.Fatalf("axis_synome_git_commit = %q, want %q", loaded.AxisSynomeGitCommit, "deadbeef")
 	}
 
-	got := bundle.Contract.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"].Address
-	if got != "0x3333333333333333333333333333333333333333" {
+	sparkMainnet := loaded.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy["spark"]["mainnet"]
+	if len(sparkMainnet) != 2 {
+		t.Fatalf("spark/mainnet proxies = %d, want 2", len(sparkMainnet))
+	}
+	if got := sparkMainnet[0].Address; got != "0x3333333333333333333333333333333333333333" {
 		t.Fatalf("address = %q, want %q", got, "0x3333333333333333333333333333333333333333")
+	}
+	if got := sparkMainnet[0].Role; got != "alm" {
+		t.Fatalf("role = %q, want %q", got, "alm")
 	}
 }
 
@@ -133,7 +143,6 @@ func TestLoadContract_InvalidAddressFails(t *testing.T) {
 										"protocol":         "aave-v3",
 										"allocation_type":  "allocation",
 										"token_type":       "atoken",
-										"created_at_block": nil,
 									},
 								},
 							},
@@ -141,10 +150,19 @@ func TestLoadContract_InvalidAddressFails(t *testing.T) {
 						"alm_proxies": map[string]any{
 							"AlmProxy": map[string]any{
 								"spark": map[string]any{
-									"mainnet": map[string]any{
-										"star":    "spark",
-										"chain":   "mainnet",
-										"address": "0x3333333333333333333333333333333333333333",
+									"mainnet": []map[string]any{
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x3333333333333333333333333333333333333333",
+											"role":    "alm",
+										},
+										{
+											"star":    "spark",
+											"chain":   "mainnet",
+											"address": "0x4444444444444444444444444444444444444444",
+											"role":    "subproxy",
+										},
 									},
 								},
 							},

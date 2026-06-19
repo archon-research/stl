@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,13 +31,25 @@ func (m *testHandler) HandleBatch(ctx context.Context, batch *SnapshotBatch) err
 
 // ── NewService ──
 
-func TestNewService_FillsDefaults(t *testing.T) {
+func TestNewService_FillsConfigDefaults(t *testing.T) {
 	handler := &testHandler{}
 	registry := NewSourceRegistry(ConfigDefaults().Logger)
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	}}
+	proxies := []ProxyConfig{{
+		Star:    "spark",
+		Chain:   "mainnet",
+		Address: common.HexToAddress("0xaaaa"),
+	}}
 
 	svc, err := NewService(
 		Config{ChainID: 1},
-		nil, nil, registry, nil, handler, nil,
+		nil, nil, registry, entries, handler, proxies,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -47,8 +60,83 @@ func TestNewService_FillsDefaults(t *testing.T) {
 	if svc.config.SweepEveryNBlocks != ConfigDefaults().SweepEveryNBlocks {
 		t.Errorf("SweepEveryNBlocks not filled: got %d", svc.config.SweepEveryNBlocks)
 	}
-	if len(svc.entries) == 0 {
-		t.Error("entries should default to DefaultTokenEntries for chain")
+	if len(svc.entries) != 1 {
+		t.Fatalf("entries length = %d, want 1", len(svc.entries))
+	}
+}
+
+func TestNewService_RequiresEntriesAndProxies(t *testing.T) {
+	handler := &testHandler{}
+	registry := NewSourceRegistry(ConfigDefaults().Logger)
+	entry := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xaaaa"),
+		Star:            "spark",
+		Chain:           "mainnet",
+		TokenType:       "erc20",
+	}}
+	proxy := []ProxyConfig{{
+		Star:    "spark",
+		Chain:   "mainnet",
+		Address: common.HexToAddress("0xaaaa"),
+	}}
+
+	tests := []struct {
+		name    string
+		entries []*TokenEntry
+		proxies []ProxyConfig
+		wantErr string
+	}{
+		{
+			name:    "missing entries",
+			proxies: proxy,
+			wantErr: "at least one token entry is required",
+		},
+		{
+			name:    "missing proxies",
+			entries: entry,
+			wantErr: "at least one proxy is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewService(
+				Config{ChainID: 1},
+				nil, nil, registry, tt.entries, handler, tt.proxies,
+			)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewService_RejectsChainScopedInputMismatch(t *testing.T) {
+	handler := &testHandler{}
+	registry := NewSourceRegistry(ConfigDefaults().Logger)
+
+	_, err := NewService(
+		Config{ChainID: 1},
+		nil,
+		nil,
+		registry,
+		[]*TokenEntry{{
+			ContractAddress: common.HexToAddress("0x1111"),
+			WalletAddress:   common.HexToAddress("0xaaaa"),
+			Star:            "spark",
+			Chain:           "base",
+			TokenType:       "erc20",
+		}},
+		handler,
+		[]ProxyConfig{{
+			Star:    "spark",
+			Chain:   "mainnet",
+			Address: common.HexToAddress("0xaaaa"),
+		}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "want mainnet") {
+		t.Fatalf("error = %v, want chain mismatch", err)
 	}
 }
 

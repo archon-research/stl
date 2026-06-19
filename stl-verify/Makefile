@@ -88,15 +88,19 @@ run-morpho-indexer:
 	@echo "==> Running Morpho indexer..."
 	@set -a && . cmd/workers/morpho-indexer/.env && [ -f cmd/workers/morpho-indexer/.env.local ] && . cmd/workers/morpho-indexer/.env.local; set +a && go run ./cmd/workers/morpho-indexer
 
-# Run the allocation tracker (requires dev-up first)
+# Run the allocation tracker (requires dev-up first).
+# Local runs target localstack with static test creds, so unset any ambient
+# AWS_PROFILE; `go run` doesn't stamp VCS info here, so pass BUILD_GIT_HASH for
+# buildregistry (falls back to "dev" outside a git checkout).
 run-allocation-tracker:
 	@echo "==> Running allocation tracker..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env && [ -f cmd/workers/prime-allocation-indexer/.env.local ] && . cmd/workers/prime-allocation-indexer/.env.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
-# Run the Avalanche allocation tracker (requires dev-up first)
+# Run the Avalanche allocation tracker (requires dev-up first). See run-allocation-tracker
+# for why AWS_PROFILE is unset and BUILD_GIT_HASH is passed.
 run-allocation-tracker-avax:
 	@echo "==> Running Avalanche allocation tracker (chain_id=43114)..."
-	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && go run ./cmd/workers/prime-allocation-indexer
+	@set -a && . cmd/workers/prime-allocation-indexer/.env.avax && [ -f cmd/workers/prime-allocation-indexer/.env.avax.local ] && . cmd/workers/prime-allocation-indexer/.env.avax.local; set +a && unset AWS_PROFILE AWS_DEFAULT_PROFILE && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/workers/prime-allocation-indexer
 
 # Run the SparkLend position tracker (requires dev-up first)
 run-sparklend-position-tracker:
@@ -622,6 +626,7 @@ dev-env:
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/offchain-price-indexer/.env; \
 	printf '%s\n' \
@@ -630,6 +635,7 @@ dev-env:
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/watcher-data-validator/.env; \
 	printf '%s\n' \
@@ -640,8 +646,21 @@ dev-env:
 		"ANCHORAGE_API_URL=" \
 		"ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" \
 		"ANCHORAGE_PRIME=" \
+		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/anchorage-indexer/.env
+	@printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"MAPLE_GRAPHQL_ENDPOINT=" \
+		"MAPLE_SYNC_INTERVAL=10m" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/maple-graphql-indexer/.env
 	@echo "Environment files generated (.env.secrets updated)."
 
 # Cold start — rebuilds all images from scratch
@@ -860,7 +879,7 @@ ecs-deploy-watcher:
 # Named aliases for consistency with other service targets
 docker-build-watcher:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/base/watcher --build-arg BIN=watcher -t stl-watcher:local -f Dockerfile.common .
 else
 	@$(MAKE) docker-build
 endif
@@ -1069,7 +1088,7 @@ ECR_REPO_ORACLE_PRICE_WORKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws
 # Build Docker image for oracle price worker (ARM64 for Fargate Graviton)
 docker-build-oracle-price-worker:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker -t stl-oracle-price-worker:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/oracle-price-indexer --build-arg BIN=oracle_price_worker -t stl-oracle-price-worker:local -f Dockerfile.common .
 else
 	@echo "==> Building Oracle Price Worker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_ORACLE_PRICE_WORKER)"
@@ -1134,7 +1153,7 @@ ECR_REPO_SPARKLEND_POSITION_TRACKER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).am
 # Build Docker image for sparklend position tracker (ARM64 for Fargate Graviton)
 docker-build-sparklend-position-tracker:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker -t stl-sparklend-position-tracker:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/sparklend-indexer --build-arg BIN=sparklend_position_tracker -t stl-sparklend-position-tracker:local -f Dockerfile.common .
 else
 	@echo "==> Building SparkLend Position Tracker Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_SPARKLEND_POSITION_TRACKER)"
@@ -1190,7 +1209,7 @@ ECR_REPO_MORPHO_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/
 # Build Docker image for morpho indexer (ARM64 for Fargate Graviton)
 docker-build-morpho-indexer:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer -t stl-morpho-indexer:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/morpho-indexer --build-arg BIN=morpho-indexer -t stl-morpho-indexer:local -f Dockerfile.common .
 else
 	@echo "==> Building Morpho Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_MORPHO_INDEXER)"
@@ -1244,7 +1263,7 @@ ECR_REPO_PRIME_DEBT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.
 # Build Docker image for prime debt indexer (ARM64 for EKS Graviton)
 docker-build-prime-debt-indexer:
 ifdef LOCAL
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer -t stl-prime-debt-indexer:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/prime-debt-indexer --build-arg BIN=prime-debt-indexer -t stl-prime-debt-indexer:local -f Dockerfile.common .
 else
 	@echo "==> Building Prime Debt Indexer Docker image for ARM64..."
 	@echo "    Repository: $(ECR_REPO_PRIME_DEBT_INDEXER)"
@@ -1693,7 +1712,7 @@ CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/mai
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:local -f Dockerfile.common .
 
 # Pattern rule: release a cronjob image to ECR (build + push).
 # All cronjobs share a single ECR repo; the cronjob name is part of the tag.

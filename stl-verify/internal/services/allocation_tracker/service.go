@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -36,6 +39,7 @@ type Service struct {
 	handler          AllocationHandler
 	ctx              context.Context
 	cancel           context.CancelFunc
+	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger           *slog.Logger
 	blocksSinceSweep int
 }
@@ -66,10 +70,13 @@ func NewService(
 		return nil, fmt.Errorf("chain ID is required")
 	}
 	if len(proxies) == 0 {
-		proxies = ProxiesForChainID(DefaultProxies(), config.ChainID)
+		return nil, fmt.Errorf("at least one proxy is required for chain ID %d", config.ChainID)
 	}
 	if len(entries) == 0 {
-		entries = EntriesForChainID(DefaultTokenEntries(), config.ChainID)
+		return nil, fmt.Errorf("at least one token entry is required for chain ID %d", config.ChainID)
+	}
+	if err := validateScopedEntriesAndProxies(entries, proxies, config.ChainID); err != nil {
+		return nil, fmt.Errorf("validating scoped entries/proxies: %w", err)
 	}
 
 	return &Service{
@@ -85,16 +92,64 @@ func NewService(
 	}, nil
 }
 
+func validateScopedEntriesAndProxies(entries []*TokenEntry, proxies []ProxyConfig, chainID int64) error {
+	chainName, ok := entity.ChainIDToName[chainID]
+	if !ok {
+		return fmt.Errorf("unknown chain ID %d", chainID)
+	}
+
+	seenEntries := make(map[EntryKey]struct{}, len(entries))
+	for i, entry := range entries {
+		if entry == nil {
+			return fmt.Errorf("entry at index %d is nil", i)
+		}
+		if entry.Chain != chainName {
+			return fmt.Errorf(
+				"entry %s/%s has chain %s, want %s",
+				entry.ContractAddress.Hex(),
+				entry.WalletAddress.Hex(),
+				entry.Chain,
+				chainName,
+			)
+		}
+		key := entry.Key()
+		if _, ok := seenEntries[key]; ok {
+			return fmt.Errorf(
+				"duplicate token entry for contract=%s wallet=%s chain=%s",
+				entry.ContractAddress.Hex(),
+				entry.WalletAddress.Hex(),
+				entry.Chain,
+			)
+		}
+		seenEntries[key] = struct{}{}
+	}
+
+	seenProxies := make(map[common.Address]struct{}, len(proxies))
+	for _, proxy := range proxies {
+		if proxy.Chain != chainName {
+			return fmt.Errorf("proxy %s has chain %s, want %s", proxy.Address.Hex(), proxy.Chain, chainName)
+		}
+		if _, ok := seenProxies[proxy.Address]; ok {
+			return fmt.Errorf("duplicate proxy address %s for chain %s", proxy.Address.Hex(), proxy.Chain)
+		}
+		seenProxies[proxy.Address] = struct{}{}
+	}
+
+	return nil
+}
+
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.sqsConsumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlock)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.sqsConsumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlock)
+	})
 
 	s.logger.Info("started",
 		"chainID", s.config.ChainID,
@@ -103,10 +158,14 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("stopped")
 	return nil
 }
@@ -115,6 +174,7 @@ func (s *Service) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
 ) error {
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	start := time.Now()
 
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)

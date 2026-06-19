@@ -82,6 +82,9 @@ export function LogoAvatar({
         borderStyle: 'solid',
         borderColor: isSelected ? 'interactive.accent' : 'border.subtle',
         flexShrink: 0,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
       })}
     >
       <Avatar.Fallback
@@ -94,6 +97,8 @@ export function LogoAvatar({
           color: isSelected ? 'white' : fallbackColor,
           fontSize: '2xs',
           fontWeight: 'semibold',
+          lineHeight: '1',
+          textAlign: 'center',
           userSelect: 'none',
         })}
       >
