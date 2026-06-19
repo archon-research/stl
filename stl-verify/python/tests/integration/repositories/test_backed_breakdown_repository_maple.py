@@ -181,6 +181,9 @@ async def test_items_ordered_by_value_desc(repository: MapleBackedBreakdownRepos
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_unknown_pool_raises(repository: MapleBackedBreakdownRepository) -> None:
-    with pytest.raises(ValueError, match="maple syrup pool not found"):
-        await repository.get_backed_breakdown(bytes.fromhex("dead" * 10), chain_id=1)
+async def test_unknown_pool_returns_empty(repository: MapleBackedBreakdownRepository) -> None:
+    # A registered-but-not-yet-indexed (or absent) syrup pool degrades to an
+    # empty breakdown rather than raising — the asset is known, data is not.
+    result = await repository.get_backed_breakdown(bytes.fromhex("dead" * 10), chain_id=1)
+    assert result.items == ()
+    assert result.backed_asset_id == 0

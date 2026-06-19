@@ -198,6 +198,13 @@ class CryptoLendingRiskService:
         enriched: list[RiskEnrichedCollateral] = []
         for item in breakdown.items:
             price = item.price_usd
+            if not price:
+                logger.warning(
+                    "Maple collateral backed_asset_id=%d symbol=%s has missing or zero price; "
+                    "emitting amount=0 (amount_usd preserved)",
+                    breakdown.backed_asset_id,
+                    item.symbol,
+                )
             amount = (item.backing_value / price) if price else Decimal("0")
             enriched.append(
                 RiskEnrichedCollateral(

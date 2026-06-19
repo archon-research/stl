@@ -464,11 +464,15 @@ class TestMaplePath:
         maple_reader.get_legacy_share.assert_not_awaited()
         maple_reader.get_liquidation_params.assert_not_awaited()
 
+    # Both a None price and a literal zero price hit distinct ternary predicates
+    # in _build_maple_items (``if price`` vs ``price is not None``); cover both.
+    @pytest.mark.parametrize("price", [None, Decimal("0")])
     @pytest.mark.asyncio
-    async def test_zero_price_yields_zero_amount(
+    async def test_zero_or_missing_price_yields_zero_amount(
         self,
         maple_service: CryptoLendingRiskService,
         maple_reader: MagicMock,
+        price: Decimal | None,
     ) -> None:
         maple_reader.get_breakdown = AsyncMock(
             return_value=_breakdown(
@@ -478,7 +482,7 @@ class TestMaplePath:
                         symbol="MYSTERY",
                         backing_value=Decimal("500"),
                         backing_pct=Decimal("100"),
-                        price_usd=None,
+                        price_usd=price,
                     ),
                 ),
                 backed_asset_id=7,

@@ -17,6 +17,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.main import create_app
+from tests.integration.seed import insert_user
 
 SYRUP_USDC_HEX = "80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"
 _PRIME_ID = "0x" + "01" * 20
@@ -44,10 +45,7 @@ async def _seed(db_url: str) -> None:
             pool_id,
             _SYNCED,
         )
-        borrower_id = await conn.fetchval(
-            'INSERT INTO "user" (chain_id, address) VALUES (1, $1) ON CONFLICT DO NOTHING RETURNING id',
-            _BORROWER,
-        )
+        borrower_id = await insert_user(conn, _BORROWER)
         loan_id = await conn.fetchval(
             "INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id) "
             "VALUES (1, $1, $2, $3, $4) RETURNING id",
@@ -102,6 +100,21 @@ def test_breakdown_endpoint_returns_maple_collateral(client: TestClient, maple_s
     assert btc["liquidation_bonus"] is None
     assert btc["amount_usd"] == "130000.00"
     assert by_symbol["USDC"]["amount_usd"] == "1000000.00"
+
+
+# syrupUSDG: receipt_token is migration-seeded but no test seeds its maple_pool,
+# so the "registered but not yet indexed" path holds regardless of test order.
+_SYRUP_USDG_HEX = "87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a"
+
+
+def test_breakdown_endpoint_empty_when_pool_unindexed(client: TestClient) -> None:
+    # The syrupUSDG receipt_token is migration-seeded but its maple_pool has not
+    # been indexed. The endpoint must degrade to 200 with an empty breakdown,
+    # not 4xx/5xx.
+    response = client.get(f"/v1/risk/1/0x{_SYRUP_USDG_HEX}/breakdown")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["items"] == []
 
 
 def test_rrc_returns_404_no_applicable_model(client: TestClient, maple_seed: None) -> None:

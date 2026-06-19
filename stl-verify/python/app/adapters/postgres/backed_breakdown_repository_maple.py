@@ -43,8 +43,8 @@ loan_latest AS (
 ),
 coll AS (
     SELECT c.asset_symbol AS symbol,
-           c.asset_amount / power(10, c.asset_decimals)        AS amount,
-           c.asset_value_usd / 100000000.0                     AS price_usd
+           c.asset_amount / power(10, c.asset_decimals)::numeric AS amount,
+           c.asset_value_usd / 100000000                         AS price_usd
     FROM loan_latest ll
     JOIN maple_loan_collateral c
       ON c.maple_loan_id      = ll.loan_id
@@ -55,8 +55,8 @@ coll AS (
 ),
 liquidity AS (
     SELECT p.underlying_symbol AS symbol,
-           lps.liquid_assets / power(10, p.underlying_decimals) AS amount,
-           1.0                                                  AS price_usd
+           lps.liquid_assets / power(10, p.underlying_decimals)::numeric AS amount,
+           1.0::numeric                                                  AS price_usd
     FROM pool p
     JOIN LATERAL (
         SELECT liquid_assets
@@ -100,7 +100,12 @@ class MapleBackedBreakdownRepository:
     async def get_backed_breakdown(self, receipt_token_address: bytes, chain_id: int) -> BackedBreakdown:
         pool_id = await self.resolve_pool_id(receipt_token_address, chain_id)
         if pool_id is None:
-            raise ValueError(f"maple syrup pool not found for {receipt_token_address.hex()} on chain {chain_id}")
+            # The syrup receipt token is registered (static migration seed) but the
+            # Maple indexer has not yet created its pool. Degrade to an empty
+            # breakdown rather than raising: the asset is known, its backing data
+            # is just not available yet. Maple has no share-warmup concept, so this
+            # is the graceful "no data yet" signal (200 with empty items).
+            return BackedBreakdown(backed_asset_id=0, items=())
         async with self._engine.connect() as conn:
             result = await conn.execute(
                 text(_MAPLE_BACKED_BREAKDOWN_SQL),
