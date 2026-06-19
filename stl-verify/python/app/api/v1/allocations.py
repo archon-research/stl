@@ -144,25 +144,28 @@ class CapitalMetricsResponse(BaseModel):
 
     prime_id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
-    risk_capital: Decimal = Field(
-        description="Risk capital exposure (USD) sourced from the upstream Star monitor.",
-        examples=["10000000"],
+    exposure: Decimal = Field(
+        description="Total USD exposure across the prime's allocations (upstream `exposure`).",
+        examples=["1900000000"],
     )
     capital_buffer: Decimal = Field(
-        description="`max(total_capital - first_loss_capital, 0)` — distance to first-loss exhaustion (USD).",
+        description="`max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).",
         examples=["2500000"],
     )
-    first_loss_capital: Decimal = Field(
-        description="Financial RRC (first-loss capital) reported by upstream (USD).",
+    required_risk_capital: Decimal = Field(
+        description="Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
         examples=["7500000"],
     )
-    total_capital: Decimal = Field(
-        description="Total RRC reported by upstream (USD).",
+    total_risk_capital: Decimal = Field(
+        description="Total Risk Capital reported by upstream `total_rc` (USD).",
         examples=["10000000"],
     )
-    risk_to_capital_ratio: Decimal | None = Field(
+    encumbrance_ratio: Decimal | None = Field(
         default=None,
-        description="Upstream `risk_tolerance_ratio`. `null` when not validated.",
+        description=(
+            "Required Risk Capital as a share of Total Risk Capital "
+            "(upstream `risk_tolerance_ratio`). `null` when not validated."
+        ),
         examples=["0.85"],
     )
     timestamp: str = Field(
@@ -184,11 +187,11 @@ class CapitalMetricsResponse(BaseModel):
             "example": {
                 "prime_id": "prime-acme",
                 "prime_name": "Acme Prime",
-                "risk_capital": "10000000",
+                "exposure": "1900000000",
                 "capital_buffer": "2500000",
-                "first_loss_capital": "7500000",
-                "total_capital": "10000000",
-                "risk_to_capital_ratio": "0.85",
+                "required_risk_capital": "7500000",
+                "total_risk_capital": "10000000",
+                "encumbrance_ratio": "0.85",
                 "timestamp": "2026-05-07T12:00:00Z",
                 "benchmark_source": "https://example.com/star-rrc",
                 "is_validated": False,
@@ -392,11 +395,11 @@ async def list_capital_metrics(
                 CapitalMetricsResponse(
                     prime_id=prime.id,
                     prime_name=prime.name,
-                    risk_capital=Decimal("0"),
+                    exposure=Decimal("0"),
                     capital_buffer=Decimal("0"),
-                    first_loss_capital=Decimal("0"),
-                    total_capital=Decimal("0"),
-                    risk_to_capital_ratio=None,
+                    required_risk_capital=Decimal("0"),
+                    total_risk_capital=Decimal("0"),
+                    encumbrance_ratio=None,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     benchmark_source=settings.star_risk_capital_upstream_url,
                     is_validated=False,
@@ -413,11 +416,11 @@ async def list_capital_metrics(
             CapitalMetricsResponse(
                 prime_id=prime.id,
                 prime_name=prime.name,
-                risk_capital=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
+                exposure=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
                 capital_buffer=capital_buffer,
-                first_loss_capital=financial_rrc,
-                total_capital=total_rc,
-                risk_to_capital_ratio=_to_decimal(
+                required_risk_capital=financial_rrc,
+                total_risk_capital=total_rc,
+                encumbrance_ratio=_to_decimal(
                     row.risk_tolerance_ratio,
                     field="risk_tolerance_ratio",
                     prime_name=prime.name,

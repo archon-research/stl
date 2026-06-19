@@ -21,7 +21,9 @@ from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepositor
 from app.api.v1 import (
     allocations,
     data_sources,
+    exposure,
     prime_debts,
+    prime_risk_capital,
     protocol_events,
     risk,
     status,
@@ -274,6 +276,8 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.include_router(protocol_events.router, prefix="/v1")
     application.include_router(prime_debts.router, prefix="/v1")
     application.include_router(total_capital.router, prefix="/v1")
+    application.include_router(prime_risk_capital.router, prefix="/v1")
+    application.include_router(exposure.router, prefix="/v1")
     application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
 

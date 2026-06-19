@@ -411,6 +411,84 @@
         "title": "AllocationResponse",
         "type": "object"
       },
+      "AllocationRiskCapitalResponse": {
+        "description": "Per-allocation risk capital from the default model.",
+        "properties": {
+          "applied": {
+            "description": "Whether the default model could price this allocation.",
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "crr_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Comparable capital-risk ratio (0-100). `null` when the model does not apply.",
+            "title": "Crr Pct"
+          },
+          "exposure_usd": {
+            "description": "On-chain USD exposure of the allocation.",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Exposure Usd",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model that produced the figure, or `null`.",
+            "title": "Model"
+          },
+          "protocol_name": {
+            "description": "Protocol the allocation sits in.",
+            "title": "Protocol Name",
+            "type": "string"
+          },
+          "receipt_token_id": {
+            "description": "Surrogate id of the receipt token.",
+            "title": "Receipt Token Id",
+            "type": "integer"
+          },
+          "required_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-allocation RRC (USD). `null` when the model does not apply.",
+            "title": "Required Risk Capital Usd"
+          },
+          "symbol": {
+            "description": "Receipt-token symbol.",
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_token_id",
+          "symbol",
+          "protocol_name",
+          "exposure_usd",
+          "applied"
+        ],
+        "title": "AllocationRiskCapitalResponse",
+        "type": "object"
+      },
       "BadDebtResponse": {
         "description": "Estimated bad debt for a receipt-token position at a given collateral gap.",
         "example": {
@@ -459,14 +537,14 @@
         "example": {
           "benchmark_source": "https://example.com/star-rrc",
           "capital_buffer": "2500000",
-          "first_loss_capital": "7500000",
+          "encumbrance_ratio": "0.85",
+          "exposure": "1900000000",
           "is_validated": false,
           "prime_id": "prime-acme",
           "prime_name": "Acme Prime",
-          "risk_capital": "10000000",
-          "risk_to_capital_ratio": "0.85",
+          "required_risk_capital": "7500000",
           "timestamp": "2026-05-07T12:00:00Z",
-          "total_capital": "10000000",
+          "total_risk_capital": "10000000",
           "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
         },
         "properties": {
@@ -483,7 +561,7 @@
             "title": "Benchmark Source"
           },
           "capital_buffer": {
-            "description": "`max(total_capital - first_loss_capital, 0)` \u2014 distance to first-loss exhaustion (USD).",
+            "description": "`max(total_risk_capital - required_risk_capital, 0)` \u2014 unencumbered risk capital (USD).",
             "examples": [
               "2500000"
             ],
@@ -491,13 +569,29 @@
             "title": "Capital Buffer",
             "type": "string"
           },
-          "first_loss_capital": {
-            "description": "Financial RRC (first-loss capital) reported by upstream (USD).",
+          "encumbrance_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required Risk Capital as a share of Total Risk Capital (upstream `risk_tolerance_ratio`). `null` when not validated.",
             "examples": [
-              "7500000"
+              "0.85"
+            ],
+            "title": "Encumbrance Ratio"
+          },
+          "exposure": {
+            "description": "Total USD exposure across the prime's allocations (upstream `exposure`).",
+            "examples": [
+              "1900000000"
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "First Loss Capital",
+            "title": "Exposure",
             "type": "string"
           },
           "is_validated": {
@@ -522,30 +616,14 @@
             "title": "Prime Name",
             "type": "string"
           },
-          "risk_capital": {
-            "description": "Risk capital exposure (USD) sourced from the upstream Star monitor.",
+          "required_risk_capital": {
+            "description": "Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
             "examples": [
-              "10000000"
+              "7500000"
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Risk Capital",
+            "title": "Required Risk Capital",
             "type": "string"
-          },
-          "risk_to_capital_ratio": {
-            "anyOf": [
-              {
-                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Upstream `risk_tolerance_ratio`. `null` when not validated.",
-            "examples": [
-              "0.85"
-            ],
-            "title": "Risk To Capital Ratio"
           },
           "timestamp": {
             "description": "ISO-8601 timestamp the snapshot was assembled.",
@@ -555,13 +633,13 @@
             "title": "Timestamp",
             "type": "string"
           },
-          "total_capital": {
-            "description": "Total RRC reported by upstream (USD).",
+          "total_risk_capital": {
+            "description": "Total Risk Capital reported by upstream `total_rc` (USD).",
             "examples": [
               "10000000"
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Capital",
+            "title": "Total Risk Capital",
             "type": "string"
           },
           "validation_note": {
@@ -580,10 +658,10 @@
         "required": [
           "prime_id",
           "prime_name",
-          "risk_capital",
+          "exposure",
           "capital_buffer",
-          "first_loss_capital",
-          "total_capital",
+          "required_risk_capital",
+          "total_risk_capital",
           "timestamp"
         ],
         "title": "CapitalMetricsResponse",
@@ -694,6 +772,68 @@
           "sources"
         ],
         "title": "DataSourcesResponse",
+        "type": "object"
+      },
+      "ExposureBucketResponse": {
+        "description": "Priced receipt-token exposure within a single time bucket (LOCF gap-filled).",
+        "properties": {
+          "bucket_start": {
+            "description": "Inclusive start of the time bucket (UTC).",
+            "format": "date-time",
+            "title": "Bucket Start",
+            "type": "string"
+          },
+          "exposure_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sum across the prime's receipt-token positions of the carried-forward balance valued at the latest underlying oracle price (USD), serialized as a JSON string. `null` for leading buckets before the first observation.",
+            "examples": [
+              "1459014561.88"
+            ],
+            "title": "Exposure Usd"
+          }
+        },
+        "required": [
+          "bucket_start"
+        ],
+        "title": "ExposureBucketResponse",
+        "type": "object"
+      },
+      "ExposureEnvelope": {
+        "description": "Per-prime exposure time series, gap-filled into buckets.",
+        "properties": {
+          "data": {
+            "description": "Priced exposure per time bucket.",
+            "items": {
+              "$ref": "#/components/schemas/ExposureBucketResponse"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "mode": {
+            "const": "aggregated",
+            "description": "Always `aggregated`: a gap-filled time series.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "window": {
+            "$ref": "#/components/schemas/TimeSeriesWindow",
+            "description": "The window and resolution applied to this response."
+          }
+        },
+        "required": [
+          "mode",
+          "window",
+          "data"
+        ],
+        "title": "ExposureEnvelope",
         "type": "object"
       },
       "GapSweepDetails": {
@@ -926,6 +1066,99 @@
           "address"
         ],
         "title": "PrimeResponse",
+        "type": "object"
+      },
+      "PrimeRiskCapitalResponse": {
+        "description": "Self-computed, model-derived capital metrics for a prime.\n\nIndependent of the upstream Star feed. `required_risk_capital_usd` is the\nsum of per-allocation RRC from the default model (`model`); it is **partial**\n(only allocations the model can price contribute) and **will not** match\nSky's dashboard. `modeled_pct` reports the priced share of exposure.",
+        "properties": {
+          "encumbrance_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required / Total Risk Capital. `null` when total is absent or zero.",
+            "title": "Encumbrance Ratio"
+          },
+          "exposure_usd": {
+            "description": "\u03a3 priced receipt-token allocation exposure (USD).",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Exposure Usd",
+            "type": "string"
+          },
+          "model": {
+            "description": "Default RRC model used (e.g. `gap_sweep`).",
+            "examples": [
+              "gap_sweep"
+            ],
+            "title": "Model",
+            "type": "string"
+          },
+          "modeled_exposure_usd": {
+            "description": "Exposure the default model could price (USD).",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Modeled Exposure Usd",
+            "type": "string"
+          },
+          "modeled_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero.",
+            "title": "Modeled Pct"
+          },
+          "per_allocation": {
+            "description": "Per-allocation breakdown, newest-exposure first.",
+            "items": {
+              "$ref": "#/components/schemas/AllocationRiskCapitalResponse"
+            },
+            "title": "Per Allocation",
+            "type": "array"
+          },
+          "prime_id": {
+            "description": "Prime's 0x-prefixed ALM proxy address.",
+            "title": "Prime Id",
+            "type": "string"
+          },
+          "required_risk_capital_usd": {
+            "description": "\u03a3 per-allocation RRC from the default model (USD).",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required Risk Capital Usd",
+            "type": "string"
+          },
+          "total_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On-chain SubProxy treasury balance (USD). `null` when absent.",
+            "title": "Total Risk Capital Usd"
+          }
+        },
+        "required": [
+          "prime_id",
+          "model",
+          "exposure_usd",
+          "required_risk_capital_usd",
+          "modeled_exposure_usd",
+          "per_allocation"
+        ],
+        "title": "PrimeRiskCapitalResponse",
         "type": "object"
       },
       "ProtocolEventBucketResponse": {
@@ -2486,6 +2719,178 @@
         "summary": "List prime debt snapshots",
         "tags": [
           "primes"
+        ]
+      }
+    },
+    "/v1/primes/{prime_id}/exposure": {
+      "get": {
+        "description": "Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "operationId": "list_prime_exposure_v1_primes__prime_id__exposure_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Max buckets returned (default 100, max 500).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "description": "Max buckets returned (default 100, max 500).",
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+            "in": "query",
+            "name": "from_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
+              "title": "From Timestamp"
+            }
+          },
+          {
+            "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+            "in": "query",
+            "name": "to_timestamp",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time.",
+              "title": "To Timestamp"
+            }
+          },
+          {
+            "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+            "in": "query",
+            "name": "resolution",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/TimeSeriesResolution"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window.",
+              "title": "Resolution"
+            }
+          },
+          {
+            "description": "When true, return time-bucketed aggregates instead of raw rows.",
+            "in": "query",
+            "name": "aggregate",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "When true, return time-bucketed aggregates instead of raw rows.",
+              "title": "Aggregate",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExposureEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Prime exposure time series",
+        "tags": [
+          "primes",
+          "capital"
+        ]
+      }
+    },
+    "/v1/primes/{prime_id}/risk-capital": {
+      "get": {
+        "description": "Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. Returns `404` if the prime is unknown.",
+        "operationId": "get_prime_risk_capital_v1_primes__prime_id__risk_capital_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "prime_id",
+            "required": true,
+            "schema": {
+              "title": "Prime Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrimeRiskCapitalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Self-computed prime risk capital",
+        "tags": [
+          "primes",
+          "capital",
+          "primes",
+          "capital"
         ]
       }
     },

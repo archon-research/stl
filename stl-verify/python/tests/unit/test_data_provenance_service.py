@@ -40,3 +40,5 @@ def test_required_sources_exist() -> None:
         and s.host == "https://info.skyeco.com/required-risk-capital"
         for s in sources
     )
+    # The dashboard's risk-capital figures are self-computed on-chain.
+    assert any(s.name == "Self-computed Risk Capital (gap_sweep)" for s in sources)

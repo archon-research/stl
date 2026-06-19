@@ -76,3 +76,21 @@ class TotalCapitalBucket:
     def __post_init__(self) -> None:
         if self.total_capital_usd is not None and self.total_capital_usd < 0:
             raise ValueError(f"total_capital_usd must be non-negative, got {self.total_capital_usd}")
+
+
+@dataclass(frozen=True)
+class ExposureBucket:
+    """A prime's priced receipt-token exposure for a single time bucket (LOCF gap-filled).
+
+    ``exposure_usd`` is the sum across the prime's receipt-token positions of the
+    last observed balance carried forward into the bucket, valued at the latest
+    underlying oracle price. ``None`` for leading buckets before the first
+    observation.
+    """
+
+    bucket_start: datetime
+    exposure_usd: Decimal | None
+
+    def __post_init__(self) -> None:
+        if self.exposure_usd is not None and self.exposure_usd < 0:
+            raise ValueError(f"exposure_usd must be non-negative, got {self.exposure_usd}")

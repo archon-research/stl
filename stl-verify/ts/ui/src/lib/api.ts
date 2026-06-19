@@ -7,7 +7,9 @@ import type {
   AllocationsResponse,
   CapitalMetricsListResponse,
   DataSourcesResponse,
+  ExposureEnvelope,
   PrimeDebtEnvelope,
+  PrimeRiskCapital,
   PrimeDebtSnapshot,
   PrimesResponse,
   ProtocolEventsResponse,
@@ -121,6 +123,49 @@ export function getAllocations(
     }),
     'GET /v1/primes/{prime_id}/allocations',
   );
+}
+
+export function getPrimeRiskCapital(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeRiskCapital> {
+  return requestData(
+    apiClient.GET('/v1/primes/{prime_id}/risk-capital', {
+      params: { path: { prime_id: primeId } },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/risk-capital',
+  );
+}
+
+export async function getExposureEnvelope(
+  primeId: string,
+  filters?: {
+    from_timestamp?: string;
+    to_timestamp?: string;
+    resolution?: TimeSeriesResolution;
+    aggregate?: boolean;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<ExposureEnvelope> {
+  const query = filters as
+    | paths['/v1/primes/{prime_id}/exposure']['get']['parameters']['query']
+    | undefined;
+
+  const envelope = await requestData(
+    apiClient.GET('/v1/primes/{prime_id}/exposure', {
+      params: {
+        path: {
+          prime_id: primeId,
+        },
+        query,
+      },
+      signal,
+    }),
+    'GET /v1/primes/{prime_id}/exposure',
+  );
+  return envelope as ExposureEnvelope;
 }
 
 export function getRiskBreakdown(

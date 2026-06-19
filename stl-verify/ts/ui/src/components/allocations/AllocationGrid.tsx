@@ -40,9 +40,10 @@ import {
 import type {
   Allocation,
   AllocationCategory,
-  CapitalMetrics,
+  AllocationRiskCapital,
   Prime,
   PrimeDebtSnapshot,
+  PrimeRiskCapital,
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import {
@@ -57,13 +58,13 @@ import {
 
 type AllocationGridProps = {
   allocations: Allocation[];
-  capitalMetrics: CapitalMetrics | null;
+  riskCapital: PrimeRiskCapital | null;
   chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   filteredAllocations: Allocation[];
   topMetricsAllocations: Allocation[];
   isLoading: boolean;
-  isCapitalMetricsLoading: boolean;
+  isRiskCapitalLoading: boolean;
   isPrimeDebtLoading: boolean;
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
@@ -79,7 +80,7 @@ type AllocationGridProps = {
   metricCharts: MetricChartSpec[];
   isChartsLoading: boolean;
   chartsErrorMessage: string | null;
-  capitalMetricsErrorMessage: string | null;
+  riskCapitalErrorMessage: string | null;
   primeDebtErrorMessage: string | null;
 };
 
@@ -621,9 +622,49 @@ function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
+function lookupAllocationRiskCapital(
+  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  allocation: Allocation,
+): AllocationRiskCapital | undefined {
+  if (
+    allocation.receipt_token_id === undefined ||
+    allocation.receipt_token_id === null
+  ) {
+    return undefined;
+  }
+
+  return riskByReceiptTokenId.get(allocation.receipt_token_id);
+}
+
+function AllocationRiskCapitalCell({
+  entry,
+}: {
+  entry: AllocationRiskCapital | undefined;
+}) {
+  if (!entry?.applied) {
+    return (
+      <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>n/a</p>
+    );
+  }
+
+  return (
+    <p
+      className={css({
+        m: 0,
+        fontSize: 'sm',
+        fontWeight: 'semibold',
+        color: 'text.strong',
+      })}
+    >
+      {formatUsdValue(entry.required_risk_capital_usd)}
+    </p>
+  );
+}
+
 function createAllocationColumns(
   chainLabels: ChainLabelLookup,
   localProtocols: LocalProtocolRow[],
+  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
 ): ColumnDef<Allocation>[] {
   return [
     {
@@ -665,18 +706,39 @@ function createAllocationColumns(
       accessorFn: (allocation) => allocation.category,
       cell: ({ row }) => <AllocationCategoryCell allocation={row.original} />,
     },
+    {
+      id: 'risk_capital',
+      header: 'Risk capital',
+      accessorFn: (allocation) => {
+        const entry = lookupAllocationRiskCapital(
+          riskByReceiptTokenId,
+          allocation,
+        );
+        return entry?.applied
+          ? (parseNumericValue(entry.required_risk_capital_usd) ?? 0)
+          : 0;
+      },
+      cell: ({ row }) => (
+        <AllocationRiskCapitalCell
+          entry={lookupAllocationRiskCapital(
+            riskByReceiptTokenId,
+            row.original,
+          )}
+        />
+      ),
+    },
   ];
 }
 
 export function AllocationGrid({
   allocations,
-  capitalMetrics,
+  riskCapital,
   chainLabels,
   errorMessage,
   filteredAllocations,
   topMetricsAllocations,
   isLoading,
-  isCapitalMetricsLoading,
+  isRiskCapitalLoading,
   isPrimeDebtLoading,
   localProtocols,
   onSelectAllocation,
@@ -690,7 +752,7 @@ export function AllocationGrid({
   metricCharts,
   isChartsLoading,
   chartsErrorMessage,
-  capitalMetricsErrorMessage,
+  riskCapitalErrorMessage,
   primeDebtErrorMessage,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
@@ -765,9 +827,22 @@ export function AllocationGrid({
 
   const hasSearchQuery = searchValue.trim().length > 0;
 
+  const riskByReceiptTokenId = useMemo(() => {
+    const map = new Map<number, AllocationRiskCapital>();
+    for (const entry of riskCapital?.per_allocation ?? []) {
+      map.set(entry.receipt_token_id, entry);
+    }
+    return map;
+  }, [riskCapital]);
+
   const columns = useMemo<ColumnDef<Allocation>[]>(
-    () => createAllocationColumns(chainLabels, localProtocols),
-    [chainLabels, localProtocols],
+    () =>
+      createAllocationColumns(
+        chainLabels,
+        localProtocols,
+        riskByReceiptTokenId,
+      ),
+    [chainLabels, localProtocols, riskByReceiptTokenId],
   );
 
   const table = useDataTable(filteredAllocations, columns, {
@@ -777,10 +852,10 @@ export function AllocationGrid({
   });
 
   const showTopMetricsSkeleton =
-    selectedPrime !== null && (isLoading || isCapitalMetricsLoading);
+    selectedPrime !== null && (isLoading || isRiskCapitalLoading);
 
   const hasTopMetrics =
-    capitalMetrics !== null || summary !== null || selectedPrime !== null;
+    riskCapital !== null || summary !== null || selectedPrime !== null;
 
   const metricsCardClassName = css({
     borderRadius: 'sm',
@@ -1015,29 +1090,14 @@ export function AllocationGrid({
               />
             ) : null}
 
-            {capitalMetrics ? (
+            {riskCapital ? (
               <>
                 <SummaryMetric
                   className={metricsCardClassName}
-                  label="Risk capital"
-                  value={formatUsdValue(capitalMetrics.risk_capital)}
+                  label="Exposure"
+                  value={formatUsdValue(riskCapital.exposure_usd)}
                   detail={
                     <div className={metricDetailClassName}>
-                      {parseNumericValue(
-                        capitalMetrics.risk_to_capital_ratio,
-                      ) !== null ? (
-                        <div
-                          className={css({
-                            fontSize: 'sm',
-                            color: 'text.muted',
-                          })}
-                        >
-                          Risk-to-capital{' '}
-                          {formatRatioPercent(
-                            capitalMetrics.risk_to_capital_ratio,
-                          )}
-                        </div>
-                      ) : null}
                       <MetricCardTrend
                         chart={riskCapitalChart}
                         isLoading={isChartsLoading}
@@ -1049,19 +1109,23 @@ export function AllocationGrid({
               </>
             ) : null}
 
-            {capitalMetrics ? (
+            {riskCapital ? (
               <SummaryMetric
                 className={metricsCardClassName}
-                label="Total capital"
-                value={formatUsdValue(capitalMetrics.total_capital)}
+                label="Total risk capital"
+                value={formatUsdValue(
+                  riskCapital.total_risk_capital_usd ?? '0',
+                )}
                 detail={
                   <div className={metricDetailClassName}>
                     <div
                       className={css({ fontSize: 'sm', color: 'text.muted' })}
                     >
-                      Buffer {formatUsdValue(capitalMetrics.capital_buffer)} ·{' '}
-                      First loss{' '}
-                      {formatUsdValue(capitalMetrics.first_loss_capital)}
+                      Required{' '}
+                      {formatUsdValue(riskCapital.required_risk_capital_usd)}
+                      {parseNumericValue(riskCapital.encumbrance_ratio) !== null
+                        ? ` · Encumbrance ${formatRatioPercent(riskCapital.encumbrance_ratio)}`
+                        : ''}
                     </div>
                     <MetricCardTrend
                       chart={totalCapitalChart}
@@ -1144,24 +1208,26 @@ export function AllocationGrid({
             ) : null}
           </div>
         ) : null}
-        {!showTopMetricsSkeleton && capitalMetrics?.validation_note ? (
+        {!showTopMetricsSkeleton && riskCapital ? (
           <p
             className={css({
               m: 0,
               fontSize: 'xs',
               color: 'text.muted',
-              fontStyle: 'italic',
-              textAlign: 'left',
             })}
           >
-            {capitalMetrics.validation_note}
+            Model-derived ({riskCapital.model}, 15% stress) ·{' '}
+            {parseNumericValue(riskCapital.modeled_pct) !== null
+              ? formatRatioPercent(riskCapital.modeled_pct)
+              : 'partial'}{' '}
+            of exposure modeled
           </p>
         ) : null}
-        {!showTopMetricsSkeleton && capitalMetricsErrorMessage ? (
+        {!showTopMetricsSkeleton && riskCapitalErrorMessage ? (
           <ErrorState
-            title="Capital metrics are unavailable"
-            description="The capital metrics endpoint failed for this session."
-            errorMessage={capitalMetricsErrorMessage}
+            title="Risk capital is unavailable"
+            description="The risk capital endpoint failed for this session."
+            errorMessage={riskCapitalErrorMessage}
           />
         ) : null}
         <div

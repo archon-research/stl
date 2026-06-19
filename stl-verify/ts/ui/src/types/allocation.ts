@@ -6,6 +6,10 @@ export type AllocationActivity =
   components['schemas']['AllocationActivityResponse'];
 export type ProtocolEvent = components['schemas']['ProtocolEventResponse'];
 export type CapitalMetrics = components['schemas']['CapitalMetricsResponse'];
+export type PrimeRiskCapital =
+  components['schemas']['PrimeRiskCapitalResponse'];
+export type AllocationRiskCapital =
+  components['schemas']['AllocationRiskCapitalResponse'];
 export type DataSources = components['schemas']['DataSourcesResponse'];
 export type DataSource = components['schemas']['DataSourceResponse'];
 export type AllocationCategory = components['schemas']['AllocationCategory'];
@@ -73,6 +77,10 @@ export type TotalCapitalEnvelope =
 
 export type TotalCapitalBucket =
   components['schemas']['TotalCapitalBucketResponse'];
+
+export type ExposureEnvelope = components['schemas']['ExposureEnvelope'];
+
+export type ExposureBucket = components['schemas']['ExposureBucketResponse'];
 
 export type TokensResponse = NonNullable<
   paths['/v1/tokens']['get']['responses']['200']['content']['application/json']

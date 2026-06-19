@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import {
   getAllocationActivityEnvelope,
+  getExposureEnvelope,
   getPrimeDebtEnvelope,
   getTotalCapitalEnvelope,
 } from '../lib/api';
@@ -10,6 +11,7 @@ import { isAbortError, toErrorMessage } from '../lib/errors';
 import { logging } from '../lib/logging';
 import type {
   AllocationActivityBucket,
+  ExposureBucket,
   PrimeDebtBucket,
   TimeSeriesResolution,
   TotalCapitalBucket,
@@ -19,6 +21,7 @@ export interface PrimeChartData {
   debtBuckets: PrimeDebtBucket[];
   activityBuckets: AllocationActivityBucket[];
   totalCapitalBuckets: TotalCapitalBucket[];
+  exposureBuckets: ExposureBucket[];
   isLoading: boolean;
   // Set only for the prime-debt chart, which is the primary series; the
   // activity and total-capital series are supplementary and degrade to their
@@ -30,6 +33,7 @@ const EMPTY: PrimeChartData = {
   debtBuckets: [],
   activityBuckets: [],
   totalCapitalBuckets: [],
+  exposureBuckets: [],
   isLoading: false,
   errorMessage: null,
 };
@@ -53,6 +57,7 @@ export function usePrimeChartData(
   const [totalCapitalBuckets, setTotalCapitalBuckets] = useState<
     TotalCapitalBucket[]
   >([]);
+  const [exposureBuckets, setExposureBuckets] = useState<ExposureBucket[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -61,6 +66,7 @@ export function usePrimeChartData(
       setDebtBuckets([]);
       setActivityBuckets([]);
       setTotalCapitalBuckets([]);
+      setExposureBuckets([]);
       setErrorMessage(null);
       setIsLoading(false);
       return;
@@ -170,6 +176,27 @@ export function usePrimeChartData(
       }
     });
 
+    // Exposure history is supplementary: it drives the Exposure card trend from
+    // priced receipt-token balances over time, and on failure that card
+    // degrades to the current-value fallback rather than failing the whole view.
+    void getExposureEnvelope(primeId, bucketFilters, controller.signal)
+      .then((exposureEnvelope) => {
+        setExposureBuckets(
+          sortByBucketStart(exposureEnvelope.data as ExposureBucket[]),
+        );
+      })
+      .catch((error: unknown) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        logging.warn('Exposure history unavailable; using current value', {
+          error,
+          primeId,
+        });
+        setExposureBuckets([]);
+      });
+
     return () => controller.abort();
   }, [primeId, fromTimestamp, toTimestamp, resolution]);
 
@@ -181,6 +208,7 @@ export function usePrimeChartData(
     debtBuckets,
     activityBuckets,
     totalCapitalBuckets,
+    exposureBuckets,
     isLoading,
     errorMessage,
   };

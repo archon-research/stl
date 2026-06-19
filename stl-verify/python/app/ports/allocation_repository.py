@@ -11,7 +11,11 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
-from app.domain.entities.time_series_bucket import AllocationActivityBucket, TotalCapitalBucket
+from app.domain.entities.time_series_bucket import (
+    AllocationActivityBucket,
+    ExposureBucket,
+    TotalCapitalBucket,
+)
 
 
 class AllocationRepositoryPort(Protocol):
@@ -117,4 +121,20 @@ class AllocationRepositoryPort(Protocol):
         limit: int = 100,
     ) -> list[TotalCapitalBucket]:
         """Return the prime's treasury USDS balance aggregated into time buckets."""
+        ...
+
+    async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
+        """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
+        ...
+
+    async def list_exposure_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[ExposureBucket]:
+        """Return priced receipt-token exposure aggregated into time buckets."""
         ...

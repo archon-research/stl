@@ -627,15 +627,15 @@ def test_list_capital_metrics_maps_star_risk_capital_data(monkeypatch):
     assert len(data) == 2
 
     grove = next(m for m in data if m["prime_id"] == grove_addr)
-    assert grove["risk_capital"] == "500.00"
-    assert grove["total_capital"] == "100.00"
-    assert grove["first_loss_capital"] == "40.00"
+    assert grove["exposure"] == "500.00"
+    assert grove["total_risk_capital"] == "100.00"
+    assert grove["required_risk_capital"] == "40.00"
     assert grove["capital_buffer"] == "60.00"
-    assert grove["risk_to_capital_ratio"] == "5.00"
+    assert grove["encumbrance_ratio"] == "5.00"
 
     spark = next(m for m in data if m["prime_id"] == spark_addr)
-    assert spark["risk_capital"] == "200.00"
-    assert spark["risk_to_capital_ratio"] == "2.50"
+    assert spark["exposure"] == "200.00"
+    assert spark["encumbrance_ratio"] == "2.50"
 
 
 def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monkeypatch):
@@ -680,14 +680,14 @@ def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monke
     data = response.json()
     assert len(data) == 2
     grove = next(item for item in data if item["prime_name"] == "grove")
-    assert grove["risk_capital"] == "100.00"
+    assert grove["exposure"] == "100.00"
 
     missing = next(item for item in data if item["prime_name"] == "unknown-prime")
-    assert missing["risk_capital"] == "0"
+    assert missing["exposure"] == "0"
     assert missing["capital_buffer"] == "0"
-    assert missing["first_loss_capital"] == "0"
-    assert missing["total_capital"] == "0"
-    assert missing["risk_to_capital_ratio"] is None
+    assert missing["required_risk_capital"] == "0"
+    assert missing["total_risk_capital"] == "0"
+    assert missing["encumbrance_ratio"] is None
     assert missing["validation_note"] == "No upstream Star risk-capital row matched this prime."
 
 
@@ -769,7 +769,7 @@ def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch
     payload = response.json()
     assert len(payload) == 1
     assert payload[0]["prime_id"] == _VALID_ADDR
-    assert payload[0]["risk_capital"] == "0"
+    assert payload[0]["exposure"] == "0"
     assert payload[0]["is_validated"] is False
 
 
