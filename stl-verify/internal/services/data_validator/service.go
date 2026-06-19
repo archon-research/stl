@@ -140,6 +140,18 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 
 // resolveBlockRange determines the actual block range to validate.
 func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
+	// GetMin/MaxBlockNumber return 0 for both an empty table and a genesis-only
+	// table, so emptiness can't be inferred from them. Check existence directly:
+	// a nil last block means nothing has been ingested yet, which is a hard
+	// failure for a validation run.
+	lastBlock, err := s.blockStateRepo.GetLastBlock(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("getting last block: %w", err)
+	}
+	if lastBlock == nil {
+		return 0, 0, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
+	}
+
 	fromBlock := s.config.FromBlock
 	toBlock := s.config.ToBlock
 
@@ -157,10 +169,6 @@ func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
 			return 0, 0, fmt.Errorf("getting max block: %w", err)
 		}
 		toBlock = maxBlock
-	}
-
-	if toBlock == 0 {
-		return 0, 0, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
 	}
 
 	if fromBlock > toBlock {
