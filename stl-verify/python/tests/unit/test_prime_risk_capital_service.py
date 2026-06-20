@@ -1,6 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import cast
+from typing import Protocol, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,6 +10,17 @@ from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 from tests.factories import make_receipt_token_position
+
+
+class _AppliesTo(Protocol):
+    """Structural type for anything the fake registry can dispatch on.
+
+    Both ``_FakeModel`` and the concrete ``CryptoLendingRiskService`` expose
+    ``applies_to``; widening the parameter lets tests mix them without a cast.
+    """
+
+    def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool: ...
+
 
 _PRIME = EthAddress("0x" + "ab" * 20)
 
@@ -31,7 +42,7 @@ class _FakeModel:
 
 
 class _FakeRegistry:
-    def __init__(self, models: list[_FakeModel]) -> None:
+    def __init__(self, models: list[_AppliesTo]) -> None:
         self._models = models
 
     def applicable(self, asset_id: int, prime_id: EthAddress):
