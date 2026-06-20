@@ -205,21 +205,19 @@ async def test_get_share_uses_prime_wallet_for_supply_share(
 ) -> None:
     info = _aave_like_info()
 
-    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.25")
-        mock_share_cls.return_value = mock_share
-
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.fetch_share",
+        AsyncMock(return_value=Decimal("0.25")),
+    ) as mock_fetch:
         result = await reader.get_share(info, DUMMY_PRIME)
 
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=777,
         wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.25")
 
 
@@ -230,21 +228,19 @@ async def test_get_share_uses_prime_wallet_for_morpho_supply_share(
 ) -> None:
     info = replace(_morpho_info(), receipt_token_token_id=888)
 
-    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.4")
-        mock_share_cls.return_value = mock_share
-
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.fetch_share",
+        AsyncMock(return_value=Decimal("0.4")),
+    ) as mock_fetch:
         result = await reader.get_share(info, DUMMY_PRIME)
 
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=888,
         wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.4")
 
 
@@ -269,12 +265,12 @@ async def test_get_share_raises_when_receipt_token_token_id_missing(
 async def test_get_legacy_share_returns_one_for_morpho(reader: PostgresCryptoLendingReader) -> None:
     with (
         patch.object(reader, "_lookup_wallet", AsyncMock()) as mock_lookup,
-        patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls,
+        patch("app.adapters.postgres.crypto_lending_reader.fetch_share", AsyncMock()) as mock_fetch,
     ):
         result = await reader.get_legacy_share(_morpho_info())
 
     mock_lookup.assert_not_awaited()
-    mock_share_cls.assert_not_called()
+    mock_fetch.assert_not_awaited()
     assert result == Decimal("1")
 
 
@@ -287,23 +283,21 @@ async def test_get_legacy_share_looks_up_wallet_then_loads_share(
 
     with (
         patch.object(reader, "_lookup_wallet", AsyncMock(return_value=bytes(20))) as mock_lookup,
-        patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls,
+        patch(
+            "app.adapters.postgres.crypto_lending_reader.fetch_share",
+            AsyncMock(return_value=Decimal("0.5")),
+        ) as mock_fetch,
     ):
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.5")
-        mock_share_cls.return_value = mock_share
-
         result = await reader.get_legacy_share(info)
 
     mock_lookup.assert_awaited_once_with(info.receipt_token_address, info.chain_id)
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=777,
         wallet_address=bytes(20),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.5")
 
 

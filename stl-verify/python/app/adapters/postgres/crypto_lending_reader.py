@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
 from app.adapters.postgres.allocation_share_repository import (
-    PostgresAllocationShare,
     _ShareRequest,
     batch_fetch_shares,
+    fetch_share,
 )
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
@@ -242,14 +242,13 @@ class PostgresCryptoLendingReader:
         return info.receipt_token_token_id
 
     async def _load_share(self, chain_id: int, token_id: int, wallet_address: bytes) -> Decimal:
-        share_port = PostgresAllocationShare(
+        return await fetch_share(
             engine=self._engine,
             chain_id=chain_id,
             token_id=token_id,
             wallet_address=wallet_address,
             max_stale_seconds=self._allocation_share_max_stale_seconds,
         )
-        return await share_port.get_share()
 
     async def _lookup_wallet(self, receipt_token_address: bytes, chain_id: int) -> bytes:
         """Find the wallet used for legacy share resolution.
