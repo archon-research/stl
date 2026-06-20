@@ -201,10 +201,13 @@ class CryptoLendingRiskService:
             if not price:
                 logger.warning(
                     "Maple collateral backed_asset_id=%d symbol=%s has missing or zero price; "
-                    "emitting amount=0 (amount_usd preserved)",
+                    "emitting amount=0 and price_usd=null (amount_usd preserved)",
                     breakdown.backed_asset_id,
                     item.symbol,
                 )
+            # Surface the missing price as null rather than masking it with 0: a null
+            # price is a machine-detectable "unpriced" signal, whereas a 0 would read
+            # as a real zero price and silently break amount × price == amount_usd.
             amount = (item.backing_value / price) if price else Decimal("0")
             enriched.append(
                 RiskEnrichedCollateral(
@@ -213,7 +216,7 @@ class CryptoLendingRiskService:
                     amount=amount,
                     backing_pct=item.backing_pct,
                     amount_usd=item.backing_value,
-                    price_usd=price if price is not None else Decimal("0"),
+                    price_usd=price if price else None,
                     liquidation_threshold=None,
                     liquidation_bonus=None,
                 )

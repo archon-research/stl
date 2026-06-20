@@ -54,6 +54,14 @@ coll AS (
       AND c.asset_value_usd IS NOT NULL
 ),
 liquidity AS (
+    -- BREAKING ASSUMPTION: pool liquidity is valued at $1/unit. This is correct ONLY
+    -- because every Syrup vault today is stablecoin-denominated (syrupUSDC/USDT/USDG).
+    -- `is_syrup` does NOT guarantee a $1-pegged underlying — that is a Maple product
+    -- fact, not a schema constraint. The underlying_symbol allowlist below makes the
+    -- assumption explicit: a future non-stable (or renamed) syrup underlying contributes
+    -- NO liquidity row rather than a confidently-wrong $1 valuation. If Maple ships a
+    -- non-stable syrup vault, price liquid_assets via an oracle here instead of widening
+    -- this list.
     SELECT p.underlying_symbol AS symbol,
            lps.liquid_assets / power(10, p.underlying_decimals)::numeric AS amount,
            1.0::numeric                                                  AS price_usd
@@ -65,6 +73,7 @@ liquidity AS (
         ORDER BY mps.synced_at DESC, mps.processing_version DESC
         LIMIT 1
     ) lps ON true
+    WHERE p.underlying_symbol IN ('USDC', 'USDT', 'USDG', 'USDS', 'DAI')
 ),
 all_rows AS (
     SELECT symbol, amount, amount * price_usd AS amount_usd FROM coll

@@ -83,7 +83,15 @@ class RiskBreakdownItemResponse(BaseModel):
         description="USD value of the backing-token row.",
         examples=["41234.56"],
     )
-    price_usd: Decimal = Field(description="Latest USD price for the backing token.", examples=["3340.55"])
+    price_usd: Decimal | None = Field(
+        default=None,
+        description=(
+            "Latest USD price for the backing token. Null when the price is unavailable "
+            "(e.g. a Maple custody asset whose attested price is missing); in that case "
+            "`amount` is 0 while `amount_usd` is still the attested USD value."
+        ),
+        examples=["3340.55"],
+    )
     liquidation_threshold: Decimal | None = Field(
         default=None,
         description=(

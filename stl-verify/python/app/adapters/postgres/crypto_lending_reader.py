@@ -147,8 +147,11 @@ class PostgresCryptoLendingReader:
             return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
 
         if normalized in _MAPLE:
-            # Maple has no per-asset liquidation params; the service's maple path
-            # never calls this, but stay consistent with get_breakdown's support.
+            # Maple has no per-asset liquidation params. Returning {} (rather than
+            # raising) keeps this method total over every protocol get_breakdown
+            # supports: a caller that does pass Maple here degrades visibly
+            # (_build_enriched_items drops every param-less item and logs) instead
+            # of hitting the unsupported-protocol raise below.
             return {}
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")

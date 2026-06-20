@@ -1281,10 +1281,10 @@ export interface components {
       liquidation_threshold?: string | null;
       /**
        * Price Usd
-       * @description Latest USD price for the backing token.
+       * @description Latest USD price for the backing token. Null when the price is unavailable (e.g. a Maple custody asset whose attested price is missing); in that case `amount` is 0 while `amount_usd` is still the attested USD value.
        * @example 3340.55
        */
-      price_usd: string;
+      price_usd?: string | null;
       /**
        * Symbol
        * @description Backing-token symbol.

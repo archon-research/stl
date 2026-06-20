@@ -1211,13 +1211,20 @@
             "title": "Liquidation Threshold"
           },
           "price_usd": {
-            "description": "Latest USD price for the backing token.",
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Latest USD price for the backing token. Null when the price is unavailable (e.g. a Maple custody asset whose attested price is missing); in that case `amount` is 0 while `amount_usd` is still the attested USD value.",
             "examples": [
               "3340.55"
             ],
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Price Usd",
-            "type": "string"
+            "title": "Price Usd"
           },
           "symbol": {
             "description": "Backing-token symbol.",
@@ -1247,8 +1254,7 @@
           "symbol",
           "amount",
           "backing_pct",
-          "amount_usd",
-          "price_usd"
+          "amount_usd"
         ],
         "title": "RiskBreakdownItemResponse",
         "type": "object"

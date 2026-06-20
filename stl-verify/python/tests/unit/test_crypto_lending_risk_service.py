@@ -493,5 +493,7 @@ class TestMaplePath:
 
         assert result is not None
         assert result.items[0].amount == Decimal("0")
-        assert result.items[0].price_usd == Decimal("0")
+        # Missing/zero price surfaces as null (machine-detectable "unpriced"),
+        # not a misleading 0 that would imply amount × price == amount_usd.
+        assert result.items[0].price_usd is None
         assert result.items[0].amount_usd == Decimal("500")
