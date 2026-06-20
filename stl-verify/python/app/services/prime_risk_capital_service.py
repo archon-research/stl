@@ -180,15 +180,17 @@ class PrimeRiskCapitalService:
         prime_id: EthAddress,
         prefetched_shares: dict[int, Decimal | Exception],
     ):
-        """Run a model compute, plumbing a pre-fetched share when available."""
+        """Run a model compute, plumbing a pre-fetched share when available.
+
+        The share value (or share-lookup error) is handed to
+        ``compute_with_share`` and only consumed *after* the empty-breakdown
+        short-circuit inside the model. Assets with no backed-breakdown rows
+        return zero items without surfacing the share-lookup error, matching
+        the un-batched ``compute`` semantics where ``get_share`` was never
+        called for empty breakdowns.
+        """
         if isinstance(model, CryptoLendingRiskService) and asset_id in prefetched_shares:
-            share_or_err = prefetched_shares[asset_id]
-            if isinstance(share_or_err, Exception):
-                # Re-raise so the caller sees identical behaviour to the
-                # un-batched code path (e.g. MissingShareError surfaces as
-                # ``503 share_data_missing`` at the API edge).
-                raise share_or_err
-            return await model.compute_with_share(asset_id, prime_id, {}, share_or_err)
+            return await model.compute_with_share(asset_id, prime_id, {}, prefetched_shares[asset_id])
         return await model.compute(asset_id, prime_id, {})
 
     def _default_model_for(self, asset_id: int, prime_id: EthAddress):

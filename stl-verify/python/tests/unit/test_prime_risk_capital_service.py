@@ -225,12 +225,16 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
 
 @pytest.mark.asyncio
 async def test_prime_compute_propagates_per_asset_share_errors():
-    """A ``MissingShareError`` returned by the batch must surface like the un-batched path.
+    """A ``MissingShareError`` from the batch must surface when the asset has a non-empty breakdown.
 
     The endpoint translates ``MissingShareError`` to ``503 share_data_missing``;
-    swallowing it inside the dispatch shim would silently hide the warm-up
-    window from clients.
+    swallowing it for assets that *do* have a backed-breakdown would silently
+    hide the warm-up window from clients. (Assets with an *empty* breakdown
+    are covered by the test below — the un-batched path never called
+    ``get_share`` for those, so the batched path must not surface a 503 for
+    them either.)
     """
+    from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
     from app.domain.exceptions import MissingShareError
 
     positions = [
@@ -239,6 +243,20 @@ async def test_prime_compute_propagates_per_asset_share_errors():
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
     reader.get_receipt_token.return_value = _info(1, 777)
     reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
+    # Non-empty breakdown means ``_load_enriched_items_for_info`` reaches the
+    # share-consumption branch, where the prefetched error must be raised.
+    reader.get_breakdown.return_value = BackedBreakdown(
+        backed_asset_id=42,
+        items=(
+            CollateralContribution(
+                token_id=99,
+                symbol="WETH",
+                backing_value=Decimal("1"),
+                backing_pct=Decimal("1"),
+                price_usd=Decimal("2000"),
+            ),
+        ),
+    )
 
     model = _crypto_lending_service(reader)
     registry = _FakeRegistry([model])
@@ -246,6 +264,39 @@ async def test_prime_compute_propagates_per_asset_share_errors():
 
     with pytest.raises(MissingShareError, match="warm-up"):
         await service.compute(_PRIME)
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_swallows_share_error_for_empty_breakdown():
+    """Empty-breakdown assets must return 200, not 503, even when share lookup failed.
+
+    Regression check for parity with the un-batched ``compute`` path: that
+    path returned early on empty breakdowns and never called ``get_share``,
+    so an asset with no backed-breakdown rows and a missing supply row
+    contributed zero items without ever surfacing the share-lookup failure.
+    The batched dispatcher must preserve that semantics.
+    """
+    from app.domain.entities.backed_breakdown import BackedBreakdown
+    from app.domain.exceptions import MissingShareError
+
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.return_value = _info(1, 777)
+    reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
+    reader.get_breakdown.return_value = BackedBreakdown(backed_asset_id=42, items=())
+
+    model = _crypto_lending_service(reader)
+    registry = _FakeRegistry([model])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME)
+
+    assert result.required_risk_capital_usd == Decimal("0")
+    # The position is still reported (with zero RRC), matching the un-batched
+    # behaviour for empty breakdowns.
+    assert len(result.per_allocation) == 1
 
 
 @pytest.mark.asyncio
