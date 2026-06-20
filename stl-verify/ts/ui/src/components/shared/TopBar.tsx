@@ -1,4 +1,10 @@
-import { StyledSelect, Tabs } from '@archon-research/design-system';
+import {
+  RangePicker,
+  type RangePreset,
+  StyledSelect,
+  Tabs,
+  type TimeRange,
+} from '@archon-research/design-system';
 import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
@@ -16,6 +22,10 @@ type TopBarProps = {
   selectedNetwork: string | null;
   selectedProtocol: string | null;
   selectedView: 'allocation' | 'activities';
+  // Range picker (rendered whenever all three props are provided)
+  rangePreset?: RangePreset;
+  timeRange?: TimeRange;
+  onRangeChange?: (preset: RangePreset, range: TimeRange) => void;
 };
 
 const tabsListClassName = css({
@@ -103,7 +113,15 @@ export function TopBar({
   selectedNetwork,
   selectedProtocol,
   selectedView,
+  rangePreset,
+  timeRange,
+  onRangeChange,
 }: TopBarProps) {
+  const showRangePicker =
+    rangePreset !== undefined &&
+    timeRange !== undefined &&
+    onRangeChange !== undefined;
+
   return (
     <div
       className={css({
@@ -165,6 +183,20 @@ export function TopBar({
           placeholder="All protocols"
           value={selectedProtocol}
         />
+        {showRangePicker ? (
+          <div
+            className={css({
+              width: { base: '100%', sm: '14rem' },
+              flexShrink: 0,
+            })}
+          >
+            <RangePicker
+              preset={rangePreset}
+              range={timeRange}
+              onChange={onRangeChange}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );

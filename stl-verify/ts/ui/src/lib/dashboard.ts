@@ -29,6 +29,20 @@ const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
   notation: 'compact',
 });
 
+// Compact with 2 significant digits, for chart axes and tooltips (e.g. "1.5B",
+// "36M"). Significant digits keep the precision consistent across magnitudes.
+const COMPACT_SIGNIFICANT_FORMAT = new Intl.NumberFormat('en-US', {
+  maximumSignificantDigits: 2,
+  notation: 'compact',
+});
+
+const COMPACT_SIGNIFICANT_CURRENCY_FORMAT = new Intl.NumberFormat('en-US', {
+  currency: 'USD',
+  maximumSignificantDigits: 2,
+  notation: 'compact',
+  style: 'currency',
+});
+
 const TOKEN_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
 });
@@ -310,6 +324,23 @@ export function formatUsdValue(
     : CURRENCY_FORMAT.format(numeric);
 }
 
+// Compact, 2-significant-digit formatters for chart axes and tooltips.
+export function formatCompactUsd(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null
+    ? '—'
+    : COMPACT_SIGNIFICANT_CURRENCY_FORMAT.format(numeric);
+}
+
+export function formatCompactNumber(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null ? '—' : COMPACT_SIGNIFICANT_FORMAT.format(numeric);
+}
+
 export function formatPercentValue(
   value: number | string | null | undefined,
   digits = 2,
@@ -476,6 +507,41 @@ export function formatRawWadLabel(
   }
 
   return `Raw WAD ${truncateMiddle(String(value))}`;
+}
+
+// Float conversion for charting only; use formatWadValue for displayed amounts,
+// which keeps full precision via BigInt.
+export function wadToUnits(
+  value: number | string | null | undefined,
+): number | null {
+  const numeric = parseNumericValue(value, 'wadToUnits');
+  return numeric === null ? null : numeric / 1e18;
+}
+
+export function formatChartTimestampLabel(value: string): string {
+  return new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function toTimestampMs(timestamp: string): number {
+  const value = new Date(timestamp).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+// Returns a new array of time-series buckets sorted oldest-first by
+// `bucket_start`. The backend does not guarantee bucket order, and the charts
+// assume ascending time, so callers must sort before rendering.
+export function sortByBucketStart<T extends { bucket_start: string }>(
+  buckets: readonly T[],
+): T[] {
+  return [...buckets].sort(
+    (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+  );
 }
 
 /**
