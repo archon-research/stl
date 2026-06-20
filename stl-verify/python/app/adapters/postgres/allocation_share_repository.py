@@ -17,6 +17,16 @@ logger = get_logger(__name__)
 # DESC so they deterministically pick the newest version of each row.
 # Pair the latest supply with a balance from the same (block_number,
 # block_version) or any strictly earlier block.
+#
+# The `created_at >= NOW() - INTERVAL '14 days'` predicate on `pinned_balance`
+# is a perf guardrail, not a correctness predicate. allocation_position is a
+# columnstore hypertable with no segmentby on proxy_address (see migration
+# 20260620_120000), so an unbounded `LIMIT 1` scans every chunk for the wallet.
+# NOW() (not ls.block_timestamp) is required for plan-time chunk exclusion:
+# TimescaleDB only prunes chunks for stable expressions of NOW(); CTE column
+# refs are runtime-only and force a full scan. Safe because the caller rejects
+# with StaleShareError when ls is older than max_stale_seconds (~minutes), so
+# any row newer than ls is also within NOW() - 14d by a wide margin.
 _SHARE_LOOKUP_SQL = """
 WITH latest_supply AS (
     SELECT total_supply, scaled_total_supply,
@@ -35,6 +45,8 @@ pinned_balance AS (
     WHERE ap.chain_id = :chain_id
       AND ap.token_id = :token_id
       AND ap.proxy_address = :wallet
+      -- See module-level comment for the NOW()-based chunk-pruning rationale.
+      AND ap.created_at >= NOW() - INTERVAL '14 days'
       AND (ap.block_number < ls.block_number
            OR (ap.block_number = ls.block_number
                AND ap.block_version = ls.block_version))
