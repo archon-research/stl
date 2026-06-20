@@ -1,3 +1,4 @@
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Protocol
 
@@ -33,6 +34,23 @@ class CryptoLendingReader(Protocol):
 
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         """Return the prime's share of the receipt-token supply."""
+        ...
+
+    async def batch_get_shares(
+        self,
+        infos: Sequence[ReceiptTokenInfo],
+        prime_id: EthAddress,
+    ) -> Mapping[int, Decimal | Exception]:
+        """Resolve shares for many receipt tokens in a single round-trip.
+
+        Returns a mapping keyed by ``receipt_token_id``. Per-asset failures
+        (``MissingShareError``/``StaleShareError``/``ValueError``) are returned
+        as **values** rather than raised, so a single bad asset does not poison
+        the whole batch. Driver-level / unexpected exceptions still propagate.
+
+        Callers that want the eager-raise semantics of ``get_share`` should
+        check ``isinstance(result, Exception)`` and re-raise.
+        """
         ...
 
     async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:

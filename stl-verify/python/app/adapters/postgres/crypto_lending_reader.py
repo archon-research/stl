@@ -1,4 +1,5 @@
 import re
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 
 from sqlalchemy import text
@@ -7,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
-from app.adapters.postgres.allocation_share_repository import PostgresAllocationShare
+from app.adapters.postgres.allocation_share_repository import (
+    PostgresAllocationShare,
+    _ShareRequest,
+    batch_fetch_shares,
+)
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
@@ -146,6 +151,66 @@ class PostgresCryptoLendingReader:
             token_id=token_id,
             wallet_address=prime_id.to_bytes(),
         )
+
+    async def batch_get_shares(
+        self,
+        infos: Sequence[ReceiptTokenInfo],
+        prime_id: EthAddress,
+    ) -> Mapping[int, Decimal | Exception]:
+        """Resolve shares for many receipt tokens in a single round-trip.
+
+        See ``CryptoLendingReader.batch_get_shares`` for the contract. Per-asset
+        validation errors (unsupported protocol, missing ``receipt_token_token_id``)
+        are returned as values; the DB call itself is a single ``LATERAL JOIN``
+        query that touches each ``(chain_id, token_id)`` pair via its segmentby
+        index (see ``_BATCH_SHARE_LOOKUP_SQL`` in
+        ``allocation_share_repository``).
+        """
+        if not infos:
+            return {}
+
+        results: dict[int, Decimal | Exception] = {}
+        # Map (chain_id, token_id) -> [receipt_token_id, ...]; the same physical
+        # share row can back multiple receipt tokens in principle, and we want
+        # all of them to share the single DB lookup result.
+        pair_to_receipts: dict[tuple[int, int], list[int]] = {}
+        requests: list[_ShareRequest] = []
+
+        for info in infos:
+            normalized = _normalize_protocol_name(info.protocol_name)
+            if normalized not in _AAVE_LIKE and normalized not in _MORPHO:
+                results[info.receipt_token_id] = ValueError(
+                    f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})"
+                )
+                continue
+            if info.receipt_token_token_id is None:
+                results[info.receipt_token_id] = MissingShareError(
+                    f"receipt-token address not indexed yet for receipt_token_id={info.receipt_token_id}"
+                )
+                continue
+
+            key = (info.chain_id, info.receipt_token_token_id)
+            if key not in pair_to_receipts:
+                pair_to_receipts[key] = []
+                requests.append(_ShareRequest(chain_id=info.chain_id, token_id=info.receipt_token_token_id))
+            pair_to_receipts[key].append(info.receipt_token_id)
+
+        if requests:
+            by_pair = await batch_fetch_shares(
+                engine=self._engine,
+                requests=requests,
+                wallet_address=prime_id.to_bytes(),
+                max_stale_seconds=self._allocation_share_max_stale_seconds,
+            )
+            for key, receipt_ids in pair_to_receipts.items():
+                value = by_pair.get(
+                    key,
+                    MissingShareError(f"no consistent balance+supply pair for chain_id={key[0]} token_id={key[1]}"),
+                )
+                for receipt_id in receipt_ids:
+                    results[receipt_id] = value
+
+        return results
 
     async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)

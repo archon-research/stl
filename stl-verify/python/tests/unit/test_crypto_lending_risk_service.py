@@ -392,3 +392,49 @@ class TestLegacyMethods:
         reader.get_receipt_token.return_value = None
 
         assert await service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID) is None
+
+
+class TestComputeWithShare:
+    """``compute_with_share`` is the fast-path used by ``PrimeRiskCapitalService``.
+
+    It must:
+      * never call ``get_share`` (that's the whole point of pre-fetching)
+      * yield the same RrcResult as ``compute`` for a given share value
+      * still validate ``applies_to`` and unknown overrides
+    """
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_skips_get_share_and_matches_compute(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_share.return_value = Decimal("0.3")
+        baseline = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        reader.get_share.reset_mock()
+        prefetched = await service.compute_with_share(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share=Decimal("0.3"))
+
+        reader.get_share.assert_not_awaited()
+        assert prefetched.rrc_usd == baseline.rrc_usd
+        assert prefetched.comparable_crr_pct == baseline.comparable_crr_pct
+        assert prefetched.risk_model == baseline.risk_model
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_rejects_unsupported_asset(
+        self,
+        service: CryptoLendingRiskService,
+    ) -> None:
+        with pytest.raises(ValueError, match="unsupported asset_id"):
+            await service.compute_with_share(99999, DUMMY_PRIME, overrides={}, share=Decimal("1"))
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_returns_zero_when_breakdown_empty(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_breakdown.return_value = _breakdown((), backed_asset_id=UNDERLYING_TOKEN_ID)
+        result = await service.compute_with_share(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share=Decimal("1"))
+        reader.get_share.assert_not_awaited()
+        assert result.rrc_usd == Decimal("0.00")
