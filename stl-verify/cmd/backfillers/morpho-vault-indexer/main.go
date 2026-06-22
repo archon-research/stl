@@ -781,7 +781,7 @@ func persistVaults(
 				return fmt.Errorf("getting protocol: %w", err)
 			}
 
-			tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, v.Asset, v.AssetSymbol, int(v.AssetDecimals), v.FirstBlock)
+			tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, v.Asset, v.AssetSymbol, int(v.AssetDecimals), &v.FirstBlock)
 			if err != nil {
 				return fmt.Errorf("getting asset token: %w", err)
 			}

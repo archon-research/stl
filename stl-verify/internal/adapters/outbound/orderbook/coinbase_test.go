@@ -140,7 +140,10 @@ func TestCoinbaseSubscribeMessage(t *testing.T) {
 }
 
 func TestCoinbaseProviderNameAndValidation(t *testing.T) {
-	p := NewCoinbaseProvider(testConfig())
+	p, err := NewCoinbaseProvider(testConfig())
+	if err != nil {
+		t.Fatalf("NewCoinbaseProvider: %v", err)
+	}
 	if p.Name() != "coinbase" {
 		t.Errorf("Name = %q", p.Name())
 	}

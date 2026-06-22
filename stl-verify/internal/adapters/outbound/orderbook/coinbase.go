@@ -35,7 +35,7 @@ const (
 // validates them.
 //
 // Docs: https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels
-func NewCoinbaseProvider(cfg Config) outbound.OrderbookProvider {
+func NewCoinbaseProvider(cfg Config) (outbound.OrderbookProvider, error) {
 	return newFeedProvider(cfg, &coinbaseExchange{}, coinbaseMaxSymbols)
 }
 
