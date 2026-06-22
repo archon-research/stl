@@ -37,7 +37,7 @@ type Config struct {
 	// HeartbeatBlocks is the number of blocks between guaranteed state
 	// snapshots even on blocks with no pool event. 0 disables the heartbeat
 	// (event-driven snapshots only).
-	HeartbeatBlocks   int64
+	HeartbeatBlocks int64
 }
 
 // ParseConfig reads the canonical DEX-worker flag + env set and validates

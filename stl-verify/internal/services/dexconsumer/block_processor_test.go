@@ -313,7 +313,9 @@ func TestProcessBlockEvent_FinalizerRunsAfterReceipts(t *testing.T) {
 }
 
 func TestProcessBlockEvent_FinalizerErrorPropagates(t *testing.T) {
-	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error { return nil }
+	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
+		return nil
+	}
 	fin := func(ctx context.Context, event outbound.BlockEvent) error { return errors.New("boom") }
 	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 1), nil, rh, fin)
 	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
