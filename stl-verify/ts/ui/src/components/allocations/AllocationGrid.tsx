@@ -737,6 +737,14 @@ function createAllocationColumns(
       header: 'Balance',
       accessorFn: (allocation) => Number(allocation.balance),
       cell: ({ row }) => <AllocationBalanceCell allocation={row.original} />,
+      // Bar reflects USD value so magnitudes compare across heterogeneous
+      // tokens; the cell text keeps the token holding. Suppress the value-text.
+      meta: {
+        magnitude: {
+          getValue: (allocation) => parseNumericValue(allocation.amount_usd),
+          getValueText: () => null,
+        },
+      },
     },
     {
       id: 'latest_activity_at',
@@ -773,6 +781,21 @@ function createAllocationColumns(
           )}
         />
       ),
+      // No bar for rows with no applied risk capital (the cell reads "n/a").
+      meta: {
+        magnitude: {
+          getValue: (allocation) => {
+            const entry = lookupAllocationRiskCapital(
+              riskByReceiptTokenId,
+              allocation,
+            );
+            return entry?.applied
+              ? parseNumericValue(entry.required_risk_capital_usd)
+              : null;
+          },
+          getValueText: () => null,
+        },
+      },
     },
   ];
 }
