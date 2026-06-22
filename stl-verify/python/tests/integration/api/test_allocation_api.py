@@ -389,6 +389,22 @@ def test_list_allocations_surfaces_latest_activity_action_and_amount(
     assert Decimal(ausdc["latest_activity_amount"]) == Decimal("750")
 
 
+def test_direct_holding_surfaces_latest_activity_action_and_amount(
+    client: TestClient,
+) -> None:
+    """The direct-holding query carries the same latest-activity fields as the
+    receipt-token query. obex's raw USDC was last touched by an ``in`` of 250
+    (the seed sets tx_amount = balance).
+    """
+    response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["symbol"] == "USDC"
+    assert row["latest_activity_action"] == "in"
+    assert Decimal(row["latest_activity_amount"]) == Decimal("250")
+
+
 def test_direct_underlying_holdings_surface_as_their_own_rows(
     client: TestClient,
 ) -> None:
