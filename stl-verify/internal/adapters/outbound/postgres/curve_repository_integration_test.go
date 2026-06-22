@@ -222,6 +222,26 @@ func TestCurveRepository_SaveCryptoswapState_RoundTrip(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1", count)
 	}
+
+	// Read back specific fields to verify the round-trip, not just row presence.
+	var virtualPrice, gamma, priceScale0 string
+	if err := curveTestPool.QueryRow(ctx,
+		`SELECT virtual_price::text, gamma::text, price_scale[1]::text
+		 FROM curve_cryptoswap_state
+		 WHERE curve_pool_id=$1 AND block_number=300`,
+		poolID,
+	).Scan(&virtualPrice, &gamma, &priceScale0); err != nil {
+		t.Fatalf("read-back query: %v", err)
+	}
+	if virtualPrice != "1000000000000000000" {
+		t.Errorf("virtual_price = %q, want 1000000000000000000", virtualPrice)
+	}
+	if gamma != "145000000000000000" {
+		t.Errorf("gamma = %q, want 145000000000000000", gamma)
+	}
+	if priceScale0 != "1234567890" {
+		t.Errorf("price_scale[0] = %q, want 1234567890", priceScale0)
+	}
 }
 
 // TestCurveRepository_SaveSwap_Idempotent verifies that saving the same swap

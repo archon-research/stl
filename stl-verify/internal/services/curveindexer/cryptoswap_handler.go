@@ -126,7 +126,10 @@ func (h *CryptoswapHandler) DecodeEvents(
 		}
 
 		// Capture net: all known pool-address logs are also stored in Captured.
-		payload, _ := json.Marshal(eventData)
+		payload, err := json.Marshal(eventData)
+		if err != nil {
+			return DecodedEvents{}, fmt.Errorf("marshalling %s capture payload: %w", ev.Name, err)
+		}
 		result.Captured = append(result.Captured, CapturedEvent{
 			Pool:      pool,
 			LogIndex:  logIndex,
@@ -424,7 +427,6 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	if v, err := shared.UnpackUint(h.cryptoABI, "xcp_profit", results[idx]); err == nil {
 		xcpProfit = v
 	}
-	idx++ //nolint:ineffassign // idx used by lockstep pattern; kept for symmetry.
 
 	return entity.NewCurveCryptoswapState(entity.CurveCryptoswapStateParams{
 		CurvePoolID:  pool.ID,

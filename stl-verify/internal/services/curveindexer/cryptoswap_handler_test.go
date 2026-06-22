@@ -138,6 +138,27 @@ func TestCryptoswapHandler_DecodeTokenExchange(t *testing.T) {
 	}
 }
 
+func TestCryptoswapHandler_EmptyReceipt(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := RegisteredPool{
+		ID:      10,
+		Address: common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:    KindCryptoswap,
+		NCoins:  3,
+	}
+	got, err := h.DecodeEvents(shared.TransactionReceipt{}, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Swaps) != 0 || len(got.Liquidity) != 0 || len(got.Captured) != 0 {
+		t.Errorf("expected empty result for empty receipt, got %+v", got)
+	}
+}
+
 func TestCryptoswapHandler_IgnoresForeignAddress(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {

@@ -293,6 +293,7 @@ func TestParseConfig_HeartbeatBlocks(t *testing.T) {
 		{name: "default when unset", flag: nil, want: 50},
 		{name: "flag overrides default", flag: []string{"-heartbeat-blocks", "10"}, want: 10},
 		{name: "env used when flag absent", env: map[string]string{"HEARTBEAT_BLOCKS": "25"}, want: 25},
+		{name: "flag overrides env", flag: []string{"-heartbeat-blocks", "10"}, env: map[string]string{"HEARTBEAT_BLOCKS": "25"}, want: 10},
 		{name: "zero disables heartbeat", flag: []string{"-heartbeat-blocks", "0"}, want: 0},
 		{name: "negative rejected", flag: []string{"-heartbeat-blocks", "-1"}, wantErr: true},
 		{name: "non-numeric env rejected", env: map[string]string{"HEARTBEAT_BLOCKS": "abc"}, wantErr: true},

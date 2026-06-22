@@ -18,8 +18,7 @@ import (
 
 // CoordinatorDeps groups the Coordinator's constructor arguments.
 // No doc comments on self-evident fields: the field names explain themselves.
-// Telemetry is optional (nil = no-op); existing callers that omit it continue
-// to work because RecordStateRows is nil-safe.
+// Telemetry is optional (nil = no-op).
 type CoordinatorDeps struct {
 	Pools           []RegisteredPool
 	Handlers        map[PoolKind]PoolClassHandler
@@ -48,7 +47,7 @@ type Coordinator struct {
 	poolsByAddr     map[common.Address]RegisteredPool
 	pools           []RegisteredPool // ordered for deterministic iteration
 	handlers        map[PoolKind]PoolClassHandler
-	mc              outbound.Multicaller
+	multicaller     outbound.Multicaller
 	repo            outbound.CurveRepository
 	eventWriter     *dexconsumer.ProtocolEventWriter
 	txMgr           outbound.TxManager
@@ -60,11 +59,11 @@ type Coordinator struct {
 	lastSnapshotBlock map[int64]int64 // pool.ID -> last snapshotted block
 
 	// per-block buffer
-	curKey   blockKey
-	swaps    []SwapRecord
-	liq      []LiquidityRecord
-	captured []CapturedEvent
-	touched  map[int64]RegisteredPool
+	curKey    blockKey
+	swaps     []SwapRecord
+	liquidity []LiquidityRecord
+	captured  []CapturedEvent
+	touched   map[int64]RegisteredPool
 }
 
 // NewCoordinator validates deps and builds a Coordinator. Every registered
@@ -101,7 +100,7 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 		poolsByAddr:       poolsByAddr,
 		pools:             deps.Pools,
 		handlers:          deps.Handlers,
-		mc:                deps.Multicaller,
+		multicaller:       deps.Multicaller,
 		repo:              deps.Repo,
 		eventWriter:       deps.EventWriter,
 		txMgr:             deps.TxManager,
@@ -120,7 +119,7 @@ func (c *Coordinator) ReceiptHandler() dexconsumer.ReceiptHandler {
 		key := blockKey{bn: blockNumber, ver: version}
 		if key != c.curKey {
 			c.swaps = nil
-			c.liq = nil
+			c.liquidity = nil
 			c.captured = nil
 			c.touched = make(map[int64]RegisteredPool)
 			c.curKey = key
@@ -141,7 +140,7 @@ func (c *Coordinator) ReceiptHandler() dexconsumer.ReceiptHandler {
 				return fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, blockNumber, err)
 			}
 			c.swaps = append(c.swaps, decoded.Swaps...)
-			c.liq = append(c.liq, decoded.Liquidity...)
+			c.liquidity = append(c.liquidity, decoded.Liquidity...)
 			c.captured = append(c.captured, decoded.Captured...)
 			c.touched[pool.ID] = pool
 		}
@@ -160,7 +159,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 		// redelivery re-accumulates from empty rather than doubling.
 		defer func() {
 			c.swaps = nil
-			c.liq = nil
+			c.liquidity = nil
 			c.captured = nil
 			c.touched = make(map[int64]RegisteredPool)
 		}()
@@ -173,7 +172,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 					return fmt.Errorf("saving swap block %d log %d: %w", bn, s.LogIndex, err)
 				}
 			}
-			for _, l := range c.liq {
+			for _, l := range c.liquidity {
 				if err := c.repo.SaveLiquidityEvent(ctx, tx, toLiquidityInput(l, bn, ver, ts)); err != nil {
 					return fmt.Errorf("saving liquidity event block %d log %d: %w", bn, l.LogIndex, err)
 				}
@@ -195,7 +194,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 				}
 			}
 			for _, pool := range snapshotSet {
-				snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.mc, pool, bn, ver, ts)
+				snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
 				if err != nil {
 					return fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
 				}
@@ -288,36 +287,5 @@ func toLiquidityInput(l LiquidityRecord, bn int64, ver int, ts time.Time) outbou
 		Fees:           l.Fees,
 		Invariant:      l.Invariant,
 		TokenSupply:    l.TokenSupply,
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Package helpers used by the worker binary (Task 12)
-// ---------------------------------------------------------------------------
-
-// IndexPoolsByAddress maps CurvePoolRow slices to RegisteredPool slices.
-func IndexPoolsByAddress(rows []outbound.CurvePoolRow) []RegisteredPool {
-	pools := make([]RegisteredPool, 0, len(rows))
-	for _, row := range rows {
-		pools = append(pools, RegisteredPool{
-			ID:           row.ID,
-			Address:      row.Address,
-			Kind:         PoolKind(row.Kind),
-			NCoins:       row.NCoins,
-			CoinTokenIDs: row.CoinTokenIDs,
-			CoinDecimals: row.CoinDecimals,
-			DeployBlock:  row.DeployBlock,
-		})
-	}
-	return pools
-}
-
-// NewHandlerRegistry builds the standard PoolKind -> PoolClassHandler map for
-// the Curve worker, where both stableswap kinds share the same handler.
-func NewHandlerRegistry(stable, crypto PoolClassHandler) map[PoolKind]PoolClassHandler {
-	return map[PoolKind]PoolClassHandler{
-		KindStableswapPreNG: stable,
-		KindStableswapNG:    stable,
-		KindCryptoswap:      crypto,
 	}
 }

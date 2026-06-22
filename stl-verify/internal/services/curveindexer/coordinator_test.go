@@ -84,21 +84,33 @@ func (r *fakeEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, _ *entity.Protoco
 	return nil
 }
 
+// countingEventRepo counts SaveEvent calls so capture-net tests can assert forwarding.
+type countingEventRepo struct {
+	saves int
+}
+
+func (r *countingEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error {
+	r.saves++
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Test fixture factory
 // ---------------------------------------------------------------------------
 
 const testChainID = int64(1)
 
-// testPool is a 2-coin pre-NG stableswap pool used by all coordinator tests.
-var testPool = RegisteredPool{
-	ID:           42,
-	Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
-	Kind:         KindStableswapPreNG,
-	NCoins:       2,
-	CoinTokenIDs: []int64{1, 2},
-	CoinDecimals: []int{18, 18},
-	DeployBlock:  1,
+// newTestPool returns a 2-coin pre-NG stableswap pool used by coordinator tests.
+func newTestPool() RegisteredPool {
+	return RegisteredPool{
+		ID:           42,
+		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:         KindStableswapPreNG,
+		NCoins:       2,
+		CoinTokenIDs: []int64{1, 2},
+		CoinDecimals: []int{18, 18},
+		DeployBlock:  1,
+	}
 }
 
 // newTestCoordinator constructs a Coordinator with one stableswap pool, a
@@ -134,7 +146,7 @@ func newTestCoordinator(t *testing.T, heartbeatBlocks int64) (*Coordinator, *fak
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCoordinator(CoordinatorDeps{
-		Pools:           []RegisteredPool{testPool},
+		Pools:           []RegisteredPool{newTestPool()},
 		Handlers:        handlers,
 		Multicaller:     mc,
 		Repo:            repo,
@@ -176,8 +188,9 @@ func TestCoordinator_EventBlockSnapshotsTouchedPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loading ABI: %v", err)
 	}
+	pool := newTestPool()
 	receipt := buildReceiptWithTokenExchange(
-		t, a, testPool.Address,
+		t, a, pool.Address,
 		common.HexToAddress("0xabc"),
 		1, big.NewInt(1000),
 		0, big.NewInt(999),
@@ -199,8 +212,8 @@ func TestCoordinator_EventBlockSnapshotsTouchedPool(t *testing.T) {
 	if repo.swapSaves != 1 {
 		t.Errorf("swap saves = %d, want 1", repo.swapSaves)
 	}
-	if len(repo.snapshotPoolIDs) != 1 || repo.snapshotPoolIDs[0] != testPool.ID {
-		t.Errorf("snapshotted pool IDs = %v, want [%d]", repo.snapshotPoolIDs, testPool.ID)
+	if len(repo.snapshotPoolIDs) != 1 || repo.snapshotPoolIDs[0] != pool.ID {
+		t.Errorf("snapshotted pool IDs = %v, want [%d]", repo.snapshotPoolIDs, pool.ID)
 	}
 }
 
@@ -267,7 +280,7 @@ func TestCoordinator_BufferResetsAcrossBlocks(t *testing.T) {
 		t.Fatalf("loading ABI: %v", err)
 	}
 	receipt := buildReceiptWithTokenExchange(
-		t, a, testPool.Address,
+		t, a, newTestPool().Address,
 		common.HexToAddress("0xabc"),
 		1, big.NewInt(500),
 		0, big.NewInt(499),
@@ -335,7 +348,7 @@ func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCoordinator(CoordinatorDeps{
-		Pools:           []RegisteredPool{testPool},
+		Pools:           []RegisteredPool{newTestPool()},
 		Handlers:        handlers,
 		Multicaller:     mc,
 		Repo:            goodRepo,
@@ -350,7 +363,7 @@ func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
 	}
 
 	receipt := buildReceiptWithTokenExchange(
-		t, a, testPool.Address,
+		t, a, newTestPool().Address,
 		common.HexToAddress("0xabc"),
 		1, big.NewInt(1000),
 		0, big.NewInt(999),
@@ -404,7 +417,7 @@ func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
 	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
 
 	c, err := NewCoordinator(CoordinatorDeps{
-		Pools:           []RegisteredPool{testPool},
+		Pools:           []RegisteredPool{newTestPool()},
 		Handlers:        handlers,
 		Multicaller:     &fakeMulticaller{},
 		Repo:            repo,
@@ -426,14 +439,83 @@ func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
 	}
 
 	// lastSnapshotBlock should NOT be advanced (no DB write occurred).
-	if _, ok := c.lastSnapshotBlock[testPool.ID]; ok {
-		t.Errorf("lastSnapshotBlock[%d] should not be set after error", testPool.ID)
+	if _, ok := c.lastSnapshotBlock[newTestPool().ID]; ok {
+		t.Errorf("lastSnapshotBlock[%d] should not be set after error", newTestPool().ID)
 	}
 
 	// No snapshot should be persisted.
 	if repo.stableswapSaves != 0 || repo.cryptoswapSaves != 0 {
 		t.Errorf("snapshot saves = %d stableswap + %d cryptoswap, want 0 + 0",
 			repo.stableswapSaves, repo.cryptoswapSaves)
+	}
+}
+
+// TestCoordinator_CaptureNetReachesEventWriter: a receipt with one decodable
+// event produces a captured event that is forwarded to the EventWriter (Save
+// is called exactly once for that event).
+func TestCoordinator_CaptureNetReachesEventWriter(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	repo := &fakeCurveRepo{}
+	protoRepo := &fakeProtocolRepo{}
+	eventRepo := &countingEventRepo{}
+	pool := newTestPool()
+
+	resolver := dexconsumer.NewProtocolIDResolver(protoRepo, dexconsumer.ProtocolDescriptor{
+		Address:      common.HexToAddress("0x0000000000000000000000000000000000000001"),
+		Name:         "curve",
+		ProtocolType: "dex",
+		DeployBlock:  1,
+	})
+	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{pool},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 0,
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	receipt := buildReceiptWithTokenExchange(
+		t, a, pool.Address,
+		common.HexToAddress("0xabc"),
+		1, big.NewInt(1000),
+		0, big.NewInt(999),
+		0,
+	)
+
+	rh := c.ReceiptHandler()
+	fin := c.Finalizer()
+	ts := time.Unix(300, 0).UTC()
+
+	if err := rh(context.Background(), receipt, testChainID, 300, 0, ts); err != nil {
+		t.Fatalf("ReceiptHandler: %v", err)
+	}
+	if err := fin(context.Background(), blockEvent(300)); err != nil {
+		t.Fatalf("Finalizer: %v", err)
+	}
+
+	// One TokenExchange log -> exactly one captured event forwarded to EventWriter.
+	if eventRepo.saves != 1 {
+		t.Errorf("eventRepo.saves = %d, want 1 (capture-net forwarded to EventWriter)", eventRepo.saves)
 	}
 }
 
