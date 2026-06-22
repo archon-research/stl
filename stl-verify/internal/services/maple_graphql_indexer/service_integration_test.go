@@ -126,11 +126,19 @@ func newIntegrationService(t *testing.T, pool *pgxpool.Pool, endpoint string) *S
 	if err != nil {
 		t.Fatalf("NewMapleGraphQLRepository: %v", err)
 	}
+	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+	userRepo, err := postgres.NewUserRepository(pool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
 	txManager, err := postgres.NewTxManager(pool, nil)
 	if err != nil {
 		t.Fatalf("NewTxManager: %v", err)
 	}
-	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, txManager, nil)
+	service, err := NewService(ServiceConfig{ChainID: 1}, client, repo, tokenRepo, userRepo, txManager, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

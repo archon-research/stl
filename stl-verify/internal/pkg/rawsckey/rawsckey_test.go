@@ -2,10 +2,13 @@ package rawsckey
 
 import "testing"
 
-func TestSelector(t *testing.T) {
+func TestSelector_ExtractsFourByteSelector(t *testing.T) {
 	if got := Selector([]byte{0xfe, 0xaf, 0x96, 0x8c, 0x01}); got != "0xfeaf968c" {
 		t.Fatalf("Selector = %q, want 0xfeaf968c", got)
 	}
+}
+
+func TestSelector_ShortInputReturnsEmpty(t *testing.T) {
 	if got := Selector([]byte{0x01, 0x02}); got != "0x" {
 		t.Fatalf("Selector short input = %q, want 0x", got)
 	}

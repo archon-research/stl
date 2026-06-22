@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/wsclient"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Config holds the tuning shared by every exchange adapter. The embedded
@@ -28,6 +30,10 @@ type Config struct {
 	// the full book, updates are dropped (not corrupted) when the consumer falls
 	// behind, so this need not be large.
 	OutputBuffer int
+
+	// MeterProvider supplies the provider's OpenTelemetry metrics. Defaults to
+	// the global provider (a no-op until telemetry.InitMetrics runs).
+	MeterProvider metric.MeterProvider
 }
 
 // DefaultConfig returns production-sensible defaults. Transport fields are left
@@ -57,6 +63,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.OutputBuffer <= 0 {
 		c.OutputBuffer = d.OutputBuffer
+	}
+	if c.MeterProvider == nil {
+		c.MeterProvider = otel.GetMeterProvider()
 	}
 	return c
 }
