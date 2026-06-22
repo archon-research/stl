@@ -21,6 +21,9 @@ import (
 // errors. The returned value is a defensive copy, so callers may retain it
 // without aliasing the decoder's internal buffers.
 func UnpackUint(a *abi.ABI, method string, r outbound.Result) (*big.Int, error) {
+	if a == nil {
+		return nil, fmt.Errorf("unpacking %s: nil ABI", method)
+	}
 	if !r.Success {
 		return nil, fmt.Errorf("%s reverted", method)
 	}

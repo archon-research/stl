@@ -72,6 +72,12 @@ func TestUnpackUint(t *testing.T) {
 			t.Fatal("expected error when method returns no values")
 		}
 	})
+
+	t.Run("nil ABI errors without panicking", func(t *testing.T) {
+		if _, err := UnpackUint(nil, "v", outbound.Result{Success: true, ReturnData: okData}); err == nil {
+			t.Fatal("expected an error (not a panic) when the ABI is nil")
+		}
+	})
 }
 
 func TestNegate(t *testing.T) {
