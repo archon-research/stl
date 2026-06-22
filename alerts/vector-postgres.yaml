@@ -17,12 +17,25 @@
 #
 # Metric source: Timescale Cloud exporter (job="tigerdata"). Series carry:
 #   - cluster="archon-prod" | "archon-staging"
-#   - service_id  (Timescale service; maps to the prod/staging DB)
+#   - service_id  (Timescale service: ucpymqz73b=prod, xd7na17213=staging)
 #   - role="primary" | "replica"
 #   - state  (pg_stat_activity backend state)
-# `cluster` is preserved through `max by (...)` so the Alertmanager Slack
-# template's `Cluster:` header is populated. No static `cluster`/`env` labels
-# (FORBIDDEN_LABELS in the mimir-rules-sync lint).
+# `cluster`/`service_id` are preserved through `max by (...)` so the Alertmanager
+# Slack template's `Cluster:` header is populated. No static `cluster`/`env`
+# labels in the rule's labels block (FORBIDDEN_LABELS in the mimir-rules-sync
+# lint); cluster is only matched in the expr against the metric's own label.
+#
+# Per-env pinning (2026-06-19): each rule is scoped to its (cluster, service_id)
+# pair instead of trusting `cluster` alone, because the exporter topology is
+# currently wrong (see docs/runbooks/vector-postgres.md "Metrics coverage"):
+#   - The staging DB (xd7na17213) exports NO metrics yet. Staging coverage
+#     activates automatically once infra enables its Timescale Cloud metrics
+#     export labelled cluster=archon-staging.
+#   - The prod DB (ucpymqz73b) metrics are also ingested into the staging Grafana
+#     stack mislabelled cluster=archon-staging. Pinning the prod rule to
+#     cluster="archon-prod" stops prod idle-tx from paging as a staging alert;
+#     pinning the staging rule to service_id="xd7na17213" keeps it immune to that
+#     leak. Relax the service_id pins once the infra topology is fixed.
 # =============================================================================
 groups:
   - name: vector-postgres
@@ -35,7 +48,9 @@ groups:
       - alert: PostgresLongIdleInTransaction
         expr: |
           max by (cluster, service_id, role) (
-            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*"}
+            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*", cluster="archon-prod",    service_id="ucpymqz73b"}
+            or
+            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*", cluster="archon-staging", service_id="xd7na17213"}
           ) > 300
         for: 2m
         labels:
@@ -61,7 +76,9 @@ groups:
       - alert: PostgresLongIdleInTransactionCritical
         expr: |
           max by (cluster, service_id, role) (
-            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*"}
+            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*", cluster="archon-prod",    service_id="ucpymqz73b"}
+            or
+            pg_stat_activity_max_tx_duration{state=~"idle in transaction.*", cluster="archon-staging", service_id="xd7na17213"}
           ) > 900
         for: 1m
         labels:
