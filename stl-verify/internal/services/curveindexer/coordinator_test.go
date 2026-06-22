@@ -16,6 +16,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // ---------------------------------------------------------------------------
@@ -310,7 +311,6 @@ func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
 		KindStableswapPreNG: stable,
 	}
 
-	failRepo := &fakeCurveRepo{}
 	goodRepo := &fakeCurveRepo{}
 
 	// txMgr that fails once then succeeds.
@@ -333,8 +333,6 @@ func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
 	})
 	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
-
-	_ = failRepo // used only to show pattern; we use failOnce's repo reference
 
 	c, err := NewCoordinator(CoordinatorDeps{
 		Pools:           []RegisteredPool{testPool},
@@ -385,6 +383,82 @@ func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
 	if goodRepo.swapSaves != 1 {
 		t.Errorf("swap saves = %d after redelivery, want 1 (buffer cleared on first failure)", goodRepo.swapSaves)
 	}
+}
+
+// TestCoordinator_NilNilSnapshotErrors: when SnapshotState returns both
+// Stableswap and Cryptoswap as nil, Finalizer should return an error.
+func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: &nilNilHandler{},
+	}
+
+	repo := &fakeCurveRepo{}
+	protoRepo := &fakeProtocolRepo{}
+	eventRepo := &fakeEventRepo{}
+	resolver := dexconsumer.NewProtocolIDResolver(protoRepo, dexconsumer.ProtocolDescriptor{
+		Address:      common.HexToAddress("0x0000000000000000000000000000000000000001"),
+		Name:         "curve",
+		ProtocolType: "dex",
+		DeployBlock:  1,
+	})
+	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{testPool},
+		Handlers:        handlers,
+		Multicaller:     &fakeMulticaller{},
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 1, // triggers heartbeat snapshot
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	fin := c.Finalizer()
+
+	// Finalizer should error because the handler returns StateSnapshot with both nil.
+	if err := fin(context.Background(), blockEvent(100)); err == nil {
+		t.Fatal("expected error from Finalizer, got nil")
+	}
+
+	// lastSnapshotBlock should NOT be advanced (no DB write occurred).
+	if _, ok := c.lastSnapshotBlock[testPool.ID]; ok {
+		t.Errorf("lastSnapshotBlock[%d] should not be set after error", testPool.ID)
+	}
+
+	// No snapshot should be persisted.
+	if repo.stableswapSaves != 0 || repo.cryptoswapSaves != 0 {
+		t.Errorf("snapshot saves = %d stableswap + %d cryptoswap, want 0 + 0",
+			repo.stableswapSaves, repo.cryptoswapSaves)
+	}
+}
+
+// nilNilHandler is a PoolClassHandler stub that returns StateSnapshot with both
+// Stableswap and Cryptoswap as nil, to test the default case error handling.
+type nilNilHandler struct{}
+
+func (h *nilNilHandler) Handles(kind PoolKind) bool {
+	return kind == KindStableswapPreNG
+}
+
+func (h *nilNilHandler) DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error) {
+	return DecodedEvents{}, nil
+}
+
+func (h *nilNilHandler) SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, ts time.Time) (StateSnapshot, error) {
+	// Return StateSnapshot with both pointers nil.
+	return StateSnapshot{
+		Pool:         pool,
+		BlockNumber:  blockNumber,
+		BlockVersion: version,
+		Timestamp:    ts,
+		Stableswap:   nil,
+		Cryptoswap:   nil,
+	}, nil
 }
 
 // callCountingTxManager delegates to a custom fn.

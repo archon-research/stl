@@ -202,6 +202,8 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 					if err := c.repo.SaveCryptoswapState(ctx, tx, snap.Cryptoswap); err != nil {
 						return fmt.Errorf("saving cryptoswap state pool %s block %d: %w", pool.Address, bn, err)
 					}
+				default:
+					return fmt.Errorf("pool %s (id=%d) snapshot has neither stableswap nor cryptoswap state", pool.Address, pool.ID)
 				}
 			}
 			return nil
