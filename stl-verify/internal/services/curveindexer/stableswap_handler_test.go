@@ -207,3 +207,91 @@ func TestStableswapHandler_EmptyReceipt(t *testing.T) {
 		t.Errorf("expected empty result for empty receipt, got %+v", got)
 	}
 }
+
+func TestStableswapHandler_UnknownTopicCaptured(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:      1,
+		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  2,
+	}
+
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	unknownTopic := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{unknownTopic.Hex()},
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Swaps) != 0 {
+		t.Errorf("expected no swaps, got %d", len(got.Swaps))
+	}
+	if len(got.Liquidity) != 0 {
+		t.Errorf("expected no liquidity events, got %d", len(got.Liquidity))
+	}
+	if len(got.Captured) != 1 {
+		t.Errorf("expected 1 captured event, got %d", len(got.Captured))
+	}
+}
+
+func TestStableswapHandler_CorruptKnownEventErrors(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:      1,
+		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  2,
+	}
+
+	ev, ok := a.Events["TokenExchange"]
+	if !ok {
+		t.Fatal("TokenExchange event not in ABI")
+	}
+
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	buyer := common.HexToAddress("0xabc")
+
+	// Create a log with TokenExchange topic but truncated/garbage data.
+	log := shared.Log{
+		Address: pool.Address.Hex(),
+		Topics: []string{
+			ev.ID.Hex(),
+			common.BytesToHash(buyer.Bytes()).Hex(),
+		},
+		Data:            "0xdead", // Too short to unpack
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Errorf("expected error for corrupt TokenExchange data, got success: %+v", got)
+	}
+}

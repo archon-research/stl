@@ -98,7 +98,7 @@ func (h *StableswapHandler) DecodeEvents(
 
 		switch ev.Name {
 		case "TokenExchange":
-			swap, err := extractStableswapTokenExchange(eventData, pool, logIndex, txHash, log)
+			swap, err := extractStableswapTokenExchange(eventData, pool, logIndex, txHash)
 			if err != nil {
 				return DecodedEvents{}, fmt.Errorf("extracting TokenExchange: %w", err)
 			}
@@ -169,7 +169,6 @@ func extractStableswapTokenExchange(
 	pool RegisteredPool,
 	logIndex uint,
 	txHash common.Hash,
-	log shared.Log,
 ) (SwapRecord, error) {
 	// buyer is indexed; it was decoded from Topics[1] into data["buyer"].
 	buyer, err := getAddrField(data, "buyer")
