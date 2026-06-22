@@ -24,6 +24,12 @@ import (
 // its own (matching on its pool/factory addresses, decoding its event set).
 type ReceiptHandler func(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, version int, blockTimestamp time.Time) error
 
+// BlockFinalizer runs once per block after all receipts are processed, within
+// the same SQS message scope. A DEX worker uses it to commit the block's
+// accumulated events plus its state snapshot in a single transaction. A non-nil
+// return leaves the message undeleted for redelivery.
+type BlockFinalizer func(ctx context.Context, event outbound.BlockEvent) error
+
 // BlockProcessor turns a cached block into per-receipt work. It owns the
 // protocol-agnostic steps every DEX worker repeats: read receipts from the cache
 // (with S3 fallback), decode them, fan out to the protocol's ReceiptHandler, and
@@ -32,6 +38,7 @@ type BlockProcessor struct {
 	cache          outbound.BlockCacheReader
 	telemetry      *dextelemetry.Telemetry
 	processReceipt ReceiptHandler
+	finalize       BlockFinalizer
 }
 
 // NewBlockProcessor wires the shared block handler. cache must be the
@@ -42,6 +49,14 @@ type BlockProcessor struct {
 // e.g. when metrics are disabled.
 func NewBlockProcessor(cache outbound.BlockCacheReader, telemetry *dextelemetry.Telemetry, processReceipt ReceiptHandler) *BlockProcessor {
 	return &BlockProcessor{cache: cache, telemetry: telemetry, processReceipt: processReceipt}
+}
+
+// NewBlockProcessorWithFinalizer wires the shared block handler with an optional
+// per-block finalize hook. The finalize func runs once after all receipts are
+// processed, within the same SQS message scope, allowing accumulated per-block
+// work (e.g. state snapshots) to be persisted in a single transaction.
+func NewBlockProcessorWithFinalizer(cache outbound.BlockCacheReader, telemetry *dextelemetry.Telemetry, processReceipt ReceiptHandler, finalize BlockFinalizer) *BlockProcessor {
+	return &BlockProcessor{cache: cache, telemetry: telemetry, processReceipt: processReceipt, finalize: finalize}
 }
 
 // ProcessBlockEvent is the sqsutil.BlockEventHandler for a DEX worker. Per-receipt
@@ -89,6 +104,16 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 			errs = append(errs, err)
 		}
 	}
+
+	// Per-block finalize (snapshot + transactional persist). Skipped if ctx is
+	// already cancelled (its work would not complete); its error joins the
+	// receipt errors so any failure leaves the message for redelivery.
+	if p.finalize != nil && ctx.Err() == nil {
+		if err := p.finalize(ctx, event); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}

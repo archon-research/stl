@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,11 @@ func receiptsJSON(t *testing.T, n int) json.RawMessage {
 		t.Fatalf("marshal receipts: %v", err)
 	}
 	return b
+}
+
+func fakeCacheWithReceipts(t *testing.T, n int) outbound.BlockCacheReader {
+	t.Helper()
+	return &fakeCache{receipts: receiptsJSON(t, n)}
 }
 
 func TestBlockProcessor_ProcessesEachReceiptWithBlockCoordinates(t *testing.T) {
@@ -283,4 +289,35 @@ func readSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name string) int
 	}
 	t.Fatalf("metric %s not found", name)
 	return 0
+}
+
+func TestProcessBlockEvent_FinalizerRunsAfterReceipts(t *testing.T) {
+	var order []string
+	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
+		order = append(order, "receipt")
+		return nil
+	}
+	fin := func(ctx context.Context, event outbound.BlockEvent) error {
+		order = append(order, "finalize")
+		return nil
+	}
+	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 2), nil, rh, fin)
+	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"receipt", "receipt", "finalize"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+}
+
+func TestProcessBlockEvent_FinalizerErrorPropagates(t *testing.T) {
+	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error { return nil }
+	fin := func(ctx context.Context, event outbound.BlockEvent) error { return errors.New("boom") }
+	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 1), nil, rh, fin)
+	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected finalize error to propagate, got %v", err)
+	}
 }
