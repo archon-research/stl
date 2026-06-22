@@ -80,10 +80,7 @@ func NewService(cfg Config, provider outbound.OrderbookProvider, repo outbound.O
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	staleAfter := stalenessFactor * interval
-	if staleAfter < minStaleness {
-		staleAfter = minStaleness
-	}
+	staleAfter := max(stalenessFactor*interval, minStaleness)
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()

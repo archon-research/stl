@@ -101,7 +101,7 @@ func parseConfig() (cliConfig, error) {
 // dropping empty entries.
 func parseSymbols(csv string) []string {
 	var out []string
-	for _, s := range strings.Split(csv, ",") {
+	for s := range strings.SplitSeq(csv, ",") {
 		if s = strings.TrimSpace(s); s != "" {
 			out = append(out, s)
 		}
