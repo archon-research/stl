@@ -565,7 +565,9 @@ function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
 // not an accounting figure. Falls back to the token amount when unpriced.
 function formatActivityMagnitude(allocation: Allocation): string | null {
   const amount = parseNumericValue(allocation.latest_activity_amount);
-  if (amount === null) {
+  // Sweeps are internal reallocations with tx_amount 0; show the icon alone
+  // rather than a misleading "$0.00".
+  if (amount === null || amount === 0) {
     return null;
   }
 
@@ -683,6 +685,18 @@ function lookupAllocationRiskCapital(
   return riskByReceiptTokenId.get(allocation.receipt_token_id);
 }
 
+// Applied required risk capital in USD, or null when none applies. Shared by the
+// column accessor and the magnitude bar so the two cannot diverge on the rule.
+function appliedRiskCapitalUsd(
+  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  allocation: Allocation,
+): number | null {
+  const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
+  return entry?.applied
+    ? parseNumericValue(entry.required_risk_capital_usd)
+    : null;
+}
+
 function AllocationRiskCapitalCell({
   entry,
 }: {
@@ -766,15 +780,8 @@ function createAllocationColumns(
     {
       id: 'risk_capital',
       header: 'Risk capital',
-      accessorFn: (allocation) => {
-        const entry = lookupAllocationRiskCapital(
-          riskByReceiptTokenId,
-          allocation,
-        );
-        return entry?.applied
-          ? (parseNumericValue(entry.required_risk_capital_usd) ?? 0)
-          : 0;
-      },
+      accessorFn: (allocation) =>
+        appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? 0,
       cell: ({ row }) => (
         <AllocationRiskCapitalCell
           entry={lookupAllocationRiskCapital(
@@ -783,20 +790,11 @@ function createAllocationColumns(
           )}
         />
       ),
-      // No bar for rows with no applied risk capital (the cell reads "n/a").
-      // NaN suppresses the bar; a null would fall back to the accessor (0) and
-      // draw an empty track under every n/a row.
+      // No bar for n/a rows: NaN suppresses it (see Balance for why not null).
       meta: {
         magnitude: {
-          getValue: (allocation) => {
-            const entry = lookupAllocationRiskCapital(
-              riskByReceiptTokenId,
-              allocation,
-            );
-            return entry?.applied
-              ? (parseNumericValue(entry.required_risk_capital_usd) ?? NaN)
-              : NaN;
-          },
+          getValue: (allocation) =>
+            appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? NaN,
           getValueText: () => null,
         },
       },
