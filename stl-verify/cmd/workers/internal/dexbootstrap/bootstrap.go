@@ -28,6 +28,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 )
 
+// defaultRepoBatchSize is the batchSize passed to the repository constructors:
+// a non-positive value tells them to use DefaultRepositoryConfig()'s sizes.
+const defaultRepoBatchSize = 0
+
 // BootstrapOptions specifies the worker-identity bits Bootstrap can't infer.
 type BootstrapOptions struct {
 	// ServiceName is the OTEL/logger service name, e.g. "curve-dex-worker".
@@ -229,12 +233,12 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		d.Close()
 		return nil, fmt.Errorf("creating transaction manager: %w", err)
 	}
-	d.ProtocolRepo, err = postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
+	d.ProtocolRepo, err = postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), defaultRepoBatchSize)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("creating protocol repository: %w", err)
 	}
-	d.TokenRepo, err = postgres.NewTokenRepository(pool, logger, 0)
+	d.TokenRepo, err = postgres.NewTokenRepository(pool, logger, defaultRepoBatchSize)
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("creating token repository: %w", err)

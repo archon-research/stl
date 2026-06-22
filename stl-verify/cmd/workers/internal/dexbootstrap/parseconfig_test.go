@@ -194,6 +194,34 @@ func TestParseConfig_RejectsMalformedTimingEnvVars(t *testing.T) {
 	}
 }
 
+func TestParseConfig_RejectsMaxMessagesOutOfRange(t *testing.T) {
+	for _, max := range []string{"0", "11"} {
+		t.Run(max, func(t *testing.T) {
+			envSet(t, happyEnv())
+			_, err := ParseConfig("test", []string{"-max", max})
+			if err == nil {
+				t.Fatalf("expected error for -max %s (AWS caps ReceiveMessage at 10)", max)
+			}
+			if !strings.Contains(err.Error(), "max messages") {
+				t.Errorf("error %q should reference the max-messages range", err)
+			}
+		})
+	}
+}
+
+func TestParseConfig_AlchemyURLHasNoDoubleSlash(t *testing.T) {
+	vars := happyEnv()
+	vars["ALCHEMY_HTTP_URL"] = "https://eth-mainnet.g.alchemy.com/v2/"
+	envSet(t, vars)
+	cfg, err := ParseConfig("test", nil)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if want := "https://eth-mainnet.g.alchemy.com/v2/key"; cfg.AlchemyURL != want {
+		t.Errorf("AlchemyURL = %q, want %q (trailing slash must not double up)", cfg.AlchemyURL, want)
+	}
+}
+
 func TestParseConfig_ExplicitTimingFlagsBeatEnv(t *testing.T) {
 	vars := happyEnv()
 	vars["SQS_WAIT_TIME"] = "10"

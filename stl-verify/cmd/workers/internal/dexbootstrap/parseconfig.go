@@ -9,8 +9,8 @@ package dexbootstrap
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strconv"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -83,11 +83,13 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		return Config{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
 	}
 
-	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
+	alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
 	if alchemyAPIKey == "" {
 		return Config{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
 	}
-	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	// Trim a trailing slash so a configured ALCHEMY_HTTP_URL ending in "/" does
+	// not produce a "//" before the API key.
+	alchemyHTTPURL := strings.TrimRight(env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), "/")
 	cfg.AlchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 
 	if cfg.RedisAddr == "" {
@@ -125,6 +127,11 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	}
 	if cfg.VisibilityTimeout < 0 || cfg.VisibilityTimeout > 43200 {
 		return Config{}, fmt.Errorf("SQS visibility timeout %d out of range [0,43200]", cfg.VisibilityTimeout)
+	}
+	// AWS ReceiveMessage accepts MaxNumberOfMessages in [1,10]; fail fast at boot
+	// rather than surfacing an opaque ReceiveMessage error on the hot path.
+	if cfg.MaxMessages < 1 || cfg.MaxMessages > 10 {
+		return Config{}, fmt.Errorf("SQS max messages %d out of range [1,10]", cfg.MaxMessages)
 	}
 
 	chainIDStr := env.Get("CHAIN_ID", "")
