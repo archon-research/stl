@@ -70,9 +70,6 @@ export function BottomPanel({
   selectedAllocation,
   selectedPrime,
 }: BottomPanelProps) {
-  const [receiptTokenParam, setReceiptTokenParam] = useUrlParam(
-    PARAMS.receiptToken,
-  );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
   const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
   const [activityActionParam, setActivityActionParam] = useUrlParam(
@@ -85,9 +82,6 @@ export function BottomPanel({
   );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
-  const previousSelectedAllocationIdRef = useRef<string | null>(
-    selectedAllocation ? getAllocationKey(selectedAllocation) : null,
-  );
 
   const activeTab: ActiveTab =
     tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
@@ -102,19 +96,13 @@ export function BottomPanel({
     const primeId = selectedPrime?.id ?? null;
 
     if (previousPrimeIdRef.current && previousPrimeIdRef.current !== primeId) {
-      setReceiptTokenParam(null);
       setCategoryFilter('');
       setCategoryParam(null);
       setActivityActionParam(null);
     }
 
     previousPrimeIdRef.current = primeId;
-  }, [
-    selectedPrime?.id,
-    setActivityActionParam,
-    setCategoryParam,
-    setReceiptTokenParam,
-  ]);
+  }, [selectedPrime?.id, setActivityActionParam, setCategoryParam]);
 
   useEffect(() => {
     const normalized = parseCategoryParam(categoryParam);
@@ -137,81 +125,25 @@ export function BottomPanel({
     return sortedAllocations.filter((a) => a.category === categoryFilter);
   }, [sortedAllocations, categoryFilter]);
 
-  useEffect(() => {
-    if (sortedAllocations.length === 0) {
-      if (receiptTokenParam !== null) {
-        setReceiptTokenParam(null);
-      }
-      return;
-    }
-
-    if (filteredAllocations.length === 0) {
-      if (receiptTokenParam !== null) {
-        setReceiptTokenParam(null);
-      }
-      return;
-    }
-
+  // The drawer follows the clicked allocation. When the category filter excludes
+  // it (or nothing is selected), fall back to the first allocation in view so a
+  // tab always has something to render.
+  const focusedAllocation = useMemo(() => {
     if (
-      receiptTokenParam &&
+      selectedAllocation &&
       filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === receiptTokenParam,
+        (allocation) =>
+          getAllocationKey(allocation) === getAllocationKey(selectedAllocation),
       )
     ) {
-      return;
+      return selectedAllocation;
     }
+    return filteredAllocations[0] ?? null;
+  }, [selectedAllocation, filteredAllocations]);
 
-    const selectedKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-    const selectedInFiltered =
-      selectedKey !== null &&
-      filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedKey,
-      )
-        ? selectedAllocation
-        : null;
-
-    const fallback = selectedInFiltered ?? filteredAllocations[0];
-    if (fallback) {
-      setReceiptTokenParam(getAllocationKey(fallback));
-    }
-  }, [
-    receiptTokenParam,
-    selectedAllocation,
-    setReceiptTokenParam,
-    filteredAllocations,
-    sortedAllocations.length,
-  ]);
-
-  // Sync the URL-backed receipt-token param to the grid's current selection
-  // only when that selection *changes*. The ref tracks the previous selection
-  // so an unrelated re-render does not re-assert a stale key, and so clicking a
-  // new row updates the focus even while the old key is still a valid option.
-  useEffect(() => {
-    const currentKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-
-    if (currentKey === previousSelectedAllocationIdRef.current) {
-      return;
-    }
-
-    previousSelectedAllocationIdRef.current = currentKey;
-
-    if (currentKey === null) {
-      return;
-    }
-
-    if (receiptTokenParam !== currentKey) {
-      setReceiptTokenParam(currentKey);
-    }
-  }, [receiptTokenParam, selectedAllocation, setReceiptTokenParam]);
-
-  const focusedAllocation =
-    filteredAllocations.find(
-      (allocation) => getAllocationKey(allocation) === receiptTokenParam,
-    ) ?? null;
+  const focusedAllocationKey = focusedAllocation
+    ? getAllocationKey(focusedAllocation)
+    : null;
 
   const categoryEmptyDescription = `No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`;
 
@@ -246,7 +178,7 @@ export function BottomPanel({
   useEffect(() => {
     setLocalRiskSearchValue('');
     setRiskSearchValue('');
-  }, [receiptTokenParam]);
+  }, [focusedAllocationKey]);
 
   return (
     <div
