@@ -222,6 +222,36 @@ func TestParseConfig_AlchemyURLHasNoDoubleSlash(t *testing.T) {
 	}
 }
 
+func TestParseConfig_RequiresAlchemyURLForNonMainnet(t *testing.T) {
+	vars := happyEnv()
+	vars["CHAIN_ID"] = "8453"                          // base
+	vars["S3_BUCKET"] = "stl-sentinelstaging-base-raw" // consistent, so the S3 check passes and the Alchemy guard fires
+	// ALCHEMY_HTTP_URL intentionally unset
+	envSet(t, vars)
+	_, err := ParseConfig("test", nil)
+	if err == nil {
+		t.Fatal("expected error: a non-mainnet chain must set ALCHEMY_HTTP_URL (default is mainnet-only)")
+	}
+	if !strings.Contains(err.Error(), "ALCHEMY_HTTP_URL") {
+		t.Errorf("error %q should name ALCHEMY_HTTP_URL, not fall through to a later check", err)
+	}
+}
+
+func TestParseConfig_AllowsNonMainnetWithExplicitAlchemyURL(t *testing.T) {
+	vars := happyEnv()
+	vars["CHAIN_ID"] = "8453"
+	vars["S3_BUCKET"] = "stl-sentinelstaging-base-raw"
+	vars["ALCHEMY_HTTP_URL"] = "https://base-mainnet.g.alchemy.com/v2"
+	envSet(t, vars)
+	cfg, err := ParseConfig("test", nil)
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if want := "https://base-mainnet.g.alchemy.com/v2/key"; cfg.AlchemyURL != want {
+		t.Errorf("AlchemyURL = %q, want %q", cfg.AlchemyURL, want)
+	}
+}
+
 func TestParseConfig_ExplicitTimingFlagsBeatEnv(t *testing.T) {
 	vars := happyEnv()
 	vars["SQS_WAIT_TIME"] = "10"

@@ -16,6 +16,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
+// ethereumMainnetChainID is the only chain the built-in ALCHEMY_HTTP_URL default
+// (eth-mainnet) is valid for; any other chain must set the endpoint explicitly.
+const ethereumMainnetChainID int64 = 1
+
 // Config is the resolved runtime configuration common to every DEX worker.
 // Worker-specific config (e.g. UV3's NFPM address) is read separately from
 // the worker's main.go after ParseConfig returns.
@@ -160,6 +164,13 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	// review-7 N7-3 finding explicitly named as the validation surface.
 	if err := chainutil.ValidateS3BucketForChain(cfg.ChainID, cfg.S3Bucket, cfg.DeployEnv); err != nil {
 		return Config{}, fmt.Errorf("S3 bucket / chain / env mismatch: %w", err)
+	}
+
+	// The built-in ALCHEMY_HTTP_URL default points at mainnet; any other chain
+	// must set it explicitly or the worker would silently talk to mainnet (same
+	// fail-fast spirit as the S3 bucket/chain cross-check above).
+	if cfg.ChainID != ethereumMainnetChainID && env.Get("ALCHEMY_HTTP_URL", "") == "" {
+		return Config{}, fmt.Errorf("ALCHEMY_HTTP_URL is required for chain %d (the default endpoint is mainnet-only)", cfg.ChainID)
 	}
 
 	return cfg, nil

@@ -109,12 +109,15 @@ ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL D
 -- 4. Assertion: every reward token must end this migration with a chainlink/USD
 -- binding. A future rename of the chainlink oracle row, or a token address typo
 -- above, would otherwise produce a successful migration with zero bindings.
+-- Count DISTINCT token_id (not rows): a token already bound to a second chainlink
+-- feed must not inflate the count past 4 (false failure), and one unbound token
+-- offset by another's extra binding must not still sum to 4 (false pass).
 -- ---------------------------------------------------------------------------
 
 DO $$
 DECLARE bound_count INT;
 BEGIN
-    SELECT count(*) INTO bound_count
+    SELECT count(DISTINCT t.id) INTO bound_count
     FROM oracle_asset oa
     JOIN oracle o ON o.id = oa.oracle_id
     JOIN token  t ON t.id = oa.token_id
@@ -128,7 +131,7 @@ BEGIN
           '\xAf5191B0De278C7286d6C7CC6ab6BB8A73bA2Cd6'::bytea   -- STG
       );
     IF bound_count <> 4 THEN
-        RAISE EXCEPTION 'expected 4 chainlink USD bindings for CVX/FXS/BAL/STG, got %', bound_count;
+        RAISE EXCEPTION 'expected all 4 of CVX/FXS/BAL/STG to have a chainlink USD binding, got % distinct', bound_count;
     END IF;
 END $$;
 
