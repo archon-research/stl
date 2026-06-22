@@ -117,15 +117,16 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
       accessorKey: 'amount_usd',
       cell: (info: CellContext<RiskItem, unknown>) =>
         formatUsdValue(info.getValue() as string | number | null | undefined),
-    },
-    {
-      id: 'backing_pct',
-      header: 'Backing %',
-      accessorKey: 'backing_pct',
-      cell: (info: CellContext<RiskItem, unknown>) =>
-        formatPercentValue(
-          info.getValue() as string | number | null | undefined,
-        ),
+      // The bar expresses each item's backing share of the position, so the USD
+      // amount and its backing percentage live in one column instead of two.
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          domain: { min: 0, max: 100 },
+          getValue: (item) => parseNumericValue(item.backing_pct),
+          getValueText: (value) => formatPercentValue(value),
+        },
+      },
     },
     {
       id: 'lt',
@@ -191,7 +192,7 @@ function RiskTable({
         table={table}
         isLoading={isLoading}
         getRowKey={(item) => String(item.token_id)}
-        skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
+        skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
         minWidth="76rem"
         renderCell={(children) => (
           <div
