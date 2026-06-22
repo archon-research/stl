@@ -607,7 +607,7 @@ export interface components {
             event_count: number;
             /**
              * Net Flow Usd
-             * @description Signed net flow valued in USD (inflows positive, outflows negative) at the receipt token's latest underlying oracle price. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
+             * @description Signed net flow valued in USD (inflows positive, outflows negative), using the receipt token's latest underlying oracle price for wrapped positions and the token's own latest oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
              * @example 1234567.89
              */
             net_flow_usd: string;
@@ -749,6 +749,8 @@ export interface components {
          *       "balance": "1234567.89",
          *       "category": "allocation",
          *       "chain_id": 1,
+         *       "latest_activity_action": "out",
+         *       "latest_activity_amount": "12.5",
          *       "latest_activity_at": "2026-05-07T12:00:00Z",
          *       "protocol_name": "aave-v3",
          *       "receipt_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -780,6 +782,18 @@ export interface components {
              * @example 1
              */
             chain_id: number;
+            /**
+             * Latest Activity Action
+             * @description Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.
+             * @example out
+             */
+            latest_activity_action?: string | null;
+            /**
+             * Latest Activity Amount
+             * @description Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a JSON string. `null` when there is no activity.
+             * @example 12.5
+             */
+            latest_activity_amount?: string | null;
             /**
              * Latest Activity At
              * @description ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.

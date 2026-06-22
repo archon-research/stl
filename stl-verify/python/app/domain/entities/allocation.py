@@ -65,6 +65,8 @@ class ReceiptTokenPosition:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
+    latest_activity_action: str | None = None
+    latest_activity_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,8 @@ class DirectAssetHolding:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
+    latest_activity_action: str | None = None
+    latest_activity_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)

@@ -374,6 +374,21 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["protocol_name"] == "Aave V3"
 
 
+def test_list_allocations_surfaces_latest_activity_action_and_amount(
+    client: TestClient,
+) -> None:
+    """The latest event's direction and token-unit magnitude come from the same
+    row that wins the DISTINCT ON. For aUSDC that is the block 2000 ``in`` of 750
+    (the seed sets tx_amount = balance), not the superseded block 1000 rows.
+    """
+    response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    ausdc = {item["symbol"]: item for item in response.json()}["aUSDC"]
+    assert ausdc["latest_activity_action"] == "in"
+    assert Decimal(ausdc["latest_activity_amount"]) == Decimal("750")
+
+
 def test_direct_underlying_holdings_surface_as_their_own_rows(
     client: TestClient,
 ) -> None:
