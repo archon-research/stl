@@ -29,11 +29,12 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix          string
-	chainAttr       attribute.KeyValue
-	blocksProcessed metric.Int64Counter
-	errorsTotal     metric.Int64Counter
-	blockDuration   metric.Float64Histogram
+	prefix           string
+	chainAttr        attribute.KeyValue
+	blocksProcessed  metric.Int64Counter
+	errorsTotal      metric.Int64Counter
+	blockDuration    metric.Float64Histogram
+	stateRowsWritten metric.Int64Counter
 }
 
 // NewTelemetry registers the two counters under `<prefix>.blocks.processed`
@@ -85,12 +86,21 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.block.duration_seconds histogram: %w", prefix, err)
 	}
 
+	stateRows, err := meter.Int64Counter(
+		prefix+".state.rows.written",
+		metric.WithDescription("Total state snapshot rows written"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
+	}
+
 	return &Telemetry{
-		prefix:          prefix,
-		chainAttr:       attribute.String("chain", chainName),
-		blocksProcessed: blocks,
-		errorsTotal:     errs,
-		blockDuration:   dur,
+		prefix:           prefix,
+		chainAttr:        attribute.String("chain", chainName),
+		blocksProcessed:  blocks,
+		errorsTotal:      errs,
+		blockDuration:    dur,
+		stateRowsWritten: stateRows,
 	}, nil
 }
 
@@ -123,4 +133,13 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 		attribute.String("operation", operation),
 		t.chainAttr,
 	))
+}
+
+// RecordStateRows increments state_rows_written_total by n. Nil receiver or
+// n <= 0 are no-ops.
+func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.stateRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }

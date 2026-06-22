@@ -1,0 +1,130 @@
+# =============================================================================
+# Vector — curve-indexer alerts (VEC-260)
+# =============================================================================
+# The curve-indexer is an SQS worker that consumes blocks from the watcher
+# pipeline and derives Curve DEX state (pool snapshots, swaps, liquidity
+# events) into TimescaleDB. It is the last hop before downstream readers see
+# Curve data, so stalls / errors here translate directly into stale views.
+#
+# Metric source: OTel SDK (dextelemetry package, prefix "curve"). Series carry:
+#   - service_name="curve-indexer"
+#   - k8s_namespace_name="vector"
+#   - cluster="archon-prod" | "archon-staging"
+#   - chain (e.g. "ethereum")
+#
+# Severity -> routing (same as vector-indexers.yaml):
+#   critical  -> pages (Grafana IRM), #at_vector_prod_alerts, 1h repeat.
+#   warning   -> no page, #at_vector_alerts, 4h repeat.
+#
+# `cluster` is preserved via `sum by` so Alertmanager Slack templates populate
+# the Cluster: header. `namespace` is a static rule label (allowed); `cluster`
+# and `env` are FORBIDDEN_LABELS and are never set statically here.
+# =============================================================================
+groups:
+  - name: vector-curve-indexer
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveIndexerStalled
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Curve pool state in TimescaleDB will go
+            stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-curve-indexer.md#vectorcurveindexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveIndexerErrorsHigh
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorCurveIndexerBlockLatencyHigh
+        # Block processing p99 >3s for 15m. Sustained high latency means the
+        # multicall/RPC path is degraded or pool snapshot decoding is blocking.
+        #
+        # Histogram `curve.block.duration_seconds` (OTel instrument), exported
+        # as `curve_block_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(curve_block_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m.
+            Indexer is degraded; expect lag in downstream Curve pool state.
+
+      - alert: VectorCurveIndexerNoStateWritten
+        # Silent-empty guard: blocks are advancing (success rate > 0) but no
+        # pool-state snapshot rows are being written. The error path will NOT
+        # catch a quietly-empty snapshot loop (e.g. buildSnapshotSet always
+        # returns empty, or all SnapshotState calls silently no-op). This
+        # alert catches that gap.
+        #
+        # Counter `curve.state.rows.written` (OTel) -> Prometheus
+        # `curve_state_rows_written_total`. Emitted by the Coordinator after
+        # each successful WithTransaction that writes at least one state row.
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
+          ) > 0
+          and
+          sum by (chain, cluster) (
+            rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+          ) == 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer writing no state rows on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 30m but written zero pool-state snapshot
+            rows. The snapshot loop may be silently empty (all pools skipped,
+            heartbeat disabled, or snapshotSet always returning empty).

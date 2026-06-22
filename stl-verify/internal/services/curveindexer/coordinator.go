@@ -10,6 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -17,6 +18,8 @@ import (
 
 // CoordinatorDeps groups the Coordinator's constructor arguments.
 // No doc comments on self-evident fields: the field names explain themselves.
+// Telemetry is optional (nil = no-op); existing callers that omit it continue
+// to work because RecordStateRows is nil-safe.
 type CoordinatorDeps struct {
 	Pools           []RegisteredPool
 	Handlers        map[PoolKind]PoolClassHandler
@@ -27,6 +30,7 @@ type CoordinatorDeps struct {
 	HeartbeatBlocks int64
 	ChainID         int64
 	Logger          *slog.Logger
+	Telemetry       *dextelemetry.Telemetry
 }
 
 // blockKey identifies a (blockNumber, version) pair for the per-block buffer.
@@ -51,6 +55,7 @@ type Coordinator struct {
 	heartbeatBlocks int64
 	chainID         int64
 	logger          *slog.Logger
+	telemetry       *dextelemetry.Telemetry
 
 	lastSnapshotBlock map[int64]int64 // pool.ID -> last snapshotted block
 
@@ -103,6 +108,7 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 		heartbeatBlocks:   deps.HeartbeatBlocks,
 		chainID:           deps.ChainID,
 		logger:            deps.Logger,
+		telemetry:         deps.Telemetry,
 		lastSnapshotBlock: make(map[int64]int64),
 		touched:           make(map[int64]RegisteredPool),
 	}, nil
@@ -215,6 +221,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 		for _, pool := range snapshotSet {
 			c.lastSnapshotBlock[pool.ID] = bn
 		}
+		c.telemetry.RecordStateRows(ctx, len(snapshotSet))
 		return nil
 	}
 }

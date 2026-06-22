@@ -95,6 +95,7 @@ func run(ctx context.Context, args []string) error {
 		HeartbeatBlocks: cfg.HeartbeatBlocks,
 		ChainID:         cfg.ChainID,
 		Logger:          deps.Logger,
+		Telemetry:       deps.DexTelemetry,
 	})
 	if err != nil {
 		return fmt.Errorf("creating coordinator: %w", err)
