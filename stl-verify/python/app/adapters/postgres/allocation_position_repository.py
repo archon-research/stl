@@ -238,10 +238,14 @@ class AllocationRepository:
                         ),
                         latest_activity_at=row.latest_activity_at,
                         latest_activity_action=row.latest_activity_action,
-                        latest_activity_amount=_safe_decimal(
-                            row.latest_activity_amount,
-                            "latest_activity_amount",
-                            row.receipt_token_id,
+                        latest_activity_amount=(
+                            _safe_decimal(
+                                row.latest_activity_amount,
+                                "latest_activity_amount",
+                                row.receipt_token_id,
+                            )
+                            if row.latest_activity_amount is not None
+                            else None
                         ),
                     )
                     for row in result
@@ -283,10 +287,14 @@ class AllocationRepository:
                         ),
                         latest_activity_at=row.latest_activity_at,
                         latest_activity_action=row.latest_activity_action,
-                        latest_activity_amount=_safe_decimal(
-                            row.latest_activity_amount,
-                            "latest_activity_amount",
-                            row.token_id,
+                        latest_activity_amount=(
+                            _safe_decimal(
+                                row.latest_activity_amount,
+                                "latest_activity_amount",
+                                row.token_id,
+                            )
+                            if row.latest_activity_amount is not None
+                            else None
                         ),
                     )
                     for row in result
