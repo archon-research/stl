@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -148,16 +149,226 @@ func (h *StableswapHandler) DecodeEvents(
 	return result, nil
 }
 
-// SnapshotState is a stub; full implementation is in Task 9.
+// SnapshotState reads stableswap pool state at the given block via multicall.
+// Call order is deterministic; results are decoded in the same order.
+// Required calls (AllowFailure=false) that revert propagate as errors (transient-retry contract).
+// NG-only calls (price_oracle, last_price) are AllowFailure=true and only issued for KindStableswapNG.
 func (h *StableswapHandler) SnapshotState(
-	_ context.Context,
-	_ outbound.Multicaller,
+	ctx context.Context,
+	mc outbound.Multicaller,
 	pool RegisteredPool,
 	blockNumber int64,
 	version int,
 	ts time.Time,
 ) (StateSnapshot, error) {
-	return StateSnapshot{}, nil
+	calls, err := h.buildSnapshotCalls(pool)
+	if err != nil {
+		return StateSnapshot{}, fmt.Errorf("building snapshot calls for pool %s: %w", pool.Address, err)
+	}
+
+	results, err := mc.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return StateSnapshot{}, fmt.Errorf("executing snapshot multicall for pool %s: %w", pool.Address, err)
+	}
+
+	st, err := h.decodeSnapshotResults(pool, blockNumber, version, ts, calls, results)
+	if err != nil {
+		return StateSnapshot{}, fmt.Errorf("decoding snapshot results for pool %s: %w", pool.Address, err)
+	}
+
+	return StateSnapshot{
+		Pool:         pool,
+		BlockNumber:  blockNumber,
+		BlockVersion: version,
+		Timestamp:    ts,
+		Stableswap:   st,
+	}, nil
+}
+
+// buildSnapshotCalls constructs the ordered multicall call list for a stableswap pool.
+// Call order:
+//  1. balances(i) for i in 0..n-1
+//  2. get_virtual_price()
+//  3. totalSupply()
+//  4. A()
+//  5. fee()
+//  6. get_dy(i,j,10^CoinDecimals[i]) for every ordered pair i!=j, i asc then j asc
+//  7. (NG only) price_oracle(), last_price() with AllowFailure=true
+func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.Call, error) {
+	var calls []outbound.Call
+
+	// 1. balances(i) for each coin
+	for i := 0; i < pool.NCoins; i++ {
+		data, err := h.stableABI.Pack("balances", big.NewInt(int64(i)))
+		if err != nil {
+			return nil, fmt.Errorf("packing balances(%d): %w", i, err)
+		}
+		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+	}
+
+	// 2. get_virtual_price()
+	data, err := h.stableABI.Pack("get_virtual_price")
+	if err != nil {
+		return nil, fmt.Errorf("packing get_virtual_price: %w", err)
+	}
+	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+
+	// 3. totalSupply()
+	data, err = h.stableABI.Pack("totalSupply")
+	if err != nil {
+		return nil, fmt.Errorf("packing totalSupply: %w", err)
+	}
+	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+
+	// 4. A()
+	data, err = h.stableABI.Pack("A")
+	if err != nil {
+		return nil, fmt.Errorf("packing A: %w", err)
+	}
+	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+
+	// 5. fee()
+	data, err = h.stableABI.Pack("fee")
+	if err != nil {
+		return nil, fmt.Errorf("packing fee: %w", err)
+	}
+	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+
+	// 6. get_dy(i, j, 10^decimals[i]) for every ordered pair i!=j
+	for i := 0; i < pool.NCoins; i++ {
+		for j := 0; j < pool.NCoins; j++ {
+			if i == j {
+				continue
+			}
+			dec := 18 // default if CoinDecimals not set
+			if i < len(pool.CoinDecimals) {
+				dec = pool.CoinDecimals[i]
+			}
+			dx := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dec)), nil)
+			data, err = h.stableABI.Pack("get_dy", big.NewInt(int64(i)), big.NewInt(int64(j)), dx)
+			if err != nil {
+				return nil, fmt.Errorf("packing get_dy(%d,%d): %w", i, j, err)
+			}
+			calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+		}
+	}
+
+	// 7. NG-only: price_oracle() and last_price() with AllowFailure=true
+	if pool.Kind == KindStableswapNG {
+		data, err = h.stableABI.Pack("price_oracle")
+		if err != nil {
+			return nil, fmt.Errorf("packing price_oracle: %w", err)
+		}
+		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
+
+		data, err = h.stableABI.Pack("last_price")
+		if err != nil {
+			return nil, fmt.Errorf("packing last_price: %w", err)
+		}
+		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
+	}
+
+	return calls, nil
+}
+
+// decodeSnapshotResults decodes the multicall results in the same order as buildSnapshotCalls.
+func (h *StableswapHandler) decodeSnapshotResults(
+	pool RegisteredPool,
+	blockNumber int64,
+	version int,
+	ts time.Time,
+	calls []outbound.Call,
+	results []outbound.Result,
+) (*entity.CurveStableswapState, error) {
+	if len(results) != len(calls) {
+		return nil, fmt.Errorf("multicall returned %d results, expected %d", len(results), len(calls))
+	}
+
+	idx := 0
+
+	// 1. balances
+	balances := make([]*big.Int, pool.NCoins)
+	for i := 0; i < pool.NCoins; i++ {
+		v, err := shared.UnpackUint(h.stableABI, "balances", results[idx])
+		if err != nil {
+			return nil, fmt.Errorf("balances(%d): %w", i, err)
+		}
+		balances[i] = v
+		idx++
+	}
+
+	// 2. get_virtual_price
+	virtualPrice, err := shared.UnpackUint(h.stableABI, "get_virtual_price", results[idx])
+	if err != nil {
+		return nil, fmt.Errorf("get_virtual_price: %w", err)
+	}
+	idx++
+
+	// 3. totalSupply
+	totalSupply, err := shared.UnpackUint(h.stableABI, "totalSupply", results[idx])
+	if err != nil {
+		return nil, fmt.Errorf("totalSupply: %w", err)
+	}
+	idx++
+
+	// 4. A
+	a, err := shared.UnpackUint(h.stableABI, "A", results[idx])
+	if err != nil {
+		return nil, fmt.Errorf("A: %w", err)
+	}
+	idx++
+
+	// 5. fee
+	fee, err := shared.UnpackUint(h.stableABI, "fee", results[idx])
+	if err != nil {
+		return nil, fmt.Errorf("fee: %w", err)
+	}
+	idx++
+
+	// 6. get_dy for each ordered pair
+	nPairs := pool.NCoins * (pool.NCoins - 1)
+	spotDy := make([]*big.Int, 0, nPairs)
+	for i := 0; i < pool.NCoins; i++ {
+		for j := 0; j < pool.NCoins; j++ {
+			if i == j {
+				continue
+			}
+			v, err := shared.UnpackUint(h.stableABI, "get_dy", results[idx])
+			if err != nil {
+				return nil, fmt.Errorf("get_dy(%d,%d): %w", i, j, err)
+			}
+			spotDy = append(spotDy, v)
+			idx++
+		}
+	}
+
+	// 7. NG-only: price_oracle and last_price
+	var priceOracle, lastPrice *big.Int
+	if pool.Kind == KindStableswapNG {
+		if po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx]); err == nil {
+			priceOracle = po
+		}
+		idx++
+		if lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx]); err == nil {
+			lastPrice = lp
+		}
+		idx++
+	}
+
+	return entity.NewCurveStableswapState(entity.CurveStableswapStateParams{
+		CurvePoolID:  pool.ID,
+		BlockNumber:  blockNumber,
+		BlockVersion: version,
+		Timestamp:    ts,
+		Balances:     balances,
+		VirtualPrice: virtualPrice,
+		TotalSupply:  totalSupply,
+		A:            a,
+		Fee:          fee,
+		SpotDy:       spotDy,
+		LastPrice:    lastPrice,
+		PriceOracle:  priceOracle,
+	})
 }
 
 // ---------------------------------------------------------------------------

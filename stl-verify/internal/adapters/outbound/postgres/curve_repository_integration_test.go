@@ -59,8 +59,8 @@ func seedCurvePoolWithTokens(t *testing.T, ctx context.Context) (int64, int64, i
 	}
 	if err := curveTestPool.QueryRow(ctx,
 		`INSERT INTO token (chain_id, address, symbol, decimals)
-		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA01'::bytea, 'TOKB', 18)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
+		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA01'::bytea, 'TOKB', 6)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
 		 RETURNING id`,
 	).Scan(&tokenID1); err != nil {
 		t.Fatalf("seed token1: %v", err)
@@ -368,5 +368,17 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 	}
 	if found.CoinTokenIDs[1] != tokenID1 {
 		t.Errorf("CoinTokenIDs[1] = %d, want %d (coin_index 1 token)", found.CoinTokenIDs[1], tokenID1)
+	}
+
+	if len(found.CoinDecimals) != 2 {
+		t.Errorf("len(CoinDecimals) = %d, want 2", len(found.CoinDecimals))
+	}
+	if len(found.CoinDecimals) == 2 {
+		if found.CoinDecimals[0] != 18 {
+			t.Errorf("CoinDecimals[0] = %d, want 18", found.CoinDecimals[0])
+		}
+		if found.CoinDecimals[1] != 6 {
+			t.Errorf("CoinDecimals[1] = %d, want 6", found.CoinDecimals[1])
+		}
 	}
 }

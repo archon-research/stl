@@ -1,6 +1,7 @@
 package curveindexer
 
 import (
+	"context"
 	"encoding/hex"
 	"math/big"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -293,5 +295,141 @@ func TestStableswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Errorf("expected error for corrupt TokenExchange data, got success: %+v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SnapshotState tests
+// ---------------------------------------------------------------------------
+
+// fakeMulticaller is a test double for outbound.Multicaller that returns
+// pre-built results in order.
+type fakeMulticaller struct {
+	results []outbound.Result
+}
+
+func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return f.results, nil
+}
+
+func (f *fakeMulticaller) Address() common.Address {
+	return common.Address{}
+}
+
+// packUint256 ABI-encodes a uint256 value as a 32-byte big-endian word.
+func packUint256(v *big.Int) []byte {
+	return common.LeftPadBytes(v.Bytes(), 32)
+}
+
+// stableswapPreNGResults builds canned multicall results for a 2-coin pre-NG pool.
+// Order must match buildSnapshotCalls for NCoins=2, Kind=plain_pre_ng:
+//
+//	0: balances(0)
+//	1: balances(1)
+//	2: get_virtual_price()
+//	3: totalSupply()
+//	4: A()
+//	5: fee()
+//	6: get_dy(0,1,dx0)
+//	7: get_dy(1,0,dx1)
+func stableswapPreNGResults(_ *testing.T, _ *abi.ABI) []outbound.Result {
+	pack := func(v int64) outbound.Result {
+		return outbound.Result{Success: true, ReturnData: packUint256(big.NewInt(v))}
+	}
+	return []outbound.Result{
+		pack(1000000000000000000), // balances(0)
+		pack(1000000000000000000), // balances(1)
+		pack(1001000000000000000), // get_virtual_price
+		pack(2000000000000000000), // totalSupply
+		pack(900),                 // A
+		pack(4000000),             // fee
+		pack(999000000000000000),  // get_dy(0,1)
+		pack(998000000000000000),  // get_dy(1,0)
+	}
+}
+
+// stableswapNGResults builds canned results for a 2-coin NG pool.
+// Same as pre-NG plus price_oracle and last_price at indices 8 and 9.
+func stableswapNGResults(t *testing.T, a *abi.ABI) []outbound.Result {
+	t.Helper()
+	base := stableswapPreNGResults(t, a)
+	pack := func(v int64) outbound.Result {
+		return outbound.Result{Success: true, ReturnData: packUint256(big.NewInt(v))}
+	}
+	return append(base,
+		pack(1000100000000000000), // price_oracle
+		pack(1000050000000000000), // last_price
+	)
+}
+
+func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:           1,
+		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:         KindStableswapPreNG,
+		NCoins:       2,
+		CoinTokenIDs: []int64{1, 2},
+		CoinDecimals: []int{18, 18},
+	}
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if ss.Stableswap == nil || ss.Cryptoswap != nil {
+		t.Fatal("want stableswap snapshot, cryptoswap must be nil")
+	}
+	if ss.Stableswap.LastPrice != nil {
+		t.Fatal("pre-NG must not populate last_price")
+	}
+	if ss.Stableswap.PriceOracle != nil {
+		t.Fatal("pre-NG must not populate price_oracle")
+	}
+	if len(ss.Stableswap.Balances) != 2 {
+		t.Fatalf("balances len = %d, want 2", len(ss.Stableswap.Balances))
+	}
+	if len(ss.Stableswap.SpotDy) != 2 {
+		t.Fatalf("spot_dy len = %d, want 2 (ordered pairs (0,1),(1,0))", len(ss.Stableswap.SpotDy))
+	}
+	if ss.BlockNumber != 100 {
+		t.Errorf("BlockNumber = %d, want 100", ss.BlockNumber)
+	}
+}
+
+func TestStableswapHandler_SnapshotNG(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:           2,
+		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:         KindStableswapNG,
+		NCoins:       2,
+		CoinTokenIDs: []int64{1, 2},
+		CoinDecimals: []int{18, 6},
+	}
+	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot NG: %v", err)
+	}
+	if ss.Stableswap == nil {
+		t.Fatal("want stableswap snapshot")
+	}
+	if ss.Stableswap.LastPrice == nil {
+		t.Fatal("NG must populate last_price")
+	}
+	if ss.Stableswap.PriceOracle == nil {
+		t.Fatal("NG must populate price_oracle")
+	}
+	if len(ss.Stableswap.SpotDy) != 2 {
+		t.Fatalf("spot_dy len = %d, want 2", len(ss.Stableswap.SpotDy))
 	}
 }

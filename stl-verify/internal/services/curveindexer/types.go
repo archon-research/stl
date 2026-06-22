@@ -27,6 +27,7 @@ type RegisteredPool struct {
 	Kind         PoolKind
 	NCoins       int
 	CoinTokenIDs []int64 // index-aligned to on-chain coins(i)
+	CoinDecimals []int
 	DeployBlock  int64
 }
 

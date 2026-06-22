@@ -15,9 +15,10 @@ import (
 type CurvePoolRow struct {
 	ID           int64
 	Address      common.Address
-	Kind         string  // matches curve_pool.pool_kind
+	Kind         string // matches curve_pool.pool_kind
 	NCoins       int
 	CoinTokenIDs []int64 // index-aligned (ordered by coin_index)
+	CoinDecimals []int
 	DeployBlock  int64
 }
 
@@ -48,7 +49,7 @@ type LiquidityInput struct {
 	Provider       common.Address
 	Kind           string
 	TokenAmounts   []*big.Int
-	CoinIndex      *int    // nullable
+	CoinIndex      *int       // nullable
 	Fees           []*big.Int // nullable
 	Invariant      *big.Int   // nullable
 	TokenSupply    *big.Int   // nullable
