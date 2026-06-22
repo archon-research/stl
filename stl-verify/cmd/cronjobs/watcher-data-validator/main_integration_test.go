@@ -12,19 +12,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestSetupRunner_EnabledWiresService covers the enabled arm of setupRunner:
-// chain ID resolved, flag on, Etherscan key required, verifier + block-state
-// repository + data validator service all constructed against a real Postgres.
-// It asserts construction only — runner.Run is exercised against a mocked
-// canonical source in the data_validator service integration tests, since
-// setupRunner builds the verifier against the real Etherscan endpoint.
-func TestSetupRunner_EnabledWiresService(t *testing.T) {
+// TestSetupRunner_WiresService covers setupRunner end to end: chain ID resolved,
+// Etherscan key required, verifier + block-state repository + data validator
+// service all constructed against a real Postgres. It asserts construction only;
+// runner.Run is exercised against a mocked canonical source in the data_validator
+// service integration tests, since setupRunner builds the verifier against the
+// real Etherscan endpoint.
+func TestSetupRunner_WiresService(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	defer cleanup()
 
 	t.Setenv("CHAIN_ID", "1")
-	t.Setenv("DATA_VALIDATION_ENABLED", "true")
 	t.Setenv("ETHERSCAN_API_KEY", "test-key")
 
 	deps := temporal.Dependencies{

@@ -45,50 +45,6 @@ func TestGetInt(t *testing.T) {
 	}
 }
 
-func TestGetBool(t *testing.T) {
-	const key = "STL_TEST_GET_BOOL"
-
-	tests := []struct {
-		name    string
-		value   string
-		def     bool
-		want    bool
-		wantErr bool
-	}{
-		{name: "unset returns default true", def: true, want: true},
-		{name: "unset returns default false", def: false, want: false},
-		{name: "true is parsed", value: "true", def: false, want: true},
-		{name: "false is parsed", value: "false", def: true, want: false},
-		{name: "one is true", value: "1", def: false, want: true},
-		{name: "zero is false", value: "0", def: true, want: false},
-		{name: "uppercase TRUE is parsed", value: "TRUE", def: false, want: true},
-		{name: "non-bool returns error", value: "yes", def: true, wantErr: true},
-		{name: "garbage returns error", value: "not-a-bool", def: false, wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.value != "" {
-				t.Setenv(key, tc.value)
-			}
-
-			got, err := GetBool(key, tc.def)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (got=%t)", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("GetBool = %t, want %t", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestGetDuration(t *testing.T) {
 	const key = "STL_TEST_GET_DURATION"
 

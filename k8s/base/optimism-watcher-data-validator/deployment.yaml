@@ -3,7 +3,10 @@ kind: Deployment
 metadata:
   name: optimism-watcher-data-validator
 spec:
-  replicas: 1
+  # Scaled to zero until our Etherscan plan covers Optimism: the validator's only
+  # job is the Etherscan cross-check, which we cannot do for this chain yet. Set
+  # to 1 to enable. Ingestion is a separate service and is unaffected.
+  replicas: 0
   selector:
     matchLabels:
       app: optimism-watcher-data-validator

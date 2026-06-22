@@ -38,22 +38,6 @@ func GetInt(key string, defaultValue int) (int, error) {
 	return v, nil
 }
 
-// GetBool returns the boolean value of the environment variable or the default
-// if unset. The value is parsed via strconv.ParseBool (accepts 1/t/T/TRUE/true,
-// 0/f/F/FALSE/false, etc.). A set-but-unparseable value is returned as an error
-// so misconfiguration is loud rather than silently falling back to the default.
-func GetBool(key string, defaultValue bool) (bool, error) {
-	raw := os.Getenv(key)
-	if raw == "" {
-		return defaultValue, nil
-	}
-	v, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, fmt.Errorf("parsing %s %q as bool: %w", key, raw, err)
-	}
-	return v, nil
-}
-
 // GetDuration returns the duration value of the environment variable or the
 // default if unset. The value is parsed via time.ParseDuration so callers can
 // configure it as e.g. "5s", "250ms", "2m". A set-but-unparseable value is
