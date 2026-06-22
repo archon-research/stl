@@ -26,6 +26,7 @@ dist/mock-blockchain-server
 
 # Claude
 settings.local.json
+.playwright-mcp/
 
 # Python
 __pycache__/

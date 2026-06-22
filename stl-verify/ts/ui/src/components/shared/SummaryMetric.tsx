@@ -46,7 +46,6 @@ export function SummaryMetric({
           align: 'center',
           gap: '2',
           wrap: 'wrap',
-          mt: '2',
           fontSize: 'lg',
           fontWeight: 'semibold',
           color: 'text.strong',
@@ -60,7 +59,6 @@ export function SummaryMetric({
       {detail ? (
         <div
           className={css({
-            mt: '1',
             fontSize: 'xs',
             color: 'text.muted',
             overflowWrap: 'anywhere',
