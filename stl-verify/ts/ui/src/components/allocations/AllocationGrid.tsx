@@ -757,6 +757,7 @@ function createAllocationColumns(
       // accessor (token balance), mixing token units into the USD domain.
       meta: {
         magnitude: {
+          scale: 'linear',
           getValue: (allocation) => parseNumericValue(allocation.amount_usd) ?? NaN,
           getValueText: () => null,
         },
@@ -793,6 +794,7 @@ function createAllocationColumns(
       // No bar for n/a rows: NaN suppresses it (see Balance for why not null).
       meta: {
         magnitude: {
+          scale: 'linear',
           getValue: (allocation) =>
             appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? NaN,
           getValueText: () => null,
