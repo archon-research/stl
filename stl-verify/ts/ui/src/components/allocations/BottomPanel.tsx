@@ -17,7 +17,6 @@ import {
   type ChainLabelLookup,
   getAllocationKey,
   getCategoryLabel,
-  getProtocolLabel,
   sortAllocations,
 } from '../../lib/dashboard';
 import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
@@ -26,7 +25,6 @@ import type {
   AllocationCategory,
   Prime,
 } from '../../types/allocation';
-import type { LocalProtocolRow } from '../../types/local-data';
 import { ActivityFeed } from './tabs/ActivityFeed';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 import { RrcTab } from './tabs/RrcTab';
@@ -37,7 +35,6 @@ type BottomPanelProps = {
   errorMessage: string | null;
   isDrawerOpen: boolean;
   isLoading: boolean;
-  localProtocols: LocalProtocolRow[];
   selectedAllocation: Allocation | null;
   selectedPrime: Prime | null;
 };
@@ -70,7 +67,6 @@ export function BottomPanel({
   errorMessage,
   isDrawerOpen,
   isLoading,
-  localProtocols,
   selectedAllocation,
   selectedPrime,
 }: BottomPanelProps) {
@@ -189,10 +185,9 @@ export function BottomPanel({
   ]);
 
   // Sync the URL-backed receipt-token param to the grid's current selection
-  // only when that selection *changes*. The ref guards against clobbering a
-  // manual dropdown pick on unrelated re-renders (e.g. the user changes the
-  // dropdown → receiptTokenParam changes → this effect would otherwise fire
-  // and overwrite the pick back to the grid row's id).
+  // only when that selection *changes*. The ref tracks the previous selection
+  // so an unrelated re-render does not re-assert a stale key, and so clicking a
+  // new row updates the focus even while the old key is still a valid option.
   useEffect(() => {
     const currentKey = selectedAllocation
       ? getAllocationKey(selectedAllocation)
@@ -339,11 +334,8 @@ export function BottomPanel({
 
       <div
         className={css({
-          display: 'grid',
-          gridTemplateColumns: {
-            base: '1fr',
-            md: 'repeat(3, minmax(12rem, 1fr)) minmax(18rem, 1fr)',
-          },
+          display: 'flex',
+          flexWrap: 'wrap',
           gap: '4',
           alignItems: 'end',
         })}
@@ -353,6 +345,7 @@ export function BottomPanel({
           className={css({
             display: 'grid',
             gap: '1',
+            flex: '1 1 12rem',
           })}
         >
           <span
@@ -389,52 +382,13 @@ export function BottomPanel({
           </StyledSelect>
         </label>
 
-        <label
-          className={css({
-            display: 'grid',
-            gap: '1',
-          })}
-        >
-          <span
-            className={css({
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.1em',
-              color: 'text.muted',
-            })}
-          >
-            Receipt token
-          </span>
-          <StyledSelect
-            value={receiptTokenParam ?? ''}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              setReceiptTokenParam(event.target.value || null)
-            }
-            disabled={
-              !selectedPrime ||
-              isLoading ||
-              errorMessage !== null ||
-              filteredAllocations.length === 0
-            }
-          >
-            <option value="">Choose a receipt token</option>
-            {filteredAllocations.map((allocation) => {
-              const key = getAllocationKey(allocation);
-              return (
-                <option key={key} value={key}>
-                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
-                </option>
-              );
-            })}
-          </StyledSelect>
-        </label>
-
         {activeTab === 'activity' ? (
           <label
             htmlFor="activity-action-filter"
             className={css({
               display: 'grid',
               gap: '1',
+              flex: '1 1 12rem',
             })}
           >
             <span
@@ -468,7 +422,7 @@ export function BottomPanel({
         {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
-              width: '100%',
+              flex: '2 1 18rem',
             })}
           >
             <SearchInput
