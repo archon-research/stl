@@ -246,7 +246,10 @@ func TestCurveMigration(t *testing.T) {
 		}
 
 		swapTS := "2021-01-01T00:00:00Z"
-		_, err := curveTestPool.Exec(ctx, `
+		// Use RETURNING to capture the processing_version that the trigger assigned,
+		// ensuring the insert succeeds and the trigger actually ran.
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
 			INSERT INTO curve_swap
 			    (curve_pool_id, block_number, block_version, block_timestamp,
 			     tx_hash, log_index, sender, sold_id, tokens_sold, bought_id, tokens_bought, build_id)
@@ -254,20 +257,11 @@ func TestCurveMigration(t *testing.T) {
 			        '\xaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd'::bytea,
 			        0,
 			        '\x1111111111111111111111111111111111111111'::bytea,
-			        0, 1000000000000000000, 1, 990000000000000000, $3)
-			ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, log_index, processing_version)
-			DO NOTHING`,
-			poolID, swapTS, 0)
+			        0, 1000000000000000000, 1, 990000000000000000, 0)
+			RETURNING processing_version`,
+			poolID, swapTS).Scan(&pv)
 		if err != nil {
 			t.Fatalf("inserting test swap: %v", err)
-		}
-
-		var pv int
-		if err := curveTestPool.QueryRow(ctx, `
-			SELECT processing_version FROM curve_swap
-			WHERE curve_pool_id = $1 AND block_number = 11592600 AND log_index = 0`,
-			poolID).Scan(&pv); err != nil {
-			t.Fatalf("reading processing_version: %v", err)
 		}
 		if pv != 0 {
 			t.Errorf("processing_version = %d after first insert, want 0", pv)

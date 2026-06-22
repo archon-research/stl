@@ -603,9 +603,12 @@ END $$;
 DO $$
 DECLARE coin_count INT;
 BEGIN
-    SELECT COUNT(*) INTO coin_count FROM curve_pool_coin;
+    SELECT COUNT(*) INTO coin_count
+    FROM curve_pool_coin cpc
+    JOIN curve_pool cp ON cp.id = cpc.curve_pool_id
+    WHERE cp.chain_id = 1;
     IF coin_count <> 10 THEN
-        RAISE EXCEPTION 'expected 10 curve_pool_coin rows (2+2+3+3), found %', coin_count;
+        RAISE EXCEPTION 'expected 10 curve_pool_coin rows for chain_id=1 (2+2+3+3), found %', coin_count;
     END IF;
 END $$;
 
