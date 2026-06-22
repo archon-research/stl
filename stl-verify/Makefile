@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -25,6 +25,8 @@ include lint.mk
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
+        docker-build-psm3-indexer docker-push-psm3-indexer docker-release-psm3-indexer \
+        docker-build-psm3-indexer-staging docker-push-psm3-indexer-staging docker-release-psm3-indexer-staging \
         \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
@@ -936,6 +938,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
 	@echo ""
+	@$(MAKE) _docker-release-psm3-indexer-internal ENV=$(ENV)
+	@echo ""
 	@$(MAKE) _docker-release-python-api-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
@@ -1303,6 +1307,56 @@ docker-push-prime-debt-indexer-staging:
 
 docker-release-prime-debt-indexer-staging:
 	@$(MAKE) docker-release-prime-debt-indexer ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - PSM3 Indexer
+# =============================================================================
+
+ECR_REPO_PSM3_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-psm3-indexer
+
+# Build Docker image for psm3 indexer (ARM64 for EKS Graviton)
+docker-build-psm3-indexer:
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/psm3-indexer --build-arg BIN=psm3-indexer -t stl-psm3-indexer:local -f Dockerfile.common .
+else
+	@echo "==> Building PSM3 Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_PSM3_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=cmd/workers/psm3-indexer \
+		--build-arg BIN=psm3-indexer \
+		-f Dockerfile.common \
+		-t $(ECR_REPO_PSM3_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_PSM3_INDEXER):latest \
+		--load .
+endif
+
+# Push psm3 indexer Docker image to ECR
+docker-push-psm3-indexer: ecr-login
+	@echo "==> Pushing PSM3 Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_PSM3_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_PSM3_INDEXER):latest
+
+# Build and push psm3 indexer in one step (captures tag at start to ensure consistency)
+docker-release-psm3-indexer: ecr-login _docker-release-psm3-indexer-internal
+
+_docker-release-psm3-indexer-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="PSM3 Indexer" GO_REPO="$(ECR_REPO_PSM3_INDEXER)" GO_CMD_PATH=cmd/workers/psm3-indexer GO_BIN=psm3-indexer GO_CACHE_KEY=psm3-indexer
+
+docker-build-psm3-indexer-staging:
+	@$(MAKE) docker-build-psm3-indexer ENV=sentinelstaging
+
+docker-push-psm3-indexer-staging:
+	@$(MAKE) docker-push-psm3-indexer ENV=sentinelstaging
+
+docker-release-psm3-indexer-staging:
+	@$(MAKE) docker-release-psm3-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Allocation Tracker
