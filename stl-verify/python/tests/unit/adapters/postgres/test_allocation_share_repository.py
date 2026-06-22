@@ -87,9 +87,9 @@ async def test_batch_uses_scaled_pair_when_both_present() -> None:
             chain_id=1,
             token_id=10,
             balance=Decimal("10"),
-            scaled_balance=Decimal("5"),
+            scaled_balance=Decimal("7"),
             total_supply=Decimal("100"),
-            scaled_total_supply=Decimal("50"),
+            scaled_total_supply=Decimal("35"),
             supply_ts=datetime.now(timezone.utc),
         ),
     ]
@@ -97,9 +97,9 @@ async def test_batch_uses_scaled_pair_when_both_present() -> None:
 
     out = await batch_fetch_shares(engine=engine, requests=[_ShareRequest(1, 10)], wallet_address=_WALLET)
 
-    # 5 / 50 (scaled), not 10 / 100 (unscaled) — the values differ so the
-    # wrong pick would be detected.
-    assert out[(1, 10)] == Decimal("5") / Decimal("50")
+    # 7 / 35 = 0.2 (scaled), not 10 / 100 = 0.1 (unscaled) — the ratios differ so
+    # picking the unscaled pair would be detected.
+    assert out[(1, 10)] == Decimal("7") / Decimal("35")
 
 
 @pytest.mark.asyncio
