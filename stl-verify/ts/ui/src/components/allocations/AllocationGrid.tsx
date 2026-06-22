@@ -738,10 +738,12 @@ function createAllocationColumns(
       accessorFn: (allocation) => Number(allocation.balance),
       cell: ({ row }) => <AllocationBalanceCell allocation={row.original} />,
       // Bar reflects USD value so magnitudes compare across heterogeneous
-      // tokens; the cell text keeps the token holding. Suppress the value-text.
+      // tokens; the cell text keeps the token holding. NaN (not null) suppresses
+      // the bar for unpriced rows: a null here would fall back to the column
+      // accessor (token balance), mixing token units into the USD domain.
       meta: {
         magnitude: {
-          getValue: (allocation) => parseNumericValue(allocation.amount_usd),
+          getValue: (allocation) => parseNumericValue(allocation.amount_usd) ?? NaN,
           getValueText: () => null,
         },
       },
@@ -782,6 +784,8 @@ function createAllocationColumns(
         />
       ),
       // No bar for rows with no applied risk capital (the cell reads "n/a").
+      // NaN suppresses the bar; a null would fall back to the accessor (0) and
+      // draw an empty track under every n/a row.
       meta: {
         magnitude: {
           getValue: (allocation) => {
@@ -790,8 +794,8 @@ function createAllocationColumns(
               allocation,
             );
             return entry?.applied
-              ? parseNumericValue(entry.required_risk_capital_usd)
-              : null;
+              ? (parseNumericValue(entry.required_risk_capital_usd) ?? NaN)
+              : NaN;
           },
           getValueText: () => null,
         },
