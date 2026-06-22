@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { getActionColor, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
   formatDateTime,
@@ -558,6 +559,28 @@ function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
+// Approximate the latest flow's USD value from the position's current implied
+// price (amount_usd / balance) rather than a historical price: the activity
+// row carries only a token-unit tx_amount, and this is a magnitude annotation,
+// not an accounting figure. Falls back to the token amount when unpriced.
+function formatActivityMagnitude(allocation: Allocation): string | null {
+  const amount = parseNumericValue(allocation.latest_activity_amount);
+  if (amount === null) {
+    return null;
+  }
+
+  const action = allocation.latest_activity_action?.toLowerCase();
+  const sign = action === 'in' ? '+' : action === 'out' ? '-' : '';
+
+  const balance = parseNumericValue(allocation.balance);
+  const amountUsd = parseNumericValue(allocation.amount_usd);
+  if (amountUsd !== null && balance !== null && balance > 0) {
+    return `${sign}${formatUsdValue(amount * (amountUsd / balance))}`;
+  }
+
+  return `${sign}${formatTokenAmount(amount)} ${allocation.symbol}`;
+}
+
 function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
   if (!allocation.latest_activity_at) {
     return (
@@ -573,18 +596,42 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     );
   }
 
+  const actionColor = getActionColor(allocation.latest_activity_action);
+  const actionIcon = getActionIcon(allocation.latest_activity_action);
+  const magnitude = formatActivityMagnitude(allocation);
+
   return (
     <div>
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {formatFreshnessLabel(allocation.latest_activity_at)}
-      </p>
+      <div className={flex({ align: 'center', gap: '1.5' })}>
+        {actionIcon ? (
+          <span
+            className={css({ display: 'inline-flex', color: actionColor })}
+          >
+            {actionIcon}
+          </span>
+        ) : null}
+        <span
+          className={css({
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            color: 'text.strong',
+          })}
+        >
+          {formatFreshnessLabel(allocation.latest_activity_at)}
+        </span>
+        {magnitude ? (
+          <span
+            className={css({
+              fontSize: 'xs',
+              fontWeight: 'medium',
+              color: actionColor,
+              whiteSpace: 'nowrap',
+            })}
+          >
+            {magnitude}
+          </span>
+        ) : null}
+      </div>
       <p
         className={css({
           m: 0,

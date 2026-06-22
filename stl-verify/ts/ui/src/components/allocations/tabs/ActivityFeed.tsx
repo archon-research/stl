@@ -5,12 +5,12 @@ import {
   SkeletonStack,
   StyledSelect,
 } from '@archon-research/design-system';
-import { ArrowDownRight, ArrowRightLeft, ArrowUpLeft } from 'lucide-react';
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { getActionColor, getActionIcon } from '../../../lib/activity';
 import {
   getAllocationActivity,
   getProtocolEvents,
@@ -105,31 +105,6 @@ function getRealTxHash(event: AllocationActivity): string | null {
   return isSweepEvent(event) ? null : (event.tx_hash ?? null);
 }
 
-function getActionIcon(actionType: string | null | undefined) {
-  switch (actionType?.toLowerCase()) {
-    case 'in':
-      return <ArrowDownRight className={css({ width: '4', height: '4' })} />;
-    case 'out':
-      return <ArrowUpLeft className={css({ width: '4', height: '4' })} />;
-    case 'sweep':
-      return <ArrowRightLeft className={css({ width: '4', height: '4' })} />;
-    default:
-      return null;
-  }
-}
-
-function getActionColor(actionType: string | null | undefined): string {
-  switch (actionType?.toLowerCase()) {
-    case 'in':
-      return 'text.success';
-    case 'out':
-      return 'text.warning';
-    case 'sweep':
-      return 'text.interactive';
-    default:
-      return 'text.default';
-  }
-}
 
 function formatEventData(eventData: ProtocolEvent['event_data']): string {
   if (eventData === null) {
