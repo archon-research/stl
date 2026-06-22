@@ -18,7 +18,14 @@ import (
 // seedCurvePool inserts a minimal 2-coin plain_pre_ng pool for tests and
 // returns its id. All inserts are idempotent so parallel/repeated test runs
 // are safe.
+// seedCurvePoolWithTokens is like seedCurvePool but also returns the token IDs
+// for coins at indices 0 and 1.
 func seedCurvePool(t *testing.T, ctx context.Context) int64 {
+	poolID, _, _ := seedCurvePoolWithTokens(t, ctx)
+	return poolID
+}
+
+func seedCurvePoolWithTokens(t *testing.T, ctx context.Context) (int64, int64, int64) {
 	t.Helper()
 
 	// Ensure a chain row exists.
@@ -81,7 +88,7 @@ func seedCurvePool(t *testing.T, ctx context.Context) int64 {
 		t.Fatalf("seed curve_pool_coin: %v", err)
 	}
 
-	return poolID
+	return poolID, tokenID0, tokenID1
 }
 
 // newCurveRepo builds a CurveRepository backed by curveTestPool with buildID 1.
@@ -213,7 +220,7 @@ func TestCurveRepository_SaveCryptoswapState_RoundTrip(t *testing.T) {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {
-		t.Errorf("row count = %d, want 1", count)
+		t.Fatalf("row count = %d, want 1", count)
 	}
 }
 
@@ -327,7 +334,7 @@ func TestCurveRepository_SaveLiquidityEvent_Idempotent(t *testing.T) {
 func TestCurveRepository_LoadPools(t *testing.T) {
 	ctx := context.Background()
 	repo := newCurveRepo(t)
-	poolID := seedCurvePool(t, ctx)
+	poolID, tokenID0, tokenID1 := seedCurvePoolWithTokens(t, ctx)
 
 	pools, err := repo.LoadPools(ctx, 999)
 	if err != nil {
@@ -352,5 +359,14 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 	}
 	if len(found.CoinTokenIDs) != 2 {
 		t.Errorf("len(CoinTokenIDs) = %d, want 2", len(found.CoinTokenIDs))
+	}
+
+	// Assert CoinTokenIDs are ordered by coin_index (tokenID0 at [0], tokenID1 at [1]).
+	// seedCurvePool inserts: coin_index 0 -> tokenID0 (TOKA), coin_index 1 -> tokenID1 (TOKB).
+	if found.CoinTokenIDs[0] != tokenID0 {
+		t.Errorf("CoinTokenIDs[0] = %d, want %d (coin_index 0 token)", found.CoinTokenIDs[0], tokenID0)
+	}
+	if found.CoinTokenIDs[1] != tokenID1 {
+		t.Errorf("CoinTokenIDs[1] = %d, want %d (coin_index 1 token)", found.CoinTokenIDs[1], tokenID1)
 	}
 }
