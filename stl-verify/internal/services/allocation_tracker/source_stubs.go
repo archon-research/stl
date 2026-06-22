@@ -70,15 +70,15 @@ func (s *StubSource) FetchBalances(ctx context.Context, entries []*TokenEntry, b
 	return NewFetchResult(), nil
 }
 
-// DefaultSkipSources returns sources for types handled by the existing SparkLend worker.
-func DefaultSkipSources(logger *slog.Logger) []PositionSource {
+// defaultSkipSources returns sources for types handled by the existing SparkLend worker.
+func defaultSkipSources(logger *slog.Logger) []PositionSource {
 	return []PositionSource{
 		NewSkipSource("anchorage-skip", "anchorage", nil, logger),
 	}
 }
 
-// DefaultStubSources returns placeholders for types not yet implemented.
-func DefaultStubSources(logger *slog.Logger) []PositionSource {
+// defaultStubSources returns placeholders for types not yet implemented.
+func defaultStubSources(logger *slog.Logger) []PositionSource {
 	// "centrifuge" is intentionally absent: Centrifuge tranche tokens are plain
 	// ERC20s and are handled by BalanceOfSource. centrifuge_feeder is a different
 	// mechanism and remains a stub until implemented.

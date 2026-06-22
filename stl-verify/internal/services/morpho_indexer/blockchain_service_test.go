@@ -547,7 +547,7 @@ func TestGetTokenMetadata_CacheHit(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xAAAA")
 
-	// Populate cache.
+	// Populate cache with a resolved entry.
 	h.svc.blockchainSvc.metadataCache[tokenAddr] = TokenMetadata{Symbol: "CACHED", Decimals: 18}
 
 	var multicallCalled bool
@@ -568,32 +568,12 @@ func TestGetTokenMetadata_CacheHit(t *testing.T) {
 	}
 }
 
-// TestGetTokenMetadata_SymbolFails_ErrorsOut replaces a previous test that
-// codified the silent-zero behavior (symbol() reverting returned an empty
-// Symbol with nil error). Post-VEC-188 Finding 3: any sub-call revert must
-// surface as an error — silent empty metadata would persist corrupt rows.
-func TestGetTokenMetadata_SymbolFails_ErrorsOut(t *testing.T) {
-	h := newTestHarness(t)
-	tokenAddr := common.HexToAddress("0xBBBB")
-
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return []outbound.Result{
-			{Success: false, ReturnData: nil},            // symbol fails
-			{Success: true, ReturnData: h.packUint8(18)}, // decimals succeeds
-		}, nil
-	}
-
-	_, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
-	if err == nil {
-		t.Fatal("expected error when symbol() sub-call reverts; silent empty metadata would be persisted")
-	}
-}
-
-// TestGetTokenMetadata_DoesNotCacheOnSubCallRevert replaces the previous
-// "CachesOnlyWithSymbol" test that relied on silent-zero behavior. Post-VEC-188
-// Finding 3: on any sub-call revert we return an error and must not pollute
-// the cache.
-func TestGetTokenMetadata_DoesNotCacheOnSubCallRevert(t *testing.T) {
+// TestGetTokenMetadata_CachesWithEmptySymbol verifies that a reverted
+// symbol() does not prevent caching: the token is persisted with Symbol=""
+// so future calls (within the same block-processing run) are served from
+// cache without re-fetching.
+// A decimals() revert still returns an error and must NOT populate the cache.
+func TestGetTokenMetadata_CachesWithEmptySymbol(t *testing.T) {
 	h := newTestHarness(t)
 	tokenAddr := common.HexToAddress("0xCCCC")
 
@@ -604,9 +584,15 @@ func TestGetTokenMetadata_DoesNotCacheOnSubCallRevert(t *testing.T) {
 		}, nil
 	}
 
-	_, _ = h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
-	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; ok {
-		t.Error("should not cache token when any sub-call reverts")
+	md, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
+	if err != nil {
+		t.Fatalf("expected no error when symbol() reverts, got %v", err)
+	}
+	if md.Symbol != "" {
+		t.Errorf("Symbol must be empty when symbol() reverted, got %q", md.Symbol)
+	}
+	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; !ok {
+		t.Error("token must be cached even when symbol() is unresolved")
 	}
 }
 
@@ -699,30 +685,6 @@ func TestGetTokenPairMetadata_OneCached(t *testing.T) {
 	}
 }
 
-// TestGetTokenMetadata_ErrorsWhenSymbolSubCallFails codifies VEC-188 Finding 3.
-// A reverted symbol() sub-call must surface as an error — otherwise the caller
-// silently persists zero-valued metadata (empty Symbol, 0 Decimals) into the
-// token table.
-func TestGetTokenMetadata_ErrorsWhenSymbolSubCallFails(t *testing.T) {
-	h := newTestHarness(t)
-	tokenAddr := common.HexToAddress("0xDDDD")
-
-	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return []outbound.Result{
-			{Success: false, ReturnData: nil},            // symbol() reverted
-			{Success: true, ReturnData: h.packUint8(18)}, // decimals() succeeded
-		}, nil
-	}
-
-	_, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), tokenAddr, 20000000)
-	if err == nil {
-		t.Fatal("expected error when symbol() sub-call reverts; silent empty metadata would be persisted")
-	}
-	if _, ok := h.svc.blockchainSvc.metadataCache[tokenAddr]; ok {
-		t.Error("metadata cache must not be populated when sub-calls revert")
-	}
-}
-
 // TestGetTokenMetadata_ErrorsWhenDecimalsSubCallFails codifies VEC-188 Finding 3.
 // A reverted decimals() sub-call must surface as an error; a silent decimals=0
 // would corrupt downstream unit conversions.
@@ -781,18 +743,25 @@ func TestGetTokenMetadata_CachesAndReturnsOnSuccess(t *testing.T) {
 	}
 }
 
-// TestGetTokenPairMetadata_ErrorsWhenAnySubCallFails codifies VEC-188 Finding 3
-// for the pair variant: any of the 4 sub-calls reverting must surface as an
-// error rather than silently returning zero-valued metadata.
-func TestGetTokenPairMetadata_ErrorsWhenAnySubCallFails(t *testing.T) {
+// TestGetTokenPairMetadata_DecimalsRevertIsFatalSymbolIsBestEffort narrows
+// VEC-188 Finding 3: a reverted decimals() is still fatal (would persist bogus
+// numeric metadata), but a reverted symbol() is tolerated and reconciled later.
+func TestGetTokenPairMetadata_DecimalsRevertIsFatalSymbolIsBestEffort(t *testing.T) {
 	tokenA := common.HexToAddress("0xA1A1")
 	tokenB := common.HexToAddress("0xB2B2")
 
-	failingIndices := []int{0, 1, 2, 3}
-	for _, failIdx := range failingIndices {
-		t.Run(fmt.Sprintf("subcall_%d_fails", failIdx), func(t *testing.T) {
+	cases := []struct {
+		failIdx   int
+		wantError bool
+	}{
+		{0, false}, // symbol(A) revert tolerated
+		{1, true},  // decimals(A) revert fatal
+		{2, false}, // symbol(B) revert tolerated
+		{3, true},  // decimals(B) revert fatal
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("subcall_%d_fails", tc.failIdx), func(t *testing.T) {
 			h := newTestHarness(t)
-
 			h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				results := []outbound.Result{
 					{Success: true, ReturnData: h.packString("TKA")},
@@ -800,19 +769,15 @@ func TestGetTokenPairMetadata_ErrorsWhenAnySubCallFails(t *testing.T) {
 					{Success: true, ReturnData: h.packString("TKB")},
 					{Success: true, ReturnData: h.packUint8(6)},
 				}
-				results[failIdx] = outbound.Result{Success: false, ReturnData: nil}
+				results[tc.failIdx] = outbound.Result{Success: false, ReturnData: nil}
 				return results, nil
 			}
-
 			_, _, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), tokenA, tokenB, 20000000)
-			if err == nil {
-				t.Fatalf("expected error when sub-call %d reverts; silent zero-valued pair metadata would be persisted", failIdx)
+			if tc.wantError && err == nil {
+				t.Fatalf("expected error when decimals sub-call %d reverts", tc.failIdx)
 			}
-			if _, ok := h.svc.blockchainSvc.metadataCache[tokenA]; ok {
-				t.Error("token A cache must not be populated when any sub-call reverts")
-			}
-			if _, ok := h.svc.blockchainSvc.metadataCache[tokenB]; ok {
-				t.Error("token B cache must not be populated when any sub-call reverts")
+			if !tc.wantError && err != nil {
+				t.Fatalf("expected no error when symbol sub-call %d reverts, got %v", tc.failIdx, err)
 			}
 		})
 	}
@@ -1487,6 +1452,226 @@ func TestGetTokenPairMetadata_ZeroLoan(t *testing.T) {
 	}
 	if mdB.Symbol != "USDT" || mdB.Decimals != 6 {
 		t.Errorf("collateral side: Symbol=%q Decimals=%d, want USDT / 6", mdB.Symbol, mdB.Decimals)
+	}
+}
+
+func TestGetTokenPairMetadata_SymbolRevertTolerated(t *testing.T) {
+	tokenA := common.HexToAddress("0xA1A1")
+	tokenB := common.HexToAddress("0xB2B2")
+	h := newTestHarness(t)
+
+	// symbol(B) (index 2) reverts; everything else succeeds. Mirrors block 25252154.
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packString("TKA")},
+			{Success: true, ReturnData: h.packUint8(18)},
+			{Success: false, ReturnData: nil},
+			{Success: true, ReturnData: h.packUint8(6)},
+		}, nil
+	}
+
+	mdA, mdB, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), tokenA, tokenB, 20000000)
+	if err != nil {
+		t.Fatalf("expected no error when only symbol() reverts, got %v", err)
+	}
+	if mdA.Symbol != "TKA" || mdA.Decimals != 18 {
+		t.Errorf("token A = %+v, want Symbol=TKA Decimals=18", mdA)
+	}
+	if mdB.Symbol != "" || mdB.Decimals != 6 {
+		t.Errorf("token B = %+v, want Symbol='' Decimals=6", mdB)
+	}
+}
+
+func TestGetTokenPairMetadata_DecimalsRevertStillErrors(t *testing.T) {
+	tokenA := common.HexToAddress("0xA1A1")
+	tokenB := common.HexToAddress("0xB2B2")
+	for _, decIdx := range []int{1, 3} {
+		t.Run(fmt.Sprintf("decimals_idx_%d", decIdx), func(t *testing.T) {
+			h := newTestHarness(t)
+			h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				results := []outbound.Result{
+					{Success: true, ReturnData: h.packString("TKA")},
+					{Success: true, ReturnData: h.packUint8(18)},
+					{Success: true, ReturnData: h.packString("TKB")},
+					{Success: true, ReturnData: h.packUint8(6)},
+				}
+				results[decIdx] = outbound.Result{Success: false, ReturnData: nil}
+				return results, nil
+			}
+			if _, _, err := h.svc.blockchainSvc.getTokenPairMetadata(context.Background(), tokenA, tokenB, 20000000); err == nil {
+				t.Fatalf("expected error when decimals sub-call %d reverts", decIdx)
+			}
+		})
+	}
+}
+
+func TestGetTokenMetadata_SymbolRevertTolerated(t *testing.T) {
+	token := common.HexToAddress("0xC3C3")
+	h := newTestHarness(t)
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: false, ReturnData: nil},           // symbol reverts
+			{Success: true, ReturnData: h.packUint8(8)}, // decimals ok
+		}, nil
+	}
+	md, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), token, 20000000)
+	if err != nil {
+		t.Fatalf("expected no error when only symbol() reverts, got %v", err)
+	}
+	if md.Symbol != "" || md.Decimals != 8 {
+		t.Errorf("md = %+v, want Symbol='' Decimals=8", md)
+	}
+}
+
+// TestGetTokenMetadata_SymbolUndecodable_IsTolerated verifies that when
+// symbol() SUCCEEDS but returns data that is neither a valid ABI string nor
+// a bytes32 (e.g. 3 bytes of garbage), the result has Symbol="" (empty pending
+// marker) with no error, while decimals is correctly decoded.
+func TestGetTokenMetadata_SymbolUndecodable_IsTolerated(t *testing.T) {
+	token := common.HexToAddress("0xD4D4")
+	h := newTestHarness(t)
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}, // 3 bytes: not a valid ABI string, not bytes32
+			{Success: true, ReturnData: h.packUint8(6)},
+		}, nil
+	}
+	md, err := h.svc.blockchainSvc.getTokenMetadata(context.Background(), token, 20000000)
+	if err != nil {
+		t.Fatalf("expected no error for undecodable symbol, got %v", err)
+	}
+	if md.Symbol != "" || md.Decimals != 6 {
+		t.Errorf("md = %+v, want Symbol='' Decimals=6", md)
+	}
+}
+
+// --- ResolveSymbolsAt ---
+
+func TestResolveSymbolsAt(t *testing.T) {
+	resolvable := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	stillReverting := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	h := newTestHarness(t)
+
+	// One symbol() call per address, in input order. First resolves, second reverts.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 2 {
+			t.Fatalf("want 2 calls, got %d", len(calls))
+		}
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packString("OK")},
+			{Success: false, ReturnData: nil},
+		}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{resolvable, stillReverting}, 25252165)
+	if err != nil {
+		t.Fatalf("ResolveSymbolsAt: %v", err)
+	}
+	if len(got) != 1 || got[resolvable] != "OK" {
+		t.Errorf("got %v, want only {%s: OK}", got, resolvable.Hex())
+	}
+	if _, ok := got[stillReverting]; ok {
+		t.Error("reverting token must be absent from results (stays pending)")
+	}
+}
+
+func TestResolveSymbolsAt_Empty(t *testing.T) {
+	h := newTestHarness(t)
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), nil, 100)
+	if err != nil {
+		t.Fatalf("ResolveSymbolsAt(nil): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+func TestResolveSymbolsAt_UsesRequestedBlock(t *testing.T) {
+	h := newTestHarness(t)
+	token := common.HexToAddress("0xAABB")
+	const wantBlock int64 = 25252165
+
+	var gotBlock *big.Int
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		gotBlock = blockNumber
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packString("SYM")},
+		}, nil
+	}
+
+	_, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{token}, wantBlock)
+	if err != nil {
+		t.Fatalf("ResolveSymbolsAt: %v", err)
+	}
+	if gotBlock == nil || gotBlock.Int64() != wantBlock {
+		t.Errorf("multicall block = %v, want %d", gotBlock, wantBlock)
+	}
+}
+
+func TestResolveSymbolsAt_UpdatesCacheEntry(t *testing.T) {
+	h := newTestHarness(t)
+	addr := common.HexToAddress("0xCCDD")
+
+	// Pre-seed cache with empty-symbol entry.
+	h.svc.blockchainSvc.metadataCache[addr] = TokenMetadata{Symbol: "", Decimals: 18}
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packString("OK")},
+		}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{addr}, 25252165)
+	if err != nil {
+		t.Fatalf("ResolveSymbolsAt: %v", err)
+	}
+	if got[addr] != "OK" {
+		t.Errorf("resolved symbol = %q, want OK", got[addr])
+	}
+	cached := h.svc.blockchainSvc.metadataCache[addr]
+	if cached.Symbol != "OK" || cached.Decimals != 18 {
+		t.Errorf("cache entry = %+v, want Symbol=OK Decimals=18", cached)
+	}
+}
+
+func TestResolveSymbolsAt_ResultCountMismatchErrors(t *testing.T) {
+	h := newTestHarness(t)
+	tokens := []common.Address{
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+	}
+
+	// Multicall returns fewer results than calls — must surface as an error
+	// rather than silently dropping a token's slot.
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: true, ReturnData: h.packString("ONLY_ONE")}}, nil
+	}
+
+	if _, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), tokens, 100); err == nil {
+		t.Fatal("expected error on result-count mismatch")
+	}
+}
+
+func TestResolveSymbolsAt_UndecodableAndEmptySymbolsOmitted(t *testing.T) {
+	h := newTestHarness(t)
+	undecodable := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	emptyDecoded := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	// First result is a successful call with undecodable return data; second
+	// decodes to the empty string. Both must be omitted (stay pending), no error.
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}},
+			{Success: true, ReturnData: h.packString("")},
+		}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.resolveSymbolsAt(context.Background(), []common.Address{undecodable, emptyDecoded}, 100)
+	if err != nil {
+		t.Fatalf("resolveSymbolsAt: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty map (undecodable and empty symbols stay pending)", got)
 	}
 }
 

@@ -20,6 +20,26 @@ type RunnerFunc func(ctx context.Context) error
 
 func (f RunnerFunc) Run(ctx context.Context) error { return f(ctx) }
 
+// scheduledAtKey carries the workflow's schedule-stable timestamp through
+// the activity context.
+type scheduledAtKey struct{}
+
+// ScheduledAtFromContext returns the timestamp the cronjob workflow stamped
+// on this run. It is identical across activity retries of the same run, so
+// runners that snapshot data keyed by time (e.g. the Maple GraphQL indexer's
+// synced_at) can make retries idempotent instead of multiplying snapshots.
+func ScheduledAtFromContext(ctx context.Context) (time.Time, bool) {
+	t, ok := ctx.Value(scheduledAtKey{}).(time.Time)
+	return t, ok && !t.IsZero()
+}
+
+// ContextWithScheduledAt returns ctx carrying the schedule-stable timestamp
+// the activity normally stamps. Exported so composition-root tests can
+// exercise the same path their runner takes in production.
+func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.Context {
+	return context.WithValue(ctx, scheduledAtKey{}, scheduledAt)
+}
+
 // cronjobActivities wraps a Runner for Temporal activity execution.
 type cronjobActivities struct {
 	runner Runner
@@ -32,11 +52,14 @@ func newCronjobActivities(runner Runner) (*cronjobActivities, error) {
 	return &cronjobActivities{runner: runner}, nil
 }
 
-// Execute runs the cronjob.
-func (a *cronjobActivities) Execute(ctx context.Context) error {
+// Execute runs the cronjob. scheduledAt is the workflow-recorded timestamp
+// (stable across activity retries) exposed to the runner via
+// ScheduledAtFromContext.
+func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) error {
 	logger := activity.GetLogger(ctx)
-	logger.Info("starting cronjob execution")
+	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
+	ctx = ContextWithScheduledAt(ctx, scheduledAt)
 	if err := a.runner.Run(ctx); err != nil {
 		return fmt.Errorf("running cronjob: %w", err)
 	}
@@ -62,8 +85,12 @@ func cronjobWorkflow(ctx workflow.Context) error {
 	}
 	ctx = workflow.WithActivityOptions(ctx, activityOptions)
 
+	// workflow.Now is recorded once in the workflow history, so server-side
+	// activity retries (the RetryPolicy above) all observe the same value.
+	scheduledAt := workflow.Now(ctx).UTC()
+
 	var activities *cronjobActivities
-	if err := workflow.ExecuteActivity(ctx, activities.Execute).Get(ctx, nil); err != nil {
+	if err := workflow.ExecuteActivity(ctx, activities.Execute, scheduledAt).Get(ctx, nil); err != nil {
 		return fmt.Errorf("executing cronjob activity: %w", err)
 	}
 

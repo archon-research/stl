@@ -2,19 +2,21 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
-from app.api._validators import EthAddressParam, OptionalEthAddressParam
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.api._validators import EthAddressParam, OptionalEthAddressParam, OptionalTxHashParam
 from app.api.deps import get_engine
+from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
+from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
 
@@ -58,10 +60,11 @@ class AllocationResponse(BaseModel):
     Two row shapes share this model:
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
-      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
-      ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
-      the held asset; ``underlying_token_id`` / ``underlying_token_address``
-      point at it.
+      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
+      null; ``symbol`` and ``underlying_symbol`` both name the held asset;
+      ``underlying_token_id`` / ``underlying_token_address`` point at it.
+      ``amount_usd`` is populated when an oracle price exists for the token and
+      null otherwise (e.g. LP/curve shares with no oracle feed).
     """
 
     chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
@@ -141,25 +144,28 @@ class CapitalMetricsResponse(BaseModel):
 
     prime_id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
-    risk_capital: Decimal = Field(
-        description="Risk capital exposure (USD) sourced from the upstream Star monitor.",
-        examples=["10000000"],
+    exposure: Decimal = Field(
+        description="Total USD exposure across the prime's allocations (upstream `exposure`).",
+        examples=["1900000000"],
     )
     capital_buffer: Decimal = Field(
-        description="`max(total_capital - first_loss_capital, 0)` — distance to first-loss exhaustion (USD).",
+        description="`max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).",
         examples=["2500000"],
     )
-    first_loss_capital: Decimal = Field(
-        description="Financial RRC (first-loss capital) reported by upstream (USD).",
+    required_risk_capital: Decimal = Field(
+        description="Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
         examples=["7500000"],
     )
-    total_capital: Decimal = Field(
-        description="Total RRC reported by upstream (USD).",
+    total_risk_capital: Decimal = Field(
+        description="Total Risk Capital reported by upstream `total_rc` (USD).",
         examples=["10000000"],
     )
-    risk_to_capital_ratio: Decimal | None = Field(
+    encumbrance_ratio: Decimal | None = Field(
         default=None,
-        description="Upstream `risk_tolerance_ratio`. `null` when not validated.",
+        description=(
+            "Required Risk Capital as a share of Total Risk Capital "
+            "(upstream `risk_tolerance_ratio`). `null` when not validated."
+        ),
         examples=["0.85"],
     )
     timestamp: str = Field(
@@ -181,11 +187,11 @@ class CapitalMetricsResponse(BaseModel):
             "example": {
                 "prime_id": "prime-acme",
                 "prime_name": "Acme Prime",
-                "risk_capital": "10000000",
+                "exposure": "1900000000",
                 "capital_buffer": "2500000",
-                "first_loss_capital": "7500000",
-                "total_capital": "10000000",
-                "risk_to_capital_ratio": "0.85",
+                "required_risk_capital": "7500000",
+                "total_risk_capital": "10000000",
+                "encumbrance_ratio": "0.85",
                 "timestamp": "2026-05-07T12:00:00Z",
                 "benchmark_source": "https://example.com/star-rrc",
                 "is_validated": False,
@@ -251,7 +257,7 @@ class StarRiskCapitalResponse(BaseModel):
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
-    return AllocationService(PostgresAllocationRepository(engine))
+    return AllocationService(AllocationRepository(engine))
 
 
 async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
@@ -389,11 +395,11 @@ async def list_capital_metrics(
                 CapitalMetricsResponse(
                     prime_id=prime.id,
                     prime_name=prime.name,
-                    risk_capital=Decimal("0"),
+                    exposure=Decimal("0"),
                     capital_buffer=Decimal("0"),
-                    first_loss_capital=Decimal("0"),
-                    total_capital=Decimal("0"),
-                    risk_to_capital_ratio=None,
+                    required_risk_capital=Decimal("0"),
+                    total_risk_capital=Decimal("0"),
+                    encumbrance_ratio=None,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     benchmark_source=settings.star_risk_capital_upstream_url,
                     is_validated=False,
@@ -410,11 +416,11 @@ async def list_capital_metrics(
             CapitalMetricsResponse(
                 prime_id=prime.id,
                 prime_name=prime.name,
-                risk_capital=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
+                exposure=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
                 capital_buffer=capital_buffer,
-                first_loss_capital=financial_rrc,
-                total_capital=total_rc,
-                risk_to_capital_ratio=_to_decimal(
+                required_risk_capital=financial_rrc,
+                total_risk_capital=total_rc,
+                encumbrance_ratio=_to_decimal(
                     row.risk_tolerance_ratio,
                     field="risk_tolerance_ratio",
                     prime_name=prime.name,
@@ -470,8 +476,9 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "Return every current allocation held by the given prime — both receipt-token "
         "positions (enriched with USD value when a price is available) and direct asset "
         "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
-        "surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and "
-        "`amount_usd` set to `null`). Each row includes the latest on-chain activity "
+        "surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` "
+        "set to `null`, and `amount_usd` valued from the token's oracle price when one "
+        "exists). Each row includes the latest on-chain activity "
         "timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`)."
     ),
 )
@@ -485,7 +492,8 @@ async def list_allocations(
     - Receipt-token positions (e.g. spUSDT wrapping USDT).
     - Direct asset holdings — tokens held in the proxy that are not
       registered as receipt-token wrappers (e.g. PYUSD, syrupUSDT). These
-      rows have null ``receipt_token_*`` / ``protocol_name`` / ``amount_usd``.
+      rows have null ``receipt_token_*`` / ``protocol_name``; ``amount_usd``
+      is valued from the token's oracle price when one exists, else null.
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -529,7 +537,7 @@ async def list_allocations(
             underlying_symbol=h.symbol,
             protocol_name=None,
             balance=h.balance,
-            amount_usd=None,
+            amount_usd=h.amount_usd,
             latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
             category=category_service.classify(None, h.symbol),
         )
@@ -538,18 +546,51 @@ async def list_allocations(
     return receipt_rows + direct_rows
 
 
+class AllocationActivityBucketResponse(BaseModel):
+    """Allocation activity aggregated into a single time bucket."""
+
+    bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
+    event_count: int = Field(description="Number of activity events in the bucket.", examples=[42])
+    total_tx_amount: Decimal = Field(
+        description="Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
+        examples=["1234567890000000000000"],
+    )
+    net_flow_usd: Decimal = Field(
+        description=(
+            "Signed net flow valued in USD (inflows positive, outflows negative), using the receipt "
+            "token's latest underlying oracle price for wrapped positions and the token's own latest "
+            "oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring "
+            "at the current total and cumulating net flows backwards."
+        ),
+        examples=["1234567.89"],
+    )
+
+
+class AllocationActivityEnvelope(BaseModel):
+    """Allocation activity response: raw events or aggregated time buckets."""
+
+    mode: Literal["raw", "aggregated"] = Field(description="`raw` for events, `aggregated` for time buckets.")
+    window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
+    data: list[AllocationActivityResponse] | list[AllocationActivityBucketResponse] = Field(
+        description="Events when `mode=raw`, count/sum buckets when `mode=aggregated`."
+    )
+
+
 @router.get(
     "/allocations/activity",
-    response_model=list[AllocationActivityResponse],
+    response_model=AllocationActivityEnvelope,
     tags=["allocations"],
     summary="Allocation activity feed",
     description=(
-        "Retrieve allocation activity events with optional filters. All filters are optional "
-        "and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive "
-        "substring matching; the rest are exact matches. Results are ordered newest first."
+        "Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` "
+        "envelope. All filters are optional and combine with logical AND. `protocol_name` and "
+        "`token_symbol` use case-insensitive substring matching; the rest are exact matches. Results "
+        "are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for "
+        "per-bucket event counts and tx-amount sums."
     ),
 )
 async def list_allocation_activity(
+    response: Response,
     prime_id: Annotated[
         OptionalEthAddressParam,
         Query(
@@ -573,26 +614,57 @@ async def list_allocation_activity(
         description="Filter by token symbol (case-insensitive substring).",
         examples=["USDC"],
     ),
-    tx_hash: str | None = Query(
-        default=None,
-        description="Filter by transaction hash (0x-prefixed).",
-        examples=["0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"],
-    ),
-    from_timestamp: datetime | None = Query(default=None, description="Inclusive lower timestamp bound (ISO-8601)."),
-    to_timestamp: datetime | None = Query(default=None, description="Inclusive upper timestamp bound (ISO-8601)."),
+    tx_hash: Annotated[
+        OptionalTxHashParam,
+        Query(
+            description="Filter by transaction hash (0x-prefixed).",
+            examples=["0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"],
+        ),
+    ] = None,
+    time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=1000, description="Max results (default 100, max 1000)."),
     service: AllocationService = Depends(_get_service),
-):
+) -> AllocationActivityEnvelope:
     """Errors:
 
     - 422 if ``prime_id`` is malformed (or ``limit`` is out of range).
-    - 200 with an empty list if filters match no rows — including when
+    - 200 with an empty ``data`` list if filters match no rows — including when
       ``prime_id`` is well-formed but unknown. ``prime_id`` is treated as
       a filter here, not a path resource.
     """
     parsed_prime_id = EthAddress(prime_id) if prime_id is not None else None
+    # Selective = an index-seekable exact filter. Substring filters
+    # (protocol_name/token_symbol) and low-cardinality filters (chain_id,
+    # action_type) do not qualify because they cannot prune chunks.
+    has_selective_filter = parsed_prime_id is not None or tx_hash is not None
+    try:
+        enforce_filter_for_window(time_series, has_selective_filter=has_selective_filter)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    window = build_window(time_series)
+    apply_cache_control(response, time_series)
 
     try:
+        if time_series.aggregate:
+            buckets = await service.list_activity_buckets(
+                prime_id=parsed_prime_id,
+                chain_id=chain_id,
+                protocol_name=protocol_name,
+                action_type=action_type,
+                token_symbol=token_symbol,
+                tx_hash=tx_hash,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            )
+            return AllocationActivityEnvelope(
+                mode="aggregated",
+                window=window,
+                data=[AllocationActivityBucketResponse(**bucket.__dict__) for bucket in buckets],
+            )
+
         events = await service.list_allocation_activity(
             prime_id=parsed_prime_id,
             chain_id=chain_id,
@@ -600,8 +672,8 @@ async def list_allocation_activity(
             action_type=action_type,
             token_symbol=token_symbol,
             tx_hash=tx_hash,
-            from_timestamp=from_timestamp,
-            to_timestamp=to_timestamp,
+            from_timestamp=time_series.from_timestamp,
+            to_timestamp=time_series.to_timestamp,
             limit=limit,
         )
     except ValueError as exc:
@@ -617,22 +689,26 @@ async def list_allocation_activity(
         )
         raise HTTPException(status_code=500, detail="Failed to retrieve allocation activity") from exc
 
-    return [
-        AllocationActivityResponse(
-            chain_id=e.chain_id,
-            prime_address=e.prime_address,
-            prime_name=e.prime_name,
-            protocol_name=e.protocol_name,
-            token_id=e.token_id,
-            token_symbol=e.token_symbol,
-            action_type=e.action_type,
-            tx_amount=e.tx_amount,
-            balance=e.balance,
-            tx_hash=e.tx_hash,
-            log_index=e.log_index,
-            block_number=e.block_number,
-            block_version=e.block_version,
-            created_at=e.created_at.isoformat(),
-        )
-        for e in events
-    ]
+    return AllocationActivityEnvelope(
+        mode="raw",
+        window=window,
+        data=[
+            AllocationActivityResponse(
+                chain_id=e.chain_id,
+                prime_address=e.prime_address,
+                prime_name=e.prime_name,
+                protocol_name=e.protocol_name,
+                token_id=e.token_id,
+                token_symbol=e.token_symbol,
+                action_type=e.action_type,
+                tx_amount=e.tx_amount,
+                balance=e.balance,
+                tx_hash=None if e.action_type.lower() == "sweep" else e.tx_hash,
+                log_index=e.log_index,
+                block_number=e.block_number,
+                block_version=e.block_version,
+                created_at=e.created_at.isoformat(),
+            )
+            for e in events
+        ],
+    )

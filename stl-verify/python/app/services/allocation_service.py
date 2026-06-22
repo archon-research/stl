@@ -10,11 +10,16 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
-from app.ports.allocation_repository import AllocationRepository
+from app.domain.entities.time_series_bucket import (
+    AllocationActivityBucket,
+    ExposureBucket,
+    TotalCapitalBucket,
+)
+from app.ports.allocation_repository import AllocationRepositoryPort
 
 
 class AllocationService:
-    def __init__(self, repository: AllocationRepository) -> None:
+    def __init__(self, repository: AllocationRepositoryPort) -> None:
         self._repository = repository
 
     async def list_chains(self) -> list[ChainMetadata]:
@@ -60,5 +65,66 @@ class AllocationService:
             tx_hash=tx_hash,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
+            limit=limit,
+        )
+
+    async def list_activity_buckets(
+        self,
+        *,
+        prime_id: EthAddress | None = None,
+        chain_id: int | None = None,
+        protocol_name: str | None = None,
+        action_type: str | None = None,
+        token_symbol: str | None = None,
+        tx_hash: str | None = None,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[AllocationActivityBucket]:
+        return await self._repository.list_activity_buckets(
+            prime_id=prime_id,
+            chain_id=chain_id,
+            protocol_name=protocol_name,
+            action_type=action_type,
+            token_symbol=token_symbol,
+            tx_hash=tx_hash,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            bucket_seconds=bucket_seconds,
+            limit=limit,
+        )
+
+    async def list_total_capital_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[TotalCapitalBucket]:
+        return await self._repository.list_total_capital_buckets(
+            prime_address,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            bucket_seconds=bucket_seconds,
+            limit=limit,
+        )
+
+    async def list_exposure_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[ExposureBucket]:
+        return await self._repository.list_exposure_buckets(
+            prime_address,
+            from_timestamp=from_timestamp,
+            to_timestamp=to_timestamp,
+            bucket_seconds=bucket_seconds,
             limit=limit,
         )

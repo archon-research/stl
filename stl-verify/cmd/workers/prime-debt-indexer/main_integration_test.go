@@ -16,22 +16,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-var sharedDSN string
+var (
+	sharedDSN           string
+	sharedLocalStackCfg testutil.LocalStackConfig
+)
+
+const (
+	// archiveBucket receives raw SC call archives when ARCHIVE_SC_CALLS=true.
+	archiveBucket = "test-prime-debt-worker-raw-sc-calls"
+	// archivePrefix is the chain_id partition rawsckey.Build writes under for chainID=1.
+	archivePrefix = "raw-sc-calls/chain_id=1/"
+)
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
 	sharedDSN = dsn
+	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
+	sharedLocalStackCfg = lsCfg
 
 	code := m.Run()
 
-	cleanup()
+	lsCleanup()
+	dbCleanup()
 	code = testutil.CheckGoroutineLeaks(code)
 	os.Exit(code)
 }
@@ -54,76 +68,6 @@ func ilkBytes32Hex(name string) string {
 // bigIntHex64 formats a *big.Int as a zero-padded 64-char hex string.
 func bigIntHex64(v *big.Int) string {
 	return fmt.Sprintf("%064x", v)
-}
-
-// ---------------------------------------------------------------------------
-// Multicall3 mock helpers
-// ---------------------------------------------------------------------------
-
-const multicall3ABIJSON = `[{
-	"name":"aggregate3",
-	"type":"function",
-	"inputs":[{"name":"calls","type":"tuple[]","components":[
-		{"name":"target","type":"address"},
-		{"name":"allowFailure","type":"bool"},
-		{"name":"callData","type":"bytes"}
-	]}],
-	"outputs":[{"name":"returnData","type":"tuple[]","components":[
-		{"name":"success","type":"bool"},
-		{"name":"returnData","type":"bytes"}
-	]}]
-}]`
-
-type subcallDispatcher func(target common.Address, callData []byte) ([]byte, bool)
-
-var parsedMulticall3ABI abi.ABI
-
-func init() {
-	var err error
-	parsedMulticall3ABI, err = abi.JSON(strings.NewReader(multicall3ABIJSON))
-	if err != nil {
-		panic("parse multicall3 ABI: " + err.Error())
-	}
-}
-
-// handleMulticall3 decodes an aggregate3 eth_call, dispatches each sub-call,
-// and returns the ABI-encoded aggregate3 result.
-func handleMulticall3(calldata []byte, dispatch subcallDispatcher) (string, error) {
-	if len(calldata) < 4 {
-		return "", fmt.Errorf("calldata too short")
-	}
-
-	args, err := parsedMulticall3ABI.Methods["aggregate3"].Inputs.Unpack(calldata[4:])
-	if err != nil {
-		return "", fmt.Errorf("unpack aggregate3 inputs: %w", err)
-	}
-
-	rawCalls, ok := args[0].([]struct {
-		Target       common.Address `json:"target"`
-		AllowFailure bool           `json:"allowFailure"`
-		CallData     []byte         `json:"callData"`
-	})
-	if !ok {
-		return "", fmt.Errorf("unexpected type for calls: %T", args[0])
-	}
-
-	type abiResult struct {
-		Success    bool   `abi:"success"`
-		ReturnData []byte `abi:"returnData"`
-	}
-
-	encoded := make([]abiResult, len(rawCalls))
-	for i, c := range rawCalls {
-		returnData, success := dispatch(c.Target, c.CallData)
-		encoded[i] = abiResult{Success: success, ReturnData: returnData}
-	}
-
-	packed, err := parsedMulticall3ABI.Methods["aggregate3"].Outputs.Pack(encoded)
-	if err != nil {
-		return "", fmt.Errorf("pack aggregate3 outputs: %w", err)
-	}
-
-	return "0x" + hex.EncodeToString(packed), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +172,7 @@ func mockVatRPCMulti(t *testing.T, _ string, primes []primeFixture, rate, art *b
 			return
 		}
 
-		result, err := handleMulticall3(calldataBytes, dispatch)
+		result, err := testutil.HandleMulticall3(calldataBytes, dispatch)
 		if err != nil {
 			t.Logf("handleMulticall3 error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -646,6 +590,122 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 
 	cancel()
 	<-errCh
+}
+
+// TestRunIntegration_ArchivesRawCalls drives one block through the worker with
+// ARCHIVE_SC_CALLS=true: it seeds a single prime, enqueues block events, and
+// serves the standard multicall mock RPC. Processing the sweep drives real
+// Multicall3 calls through the archiving-wrapped multicaller, so the worker must
+// write a raw SC call object to S3 keyed under the block's reorg version with
+// the "prime-debt" source.
+func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
+	ctx := context.Background()
+
+	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer dbCleanup()
+
+	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
+
+	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
+		t.Fatalf("truncate prime: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO prime (name, vault_address) VALUES ('spark', '\x691a6c29e9e96dd897718305427ad5d534db16ba')`); err != nil {
+		t.Fatalf("seed prime: %v", err)
+	}
+
+	primes := []primeFixture{{name: "spark", vaultAddress: "0x691A6c29e9e96Dd897718305427Ad5D534db16BA", ilkHex: ilkBytes32Hex("ALLOCATOR-SPARK-A")}}
+
+	rayVal := new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	wadVal := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	art1000 := new(big.Int).Mul(big.NewInt(1000), wadVal)
+
+	rpcServer := mockVatRPCMulti(t, vatAddr, primes, rayVal, art1000)
+	defer rpcServer.Close()
+
+	// Create the archive bucket so the fire-and-forget archiver has somewhere to write.
+	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
+	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
+		t.Fatalf("create bucket %s: %v", archiveBucket, err)
+	}
+
+	sqsServer, sqsState := testutil.StartMockSQS(t)
+	defer sqsServer.Close()
+
+	// The sweep reads debt on blocks that are multiples of -sweep-blocks; enqueue a
+	// short run starting at the mock block number so at least one sweep fires.
+	const startBlock = int64(20971520)
+	enqueueBlockEvents(t, sqsState, startBlock, 5, 1)
+
+	t.Setenv("BUILD_GIT_HASH", "test")
+	t.Setenv("ETH_RPC_URL", rpcServer.URL)
+	t.Setenv("AWS_SQS_ENDPOINT", sqsServer.URL)
+	t.Setenv("AWS_S3_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("OTEL_EXPORTER_OTLP_TIMEOUT", "1000")
+	t.Setenv("ARCHIVE_SC_CALLS", "true")
+	t.Setenv("RAW_SC_BUCKET", archiveBucket)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- run(runCtx, []string{
+			"-db", dbURL,
+			"-vat", vatAddr,
+			"-queue", sqsServer.URL + "/queue/test",
+			"-sweep-blocks", "1",
+		})
+	}()
+
+	// Wait until a debt snapshot is written so the sweep (and its multicalls) has run.
+	testutil.WaitForCondition(t, 15*time.Second, func() bool {
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM prime_debt`).Scan(&count); err != nil {
+			return false
+		}
+		return count >= 1
+	}, "a debt snapshot to be persisted")
+
+	// Find the block version the sweep actually wrote so we can assert on the same key.
+	// enqueueBlockEvents publishes events with version 0, so the archive key embeds bv=0.
+	var sweptBlock int64
+	if err := pool.QueryRow(ctx, `SELECT block_number FROM prime_debt ORDER BY synced_at LIMIT 1`).Scan(&sweptBlock); err != nil {
+		t.Fatalf("query swept block: %v", err)
+	}
+
+	// Archives are fire-and-forget; poll until the object lands. rawsckey.Build formats
+	// {block}_{blockVersion}_{source}_{batchHash}, so the worker must archive under the
+	// event's version (0) with the "prime-debt" source.
+	wantSegment := fmt.Sprintf("%d_%d_prime-debt_", sweptBlock, 0)
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
+		out, err := s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket: aws.String(archiveBucket),
+			Prefix: aws.String(archivePrefix),
+		})
+		if err != nil {
+			return false
+		}
+		for _, obj := range out.Contents {
+			if strings.Contains(aws.ToString(obj.Key), wantSegment) {
+				return true
+			}
+		}
+		return false
+	}, fmt.Sprintf("a raw SC call archive whose key contains %q", wantSegment))
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("run() did not return after context cancellation")
+	}
 }
 
 func TestRunIntegration_InvalidVatFlag(t *testing.T) {

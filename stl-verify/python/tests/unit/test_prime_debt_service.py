@@ -46,7 +46,12 @@ async def test_list_debt_snapshots_delegates_with_limit() -> None:
     result = await service.list_debt_snapshots(_VALID_ADDR, limit=25)
 
     assert result == [snap]
-    repo.list_debt_snapshots.assert_awaited_once_with(_VALID_ADDR, limit=25)
+    repo.list_debt_snapshots.assert_awaited_once_with(
+        _VALID_ADDR,
+        from_timestamp=None,
+        to_timestamp=None,
+        limit=25,
+    )
 
 
 @pytest.mark.asyncio
@@ -58,6 +63,34 @@ async def test_list_debt_snapshots_returns_empty_list() -> None:
     result = await service.list_debt_snapshots(_VALID_ADDR)
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_list_debt_buckets_delegates_to_repository() -> None:
+    from datetime import UTC, datetime
+
+    repo = AsyncMock()
+    repo.list_debt_buckets.return_value = []
+    service = PrimeDebtService(repo)
+    from_ts = datetime(2026, 1, 1, tzinfo=UTC)
+    to_ts = datetime(2026, 1, 2, tzinfo=UTC)
+
+    result = await service.list_debt_buckets(
+        _VALID_ADDR,
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
+
+    assert result == []
+    repo.list_debt_buckets.assert_awaited_once_with(
+        _VALID_ADDR,
+        from_timestamp=from_ts,
+        to_timestamp=to_ts,
+        bucket_seconds=300.0,
+        limit=10,
+    )
 
 
 @pytest.mark.asyncio

@@ -4,2251 +4,2779 @@
  */
 
 export interface paths {
-  '/v1/allocations/activity': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/allocations/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Allocation activity feed
+         * @description Retrieve allocation activity events with optional filters, inside a `{mode, window, data}` envelope. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are time-windowed (default last 24h) and ordered newest first. Set `aggregate=true` for per-bucket event counts and tx-amount sums.
+         */
+        get: operations["list_allocation_activity_v1_allocations_activity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Allocation activity feed
-     * @description Retrieve allocation activity events with optional filters. All filters are optional and combine with logical AND. `protocol_name` and `token_symbol` use case-insensitive substring matching; the rest are exact matches. Results are ordered newest first.
-     */
-    get: operations['list_allocation_activity_v1_allocations_activity_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/capital-metrics': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/capital-metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List per-prime capital metrics
+         * @description Join each tracked prime with the latest row from the upstream Star risk-capital monitor and return derived capital metrics: risk capital, first-loss capital, total capital, and the buffer between them. Primes without a matching upstream row are still returned, with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when the upstream call itself fails.
+         */
+        get: operations["list_capital_metrics_v1_capital_metrics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List per-prime capital metrics
-     * @description Join each tracked prime with the latest row from the upstream Star risk-capital monitor and return derived capital metrics: risk capital, first-loss capital, total capital, and the buffer between them. Primes without a matching upstream row are still returned, with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when the upstream call itself fails.
-     */
-    get: operations['list_capital_metrics_v1_capital_metrics_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/chains': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/chains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List supported chains
+         * @description Return every EVM chain that STL tracks data for, for use as a filter value.
+         */
+        get: operations["list_chains_v1_chains_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List supported chains
-     * @description Return every EVM chain that STL tracks data for, for use as a filter value.
-     */
-    get: operations['list_chains_v1_chains_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/data-sources': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/data-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List registered data sources
+         * @description Return the registry of upstream data sources the verify service depends on, with access model, role, and any operational caveats. Useful for UI transparency panels and for auditing where on-chain and off-chain data ultimately originate.
+         */
+        get: operations["get_data_sources_v1_data_sources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List registered data sources
-     * @description Return the registry of upstream data sources the verify service depends on, with access model, role, and any operational caveats. Useful for UI transparency panels and for auditing where on-chain and off-chain data ultimately originate.
-     */
-    get: operations['get_data_sources_v1_data_sources_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/primes': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all primes
+         * @description Return every prime tracked by STL with its surrogate id, name, and on-chain address.
+         */
+        get: operations["list_primes_v1_primes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List all primes
-     * @description Return every prime tracked by STL with its surrogate id, name, and on-chain address.
-     */
-    get: operations['list_primes_v1_primes_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/primes/{prime_id}/allocations': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/allocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a prime's current allocations
+         * @description Return every current allocation held by the given prime — both receipt-token positions (enriched with USD value when a price is available) and direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists). Each row includes the latest on-chain activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`).
+         */
+        get: operations["list_allocations_v1_primes__prime_id__allocations_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List a prime's current allocations
-     * @description Return every current allocation held by the given prime — both receipt-token positions (enriched with USD value when a price is available) and direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and `amount_usd` set to `null`). Each row includes the latest on-chain activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`).
-     */
-    get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/primes/{prime_id}/debt': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/debt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List prime debt snapshots
+         * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled).
+         */
+        get: operations["list_prime_debt_snapshots_v1_primes__prime_id__debt_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List prime debt snapshots
-     * @description Return recent debt snapshots for a prime, newest first. Returns `404` if the prime is unknown. Each row carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions.
-     */
-    get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/protocol-events': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/exposure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Prime exposure time series
+         * @description Return the prime's priced receipt-token exposure over time, gap-filled (LOCF) into buckets. Per bucket, each receipt-token position's carried-forward balance is valued at the latest underlying oracle price and summed (the current `balance * price` exposure extended over time). Direct (non-receipt-token) holdings are excluded, matching the risk-capital exposure basis. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+         */
+        get: operations["list_prime_exposure_v1_primes__prime_id__exposure_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List protocol events
-     * @description List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are ordered newest first and capped at `limit`.
-     */
-    get: operations['list_protocol_events_v1_protocol_events_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/protocols': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/risk-capital": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Self-computed prime risk capital
+         * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. Returns `404` if the prime is unknown.
+         */
+        get: operations["get_prime_risk_capital_v1_primes__prime_id__risk_capital_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List supported protocols
-     * @description Return every protocol/chain pair STL classifies positions against, for use as a filter value.
-     */
-    get: operations['list_protocols_v1_protocols_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/ready': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/primes/{prime_id}/total-capital": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Prime total-capital (treasury) time series
+         * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+         */
+        get: operations["list_prime_total_capital_v1_primes__prime_id__total_capital_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Readiness probe
-     * @description Returns `{"status": "ok"}` if the database is reachable. Used by orchestrators (e.g. Kubernetes) to gate traffic until the service can serve requests.
-     */
-    get: operations['get_ready_v1_ready_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/rrc': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/protocol-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List protocol events
+         * @description List decoded protocol events with optional filters. Use `tx_hash` to fetch all events for a single transaction or `protocol_name` to scope to one protocol. Results are time-windowed (default last 24h) and returned newest first inside a `{mode, window, data}` envelope. Set `aggregate=true` to get per-bucket event counts.
+         */
+        get: operations["list_protocol_events_v1_protocol_events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Risk capital (RRC) at default stress
-     * @description Compute RRC at default stress for every model that applies to the asset. Identify the asset by **exactly one** of:
-     *
-     *     - `asset_id` (deprecated surrogate id), or
-     *     - `chain_id` + `token_address` (receipt-token address on the given chain).
-     *
-     *     Passing both forms or neither yields a `422`.
-     *
-     *     See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.
-     *
-     *     Errors:
-     *     - `404` if the asset is not a known receipt token, or no models apply.
-     *     - `422` if `prime_id` is malformed, identifiers are invalid, or the asset-identity mix is wrong (both forms / neither / partial pair).
-     *     - `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.
-     */
-    get: operations['get_rrc_v1_risk_rrc_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/rrc/scenario': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/protocols": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List supported protocols
+         * @description Return every protocol/chain pair STL classifies positions against, for use as a filter value.
+         */
+        get: operations["list_protocols_v1_protocols_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    get?: never;
-    put?: never;
-    /**
-     * Risk capital (RRC) with scenario overrides
-     * @description Compute RRC with per-model scenario overrides for every applicable model. Identify the asset by **exactly one** of `asset_id` (deprecated) or `chain_id` + `token_address`. Outer override keys must be valid model names; unknown keys reject the request with `422`. See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.
-     *
-     *     Errors:
-     *     - `404` if the asset is not a known receipt token, or no models apply.
-     *     - `422` if identifiers are invalid, asset-identity mix is wrong, an unknown override model key is present, or any model rejects its overrides.
-     *     - `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.
-     */
-    post: operations['post_rrc_scenario_v1_risk_rrc_scenario_post'];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{chain_id}/{token_address}/bad-debt': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Readiness probe
+         * @description Returns `{"status": "ok"}` if the database is reachable. Used by orchestrators (e.g. Kubernetes) to gate traffic until the service can serve requests.
+         */
+        get: operations["get_ready_v1_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Estimate bad debt at a collateral gap (by chain id and receipt-token address)
-     * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
-     *
-     *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
-     *
-     *     Errors:
-     *     - `404` if the receipt token is not found.
-     *     - `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.
-     *     - `503` (`share_data_*`) if the allocation-share lookup fails.
-     */
-    get: operations['get_bad_debt_by_address_v1_risk__chain_id___token_address__bad_debt_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{chain_id}/{token_address}/breakdown': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/rrc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Risk capital (RRC) at default stress
+         * @description Compute RRC at default stress for every model that applies to the asset. Identify the asset by **exactly one** of:
+         *
+         *     - `asset_id` (deprecated surrogate id), or
+         *     - `chain_id` + `token_address` (receipt-token address on the given chain).
+         *
+         *     Passing both forms or neither yields a `422`.
+         *
+         *     See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.
+         *
+         *     Errors:
+         *     - `404` if the asset is not a known receipt token, or no models apply.
+         *     - `422` if `prime_id` is malformed, identifiers are invalid, or the asset-identity mix is wrong (both forms / neither / partial pair).
+         *     - `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.
+         */
+        get: operations["get_rrc_v1_risk_rrc_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Risk-enriched collateral breakdown (by chain id and receipt-token address)
-     * @description Return the full risk-enriched collateral breakdown for the receipt-token position at `(chain_id, token_address)`.
-     *
-     *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
-     *
-     *     Errors:
-     *     - `404` if the receipt token is not found.
-     *     - `422` if `chain_id` < 1 or `token_address` is malformed.
-     *     - `503` (`share_data_*`) if the allocation-share lookup fails.
-     */
-    get: operations['get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{receipt_token_id}/bad-debt': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/rrc/scenario": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Risk capital (RRC) with scenario overrides
+         * @description Compute RRC with per-model scenario overrides for every applicable model. Identify the asset by **exactly one** of `asset_id` (deprecated) or `chain_id` + `token_address`. Outer override keys must be valid model names; unknown keys reject the request with `422`. See `RrcEnvelope` for how to interpret per-model `results` versus the `max_*` summary fields.
+         *
+         *     Errors:
+         *     - `404` if the asset is not a known receipt token, or no models apply.
+         *     - `422` if identifiers are invalid, asset-identity mix is wrong, an unknown override model key is present, or any model rejects its overrides.
+         *     - `503` (`share_data_missing` / `share_data_stale`) if share-data lookup fails.
+         */
+        post: operations["post_rrc_scenario_v1_risk_rrc_scenario_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Estimate bad debt at a collateral gap (deprecated)
-     * @deprecated
-     * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
-     *
-     *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.
-     *
-     *     Errors:
-     *     - `404` if the receipt token is not found.
-     *     - `422` if `gap_pct` is outside `[0, 1]`.
-     *     - `503` (`share_data_*`) if the allocation-share lookup fails.
-     */
-    get: operations['get_bad_debt_v1_risk__receipt_token_id__bad_debt_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/risk/{receipt_token_id}/breakdown': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/{chain_id}/{token_address}/bad-debt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Estimate bad debt at a collateral gap (by chain id and receipt-token address)
+         * @description Estimate USD bad debt for the receipt-token position at `(chain_id, token_address)` when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+         *
+         *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
+         *
+         *     Errors:
+         *     - `404` if the receipt token is not found.
+         *     - `422` if `chain_id` < 1, `token_address` is malformed, or `gap_pct` is outside `[0, 1]`.
+         *     - `503` (`share_data_*`) if the allocation-share lookup fails.
+         */
+        get: operations["get_bad_debt_by_address_v1_risk__chain_id___token_address__bad_debt_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Risk-enriched collateral breakdown (deprecated)
-     * @deprecated
-     * @description Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.
-     *
-     *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.
-     *
-     *     Errors:
-     *     - `404` if the receipt token is not found.
-     *     - `503` (`share_data_*`) if the allocation-share lookup fails.
-     */
-    get: operations['get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/status': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/{chain_id}/{token_address}/breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Risk-enriched collateral breakdown (by chain id and receipt-token address)
+         * @description Return the full risk-enriched collateral breakdown for the receipt-token position at `(chain_id, token_address)`.
+         *
+         *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
+         *
+         *     Errors:
+         *     - `404` if the receipt token is not found.
+         *     - `422` if `chain_id` < 1 or `token_address` is malformed.
+         *     - `503` (`share_data_*`) if the allocation-share lookup fails.
+         */
+        get: operations["get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Liveness probe
-     * @description Returns `{"status": "ok"}` if the process is running. Does not check downstream dependencies.
-     */
-    get: operations['get_status_v1_status_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tokens': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/{receipt_token_id}/bad-debt": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Estimate bad debt at a collateral gap (deprecated)
+         * @deprecated
+         * @description Estimate USD bad debt for a receipt-token position when collateral prices fall by `gap_pct` (a fraction in `[0, 1]`).
+         *
+         *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/bad-debt`.
+         *
+         *     Errors:
+         *     - `404` if the receipt token is not found.
+         *     - `422` if `gap_pct` is outside `[0, 1]`.
+         *     - `503` (`share_data_*`) if the allocation-share lookup fails.
+         */
+        get: operations["get_bad_debt_v1_risk__receipt_token_id__bad_debt_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * List tokens
-     * @description List entries from the token catalog with optional filters. Use `chain_id` to scope to a single chain and `symbol` for a case-insensitive substring match against the symbol. Pagination is page-less; `limit` caps the page size.
-     */
-    get: operations['list_tokens_v1_tokens_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tokens/{chain_id}/{token_address}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/risk/{receipt_token_id}/breakdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Risk-enriched collateral breakdown (deprecated)
+         * @deprecated
+         * @description Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.
+         *
+         *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.
+         *
+         *     Errors:
+         *     - `404` if the receipt token is not found.
+         *     - `503` (`share_data_*`) if the allocation-share lookup fails.
+         */
+        get: operations["get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get a token by chain id and address
-     * @description Return the token catalog entry for the ERC-20 at `(chain_id, token_address)`, or `404` if unknown. `token_address` is matched case-insensitively.
-     */
-    get: operations['get_token_v1_tokens__chain_id___token_address__get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tokens/{chain_id}/{token_address}/price': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Liveness probe
+         * @description Returns `{"status": "ok"}` if the process is running. Does not check downstream dependencies.
+         */
+        get: operations["get_status_v1_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get latest token price by chain id and address
-     * @description Return the latest USD price snapshot for the token at `(chain_id, token_address)`.
-     *
-     *     - Returns `404` only when the token does not exist.
-     *     - Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.
-     *     - `price_usd` is a decimal serialized as a JSON string to preserve precision.
-     */
-    get: operations['get_token_price_v1_tokens__chain_id___token_address__price_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tokens/{token_id}': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List tokens
+         * @description List entries from the token catalog with optional filters. Use `chain_id` to scope to a single chain and `symbol` for a case-insensitive substring match against the symbol. Pagination is page-less; `limit` caps the page size.
+         */
+        get: operations["list_tokens_v1_tokens_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get a token by id (deprecated)
-     * @deprecated
-     * @description Return the token catalog entry for the given surrogate `token_id`, or `404` if unknown.
-     *
-     *     **Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}` which addresses tokens by on-chain identity and avoids a discovery round-trip.
-     */
-    get: operations['get_token_by_id_v1_tokens__token_id__get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tokens/{token_id}/price': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/tokens/{chain_id}/{token_address}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a token by chain id and address
+         * @description Return the token catalog entry for the ERC-20 at `(chain_id, token_address)`, or `404` if unknown. `token_address` is matched case-insensitively.
+         */
+        get: operations["get_token_v1_tokens__chain_id___token_address__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get latest token price (deprecated)
-     * @deprecated
-     * @description Return the latest USD price snapshot for a token.
-     *
-     *     - Returns `404` only when the token does not exist.
-     *     - Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.
-     *     - `price_usd` is a decimal serialized as a JSON string to preserve precision.
-     *
-     *     **Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}/price`.
-     */
-    get: operations['get_token_price_by_id_v1_tokens__token_id__price_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  '/v1/tx/{tx_hash}/events': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    "/v1/tokens/{chain_id}/{token_address}/price": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get latest token price by chain id and address
+         * @description Return the latest USD price snapshot for the token at `(chain_id, token_address)`.
+         *
+         *     - Returns `404` only when the token does not exist.
+         *     - Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.
+         *     - `price_usd` is a decimal serialized as a JSON string to preserve precision.
+         */
+        get: operations["get_token_price_v1_tokens__chain_id___token_address__price_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
     };
-    /**
-     * Get all events for a transaction
-     * @description Return every decoded protocol event emitted within a single transaction, ordered by `log_index`. Returns an empty list if the transaction is unknown or did not emit any tracked protocol events.
-     */
-    get: operations['get_tx_events_v1_tx__tx_hash__events_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
+    "/v1/tokens/{token_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a token by id (deprecated)
+         * @deprecated
+         * @description Return the token catalog entry for the given surrogate `token_id`, or `404` if unknown.
+         *
+         *     **Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}` which addresses tokens by on-chain identity and avoids a discovery round-trip.
+         */
+        get: operations["get_token_by_id_v1_tokens__token_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tokens/{token_id}/price": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get latest token price (deprecated)
+         * @deprecated
+         * @description Return the latest USD price snapshot for a token.
+         *
+         *     - Returns `404` only when the token does not exist.
+         *     - Returns `200` with `is_stale=true` and `staleness_reason='missing_quote'` when the token exists but no quote is currently available.
+         *     - `price_usd` is a decimal serialized as a JSON string to preserve precision.
+         *
+         *     **Deprecated.** Prefer `/v1/tokens/{chain_id}/{token_address}/price`.
+         */
+        get: operations["get_token_price_by_id_v1_tokens__token_id__price_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tx/{tx_hash}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get all events for a transaction
+         * @description Return every decoded protocol event emitted within a single transaction, ordered by `log_index`. Returns an empty list if the transaction is unknown or did not emit any tracked protocol events.
+         */
+        get: operations["get_tx_events_v1_tx__tx_hash__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
-  schemas: {
-    /**
-     * AllocationActivityResponse
-     * @description Allocation activity event record for timeline feeds.
-     */
-    AllocationActivityResponse: {
-      /**
-       * Action Type
-       * @description One of `in`, `out`, `sweep`.
-       * @example in
-       */
-      action_type: string;
-      /**
-       * Balance
-       * @description Resulting balance after the event, in token units.
-       * @example 1234567.89
-       */
-      balance: string;
-      /**
-       * Block Number
-       * @description Block number containing the event.
-       * @example 18000000
-       */
-      block_number: number;
-      /**
-       * Block Version
-       * @description Cache-key version that increments on chain reorgs.
-       * @example 1
-       */
-      block_version: number;
-      /**
-       * Chain Id
-       * @description EVM chain id where the event occurred.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Created At
-       * @description ISO-8601 timestamp the event row was persisted.
-       */
-      created_at: string;
-      /**
-       * Log Index
-       * @description Index of the originating log within the transaction.
-       * @example 3
-       */
-      log_index: number;
-      /**
-       * Prime Address
-       * @description Prime's 0x-prefixed Ethereum address.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      prime_address: string;
-      /**
-       * Prime Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      prime_name: string;
-      /**
-       * Protocol Name
-       * @description Protocol the event was emitted by.
-       * @example aave-v3
-       */
-      protocol_name?: string | null;
-      /**
-       * Token Id
-       * @description Surrogate id of the receipt token involved.
-       * @example 42
-       */
-      token_id: number;
-      /**
-       * Token Symbol
-       * @description Receipt-token symbol, when known.
-       * @example aUSDC
-       */
-      token_symbol?: string | null;
-      /**
-       * Tx Amount
-       * @description Token-unit amount moved by this event. Decimal serialized as a JSON string.
-       * @example 1000.5
-       */
-      tx_amount: string;
-      /**
-       * Tx Hash
-       * @description 0x-prefixed transaction hash, when available.
-       * @example 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
-       */
-      tx_hash?: string | null;
-    };
-    /**
-     * AllocationCategory
-     * @description Classification of allocation position types across primes.
-     * @enum {string}
-     */
-    AllocationCategory: 'allocation' | 'pol' | 'psm3' | 'asset';
-    /**
-     * AllocationResponse
-     * @description Enriched allocation response with category and metadata.
-     *
-     *     Two row shapes share this model:
-     *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
-     *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
-     *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
-     *       ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
-     *       the held asset; ``underlying_token_id`` / ``underlying_token_address``
-     *       point at it.
-     * @example {
-     *       "amount_usd": "1234567.89",
-     *       "balance": "1234567.89",
-     *       "category": "allocation",
-     *       "chain_id": 1,
-     *       "latest_activity_at": "2026-05-07T12:00:00Z",
-     *       "protocol_name": "aave-v3",
-     *       "receipt_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-     *       "receipt_token_id": 42,
-     *       "symbol": "aUSDC",
-     *       "underlying_symbol": "USDC",
-     *       "underlying_token_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-     *       "underlying_token_id": 1
-     *     }
-     */
-    AllocationResponse: {
-      /**
-       * Amount Usd
-       * @description USD value of the position when a price is available; `null` otherwise.
-       * @example 1234567.89
-       */
-      amount_usd?: string | null;
-      /**
-       * Balance
-       * @description Balance held by the prime, in token units. Decimal serialized as a JSON string.
-       * @example 1234567.89
-       */
-      balance: string;
-      /** @description Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`). */
-      category: components['schemas']['AllocationCategory'];
-      /**
-       * Chain Id
-       * @description EVM chain id of the position.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Latest Activity At
-       * @description ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.
-       * @example 2026-05-07T12:00:00Z
-       */
-      latest_activity_at?: string | null;
-      /**
-       * Protocol Name
-       * @description Protocol the position is held in. `null` for direct holdings (no registered wrapper).
-       * @example aave-v3
-       */
-      protocol_name?: string | null;
-      /**
-       * Receipt Token Address
-       * @description 0x-prefixed receipt-token contract address. `null` for direct asset holdings.
-       * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
-       */
-      receipt_token_address?: string | null;
-      /**
-       * Receipt Token Id
-       * @description Surrogate id of the receipt token. `null` for direct asset holdings.
-       * @example 42
-       */
-      receipt_token_id?: number | null;
-      /**
-       * Symbol
-       * @description Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.
-       * @example aUSDC
-       */
-      symbol: string;
-      /**
-       * Underlying Symbol
-       * @description Underlying-token symbol. For direct holdings, same as ``symbol``.
-       * @example USDC
-       */
-      underlying_symbol: string;
-      /**
-       * Underlying Token Address
-       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself.
-       * @example 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
-       */
-      underlying_token_address: string;
-      /**
-       * Underlying Token Id
-       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself.
-       * @example 1
-       */
-      underlying_token_id: number;
-    };
-    /**
-     * BadDebtResponse
-     * @description Estimated bad debt for a receipt-token position at a given collateral gap.
-     * @example {
-     *       "bad_debt_usd": "1234567.89",
-     *       "gap_pct": "0.10",
-     *       "receipt_token_id": 42
-     *     }
-     */
-    BadDebtResponse: {
-      /**
-       * Bad Debt Usd
-       * @description Estimated USD bad debt at the given gap. Decimal serialized as a JSON string.
-       * @example 1234567.89
-       */
-      bad_debt_usd: string;
-      /**
-       * Gap Pct
-       * @description Collateral price gap as a fraction in `[0, 1]`. Decimal serialized as a JSON string.
-       * @example 0.10
-       */
-      gap_pct: string;
-      /**
-       * Receipt Token Id
-       * @description Surrogate id of the receipt token.
-       * @example 42
-       */
-      receipt_token_id: number;
-    };
-    /**
-     * CapitalMetricsResponse
-     * @description Prime-level capital metrics for risk and alert management.
-     * @example {
-     *       "benchmark_source": "https://example.com/star-rrc",
-     *       "capital_buffer": "2500000",
-     *       "first_loss_capital": "7500000",
-     *       "is_validated": false,
-     *       "prime_id": "prime-acme",
-     *       "prime_name": "Acme Prime",
-     *       "risk_capital": "10000000",
-     *       "risk_to_capital_ratio": "0.85",
-     *       "timestamp": "2026-05-07T12:00:00Z",
-     *       "total_capital": "10000000",
-     *       "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
-     *     }
-     */
-    CapitalMetricsResponse: {
-      /**
-       * Benchmark Source
-       * @description URL of the upstream benchmark source used to populate the row.
-       */
-      benchmark_source?: string | null;
-      /**
-       * Capital Buffer
-       * @description `max(total_capital - first_loss_capital, 0)` — distance to first-loss exhaustion (USD).
-       * @example 2500000
-       */
-      capital_buffer: string;
-      /**
-       * First Loss Capital
-       * @description Financial RRC (first-loss capital) reported by upstream (USD).
-       * @example 7500000
-       */
-      first_loss_capital: string;
-      /**
-       * Is Validated
-       * @description Whether the row was validated against on-chain state.
-       * @default false
-       */
-      is_validated: boolean;
-      /**
-       * Prime Id
-       * @description Stable surrogate id for the prime.
-       * @example prime-acme
-       */
-      prime_id: string;
-      /**
-       * Prime Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      prime_name: string;
-      /**
-       * Risk Capital
-       * @description Risk capital exposure (USD) sourced from the upstream Star monitor.
-       * @example 10000000
-       */
-      risk_capital: string;
-      /**
-       * Risk To Capital Ratio
-       * @description Upstream `risk_tolerance_ratio`. `null` when not validated.
-       * @example 0.85
-       */
-      risk_to_capital_ratio?: string | null;
-      /**
-       * Timestamp
-       * @description ISO-8601 timestamp the snapshot was assembled.
-       * @example 2026-05-07T12:00:00Z
-       */
-      timestamp: string;
-      /**
-       * Total Capital
-       * @description Total RRC reported by upstream (USD).
-       * @example 10000000
-       */
-      total_capital: string;
-      /**
-       * Validation Note
-       * @description Human-readable note about validation, e.g. why a row is missing or unmatched.
-       */
-      validation_note?: string | null;
-    };
-    /**
-     * ChainResponse
-     * @description An EVM chain that STL tracks data for.
-     */
-    ChainResponse: {
-      /**
-       * Chain Id
-       * @description EVM chain id.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Name
-       * @description Human-readable chain name.
-       * @example Ethereum Mainnet
-       */
-      name: string;
-    };
-    /**
-     * DataSourceResponse
-     * @description Data source metadata for the transparency panel.
-     */
-    DataSourceResponse: {
-      /** @description How the source is accessed (e.g. `paid_api`, `public_rpc`). */
-      access_model: components['schemas']['SourceAccessModel'];
-      /**
-       * Attribution Required
-       * @description Whether downstream displays must attribute the source.
-       * @default false
-       */
-      attribution_required: boolean;
-      /**
-       * Caveat
-       * @description Operational caveat callers should be aware of, when present.
-       * @example Rate-limited to 300 req/s
-       */
-      caveat?: string | null;
-      /**
-       * Host
-       * @description Hostname or base URL of the source.
-       * @example alch.api.example.com
-       */
-      host: string;
-      /**
-       * Name
-       * @description Human-readable name of the data source.
-       * @example Alchemy
-       */
-      name: string;
-      /**
-       * Role
-       * @description The role this source plays in the system (e.g. block ingestion, price feed).
-       * @example block ingestion
-       */
-      role: string;
-    };
-    /**
-     * DataSourcesResponse
-     * @description Registered data sources used by STL.
-     */
-    DataSourcesResponse: {
-      /**
-       * Sources
-       * @description All registered upstream data sources.
-       */
-      sources: components['schemas']['DataSourceResponse'][];
-    };
-    /**
-     * GapSweepDetails
-     * @description Gap-sweep model-specific output embedded in an RrcResult.
-     *
-     *     ``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal("0.15")``
-     *     means a 15% collateral price drop) — note this is a different scale
-     *     from ``SurafDetails.crr_pct`` which is on 0–100. ``loss_usd`` is the
-     *     engine-native expected loss in USD under that price drop; equal in
-     *     magnitude to the envelope-level ``rrc_usd`` for this model and rounded
-     *     to USD cents. The cross-model comparable capital ratio is exposed on
-     *     ``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure
-     *     basis, not the collateral backing basis.
-     */
-    GapSweepDetails: {
-      /** Gap Pct */
-      gap_pct: string;
-      /** Loss Usd */
-      loss_usd: string;
-      /**
-       * @description discriminator enum property added by openapi-typescript
-       * @enum {string}
-       */
-      risk_model: 'gap_sweep';
-    };
-    /** HTTPValidationError */
-    HTTPValidationError: {
-      /** Detail */
-      detail?: components['schemas']['ValidationError'][];
-    };
-    /**
-     * PrimeDebtSnapshotResponse
-     * @description A single observed prime-debt position at a point in time.
-     * @example {
-     *       "block_number": 18000000,
-     *       "block_version": 1,
-     *       "debt_wad": "1234567890000000000000",
-     *       "ilk_name": "ALLOCATOR-NEXUS-A",
-     *       "prime_address": "0x1234567890abcdef1234567890abcdef12345678",
-     *       "prime_name": "Acme Prime",
-     *       "synced_at": "2026-05-07T12:00:00Z"
-     *     }
-     */
-    PrimeDebtSnapshotResponse: {
-      /**
-       * Block Number
-       * @description Block number the snapshot was observed at.
-       * @example 18000000
-       */
-      block_number: number;
-      /**
-       * Block Version
-       * @description Cache-key version that increments on chain reorgs.
-       * @example 1
-       */
-      block_version: number;
-      /**
-       * Debt Wad
-       * @description Outstanding debt in MakerDAO `wad` units (1e18 fixed-point). Decimal serialized as a JSON string to preserve precision.
-       * @example 1234567890000000000000
-       */
-      debt_wad: string;
-      /**
-       * Ilk Name
-       * @description Maker `ilk` (collateral type) the debt is denominated against.
-       * @example ALLOCATOR-NEXUS-A
-       */
-      ilk_name: string;
-      /**
-       * Prime Address
-       * @description Prime's 0x-prefixed Ethereum address.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      prime_address: string;
-      /**
-       * Prime Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      prime_name: string;
-      /**
-       * Synced At
-       * Format: date-time
-       * @description Server-side time the snapshot was persisted.
-       */
-      synced_at: string;
-    };
-    /**
-     * PrimeResponse
-     * @description A prime (capital allocator) tracked by STL.
-     */
-    PrimeResponse: {
-      /**
-       * Address
-       * @description 0x-prefixed Ethereum address controlled by the prime.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      address: string;
-      /**
-       * Id
-       * @description Stable surrogate id for the prime.
-       * @example prime-acme
-       */
-      id: string;
-      /**
-       * Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      name: string;
-    };
-    /**
-     * ProtocolEventResponse
-     * @description A single decoded protocol event observed on-chain.
-     * @example {
-     *       "block_number": 18000000,
-     *       "block_version": 1,
-     *       "chain_id": 1,
-     *       "contract_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-     *       "created_at": "2026-05-07T12:00:00Z",
-     *       "event_data": {
-     *         "amount": "1000000",
-     *         "reserve": "0x...",
-     *         "user": "0x..."
-     *       },
-     *       "event_name": "Supply",
-     *       "log_index": 3,
-     *       "protocol_name": "aave-v3",
-     *       "tx_hash": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
-     *     }
-     */
-    ProtocolEventResponse: {
-      /**
-       * Block Number
-       * @description Block number containing the event.
-       * @example 18000000
-       */
-      block_number: number;
-      /**
-       * Block Version
-       * @description Cache-key version that increments on chain reorgs.
-       * @example 1
-       */
-      block_version: number;
-      /**
-       * Chain Id
-       * @description EVM chain id where the event was observed.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Contract Address
-       * @description Lower-case 0x-prefixed contract address that emitted the event.
-       * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
-       */
-      contract_address: string;
-      /**
-       * Created At
-       * Format: date-time
-       * @description Server-side time the event row was persisted.
-       */
-      created_at: string;
-      /**
-       * Event Data
-       * @description Decoded event arguments as a JSON object. Schema varies by `event_name`.
-       */
-      event_data?: {
-        [key: string]: unknown;
-      } | null;
-      /**
-       * Event Name
-       * @description Decoded event name from the protocol's ABI.
-       * @example Supply
-       */
-      event_name: string;
-      /**
-       * Log Index
-       * @description Index of the log within the transaction's receipt.
-       * @example 3
-       */
-      log_index: number;
-      /**
-       * Protocol Name
-       * @description Protocol the event was emitted by.
-       * @example aave-v3
-       */
-      protocol_name: string;
-      /**
-       * Tx Hash
-       * @description 0x-prefixed transaction hash that emitted the event.
-       * @example 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
-       */
-      tx_hash: string;
-    };
-    /**
-     * ProtocolResponse
-     * @description A protocol (lender, AMM, etc.) that STL classifies positions against.
-     */
-    ProtocolResponse: {
-      /**
-       * Chain Id
-       * @description EVM chain id the protocol instance lives on.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Encode
-       * @description Machine-readable protocol code used in joins (`<name>-<version>`).
-       * @example aave-v3
-       */
-      encode: string;
-      /**
-       * Id
-       * @description Surrogate protocol id.
-       * @example 7
-       */
-      id: number;
-      /**
-       * Name
-       * @description Human-readable protocol name.
-       * @example Aave v3
-       */
-      name: string;
-    };
-    /**
-     * RiskBreakdownItemResponse
-     * @description One backing-token row in a receipt-token's risk-enriched breakdown.
-     */
-    RiskBreakdownItemResponse: {
-      /**
-       * Amount
-       * @description Backing-token amount, expressed in token units. Decimal serialized as a JSON string.
-       * @example 12.345678
-       */
-      amount: string;
-      /**
-       * Amount Usd
-       * @description USD value of the backing-token row.
-       * @example 41234.56
-       */
-      amount_usd: string;
-      /**
-       * Backing Pct
-       * @description Share of the receipt token backed by this row, as a 0–100 percentage.
-       * @example 42.0
-       */
-      backing_pct: string;
-      /**
-       * Liquidation Bonus
-       * @description Liquidation bonus expressed as a multiplier (e.g. `1.05` for a 5% bonus). Stored as basis points upstream and normalised by dividing by 10000.
-       * @example 1.05
-       */
-      liquidation_bonus: string;
-      /**
-       * Liquidation Threshold
-       * @description Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`.
-       * @example 0.83
-       */
-      liquidation_threshold: string;
-      /**
-       * Price Usd
-       * @description Latest USD price for the backing token.
-       * @example 3340.55
-       */
-      price_usd: string;
-      /**
-       * Symbol
-       * @description Backing-token symbol.
-       * @example WETH
-       */
-      symbol: string;
-      /**
-       * Token Id
-       * @description Surrogate token id of the backing token.
-       * @example 101
-       */
-      token_id: number;
-    };
-    /**
-     * RiskBreakdownResponse
-     * @description Risk-enriched breakdown of a receipt token's backing collateral.
-     * @example {
-     *       "items": [
-     *         {
-     *           "amount": "12.345678",
-     *           "amount_usd": "41234.56",
-     *           "backing_pct": "42.0",
-     *           "liquidation_bonus": "1.05",
-     *           "liquidation_threshold": "0.83",
-     *           "price_usd": "3340.55",
-     *           "symbol": "WETH",
-     *           "token_id": 101
-     *         }
-     *       ],
-     *       "receipt_token_id": 42
-     *     }
-     */
-    RiskBreakdownResponse: {
-      /**
-       * Items
-       * @description One entry per backing-token row.
-       */
-      items: components['schemas']['RiskBreakdownItemResponse'][];
-      /**
-       * Receipt Token Id
-       * @description Surrogate id of the receipt token.
-       * @example 42
-       */
-      receipt_token_id: number;
-    };
-    /**
-     * RrcEnvelope
-     * @description Response wrapper carrying one RrcResult per applicable model.
-     *
-     *     On-chain identifiers (``chain_id``, ``receipt_token_address``) are echoed
-     *     so consumers can resolve the surrogate ``asset_id`` without a second call.
-     *
-     *     ``max_rrc_usd`` and ``max_crr_pct`` collapse every applicable model to a
-     *     single conservative number. Use these when you need one capital figure
-     *     rather than a per-model breakdown: ``max_rrc_usd`` is the largest USD
-     *     figure across results; ``max_crr_pct`` is the largest
-     *     ``results[].comparable_crr_pct``. Each model computes that value on the
-     *     same receipt-token USD exposure basis, so it is safe to compare across
-     *     models.
-     *
-     *     Per-model values in ``results`` are *not* additive — SURAF capital and
-     *     gap-sweep expected-loss overlap economically. Pick a single result, or
-     *     use the ``max_*`` fields; do not sum across results. The two ``max_*``
-     *     fields may come from different models.
-     */
-    RrcEnvelope: {
-      /**
-       * Asset Id
-       * @description Echo of the requested asset id.
-       * @example 42
-       */
-      asset_id: number;
-      /**
-       * Chain Id
-       * @description EVM chain id of the receipt token.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Max Crr Pct
-       * @description Largest `comparable_crr_pct` across `results`, as a 0–100 percentage.
-       * @example 33.7
-       */
-      max_crr_pct: string;
-      /**
-       * Max Rrc Usd
-       * @description Largest `rrc_usd` across `results`. Decimal serialized as a JSON string.
-       * @example 12300
-       */
-      max_rrc_usd: string;
-      /**
-       * Prime Id
-       * @description Echo of the requested prime address.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      prime_id: string;
-      /**
-       * Receipt Token Address
-       * @description 0x-prefixed contract address of the receipt token.
-       * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
-       */
-      receipt_token_address: string;
-      /**
-       * Results
-       * @description One entry per applicable risk model.
-       */
-      results: components['schemas']['RrcResult'][];
-    };
-    /**
-     * RrcRequest
-     * @description POST /v1/risk/rrc/scenario body — overrides keyed by model name.
-     *
-     *     Asset identity must be supplied as **exactly one** of:
-     *
-     *     * ``asset_id`` (deprecated surrogate id), or
-     *     * ``(chain_id, token_address)`` — receipt-token address on the given chain.
-     *
-     *     Both forms or neither raises 422.
-     * @example {
-     *       "chain_id": 1,
-     *       "overrides": {
-     *         "gap_sweep": {
-     *           "gap_pct": "0.15"
-     *         }
-     *       },
-     *       "prime_id": "0x1234567890abcdef1234567890abcdef12345678",
-     *       "token_address": "0xbcca60bb61934080951369a648fb03df4f96263c"
-     *     }
-     */
-    RrcRequest: {
-      /**
-       * Asset Id
-       * @deprecated
-       * @description Surrogate receipt-token id. **Deprecated** — pass `chain_id` + `token_address` instead.
-       * @example 42
-       */
-      asset_id?: number | null;
-      /**
-       * Chain Id
-       * @description EVM chain id of the receipt token.
-       * @example 1
-       */
-      chain_id?: number | null;
-      /**
-       * Overrides
-       * @description Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.
-       */
-      overrides?: {
-        [key: string]: {
-          [key: string]: unknown;
+    schemas: {
+        /**
+         * AllocationActivityBucketResponse
+         * @description Allocation activity aggregated into a single time bucket.
+         */
+        AllocationActivityBucketResponse: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             * @description Inclusive start of the time bucket (UTC).
+             */
+            bucket_start: string;
+            /**
+             * Event Count
+             * @description Number of activity events in the bucket.
+             * @example 42
+             */
+            event_count: number;
+            /**
+             * Net Flow Usd
+             * @description Signed net flow valued in USD (inflows positive, outflows negative) at the receipt token's latest underlying oracle price. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
+             * @example 1234567.89
+             */
+            net_flow_usd: string;
+            /**
+             * Total Tx Amount
+             * @description Sum of `tx_amount` across the bucket's events, serialized as a JSON string.
+             * @example 1234567890000000000000
+             */
+            total_tx_amount: string;
         };
-      };
-      /**
-       * Prime Id
-       * @description Prime's 0x-prefixed Ethereum address.
-       * @example 0x1234567890abcdef1234567890abcdef12345678
-       */
-      prime_id: string;
-      /**
-       * Token Address
-       * @description 0x-prefixed receipt-token contract address.
-       * @example 0xbcca60bb61934080951369a648fb03df4f96263c
-       */
-      token_address?: string | null;
+        /**
+         * AllocationActivityEnvelope
+         * @description Allocation activity response: raw events or aggregated time buckets.
+         */
+        AllocationActivityEnvelope: {
+            /**
+             * Data
+             * @description Events when `mode=raw`, count/sum buckets when `mode=aggregated`.
+             */
+            data: components["schemas"]["AllocationActivityResponse"][] | components["schemas"]["AllocationActivityBucketResponse"][];
+            /**
+             * Mode
+             * @description `raw` for events, `aggregated` for time buckets.
+             * @enum {string}
+             */
+            mode: "raw" | "aggregated";
+            /** @description The window and resolution applied to this response. */
+            window: components["schemas"]["TimeSeriesWindow"];
+        };
+        /**
+         * AllocationActivityResponse
+         * @description Allocation activity event record for timeline feeds.
+         */
+        AllocationActivityResponse: {
+            /**
+             * Action Type
+             * @description One of `in`, `out`, `sweep`.
+             * @example in
+             */
+            action_type: string;
+            /**
+             * Balance
+             * @description Resulting balance after the event, in token units.
+             * @example 1234567.89
+             */
+            balance: string;
+            /**
+             * Block Number
+             * @description Block number containing the event.
+             * @example 18000000
+             */
+            block_number: number;
+            /**
+             * Block Version
+             * @description Cache-key version that increments on chain reorgs.
+             * @example 1
+             */
+            block_version: number;
+            /**
+             * Chain Id
+             * @description EVM chain id where the event occurred.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Created At
+             * @description ISO-8601 timestamp the event row was persisted.
+             */
+            created_at: string;
+            /**
+             * Log Index
+             * @description Index of the originating log within the transaction.
+             * @example 3
+             */
+            log_index: number;
+            /**
+             * Prime Address
+             * @description Prime's 0x-prefixed Ethereum address.
+             * @example 0x1234567890abcdef1234567890abcdef12345678
+             */
+            prime_address: string;
+            /**
+             * Prime Name
+             * @description Human-readable prime name.
+             * @example Acme Prime
+             */
+            prime_name: string;
+            /**
+             * Protocol Name
+             * @description Protocol the event was emitted by.
+             * @example aave-v3
+             */
+            protocol_name?: string | null;
+            /**
+             * Token Id
+             * @description Surrogate id of the receipt token involved.
+             * @example 42
+             */
+            token_id: number;
+            /**
+             * Token Symbol
+             * @description Receipt-token symbol, when known.
+             * @example aUSDC
+             */
+            token_symbol?: string | null;
+            /**
+             * Tx Amount
+             * @description Token-unit amount moved by this event. Decimal serialized as a JSON string.
+             * @example 1000.5
+             */
+            tx_amount: string;
+            /**
+             * Tx Hash
+             * @description 0x-prefixed transaction hash, when available.
+             * @example 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
+             */
+            tx_hash?: string | null;
+        };
+        /**
+         * AllocationCategory
+         * @description Classification of allocation position types across primes.
+         * @enum {string}
+         */
+        AllocationCategory: "allocation" | "pol" | "psm3" | "asset";
+        /**
+         * AllocationResponse
+         * @description Enriched allocation response with category and metadata.
+         *
+         *     Two row shapes share this model:
+         *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
+         *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
+         *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
+         *       null; ``symbol`` and ``underlying_symbol`` both name the held asset;
+         *       ``underlying_token_id`` / ``underlying_token_address`` point at it.
+         *       ``amount_usd`` is populated when an oracle price exists for the token and
+         *       null otherwise (e.g. LP/curve shares with no oracle feed).
+         * @example {
+         *       "amount_usd": "1234567.89",
+         *       "balance": "1234567.89",
+         *       "category": "allocation",
+         *       "chain_id": 1,
+         *       "latest_activity_at": "2026-05-07T12:00:00Z",
+         *       "protocol_name": "aave-v3",
+         *       "receipt_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+         *       "receipt_token_id": 42,
+         *       "symbol": "aUSDC",
+         *       "underlying_symbol": "USDC",
+         *       "underlying_token_address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+         *       "underlying_token_id": 1
+         *     }
+         */
+        AllocationResponse: {
+            /**
+             * Amount Usd
+             * @description USD value of the position when a price is available; `null` otherwise.
+             * @example 1234567.89
+             */
+            amount_usd?: string | null;
+            /**
+             * Balance
+             * @description Balance held by the prime, in token units. Decimal serialized as a JSON string.
+             * @example 1234567.89
+             */
+            balance: string;
+            /** @description Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`). */
+            category: components["schemas"]["AllocationCategory"];
+            /**
+             * Chain Id
+             * @description EVM chain id of the position.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Latest Activity At
+             * @description ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.
+             * @example 2026-05-07T12:00:00Z
+             */
+            latest_activity_at?: string | null;
+            /**
+             * Protocol Name
+             * @description Protocol the position is held in. `null` for direct holdings (no registered wrapper).
+             * @example aave-v3
+             */
+            protocol_name?: string | null;
+            /**
+             * Receipt Token Address
+             * @description 0x-prefixed receipt-token contract address. `null` for direct asset holdings.
+             * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+             */
+            receipt_token_address?: string | null;
+            /**
+             * Receipt Token Id
+             * @description Surrogate id of the receipt token. `null` for direct asset holdings.
+             * @example 42
+             */
+            receipt_token_id?: number | null;
+            /**
+             * Symbol
+             * @description Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.
+             * @example aUSDC
+             */
+            symbol: string;
+            /**
+             * Underlying Symbol
+             * @description Underlying-token symbol. For direct holdings, same as ``symbol``.
+             * @example USDC
+             */
+            underlying_symbol: string;
+            /**
+             * Underlying Token Address
+             * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself.
+             * @example 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+             */
+            underlying_token_address: string;
+            /**
+             * Underlying Token Id
+             * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself.
+             * @example 1
+             */
+            underlying_token_id: number;
+        };
+        /**
+         * AllocationRiskCapitalResponse
+         * @description Per-allocation risk capital from the default model.
+         */
+        AllocationRiskCapitalResponse: {
+            /**
+             * Applied
+             * @description Whether the default model could price this allocation.
+             */
+            applied: boolean;
+            /**
+             * Crr Pct
+             * @description Comparable capital-risk ratio (0-100). `null` when the model does not apply.
+             */
+            crr_pct?: string | null;
+            /**
+             * Exposure Usd
+             * @description On-chain USD exposure of the allocation.
+             */
+            exposure_usd: string;
+            /**
+             * Model
+             * @description Model that produced the figure, or `null`.
+             */
+            model?: string | null;
+            /**
+             * Protocol Name
+             * @description Protocol the allocation sits in.
+             */
+            protocol_name: string;
+            /**
+             * Receipt Token Id
+             * @description Surrogate id of the receipt token.
+             */
+            receipt_token_id: number;
+            /**
+             * Required Risk Capital Usd
+             * @description Per-allocation RRC (USD). `null` when the model does not apply.
+             */
+            required_risk_capital_usd?: string | null;
+            /**
+             * Symbol
+             * @description Receipt-token symbol.
+             */
+            symbol: string;
+        };
+        /**
+         * BadDebtResponse
+         * @description Estimated bad debt for a receipt-token position at a given collateral gap.
+         * @example {
+         *       "bad_debt_usd": "1234567.89",
+         *       "gap_pct": "0.10",
+         *       "receipt_token_id": 42
+         *     }
+         */
+        BadDebtResponse: {
+            /**
+             * Bad Debt Usd
+             * @description Estimated USD bad debt at the given gap. Decimal serialized as a JSON string.
+             * @example 1234567.89
+             */
+            bad_debt_usd: string;
+            /**
+             * Gap Pct
+             * @description Collateral price gap as a fraction in `[0, 1]`. Decimal serialized as a JSON string.
+             * @example 0.10
+             */
+            gap_pct: string;
+            /**
+             * Receipt Token Id
+             * @description Surrogate id of the receipt token.
+             * @example 42
+             */
+            receipt_token_id: number;
+        };
+        /**
+         * CapitalMetricsResponse
+         * @description Prime-level capital metrics for risk and alert management.
+         * @example {
+         *       "benchmark_source": "https://example.com/star-rrc",
+         *       "capital_buffer": "2500000",
+         *       "encumbrance_ratio": "0.85",
+         *       "exposure": "1900000000",
+         *       "is_validated": false,
+         *       "prime_id": "prime-acme",
+         *       "prime_name": "Acme Prime",
+         *       "required_risk_capital": "7500000",
+         *       "timestamp": "2026-05-07T12:00:00Z",
+         *       "total_risk_capital": "10000000",
+         *       "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
+         *     }
+         */
+        CapitalMetricsResponse: {
+            /**
+             * Benchmark Source
+             * @description URL of the upstream benchmark source used to populate the row.
+             */
+            benchmark_source?: string | null;
+            /**
+             * Capital Buffer
+             * @description `max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).
+             * @example 2500000
+             */
+            capital_buffer: string;
+            /**
+             * Encumbrance Ratio
+             * @description Required Risk Capital as a share of Total Risk Capital (upstream `risk_tolerance_ratio`). `null` when not validated.
+             * @example 0.85
+             */
+            encumbrance_ratio?: string | null;
+            /**
+             * Exposure
+             * @description Total USD exposure across the prime's allocations (upstream `exposure`).
+             * @example 1900000000
+             */
+            exposure: string;
+            /**
+             * Is Validated
+             * @description Whether the row was validated against on-chain state.
+             * @default false
+             */
+            is_validated: boolean;
+            /**
+             * Prime Id
+             * @description Stable surrogate id for the prime.
+             * @example prime-acme
+             */
+            prime_id: string;
+            /**
+             * Prime Name
+             * @description Human-readable prime name.
+             * @example Acme Prime
+             */
+            prime_name: string;
+            /**
+             * Required Risk Capital
+             * @description Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).
+             * @example 7500000
+             */
+            required_risk_capital: string;
+            /**
+             * Timestamp
+             * @description ISO-8601 timestamp the snapshot was assembled.
+             * @example 2026-05-07T12:00:00Z
+             */
+            timestamp: string;
+            /**
+             * Total Risk Capital
+             * @description Total Risk Capital reported by upstream `total_rc` (USD).
+             * @example 10000000
+             */
+            total_risk_capital: string;
+            /**
+             * Validation Note
+             * @description Human-readable note about validation, e.g. why a row is missing or unmatched.
+             */
+            validation_note?: string | null;
+        };
+        /**
+         * ChainResponse
+         * @description An EVM chain that STL tracks data for.
+         */
+        ChainResponse: {
+            /**
+             * Chain Id
+             * @description EVM chain id.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Name
+             * @description Human-readable chain name.
+             * @example Ethereum Mainnet
+             */
+            name: string;
+        };
+        /**
+         * DataSourceResponse
+         * @description Data source metadata for the transparency panel.
+         */
+        DataSourceResponse: {
+            /** @description How the source is accessed (e.g. `paid_api`, `public_rpc`). */
+            access_model: components["schemas"]["SourceAccessModel"];
+            /**
+             * Attribution Required
+             * @description Whether downstream displays must attribute the source.
+             * @default false
+             */
+            attribution_required: boolean;
+            /**
+             * Caveat
+             * @description Operational caveat callers should be aware of, when present.
+             * @example Rate-limited to 300 req/s
+             */
+            caveat?: string | null;
+            /**
+             * Host
+             * @description Hostname or base URL of the source.
+             * @example alch.api.example.com
+             */
+            host: string;
+            /**
+             * Name
+             * @description Human-readable name of the data source.
+             * @example Alchemy
+             */
+            name: string;
+            /**
+             * Role
+             * @description The role this source plays in the system (e.g. block ingestion, price feed).
+             * @example block ingestion
+             */
+            role: string;
+        };
+        /**
+         * DataSourcesResponse
+         * @description Registered data sources used by STL.
+         */
+        DataSourcesResponse: {
+            /**
+             * Sources
+             * @description All registered upstream data sources.
+             */
+            sources: components["schemas"]["DataSourceResponse"][];
+        };
+        /**
+         * ExposureBucketResponse
+         * @description Priced receipt-token exposure within a single time bucket (LOCF gap-filled).
+         */
+        ExposureBucketResponse: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             * @description Inclusive start of the time bucket (UTC).
+             */
+            bucket_start: string;
+            /**
+             * Exposure Usd
+             * @description Sum across the prime's receipt-token positions of the carried-forward balance valued at the latest underlying oracle price (USD), serialized as a JSON string. `null` for leading buckets before the first observation.
+             * @example 1459014561.88
+             */
+            exposure_usd?: string | null;
+        };
+        /**
+         * ExposureEnvelope
+         * @description Per-prime exposure time series, gap-filled into buckets.
+         */
+        ExposureEnvelope: {
+            /**
+             * Data
+             * @description Priced exposure per time bucket.
+             */
+            data: components["schemas"]["ExposureBucketResponse"][];
+            /**
+             * Mode
+             * @description Always `aggregated`: a gap-filled time series.
+             * @constant
+             */
+            mode: "aggregated";
+            /** @description The window and resolution applied to this response. */
+            window: components["schemas"]["TimeSeriesWindow"];
+        };
+        /**
+         * GapSweepDetails
+         * @description Gap-sweep model-specific output embedded in an RrcResult.
+         *
+         *     ``gap_pct`` is a *fraction* in ``[0, 1]`` (e.g. ``Decimal("0.15")``
+         *     means a 15% collateral price drop) — note this is a different scale
+         *     from ``SurafDetails.crr_pct`` which is on 0–100. ``loss_usd`` is the
+         *     engine-native expected loss in USD under that price drop; equal in
+         *     magnitude to the envelope-level ``rrc_usd`` for this model and rounded
+         *     to USD cents. The cross-model comparable capital ratio is exposed on
+         *     ``RrcResult.comparable_crr_pct`` using the receipt-token USD exposure
+         *     basis, not the collateral backing basis.
+         */
+        GapSweepDetails: {
+            /** Gap Pct */
+            gap_pct: string;
+            /** Loss Usd */
+            loss_usd: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            risk_model: "gap_sweep";
+        };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * PrimeDebtBucketResponse
+         * @description Last observed debt within a single time bucket (LOCF gap-filled).
+         */
+        PrimeDebtBucketResponse: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             * @description Inclusive start of the time bucket (UTC).
+             */
+            bucket_start: string;
+            /**
+             * Debt Wad
+             * @description Last observed debt in `wad` units carried forward into the bucket, serialized as a JSON string. `null` for leading buckets before the first observation.
+             * @example 1234567890000000000000
+             */
+            debt_wad?: string | null;
+        };
+        /**
+         * PrimeDebtEnvelope
+         * @description Prime debt response: raw snapshots or aggregated time buckets.
+         */
+        PrimeDebtEnvelope: {
+            /**
+             * Data
+             * @description Snapshots when `mode=raw`, value buckets when `mode=aggregated`.
+             */
+            data: components["schemas"]["PrimeDebtSnapshotResponse"][] | components["schemas"]["PrimeDebtBucketResponse"][];
+            /**
+             * Mode
+             * @description `raw` for snapshots, `aggregated` for time buckets.
+             * @enum {string}
+             */
+            mode: "raw" | "aggregated";
+            /** @description The window and resolution applied to this response. */
+            window: components["schemas"]["TimeSeriesWindow"];
+        };
+        /**
+         * PrimeDebtSnapshotResponse
+         * @description A single observed prime-debt position at a point in time.
+         * @example {
+         *       "block_number": 18000000,
+         *       "block_version": 1,
+         *       "debt_wad": "1234567890000000000000",
+         *       "ilk_name": "ALLOCATOR-NEXUS-A",
+         *       "prime_address": "0x1234567890abcdef1234567890abcdef12345678",
+         *       "prime_name": "Acme Prime",
+         *       "synced_at": "2026-05-07T12:00:00Z"
+         *     }
+         */
+        PrimeDebtSnapshotResponse: {
+            /**
+             * Block Number
+             * @description Block number the snapshot was observed at.
+             * @example 18000000
+             */
+            block_number: number;
+            /**
+             * Block Version
+             * @description Cache-key version that increments on chain reorgs.
+             * @example 1
+             */
+            block_version: number;
+            /**
+             * Debt Wad
+             * @description Outstanding debt in MakerDAO `wad` units (1e18 fixed-point). Decimal serialized as a JSON string to preserve precision.
+             * @example 1234567890000000000000
+             */
+            debt_wad: string;
+            /**
+             * Ilk Name
+             * @description Maker `ilk` (collateral type) the debt is denominated against.
+             * @example ALLOCATOR-NEXUS-A
+             */
+            ilk_name: string;
+            /**
+             * Prime Address
+             * @description Prime's 0x-prefixed Ethereum address.
+             * @example 0x1234567890abcdef1234567890abcdef12345678
+             */
+            prime_address: string;
+            /**
+             * Prime Name
+             * @description Human-readable prime name.
+             * @example Acme Prime
+             */
+            prime_name: string;
+            /**
+             * Synced At
+             * Format: date-time
+             * @description Server-side time the snapshot was persisted.
+             */
+            synced_at: string;
+        };
+        /**
+         * PrimeResponse
+         * @description A prime (capital allocator) tracked by STL.
+         */
+        PrimeResponse: {
+            /**
+             * Address
+             * @description 0x-prefixed Ethereum address controlled by the prime.
+             * @example 0x1234567890abcdef1234567890abcdef12345678
+             */
+            address: string;
+            /**
+             * Id
+             * @description Stable surrogate id for the prime.
+             * @example prime-acme
+             */
+            id: string;
+            /**
+             * Name
+             * @description Human-readable prime name.
+             * @example Acme Prime
+             */
+            name: string;
+        };
+        /**
+         * PrimeRiskCapitalResponse
+         * @description Self-computed, model-derived capital metrics for a prime.
+         *
+         *     Independent of the upstream Star feed. `required_risk_capital_usd` is the
+         *     sum of per-allocation RRC from the default model (`model`); it is **partial**
+         *     (only allocations the model can price contribute) and **will not** match
+         *     Sky's dashboard. `modeled_pct` reports the priced share of exposure.
+         */
+        PrimeRiskCapitalResponse: {
+            /**
+             * Encumbrance Ratio
+             * @description Required / Total Risk Capital. `null` when total is absent or zero.
+             */
+            encumbrance_ratio?: string | null;
+            /**
+             * Exposure Usd
+             * @description Σ priced receipt-token allocation exposure (USD).
+             */
+            exposure_usd: string;
+            /**
+             * Model
+             * @description Default RRC model used (e.g. `gap_sweep`).
+             * @example gap_sweep
+             */
+            model: string;
+            /**
+             * Modeled Exposure Usd
+             * @description Exposure the default model could price (USD).
+             */
+            modeled_exposure_usd: string;
+            /**
+             * Modeled Pct
+             * @description `modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero.
+             */
+            modeled_pct?: string | null;
+            /**
+             * Per Allocation
+             * @description Per-allocation breakdown, newest-exposure first.
+             */
+            per_allocation: components["schemas"]["AllocationRiskCapitalResponse"][];
+            /**
+             * Prime Id
+             * @description Prime's 0x-prefixed ALM proxy address.
+             */
+            prime_id: string;
+            /**
+             * Required Risk Capital Usd
+             * @description Σ per-allocation RRC from the default model (USD).
+             */
+            required_risk_capital_usd: string;
+            /**
+             * Total Risk Capital Usd
+             * @description On-chain SubProxy treasury balance (USD). `null` when absent.
+             */
+            total_risk_capital_usd?: string | null;
+        };
+        /**
+         * ProtocolEventBucketResponse
+         * @description Count of protocol events within a single time bucket.
+         */
+        ProtocolEventBucketResponse: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             * @description Inclusive start of the time bucket (UTC).
+             */
+            bucket_start: string;
+            /**
+             * Event Count
+             * @description Number of events in the bucket.
+             * @example 42
+             */
+            event_count: number;
+        };
+        /**
+         * ProtocolEventResponse
+         * @description A single decoded protocol event observed on-chain.
+         * @example {
+         *       "block_number": 18000000,
+         *       "block_version": 1,
+         *       "chain_id": 1,
+         *       "contract_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+         *       "created_at": "2026-05-07T12:00:00Z",
+         *       "event_data": {
+         *         "amount": "1000000",
+         *         "reserve": "0x...",
+         *         "user": "0x..."
+         *       },
+         *       "event_name": "Supply",
+         *       "log_index": 3,
+         *       "protocol_name": "aave-v3",
+         *       "tx_hash": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+         *     }
+         */
+        ProtocolEventResponse: {
+            /**
+             * Block Number
+             * @description Block number containing the event.
+             * @example 18000000
+             */
+            block_number: number;
+            /**
+             * Block Version
+             * @description Cache-key version that increments on chain reorgs.
+             * @example 1
+             */
+            block_version: number;
+            /**
+             * Chain Id
+             * @description EVM chain id where the event was observed.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Contract Address
+             * @description Lower-case 0x-prefixed contract address that emitted the event.
+             * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+             */
+            contract_address: string;
+            /**
+             * Created At
+             * Format: date-time
+             * @description Server-side time the event row was persisted.
+             */
+            created_at: string;
+            /**
+             * Event Data
+             * @description Decoded event arguments as a JSON object. Schema varies by `event_name`.
+             */
+            event_data?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Event Name
+             * @description Decoded event name from the protocol's ABI.
+             * @example Supply
+             */
+            event_name: string;
+            /**
+             * Log Index
+             * @description Index of the log within the transaction's receipt.
+             * @example 3
+             */
+            log_index: number;
+            /**
+             * Protocol Name
+             * @description Protocol the event was emitted by.
+             * @example aave-v3
+             */
+            protocol_name: string;
+            /**
+             * Tx Hash
+             * @description 0x-prefixed transaction hash that emitted the event.
+             * @example 0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
+             */
+            tx_hash: string;
+        };
+        /**
+         * ProtocolEventsEnvelope
+         * @description Protocol events response: raw rows or aggregated time buckets.
+         */
+        ProtocolEventsEnvelope: {
+            /**
+             * Data
+             * @description Events when `mode=raw`, count buckets when `mode=aggregated`.
+             */
+            data: components["schemas"]["ProtocolEventResponse"][] | components["schemas"]["ProtocolEventBucketResponse"][];
+            /**
+             * Mode
+             * @description `raw` for events, `aggregated` for time buckets.
+             * @enum {string}
+             */
+            mode: "raw" | "aggregated";
+            /** @description The window and resolution applied to this response. */
+            window: components["schemas"]["TimeSeriesWindow"];
+        };
+        /**
+         * ProtocolResponse
+         * @description A protocol (lender, AMM, etc.) that STL classifies positions against.
+         */
+        ProtocolResponse: {
+            /**
+             * Chain Id
+             * @description EVM chain id the protocol instance lives on.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Encode
+             * @description Machine-readable protocol code used in joins (`<name>-<version>`).
+             * @example aave-v3
+             */
+            encode: string;
+            /**
+             * Id
+             * @description Surrogate protocol id.
+             * @example 7
+             */
+            id: number;
+            /**
+             * Name
+             * @description Human-readable protocol name.
+             * @example Aave v3
+             */
+            name: string;
+        };
+        /**
+         * RiskBreakdownItemResponse
+         * @description One backing-token row in a receipt-token's risk-enriched breakdown.
+         */
+        RiskBreakdownItemResponse: {
+            /**
+             * Amount
+             * @description Backing-token amount, expressed in token units. Decimal serialized as a JSON string.
+             * @example 12.345678
+             */
+            amount: string;
+            /**
+             * Amount Usd
+             * @description USD value of the backing-token row.
+             * @example 41234.56
+             */
+            amount_usd: string;
+            /**
+             * Backing Pct
+             * @description Share of the receipt token backed by this row, as a 0–100 percentage.
+             * @example 42.0
+             */
+            backing_pct: string;
+            /**
+             * Liquidation Bonus
+             * @description Liquidation bonus expressed as a multiplier (e.g. `1.05` for a 5% bonus). Stored as basis points upstream and normalised by dividing by 10000.
+             * @example 1.05
+             */
+            liquidation_bonus: string;
+            /**
+             * Liquidation Threshold
+             * @description Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`.
+             * @example 0.83
+             */
+            liquidation_threshold: string;
+            /**
+             * Price Usd
+             * @description Latest USD price for the backing token.
+             * @example 3340.55
+             */
+            price_usd: string;
+            /**
+             * Symbol
+             * @description Backing-token symbol.
+             * @example WETH
+             */
+            symbol: string;
+            /**
+             * Token Id
+             * @description Surrogate token id of the backing token.
+             * @example 101
+             */
+            token_id: number;
+        };
+        /**
+         * RiskBreakdownResponse
+         * @description Risk-enriched breakdown of a receipt token's backing collateral.
+         * @example {
+         *       "items": [
+         *         {
+         *           "amount": "12.345678",
+         *           "amount_usd": "41234.56",
+         *           "backing_pct": "42.0",
+         *           "liquidation_bonus": "1.05",
+         *           "liquidation_threshold": "0.83",
+         *           "price_usd": "3340.55",
+         *           "symbol": "WETH",
+         *           "token_id": 101
+         *         }
+         *       ],
+         *       "receipt_token_id": 42
+         *     }
+         */
+        RiskBreakdownResponse: {
+            /**
+             * Items
+             * @description One entry per backing-token row.
+             */
+            items: components["schemas"]["RiskBreakdownItemResponse"][];
+            /**
+             * Receipt Token Id
+             * @description Surrogate id of the receipt token.
+             * @example 42
+             */
+            receipt_token_id: number;
+        };
+        /**
+         * RrcEnvelope
+         * @description Response wrapper carrying one RrcResult per applicable model.
+         *
+         *     On-chain identifiers (``chain_id``, ``receipt_token_address``) are echoed
+         *     so consumers can resolve the surrogate ``asset_id`` without a second call.
+         *
+         *     ``max_rrc_usd`` and ``max_crr_pct`` collapse every applicable model to a
+         *     single conservative number. Use these when you need one capital figure
+         *     rather than a per-model breakdown: ``max_rrc_usd`` is the largest USD
+         *     figure across results; ``max_crr_pct`` is the largest
+         *     ``results[].comparable_crr_pct``. Each model computes that value on the
+         *     same receipt-token USD exposure basis, so it is safe to compare across
+         *     models.
+         *
+         *     Per-model values in ``results`` are *not* additive — SURAF capital and
+         *     gap-sweep expected-loss overlap economically. Pick a single result, or
+         *     use the ``max_*`` fields; do not sum across results. The two ``max_*``
+         *     fields may come from different models.
+         */
+        RrcEnvelope: {
+            /**
+             * Asset Id
+             * @description Echo of the requested asset id.
+             * @example 42
+             */
+            asset_id: number;
+            /**
+             * Chain Id
+             * @description EVM chain id of the receipt token.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Max Crr Pct
+             * @description Largest `comparable_crr_pct` across `results`, as a 0–100 percentage.
+             * @example 33.7
+             */
+            max_crr_pct: string;
+            /**
+             * Max Rrc Usd
+             * @description Largest `rrc_usd` across `results`. Decimal serialized as a JSON string.
+             * @example 12300
+             */
+            max_rrc_usd: string;
+            /**
+             * Prime Id
+             * @description Echo of the requested prime address.
+             * @example 0x1234567890abcdef1234567890abcdef12345678
+             */
+            prime_id: string;
+            /**
+             * Receipt Token Address
+             * @description 0x-prefixed contract address of the receipt token.
+             * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+             */
+            receipt_token_address: string;
+            /**
+             * Results
+             * @description One entry per applicable risk model.
+             */
+            results: components["schemas"]["RrcResult"][];
+        };
+        /**
+         * RrcRequest
+         * @description POST /v1/risk/rrc/scenario body — overrides keyed by model name.
+         *
+         *     Asset identity must be supplied as **exactly one** of:
+         *
+         *     * ``asset_id`` (deprecated surrogate id), or
+         *     * ``(chain_id, token_address)`` — receipt-token address on the given chain.
+         *
+         *     Both forms or neither raises 422.
+         * @example {
+         *       "chain_id": 1,
+         *       "overrides": {
+         *         "gap_sweep": {
+         *           "gap_pct": "0.15"
+         *         }
+         *       },
+         *       "prime_id": "0x1234567890abcdef1234567890abcdef12345678",
+         *       "token_address": "0xbcca60bb61934080951369a648fb03df4f96263c"
+         *     }
+         */
+        RrcRequest: {
+            /**
+             * Asset Id
+             * @deprecated
+             * @description Surrogate receipt-token id. **Deprecated** — pass `chain_id` + `token_address` instead.
+             * @example 42
+             */
+            asset_id?: number | null;
+            /**
+             * Chain Id
+             * @description EVM chain id of the receipt token.
+             * @example 1
+             */
+            chain_id?: number | null;
+            /**
+             * Overrides
+             * @description Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.
+             */
+            overrides?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
+            /**
+             * Prime Id
+             * @description Prime's 0x-prefixed Ethereum address.
+             * @example 0x1234567890abcdef1234567890abcdef12345678
+             */
+            prime_id: string;
+            /**
+             * Token Address
+             * @description 0x-prefixed receipt-token contract address.
+             * @example 0xbcca60bb61934080951369a648fb03df4f96263c
+             */
+            token_address?: string | null;
+        };
+        /**
+         * RrcResult
+         * @description Shared result type returned by every RiskModel implementation.
+         *
+         *     ``risk_model`` identifies which model produced the result (e.g.
+         *     ``"suraf"``, ``"gap_sweep"``).  ``details`` carries model-specific
+         *     output — use ``isinstance`` to narrow. The same value also appears
+         *     on ``details.risk_model`` and serves as the OpenAPI discriminator.
+         *     ``comparable_crr_pct`` is the model's effective capital ratio on the
+         *     shared receipt-token USD exposure basis, expressed on a 0–100 scale.
+         */
+        RrcResult: {
+            /** Asset Id */
+            asset_id: number;
+            /** Comparable Crr Pct */
+            comparable_crr_pct: string;
+            /** Details */
+            details: components["schemas"]["SurafDetails"] | components["schemas"]["GapSweepDetails"];
+            /** Prime Id */
+            prime_id: string;
+            /**
+             * Risk Model
+             * @enum {string}
+             */
+            risk_model: "suraf" | "gap_sweep";
+            /** Rrc Usd */
+            rrc_usd: string;
+        };
+        /**
+         * SourceAccessModel
+         * @description Classification of data source accessibility and terms of use.
+         * @enum {string}
+         */
+        SourceAccessModel: "open" | "public" | "closed";
+        /**
+         * SurafDetails
+         * @description SURAF model-specific output embedded in an RrcResult.
+         *
+         *     ``crr_pct`` is the adjusted CRR (i.e. ``unadjusted_crr_pct + penalty_pp``,
+         *     capped at 100). All three are percentages on a 0–100 scale (e.g.
+         *     ``Decimal("33.7")`` means 33.7%, not 0.337). The relation
+         *     ``crr_pct == unadjusted_crr_pct + penalty_pp`` holds up to ~1e-10 only —
+         *     the underlying scorer caps to 100 in float before Decimal conversion;
+         *     consumers should always trust ``crr_pct`` over a recomputation from
+         *     parts.
+         */
+        SurafDetails: {
+            /** Crr Pct */
+            crr_pct: string;
+            /** Penalty Pp */
+            penalty_pp: string;
+            /** Rating Id */
+            rating_id: string;
+            /** Rating Version */
+            rating_version: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            risk_model: "suraf";
+            /** Source Commit Sha */
+            source_commit_sha: string;
+            /** Unadjusted Crr Pct */
+            unadjusted_crr_pct: string;
+        };
+        /**
+         * TimeSeriesResolution
+         * @description Allowed ISO-8601 durations for time-series downsampling.
+         * @enum {string}
+         */
+        TimeSeriesResolution: "PT1M" | "PT5M" | "PT15M" | "PT1H" | "PT6H" | "P1D";
+        /**
+         * TimeSeriesWindow
+         * @description The resolved window and resolution actually applied to a request.
+         *
+         *     Echoing this back lets consumers distinguish an empty result caused by the
+         *     window from one caused by the absence of data.
+         */
+        TimeSeriesWindow: {
+            /**
+             * From Timestamp
+             * Format: date-time
+             * @description Inclusive lower bound applied (UTC).
+             */
+            from_timestamp: string;
+            /**
+             * Interval Ms
+             * @description Resolution width in milliseconds.
+             */
+            interval_ms: number;
+            /** @description Resolution applied (relevant when aggregated). */
+            resolution: components["schemas"]["TimeSeriesResolution"];
+            /**
+             * To Timestamp
+             * Format: date-time
+             * @description Inclusive upper bound applied (UTC).
+             */
+            to_timestamp: string;
+        };
+        /**
+         * TokenPriceResponse
+         * @description Latest token price state.
+         *
+         *     The endpoint returns `200` when the token exists even if no quote is currently
+         *     available. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and
+         *     quote fields are `null`.
+         * @example {
+         *       "is_stale": false,
+         *       "price_usd": "1.0001",
+         *       "source_display_name": "CoinGecko",
+         *       "source_id": 7,
+         *       "source_name": "coingecko",
+         *       "source_type": "offchain",
+         *       "staleness_seconds": 42,
+         *       "timestamp": "2026-05-07T12:00:00Z",
+         *       "token_id": 12345
+         *     }
+         */
+        TokenPriceResponse: {
+            /**
+             * Is Stale
+             * @description Whether quote data is stale or missing
+             */
+            is_stale: boolean;
+            /**
+             * Price Usd
+             * @description Latest USD price; null when no quote is available. Decimal serialized as a JSON string to preserve precision.
+             * @example 1.0001
+             */
+            price_usd?: string | null;
+            /**
+             * Source Display Name
+             * @description Human-friendly source name when available
+             * @example CoinGecko
+             */
+            source_display_name?: string | null;
+            /**
+             * Source Id
+             * @description Source identifier when available
+             * @example 7
+             */
+            source_id?: number | null;
+            /**
+             * Source Name
+             * @description Source machine name when available
+             * @example coingecko
+             */
+            source_name?: string | null;
+            /**
+             * Source Type
+             * @description Price source type (`onchain` or `offchain`) when available
+             * @example offchain
+             */
+            source_type?: string | null;
+            /**
+             * Staleness Reason
+             * @description Reason for stale state, e.g. `missing_quote`
+             * @example missing_quote
+             */
+            staleness_reason?: string | null;
+            /**
+             * Staleness Seconds
+             * @description Age of the latest quote in seconds; null when unavailable
+             * @example 42
+             */
+            staleness_seconds?: number | null;
+            /**
+             * Timestamp
+             * @description Timestamp of the latest quote; null when unavailable
+             */
+            timestamp?: string | null;
+            /**
+             * Token Id
+             * @description Token identifier
+             * @example 12345
+             */
+            token_id: number;
+        };
+        /**
+         * TokenResponse
+         * @description Token metadata entry from the token catalog.
+         * @example {
+         *       "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+         *       "chain_id": 1,
+         *       "decimals": 6,
+         *       "id": 12345,
+         *       "metadata": {
+         *         "coingecko_id": "usd-coin"
+         *       },
+         *       "symbol": "USDC",
+         *       "updated_at": "2026-05-01T12:00:00Z"
+         *     }
+         */
+        TokenResponse: {
+            /**
+             * Address
+             * @description Lower-case 0x-prefixed contract address.
+             * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+             */
+            address: string;
+            /**
+             * Chain Id
+             * @description EVM chain id the token lives on.
+             * @example 1
+             */
+            chain_id: number;
+            /**
+             * Decimals
+             * @description ERC-20 decimals, when known.
+             * @example 6
+             */
+            decimals?: number | null;
+            /**
+             * Id
+             * @description Surrogate token id, stable across chain reorgs.
+             * @example 12345
+             */
+            id: number;
+            /**
+             * Metadata
+             * @description Free-form catalog metadata (e.g. logo URL, vendor ids).
+             */
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Symbol
+             * @description ERC-20 symbol, when known.
+             * @example USDC
+             */
+            symbol?: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             * @description Timestamp the catalog row was last refreshed.
+             */
+            updated_at: string;
+        };
+        /**
+         * TotalCapitalBucketResponse
+         * @description Last observed treasury balance within a single time bucket (LOCF gap-filled).
+         */
+        TotalCapitalBucketResponse: {
+            /**
+             * Bucket Start
+             * Format: date-time
+             * @description Inclusive start of the time bucket (UTC).
+             */
+            bucket_start: string;
+            /**
+             * Total Capital Usd
+             * @description Last observed SubProxy treasury USDS balance carried forward into the bucket (USD; USDS is dollar-pegged), serialized as a JSON string. `null` for leading buckets before the first observation.
+             * @example 36359440.25
+             */
+            total_capital_usd?: string | null;
+        };
+        /**
+         * TotalCapitalEnvelope
+         * @description Per-prime total-capital time series, gap-filled into buckets.
+         */
+        TotalCapitalEnvelope: {
+            /**
+             * Data
+             * @description Last treasury balance per time bucket.
+             */
+            data: components["schemas"]["TotalCapitalBucketResponse"][];
+            /**
+             * Mode
+             * @description Always `aggregated`: a gap-filled time series.
+             * @constant
+             */
+            mode: "aggregated";
+            /** @description The window and resolution applied to this response. */
+            window: components["schemas"]["TimeSeriesWindow"];
+        };
+        /** ValidationError */
+        ValidationError: {
+            /** Context */
+            ctx?: Record<string, never>;
+            /** Input */
+            input?: unknown;
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
+        };
     };
-    /**
-     * RrcResult
-     * @description Shared result type returned by every RiskModel implementation.
-     *
-     *     ``risk_model`` identifies which model produced the result (e.g.
-     *     ``"suraf"``, ``"gap_sweep"``).  ``details`` carries model-specific
-     *     output — use ``isinstance`` to narrow. The same value also appears
-     *     on ``details.risk_model`` and serves as the OpenAPI discriminator.
-     *     ``comparable_crr_pct`` is the model's effective capital ratio on the
-     *     shared receipt-token USD exposure basis, expressed on a 0–100 scale.
-     */
-    RrcResult: {
-      /** Asset Id */
-      asset_id: number;
-      /** Comparable Crr Pct */
-      comparable_crr_pct: string;
-      /** Details */
-      details:
-        | components['schemas']['SurafDetails']
-        | components['schemas']['GapSweepDetails'];
-      /** Prime Id */
-      prime_id: string;
-      /**
-       * Risk Model
-       * @enum {string}
-       */
-      risk_model: 'suraf' | 'gap_sweep';
-      /** Rrc Usd */
-      rrc_usd: string;
-    };
-    /**
-     * SourceAccessModel
-     * @description Classification of data source accessibility and terms of use.
-     * @enum {string}
-     */
-    SourceAccessModel: 'open' | 'public' | 'closed';
-    /**
-     * SurafDetails
-     * @description SURAF model-specific output embedded in an RrcResult.
-     *
-     *     ``crr_pct`` is the adjusted CRR (i.e. ``unadjusted_crr_pct + penalty_pp``,
-     *     capped at 100). All three are percentages on a 0–100 scale (e.g.
-     *     ``Decimal("33.7")`` means 33.7%, not 0.337). The relation
-     *     ``crr_pct == unadjusted_crr_pct + penalty_pp`` holds up to ~1e-10 only —
-     *     the underlying scorer caps to 100 in float before Decimal conversion;
-     *     consumers should always trust ``crr_pct`` over a recomputation from
-     *     parts.
-     */
-    SurafDetails: {
-      /** Crr Pct */
-      crr_pct: string;
-      /** Penalty Pp */
-      penalty_pp: string;
-      /** Rating Id */
-      rating_id: string;
-      /** Rating Version */
-      rating_version: string;
-      /**
-       * @description discriminator enum property added by openapi-typescript
-       * @enum {string}
-       */
-      risk_model: 'suraf';
-      /** Source Commit Sha */
-      source_commit_sha: string;
-      /** Unadjusted Crr Pct */
-      unadjusted_crr_pct: string;
-    };
-    /**
-     * TokenPriceResponse
-     * @description Latest token price state.
-     *
-     *     The endpoint returns `200` when the token exists even if no quote is currently
-     *     available. In that case `is_stale=true`, `staleness_reason='missing_quote'`, and
-     *     quote fields are `null`.
-     * @example {
-     *       "is_stale": false,
-     *       "price_usd": "1.0001",
-     *       "source_display_name": "CoinGecko",
-     *       "source_id": 7,
-     *       "source_name": "coingecko",
-     *       "source_type": "offchain",
-     *       "staleness_seconds": 42,
-     *       "timestamp": "2026-05-07T12:00:00Z",
-     *       "token_id": 12345
-     *     }
-     */
-    TokenPriceResponse: {
-      /**
-       * Is Stale
-       * @description Whether quote data is stale or missing
-       */
-      is_stale: boolean;
-      /**
-       * Price Usd
-       * @description Latest USD price; null when no quote is available. Decimal serialized as a JSON string to preserve precision.
-       * @example 1.0001
-       */
-      price_usd?: string | null;
-      /**
-       * Source Display Name
-       * @description Human-friendly source name when available
-       * @example CoinGecko
-       */
-      source_display_name?: string | null;
-      /**
-       * Source Id
-       * @description Source identifier when available
-       * @example 7
-       */
-      source_id?: number | null;
-      /**
-       * Source Name
-       * @description Source machine name when available
-       * @example coingecko
-       */
-      source_name?: string | null;
-      /**
-       * Source Type
-       * @description Price source type (`onchain` or `offchain`) when available
-       * @example offchain
-       */
-      source_type?: string | null;
-      /**
-       * Staleness Reason
-       * @description Reason for stale state, e.g. `missing_quote`
-       * @example missing_quote
-       */
-      staleness_reason?: string | null;
-      /**
-       * Staleness Seconds
-       * @description Age of the latest quote in seconds; null when unavailable
-       * @example 42
-       */
-      staleness_seconds?: number | null;
-      /**
-       * Timestamp
-       * @description Timestamp of the latest quote; null when unavailable
-       */
-      timestamp?: string | null;
-      /**
-       * Token Id
-       * @description Token identifier
-       * @example 12345
-       */
-      token_id: number;
-    };
-    /**
-     * TokenResponse
-     * @description Token metadata entry from the token catalog.
-     * @example {
-     *       "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-     *       "chain_id": 1,
-     *       "decimals": 6,
-     *       "id": 12345,
-     *       "metadata": {
-     *         "coingecko_id": "usd-coin"
-     *       },
-     *       "symbol": "USDC",
-     *       "updated_at": "2026-05-01T12:00:00Z"
-     *     }
-     */
-    TokenResponse: {
-      /**
-       * Address
-       * @description Lower-case 0x-prefixed contract address.
-       * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
-       */
-      address: string;
-      /**
-       * Chain Id
-       * @description EVM chain id the token lives on.
-       * @example 1
-       */
-      chain_id: number;
-      /**
-       * Decimals
-       * @description ERC-20 decimals, when known.
-       * @example 6
-       */
-      decimals?: number | null;
-      /**
-       * Id
-       * @description Surrogate token id, stable across chain reorgs.
-       * @example 12345
-       */
-      id: number;
-      /**
-       * Metadata
-       * @description Free-form catalog metadata (e.g. logo URL, vendor ids).
-       */
-      metadata?: {
-        [key: string]: unknown;
-      } | null;
-      /**
-       * Symbol
-       * @description ERC-20 symbol, when known.
-       * @example USDC
-       */
-      symbol?: string | null;
-      /**
-       * Updated At
-       * Format: date-time
-       * @description Timestamp the catalog row was last refreshed.
-       */
-      updated_at: string;
-    };
-    /** ValidationError */
-    ValidationError: {
-      /** Context */
-      ctx?: Record<string, never>;
-      /** Input */
-      input?: unknown;
-      /** Location */
-      loc: (string | number)[];
-      /** Message */
-      msg: string;
-      /** Error Type */
-      type: string;
-    };
-  };
-  responses: never;
-  parameters: never;
-  requestBodies: never;
-  headers: never;
-  pathItems: never;
+    responses: never;
+    parameters: never;
+    requestBodies: never;
+    headers: never;
+    pathItems: never;
 }
 export type $defs = Record<string, never>;
 export interface operations {
-  list_allocation_activity_v1_allocations_activity_get: {
-    parameters: {
-      query?: {
-        /** @description Filter by prime address (0x-prefixed Ethereum address). */
-        prime_id?: string | null;
-        /** @description Filter by EVM chain id. */
-        chain_id?: number | null;
-        /** @description Filter by protocol name (case-insensitive substring). */
-        protocol_name?: string | null;
-        /** @description Filter by action type (`in`, `out`, `sweep`). */
-        action_type?: string | null;
-        /** @description Filter by token symbol (case-insensitive substring). */
-        token_symbol?: string | null;
-        /** @description Filter by transaction hash (0x-prefixed). */
-        tx_hash?: string | null;
-        /** @description Inclusive lower timestamp bound (ISO-8601). */
-        from_timestamp?: string | null;
-        /** @description Inclusive upper timestamp bound (ISO-8601). */
-        to_timestamp?: string | null;
-        /** @description Max results (default 100, max 1000). */
-        limit?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
+    list_allocation_activity_v1_allocations_activity_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by prime address (0x-prefixed Ethereum address). */
+                prime_id?: string | null;
+                /** @description Filter by EVM chain id. */
+                chain_id?: number | null;
+                /** @description Filter by protocol name (case-insensitive substring). */
+                protocol_name?: string | null;
+                /** @description Filter by action type (`in`, `out`, `sweep`). */
+                action_type?: string | null;
+                /** @description Filter by token symbol (case-insensitive substring). */
+                token_symbol?: string | null;
+                /** @description Filter by transaction hash (0x-prefixed). */
+                tx_hash?: string | null;
+                /** @description Max results (default 100, max 1000). */
+                limit?: number;
+                /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+                from_timestamp?: string | null;
+                /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+                to_timestamp?: string | null;
+                /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+                resolution?: components["schemas"]["TimeSeriesResolution"] | null;
+                /** @description When true, return time-bucketed aggregates instead of raw rows. */
+                aggregate?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllocationActivityEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    list_capital_metrics_v1_capital_metrics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['AllocationActivityResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapitalMetricsResponse"][];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  list_capital_metrics_v1_capital_metrics_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    list_chains_v1_chains_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainResponse"][];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_data_sources_v1_data_sources_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['CapitalMetricsResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DataSourcesResponse"];
+                };
+            };
         };
-      };
     };
-  };
-  list_chains_v1_chains_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    list_primes_v1_primes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrimeResponse"][];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    list_allocations_v1_primes__prime_id__allocations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['ChainResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllocationResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
     };
-  };
-  get_data_sources_v1_data_sources_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    list_prime_debt_snapshots_v1_primes__prime_id__debt_get: {
+        parameters: {
+            query?: {
+                /** @description Max snapshots returned (default 100, max 500). */
+                limit?: number;
+                /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+                from_timestamp?: string | null;
+                /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+                to_timestamp?: string | null;
+                /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+                resolution?: components["schemas"]["TimeSeriesResolution"] | null;
+                /** @description When true, return time-bucketed aggregates instead of raw rows. */
+                aggregate?: boolean;
+            };
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrimeDebtEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    list_prime_exposure_v1_primes__prime_id__exposure_get: {
+        parameters: {
+            query?: {
+                /** @description Max buckets returned (default 100, max 500). */
+                limit?: number;
+                /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+                from_timestamp?: string | null;
+                /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+                to_timestamp?: string | null;
+                /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+                resolution?: components["schemas"]["TimeSeriesResolution"] | null;
+                /** @description When true, return time-bucketed aggregates instead of raw rows. */
+                aggregate?: boolean;
+            };
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['DataSourcesResponse'];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExposureEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
     };
-  };
-  list_primes_v1_primes_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    get_prime_risk_capital_v1_primes__prime_id__risk_capital_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrimeRiskCapitalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    list_prime_total_capital_v1_primes__prime_id__total_capital_get: {
+        parameters: {
+            query?: {
+                /** @description Max buckets returned (default 100, max 500). */
+                limit?: number;
+                /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+                from_timestamp?: string | null;
+                /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+                to_timestamp?: string | null;
+                /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+                resolution?: components["schemas"]["TimeSeriesResolution"] | null;
+                /** @description When true, return time-bucketed aggregates instead of raw rows. */
+                aggregate?: boolean;
+            };
+            header?: never;
+            path: {
+                prime_id: string;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['PrimeResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotalCapitalEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
     };
-  };
-  list_allocations_v1_primes__prime_id__allocations_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        prime_id: string;
-      };
-      cookie?: never;
+    list_protocol_events_v1_protocol_events_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by transaction hash (0x-prefixed, 32 bytes). */
+                tx_hash?: string | null;
+                /** @description Filter by protocol name. */
+                protocol_name?: string | null;
+                /** @description Max events returned (default 100, max 500). */
+                limit?: number;
+                /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
+                from_timestamp?: string | null;
+                /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
+                to_timestamp?: string | null;
+                /** @description ISO-8601 duration resolution (for example `PT5M`, `PT1H`). Used for time-bucketing when `aggregate=true`; defaults to the finest resolution allowed for the window. */
+                resolution?: components["schemas"]["TimeSeriesResolution"] | null;
+                /** @description When true, return time-bucketed aggregates instead of raw rows. */
+                aggregate?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolEventsEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    list_protocols_v1_protocols_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['AllocationResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolResponse"][];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  list_prime_debt_snapshots_v1_primes__prime_id__debt_get: {
-    parameters: {
-      query?: {
-        /** @description Max snapshots returned (default 100, max 500). */
-        limit?: number;
-      };
-      header?: never;
-      path: {
-        prime_id: string;
-      };
-      cookie?: never;
+    get_ready_v1_ready_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_rrc_v1_risk_rrc_get: {
+        parameters: {
+            query: {
+                prime_id: string;
+                /**
+                 * @deprecated
+                 * @description Surrogate receipt-token id. **Deprecated** — prefer `chain_id` + `token_address`.
+                 */
+                asset_id?: number | null;
+                /** @description EVM chain id of the receipt token. */
+                chain_id?: number | null;
+                /** @description 0x-prefixed receipt-token contract address. */
+                token_address?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['PrimeDebtSnapshotResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RrcEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  list_protocol_events_v1_protocol_events_get: {
-    parameters: {
-      query?: {
-        /** @description Filter by transaction hash (0x-prefixed, 32 bytes). */
-        tx_hash?: string | null;
-        /** @description Filter by protocol name. */
-        protocol_name?: string | null;
-        /** @description Max events returned (default 100, max 500). */
-        limit?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
+    post_rrc_scenario_v1_risk_rrc_scenario_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RrcRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RrcEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_bad_debt_by_address_v1_risk__chain_id___token_address__bad_debt_get: {
+        parameters: {
+            query: {
+                /** @description Collateral gap fraction in [0, 1]. */
+                gap_pct: number | string;
+            };
+            header?: never;
+            path: {
+                /** @description EVM chain id. */
+                chain_id: number;
+                /** @description 0x-prefixed token contract address (40 hex chars). */
+                token_address: string;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['ProtocolEventResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BadDebtResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  list_protocols_v1_protocols_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description EVM chain id. */
+                chain_id: number;
+                /** @description 0x-prefixed token contract address (40 hex chars). */
+                token_address: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskBreakdownResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_bad_debt_v1_risk__receipt_token_id__bad_debt_get: {
+        parameters: {
+            query: {
+                /** @description Collateral gap fraction in [0, 1]. */
+                gap_pct: number | string;
+            };
+            header?: never;
+            path: {
+                receipt_token_id: number;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['ProtocolResponse'][];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BadDebtResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
     };
-  };
-  get_ready_v1_ready_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                receipt_token_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RiskBreakdownResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_status_v1_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
         };
-        content: {
-          'application/json': unknown;
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
         };
-      };
     };
-  };
-  get_rrc_v1_risk_rrc_get: {
-    parameters: {
-      query: {
-        prime_id: string;
-        /**
-         * @deprecated
-         * @description Surrogate receipt-token id. **Deprecated** — prefer `chain_id` + `token_address`.
-         */
-        asset_id?: number | null;
-        /** @description EVM chain id of the receipt token. */
-        chain_id?: number | null;
-        /** @description 0x-prefixed receipt-token contract address. */
-        token_address?: string | null;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
+    list_tokens_v1_tokens_get: {
+        parameters: {
+            query?: {
+                /** @description Filter by EVM chain id. */
+                chain_id?: number | null;
+                /** @description Filter by symbol (case-insensitive substring match). */
+                symbol?: string | null;
+                /** @description Max results (default 100, max 500). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_token_v1_tokens__chain_id___token_address__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description EVM chain id. */
+                chain_id: number;
+                /** @description 0x-prefixed token contract address (40 hex chars). */
+                token_address: string;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['RrcEnvelope'];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  post_rrc_scenario_v1_risk_rrc_scenario_post: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
+    get_token_price_v1_tokens__chain_id___token_address__price_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description EVM chain id. */
+                chain_id: number;
+                /** @description 0x-prefixed token contract address (40 hex chars). */
+                token_address: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenPriceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody: {
-      content: {
-        'application/json': components['schemas']['RrcRequest'];
-      };
+    get_token_by_id_v1_tokens__token_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
+    get_token_price_by_id_v1_tokens__token_id__price_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token_id: number;
+            };
+            cookie?: never;
         };
-        content: {
-          'application/json': components['schemas']['RrcEnvelope'];
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenPriceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
     };
-  };
-  get_bad_debt_by_address_v1_risk__chain_id___token_address__bad_debt_get: {
-    parameters: {
-      query: {
-        /** @description Collateral gap fraction in [0, 1]. */
-        gap_pct: number | string;
-      };
-      header?: never;
-      path: {
-        /** @description EVM chain id. */
-        chain_id: number;
-        /** @description 0x-prefixed token contract address (40 hex chars). */
-        token_address: string;
-      };
-      cookie?: never;
+    get_tx_events_v1_tx__tx_hash__events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description 0x-prefixed 32-byte transaction hash. */
+                tx_hash: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProtocolEventResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
     };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['BadDebtResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description EVM chain id. */
-        chain_id: number;
-        /** @description 0x-prefixed token contract address (40 hex chars). */
-        token_address: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RiskBreakdownResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_bad_debt_v1_risk__receipt_token_id__bad_debt_get: {
-    parameters: {
-      query: {
-        /** @description Collateral gap fraction in [0, 1]. */
-        gap_pct: number | string;
-      };
-      header?: never;
-      path: {
-        receipt_token_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['BadDebtResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        receipt_token_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['RiskBreakdownResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_status_v1_status_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': unknown;
-        };
-      };
-    };
-  };
-  list_tokens_v1_tokens_get: {
-    parameters: {
-      query?: {
-        /** @description Filter by EVM chain id. */
-        chain_id?: number | null;
-        /** @description Filter by symbol (case-insensitive substring match). */
-        symbol?: string | null;
-        /** @description Max results (default 100, max 500). */
-        limit?: number;
-      };
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TokenResponse'][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_token_v1_tokens__chain_id___token_address__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description EVM chain id. */
-        chain_id: number;
-        /** @description 0x-prefixed token contract address (40 hex chars). */
-        token_address: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TokenResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_token_price_v1_tokens__chain_id___token_address__price_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description EVM chain id. */
-        chain_id: number;
-        /** @description 0x-prefixed token contract address (40 hex chars). */
-        token_address: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TokenPriceResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_token_by_id_v1_tokens__token_id__get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        token_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TokenResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_token_price_by_id_v1_tokens__token_id__price_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        token_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['TokenPriceResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_tx_events_v1_tx__tx_hash__events_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        /** @description 0x-prefixed 32-byte transaction hash. */
-        tx_hash: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['ProtocolEventResponse'][];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
 }

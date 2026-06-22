@@ -12,6 +12,7 @@ import (
 // MockUserRepository implements outbound.UserRepository for testing.
 type MockUserRepository struct {
 	GetOrCreateUserFn            func(ctx context.Context, tx pgx.Tx, user entity.User) (int64, error)
+	GetOrCreateUsersFn           func(ctx context.Context, tx pgx.Tx, users []entity.User) (map[common.Address]int64, error)
 	UpsertUserProtocolMetadataFn func(ctx context.Context, metadata []*entity.UserProtocolMetadata) error
 }
 
@@ -23,6 +24,9 @@ func (m *MockUserRepository) GetOrCreateUser(ctx context.Context, tx pgx.Tx, use
 }
 
 func (m *MockUserRepository) GetOrCreateUsers(ctx context.Context, tx pgx.Tx, users []entity.User) (map[common.Address]int64, error) {
+	if m.GetOrCreateUsersFn != nil {
+		return m.GetOrCreateUsersFn(ctx, tx, users)
+	}
 	result := make(map[common.Address]int64, len(users))
 	for i, u := range users {
 		if m.GetOrCreateUserFn != nil {

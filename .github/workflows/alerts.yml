@@ -32,12 +32,12 @@ jobs:
       id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
       - name: Check out internal actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           repository: archon-research/github-actions
           ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
@@ -62,7 +62,7 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
@@ -84,12 +84,12 @@ jobs:
       id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           persist-credentials: false
 
       - name: Check out internal actions
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
           repository: archon-research/github-actions
           ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
@@ -114,7 +114,7 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
