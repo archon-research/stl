@@ -240,11 +240,10 @@ func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 			if i == j {
 				continue
 			}
-			dec := 18 // default if CoinDecimals not set
-			if i < len(pool.CoinDecimals) {
-				dec = pool.CoinDecimals[i]
+			if i >= len(pool.CoinDecimals) {
+				return nil, fmt.Errorf("pool %s coin %d missing decimals (have %d, n_coins %d)", pool.Address, i, len(pool.CoinDecimals), pool.NCoins)
 			}
-			dx := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(dec)), nil)
+			dx := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(pool.CoinDecimals[i])), nil)
 			data, err = h.stableABI.Pack("get_dy", big.NewInt(int64(i)), big.NewInt(int64(j)), dx)
 			if err != nil {
 				return nil, fmt.Errorf("packing get_dy(%d,%d): %w", i, j, err)

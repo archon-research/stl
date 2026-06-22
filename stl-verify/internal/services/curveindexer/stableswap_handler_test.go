@@ -433,3 +433,33 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 		t.Fatalf("spot_dy len = %d, want 2", len(ss.Stableswap.SpotDy))
 	}
 }
+
+func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:           1,
+		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:         KindStableswapPreNG,
+		NCoins:       2,
+		CoinTokenIDs: []int64{1, 2},
+		CoinDecimals: []int{18, 18},
+	}
+
+	// Build results where the first balances call (required, AllowFailure=false) reverts.
+	baseResults := stableswapPreNGResults(t, a)
+	revertResults := make([]outbound.Result, len(baseResults))
+	for i := range revertResults {
+		revertResults[i] = baseResults[i]
+	}
+	revertResults[0] = outbound.Result{Success: false, ReturnData: nil} // First balances call reverts
+
+	mc := &fakeMulticaller{results: revertResults}
+	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Errorf("snapshot with required call revert should error, got nil")
+	}
+}

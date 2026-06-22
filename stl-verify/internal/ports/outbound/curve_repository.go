@@ -18,7 +18,7 @@ type CurvePoolRow struct {
 	Kind         string // matches curve_pool.pool_kind
 	NCoins       int
 	CoinTokenIDs []int64 // index-aligned (ordered by coin_index)
-	CoinDecimals []int
+	CoinDecimals []int   // index-aligned (ordered by coin_index), matching CoinTokenIDs
 	DeployBlock  int64
 }
 
