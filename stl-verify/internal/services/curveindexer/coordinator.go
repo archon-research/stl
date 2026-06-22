@@ -71,22 +71,22 @@ type Coordinator struct {
 // pool's Kind must have a corresponding handler entry.
 func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 	if deps.Multicaller == nil {
-		return nil, fmt.Errorf("Multicaller is required")
+		return nil, fmt.Errorf("multicaller is required")
 	}
 	if deps.Repo == nil {
-		return nil, fmt.Errorf("Repo is required")
+		return nil, fmt.Errorf("repo is required")
 	}
 	if deps.EventWriter == nil {
-		return nil, fmt.Errorf("EventWriter is required")
+		return nil, fmt.Errorf("eventWriter is required")
 	}
 	if deps.TxManager == nil {
-		return nil, fmt.Errorf("TxManager is required")
+		return nil, fmt.Errorf("txManager is required")
 	}
 	if deps.Handlers == nil {
-		return nil, fmt.Errorf("Handlers is required")
+		return nil, fmt.Errorf("handlers is required")
 	}
 	if deps.Logger == nil {
-		return nil, fmt.Errorf("Logger is required")
+		return nil, fmt.Errorf("logger is required")
 	}
 
 	poolsByAddr := make(map[common.Address]RegisteredPool, len(deps.Pools))
