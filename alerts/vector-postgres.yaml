@@ -23,7 +23,8 @@
 # `cluster`/`service_id` are preserved through `max by (...)` so the Alertmanager
 # Slack template's `Cluster:` header is populated. No static `cluster`/`env`
 # labels in the rule's labels block (FORBIDDEN_LABELS in the mimir-rules-sync
-# lint); cluster is only matched in the expr against the metric's own label.
+# lint); `cluster` and `service_id` are matched only in the expr, against the
+# metric's own labels.
 #
 # Per-env pinning (2026-06-19): each rule is scoped to its (cluster, service_id)
 # pair instead of trusting `cluster` alone, because the exporter topology is

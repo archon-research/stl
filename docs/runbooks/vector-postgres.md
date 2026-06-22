@@ -33,10 +33,11 @@ As of 2026-06-19 the exporter topology is wrong, and the rules are pinned per
   that leak cannot page as a staging alert; the staging rule is pinned to
   `service_id="xd7na17213"` so it stays immune to the leak.
 
-Infra action plan: [staging-db-metrics-export-plan.md](../staging-db-metrics-export-plan.md).
-Verify coverage with `count by (cluster, service_id) ({job="tigerdata"})` in each
-Grafana stack: staging should show `xd7na17213` (not `ucpymqz73b`); prod should
-show `ucpymqz73b`.
+The fix lives in the infrastructure repo: enable the `xd7na17213` metrics export
+labelled `cluster=archon-staging`, and stop prod metrics being ingested into the
+staging stack. Verify coverage with `count by (cluster, service_id) ({job="tigerdata"})`
+in each Grafana stack: staging should show `xd7na17213` (not `ucpymqz73b`); prod
+should show `ucpymqz73b`.
 
 ---
 
