@@ -11,20 +11,23 @@ package dextelemetry
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
 // Telemetry emits per-worker block/error counters plus a block-duration
-// histogram. Every datapoint is tagged with the worker's chain ID via the
-// `chain` attribute so alerts can `sum by (chain)` like the morpho/oracle
-// alerts do. The receiver is nil-safe: every method becomes a no-op when
-// called on a nil pointer, so production code can pass nil for "telemetry
-// disabled" without guard checks at each call site.
+// histogram. Every datapoint is tagged with the worker's chain NAME via the
+// `chain` attribute (the same entity.ChainName value morpho/oracle emit) so
+// shared dashboards and alerts can `sum by (chain)` across all indexers without
+// the value spaces fragmenting. The receiver is nil-safe: every method becomes a
+// no-op when called on a nil pointer, so production code can pass nil for
+// "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
 	prefix          string
 	chainAttr       attribute.KeyValue
@@ -37,16 +40,18 @@ type Telemetry struct {
 // and `<prefix>.errors.total`, plus the `<prefix>.block.duration_seconds`
 // histogram. The OTel-to-Prometheus exporter normalises the dots to
 // underscores and adds the `_total` suffix, yielding the metric series names
-// the alert rules expect. The chainID is baked into every datapoint as a
-// `chain` attribute (string form) so multi-chain Prometheus dashboards can
-// distinguish ethereum vs base vs avalanche traffic without resorting to
-// k8s pod labels.
+// the alert rules expect. The chain NAME (via entity.ChainName) is baked into
+// every datapoint as the `chain` attribute so multi-chain dashboards line up
+// with the morpho/oracle indexers, which label the same way. An unknown chainID
+// is rejected so a worker fails hard at startup rather than emitting an empty or
+// mismatched `chain` label.
 func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")
 	}
-	if chainID <= 0 {
-		return nil, fmt.Errorf("dextelemetry.NewTelemetry: chainID must be positive, got %d", chainID)
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return nil, fmt.Errorf("dextelemetry.NewTelemetry: %w", err)
 	}
 	meter := otel.Meter(prefix + "-dex-worker")
 
@@ -70,6 +75,11 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		prefix+".block.duration_seconds",
 		metric.WithDescription("Wall-clock duration of processBlockEvent in seconds"),
 		metric.WithUnit("s"),
+		// Declare seconds-scale buckets on the instrument (matching morpho/oracle)
+		// rather than relying on the global view: OTel's default millisecond-scale
+		// buckets would pin histogram_quantile near the top bucket for sub-second
+		// durations.
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating %s.block.duration_seconds histogram: %w", prefix, err)
@@ -77,7 +87,7 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 
 	return &Telemetry{
 		prefix:          prefix,
-		chainAttr:       attribute.String("chain", strconv.FormatInt(chainID, 10)),
+		chainAttr:       attribute.String("chain", chainName),
 		blocksProcessed: blocks,
 		errorsTotal:     errs,
 		blockDuration:   dur,

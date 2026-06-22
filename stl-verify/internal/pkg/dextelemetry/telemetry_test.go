@@ -3,18 +3,20 @@ package dextelemetry
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 )
 
-// Review-11: every datapoint must carry a `chain="<id>"` attribute so the
-// alert rules can `sum by (chain)` like the morpho/oracle alerts do, and
-// query-time triage can tell which chain produced the signal without
-// inferring from k8s pod labels alone.
+// Review-11 / A2: every datapoint must carry a `chain="<name>"` attribute (the
+// entity.ChainName value, matching morpho/oracle) so shared alerts can
+// `sum by (chain)` across all indexers without the value spaces fragmenting.
 func TestRecordBlockProcessed_AttachesChainLabel(t *testing.T) {
 	reader := metricsdk.NewManualReader()
 	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
@@ -38,14 +40,15 @@ func TestRecordBlockProcessed_AttachesChainLabel(t *testing.T) {
 		t.Fatalf("Collect: %v", err)
 	}
 
-	if got := readChainAttr(t, &rm, "curve.blocks.processed"); got != "8453" {
-		t.Errorf("curve.blocks.processed chain attr = %q, want %q", got, "8453")
+	const want = "base" // entity.ChainName(8453)
+	if got := readChainAttr(t, &rm, "curve.blocks.processed"); got != want {
+		t.Errorf("curve.blocks.processed chain attr = %q, want %q", got, want)
 	}
-	if got := readChainAttr(t, &rm, "curve.errors.total"); got != "8453" {
-		t.Errorf("curve.errors.total chain attr = %q, want %q", got, "8453")
+	if got := readChainAttr(t, &rm, "curve.errors.total"); got != want {
+		t.Errorf("curve.errors.total chain attr = %q, want %q", got, want)
 	}
-	if got := readChainAttr(t, &rm, "curve.block.duration_seconds"); got != "8453" {
-		t.Errorf("curve.block.duration_seconds chain attr = %q, want %q", got, "8453")
+	if got := readChainAttr(t, &rm, "curve.block.duration_seconds"); got != want {
+		t.Errorf("curve.block.duration_seconds chain attr = %q, want %q", got, want)
 	}
 }
 
@@ -139,6 +142,57 @@ func readHistogram(t *testing.T, rm *metricdata.ResourceMetrics, name string) (c
 	return 0, 0
 }
 
+// A4: the duration histogram must declare seconds-scale buckets on the
+// instrument itself (not rely on the global view), so it is correct even under
+// a bare reader and matches morpho/oracle.
+func TestNewTelemetry_HistogramUsesSecondsBuckets(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+	tel.RecordBlockProcessed(context.Background(), 10*time.Millisecond, nil)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	bounds := readHistogramBounds(t, &rm, "curve.block.duration_seconds")
+	if !slices.Equal(bounds, telemetry.SecondsDurationBuckets) {
+		t.Errorf("histogram bounds = %v, want SecondsDurationBuckets %v", bounds, telemetry.SecondsDurationBuckets)
+	}
+}
+
+func readHistogramBounds(t *testing.T, rm *metricdata.ResourceMetrics, name string) []float64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("%s: unexpected metric type %T", name, m.Data)
+			}
+			if len(hist.DataPoints) == 0 {
+				t.Fatalf("%s: no datapoints", name)
+			}
+			return hist.DataPoints[0].Bounds
+		}
+	}
+	t.Fatalf("metric %s not found", name)
+	return nil
+}
+
 func TestNewTelemetry_RejectsEmptyPrefix(t *testing.T) {
 	_, err := NewTelemetry("", 1)
 	if err == nil {
@@ -146,10 +200,12 @@ func TestNewTelemetry_RejectsEmptyPrefix(t *testing.T) {
 	}
 }
 
-func TestNewTelemetry_RejectsNonPositiveChainID(t *testing.T) {
-	for _, chainID := range []int64{0, -1, -8453} {
+func TestNewTelemetry_RejectsUnknownChainID(t *testing.T) {
+	// Non-positive and unrecognised chain IDs both fail entity.ChainName, so the
+	// worker crashes at startup rather than emitting an empty/mismatched label.
+	for _, chainID := range []int64{0, -1, -8453, 999999} {
 		if _, err := NewTelemetry("curve", chainID); err == nil {
-			t.Errorf("NewTelemetry(\"curve\", %d) returned nil error; chainID must be positive", chainID)
+			t.Errorf("NewTelemetry(\"curve\", %d) returned nil error; chainID must be a known chain", chainID)
 		}
 	}
 }

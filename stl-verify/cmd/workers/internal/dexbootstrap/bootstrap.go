@@ -185,7 +185,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	d.Multicaller = mc
 
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.DBURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))
 	if err != nil {
 		d.Close()
 		return nil, fmt.Errorf("opening database: %w", err)
