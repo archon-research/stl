@@ -76,11 +76,12 @@ CREATE TABLE IF NOT EXISTS curve_swap
     block_timestamp    TIMESTAMPTZ NOT NULL,
     tx_hash            BYTEA       NOT NULL,
     log_index          INT         NOT NULL,
-    sender             BYTEA       NOT NULL,
-    sold_id            SMALLINT    NOT NULL,
+    buyer              BYTEA       NOT NULL,
+    sold_id            INT         NOT NULL,
+    bought_id          INT         NOT NULL,
     tokens_sold        NUMERIC     NOT NULL,
-    bought_id          SMALLINT    NOT NULL,
     tokens_bought      NUMERIC     NOT NULL,
+    fee                NUMERIC,
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     -- block_timestamp must be in the PK: TimescaleDB requires the partition
@@ -161,10 +162,13 @@ CREATE TABLE IF NOT EXISTS curve_liquidity_event
     block_timestamp    TIMESTAMPTZ NOT NULL,
     tx_hash            BYTEA       NOT NULL,
     log_index          INT         NOT NULL,
-    event_type         VARCHAR(10) NOT NULL CHECK (event_type IN ('add', 'remove')),
     provider           BYTEA       NOT NULL,
+    kind               VARCHAR(20) NOT NULL CHECK (kind IN ('add','remove','remove_one','remove_imbalance')),
     token_amounts      NUMERIC[]   NOT NULL,
-    lp_token_supply    NUMERIC,
+    coin_index         INT,
+    fees               NUMERIC[],
+    invariant          NUMERIC,
+    token_supply       NUMERIC,
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (curve_pool_id, block_timestamp, block_number, block_version, log_index, processing_version)
@@ -243,7 +247,12 @@ CREATE TABLE IF NOT EXISTS curve_stableswap_state
     block_number       BIGINT      NOT NULL,
     block_version      INT         NOT NULL DEFAULT 0,
     block_timestamp    TIMESTAMPTZ NOT NULL,
+    balances           NUMERIC[]   NOT NULL,
     virtual_price      NUMERIC     NOT NULL,
+    total_supply       NUMERIC     NOT NULL,
+    a                  NUMERIC     NOT NULL,
+    fee                NUMERIC     NOT NULL,
+    spot_dy            NUMERIC[]   NOT NULL,
     last_price         NUMERIC,
     price_oracle       NUMERIC,
     processing_version INT         NOT NULL DEFAULT 0,
@@ -311,8 +320,8 @@ EXECUTE FUNCTION assign_processing_version_curve_stableswap_state();
 
 -- ============================================================================
 -- curve_cryptoswap_state: periodic snapshots of cryptoswap pool oracle state.
--- price_scale_raw / price_oracle_raw store the (n-1)-element vectors returned
--- by price_scale(i) / price_oracle(i) for i in [0, n-2].
+-- price_scale / price_oracle / last_prices store the (n-1)-element vectors
+-- returned by price_scale(i) / price_oracle(i) / last_prices(i) for i in [0, n-2].
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS curve_cryptoswap_state
 (
@@ -320,12 +329,18 @@ CREATE TABLE IF NOT EXISTS curve_cryptoswap_state
     block_number       BIGINT      NOT NULL,
     block_version      INT         NOT NULL DEFAULT 0,
     block_timestamp    TIMESTAMPTZ NOT NULL,
-    d                  NUMERIC     NOT NULL,
+    balances           NUMERIC[]   NOT NULL,
     virtual_price      NUMERIC     NOT NULL,
+    total_supply       NUMERIC     NOT NULL,
+    a                  NUMERIC     NOT NULL,
+    gamma              NUMERIC     NOT NULL,
+    fee                NUMERIC     NOT NULL,
+    d                  NUMERIC,
     xcp_profit         NUMERIC,
-    price_scale_raw    NUMERIC[]   NOT NULL,
-    price_oracle_raw   NUMERIC[]   NOT NULL,
-    last_prices_raw    NUMERIC[]   NOT NULL,
+    price_scale        NUMERIC[]   NOT NULL,
+    price_oracle       NUMERIC[]   NOT NULL,
+    last_prices        NUMERIC[]   NOT NULL,
+    spot_dy            NUMERIC[]   NOT NULL,
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (curve_pool_id, block_timestamp, block_number, block_version, processing_version)

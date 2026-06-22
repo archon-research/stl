@@ -252,16 +252,119 @@ func TestCurveMigration(t *testing.T) {
 		err := curveTestPool.QueryRow(ctx, `
 			INSERT INTO curve_swap
 			    (curve_pool_id, block_number, block_version, block_timestamp,
-			     tx_hash, log_index, sender, sold_id, tokens_sold, bought_id, tokens_bought, build_id)
+			     tx_hash, log_index, buyer, sold_id, bought_id, tokens_sold, tokens_bought, build_id)
 			VALUES ($1, 11592600, 0, $2::timestamptz,
 			        '\xaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd'::bytea,
 			        0,
 			        '\x1111111111111111111111111111111111111111'::bytea,
-			        0, 1000000000000000000, 1, 990000000000000000, 0)
+			        0, 1, 1000000000000000000, 990000000000000000, 0)
 			RETURNING processing_version`,
 			poolID, swapTS).Scan(&pv)
 		if err != nil {
 			t.Fatalf("inserting test swap: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+
+	t.Run("processing_version_trigger_fires_on_curve_liquidity_event", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving stETH classic pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_liquidity_event
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     tx_hash, log_index, provider, kind, token_amounts, build_id)
+			VALUES ($1, 11592601, 0, '2021-01-01T01:00:00Z'::timestamptz,
+			        '\xbbccddeebbccddeebbccddeebbccddeebbccddeebbccddeebbccddeebbccddee'::bytea,
+			        0,
+			        '\x2222222222222222222222222222222222222222'::bytea,
+			        'add',
+			        ARRAY[1000000000000000000, 990000000000000000]::NUMERIC[],
+			        0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test liquidity event: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+
+	t.Run("processing_version_trigger_fires_on_curve_stableswap_state", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving stETH classic pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_stableswap_state
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     balances, virtual_price, total_supply, a, fee, spot_dy, build_id)
+			VALUES ($1, 11592602, 0, '2021-01-01T02:00:00Z'::timestamptz,
+			        ARRAY[1000000000000000000, 990000000000000000]::NUMERIC[],
+			        1000000000000000000,
+			        1000000000000000000,
+			        100,
+			        4000000,
+			        ARRAY[990000000000000000, 1000000000000000000]::NUMERIC[],
+			        0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test stableswap state: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+
+	t.Run("processing_version_trigger_fires_on_curve_cryptoswap_state", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving TricryptoUSDC pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_cryptoswap_state
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     balances, virtual_price, total_supply, a, gamma, fee,
+			     price_scale, price_oracle, last_prices, spot_dy, build_id)
+			VALUES ($1, 17072900, 0, '2023-04-01T00:00:00Z'::timestamptz,
+			        ARRAY[1000000, 1000000000000000000, 1000000000000000000]::NUMERIC[],
+			        1000000000000000000,
+			        1000000000000000000,
+			        2700000,
+			        145000000000000000,
+			        4000000,
+			        ARRAY[1000000000000000000, 1000000000000000000]::NUMERIC[],
+			        ARRAY[1000000000000000000, 1000000000000000000]::NUMERIC[],
+			        ARRAY[1000000000000000000, 1000000000000000000]::NUMERIC[],
+			        ARRAY[990000000000000000, 990000000000000000]::NUMERIC[],
+			        0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test cryptoswap state: %v", err)
 		}
 		if pv != 0 {
 			t.Errorf("processing_version = %d after first insert, want 0", pv)
