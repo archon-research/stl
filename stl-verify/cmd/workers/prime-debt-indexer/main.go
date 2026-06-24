@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -60,16 +59,6 @@ func main() {
 		slog.Error("prime-debt-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// maskRPCURL redacts the path (which typically contains API keys) from an RPC URL.
-// Example: "https://eth-mainnet.g.alchemy.com/v2/abc123" → "https://eth-mainnet.g.alchemy.com/***"
-func maskRPCURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "***"
-	}
-	return fmt.Sprintf("%s://%s/***", u.Scheme, u.Host)
 }
 
 // run is the entry point for the prime-debt-indexer.
@@ -144,7 +133,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(*dbURL))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
@@ -181,7 +170,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("eth rpc dial: %w", err)
 	}
 	defer ethClient.Close()
-	logger.Info("eth rpc client connected", "rpc", maskRPCURL(*rpcURL))
+	logger.Info("eth rpc client connected", "rpc", rpchttp.MaskURL(*rpcURL))
 
 	// Multicaller
 	chainName, err := entity.ChainName(chainID)

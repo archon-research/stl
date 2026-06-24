@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
 from app.domain.entities.allocation import EthAddress
-from tests.integration.conftest import store_test_ids
+from tests.integration.seed import store_test_ids
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")

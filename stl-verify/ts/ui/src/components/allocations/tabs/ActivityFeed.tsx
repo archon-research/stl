@@ -33,7 +33,17 @@ import type {
   Prime,
   ProtocolEvent,
 } from '../../../types/allocation';
-import { ChainLogo, PageShell, ProtocolLogo, TokenAddress } from '../../shared';
+import {
+  ChainLogo,
+  DEFAULT_RANGE_PRESET,
+  defaultTimeRange,
+  PageShell,
+  ProtocolLogo,
+  RangePicker,
+  type RangePreset,
+  type TimeRange,
+  TokenAddress,
+} from '../../shared';
 
 type ActivityFeedProps = {
   isEnabled: boolean;
@@ -52,12 +62,17 @@ type ActivityFeedProps = {
   showAllPrimes?: boolean;
   tokenOptions?: string[];
   chainLabels?: ChainLabelLookup;
+  // External range control: provided by parent-owned top bar picker.
+  externalRangePreset?: RangePreset;
+  externalTimeRange?: TimeRange;
+  onRangeChange?: (preset: RangePreset, range: TimeRange) => void;
 };
 
 type ActivityFilters = {
   from_timestamp?: string;
   to_timestamp?: string;
   limit?: number;
+  rangePreset: RangePreset;
 };
 
 const ACTION_FILTER_OPTIONS = [
@@ -74,36 +89,10 @@ const filterLabelClassName = css({
   letterSpacing: '0.1em',
   color: 'text.muted',
 });
-const dateInputClassName = css({
-  width: 'full',
-  h: '9',
-  borderRadius: 'md',
-  borderWidth: '1px',
-  borderStyle: 'solid',
-  borderColor: 'border.subtle',
-  bg: 'surface.default',
-  color: 'text.default',
-  px: '3',
-  fontSize: 'sm',
-});
 
 function normalizeFilterValue(value: string): string | undefined {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function toDateTimeLocalValue(value: string | undefined): string {
-  if (!value) {
-    return '';
-  }
-
-  const date = new Date(value);
-  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-  return localDate.toISOString().slice(0, 16);
-}
-
-function fromDateTimeLocalValue(value: string): string | undefined {
-  return value ? new Date(value).toISOString() : undefined;
 }
 
 function isSweepEvent(event: AllocationActivity): boolean {
@@ -453,6 +442,9 @@ export function ActivityFeed({
   showAllPrimes = false,
   tokenOptions = [],
   chainLabels,
+  externalRangePreset,
+  externalTimeRange,
+  onRangeChange: onExternalRangeChange,
 }: ActivityFeedProps) {
   const isPageMode = mode === 'page';
   const txRequestControllersRef = useRef<Record<string, AbortController>>({});
@@ -470,9 +462,19 @@ export function ActivityFeed({
   const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
     Record<string, boolean>
   >({});
-  const [filters, setFilters] = useState<ActivityFilters>({
-    limit: 50,
+  const [filters, setFilters] = useState<ActivityFilters>(() => {
+    const initialRange = defaultTimeRange();
+    return {
+      limit: 50,
+      rangePreset: DEFAULT_RANGE_PRESET,
+      from_timestamp: initialRange.from_timestamp,
+      to_timestamp: initialRange.to_timestamp,
+    };
   });
+  // The parent (page mode) owns the range and passes it via props; the local
+  // `filters` range is only the source of truth in standalone/drawer mode.
+  const isRangeControlled =
+    externalTimeRange !== undefined && onExternalRangeChange !== undefined;
   const uniqueTokenOptions = useMemo(() => {
     const symbols = new Set(tokenOptions);
     // Keep a deep-linked token selectable even if it isn't in the catalog list.
@@ -481,15 +483,6 @@ export function ActivityFeed({
     }
     return Array.from(symbols).sort((a, b) => a.localeCompare(b));
   }, [tokenOptions, tokenFilter]);
-  // Page mode: action/token come from controlled props (URL-backed); the date
-  // range stays local. hasActiveFilters drives the "clear" affordance.
-  const hasActiveFilters = Boolean(
-    actionFilter ||
-    tokenFilter ||
-    filters.from_timestamp ||
-    filters.to_timestamp,
-  );
-
   const resetTxInspectionState = () => {
     Object.values(txRequestControllersRef.current).forEach((controller) => {
       controller.abort();
@@ -499,17 +492,6 @@ export function ActivityFeed({
     setTxEventsByHash({});
     setTxEventErrorsByHash({});
     setTxEventsLoadingByHash({});
-  };
-
-  const updateFilter = (
-    key: keyof ActivityFilters,
-    value: string | undefined,
-  ) => {
-    setFilters((previous) => ({
-      ...previous,
-      [key]: value,
-    }));
-    resetTxInspectionState();
   };
 
   const updateActionFilter = (value: string | null) => {
@@ -522,10 +504,63 @@ export function ActivityFeed({
     resetTxInspectionState();
   };
 
+  const updateRangePreset = (preset: RangePreset, range: TimeRange) => {
+    if (isRangeControlled) {
+      onExternalRangeChange?.(preset, range);
+    } else {
+      setFilters((previous) => ({
+        ...previous,
+        rangePreset: preset,
+        from_timestamp: range.from_timestamp,
+        to_timestamp: range.to_timestamp,
+      }));
+    }
+    resetTxInspectionState();
+  };
+
+  // When the parent drives range via props, use those values over local state.
+  const effectivePreset = isRangeControlled
+    ? (externalRangePreset ?? DEFAULT_RANGE_PRESET)
+    : filters.rangePreset;
+  const effectiveRange = useMemo<TimeRange>(() => {
+    if (isRangeControlled && externalTimeRange) {
+      return externalTimeRange;
+    }
+    // filters is always seeded with a range; fall back defensively so the
+    // strict TimeRange (non-optional timestamps) always holds.
+    const fallback = defaultTimeRange();
+    return {
+      from_timestamp: filters.from_timestamp ?? fallback.from_timestamp,
+      to_timestamp: filters.to_timestamp ?? fallback.to_timestamp,
+    };
+  }, [
+    isRangeControlled,
+    externalTimeRange,
+    filters.from_timestamp,
+    filters.to_timestamp,
+  ]);
+
+  // Page mode: action/token come from controlled props (URL-backed); the date
+  // range stays local. The range is always seeded with a default, so a
+  // non-default preset — not the mere presence of timestamps — is what marks
+  // the range as an active filter for the "clear" affordance.
+  const hasActiveFilters = Boolean(
+    actionFilter || tokenFilter || effectivePreset !== DEFAULT_RANGE_PRESET,
+  );
+
   const clearFilters = () => {
     onActionFilterChange?.(null);
     onTokenFilterChange?.(null);
-    setFilters({ limit: filters.limit ?? 50 });
+    const nextRange = defaultTimeRange();
+    if (isRangeControlled) {
+      onExternalRangeChange?.(DEFAULT_RANGE_PRESET, nextRange);
+    }
+    setFilters({
+      limit: filters.limit ?? 50,
+      rangePreset: DEFAULT_RANGE_PRESET,
+      from_timestamp: nextRange.from_timestamp,
+      to_timestamp: nextRange.to_timestamp,
+    });
     resetTxInspectionState();
   };
 
@@ -548,8 +583,8 @@ export function ActivityFeed({
             : undefined,
         token_symbol: tokenFilter || undefined,
         action_type: actionFilter || undefined,
-        from_timestamp: filters.from_timestamp,
-        to_timestamp: filters.to_timestamp,
+        from_timestamp: effectiveRange.from_timestamp,
+        to_timestamp: effectiveRange.to_timestamp,
         limit: filters.limit ?? 50,
       };
     }
@@ -563,6 +598,7 @@ export function ActivityFeed({
     };
   }, [
     actionFilter,
+    effectiveRange,
     filters,
     isPageMode,
     selectedNetwork,
@@ -826,6 +862,17 @@ export function ActivityFeed({
             Across all primes
           </span>
         ) : null}
+
+        {!isPageMode ? (
+          <div className={css({ display: 'grid', gap: '1' })}>
+            <span className={filterLabelClassName}>Time range</span>
+            <RangePicker
+              preset={effectivePreset}
+              range={effectiveRange}
+              onChange={updateRangePreset}
+            />
+          </div>
+        ) : null}
       </div>
       {latestActivityAt ? (
         <div
@@ -904,38 +951,7 @@ export function ActivityFeed({
             </StyledSelect>
           </label>
         ) : null}
-        <label className={filterFieldClassName}>
-          <span className={filterLabelClassName}>From</span>
-          <input
-            aria-label="Filter activity from timestamp"
-            type="datetime-local"
-            value={toDateTimeLocalValue(filters.from_timestamp)}
-            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              updateFilter(
-                'from_timestamp',
-                fromDateTimeLocalValue(event.target.value),
-              )
-            }
-            className={dateInputClassName}
-          />
-        </label>
-        <label className={filterFieldClassName}>
-          <span className={filterLabelClassName}>To</span>
-          <input
-            aria-label="Filter activity to timestamp"
-            type="datetime-local"
-            value={toDateTimeLocalValue(filters.to_timestamp)}
-            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-              updateFilter(
-                'to_timestamp',
-                fromDateTimeLocalValue(event.target.value),
-              )
-            }
-            className={dateInputClassName}
-          />
-        </label>
       </div>
-
       {hasActiveFilters ? (
         <div
           className={css({

@@ -435,7 +435,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		}
 
 		// Get or create token
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -558,7 +558,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 			ChainID:        chainID,
 			Address:        eventData.User,
-			FirstSeenBlock: blockNumber,
+			FirstSeenBlock: &blockNumber,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to ensure user: %w", err)
@@ -574,7 +574,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -653,7 +653,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 			ChainID:        chainID,
 			Address:        eventData.User,
-			FirstSeenBlock: blockNumber,
+			FirstSeenBlock: &blockNumber,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to ensure user: %w", err)
@@ -681,7 +681,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				Address:        eventData.Reserve,
 				Symbol:         normalizeTokenSymbol(tokenMetadata.Symbol),
 				Decimals:       tokenMetadata.Decimals,
-				CreatedAtBlock: blockNumber,
+				CreatedAtBlock: &blockNumber,
 			}}
 		}
 		tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, nil, extras...)
@@ -735,7 +735,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to ensure user: %w", err)
@@ -823,7 +823,7 @@ func (s *Service) persistPositionData(
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to ensure user: %w", err)
@@ -919,7 +919,7 @@ func (s *Service) resolvePositionTokens(
 			Address:        c.Asset,
 			Symbol:         normalizeTokenSymbol(c.Symbol),
 			Decimals:       c.Decimals,
-			CreatedAtBlock: blockNumber,
+			CreatedAtBlock: &blockNumber,
 		}
 	}
 	for _, d := range debts {
@@ -931,7 +931,7 @@ func (s *Service) resolvePositionTokens(
 			Address:        d.Asset,
 			Symbol:         normalizeTokenSymbol(d.Symbol),
 			Decimals:       d.Decimals,
-			CreatedAtBlock: blockNumber,
+			CreatedAtBlock: &blockNumber,
 		}
 	}
 	for _, e := range extras {
@@ -1021,7 +1021,7 @@ func (s *Service) PersistUserPositionBatch(
 			userEntities[i] = entity.User{
 				ChainID:        chainID,
 				Address:        p.User,
-				FirstSeenBlock: blockNumber,
+				FirstSeenBlock: &blockNumber,
 			}
 		}
 		userIDs, err := s.userRepo.GetOrCreateUsers(ctx, tx, userEntities)
@@ -1045,7 +1045,7 @@ func (s *Service) PersistUserPositionBatch(
 						Address:        d.Asset,
 						Symbol:         normalizeTokenSymbol(d.Symbol),
 						Decimals:       d.Decimals,
-						CreatedAtBlock: blockNumber,
+						CreatedAtBlock: &blockNumber,
 					}
 				}
 			}
@@ -1056,7 +1056,7 @@ func (s *Service) PersistUserPositionBatch(
 						Address:        c.Asset,
 						Symbol:         normalizeTokenSymbol(c.Symbol),
 						Decimals:       c.Decimals,
-						CreatedAtBlock: blockNumber,
+						CreatedAtBlock: &blockNumber,
 					}
 				}
 			}
@@ -1064,16 +1064,6 @@ func (s *Service) PersistUserPositionBatch(
 		tokenSlice := make([]outbound.TokenInput, 0, len(tokenInputs))
 		for _, t := range tokenInputs {
 			tokenSlice = append(tokenSlice, t)
-		}
-
-		// Defensive: all tokens in a batch must belong to the same chain.
-		if len(tokenSlice) > 1 {
-			chainID := tokenSlice[0].ChainID
-			for _, t := range tokenSlice[1:] {
-				if t.ChainID != chainID {
-					return fmt.Errorf("mixed chain IDs in token batch: %d and %d", chainID, t.ChainID)
-				}
-			}
 		}
 
 		tokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, tokenSlice)

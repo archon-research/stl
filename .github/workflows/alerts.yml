@@ -15,6 +15,11 @@ concurrency:
   group: alerts-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default. Jobs that need more (staging/prod: id-token +
+# pull-requests) declare their own block, which overrides this. The notify
+# jobs reach Slack via webhook + an SSH deploy key, so they need no token.
+permissions: {}
+
 jobs:
   # Staging runs on PRs (for the diff preview comment) and on push to main.
   # Fork-PR guard: secrets aren't passed to fork PRs, but we also refuse to
@@ -62,13 +67,30 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
           mimir-token: ${{ env.GC_TOKEN }}
           cluster-label: ${{ env.GC_CLUSTER_LABEL }}
           env-label: ${{ env.GC_ENV_LABEL }}
+
+  # Posts a Slack "awaiting approval" message before the gated prod job. The
+  # prod job carries `environment: production`, so it parks at the manual gate
+  # before any step runs — an in-job notify step would never fire while the job
+  # is still waiting. This job depends only on `staging`, so it runs while prod
+  # waits at the gate. Mirrors notify-prod-pr-created in deploy.yaml.
+  notify-prod-pending:
+    name: Notify Prod Alerts Sync Awaiting Approval
+    needs: staging
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: pending
+      context: Alerts Prod Sync
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
   # Prod only runs on push to main, and only after a `vector-engineers`
   # reviewer approves the `production` environment. PRs never reach this job
@@ -114,10 +136,43 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
           mimir-token: ${{ env.GC_TOKEN }}
           cluster-label: ${{ env.GC_CLUSTER_LABEL }}
           env-label: ${{ env.GC_ENV_LABEL }}
+
+  # Staging sync failures on push to main are silent otherwise. Scoped to push
+  # only — a staging failure on a PR is already visible as a failed check, so a
+  # Slack ping there would be noise.
+  notify-staging-failure:
+    name: Notify Staging Alerts Sync Failure
+    needs: staging
+    if: ${{ always() && github.event_name == 'push' && needs.staging.result == 'failure' }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Alerts Staging Sync
+      failed-jobs: |
+        Sync staging alert rules=${{ needs.staging.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  # Catches prod failures that are otherwise silent: a failed rules sync after
+  # approval, or a rejected `production` gate (both surface as result==failure).
+  notify-prod-failure:
+    name: Notify Prod Alerts Sync Failure
+    needs: prod
+    if: ${{ always() && needs.prod.result == 'failure' }}
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Alerts Prod Sync
+      failed-jobs: |
+        Sync prod alert rules=${{ needs.prod.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

@@ -6,6 +6,8 @@ per test module.  Migrations are applied by the ``module_db`` fixture from
 """
 
 import asyncio
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import asyncpg
@@ -15,7 +17,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.main import create_app
-from tests.integration.conftest import (
+from tests.integration.seed import (
     GHOST_CLOSED_PROXY_HEX,
     GHOST_MIXED_PROXY_HEX,
     GHOST_OPEN_PROXY_HEX,
@@ -50,6 +52,34 @@ _TX2_HEX = "bb" * 32
 _TX3_HEX = "cc" * 32
 _TX4_HEX = "dd" * 32
 _TX5_HEX = "ee" * 32
+
+# Flow-reconstruction (net_flow_usd) fixture: a dedicated prime whose aUSDC
+# activity exercises the signed-flow valuation. USDC is priced at 1 USD (seeded
+# in ``_seed``), so net_flow_usd equals the signed token magnitude.
+_FLOW_PRIME_VAULT_HEX = "f1" * 20
+_FLOW_PROXY_HEX = "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+_FLOW_TX_IN = "1a" * 32
+_FLOW_TX_OUT = "1b" * 32
+_FLOW_TX_SWEEP = "1c" * 32
+# All three events fall in the single 00:00 PT1H bucket.
+_FLOW_BUCKET_TS = datetime(2026, 1, 1, 0, 30, tzinfo=UTC)
+
+# Direct-asset flow fixture: a prime that holds raw USDC (no receipt-token
+# wrapper). Its flow must NOT contribute to net_flow_usd: direct underlying
+# tokens record outflows mostly as sweeps (excluded) while inflows are 'in', so
+# valuing them overstates net flow as gross inflow throughput. Only receipt-token
+# flows drive the reconstructed balance series.
+_DIRECT_FLOW_PRIME_VAULT_HEX = "f2" * 20
+_DIRECT_FLOW_PROXY_HEX = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+_DIRECT_FLOW_TX_IN = "2a" * 32
+_DIRECT_FLOW_TX_OUT = "2b" * 32
+
+# Total-capital LOCF fixture: the Spark SubProxy holds treasury USDS, observed
+# at two timestamps two hours apart, so gap-fill carry-forward and the
+# leading-gap null are observable.
+_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
+_CAP_SNAP1_TS = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+_CAP_SNAP2_TS = datetime(2026, 1, 1, 2, 0, tzinfo=UTC)
 
 
 async def _token_id_by_address(conn: asyncpg.Connection, addr_hex: str) -> int:
@@ -170,6 +200,100 @@ async def _seed(db_url: str) -> None:
                 tx=_TX5_HEX,
                 direction="in",
             )
+
+            # USDC has an oracle price, so obex's direct holding is valued in USD.
+            # GNO (grove's direct holding) is deliberately left unpriced to assert
+            # the null-amount_usd path for tokens with no oracle feed.
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+            await conn.execute(
+                "INSERT INTO onchain_token_price "
+                "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                "VALUES ($1, $2, 1500, 0, NOW(), $3)",
+                usdc_id,
+                oracle_id,
+                Decimal(1),
+            )
+
+            # net_flow_usd flow-reconstruction fixture: three aUSDC events in one
+            # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
+            # aUSDC's underlying USDC is priced at 1 USD, so net_flow_usd == 60.
+            flow_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('flow_test', $1) RETURNING id",
+                bytes.fromhex(_FLOW_PRIME_VAULT_HEX),
+            )
+            for offset, (tx, direction, amount) in enumerate(
+                [
+                    (_FLOW_TX_IN, "in", 100),
+                    (_FLOW_TX_OUT, "out", 40),
+                    (_FLOW_TX_SWEEP, "sweep", 1000),
+                ]
+            ):
+                await conn.execute(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction, created_at) "
+                    "VALUES (1, $1, $2, $3, $4, $5, 0, $6, 0, $4, $7, $8)",
+                    ausdc_token_id,
+                    flow_prime_id,
+                    bytes.fromhex(_FLOW_PROXY_HEX),
+                    Decimal(amount),
+                    5000 + offset,
+                    bytes.fromhex(tx),
+                    direction,
+                    _FLOW_BUCKET_TS,
+                )
+
+            # Direct-asset flow fixture: a prime holding raw USDC (no receipt
+            # token). +250 in, -50 out in one bucket. USDC has no receipt-token
+            # wrapper, so the flow is excluded from net_flow_usd (== 0) even
+            # though the events are still counted.
+            direct_flow_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('direct_flow_test', $1) RETURNING id",
+                bytes.fromhex(_DIRECT_FLOW_PRIME_VAULT_HEX),
+            )
+            for offset, (tx, direction, amount) in enumerate(
+                [
+                    (_DIRECT_FLOW_TX_IN, "in", 250),
+                    (_DIRECT_FLOW_TX_OUT, "out", 50),
+                ]
+            ):
+                await conn.execute(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction, created_at) "
+                    "VALUES (1, $1, $2, $3, $4, $5, 0, $6, 0, $4, $7, $8)",
+                    usdc_id,
+                    direct_flow_prime_id,
+                    bytes.fromhex(_DIRECT_FLOW_PROXY_HEX),
+                    Decimal(amount),
+                    7000 + offset,
+                    bytes.fromhex(tx),
+                    direction,
+                    _FLOW_BUCKET_TS,
+                )
+
+            # Total-capital LOCF fixture: the Spark SubProxy holds treasury USDS,
+            # observed at two timestamps two hours apart (and sharing spark's
+            # prime_id), so the gap bucket carries the earlier value forward and a
+            # bucket before the first observation gap-fills to null.
+            usds_id = await insert_token(conn, "USDS", 18, bytes.fromhex(_USDS_HEX))
+            for created_at, balance, tx, block in [
+                (_CAP_SNAP1_TS, 2_000_000, "a1" * 32, 6000),
+                (_CAP_SNAP2_TS, 2_100_000, "a2" * 32, 6001),
+            ]:
+                await conn.execute(
+                    "INSERT INTO allocation_position "
+                    "(chain_id, token_id, prime_id, proxy_address, balance, "
+                    "block_number, block_version, tx_hash, log_index, tx_amount, direction, created_at) "
+                    "VALUES (1, $1, $2, $3, $4, $5, 0, $6, 0, $4, 'in', $7)",
+                    usds_id,
+                    spark_id,
+                    bytes.fromhex(_SPARK_SUB_PROXY_HEX),
+                    Decimal(balance),
+                    block,
+                    bytes.fromhex(tx),
+                    created_at,
+                )
     finally:
         await conn.close()
 
@@ -256,7 +380,8 @@ def test_direct_underlying_holdings_surface_as_their_own_rows(
     """A prime holds raw USDC directly. It must not be attributed to any
     USDC-wrapping receipt token (that would double-count and fan out), but
     it should appear as a direct-asset row with null receipt_token fields
-    and ASSET category.
+    and ASSET category. USDC has an oracle price, so amount_usd is valued
+    (balance 250 × 1 USD).
     """
     response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
 
@@ -271,6 +396,7 @@ def test_direct_underlying_holdings_surface_as_their_own_rows(
     assert row["protocol_name"] is None
     assert row["underlying_token_address"] == f"0x{_USDC_HEX}"
     assert row["balance"] == "250"
+    assert Decimal(row["amount_usd"]) == Decimal("250")
     assert row["category"] == "asset"
 
 
@@ -279,6 +405,8 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
 ) -> None:
     """A prime holds only GNO. There is no receipt_token wrapping GNO, so the
     response contains exactly one direct-asset row and no receipt-token rows.
+    GNO has no oracle price, so amount_usd is null rather than the row being
+    dropped.
     """
     response = client.get(f"/v1/primes/0x{_GROVE_PROXY_HEX}/allocations")
 
@@ -289,6 +417,7 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     assert row["symbol"] == "GNO"
     assert row["receipt_token_id"] is None
     assert row["protocol_name"] is None
+    assert row["amount_usd"] is None
     assert row["category"] == "asset"
 
 
@@ -376,3 +505,150 @@ def test_same_block_log_index_tiebreak_decides_latest_row(client: TestClient) ->
     assert "aSyrupUSDT" not in by_symbol, "position zeroed within its final block surfaced"
     assert "USDS" in by_symbol, "position opened within the same block incorrectly filtered out"
     assert by_symbol["USDS"]["balance"] == "400"
+
+
+# ---------------------------------------------------------------------------
+# net_flow_usd: the signed flow valuation that drives the UI's reconstructed
+# total-allocation balance series. Inflows add, outflows subtract, and sweeps
+# (internal position moves) net to zero — a flipped sign here would silently
+# invert every reconstructed balance chart.
+# ---------------------------------------------------------------------------
+
+
+def test_activity_buckets_net_flow_is_signed_and_excludes_sweeps(client: TestClient) -> None:
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": f"0x{_FLOW_PROXY_HEX}",
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-01T01:00:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    buckets = envelope["data"]
+    assert len(buckets) == 1
+    bucket = buckets[0]
+    assert bucket["event_count"] == 3
+    # +100 (in) − 40 (out) + 0 (the 1000 sweep is excluded), valued at USDC = 1 USD.
+    assert Decimal(str(bucket["net_flow_usd"])) == Decimal("60")
+    # total_tx_amount is the unsigned magnitude sum and DOES include the sweep.
+    assert Decimal(str(bucket["total_tx_amount"])) == Decimal("1140")
+
+
+def test_activity_buckets_exclude_direct_asset_flows(client: TestClient) -> None:
+    """A flow whose token is held directly (no receipt-token wrapper) contributes
+    0 to net_flow_usd. Direct underlying tokens record outflows mostly as sweeps
+    (excluded) while inflows are 'in', so pricing them overstates net flow as
+    gross inflow throughput and makes the reconstructed balance ramp from zero;
+    only receipt-token flows drive the series. The events are still counted."""
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": f"0x{_DIRECT_FLOW_PROXY_HEX}",
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-01T01:00:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    buckets = envelope["data"]
+    assert len(buckets) == 1
+    # +250 (in) / -50 (out) on USDC, which is held directly (no receipt-token
+    # wrapper): not valued, so net_flow_usd is 0 though both events are counted.
+    assert buckets[0]["event_count"] == 2
+    assert Decimal(str(buckets[0]["net_flow_usd"])) == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# Total-capital aggregation: time_bucket_gapfill + locf over the SubProxy
+# treasury USDS balance. A bucket with no observation carries the previous
+# value forward; buckets before the first observation gap-fill to null. The
+# prime is addressed by its ALM proxy; the SubProxy is matched by shared
+# prime_id.
+# ---------------------------------------------------------------------------
+
+
+def test_total_capital_buckets_locf_carry_forward_and_leading_gap(client: TestClient) -> None:
+    response = client.get(
+        f"/v1/primes/0x{_SPARK_PROXY_HEX}/total-capital",
+        params={
+            "from_timestamp": "2025-12-31T23:00:00Z",
+            "to_timestamp": "2026-01-01T03:30:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    by_start = {datetime.fromisoformat(b["bucket_start"]): b for b in envelope["data"]}
+
+    leading = by_start[datetime(2025, 12, 31, 23, 0, tzinfo=UTC)]
+    assert leading["total_capital_usd"] is None, "bucket before the first observation must gap-fill to null"
+
+    first = by_start[datetime(2026, 1, 1, 0, 0, tzinfo=UTC)]
+    assert Decimal(first["total_capital_usd"]) == Decimal("2000000")
+
+    carried = by_start[datetime(2026, 1, 1, 1, 0, tzinfo=UTC)]
+    assert Decimal(carried["total_capital_usd"]) == Decimal("2000000"), "LOCF must carry the prior value into the gap"
+
+    second = by_start[datetime(2026, 1, 1, 2, 0, tzinfo=UTC)]
+    assert Decimal(second["total_capital_usd"]) == Decimal("2100000")
+
+    trailing = by_start[datetime(2026, 1, 1, 3, 0, tzinfo=UTC)]
+    assert Decimal(trailing["total_capital_usd"]) == Decimal("2100000")
+
+
+def test_total_capital_returns_all_null_when_prime_has_no_treasury(client: TestClient) -> None:
+    """Grove is a known prime (it holds GNO) but has no seeded SubProxy USDS, so
+    its total-capital series is a 200 with every bucket gap-filled to null —
+    not a 404 and not an error.
+    """
+    response = client.get(
+        f"/v1/primes/0x{_GROVE_PROXY_HEX}/total-capital",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-01T03:00:00Z",
+            "resolution": "PT1H",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["mode"] == "aggregated"
+    # No treasury observations -> every bucket is null (gap-filled) or the series
+    # is empty; either way no real value is surfaced, and it is not a 404/500.
+    assert all(b["total_capital_usd"] is None for b in envelope["data"])
+
+
+def test_risk_capital_self_computed_total_is_latest_treasury(client: TestClient) -> None:
+    """The self-computed risk-capital endpoint reports Total Risk Capital from the
+    latest on-chain SubProxy USDS balance (the 2.1M observation wins over 2.0M),
+    independent of the Star feed. The default model (gap_sweep) is reported and a
+    per-allocation breakdown is present; required RRC depends on model coverage
+    which the fixture does not seed, so it is not asserted here.
+    """
+    response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/risk-capital")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "gap_sweep"
+    assert Decimal(body["total_risk_capital_usd"]) == Decimal("2100000")
+    assert isinstance(body["per_allocation"], list)
+
+
+def test_risk_capital_returns_404_for_unknown_prime(client: TestClient) -> None:
+    response = client.get(f"/v1/primes/0x{_UNKNOWN_PROXY_HEX}/risk-capital")
+
+    assert response.status_code == 404

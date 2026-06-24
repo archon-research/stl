@@ -240,7 +240,7 @@ func (r *AllocationRepository) resolveTokenIDs(
 			pos.TokenAddress,
 			pos.TokenSymbol,
 			pos.TokenDecimals,
-			pos.CreatedAtBlock,
+			&pos.CreatedAtBlock,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(

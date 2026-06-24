@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.protocol_event_repository import PostgresProtocolEventRepository
+from app.adapters.postgres.protocol_event_repository import ProtocolEventRepository
 from app.api._validators import OptionalTxHashParam, TxHashParam
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
@@ -79,7 +79,7 @@ class ProtocolEventsEnvelope(BaseModel):
 
 
 async def _get_protocol_event_service(engine: AsyncEngine = Depends(get_engine)) -> ProtocolEventService:
-    repository = PostgresProtocolEventRepository(engine)
+    repository = ProtocolEventRepository(engine)
     return ProtocolEventService(repository)
 
 

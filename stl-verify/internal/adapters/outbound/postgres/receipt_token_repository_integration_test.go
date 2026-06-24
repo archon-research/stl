@@ -61,7 +61,7 @@ func seedReceiptTokenDeps(t *testing.T, ctx context.Context, chainID int64) (int
 	}
 
 	tokenAddr := common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F")
-	tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, tokenAddr, "DAI", 18, 100)
+	tokenID, err := tokenRepo.GetOrCreateToken(ctx, tx, chainID, tokenAddr, "DAI", 18, i64(100))
 	if err != nil {
 		t.Fatalf("GetOrCreateToken: %v", err)
 	}

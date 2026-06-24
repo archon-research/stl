@@ -190,6 +190,10 @@ git commit  # Hooks auto-fix, may stage changes
     - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`.
 - **Testing**:
     - Table-driven tests, mock outbound ports for unit tests.
+    - One scenario per test, named for the single behavior it covers. Never chain independent scenarios in one function — a failure must point at one thing. Table-driven varies *inputs* of the *same* behavior (each case under `t.Run`); distinct behaviors get distinct functions. Tempted to join with "and" in a test name → write two tests.
+    - Parametrize, don't copy-paste. When two tests differ only in inputs and expected outputs, fold them into one table-driven test (a row per case) rather than near-duplicate functions. The split rule above wins on conflict: a distinct *behavior* stays its own function even if its body looks similar.
+    - Share setup, don't repeat it. Spot a setup pattern recurring across tests — especially in the same file — and hoist it into a common fixture/helper.
+    - Use fixture factories for varying data. When setups build the same shape of data but differ in a few values, write a fixture factory (a constructor taking the varying values, sensible defaults for the rest) instead of one helper per variant.
     - Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission-critical that code is correct and robust.
     - In services, ONLY test the public api. Don't test internals if you can avoid it.
     - You can move the main.go code into a function and only call that from main() so that you can test it properly.
@@ -207,6 +211,7 @@ git commit  # Hooks auto-fix, may stage changes
     - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
     - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
     - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+    - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
     - When unsure, leave it out: a stale or redundant comment is worse than none.
 - **Libraries**:
     - Use the standard library as much as possible.
@@ -216,11 +221,26 @@ git commit  # Hooks auto-fix, may stage changes
     - Always think hard and carefully about schema design.
     - For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
     - NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
+    - Role admin vs object grants: role-level ops (`CREATE ROLE`, `ALTER ROLE … SET`, role-to-role membership grants) require superuser and belong in the infra repo's `bootstrap-db.sh`. Migrations run as `stl_migrator` (CREATEROLE only) and hold object-level grants only (`GRANT … ON <object> TO <role>`, `ALTER DEFAULT PRIVILEGES`). Rule: a role named on the left of ALTER/GRANT/DROP = bootstrap; object on left, role on right = migration.
 - **System-wide registries** (`chain`, `token`, `user`, `protocol`, `prime`, `oracle` + mapping tables): FK these instead of duplicating address/symbol/decimals/name columns.
     - FK by natural key only (`token`/`user`/`protocol`: `(chain_id, address)`; `oracle`/`prime`: `name`). Never resolve FKs by display label (e.g. token symbol) — labels are not unique or authoritative.
     - Assets with no on-chain address (custodied BTC/SOL, off-chain API symbols) get no `token` row: store raw symbol or curated nullable `token_id` (see `offchain_price_asset`). Never invent addresses.
 - **External API adapters**:
     - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
+
+## Observability — alerts & runbooks (required for new indexers)
+
+A new indexer / data service that emits metrics ships its alert rules **and**
+runbook sections in the same PR — same definition-of-done as tests.
+
+- Rules → a group in `alerts/vector-<service>.yaml`; runbooks → matching
+  `## AlertName` sections in `docs/runbooks/vector-<service>.md`. Copy an
+  existing pair (`vector-indexers.yaml` + `.md`) — their header comments carry
+  the label, severity→routing, and window conventions; follow them.
+- Cover at minimum: liveness/stall, error rate, silent-empty / data-quality
+  holes the error path won't catch, and latency.
+- `critical` must have a `runbook_url` + runbook section; `warning`/`info` must
+  have a runbook section.
 
 ### Do NOT
 

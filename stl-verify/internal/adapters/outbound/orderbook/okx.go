@@ -36,7 +36,7 @@ const (
 // and validates them.
 //
 // Docs: https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel
-func NewOKXProvider(cfg Config) outbound.OrderbookProvider {
+func NewOKXProvider(cfg Config) (outbound.OrderbookProvider, error) {
 	return newFeedProvider(cfg, &okxExchange{}, okxMaxSymbols)
 }
 
