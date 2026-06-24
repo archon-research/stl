@@ -37,7 +37,7 @@ func TestNewCronjobActivities(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			activities, err := newCronjobActivities(tt.runner)
+			activities, err := newCronjobActivities(tt.runner, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -105,7 +105,7 @@ func TestCronjobActivities_Execute(t *testing.T) {
 					gotScheduledAt, gotOK = ScheduledAtFromContext(ctx)
 					return tt.runErr
 				},
-			})
+			}, nil)
 			if err != nil {
 				t.Fatalf("unexpected error creating activities: %v", err)
 			}
