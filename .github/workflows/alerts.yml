@@ -67,7 +67,7 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres|cronjobs)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
@@ -136,7 +136,7 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
-          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres)$'
+          namespaces-regex: '^vector-(watcher|backup-worker|indexers|postgres|cronjobs)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
           mimir-tenant-id: ${{ env.GC_MIMIR_TENANT_ID }}
