@@ -46,10 +46,13 @@ type MapleGraphQLRepository interface {
 
 	// UpsertLoans upserts loan registry rows (maple_pool_id and
 	// borrower_user_id already resolved by the service) and returns loan
-	// address -> maple_loan.id. maple_pool_id, borrower_user_id, and every
-	// loanMeta column are immutable per loan: nothing is refreshed on
-	// conflict, and implementations must fail when any stored value differs
-	// from the incoming one (nullable loanMeta columns compared NULL-safely).
+	// address -> maple_loan.id. maple_pool_id and borrower_user_id are strictly
+	// immutable per loan: nothing is refreshed on conflict, and implementations
+	// must fail when a stored value differs from the incoming one. The loanMeta
+	// columns are fill-once instead: a stored NULL is filled from the incoming
+	// value (Maple enriches loanMeta off-chain after origination), but a stored
+	// non-NULL that changes (value->value) or clears (value->null) must still
+	// fail.
 	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
