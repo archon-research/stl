@@ -193,13 +193,19 @@ func loanMetaColsOf(l *maple.Loan) loanMetaCols {
 }
 
 // UpsertLoans upserts loan registry rows and returns loan
-// address -> maple_loan.id. maple_pool_id, borrower_user_id, and every
-// loanMeta column are immutable per loan — empirically unchanged across ~1
-// year of subgraph history — so the upsert refreshes nothing on conflict (the
-// no-op DO UPDATE keeps RETURNING yielding the stored row) and the scan fails
-// the run if any stored value differs from the incoming one. Nullable
-// loanMeta columns compare NULL-safely, so editorial enrichment (null→value)
-// trips the guard like any other change.
+// address -> maple_loan.id. maple_pool_id and borrower_user_id are strictly
+// immutable per loan: the upsert never refreshes them and the scan fails the
+// run if a stored value differs from the incoming one.
+//
+// The six loanMeta columns are fill-once instead of strictly immutable. Maple
+// enriches a loan's metadata after origination — a stored NULL loan_meta_type
+// later resolves to a concrete value such as "intercompany" — so on conflict
+// each loanMeta column is COALESCE(stored, incoming): a stored NULL is filled
+// from the incoming value and persisted, a stored non-NULL is kept. RETURNING
+// yields the post-COALESCE row, so the scan's NULL-safe comparison passes the
+// legitimate null→value fill (stored now equals incoming) while still failing
+// a forbidden value→value mutation or value→null clear (stored is kept and
+// differs from incoming).
 func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
@@ -215,7 +221,13 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 			                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
 			                         loan_meta_wallet_type, loan_meta_location)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET id = maple_loan.id
+			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET
+			     loan_meta_type           = COALESCE(maple_loan.loan_meta_type, EXCLUDED.loan_meta_type),
+			     loan_meta_asset_symbol   = COALESCE(maple_loan.loan_meta_asset_symbol, EXCLUDED.loan_meta_asset_symbol),
+			     loan_meta_dex            = COALESCE(maple_loan.loan_meta_dex, EXCLUDED.loan_meta_dex),
+			     loan_meta_wallet_address = COALESCE(maple_loan.loan_meta_wallet_address, EXCLUDED.loan_meta_wallet_address),
+			     loan_meta_wallet_type    = COALESCE(maple_loan.loan_meta_wallet_type, EXCLUDED.loan_meta_wallet_type),
+			     loan_meta_location       = COALESCE(maple_loan.loan_meta_location, EXCLUDED.loan_meta_location)
 			 RETURNING id, maple_pool_id, borrower_user_id,
 			           loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
 			           loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location`,

@@ -711,11 +711,10 @@ func TestMapleUpsertLoans_NoOpOnUnchanged(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_RejectsFieldChange(t *testing.T) {
-	// maple_pool_id and every loanMeta column are immutable; a re-upsert with
-	// any changed value (including editorial null->value enrichment of a
-	// nullable loanMeta field) must fail the run naming the field, instead of
-	// refreshing the row.
+func TestMapleUpsertLoans_RejectsPoolChange(t *testing.T) {
+	// maple_pool_id is strictly immutable; the upsert never refreshes it and a
+	// re-upsert reassigning the loan to a different pool must fail the run
+	// naming the field, instead of refreshing the row.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	repo := newMapleRepo(t, 0)
@@ -730,13 +729,13 @@ func TestMapleUpsertLoans_RejectsFieldChange(t *testing.T) {
 	})
 
 	loanAddr := mapleAddr(0x30)
-	upsert := func(poolID int64, meta *maple.LoanMeta) error {
+	upsert := func(poolID int64) error {
 		tx, err := maplePool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
 		defer func() { _ = tx.Rollback(ctx) }()
-		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, borrowerID, meta)
+		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, borrowerID, nil)
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
@@ -746,85 +745,217 @@ func TestMapleUpsertLoans_RejectsFieldChange(t *testing.T) {
 		return tx.Commit(ctx)
 	}
 
-	// Baseline: poolA, nil meta (every loan_meta_* column NULL).
-	if err := upsert(poolA, nil); err != nil {
+	if err := upsert(poolA); err != nil {
 		t.Fatalf("baseline upsert: %v", err)
 	}
 	// Unchanged re-upsert is a clean no-op.
-	if err := upsert(poolA, nil); err != nil {
+	if err := upsert(poolA); err != nil {
 		t.Fatalf("unchanged re-upsert: %v", err)
 	}
+	// Pool reassignment must fail.
+	err := upsert(poolB)
+	if err == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "maple_pool_id") || !strings.Contains(err.Error(), "registry fields changed") {
+		t.Errorf("error %q should report a registry mismatch naming maple_pool_id", err.Error())
+	}
+}
+
+func TestMapleUpsertLoans_FillsNullMetaOnce(t *testing.T) {
+	// loanMeta columns are fill-once: Maple enriches a loan's metadata after
+	// origination (e.g. loan_meta_type NULL -> "intercompany"). A re-upsert that
+	// fills a stored-NULL field must succeed and persist the incoming value
+	// rather than tripping the immutability guard.
+	ctx := context.Background()
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
 
 	cases := []struct {
-		name      string
-		poolID    int64
-		meta      *maple.LoanMeta
-		wantField string
+		name       string
+		addrByte   byte
+		meta       *maple.LoanMeta
+		column     string
+		wantValue  string
+		wantIntern bool
 	}{
-		{"pool reassignment", poolB, nil, "maple_pool_id"},
-		{"loan_meta_type null->value", poolA, &maple.LoanMeta{Type: "amm"}, "loan_meta_type"},
-		{"loan_meta_asset_symbol null->value", poolA, &maple.LoanMeta{AssetSymbol: "BTC"}, "loan_meta_asset_symbol"},
-		{"loan_meta_dex null->value", poolA, &maple.LoanMeta{DexName: "Uniswap"}, "loan_meta_dex"},
-		{"loan_meta_wallet_address null->value", poolA, &maple.LoanMeta{WalletAddress: "0xdead"}, "loan_meta_wallet_address"},
-		{"loan_meta_wallet_type null->value", poolA, &maple.LoanMeta{WalletType: "custody"}, "loan_meta_wallet_type"},
-		{"loan_meta_location null->value", poolA, &maple.LoanMeta{Location: "Cayman"}, "loan_meta_location"},
+		{"type intercompany", 0x40, &maple.LoanMeta{Type: "intercompany"}, "loan_meta_type", "intercompany", false},
+		{"type amm flips is_internal", 0x41, &maple.LoanMeta{Type: "amm"}, "loan_meta_type", "amm", true},
+		{"asset_symbol", 0x42, &maple.LoanMeta{AssetSymbol: "BTC"}, "loan_meta_asset_symbol", "BTC", false},
+		{"dex", 0x43, &maple.LoanMeta{DexName: "Uniswap"}, "loan_meta_dex", "Uniswap", false},
+		{"wallet_address", 0x44, &maple.LoanMeta{WalletAddress: "0xdead"}, "loan_meta_wallet_address", "0xdead", false},
+		{"wallet_type", 0x45, &maple.LoanMeta{WalletType: "custody"}, "loan_meta_wallet_type", "custody", false},
+		{"location", 0x46, &maple.LoanMeta{Location: "Cayman"}, "loan_meta_location", "Cayman", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := upsert(tc.poolID, tc.meta)
-			if err == nil {
-				t.Fatal("expected mismatch error, got nil")
+			truncateMaple(t, ctx)
+			poolID := upsertTestPool(t, ctx, repo, 0x20)
+
+			upsert := func(meta *maple.LoanMeta) error {
+				tx, err := maplePool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("begin: %v", err)
+				}
+				defer func() { _ = tx.Rollback(ctx) }()
+				borrowerID := upsertTestBorrowerUser(t, ctx, tx, 0xab)
+				loan, err := maple.NewLoan(1, protocolID, mapleAddr(tc.addrByte), poolID, borrowerID, meta)
+				if err != nil {
+					t.Fatalf("NewLoan: %v", err)
+				}
+				if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
 			}
-			if !strings.Contains(err.Error(), tc.wantField) || !strings.Contains(err.Error(), "registry fields changed") {
-				t.Errorf("error %q should report a registry mismatch naming %q", err.Error(), tc.wantField)
+
+			// Baseline: nil meta (every loan_meta_* column NULL).
+			if err := upsert(nil); err != nil {
+				t.Fatalf("baseline upsert: %v", err)
+			}
+			// Enrichment: the field flips NULL -> value. Must succeed.
+			if err := upsert(tc.meta); err != nil {
+				t.Fatalf("fill upsert: %v", err)
+			}
+
+			var stored *string
+			var isInternal bool
+			if err := maplePool.QueryRow(ctx,
+				`SELECT `+tc.column+`, is_internal FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
+				mapleAddr(tc.addrByte)).Scan(&stored, &isInternal); err != nil {
+				t.Fatalf("querying loan: %v", err)
+			}
+			if stored == nil || *stored != tc.wantValue {
+				t.Errorf("%s = %v, want %q (enrichment must persist)", tc.column, stored, tc.wantValue)
+			}
+			if isInternal != tc.wantIntern {
+				t.Errorf("is_internal = %v, want %v", isInternal, tc.wantIntern)
+			}
+
+			// Re-applying the same value is a clean no-op (stored == incoming).
+			if err := upsert(tc.meta); err != nil {
+				t.Fatalf("idempotent re-upsert: %v", err)
 			}
 		})
 	}
 }
 
-func TestMapleUpsertLoans_RejectsMetaClear(t *testing.T) {
-	// The NULL-safe comparison must trip in the value->null direction too: a
-	// loan that stored a non-null loanMeta field and reappears with that field
-	// cleared is a mismatch, not a silent clear.
+func TestMapleUpsertLoans_BatchRejectsForbiddenChangeAndRollsBackSiblingFill(t *testing.T) {
+	// UpsertLoans runs the whole slice as one batch inside the caller's
+	// transaction. A legitimate null->value fill on one loan and a forbidden
+	// value->value change on a sibling in the same batch must fail the run, so
+	// the legitimate fill is rolled back with the rejected change rather than
+	// committed on its own.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	repo := newMapleRepo(t, 0)
 	protocolID := mapleProtocolID(t, ctx, repo)
-	poolID := upsertTestPool(t, ctx, repo, 0x28)
+	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
-	var borrowerID int64
-	inMapleTx(t, ctx, func(tx pgx.Tx) error {
-		borrowerID = upsertTestBorrowerUser(t, ctx, tx, 0xab)
-		return nil
-	})
+	fillAddr := mapleAddr(0x50)   // baseline NULL type, gets enriched
+	changeAddr := mapleAddr(0x51) // baseline "amm", gets a forbidden mutation
 
-	loanAddr := mapleAddr(0x35)
-	upsert := func(meta *maple.LoanMeta) error {
-		tx, err := maplePool.Begin(ctx)
-		if err != nil {
-			t.Fatalf("begin: %v", err)
-		}
-		defer func() { _ = tx.Rollback(ctx) }()
-		loan, err := maple.NewLoan(1, protocolID, loanAddr, poolID, borrowerID, meta)
+	newLoan := func(tx pgx.Tx, addr []byte, meta *maple.LoanMeta) *maple.Loan {
+		t.Helper()
+		borrowerID := upsertTestBorrowerUser(t, ctx, tx, 0xab)
+		loan, err := maple.NewLoan(1, protocolID, addr, poolID, borrowerID, meta)
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
+		return loan
 	}
 
-	if err := upsert(&maple.LoanMeta{Type: "amm", Location: "Cayman"}); err != nil {
-		t.Fatalf("baseline upsert: %v", err)
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{
+			newLoan(tx, fillAddr, nil),
+			newLoan(tx, changeAddr, &maple.LoanMeta{Type: "amm"}),
+		})
+		return err
+	})
+
+	// One batch: fillAddr null->"intercompany" (allowed), changeAddr "amm"->"strategy" (forbidden).
+	inMapleTxExpectErr(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{
+			newLoan(tx, fillAddr, &maple.LoanMeta{Type: "intercompany"}),
+			newLoan(tx, changeAddr, &maple.LoanMeta{Type: "strategy"}),
+		})
+		return err
+	})
+
+	var fillType *string
+	if err := maplePool.QueryRow(ctx,
+		`SELECT loan_meta_type FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
+		fillAddr).Scan(&fillType); err != nil {
+		t.Fatalf("querying filled loan: %v", err)
 	}
-	// Clearing Location (value->null) must fail naming loan_meta_location.
-	err := upsert(&maple.LoanMeta{Type: "amm"})
-	if err == nil {
-		t.Fatal("expected mismatch error, got nil")
+	if fillType != nil {
+		t.Errorf("loan_meta_type = %q, want NULL (sibling fill must roll back with the rejected batch)", *fillType)
 	}
-	if !strings.Contains(err.Error(), "loan_meta_location") || !strings.Contains(err.Error(), "registry fields changed") {
-		t.Errorf("error %q should report a registry mismatch naming loan_meta_location", err.Error())
+}
+
+func TestMapleUpsertLoans_RejectsPopulatedMetaChange(t *testing.T) {
+	// fill-once covers a stored NULL only. Once a loanMeta field holds a value,
+	// COALESCE keeps the stored value, so the NULL-safe scan still trips on any
+	// change to a populated field — both clearing it (value->null) and mutating
+	// it (value->value) — instead of silently overwriting or dropping it.
+	ctx := context.Background()
+	repo := newMapleRepo(t, 0)
+	protocolID := mapleProtocolID(t, ctx, repo)
+
+	cases := []struct {
+		name     string
+		addrByte byte
+		incoming *maple.LoanMeta
+	}{
+		// Baseline below is {Type:"amm", Location:"Cayman"}; both cases keep Type
+		// and only touch location, exercising the two forbidden directions.
+		{"location clear (value->null)", 0x35, &maple.LoanMeta{Type: "amm"}},
+		{"location change (value->value)", 0x36, &maple.LoanMeta{Type: "amm", Location: "Singapore"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateMaple(t, ctx)
+			poolID := upsertTestPool(t, ctx, repo, 0x28)
+
+			upsert := func(meta *maple.LoanMeta) error {
+				tx, err := maplePool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("begin: %v", err)
+				}
+				defer func() { _ = tx.Rollback(ctx) }()
+				borrowerID := upsertTestBorrowerUser(t, ctx, tx, 0xab)
+				loan, err := maple.NewLoan(1, protocolID, mapleAddr(tc.addrByte), poolID, borrowerID, meta)
+				if err != nil {
+					t.Fatalf("NewLoan: %v", err)
+				}
+				if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+
+			if err := upsert(&maple.LoanMeta{Type: "amm", Location: "Cayman"}); err != nil {
+				t.Fatalf("baseline upsert: %v", err)
+			}
+			err := upsert(tc.incoming)
+			if err == nil {
+				t.Fatal("expected mismatch error, got nil")
+			}
+			if !strings.Contains(err.Error(), "loan_meta_location") || !strings.Contains(err.Error(), "registry fields changed") {
+				t.Errorf("error %q should report a registry mismatch naming loan_meta_location", err.Error())
+			}
+
+			// The stored value is untouched (the failing upsert rolled back).
+			var location *string
+			if err := maplePool.QueryRow(ctx,
+				`SELECT loan_meta_location FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
+				mapleAddr(tc.addrByte)).Scan(&location); err != nil {
+				t.Fatalf("querying loan: %v", err)
+			}
+			if location == nil || *location != "Cayman" {
+				t.Errorf("loan_meta_location = %v, want Cayman (rejected change must not persist)", location)
+			}
+		})
 	}
 }
 
