@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: avalanche-watcher-data-validator
+spec:
+  # Scaled to zero until our Etherscan plan covers Avalanche: the validator's only
+  # job is the Etherscan cross-check, which we cannot do for this chain yet. Set
+  # to 1 to enable. Ingestion is a separate service and is unaffected.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: avalanche-watcher-data-validator
+  template:
+    metadata:
+      labels:
+        app: avalanche-watcher-data-validator
+    spec:
+      serviceAccountName: avalanche-watcher-data-validator
+      containers:
+        - name: avalanche-watcher-data-validator
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: avalanche-watcher-data-validator
+          env:
+            # Inject the deployment name so this validator registers its own
+            # Temporal schedule/task queue (cfg.Name) distinct from other chains.
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: avalanche-watcher-data-validator
+            - secretRef:
+                name: avalanche-watcher-data-validator
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

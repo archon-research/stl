@@ -1,5 +1,6 @@
 // Package main implements a Temporal cronjob worker that validates blockchain
-// data stored by the watcher against Etherscan on a schedule.
+// data stored by the watcher against an independent canonical block source
+// (Etherscan V2 today) on a schedule.
 package main
 
 import (
@@ -10,7 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/etherscan"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockverifier"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -36,7 +37,12 @@ func main() {
 	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
-		Name:            "watcher-data-validator",
+		// SERVICE_NAME is injected per deployment from the pod's app label so each
+		// per-chain validator registers its own Temporal schedule and task queue.
+		// The mainnet deployment's app label resolves to "watcher-data-validator",
+		// matching this default, so its existing schedule ID is preserved. The
+		// default only applies to local/non-k8s runs that set no SERVICE_NAME.
+		Name:            env.Get("SERVICE_NAME", "watcher-data-validator"),
 		IntervalEnv:     "DATA_VALIDATION_INTERVAL",
 		IntervalDefault: "1h",
 		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
@@ -58,13 +64,12 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 		return nil, err
 	}
 
-	etherscanClient, err := etherscan.NewClient(etherscan.ClientConfig{
-		APIKey:  etherscanAPIKey,
-		ChainID: int64(chainID),
-		Logger:  deps.Logger,
+	verifier, err := blockverifier.New(int64(chainID), blockverifier.Options{
+		EtherscanAPIKey: etherscanAPIKey,
+		Logger:          deps.Logger,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("creating etherscan client: %w", err)
+		return nil, fmt.Errorf("creating block verifier: %w", err)
 	}
 
 	blockStateRepo := postgres.NewBlockStateRepository(deps.Pool, int64(chainID), deps.Logger)
@@ -72,7 +77,7 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 	service, err := data_validator.NewService(
 		data_validator.DefaultConfig(),
 		blockStateRepo,
-		etherscanClient,
+		verifier,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating data validator service: %w", err)
