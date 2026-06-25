@@ -11,6 +11,36 @@ before it cascades.
 
 ---
 
+## Metrics coverage (staging vs prod)
+
+These alerts read `pg_stat_activity_*` from the Timescale Cloud exporter
+(`job="tigerdata"`). Each rule is pinned to its environment's Timescale service:
+
+| Environment | Timescale service | `service_id` |
+| --- | --- | --- |
+| prod | `stl-sentinelprod-db` | `ucpymqz73b` |
+| staging | `stl-sentinelstaging-db` | `xd7na17213` |
+
+As of 2026-06-19 the exporter topology is wrong, and the rules are pinned per
+`(cluster, service_id)` to work around it:
+
+- **Staging is not yet covered.** The staging DB (`xd7na17213`) exports no
+  metrics to Grafana Cloud, so `PostgresLongIdleInTransaction` cannot fire for
+  staging. Coverage activates automatically once infra enables that service's
+  metrics export labelled `cluster=archon-staging`.
+- **Prod metrics also land in the staging stack** mislabelled
+  `cluster=archon-staging`. The prod rule is pinned to `cluster="archon-prod"` so
+  that leak cannot page as a staging alert; the staging rule is pinned to
+  `service_id="xd7na17213"` so it stays immune to the leak.
+
+The fix lives in the infrastructure repo: enable the `xd7na17213` metrics export
+labelled `cluster=archon-staging`, and stop prod metrics being ingested into the
+staging stack. Verify coverage with `count by (cluster, service_id) ({job="tigerdata"})`
+in each Grafana stack: staging should show `xd7na17213` (not `ucpymqz73b`); prod
+should show `ucpymqz73b`.
+
+---
+
 ## PostgresLongIdleInTransaction
 
 **Severity:** warning · **For:** 2m (idle-in-transaction > 5m)
