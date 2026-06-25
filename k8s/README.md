@@ -19,6 +19,7 @@ overlays/
     config.yaml          #   stl-config ConfigMap (local, non-secret env)
     components/runtime/  #   shared patches: envFrom→stl-config/stl-secrets, imagePullPolicy:Never
     workers/             #   Alchemy-key workers (applied only when a key is set)
+    data-validator/      #   opt-in cron (real-Etherscan verify; make kind-deploy-data-validator)
 dev-infra/               # local-only artifacts (no EKS equivalent), applied imperatively by the Makefile
   timescaledb redis localstack jaeger temporal* mock-blockchain-server
   jobs/                  #   bootstrap-db, migrate, k6-stress-test
@@ -40,8 +41,9 @@ Each overlay sets the target namespace and pins image names. For EKS, CI bumps
 ```bash
 # Preview what gets applied
 kubectl kustomize k8s/overlays/prod | kubectl diff -f -
-kubectl kustomize k8s/overlays/dev          # local core apps
-kubectl kustomize k8s/overlays/dev/workers  # local workers
+kubectl kustomize k8s/overlays/dev                 # local core apps
+kubectl kustomize k8s/overlays/dev/workers         # local workers
+kubectl kustomize k8s/overlays/dev/data-validator  # opt-in: watcher-data-validator
 ```
 
 ## IAM / AWS credentials (EKS)
@@ -193,9 +195,13 @@ make kind-redeploy-worker NAME=morpho-indexer       # any worker
 make kind-redeploy-worker NAME=oracle-price-worker
 make kind-redeploy-worker NAME=sparklend-position-tracker
 make kind-redeploy-worker NAME=offchain-price-indexer
-make kind-redeploy-worker NAME=watcher-data-validator
 make kind-redeploy-worker NAME=anchorage-indexer    # deployed as spark-anchorage-indexer
 ```
+
+`watcher-data-validator` is opt-in (not deployed by `make dev-up` — it verifies against
+real Etherscan, which is meaningless on the mock blockchain server). Deploy/redeploy it
+with `make kind-deploy-data-validator` (needs `ETHERSCAN_API_KEY` and real chain data via
+`make kind-use-alchemy`).
 
 Restart all deployments without rebuilding (e.g. after updating secrets or config):
 
@@ -207,8 +213,11 @@ kubectl --context=kind-vector rollout restart deployment -n vector
 
 Add a `base/<name>/` directory (deployment + serviceaccount + kustomization) like
 the existing services, then reference it (with a local `images:` entry) from
-`overlays/dev/kustomization.yaml` (or `overlays/dev/workers/`) and the prod/staging
-overlays. Cronjobs follow the same pattern — there is no manifest generator.
+`overlays/dev/kustomization.yaml` (or `overlays/dev/workers/`, or `overlays/dev/data-validator/`
+for opt-in crons) and the prod/staging overlays. Cronjobs follow the same pattern — there is
+no manifest generator. If a dev cron is added to the core overlay, also add its Deployment
+name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile` (the `check-dev-overlay-sync` guard
+enforces this).
 
 ## Updating Secrets
 
