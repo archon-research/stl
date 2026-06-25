@@ -25,6 +25,8 @@ spec:
                   fieldPath: metadata.labels['app']
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: watcher-data-validator
             - secretRef:
                 name: watcher-data-validator
