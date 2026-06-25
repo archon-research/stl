@@ -14,6 +14,7 @@ import (
 type mockBlockStateRepository struct {
 	minBlockNumber      int64
 	maxBlockNumber      int64
+	lastBlock           *outbound.BlockState
 	blocks              map[int64]*outbound.BlockState
 	reorgEvents         []outbound.ReorgEvent
 	chainIntegrityError error
@@ -24,6 +25,14 @@ func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound
 }
 
 func (m *mockBlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.BlockState, error) {
+	if m.lastBlock != nil {
+		return m.lastBlock, nil
+	}
+	// Treat any seeded data as a non-empty DB so existing tests need no edits;
+	// only a repo with no blocks at all reports nil (genuinely empty).
+	if m.maxBlockNumber > 0 || len(m.blocks) > 0 {
+		return &outbound.BlockState{Number: m.maxBlockNumber}, nil
+	}
 	return nil, nil
 }
 
@@ -521,6 +530,61 @@ func TestReport_FormatJSON(t *testing.T) {
 	}
 	if !strings.Contains(jsonStr, `"status": "passed"`) {
 		t.Error("missing status in JSON")
+	}
+}
+
+func TestService_Validate_EmptyDatabaseErrors(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 0,
+		maxBlockNumber: 0,
+	}
+	verifier := &mockBlockVerifier{}
+
+	svc, err := NewService(DefaultConfig(), repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	ctx := context.Background()
+	_, err = svc.Validate(ctx)
+	if err == nil {
+		t.Fatal("Validate() expected a non-nil error for empty database, got nil")
+	}
+	if !strings.Contains(err.Error(), "no blocks found") {
+		t.Errorf("error %q should contain %q", err.Error(), "no blocks found")
+	}
+}
+
+func TestService_Validate_GenesisOnlyNotTreatedAsEmpty(t *testing.T) {
+	// A DB whose only canonical block is genesis (block 0) reports max/min == 0,
+	// the same as an empty DB, but it is NOT empty and must be validated, not
+	// rejected with "no blocks found".
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 0,
+		maxBlockNumber: 0,
+		lastBlock:      &outbound.BlockState{Number: 0, Hash: "0xgenesis"},
+		blocks:         map[int64]*outbound.BlockState{0: {Number: 0, Hash: "0xgenesis"}},
+	}
+	verifier := &mockBlockVerifier{
+		blocks: map[int64]*outbound.CanonicalBlock{0: {Number: 0, Hash: "0xgenesis"}},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 1
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("genesis-only DB must not error, got: %v", err)
+	}
+	if report.Passed != 1 {
+		t.Errorf("got %d passed, want 1 (block 0 spot-checked)", report.Passed)
 	}
 }
 
