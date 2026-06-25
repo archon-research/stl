@@ -26,10 +26,10 @@
 # including any added later, is covered automatically.
 #
 # Severity → routing (per the alerting routing spec):
-#   critical       → pages, prod #at_vector_prod_alerts / staging
-#                    #at_vector_staging_alerts, [CRITICAL], 1h repeat.
-#   warning / info → no page, prod #at_vector_alerts / staging
-#                    #at_vector_staging_alerts, [WARNING]/[INFO], 4h repeat.
+#   critical       → pages, prod #at_stl_prod_alerts / staging
+#                    #at_stl_staging_alerts, [CRITICAL], 1h repeat.
+#   warning / info → no page, prod #at_stl_alerts / staging
+#                    #at_stl_staging_alerts, [WARNING]/[INFO], 4h repeat.
 # Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
 # `alert_env` label is needed — every rule reads objects in its own tenant.
 # =============================================================================
