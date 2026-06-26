@@ -6,6 +6,32 @@ import (
 	"time"
 )
 
+func TestOracleTypeClassification(t *testing.T) {
+	tests := []struct {
+		name        string
+		oracleType  OracleType
+		wantFeed    bool
+		wantERC4626 bool
+	}{
+		{name: "chainlink is feed", oracleType: OracleTypeChainlinkFeed, wantFeed: true},
+		{name: "chronicle is feed", oracleType: OracleTypeChronicle, wantFeed: true},
+		{name: "redstone is feed", oracleType: OracleTypeRedstone, wantFeed: true},
+		{name: "aave is neither", oracleType: OracleTypeAave},
+		{name: "erc4626 share is erc4626 only", oracleType: OracleTypeERC4626Share, wantERC4626: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.oracleType.IsFeedOracle(); got != tt.wantFeed {
+				t.Errorf("IsFeedOracle() = %v, want %v", got, tt.wantFeed)
+			}
+			if got := tt.oracleType.IsERC4626Oracle(); got != tt.wantERC4626 {
+				t.Errorf("IsERC4626Oracle() = %v, want %v", got, tt.wantERC4626)
+			}
+		})
+	}
+}
+
 func TestNewOnchainTokenPrice(t *testing.T) {
 	validTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 

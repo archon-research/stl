@@ -33,6 +33,8 @@ type OracleUnit struct {
 	Feeds       []blockchain.FeedConfig // for chainlink_feed: per-feed config
 	RefFeedIdx  map[string]int          // quote currency → index in Feeds[] for USD-denominated reference
 	NonUSDFeeds map[int]string          // feed index → quote currency for non-USD feeds
+
+	ERC4626Vaults []blockchain.ERC4626VaultConfig // for erc4626_share: per-vault config
 }
 
 // LoadOracleUnits loads all enabled oracles from DB, deduplicates by oracle ID,
@@ -102,9 +104,12 @@ func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, 
 		unit *OracleUnit
 		err  error
 	)
-	if oracle.OracleType.IsFeedOracle() {
+	switch {
+	case oracle.OracleType.IsFeedOracle():
 		unit, err = buildFeedUnit(ctx, repo, oracle)
-	} else {
+	case oracle.OracleType.IsERC4626Oracle():
+		unit, err = buildERC4626Unit(ctx, repo, oracle)
+	default:
 		unit, err = buildAaveUnit(ctx, repo, oracle)
 	}
 	if err != nil {
@@ -205,6 +210,69 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		Feeds:       feeds,
 		RefFeedIdx:  refFeedIdx,
 		NonUSDFeeds: nonUSDFeeds,
+	}, nil
+}
+
+// buildERC4626Unit builds a unit that prices ERC-4626 vault shares. Each enabled
+// asset is a vault token whose USD price is convertToAssets(1 share) in underlying
+// units times the underlying token's USD feed (carried on the asset's feed_address).
+// Underlying decimals equal the vault's share decimals for the peg vaults this
+// oracle type covers (e.g. fsUSDS 18 ⇄ USDS 18), so the single token-decimals value
+// scales both the convertToAssets input and its output.
+func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting enabled assets: %w", err)
+	}
+	if len(assets) == 0 {
+		return nil, nil
+	}
+
+	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token addresses: %w", err)
+	}
+	tokenDecimals, err := repo.GetTokenDecimals(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token decimals: %w", err)
+	}
+
+	vaults := make([]blockchain.ERC4626VaultConfig, len(assets))
+	tokenIDs := make([]int64, len(assets))
+	for i, asset := range assets {
+		addrBytes, ok := tokenAddrBytes[asset.TokenID]
+		if !ok {
+			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
+		}
+		decimals, ok := tokenDecimals[asset.TokenID]
+		if !ok {
+			return nil, fmt.Errorf("token decimals not found for token_id %d", asset.TokenID)
+		}
+		if asset.FeedAddress == (common.Address{}) {
+			return nil, fmt.Errorf("underlying feed address missing for token_id %d", asset.TokenID)
+		}
+		if asset.FeedDecimals <= 0 {
+			return nil, fmt.Errorf("invalid underlying feed decimals for token_id %d: %d", asset.TokenID, asset.FeedDecimals)
+		}
+		if asset.QuoteCurrency != entity.QuoteCurrencyUSD {
+			return nil, fmt.Errorf("erc4626 underlying feed for token_id %d must be USD-denominated, got %q", asset.TokenID, asset.QuoteCurrency)
+		}
+
+		vaults[i] = blockchain.ERC4626VaultConfig{
+			TokenID:            asset.TokenID,
+			VaultAddress:       common.BytesToAddress(addrBytes),
+			ShareDecimals:      decimals,
+			UnderlyingFeed:     asset.FeedAddress,
+			UnderlyingDecimals: decimals,
+			FeedDecimals:       asset.FeedDecimals,
+		}
+		tokenIDs[i] = asset.TokenID
+	}
+
+	return &OracleUnit{
+		Oracle:        oracle,
+		TokenIDs:      tokenIDs,
+		ERC4626Vaults: vaults,
 	}, nil
 }
 

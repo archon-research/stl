@@ -63,6 +63,20 @@ func PackLatestAnswer(t *testing.T, answer *big.Int) []byte {
 	return data
 }
 
+// PackConvertToAssets ABI-encodes a uint256 assets value as convertToAssets() return data.
+func PackConvertToAssets(t *testing.T, assets *big.Int) []byte {
+	t.Helper()
+	shareABI, err := abis.GetERC4626ABI()
+	if err != nil {
+		t.Fatalf("loading ERC4626 ABI: %v", err)
+	}
+	data, err := shareABI.Methods["convertToAssets"].Outputs.Pack(assets)
+	if err != nil {
+		t.Fatalf("packing convertToAssets: %v", err)
+	}
+	return data
+}
+
 // PackDecimals ABI-encodes a uint8 decimals value as decimals() return data.
 func PackDecimals(t *testing.T, decimals uint8) []byte {
 	t.Helper()

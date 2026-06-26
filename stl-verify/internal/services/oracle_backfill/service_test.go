@@ -29,6 +29,7 @@ type mockRepo struct {
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
 	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenDecimalsFn             func(ctx context.Context, oracleID int64) (map[int64]int, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -76,6 +77,13 @@ func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[i
 		return m.getTokenAddressesFn(ctx, oracleID)
 	}
 	return nil, errors.New("GetTokenAddresses not mocked")
+}
+
+func (m *mockRepo) GetTokenDecimals(ctx context.Context, oracleID int64) (map[int64]int, error) {
+	if m.getTokenDecimalsFn != nil {
+		return m.getTokenDecimalsFn(ctx, oracleID)
+	}
+	return nil, errors.New("GetTokenDecimals not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
@@ -2439,4 +2447,102 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 			t.Error("expected prices to be stored after successful decimals validation")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626Oracle — backfill stores fsUSDS share prices
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626Oracle(t *testing.T) {
+	fsusds := common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
+	usdsFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
+
+	oneE18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	// Block 100: assets 1.05e18, USDS 1.0 -> $1.05 (stored)
+	// Block 101: same -> NOT stored
+	// Block 102: assets 1.06e18, USDS 1.0 -> $1.06 (stored)
+	assetsByBlock := map[int64]*big.Int{
+		100: new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20))),
+		101: new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20))),
+		102: new(big.Int).Add(oneE18, new(big.Int).Mul(big.NewInt(6), new(big.Int).Div(oneE18, big.NewInt(100)))),
+	}
+
+	repo := &mockRepo{
+		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{{
+				ID: 5, Name: "fluid_fsusds", Enabled: true,
+				OracleType: entity.OracleTypeERC4626Share,
+			}}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return []*entity.OracleAsset{{
+				ID: 1, OracleID: 5, TokenID: 10, Enabled: true,
+				FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD",
+			}}, nil
+		},
+		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+			return map[int64][]byte{10: fsusds.Bytes()}, nil
+		},
+		getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
+			return map[int64]int{10: 18}, nil
+		},
+	}
+
+	header := &mockHeaderFetcher{
+		headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+			return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+		},
+	}
+
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+				if len(calls) != 2 {
+					return nil, fmt.Errorf("expected 2 calls, got %d", len(calls))
+				}
+				assets := assetsByBlock[blockNumber.Int64()]
+				return []outbound.Result{
+					{Success: true, ReturnData: testutil.PackConvertToAssets(t, assets)},
+					{Success: true, ReturnData: testutil.PackLatestRoundData(t,
+						big.NewInt(1), big.NewInt(100_000_000), big.NewInt(1000), big.NewInt(1000), big.NewInt(1))},
+				}, nil
+			},
+		}, nil
+	}
+
+	svc, err := NewService(Config{
+		ChainID:     1,
+		Concurrency: 1,
+		BatchSize:   100,
+		Logger:      testutil.DiscardLogger(),
+	}, header, mcFactory, repo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Run(context.Background(), 100, 102); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	upserted := repo.getUpserted()
+	if len(upserted) != 2 {
+		t.Fatalf("upserted count = %d, want 2 (blocks 100 and 102)", len(upserted))
+	}
+
+	byBlock := make(map[int64]float64)
+	for _, p := range upserted {
+		if p.TokenID != 10 {
+			t.Errorf("TokenID = %d, want 10", p.TokenID)
+		}
+		byBlock[p.BlockNumber] = p.PriceUSD
+	}
+	if byBlock[100] != 1.05 {
+		t.Errorf("block 100 price = %f, want 1.05", byBlock[100])
+	}
+	if byBlock[102] != 1.06 {
+		t.Errorf("block 102 price = %f, want 1.06", byBlock[102])
+	}
+	if _, ok := byBlock[101]; ok {
+		t.Errorf("block 101 should be skipped (unchanged price)")
+	}
 }

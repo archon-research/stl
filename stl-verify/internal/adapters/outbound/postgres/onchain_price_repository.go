@@ -184,6 +184,35 @@ func (r *OnchainPriceRepository) GetTokenAddresses(ctx context.Context, oracleID
 	return addrs, nil
 }
 
+// GetTokenDecimals returns a map of token_id → on-chain decimals for enabled oracle assets.
+func (r *OnchainPriceRepository) GetTokenDecimals(ctx context.Context, oracleID int64) (map[int64]int, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT oa.token_id, t.decimals
+		FROM oracle_asset oa
+		JOIN token t ON t.id = oa.token_id
+		WHERE oa.oracle_id = $1 AND oa.enabled = true
+		ORDER BY oa.id
+	`, oracleID)
+	if err != nil {
+		return nil, fmt.Errorf("querying token decimals: %w", err)
+	}
+	defer rows.Close()
+
+	decimals := make(map[int64]int)
+	for rows.Next() {
+		var tokenID int64
+		var dec int
+		if err := rows.Scan(&tokenID, &dec); err != nil {
+			return nil, fmt.Errorf("scanning token decimals: %w", err)
+		}
+		decimals[tokenID] = dec
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating token decimals: %w", err)
+	}
+	return decimals, nil
+}
+
 // UpsertPrices inserts onchain price records in batches.
 // Uses ON CONFLICT DO NOTHING to handle duplicates.
 func (r *OnchainPriceRepository) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {

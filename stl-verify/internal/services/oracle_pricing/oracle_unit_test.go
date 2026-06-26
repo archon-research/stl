@@ -23,6 +23,7 @@ type mockRepo struct {
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
 	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenDecimalsFn             func(ctx context.Context, oracleID int64) (map[int64]int, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -60,6 +61,12 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
 	if m.getTokenAddressesFn != nil {
 		return m.getTokenAddressesFn(ctx, oracleID)
+	}
+	return nil, errors.New("not mocked")
+}
+func (m *mockRepo) GetTokenDecimals(ctx context.Context, oracleID int64) (map[int64]int, error) {
+	if m.getTokenDecimalsFn != nil {
+		return m.getTokenDecimalsFn(ctx, oracleID)
 	}
 	return nil, errors.New("not mocked")
 }
@@ -490,6 +497,158 @@ func TestLoadOracleUnits(t *testing.T) {
 			}
 			if len(units) != tt.wantCount {
 				t.Fatalf("units count = %d, want %d", len(units), tt.wantCount)
+			}
+			if tt.checkUnits != nil {
+				tt.checkUnits(t, units)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLoadOracleUnits_ERC4626
+// ---------------------------------------------------------------------------
+
+func TestLoadOracleUnits_ERC4626(t *testing.T) {
+	fsusds := common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
+	usdsFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
+
+	tests := []struct {
+		name        string
+		setupRepo   func() *mockRepo
+		wantErr     bool
+		errContains string
+		checkUnits  func(t *testing.T, units []*OracleUnit)
+	}{
+		{
+			name: "success builds vault config from asset feed and token decimals",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{
+							ID: 1, Name: "fluid_fsusds", Enabled: true,
+							OracleType: entity.OracleTypeERC4626Share,
+						}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{
+							ID: 1, OracleID: 1, TokenID: 10, Enabled: true,
+							FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD",
+						}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{10: fsusds.Bytes()}, nil
+					},
+					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
+						return map[int64]int{10: 18}, nil
+					},
+				}
+			},
+			checkUnits: func(t *testing.T, units []*OracleUnit) {
+				t.Helper()
+				u := units[0]
+				if len(u.ERC4626Vaults) != 1 {
+					t.Fatalf("ERC4626Vaults len = %d, want 1", len(u.ERC4626Vaults))
+				}
+				v := u.ERC4626Vaults[0]
+				if v.VaultAddress != fsusds {
+					t.Errorf("VaultAddress = %s, want %s", v.VaultAddress, fsusds)
+				}
+				if v.UnderlyingFeed != usdsFeed {
+					t.Errorf("UnderlyingFeed = %s, want %s", v.UnderlyingFeed, usdsFeed)
+				}
+				if v.ShareDecimals != 18 || v.UnderlyingDecimals != 18 {
+					t.Errorf("decimals = (%d,%d), want (18,18)", v.ShareDecimals, v.UnderlyingDecimals)
+				}
+				if v.FeedDecimals != 8 {
+					t.Errorf("FeedDecimals = %d, want 8", v.FeedDecimals)
+				}
+				if len(u.TokenIDs) != 1 || u.TokenIDs[0] != 10 {
+					t.Errorf("TokenIDs = %v, want [10]", u.TokenIDs)
+				}
+			},
+		},
+		{
+			name: "missing underlying feed address returns error",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{ID: 1, Name: "fluid", Enabled: true, OracleType: entity.OracleTypeERC4626Share}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 10, Enabled: true, FeedDecimals: 8, QuoteCurrency: "USD"}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{10: fsusds.Bytes()}, nil
+					},
+					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
+						return map[int64]int{10: 18}, nil
+					},
+				}
+			},
+			wantErr: true, errContains: "underlying feed address missing",
+		},
+		{
+			name: "non-USD underlying feed returns error",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{ID: 1, Name: "fluid", Enabled: true, OracleType: entity.OracleTypeERC4626Share}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 10, Enabled: true, FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "ETH"}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{10: fsusds.Bytes()}, nil
+					},
+					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
+						return map[int64]int{10: 18}, nil
+					},
+				}
+			},
+			wantErr: true, errContains: "must be USD",
+		},
+		{
+			name: "missing token decimals returns error",
+			setupRepo: func() *mockRepo {
+				return &mockRepo{
+					getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+						return []*entity.Oracle{{ID: 1, Name: "fluid", Enabled: true, OracleType: entity.OracleTypeERC4626Share}}, nil
+					},
+					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 10, Enabled: true, FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD"}}, nil
+					},
+					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+						return map[int64][]byte{10: fsusds.Bytes()}, nil
+					},
+					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
+						return map[int64]int{}, nil
+					},
+				}
+			},
+			wantErr: true, errContains: "token decimals not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := tt.setupRepo()
+			units, err := LoadOracleUnits(context.Background(), repo, 1, testutil.DiscardLogger())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(units) != 1 {
+				t.Fatalf("units count = %d, want 1", len(units))
 			}
 			if tt.checkUnits != nil {
 				tt.checkUnits(t, units)

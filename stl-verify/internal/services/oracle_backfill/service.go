@@ -74,6 +74,7 @@ type Service struct {
 
 	oracleABI *abi.ABI
 	feedABI   *abi.ABI
+	shareABI  *abi.ABI
 
 	logger *slog.Logger
 }
@@ -119,6 +120,11 @@ func NewService(
 		return nil, fmt.Errorf("loading AggregatorV3 ABI: %w", err)
 	}
 
+	shareABI, err := abis.GetERC4626ABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading ERC4626 ABI: %w", err)
+	}
+
 	return &Service{
 		config:         config,
 		headerFetcher:  headerFetcher,
@@ -126,6 +132,7 @@ func NewService(
 		repo:           repo,
 		oracleABI:      oracleABI,
 		feedABI:        feedABI,
+		shareABI:       shareABI,
 		logger:         config.Logger.With("component", "oracle-backfill"),
 	}, nil
 }
@@ -413,6 +420,8 @@ func (s *Service) worker(
 			prices, blockErr = s.processBlockFeed(ctx, mc, wu, oracleID, blockNum)
 		case entity.OracleTypeAave:
 			prices, blockErr = s.processBlockAave(ctx, mc, wu.OracleAddr, wu.TokenAddrs, wu.TokenIDs, oracleID, priceDecimals, blockNum)
+		case entity.OracleTypeERC4626Share:
+			prices, blockErr = s.processBlockERC4626(ctx, mc, wu, oracleID, blockNum)
 		default:
 			blockErr = fmt.Errorf("unsupported oracle type: %s", wu.Oracle.OracleType)
 		}
@@ -528,6 +537,37 @@ func (s *Service) processBlockFeed(
 
 	results = oracle_pricing.ConvertNonUSDPrices(results, wu.OracleUnit, s.logger, blockNum)
 
+	return s.feedResultsToPrices(ctx, results, oracleID, blockNum)
+}
+
+func (s *Service) processBlockERC4626(
+	ctx context.Context,
+	mc outbound.Multicaller,
+	wu *oracleWorkUnit,
+	oracleID int16,
+	blockNum int64,
+) ([]*entity.OnchainTokenPrice, error) {
+	results, err := blockchain.FetchERC4626SharePrices(
+		ctx, mc, s.shareABI, s.feedABI,
+		wu.ERC4626Vaults, blockNum,
+		s.logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetching erc4626 share prices: %w", err)
+	}
+
+	return s.feedResultsToPrices(ctx, results, oracleID, blockNum)
+}
+
+// feedResultsToPrices converts successful price results into OnchainTokenPrice
+// entities at the block, fetching the block timestamp once. Failed results are
+// dropped (their reverts/zeros were already logged by the fetcher).
+func (s *Service) feedResultsToPrices(
+	ctx context.Context,
+	results []blockchain.FeedPriceResult,
+	oracleID int16,
+	blockNum int64,
+) ([]*entity.OnchainTokenPrice, error) {
 	var successResults []blockchain.FeedPriceResult
 	for _, r := range results {
 		if r.Success {

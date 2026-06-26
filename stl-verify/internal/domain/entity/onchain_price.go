@@ -15,6 +15,7 @@ const (
 	OracleTypeChainlinkFeed OracleType = "chainlink_feed"
 	OracleTypeChronicle     OracleType = "chronicle"
 	OracleTypeRedstone      OracleType = "redstone"
+	OracleTypeERC4626Share  OracleType = "erc4626_share"
 )
 
 // QuoteCurrency identifies the denomination of a feed price.
@@ -35,6 +36,13 @@ func (t OracleType) IsFeedOracle() bool {
 	default:
 		return false
 	}
+}
+
+// IsERC4626Oracle returns true for ERC-4626 share-pricing oracles, which derive
+// a vault share's USD price from convertToAssets(1e18) and the underlying token's
+// USD feed.
+func (t OracleType) IsERC4626Oracle() bool {
+	return t == OracleTypeERC4626Share
 }
 
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).

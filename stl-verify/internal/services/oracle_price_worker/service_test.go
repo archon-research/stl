@@ -122,6 +122,7 @@ type mockRepo struct {
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
 	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenDecimalsFn             func(ctx context.Context, oracleID int64) (map[int64]int, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -168,6 +169,13 @@ func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[i
 		return m.getTokenAddressesFn(ctx, oracleID)
 	}
 	return nil, errors.New("GetTokenAddresses not mocked")
+}
+
+func (m *mockRepo) GetTokenDecimals(ctx context.Context, oracleID int64) (map[int64]int, error) {
+	if m.getTokenDecimalsFn != nil {
+		return m.getTokenDecimalsFn(ctx, oracleID)
+	}
+	return nil, errors.New("GetTokenDecimals not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
