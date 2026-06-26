@@ -286,6 +286,64 @@ Maple API is degraded and a phase risks overrunning the 10m interval.
 
 ---
 
+## VectorCexOrderbookPersistFailing
+
+**Severity:** critical · **For:** 15m
+
+### What it means
+
+Every snapshot write for the labelled `exchange` has failed continuously for
+>15 minutes. The WebSocket is probably still up (books are fresh in memory) but
+nothing is reaching TimescaleDB — a silent data hole. Because the indexer drops
+failed ticks by design, it will not recover on its own from a permanent cause.
+
+### First checks (≤5 min)
+
+1. **Pod status & logs** — `kubectl -n vector logs -l app=cex-orderbook-indexer-<exchange> --tail=200`.
+   Look for the `failed to persist order book snapshots` error and its cause.
+2. **Classify the cause from the error:**
+   - `password authentication failed` / permission denied → DB credential or
+     grant problem; fix the secret/role and restart.
+   - `relation "cex_orderbook_snapshots" does not exist` → the migration did not
+     run in this environment; run the migrate job.
+   - `timeout` / `too many connections` / pool exhausted → DB under load or pool
+     too small; check the Postgres dashboard.
+
+### Verify recovery
+
+`rate(orderbook_persist_failures_total{exchange="<exchange>"}[10m]) == 0` and
+fresh rows: `SELECT max(persisted_at) FROM cex_orderbook_snapshots WHERE exchange = '<exchange>'`.
+
+---
+
+## VectorCexOrderbookStreamStalled
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The oldest symbol on the labelled `exchange` has had no order book update for
+>120s sustained over 10m. The upstream feed has silently gone dead; snapshots
+are stale and stale symbols stop being written, so the series flat-lines.
+
+### First checks (≤5 min)
+
+1. **Pod logs** — `kubectl -n vector logs -l app=cex-orderbook-indexer-<exchange> --tail=200`.
+   Look for reconnect churn (`orderbook.reconnections.total`) or
+   `skipping stale order books`.
+2. **Exchange status** — check the venue's status page / API health; an outage
+   or a symbol delisting stops updates.
+3. **Symbol config** — a bad/renamed symbol can wedge the feed (e.g. Kraken
+   `XBT`/`XDG` aliasing); confirm `SYMBOLS` matches the venue's current pairs.
+4. **Network egress** — confirm the pod can reach the exchange WebSocket.
+
+### Verify recovery
+
+`max(orderbook_last_update_age{exchange="<exchange>"}) < 120` and
+`rate(orderbook_updates_emitted_total{exchange="<exchange>"}[5m]) > 0`.
+
+---
+
 ## See also
 
 - Watcher runbook: [vector-watcher.md](vector-watcher.md)

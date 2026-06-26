@@ -340,9 +340,10 @@ func TestPersistErrorIncrementsFailureMetric(t *testing.T) {
 	if err := svc.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	t.Cleanup(func() { _ = svc.Stop() }) // don't leak the loop if an assertion below fails
 	p.updates <- bookWith("BTC-USD", map[string]string{"100": "1"}, map[string]string{"101": "2"}, time.Time{})
 	waitForSaves(t, r, 2)
-	_ = svc.Stop() // final flush attempts one more (also failing) save
+	_ = svc.Stop() // blocks until the loop drains so all failure increments are recorded
 
 	if got := persistFailureCount(t, reader); got < 2 {
 		t.Fatalf("orderbook.persist.failures.total = %d, want >= 2", got)
