@@ -48,6 +48,9 @@ type Config struct {
 
 	// Logger is the structured logger.
 	Logger *slog.Logger
+
+	// Telemetry records sweep metrics. Optional; nil disables recording.
+	Telemetry *Telemetry
 }
 
 // Service consumes block events from SQS and periodically reads the PSM3
@@ -58,6 +61,7 @@ type Service struct {
 	repo             outbound.PSM3ReservesRepository
 	sqsConsumer      outbound.SQSConsumer
 	blockQuerier     entity.BlockQuerier
+	telemetry        *Telemetry
 	logger           *slog.Logger
 	blocksSinceSweep int
 	wg               sync.WaitGroup
@@ -114,6 +118,7 @@ func NewService(
 		repo:         repo,
 		sqsConsumer:  sqsConsumer,
 		blockQuerier: blockQuerier,
+		telemetry:    config.Telemetry,
 		logger:       config.Logger.With("component", "psm3-service"),
 	}, nil
 }
@@ -173,6 +178,10 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 	}
 	s.blocksSinceSweep = 0
 
+	start := time.Now()
+	err := s.sweep(ctx, event)
+	s.telemetry.RecordSweep(ctx, time.Since(start), err)
+
 	// A failed sweep is logged and ACKed, not returned. Block events are a
 	// per-chain FIFO cadence clock (MessageGroupId = chainId), not a unit of
 	// work to retry: NACKing would redeliver the event, which the reset counter
@@ -182,7 +191,7 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 	// the RPC during an outage. So we skip the failed interval and sweep again
 	// at the next one; persistent failure surfaces via snapshot-freshness
 	// metrics, not the DLQ.
-	if err := s.sweep(ctx, event); err != nil {
+	if err != nil {
 		s.logger.Error("psm3 sweep failed; skipping to next interval",
 			"block", event.BlockNumber,
 			"blockVersion", event.Version,
@@ -195,8 +204,6 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 // snapshot row, returning an error on any failure so no partial rows are
 // written. The caller decides how to handle that error (see processBlock).
 func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
-	start := time.Now()
-
 	state, err := s.caller.ReadState(ctx, big.NewInt(event.BlockNumber))
 	if err != nil {
 		return fmt.Errorf("read psm3 state at block %d: %w", event.BlockNumber, err)
@@ -219,10 +226,11 @@ func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 		return fmt.Errorf("save psm3 reserves at block %d: %w", event.BlockNumber, err)
 	}
 
+	s.telemetry.RecordSnapshot(ctx, event.BlockNumber, *state)
+
 	s.logger.Info("psm3 sweep complete",
 		"block", event.BlockNumber,
 		"blockVersion", event.Version,
-		"duration", time.Since(start),
 	)
 
 	return nil
