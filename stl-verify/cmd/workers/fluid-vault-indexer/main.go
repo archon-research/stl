@@ -1,0 +1,331 @@
+// Package main consumes Ethereum block events from SQS, reads end-of-block Fluid
+// vault state from the VaultResolver for vaults touched in each block, and writes
+// append-only snapshots to Postgres (see internal/services/fluid_vault_indexer).
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/ethereum/go-ethereum/common"
+
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
+	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/services/fluid_vault_indexer"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+)
+
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
+}
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := run(ctx, os.Args[1:]); err != nil {
+		slog.Error("fatal error", "error", err)
+		os.Exit(1)
+	}
+}
+
+type cliConfig struct {
+	queueURL          string
+	redisAddr         string
+	dbURL             string
+	alchemyURL        string
+	s3Bucket          string
+	deployEnv         string
+	maxMessages       int
+	waitTime          int
+	visibilityTimeout int
+	chainID           int64
+	chainName         string
+	targetDebtToken   common.Address
+}
+
+func parseConfig(args []string) (cliConfig, error) {
+	fs := flag.NewFlagSet("fluid-vault-indexer", flag.ContinueOnError)
+	queueURL := fs.String("queue", "", "SQS Queue URL")
+	redisAddr := fs.String("redis", "", "Redis address")
+	dbURL := fs.String("db", "", "PostgreSQL connection URL")
+	maxMessages := fs.Int("max", 10, "Max messages per poll")
+	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
+	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
+	if err := fs.Parse(args); err != nil {
+		return cliConfig{}, err
+	}
+
+	cfg := cliConfig{
+		queueURL:          *queueURL,
+		redisAddr:         *redisAddr,
+		dbURL:             *dbURL,
+		maxMessages:       *maxMessages,
+		waitTime:          *waitTime,
+		visibilityTimeout: *visibilityTimeout,
+	}
+
+	if cfg.queueURL == "" {
+		cfg.queueURL = env.Get("AWS_SQS_QUEUE_URL", "")
+	}
+	if cfg.queueURL == "" {
+		return cliConfig{}, fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
+	}
+
+	if cfg.dbURL == "" {
+		cfg.dbURL = env.Get("DATABASE_URL", "")
+	}
+	if cfg.dbURL == "" {
+		return cliConfig{}, fmt.Errorf("database URL not provided (use -db flag or DATABASE_URL env var)")
+	}
+
+	alchemyAPIKey := os.Getenv("ALCHEMY_API_KEY")
+	if alchemyAPIKey == "" {
+		return cliConfig{}, fmt.Errorf("ALCHEMY_API_KEY environment variable is required")
+	}
+	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
+	cfg.alchemyURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
+
+	if cfg.redisAddr == "" {
+		cfg.redisAddr = env.Get("REDIS_ADDR", "")
+	}
+	if cfg.redisAddr == "" {
+		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
+	}
+
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+		v, err := strconv.Atoi(waitTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+		}
+		cfg.waitTime = v
+	}
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+		v, err := strconv.Atoi(visTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+		}
+		cfg.visibilityTimeout = v
+	}
+
+	chainIDStr := env.Get("CHAIN_ID", "1")
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	cfg.chainID = chainID
+	cfg.chainName, err = entity.ChainName(chainID)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("resolving chain name: %w", err)
+	}
+
+	cfg.s3Bucket = env.Get("S3_BUCKET", "")
+	if cfg.s3Bucket == "" {
+		return cliConfig{}, fmt.Errorf("S3_BUCKET environment variable is required")
+	}
+
+	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
+	if cfg.deployEnv == "" {
+		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
+	}
+
+	// TargetDebtToken defaults to sUSDS; an explicit override must be a valid
+	// hex address so a typo fails fast rather than silently scoping to address(0).
+	cfg.targetDebtToken = fluid_vault_indexer.SUSDSAddress
+	if tokenStr := env.Get("TARGET_DEBT_TOKEN", ""); tokenStr != "" {
+		if !common.IsHexAddress(tokenStr) {
+			return cliConfig{}, fmt.Errorf("invalid TARGET_DEBT_TOKEN %q: not a hex address", tokenStr)
+		}
+		cfg.targetDebtToken = common.HexToAddress(tokenStr)
+	}
+
+	return cfg, nil
+}
+
+func run(ctx context.Context, args []string) error {
+	cfg, err := parseConfig(args)
+	if err != nil {
+		return err
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: env.ParseLogLevel(slog.LevelInfo),
+	}))
+	slog.SetDefault(logger)
+
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
+	if err != nil {
+		return fmt.Errorf("loading AWS config: %w", err)
+	}
+
+	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
+		QueueURL:          cfg.queueURL,
+		WaitTimeSeconds:   int32(cfg.waitTime),
+		VisibilityTimeout: int32(cfg.visibilityTimeout),
+		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("creating SQS consumer: %w", err)
+	}
+	defer sqsConsumer.Close()
+
+	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
+		Addr:      cfg.redisAddr,
+		Password:  env.Get("REDIS_PASSWORD", ""),
+		DB:        0,
+		TTL:       2 * 24 * time.Hour,
+		KeyPrefix: "stl",
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("creating Redis cache: %w", err)
+	}
+	defer blockCache.Close()
+	if err := blockCache.Ping(ctx); err != nil {
+		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
+	}
+	logger.Info("Redis connected", "addr", cfg.redisAddr)
+
+	s3Opts := []func(*awss3.Options){}
+	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
+		s3Opts = append(s3Opts, func(o *awss3.Options) {
+			o.BaseEndpoint = aws.String(s3Endpoint)
+			o.UsePathStyle = true
+		})
+	}
+	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
+	if err != nil {
+		return fmt.Errorf("creating cache reader: %w", err)
+	}
+
+	ethClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
+	if err != nil {
+		return fmt.Errorf("connecting to Ethereum node: %w", err)
+	}
+	defer ethClient.Close()
+	logger.Info("Ethereum node connected")
+
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer pool.Close()
+	logger.Info("PostgreSQL connected")
+
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		return fmt.Errorf("registering build: %w", err)
+	}
+
+	logger.Info("starting fluid vault indexer",
+		"queue", cfg.queueURL,
+		"redis", cfg.redisAddr,
+		"chainID", cfg.chainID,
+		"targetDebtToken", cfg.targetDebtToken.Hex(),
+		"commit", buildReg.GitHash())
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "fluid-vault-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	mcTel, err := multicall.NewTelemetry(cfg.chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
+	txManager, err := postgres.NewTxManager(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating transaction manager: %w", err)
+	}
+
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
+	if err != nil {
+		return fmt.Errorf("creating protocol repository: %w", err)
+	}
+
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
+	if err != nil {
+		return fmt.Errorf("creating token repository: %w", err)
+	}
+
+	vaultRepo, err := postgres.NewFluidVaultRepository(pool, logger, buildReg.BuildID(), 0)
+	if err != nil {
+		return fmt.Errorf("creating fluid vault repository: %w", err)
+	}
+
+	service, err := fluid_vault_indexer.NewService(
+		fluid_vault_indexer.Config{
+			SQSConsumerConfig: shared.SQSConsumerConfig{
+				MaxMessages: cfg.maxMessages,
+				Logger:      logger,
+				ChainID:     cfg.chainID,
+			},
+			TargetDebtToken: cfg.targetDebtToken,
+		},
+		sqsConsumer,
+		cacheReader,
+		ethClient,
+		mc,
+		txManager,
+		vaultRepo,
+		tokenRepo,
+		protocolRepo,
+	)
+	if err != nil {
+		return fmt.Errorf("creating service: %w", err)
+	}
+
+	logger.Info("fluid vault indexer started, waiting for messages...")
+
+	return lifecycle.Run(ctx, logger, service)
+}
