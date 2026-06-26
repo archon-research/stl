@@ -235,37 +235,23 @@ const insertLoanSQL = `
 	 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	 RETURNING id`
 
-// RecordLoans records loan registry rows and returns loan address ->
-// maple_loan.id of the row matching THIS cycle's metadata.
+// RecordLoans returns loan address -> the maple_loan.id current for this cycle:
+// the existing version when loanMeta is unchanged, a freshly appended one when
+// it changed. maple_pool_id and borrower_user_id are immutable — a change fails
+// the run.
 //
-// maple_loan is an append-only registry. maple_pool_id and borrower_user_id are
-// strictly immutable per loan (on-chain facts) — a change versus the latest
-// stored row fails the run. The six loanMeta columns are off-chain editorial
-// metadata Maple enriches after origination (a stored NULL loan_meta_type later
-// resolves to a value such as "intercompany"). Rather than mutate the stored row
-// — which would erase the metadata in effect when earlier state snapshots were
-// taken, breaking the reproducibility of downstream loan-risk calculations — any
-// loanMeta difference appends a NEW row, leaving prior rows intact. State
-// snapshots FK the row current at their sync cycle, so a join reproduces the
-// metadata that was live then. The latest version per loan is the row with the
-// greatest (synced_at, id), where synced_at is the cycle timestamp passed in.
+// Each loan is checked against two reference rows: immutable fields against the
+// absolute latest row, but the loanMeta equality decision against the version
+// current at syncedAt (greatest synced_at <= syncedAt). Comparing loanMeta
+// against the latest would re-append a duplicate whenever an older cycle is
+// replayed against an already-newer version; deduping at the cycle boundary
+// keeps replay idempotent.
 //
-// Each loan is checked against two reference rows, on purpose:
-//   - Immutable fields are validated against the absolute latest row — they
-//     never change, so any version is a valid witness.
-//   - The loanMeta equality decision is made against the version current at
-//     syncedAt (the greatest synced_at <= syncedAt), NOT the absolute latest.
-//     Comparing against the latest would, when a newer version already exists,
-//     re-append a duplicate every time an older cycle is replayed with metadata
-//     that already matches the version live at that cycle. Deduping at the cycle
-//     boundary keeps replay/backfill idempotent.
-//
-// The append decision is made from a prior read, which ON CONFLICT cannot guard,
-// so each loan takes a per-loan pg_advisory_xact_lock on its natural key
-// (ADR-0002 §3). Locks and reads are issued in one batched round-trip in sorted
-// address order, so locks are acquired in a consistent order (deadlock-free) and
-// the lock+read phase costs one round-trip instead of two per loan; only loans
-// that actually changed get an insert, batched in a second round-trip.
+// The decision is read-then-append, which ON CONFLICT cannot guard, so each loan
+// takes a pg_advisory_xact_lock on its natural key (ADR-0002 §3). Locks and reads
+// go out in one batched round-trip in sorted address order — consistent lock
+// order (deadlock-free), one round-trip instead of per-loan; only changed loans
+// are inserted, batched in a second round-trip.
 func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
