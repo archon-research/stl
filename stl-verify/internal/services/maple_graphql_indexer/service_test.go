@@ -55,7 +55,7 @@ type mockRepo struct {
 	GetMapleProtocolIDFn    func(ctx context.Context, chainID int64) (int64, error)
 	UpsertPoolsFn           func(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
 	SavePoolStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
-	UpsertLoansFn           func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error)
+	RecordLoansFn           func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error)
 	SaveLoanStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
 	SaveLoanCollateralsFn   func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
 	UpsertSkyStrategiesFn   func(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
@@ -71,7 +71,7 @@ type mockRepo struct {
 	borrowerCalls   [][]entity.User
 	assetTokenCalls [][]outbound.TokenInput
 	upsertedPools   []*maple.Pool
-	upsertedLoans   []*maple.Loan
+	recordedLoans   []*maple.Loan
 	savedPoolStates []*maple.PoolState
 	savedLoanStates []*maple.LoanState
 	savedCollats    []*maple.LoanCollateral
@@ -116,8 +116,8 @@ func newMockRepo() *mockRepo {
 		r.savedPoolStates = append(r.savedPoolStates, states...)
 		return nil
 	}
-	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.Loan, _ time.Time) (map[common.Address]int64, error) {
-		r.upsertedLoans = append(r.upsertedLoans, loans...)
+	r.RecordLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.Loan, _ time.Time) (map[common.Address]int64, error) {
+		r.recordedLoans = append(r.recordedLoans, loans...)
 		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
 			ids[common.BytesToAddress(l.LoanAddress)] = int64(20 + i)
@@ -162,8 +162,8 @@ func (m *mockRepo) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*mapl
 	return m.SavePoolStatesFn(ctx, tx, states)
 }
 
-func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
-	return m.UpsertLoansFn(ctx, tx, loans, syncedAt)
+func (m *mockRepo) RecordLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
+	return m.RecordLoansFn(ctx, tx, loans, syncedAt)
 }
 
 func (m *mockRepo) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error {
@@ -442,11 +442,11 @@ func TestSync_HappyPath(t *testing.T) {
 
 	// Loan meta maps field-for-field into the registry entity; the loan
 	// without API meta keeps a nil meta.
-	if len(repo.upsertedLoans) != 3 {
-		t.Fatalf("upserted loans = %d, want 3", len(repo.upsertedLoans))
+	if len(repo.recordedLoans) != 3 {
+		t.Fatalf("recorded loans = %d, want 3", len(repo.recordedLoans))
 	}
 	metaByAddr := map[common.Address]*maple.LoanMeta{}
-	for _, l := range repo.upsertedLoans {
+	for _, l := range repo.recordedLoans {
 		metaByAddr[common.BytesToAddress(l.LoanAddress)] = l.LoanMeta
 	}
 	wantMeta := maple.LoanMeta{Type: "amm", DexName: "Uniswap"}
@@ -867,7 +867,7 @@ func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
+	repo.RecordLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -1140,7 +1140,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "loan upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
+				r.RecordLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},

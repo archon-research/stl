@@ -834,14 +834,14 @@ func TestProcessingVersionTrigger_CrossBuildRace_MapleLoanState(t *testing.T) {
 	}
 }
 
-// TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce covers the
-// append-only maple_loan registry. UpsertLoans decides whether to append a new
+// TestMapleRecordLoans_ConcurrentMetaChangeAppendsExactlyOnce covers the
+// append-only maple_loan registry. RecordLoans decides whether to append a new
 // version from a prior read of the latest row, which ON CONFLICT cannot guard.
 // Two concurrent cycles observing the same metadata change must append exactly
 // once: the per-loan pg_advisory_xact_lock serializes them so the second reads
 // the first's committed row and reuses it. Without the lock both would read the
 // stale row and insert, producing a duplicate version.
-func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
+func TestMapleRecordLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 	withConcurrencyPool(t)
 	ctx := context.Background()
 	truncateMapleForConcurrency(t, ctx)
@@ -873,7 +873,7 @@ func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin baseline: %v", err)
 	}
-	if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(nil)}, baseSyncedAt); err != nil {
+	if _, err := repo.RecordLoans(ctx, tx, []*maple.Loan{makeLoan(nil)}, baseSyncedAt); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("baseline upsert: %v", err)
 	}
@@ -883,7 +883,7 @@ func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 
 	// Two concurrent cycles both reclassify to the same internal type.
 	errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		_, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(&maple.LoanMeta{Type: "intercompany"})}, raceSyncedAt)
+		_, err := repo.RecordLoans(ctx, tx, []*maple.Loan{makeLoan(&maple.LoanMeta{Type: "intercompany"})}, raceSyncedAt)
 		return err
 	})
 	for i, err := range errs {
@@ -908,7 +908,7 @@ func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces proves the advisory
+// TestMapleRecordLoans_NegativeControl_LocklessAppendRaces proves the advisory
 // lock in appendLoanVersion is load-bearing. It replays the same
 // read-latest-then-insert WITHOUT the lock (and with a pg_sleep widening the
 // window) and asserts two concurrent cycles DO append duplicate versions. If
@@ -918,7 +918,7 @@ func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 //
 // The race is statistical even with the barrier + pg_sleep (Postgres can still
 // serialise the two transactions), so retry until it manifests once.
-func TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
+func TestMapleRecordLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
 	withConcurrencyPool(t)
 	ctx := context.Background()
 

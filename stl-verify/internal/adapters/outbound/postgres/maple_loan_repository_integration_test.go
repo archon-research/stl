@@ -158,7 +158,7 @@ func upsertTestPool(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 	return id
 }
 
-func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, poolID int64, addrByte byte, meta *maple.LoanMeta, syncedAt time.Time) int64 {
+func recordTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, poolID int64, addrByte byte, meta *maple.LoanMeta, syncedAt time.Time) int64 {
 	t.Helper()
 	protocolID := mapleProtocolID(t, ctx, repo)
 
@@ -169,7 +169,7 @@ func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 		if err != nil {
 			return err
 		}
-		ids, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, syncedAt)
+		ids, err := repo.RecordLoans(ctx, tx, []*maple.Loan{loan}, syncedAt)
 		if err != nil {
 			return err
 		}
@@ -226,7 +226,7 @@ func TestMapleUpsertPools_RoundTripAndNoOp(t *testing.T) {
 		t.Fatalf("len(ids) = %d, want 2", len(ids))
 	}
 
-	// Re-upsert with all values unchanged is a clean no-op that keeps the
+	// Re-record with all values unchanged is a clean no-op that keeps the
 	// same id (nothing is refreshed).
 	var again map[common.Address]int64
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
@@ -235,7 +235,7 @@ func TestMapleUpsertPools_RoundTripAndNoOp(t *testing.T) {
 		return err
 	})
 	if again[common.BytesToAddress(poolA.Address)] != ids[common.BytesToAddress(poolA.Address)] {
-		t.Errorf("pool id changed on unchanged re-upsert")
+		t.Errorf("pool id changed on unchanged re-record")
 	}
 
 	var name string
@@ -251,7 +251,7 @@ func TestMapleUpsertPools_RoundTripAndNoOp(t *testing.T) {
 }
 
 func TestMapleUpsertPools_RejectsFieldChange(t *testing.T) {
-	// Every pool attribute is immutable; a re-upsert with any changed value
+	// Every pool attribute is immutable; a re-record with any changed value
 	// must fail the run, naming the field, instead of refreshing the row.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
@@ -270,7 +270,7 @@ func TestMapleUpsertPools_RejectsFieldChange(t *testing.T) {
 		t.Fatalf("NewPool: %v", err)
 	}
 
-	upsert := func(p *maple.Pool) error {
+	record := func(p *maple.Pool) error {
 		tx, err := maplePool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -282,12 +282,12 @@ func TestMapleUpsertPools_RejectsFieldChange(t *testing.T) {
 		return tx.Commit(ctx)
 	}
 
-	if err := upsert(baseline); err != nil {
-		t.Fatalf("baseline upsert: %v", err)
+	if err := record(baseline); err != nil {
+		t.Fatalf("baseline record: %v", err)
 	}
-	// Unchanged re-upsert is a clean no-op.
-	if err := upsert(baseline); err != nil {
-		t.Fatalf("unchanged re-upsert: %v", err)
+	// Unchanged re-record is a clean no-op.
+	if err := record(baseline); err != nil {
+		t.Fatalf("unchanged re-record: %v", err)
 	}
 
 	cases := []struct {
@@ -303,7 +303,7 @@ func TestMapleUpsertPools_RejectsFieldChange(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := *baseline
 			tc.mutate(&changed)
-			err := upsert(&changed)
+			err := record(&changed)
 			if err == nil {
 				t.Fatal("expected mismatch error, got nil")
 			}
@@ -581,8 +581,8 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x21)
 
-	internalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x30, &maple.LoanMeta{Type: "amm", DexName: "Uniswap"}, mapleSyncedAt())
-	externalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x31, nil, mapleSyncedAt())
+	internalLoanID := recordTestLoan(t, ctx, repo, poolID, 0x30, &maple.LoanMeta{Type: "amm", DexName: "Uniswap"}, mapleSyncedAt())
+	externalLoanID := recordTestLoan(t, ctx, repo, poolID, 0x31, nil, mapleSyncedAt())
 
 	// is_internal generated column follows loan_meta_type.
 	var isInternal bool
@@ -680,7 +680,7 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_NoOpOnUnchangedMeta(t *testing.T) {
+func TestMapleRecordLoans_NoOpOnUnchangedMeta(t *testing.T) {
 	// Re-reading a loan with identical metadata reuses the existing row: no new
 	// version is appended and the same id is returned.
 	ctx := context.Background()
@@ -689,13 +689,13 @@ func TestMapleUpsertLoans_NoOpOnUnchangedMeta(t *testing.T) {
 	poolID := upsertTestPool(t, ctx, repo, 0x22)
 
 	meta := &maple.LoanMeta{Type: "strategy", Location: "base"}
-	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta, mapleSyncedAt())
+	loanID := recordTestLoan(t, ctx, repo, poolID, 0x32, meta, mapleSyncedAt())
 
 	// A later cycle re-reading the same metadata reuses the row (no new version),
 	// even though its synced_at is newer.
-	sameID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta, mapleSyncedAt().Add(time.Hour))
+	sameID := recordTestLoan(t, ctx, repo, poolID, 0x32, meta, mapleSyncedAt().Add(time.Hour))
 	if sameID != loanID {
-		t.Fatalf("unchanged re-upsert appended a new row: %d vs %d", sameID, loanID)
+		t.Fatalf("unchanged re-record appended a new row: %d vs %d", sameID, loanID)
 	}
 
 	var count int
@@ -749,9 +749,9 @@ func mapleLoanRowCount(t *testing.T, ctx context.Context, addrByte byte) int {
 	return count
 }
 
-func TestMapleUpsertLoans_RejectsPoolChange(t *testing.T) {
-	// maple_pool_id is strictly immutable; the upsert never refreshes it and a
-	// re-upsert reassigning the loan to a different pool must fail the run
+func TestMapleRecordLoans_RejectsPoolChange(t *testing.T) {
+	// maple_pool_id is strictly immutable; the record never refreshes it and a
+	// re-record reassigning the loan to a different pool must fail the run
 	// naming the field, instead of refreshing the row.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
@@ -767,7 +767,7 @@ func TestMapleUpsertLoans_RejectsPoolChange(t *testing.T) {
 	})
 
 	loanAddr := mapleAddr(0x30)
-	upsert := func(poolID int64) error {
+	record := func(poolID int64) error {
 		tx, err := maplePool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -777,21 +777,21 @@ func TestMapleUpsertLoans_RejectsPoolChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
+		if _, err := repo.RecordLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
 	}
 
-	if err := upsert(poolA); err != nil {
-		t.Fatalf("baseline upsert: %v", err)
+	if err := record(poolA); err != nil {
+		t.Fatalf("baseline record: %v", err)
 	}
-	// Unchanged re-upsert is a clean no-op.
-	if err := upsert(poolA); err != nil {
-		t.Fatalf("unchanged re-upsert: %v", err)
+	// Unchanged re-record is a clean no-op.
+	if err := record(poolA); err != nil {
+		t.Fatalf("unchanged re-record: %v", err)
 	}
 	// Pool reassignment must fail.
-	err := upsert(poolB)
+	err := record(poolB)
 	if err == nil {
 		t.Fatal("expected mismatch error, got nil")
 	}
@@ -800,7 +800,7 @@ func TestMapleUpsertLoans_RejectsPoolChange(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_AppendsRowOnMetaChange(t *testing.T) {
+func TestMapleRecordLoans_AppendsRowOnMetaChange(t *testing.T) {
 	// maple_loan is append-only: loanMeta is off-chain editorial data Maple
 	// enriches after origination. Any loanMeta difference — null->value
 	// enrichment, value->value reclassification, value->null clear — appends a
@@ -826,8 +826,8 @@ func TestMapleUpsertLoans_AppendsRowOnMetaChange(t *testing.T) {
 			truncateMaple(t, ctx)
 			poolID := upsertTestPool(t, ctx, repo, 0x20)
 
-			oldID := upsertTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.from, mapleSyncedAt())
-			newID := upsertTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.to, mapleSyncedAt().Add(time.Hour))
+			oldID := recordTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.from, mapleSyncedAt())
+			newID := recordTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.to, mapleSyncedAt().Add(time.Hour))
 			if newID == oldID {
 				t.Fatalf("meta change reused id %d; expected a new appended row", oldID)
 			}
@@ -868,15 +868,15 @@ func TestMapleUpsertLoans_AppendsRowOnMetaChange(t *testing.T) {
 			if internal != tc.wantIntern {
 				t.Errorf("is_internal = %v, want %v", internal, tc.wantIntern)
 			}
-			// UpsertLoans returns the latest (appended) row id.
+			// RecordLoans returns the latest (appended) row id.
 			if latest := latestMapleLoanID(t, ctx, tc.addrByte); latest != newID {
-				t.Errorf("latest row id = %d, but UpsertLoans returned %d", latest, newID)
+				t.Errorf("latest row id = %d, but RecordLoans returned %d", latest, newID)
 			}
 		})
 	}
 }
 
-func TestMapleUpsertLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
+func TestMapleRecordLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
 	// Reproducibility guarantee: each loan state snapshot FKs the maple_loan
 	// version current at its sync cycle, so a later metadata change never
 	// rewrites the metadata a historical snapshot was taken under.
@@ -886,7 +886,7 @@ func TestMapleUpsertLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
 	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
 	// Cycle 1: external loan (type null). Snapshot S1 points to version v1.
-	v1 := upsertTestLoan(t, ctx, repo, poolID, 0x50, nil, mapleSyncedAt())
+	v1 := recordTestLoan(t, ctx, repo, poolID, 0x50, nil, mapleSyncedAt())
 	s1, err := maple.NewLoanState(v1, mapleSyncedAt(), "Active", big.NewInt(100), big.NewInt(1000000))
 	if err != nil {
 		t.Fatalf("NewLoanState s1: %v", err)
@@ -897,7 +897,7 @@ func TestMapleUpsertLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
 
 	// Cycle 2: Maple reclassifies the loan internal ("amm"). New version v2;
 	// snapshot S2 points to it.
-	v2 := upsertTestLoan(t, ctx, repo, poolID, 0x50, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(time.Hour))
+	v2 := recordTestLoan(t, ctx, repo, poolID, 0x50, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(time.Hour))
 	if v2 == v1 {
 		t.Fatal("expected a new version row for the reclassified loan")
 	}
@@ -945,8 +945,8 @@ func TestMapleUpsertLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
-	// One UpsertLoans call carrying several loans appends a new version only for
+func TestMapleRecordLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
+	// One RecordLoans call carrying several loans appends a new version only for
 	// the loan whose metadata changed; the unchanged sibling reuses its row. The
 	// returned map must carry the right id per loan. Exercises the per-loan lock
 	// loop across more than one loan.
@@ -961,7 +961,7 @@ func TestMapleUpsertLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
 	keyA := common.BytesToAddress(addrA)
 	keyB := common.BytesToAddress(addrB)
 
-	upsertBatch := func(metaA, metaB *maple.LoanMeta, syncedAt time.Time) map[common.Address]int64 {
+	recordBatch := func(metaA, metaB *maple.LoanMeta, syncedAt time.Time) map[common.Address]int64 {
 		t.Helper()
 		var ids map[common.Address]int64
 		inMapleTx(t, ctx, func(tx pgx.Tx) error {
@@ -974,15 +974,15 @@ func TestMapleUpsertLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			ids, err = repo.UpsertLoans(ctx, tx, []*maple.Loan{loanA, loanB}, syncedAt)
+			ids, err = repo.RecordLoans(ctx, tx, []*maple.Loan{loanA, loanB}, syncedAt)
 			return err
 		})
 		return ids
 	}
 
-	first := upsertBatch(nil, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt())
+	first := recordBatch(nil, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt())
 	// Cycle 2: A enriched null->intercompany; B unchanged.
-	second := upsertBatch(&maple.LoanMeta{Type: "intercompany"}, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(time.Hour))
+	second := recordBatch(&maple.LoanMeta{Type: "intercompany"}, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(time.Hour))
 
 	if second[keyA] == first[keyA] {
 		t.Errorf("loan A meta changed but reused id %d; expected a new version", first[keyA])
@@ -998,7 +998,7 @@ func TestMapleUpsertLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_MetaRoundTripAppendsDistinctVersions(t *testing.T) {
+func TestMapleRecordLoans_MetaRoundTripAppendsDistinctVersions(t *testing.T) {
 	// append-only compares only against the latest row, never resurrecting an
 	// older one: amm -> intercompany -> amm yields three distinct version rows
 	// (the third matches the first's metadata but is a fresh row).
@@ -1007,9 +1007,9 @@ func TestMapleUpsertLoans_MetaRoundTripAppendsDistinctVersions(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
-	id1 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt())
-	id2 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "intercompany"}, mapleSyncedAt().Add(time.Hour))
-	id3 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(2*time.Hour))
+	id1 := recordTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt())
+	id2 := recordTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "intercompany"}, mapleSyncedAt().Add(time.Hour))
+	id3 := recordTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(2*time.Hour))
 
 	if id1 == id2 || id2 == id3 || id1 == id3 {
 		t.Fatalf("expected three distinct version ids, got %d, %d, %d", id1, id2, id3)
@@ -1022,7 +1022,7 @@ func TestMapleUpsertLoans_MetaRoundTripAppendsDistinctVersions(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
+func TestMapleRecordLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 	// The immutable maple_pool_id guard runs before the loanMeta append decision:
 	// a loan changing BOTH its pool and its metadata fails on the pool change and
 	// appends nothing, instead of recording a forbidden pool reassignment as a
@@ -1035,7 +1035,7 @@ func TestMapleUpsertLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 	poolB := upsertTestPool(t, ctx, repo, 0x21)
 
 	loanAddr := mapleAddr(0x63)
-	upsert := func(poolID int64, meta *maple.LoanMeta) error {
+	record := func(poolID int64, meta *maple.LoanMeta) error {
 		tx, err := maplePool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -1046,17 +1046,17 @@ func TestMapleUpsertLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
+		if _, err := repo.RecordLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
 	}
 
-	if err := upsert(poolA, &maple.LoanMeta{Type: "amm"}); err != nil {
-		t.Fatalf("baseline upsert: %v", err)
+	if err := record(poolA, &maple.LoanMeta{Type: "amm"}); err != nil {
+		t.Fatalf("baseline record: %v", err)
 	}
 	// Pool reassignment together with a metadata change must fail on the pool.
-	err := upsert(poolB, &maple.LoanMeta{Type: "intercompany"})
+	err := record(poolB, &maple.LoanMeta{Type: "intercompany"})
 	if err == nil {
 		t.Fatal("expected mismatch error, got nil")
 	}
@@ -1070,7 +1070,7 @@ func TestMapleUpsertLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 
 func TestMapleUpsertPools_RejectsNullStoredName(t *testing.T) {
 	// name is a nullable column. A row seeded with NULL name (e.g. by another
-	// writer) that re-upserts with a concrete name must surface as a named
+	// writer) that re-records with a concrete name must surface as a named
 	// registry mismatch, not a misattributed scan error.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
@@ -1108,7 +1108,7 @@ func TestMapleUpsertPools_RejectsNullStoredName(t *testing.T) {
 }
 
 func TestMapleUpsertSkyStrategies_RejectsNullStoredVersion(t *testing.T) {
-	// version is a nullable column; a stored NULL re-upserted with a concrete
+	// version is a nullable column; a stored NULL re-recorded with a concrete
 	// version must surface as a named registry mismatch, not a scan error.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
@@ -1140,7 +1140,7 @@ func TestMapleUpsertSkyStrategies_RejectsNullStoredVersion(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_NullMetaTypeIsNotInternal(t *testing.T) {
+func TestMapleRecordLoans_NullMetaTypeIsNotInternal(t *testing.T) {
 	// Live API drift documented in CLAUDE.md: loanMeta present but type null.
 	// The empty Type maps to a NULL loan_meta_type, so the is_internal
 	// generated column stays false while the other meta fields persist.
@@ -1149,7 +1149,7 @@ func TestMapleUpsertLoans_NullMetaTypeIsNotInternal(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x33)
 
-	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x34, &maple.LoanMeta{Type: "", Location: "Cayman"}, mapleSyncedAt())
+	loanID := recordTestLoan(t, ctx, repo, poolID, 0x34, &maple.LoanMeta{Type: "", Location: "Cayman"}, mapleSyncedAt())
 
 	var metaType, location *string
 	var isInternal bool
@@ -1169,8 +1169,8 @@ func TestMapleUpsertLoans_NullMetaTypeIsNotInternal(t *testing.T) {
 	}
 }
 
-func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
-	// A loan contract's borrower is immutable; the upsert never refreshes
+func TestMapleRecordLoans_RejectsBorrowerChange(t *testing.T) {
+	// A loan contract's borrower is immutable; the record never refreshes
 	// borrower_user_id and must fail loudly when the API contradicts the
 	// stored value instead of silently keeping the stale association.
 	ctx := context.Background()
@@ -1180,7 +1180,7 @@ func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
 	protocolID := mapleProtocolID(t, ctx, repo)
 
 	loanAddr := mapleAddr(0x34)
-	upsertWithBorrower := func(borrowerByte byte) error {
+	recordWithBorrower := func(borrowerByte byte) error {
 		tx, err := maplePool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -1192,21 +1192,21 @@ func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
+		if _, err := repo.RecordLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
 	}
 
-	if err := upsertWithBorrower(0xa1); err != nil {
-		t.Fatalf("first upsert: %v", err)
+	if err := recordWithBorrower(0xa1); err != nil {
+		t.Fatalf("first record: %v", err)
 	}
 	// Same loan, same borrower: fine.
-	if err := upsertWithBorrower(0xa1); err != nil {
-		t.Fatalf("same-borrower re-upsert: %v", err)
+	if err := recordWithBorrower(0xa1); err != nil {
+		t.Fatalf("same-borrower re-record: %v", err)
 	}
 	// Same loan, different borrower: must fail.
-	err := upsertWithBorrower(0xa2)
+	err := recordWithBorrower(0xa2)
 	if err == nil {
 		t.Fatal("expected borrower-change error, got nil")
 	}
@@ -1221,7 +1221,7 @@ func TestMapleStates_IdempotencyAndReprocessing(t *testing.T) {
 	repoBuild0 := newMapleRepo(t, 0)
 	repoBuild9 := newMapleRepo(t, 9)
 	poolID := upsertTestPool(t, ctx, repoBuild0, 0x23)
-	loanID := upsertTestLoan(t, ctx, repoBuild0, poolID, 0x33, nil, mapleSyncedAt())
+	loanID := recordTestLoan(t, ctx, repoBuild0, poolID, 0x33, nil, mapleSyncedAt())
 
 	newState := func(principal int64) *maple.LoanState {
 		s, err := maple.NewLoanState(loanID, mapleSyncedAt(), "Active", big.NewInt(principal), big.NewInt(1))
@@ -1306,7 +1306,7 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 		t.Fatal("strategy id not resolved")
 	}
 
-	// Unchanged re-upsert is a clean no-op that keeps the id (nothing is
+	// Unchanged re-record is a clean no-op that keeps the id (nothing is
 	// refreshed).
 	inMapleTx(t, ctx, func(tx pgx.Tx) error {
 		var err error
@@ -1314,7 +1314,7 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 		return err
 	})
 	if ids[common.BytesToAddress(strategy.StrategyAddress)] != strategyID {
-		t.Error("strategy id changed on unchanged re-upsert")
+		t.Error("strategy id changed on unchanged re-record")
 	}
 	var version int
 	if err := maplePool.QueryRow(ctx,
@@ -1349,7 +1349,7 @@ func TestMapleSkyStrategies_RoundTrip(t *testing.T) {
 }
 
 func TestMapleUpsertSkyStrategies_RejectsFieldChange(t *testing.T) {
-	// maple_pool_id and version are immutable; a re-upsert with any changed
+	// maple_pool_id and version are immutable; a re-record with any changed
 	// value must fail the run naming the field, instead of refreshing the row.
 	// version is the field with a live mutation path (proxy upgrade), so its
 	// guard firing is the expected first-observed-mismatch signal.
@@ -1360,7 +1360,7 @@ func TestMapleUpsertSkyStrategies_RejectsFieldChange(t *testing.T) {
 	poolB := upsertTestPool(t, ctx, repo, 0x27)
 
 	strategyAddr := mapleAddr(0x41)
-	upsert := func(poolID int64, version int) error {
+	record := func(poolID int64, version int) error {
 		tx, err := maplePool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
@@ -1376,12 +1376,12 @@ func TestMapleUpsertSkyStrategies_RejectsFieldChange(t *testing.T) {
 		return tx.Commit(ctx)
 	}
 
-	if err := upsert(poolA, 100); err != nil {
-		t.Fatalf("baseline upsert: %v", err)
+	if err := record(poolA, 100); err != nil {
+		t.Fatalf("baseline record: %v", err)
 	}
-	// Unchanged re-upsert is a clean no-op.
-	if err := upsert(poolA, 100); err != nil {
-		t.Fatalf("unchanged re-upsert: %v", err)
+	// Unchanged re-record is a clean no-op.
+	if err := record(poolA, 100); err != nil {
+		t.Fatalf("unchanged re-record: %v", err)
 	}
 
 	cases := []struct {
@@ -1395,7 +1395,7 @@ func TestMapleUpsertSkyStrategies_RejectsFieldChange(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := upsert(tc.poolID, tc.version)
+			err := record(tc.poolID, tc.version)
 			if err == nil {
 				t.Fatal("expected mismatch error, got nil")
 			}

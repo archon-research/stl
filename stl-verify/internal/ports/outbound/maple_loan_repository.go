@@ -16,9 +16,10 @@ import (
 // standalone registry read. Borrower users and pool asset tokens are upserted
 // through the shared UserRepository/TokenRepository, not this port.
 //
-// Registry upserts (pools, loans, strategies) return address -> database-id
-// maps and resolve ids even when the row already exists
-// (ON CONFLICT DO UPDATE ... RETURNING id).
+// Registry writes (pools, loans, strategies) return address -> database-id
+// maps and resolve ids even when the row already exists. Pools and strategies
+// upsert (ON CONFLICT DO UPDATE ... RETURNING id); loans are append-only and
+// resolve to the id of the version current for the cycle (see RecordLoans).
 //
 // State saves use ON CONFLICT DO NOTHING on the
 // (natural key, processing_version) primary key: the BEFORE INSERT trigger
@@ -45,7 +46,7 @@ type MapleGraphQLRepository interface {
 	// SavePoolStates inserts pool state snapshots.
 	SavePoolStates(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
 
-	// UpsertLoans records loan registry rows (maple_pool_id and
+	// RecordLoans records loan registry rows (maple_pool_id and
 	// borrower_user_id already resolved by the service) and returns loan
 	// address -> maple_loan.id of the row matching this cycle's metadata.
 	// maple_loan is append-only: maple_pool_id and borrower_user_id are strictly
@@ -55,7 +56,7 @@ type MapleGraphQLRepository interface {
 	// version row stamped with syncedAt (leaving prior rows intact) rather than
 	// mutating in place; unchanged metadata reuses the existing row. syncedAt is
 	// the sync-cycle timestamp and is the key versions are ordered by.
-	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error)
+	RecordLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
 	SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error

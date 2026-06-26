@@ -203,7 +203,7 @@ func loanMetaEqual(a, b loanMetaCols) bool {
 		equalStringPtr(a.location, b.location)
 }
 
-// UpsertLoans records loan registry rows and returns loan address ->
+// RecordLoans records loan registry rows and returns loan address ->
 // maple_loan.id of the row matching THIS cycle's metadata.
 //
 // maple_loan is an append-only registry. maple_pool_id and borrower_user_id are
@@ -222,7 +222,7 @@ func loanMetaEqual(a, b loanMetaCols) bool {
 // ON CONFLICT cannot guard, so a per-loan pg_advisory_xact_lock on the natural
 // key serializes concurrent writers (ADR-0002 §3). Loans are processed in sorted
 // address order, so locks are acquired in a consistent order (deadlock-free).
-func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
+func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
 	}

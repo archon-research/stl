@@ -438,9 +438,9 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 			return err
 		}
 
-		loanIDs, err := s.repo.UpsertLoans(ctx, tx, loanEntities, syncedAt)
+		loanIDs, err := s.repo.RecordLoans(ctx, tx, loanEntities, syncedAt)
 		if err != nil {
-			return fmt.Errorf("upserting loans: %w", err)
+			return fmt.Errorf("recording loans: %w", err)
 		}
 
 		states, collaterals, err := buildLoanSnapshots(loans, loanIDs, syncedAt)
@@ -496,7 +496,7 @@ func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[common.Add
 	for _, l := range loans {
 		loanID, ok := loanIDs[l.LoanID]
 		if !ok {
-			return nil, nil, fmt.Errorf("loan %s missing from upsert result", lowerHex(l.LoanID))
+			return nil, nil, fmt.Errorf("loan %s missing from record result", lowerHex(l.LoanID))
 		}
 
 		state, err := maple.NewLoanState(loanID, syncedAt, l.State, l.PrincipalOwed, l.AcmRatio)
