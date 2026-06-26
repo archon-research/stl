@@ -4,7 +4,9 @@ kind: Kustomization
 # Local kind overlay (core pipeline). Reuses the same k8s/base manifests as
 # overlays/prod and overlays/staging; the runtime component swaps config
 # sourcing and image pull policy for local dev. Workers live in ./workers so
-# the Makefile can apply them only when an Alchemy API key is present.
+# the Makefile can apply them only when an Alchemy API key is present;
+# watcher-data-validator lives in ./data-validator for the same reason (it
+# verifies against real Etherscan, which is meaningless on mock chain data).
 namespace: vector
 
 resources:
@@ -12,7 +14,6 @@ resources:
   - ../../base/python-api
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
-  - ../../base/watcher-data-validator
   - config.yaml
 
 components:
@@ -32,9 +33,6 @@ images:
     newTag: local
   - name: offchain-price-indexer
     newName: localhost/stl-offchain-price-indexer
-    newTag: local
-  - name: watcher-data-validator
-    newName: localhost/stl-watcher-data-validator
     newTag: local
 
 patches:

@@ -30,6 +30,8 @@ spec:
                   fieldPath: metadata.labels['app']
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: optimism-watcher-data-validator
             - secretRef:
                 name: optimism-watcher-data-validator

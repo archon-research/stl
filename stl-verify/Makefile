@@ -39,7 +39,7 @@ include lint.mk
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
-		kind-deploy-apps kind-deploy-workers check-dev-overlay-sync \
+		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -379,9 +379,11 @@ dev-up:
 	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer,"; \
 	  echo "                         sparklend-position-tracker, prime-debt-indexer"; \
 	  echo "    COINGECKO_API_KEY  — offchain-price-indexer"; \
-	  echo "    ETHERSCAN_API_KEY  — watcher-data-validator"; \
 	  echo ""; \
 	  echo "  Once set, run: make kind-secrets && make dev-up-workers"; \
+	  echo ""; \
+	  echo "  watcher-data-validator is opt-in (it needs real chain data, not the mock):"; \
+	  echo "    make kind-use-alchemy && make kind-secrets && make kind-deploy-data-validator"; \
 	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
 	fi
 
@@ -396,9 +398,6 @@ dev-up-workers:
 	fi; \
 	if [ -z "$$COINGECKO_API_KEY" ]; then \
 	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — offchain-price-indexer"; \
-	fi; \
-	if [ -z "$$ETHERSCAN_API_KEY" ]; then \
-	  MISSING="$$MISSING\n    ETHERSCAN_API_KEY  — watcher-data-validator"; \
 	fi; \
 	if [ -n "$$MISSING" ]; then \
 	  echo "==> Missing API keys:"; \
@@ -1758,18 +1757,38 @@ kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -k ../k8s/overlays/dev/workers
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
 
+# Opt-in: build + deploy the watcher-data-validator cron (excluded from `make dev-up`).
+# It verifies stored blocks against real Etherscan, which is meaningless on the mock
+# blockchain server — use only when developing the validator against real chain data:
+# run `make kind-use-alchemy` first, and set ETHERSCAN_API_KEY in .env.secrets.
+# Usage: make kind-secrets && make kind-deploy-data-validator
+kind-deploy-data-validator:
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	if [ -z "$$ETHERSCAN_API_KEY" ]; then \
+	  echo "==> ETHERSCAN_API_KEY not set in .env.secrets — watcher-data-validator requires it."; \
+	  echo "    Set it, then run: make kind-secrets && make kind-deploy-data-validator"; \
+	  exit 1; \
+	fi
+	$(call build-if-needed,stl-watcher-data-validator:local,docker-build-cronjob-watcher-data-validator)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher-data-validator:local"
+	kubectl --context=$(KUBE_CONTEXT) apply -k ../k8s/overlays/dev/data-validator
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher-data-validator -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/watcher-data-validator -n $(KUBE_NS) --timeout=300s
+
 kind-load-python-api:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-python-api:local"
 
 # --- Cronjobs (Temporal workers) ---
 # CRONJOBS (cmd dir names) drive image builds — auto-discovered from cmd/cronjobs/*/main.go.
-# CRONJOB_DEPLOYMENTS are the k8s Deployment names from k8s/base that the dev overlay
-# reuses. They mostly match the cmd dir name; anchorage-indexer is deployed as
+# CRONJOB_DEPLOYMENTS are the k8s Deployment names from k8s/base that the core dev
+# overlay reuses. They mostly match the cmd dir name; anchorage-indexer is deployed as
 # spark-anchorage-indexer (matching prod/staging). Keep these in sync with the cronjob
 # resources listed in k8s/overlays/dev/kustomization.yaml.
+# watcher-data-validator is intentionally excluded — it's opt-in via
+# `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer watcher-data-validator
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
