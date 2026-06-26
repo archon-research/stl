@@ -909,74 +909,89 @@ func TestMapleRecordLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 }
 
 // TestMapleRecordLoans_NegativeControl_LocklessAppendRaces proves the advisory
-// lock in appendLoanVersion is load-bearing. It replays the same
-// read-latest-then-insert WITHOUT the lock (and with a pg_sleep widening the
-// window) and asserts two concurrent cycles DO append duplicate versions. If
-// this ever stops observing the duplicate, the positive test above is no longer
-// actually exercising the lock — mirrors
-// TestProcessingVersionTrigger_NegativeControl_LocklessFunction.
-//
-// The race is statistical even with the barrier + pg_sleep (Postgres can still
-// serialise the two transactions), so retry until it manifests once.
+// lock in appendLoanVersion is load-bearing. It replays the read-latest-then-
+// insert WITHOUT the lock, holding both workers at an in-test barrier until both
+// have finished their SELECT — so each reads only the baseline before either
+// INSERTs. The stale read is forced, not raced: with no pg_advisory_xact_lock
+// both workers then append, deterministically duplicating the version (no
+// pg_sleep, no retry loop, no scheduler dependence). If this ever stops
+// observing the duplicate, the positive test above is no longer exercising the
+// lock — mirrors TestProcessingVersionTrigger_NegativeControl_LocklessFunction.
 func TestMapleRecordLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
 	withConcurrencyPool(t)
 	ctx := context.Background()
+	truncateMapleForConcurrency(t, ctx)
+	deps := seedMapleRegistryDeps(t, ctx)
 
 	loanAddr := make([]byte, 20)
 	for i := range loanAddr {
 		loanAddr[i] = 0x88
 	}
 
-	const attempts = 5
-	for attempt := 0; attempt < attempts; attempt++ {
-		truncateMapleForConcurrency(t, ctx)
-		deps := seedMapleRegistryDeps(t, ctx)
+	// Baseline external version (type null), committed.
+	if _, err := concurrencyPool.Exec(ctx,
+		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, synced_at)
+		 VALUES (1, $1, $2, $3, $4, NOW())`,
+		deps.protocolID, loanAddr, deps.poolID, deps.borrowerID); err != nil {
+		t.Fatalf("seed baseline: %v", err)
+	}
 
-		// Baseline external version (type null), committed.
-		if _, err := concurrencyPool.Exec(ctx,
-			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, synced_at)
-			 VALUES (1, $1, $2, $3, $4, NOW())`,
-			deps.protocolID, loanAddr, deps.poolID, deps.borrowerID); err != nil {
-			t.Fatalf("seed baseline: %v", err)
-		}
+	// selected releases both workers only once both have read, so neither can
+	// observe the other's not-yet-committed INSERT — the defining condition of
+	// the stale-read race the production lock prevents.
+	var selected, done sync.WaitGroup
+	selected.Add(2)
+	done.Add(2)
+	var errs [2]error
+	for i := 0; i < 2; i++ {
+		go func(idx int) {
+			defer done.Done()
+			tx, err := concurrencyPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			if err != nil {
+				errs[idx] = err
+				selected.Done()
+				return
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
 
-		// Lockless replica of appendLoanVersion: read latest, widen the window,
-		// then append because the incoming "intercompany" differs. No
-		// pg_advisory_xact_lock — both workers read the baseline and both insert.
-		errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, _ int) error {
 			var id int64
 			if err := tx.QueryRow(ctx,
 				`SELECT id FROM maple_loan WHERE chain_id = 1 AND loan_address = $1
 				 ORDER BY synced_at DESC, id DESC LIMIT 1`,
 				loanAddr).Scan(&id); err != nil {
-				return err
+				errs[idx] = fmt.Errorf("reading baseline: %w", err)
+				selected.Done()
+				return
 			}
-			if _, err := tx.Exec(ctx, `SELECT pg_sleep(0.1)`); err != nil {
-				return err
-			}
-			_, err := tx.Exec(ctx,
+			selected.Done()
+			selected.Wait()
+
+			if _, err := tx.Exec(ctx,
 				`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, loan_meta_type, synced_at)
 				 VALUES (1, $1, $2, $3, $4, 'intercompany', NOW())`,
-				deps.protocolID, loanAddr, deps.poolID, deps.borrowerID)
-			return err
-		})
-		for i, err := range errs {
-			if err != nil {
-				t.Fatalf("attempt %d, worker %d: %v", attempt, i, err)
+				deps.protocolID, loanAddr, deps.poolID, deps.borrowerID); err != nil {
+				errs[idx] = fmt.Errorf("appending duplicate: %w", err)
+				return
 			}
-		}
-
-		var count int
-		if err := concurrencyPool.QueryRow(ctx,
-			`SELECT COUNT(*) FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
-			loanAddr).Scan(&count); err != nil {
-			t.Fatalf("counting loan rows: %v", err)
-		}
-		if count > 2 {
-			// Race observed: baseline + two duplicate appends. The lock the
-			// production path holds is genuinely necessary.
-			return
+			if err := tx.Commit(ctx); err != nil {
+				errs[idx] = fmt.Errorf("committing: %w", err)
+			}
+		}(i)
+	}
+	done.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
 		}
 	}
-	t.Fatalf("negative control never observed a duplicate append in %d attempts — the lock is not being exercised by the positive test", attempts)
+
+	var count int
+	if err := concurrencyPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
+		loanAddr).Scan(&count); err != nil {
+		t.Fatalf("counting loan rows: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("loan row count = %d, want 3 (baseline + two lockless duplicate appends); without the advisory lock both stale reads must append", count)
+	}
 }
