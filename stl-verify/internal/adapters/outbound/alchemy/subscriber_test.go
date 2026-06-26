@@ -1507,6 +1507,151 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 	}
 }
 
+// --- Test: Data-freshness watchdog ---
+
+func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
+	connectCount := atomic.Int32{}
+
+	server := newMockWSServer(func(conn *websocket.Conn) {
+		count := connectCount.Add(1)
+
+		// Answer client pings with pongs. Every pong refreshes the client's
+		// read deadline, which is exactly what kept ReadTimeout from firing
+		// during the prod stall (VEC-388).
+		conn.SetPingHandler(func(data string) error {
+			return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
+		})
+
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`"0x1234"`)}
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
+
+		if count == 1 {
+			// First connection delivers one header, then goes silent while
+			// staying transport-alive: zero newHeads but answering pings.
+			header := outbound.BlockHeader{Number: "0x100", Hash: "0xabc", ParentHash: "0xdef"}
+			_ = conn.WriteJSON(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": "0x1234", "result": header},
+			})
+		}
+
+		// Drive the ping handler (so pongs flow) but send no further data.
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				return
+			}
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		ReadTimeout:    5 * time.Second,        // long: pongs keep refreshing it so it never fires
+		HealthTimeout:  200 * time.Millisecond, // the data-freshness watchdog must fire here
+		PingInterval:   50 * time.Millisecond,
+		PongTimeout:    time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Without the watchdog, ReadTimeout (5s) never fires while pongs flow, so
+	// the connection count stays at 1 and this times out.
+	deadline := time.After(2 * time.Second)
+	for connectCount.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("expected reconnect within HealthTimeout, connectCount=%d", connectCount.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestSubscribe_DataFlowingDoesNotTriggerWatchdog(t *testing.T) {
+	connectCount := atomic.Int32{}
+
+	server := newMockWSServer(func(conn *websocket.Conn) {
+		connectCount.Add(1)
+
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`"0x1234"`)}
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
+
+		// Stream headers faster than HealthTimeout; the watchdog must keep
+		// resetting and never fire.
+		for i := 0; ; i++ {
+			header := outbound.BlockHeader{
+				Number:     fmt.Sprintf("0x%x", 1000+i),
+				Hash:       "0xabc",
+				ParentHash: "0xdef",
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": "0x1234", "result": header},
+			}); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		ReadTimeout:    5 * time.Second,
+		HealthTimeout:  200 * time.Millisecond, // headers arrive every 20ms, so this must never fire
+		PingInterval:   50 * time.Millisecond,
+		PongTimeout:    time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Run past several HealthTimeout windows. Data is always flowing, so the
+	// watchdog must not force a reconnect.
+	time.Sleep(700 * time.Millisecond)
+
+	if got := connectCount.Load(); got != 1 {
+		t.Errorf("expected exactly 1 connection (no spurious watchdog reconnect), got %d", got)
+	}
+}
+
 func TestHealthCheck_NotYetConnected(t *testing.T) {
 	sub, err := NewSubscriber(SubscriberConfig{
 		WebSocketURL:  "ws://localhost:19999", // Doesn't matter, we won't connect

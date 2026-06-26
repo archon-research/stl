@@ -5,6 +5,8 @@
 //     InitialBackoff, MaxBackoff, BackoffFactor)
 //   - Non-blocking sends to the headers channel; blocks are DROPPED if buffer is full
 //   - Ping/pong keepalive to detect stale connections (PongTimeout configurable)
+//   - Data-freshness watchdog: forces a reconnect if no headers arrive for
+//     HealthTimeout, even while ping/pong keepalive holds the socket open
 //   - Health checks via HealthCheck() to verify blocks are being received
 //   - Thread-safe: All public methods are safe for concurrent use
 //
@@ -312,6 +314,13 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 	pingTicker := time.NewTicker(s.config.PingInterval)
 	defer pingTicker.Stop()
 
+	// dataWatchdog forces a reconnect when no newHeads arrive for HealthTimeout.
+	// ReadTimeout cannot catch this alone: the pong handler refreshes the read
+	// deadline on every pong, so a pong-alive connection delivering zero headers
+	// never trips it (VEC-388). Reset on each received header below.
+	dataWatchdog := time.NewTimer(s.config.HealthTimeout)
+	defer dataWatchdog.Stop()
+
 	readErr := make(chan error, 1)
 	blockChan := make(chan outbound.BlockHeader, 10)
 
@@ -387,7 +396,13 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 		case err := <-readErr:
 			s.closeConnection()
 			return fmt.Errorf("read error: %w", err)
+		case <-dataWatchdog.C:
+			s.closeConnection()
+			return fmt.Errorf("no newHeads received for %v, forcing reconnect", s.config.HealthTimeout)
 		case header := <-blockChan:
+			// A header off the wire means the subscription is delivering, so
+			// reset the freshness watchdog whether we forward or drop it.
+			dataWatchdog.Reset(s.config.HealthTimeout)
 			blockNum, err := hexutil.ParseInt64(header.Number)
 			if err != nil {
 				logger.Error("failed to parse block number, ignoring block", "raw", header.Number, "hash", header.Hash, "error", err)
