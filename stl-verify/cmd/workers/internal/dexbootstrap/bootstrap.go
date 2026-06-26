@@ -149,7 +149,11 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		d.Close()
 		return nil, fmt.Errorf("creating Redis cache: %w", err)
 	}
-	d.cleanups = append(d.cleanups, func() { blockCache.Close() })
+	d.cleanups = append(d.cleanups, func() {
+		if err := blockCache.Close(); err != nil {
+			logger.Warn("closing Redis cache", "error", err)
+		}
+	})
 	if err := blockCache.Ping(ctx); err != nil {
 		d.Close()
 		return nil, fmt.Errorf("connecting to Redis at %s: %w", cfg.RedisAddr, err)

@@ -1,4 +1,4 @@
-package shared
+package dexconsumer
 
 import (
 	"fmt"
@@ -10,16 +10,17 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// This file holds the pure helpers hoisted out of the per-DEX worker packages
+// This file holds the pure helpers used across the per-DEX worker packages
 // (review S7/S8): single-uint multicall decoding and big.Int/time conversions
-// shared by the Curve / Uniswap V3 / Balancer workers.
+// shared by the Curve / Uniswap V3 / Balancer workers. They live in this
+// DEX-scoped package rather than the generic services/shared package.
 
 // UnpackUint decodes a single uint256-returning view method's result from a
 // multicall sub-call. It is the shared implementation used by the per-DEX
-// multicall readers (Curve, Uniswap V3, Balancer). A reverted sub-call, an
-// undecodable payload, an empty tuple, or a non-*big.Int first value are all
-// errors. The returned value is a defensive copy, so callers may retain it
-// without aliasing the decoder's internal buffers.
+// multicall readers (Curve, Uniswap V3, Balancer). A nil ABI, a reverted
+// sub-call, an undecodable payload, an empty tuple, or a non-*big.Int first
+// value are all errors. The returned value is a defensive copy, so callers may
+// retain it without aliasing the decoder's internal buffers.
 func UnpackUint(a *abi.ABI, method string, r outbound.Result) (*big.Int, error) {
 	if a == nil {
 		return nil, fmt.Errorf("unpacking %s: nil ABI", method)
