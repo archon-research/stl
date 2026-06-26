@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity/maple"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -656,11 +657,66 @@ type mapleLoanStateKey struct {
 
 func truncateMapleForConcurrency(t *testing.T, ctx context.Context) {
 	t.Helper()
-	for _, table := range []string{"maple_loan_state", "maple_loan", "maple_pool"} {
+	// FK order: child snapshot/registry tables before the pool they reference.
+	for _, table := range []string{
+		"maple_loan_collateral", "maple_loan_state", "maple_loan",
+		"maple_sky_strategy_state", "maple_sky_strategy", "maple_pool",
+	} {
 		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
 	}
+}
+
+// mapleRegistryDeps holds the FK ids a maple_loan row depends on.
+type mapleRegistryDeps struct {
+	protocolID int64
+	poolID     int64
+	borrowerID int64
+}
+
+// seedMapleRegistryDeps upserts the protocol/user/token/pool rows a maple_loan
+// needs. Self-seeding (ON CONFLICT) so it survives the protocol-CASCADE
+// truncations the morpho race tests perform in this shared schema.
+func seedMapleRegistryDeps(t *testing.T, ctx context.Context) mapleRegistryDeps {
+	t.Helper()
+
+	var protocolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\x804a6F5F667170F545Bf14e5DDB48C70B788390C'::bytea, 'maple', 'lending', 11964925, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`).Scan(&protocolID); err != nil {
+		t.Fatalf("seed maple protocol: %v", err)
+	}
+
+	var borrowerID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO "user" (chain_id, address, created_at, updated_at, metadata)
+		 VALUES (1, '\x5511111111111111111111111111111111111155'::bytea, NOW(), NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = "user".id
+		 RETURNING id`).Scan(&borrowerID); err != nil {
+		t.Fatalf("seed borrower user: %v", err)
+	}
+
+	var assetTokenID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, '\x8844444444444444444444444444444444444488'::bytea, 'USDC', 6, '{}'::jsonb, NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`).Scan(&assetTokenID); err != nil {
+		t.Fatalf("seed asset token: %v", err)
+	}
+
+	var poolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
+		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, 'Race Pool', $2, false)
+		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
+		t.Fatalf("seed maple pool: %v", err)
+	}
+
+	return mapleRegistryDeps{protocolID: protocolID, poolID: poolID, borrowerID: borrowerID}
 }
 
 func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey {
@@ -776,4 +832,148 @@ func TestProcessingVersionTrigger_CrossBuildRace_MapleLoanState(t *testing.T) {
 	if want := []int{0, 1}; !slices.Equal(versions, want) {
 		t.Fatalf("processing_version assignment incorrect: got %v, want %v — both rows must survive with distinct versions", versions, want)
 	}
+}
+
+// TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce covers the
+// append-only maple_loan registry. UpsertLoans decides whether to append a new
+// version from a prior read of the latest row, which ON CONFLICT cannot guard.
+// Two concurrent cycles observing the same metadata change must append exactly
+// once: the per-loan pg_advisory_xact_lock serializes them so the second reads
+// the first's committed row and reuses it. Without the lock both would read the
+// stale row and insert, producing a duplicate version.
+func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+	truncateMapleForConcurrency(t, ctx)
+
+	repo, err := NewMapleGraphQLRepository(concurrencyPool, nil, 0, 0)
+	if err != nil {
+		t.Fatalf("NewMapleGraphQLRepository: %v", err)
+	}
+	deps := seedMapleRegistryDeps(t, ctx)
+
+	loanAddr := make([]byte, 20)
+	for i := range loanAddr {
+		loanAddr[i] = 0x99
+	}
+	makeLoan := func(meta *maple.LoanMeta) *maple.Loan {
+		t.Helper()
+		loan, err := maple.NewLoan(1, deps.protocolID, loanAddr, deps.poolID, deps.borrowerID, meta)
+		if err != nil {
+			t.Fatalf("NewLoan: %v", err)
+		}
+		return loan
+	}
+
+	// Baseline version: external loan (type null), committed.
+	tx, err := concurrencyPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin baseline: %v", err)
+	}
+	if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(nil)}); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("baseline upsert: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit baseline: %v", err)
+	}
+
+	// Two concurrent cycles both reclassify to the same internal type.
+	errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, _ int) error {
+		_, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(&maple.LoanMeta{Type: "intercompany"})})
+		return err
+	})
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+
+	// count == 2 is deterministic, not lucky: pg_advisory_xact_lock is
+	// transaction-scoped, so the first worker holds it until commit; the second
+	// blocks, then under READ COMMITTED re-snapshots per statement and sees the
+	// first's committed appended row, so loanMetaEqual matches and it reuses
+	// rather than appending. The lockless negative control below proves this.
+	var count int
+	if err := concurrencyPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
+		loanAddr).Scan(&count); err != nil {
+		t.Fatalf("counting loan rows: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("loan row count = %d, want 2 (baseline + one appended version); the advisory lock must prevent a duplicate", count)
+	}
+}
+
+// TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces proves the advisory
+// lock in appendLoanVersion is load-bearing. It replays the same
+// read-latest-then-insert WITHOUT the lock (and with a pg_sleep widening the
+// window) and asserts two concurrent cycles DO append duplicate versions. If
+// this ever stops observing the duplicate, the positive test above is no longer
+// actually exercising the lock — mirrors
+// TestProcessingVersionTrigger_NegativeControl_LocklessFunction.
+//
+// The race is statistical even with the barrier + pg_sleep (Postgres can still
+// serialise the two transactions), so retry until it manifests once.
+func TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+
+	loanAddr := make([]byte, 20)
+	for i := range loanAddr {
+		loanAddr[i] = 0x88
+	}
+
+	const attempts = 5
+	for attempt := 0; attempt < attempts; attempt++ {
+		truncateMapleForConcurrency(t, ctx)
+		deps := seedMapleRegistryDeps(t, ctx)
+
+		// Baseline external version (type null), committed.
+		if _, err := concurrencyPool.Exec(ctx,
+			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+			 VALUES (1, $1, $2, $3, $4)`,
+			deps.protocolID, loanAddr, deps.poolID, deps.borrowerID); err != nil {
+			t.Fatalf("seed baseline: %v", err)
+		}
+
+		// Lockless replica of appendLoanVersion: read latest, widen the window,
+		// then append because the incoming "intercompany" differs. No
+		// pg_advisory_xact_lock — both workers read the baseline and both insert.
+		errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, _ int) error {
+			var id int64
+			if err := tx.QueryRow(ctx,
+				`SELECT id FROM maple_loan WHERE chain_id = 1 AND loan_address = $1
+				 ORDER BY first_seen_at DESC, id DESC LIMIT 1`,
+				loanAddr).Scan(&id); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT pg_sleep(0.1)`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx,
+				`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, loan_meta_type)
+				 VALUES (1, $1, $2, $3, $4, 'intercompany')`,
+				deps.protocolID, loanAddr, deps.poolID, deps.borrowerID)
+			return err
+		})
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("attempt %d, worker %d: %v", attempt, i, err)
+			}
+		}
+
+		var count int
+		if err := concurrencyPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM maple_loan WHERE chain_id = 1 AND loan_address = $1`,
+			loanAddr).Scan(&count); err != nil {
+			t.Fatalf("counting loan rows: %v", err)
+		}
+		if count > 2 {
+			// Race observed: baseline + two duplicate appends. The lock the
+			// production path holds is genuinely necessary.
+			return
+		}
+	}
+	t.Fatalf("negative control never observed a duplicate append in %d attempts — the lock is not being exercised by the positive test", attempts)
 }

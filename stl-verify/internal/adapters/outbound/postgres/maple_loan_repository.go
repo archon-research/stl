@@ -192,20 +192,35 @@ func loanMetaColsOf(l *maple.Loan) loanMetaCols {
 	}
 }
 
-// UpsertLoans upserts loan registry rows and returns loan
-// address -> maple_loan.id. maple_pool_id and borrower_user_id are strictly
-// immutable per loan: the upsert never refreshes them and the scan fails the
-// run if a stored value differs from the incoming one.
+// loanMetaEqual reports NULL-safe equality of every loanMeta column.
+func loanMetaEqual(a, b loanMetaCols) bool {
+	return equalStringPtr(a.typ, b.typ) &&
+		equalStringPtr(a.assetSymbol, b.assetSymbol) &&
+		equalStringPtr(a.dex, b.dex) &&
+		equalStringPtr(a.walletAddress, b.walletAddress) &&
+		equalStringPtr(a.walletType, b.walletType) &&
+		equalStringPtr(a.location, b.location)
+}
+
+// UpsertLoans records loan registry rows and returns loan address ->
+// maple_loan.id of the row matching THIS cycle's metadata.
 //
-// The six loanMeta columns are fill-once instead of strictly immutable. Maple
-// enriches a loan's metadata after origination — a stored NULL loan_meta_type
-// later resolves to a concrete value such as "intercompany" — so on conflict
-// each loanMeta column is COALESCE(stored, incoming): a stored NULL is filled
-// from the incoming value and persisted, a stored non-NULL is kept. RETURNING
-// yields the post-COALESCE row, so the scan's NULL-safe comparison passes the
-// legitimate null→value fill (stored now equals incoming) while still failing
-// a forbidden value→value mutation or value→null clear (stored is kept and
-// differs from incoming).
+// maple_loan is an append-only registry. maple_pool_id and borrower_user_id are
+// strictly immutable per loan (on-chain facts) — a change versus the latest
+// stored row fails the run. The six loanMeta columns are off-chain editorial
+// metadata Maple enriches after origination (a stored NULL loan_meta_type later
+// resolves to a value such as "intercompany"). Rather than mutate the stored row
+// — which would erase the metadata in effect when earlier state snapshots were
+// taken, breaking the reproducibility of downstream loan-risk calculations — any
+// loanMeta difference appends a NEW row, leaving prior rows intact. State
+// snapshots FK the row current at their sync cycle, so a join reproduces the
+// metadata that was live then. The latest version per loan is the row with the
+// greatest (first_seen_at, id).
+//
+// The insert decision is made from a prior read of the latest row, which
+// ON CONFLICT cannot guard, so a per-loan pg_advisory_xact_lock on the natural
+// key serializes concurrent writers (ADR-0002 §3). Loans are processed in sorted
+// address order, so locks are acquired in a consistent order (deadlock-free).
 func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
@@ -213,68 +228,93 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 
 	sorted := sortedByBytesKey(loans, func(l *maple.Loan) []byte { return l.LoanAddress })
 
-	batch := &pgx.Batch{}
+	result := make(map[common.Address]int64, len(sorted))
 	for _, l := range sorted {
-		m := loanMetaColsOf(l)
-		batch.Queue(
-			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
-			                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
-			                         loan_meta_wallet_type, loan_meta_location)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET
-			     loan_meta_type           = COALESCE(maple_loan.loan_meta_type, EXCLUDED.loan_meta_type),
-			     loan_meta_asset_symbol   = COALESCE(maple_loan.loan_meta_asset_symbol, EXCLUDED.loan_meta_asset_symbol),
-			     loan_meta_dex            = COALESCE(maple_loan.loan_meta_dex, EXCLUDED.loan_meta_dex),
-			     loan_meta_wallet_address = COALESCE(maple_loan.loan_meta_wallet_address, EXCLUDED.loan_meta_wallet_address),
-			     loan_meta_wallet_type    = COALESCE(maple_loan.loan_meta_wallet_type, EXCLUDED.loan_meta_wallet_type),
-			     loan_meta_location       = COALESCE(maple_loan.loan_meta_location, EXCLUDED.loan_meta_location)
-			 RETURNING id, maple_pool_id, borrower_user_id,
-			           loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
-			           loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location`,
-			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
-			m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location,
-		)
+		id, err := r.appendLoanVersion(ctx, tx, l)
+		if err != nil {
+			return nil, err
+		}
+		result[common.BytesToAddress(l.LoanAddress)] = id
+	}
+	return result, nil
+}
+
+// appendLoanVersion locks the loan's natural key, reads the latest stored row,
+// and returns its id when nothing changed (or when only loanMeta is unchanged),
+// inserts and returns a new version row when loanMeta differs, and fails the run
+// when an immutable maple_pool_id / borrower_user_id changed.
+//
+// This compares the incoming metadata against the row with the greatest
+// first_seen_at, which is correct only for forward-only ingestion (the live
+// cron advances synced_at monotonically). A backfill or replay that runs an
+// older cycle after a newer one would compare stale metadata against the newest
+// version and append it as the new latest — so a backfill path must not reuse
+// this method; it would need version ordering keyed on snapshot time, not
+// insert time.
+func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.Tx, l *maple.Loan) (int64, error) {
+	addr := common.BytesToAddress(l.LoanAddress)
+	incoming := loanMetaColsOf(l)
+
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended(format('maple_loan|%s|%s', $1::int, encode($2::bytea, 'hex')), 0))`,
+		l.ChainID, l.LoanAddress,
+	); err != nil {
+		return 0, fmt.Errorf("locking maple loan %s: %w", addr, err)
 	}
 
-	return collectBatchRows(ctx, tx, batch, sorted, "maple loan",
-		func(row pgx.Row, l *maple.Loan) (common.Address, int64, error) {
-			addr := common.BytesToAddress(l.LoanAddress)
-			var id, storedPoolID, storedBorrower int64
-			var stored loanMetaCols
-			if err := row.Scan(&id, &storedPoolID, &storedBorrower,
-				&stored.typ, &stored.assetSymbol, &stored.dex,
-				&stored.walletAddress, &stored.walletType, &stored.location); err != nil {
-				return common.Address{}, 0, fmt.Errorf("upserting maple loan %s: %w", addr, err)
-			}
+	var storedID, storedPoolID, storedBorrower int64
+	var stored loanMetaCols
+	err := tx.QueryRow(ctx,
+		`SELECT id, maple_pool_id, borrower_user_id,
+		        loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
+		        loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location
+		   FROM maple_loan
+		  WHERE chain_id = $1 AND loan_address = $2
+		  ORDER BY first_seen_at DESC, id DESC
+		  LIMIT 1`,
+		l.ChainID, l.LoanAddress,
+	).Scan(&storedID, &storedPoolID, &storedBorrower,
+		&stored.typ, &stored.assetSymbol, &stored.dex,
+		&stored.walletAddress, &stored.walletType, &stored.location)
 
-			incoming := loanMetaColsOf(l)
-			var mismatches []string
-			if storedPoolID != l.PoolID {
-				mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, l.PoolID))
-			}
-			if storedBorrower != l.BorrowerUserID {
-				mismatches = append(mismatches, fmt.Sprintf("borrower_user_id (stored %d, incoming %d)", storedBorrower, l.BorrowerUserID))
-			}
-			for _, c := range []struct {
-				field            string
-				stored, incoming *string
-			}{
-				{"loan_meta_type", stored.typ, incoming.typ},
-				{"loan_meta_asset_symbol", stored.assetSymbol, incoming.assetSymbol},
-				{"loan_meta_dex", stored.dex, incoming.dex},
-				{"loan_meta_wallet_address", stored.walletAddress, incoming.walletAddress},
-				{"loan_meta_wallet_type", stored.walletType, incoming.walletType},
-				{"loan_meta_location", stored.location, incoming.location},
-			} {
-				if !equalStringPtr(c.stored, c.incoming) {
-					mismatches = append(mismatches, fmt.Sprintf("%s (stored %s, incoming %s)", c.field, strOrNull(c.stored), strOrNull(c.incoming)))
-				}
-			}
-			if err := registryMismatchError("maple loan", addr, mismatches); err != nil {
-				return common.Address{}, 0, err
-			}
-			return addr, id, nil
-		})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return r.insertLoanRow(ctx, tx, l, incoming)
+	case err != nil:
+		return 0, fmt.Errorf("reading latest maple loan %s: %w", addr, err)
+	}
+
+	var mismatches []string
+	if storedPoolID != l.PoolID {
+		mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, l.PoolID))
+	}
+	if storedBorrower != l.BorrowerUserID {
+		mismatches = append(mismatches, fmt.Sprintf("borrower_user_id (stored %d, incoming %d)", storedBorrower, l.BorrowerUserID))
+	}
+	if err := registryMismatchError("maple loan", addr, mismatches); err != nil {
+		return 0, err
+	}
+
+	if loanMetaEqual(stored, incoming) {
+		return storedID, nil
+	}
+	return r.insertLoanRow(ctx, tx, l, incoming)
+}
+
+func (r *MapleGraphQLRepository) insertLoanRow(ctx context.Context, tx pgx.Tx, l *maple.Loan, m loanMetaCols) (int64, error) {
+	var id int64
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
+		                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
+		                         loan_meta_wallet_type, loan_meta_location)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 RETURNING id`,
+		l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
+		m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("inserting maple loan %s: %w", common.BytesToAddress(l.LoanAddress), err)
+	}
+	return id, nil
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
