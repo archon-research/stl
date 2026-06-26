@@ -1022,6 +1022,33 @@ func TestMapleRecordLoans_MetaRoundTripAppendsDistinctVersions(t *testing.T) {
 	}
 }
 
+func TestMapleRecordLoans_ReplayedOlderCycleReusesVersionAtCycle(t *testing.T) {
+	// Replaying an older cycle whose metadata still matches the version live at
+	// that cycle must reuse that row, not append a duplicate — even though a
+	// newer version exists. The equality check is against the version current at
+	// syncedAt, not the absolute latest.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x20)
+
+	s1 := mapleSyncedAt()
+	id1 := recordTestLoan(t, ctx, repo, poolID, 0x63, nil, s1)
+	id2 := recordTestLoan(t, ctx, repo, poolID, 0x63, &maple.LoanMeta{Type: "intercompany"}, s1.Add(time.Hour))
+
+	replayID := recordTestLoan(t, ctx, repo, poolID, 0x63, nil, s1)
+
+	if replayID != id1 {
+		t.Errorf("replay of cycle s1 returned %d, want the existing s1 version %d (no duplicate)", replayID, id1)
+	}
+	if got := mapleLoanRowCount(t, ctx, 0x63); got != 2 {
+		t.Errorf("row count = %d, want 2 (replay must not append a duplicate)", got)
+	}
+	if latest := latestMapleLoanID(t, ctx, 0x63); latest != id2 {
+		t.Errorf("latest id = %d, want the unchanged %d", latest, id2)
+	}
+}
+
 func TestMapleRecordLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 	// The immutable maple_pool_id guard runs before the loanMeta append decision:
 	// a loan changing BOTH its pool and its metadata fails on the pool change and
