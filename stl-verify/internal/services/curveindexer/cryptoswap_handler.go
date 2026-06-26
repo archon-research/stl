@@ -26,7 +26,6 @@ type CryptoswapHandler struct {
 func NewCryptoswapHandler(cryptoABI *abi.ABI) *CryptoswapHandler {
 	eventsByID := make(map[common.Hash]*abi.Event, len(cryptoABI.Events))
 	for _, ev := range cryptoABI.Events {
-		ev := ev
 		eventsByID[ev.ID] = &ev
 	}
 	return &CryptoswapHandler{
@@ -73,6 +72,27 @@ func (h *CryptoswapHandler) DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		topic0 := common.HexToHash(log.Topics[0])
+
+		// Cryptoswap liquidity events use fixed-size arrays whose topic0s differ
+		// from the dynamic-array ABI. Dispatch them via word-slicing before the
+		// ABI lookup so they are typed rather than falling through to captured-only.
+		rec, matched, err := decodeCryptoLiquidity(log, pool)
+		if err != nil {
+			return DecodedEvents{}, fmt.Errorf("decoding cryptoswap liquidity log (index %s): %w", log.LogIndex, err)
+		}
+		if matched {
+			result.Liquidity = append(result.Liquidity, *rec)
+			payload, _ := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+			result.Captured = append(result.Captured, CapturedEvent{
+				Pool:      pool,
+				LogIndex:  logIndex,
+				TxHash:    txHash,
+				EventName: log.Topics[0],
+				Payload:   payload,
+			})
+			continue
+		}
+
 		ev, known := h.eventsByID[topic0]
 
 		if !known {
@@ -102,27 +122,6 @@ func (h *CryptoswapHandler) DecodeEvents(
 				return DecodedEvents{}, fmt.Errorf("extracting TokenExchange: %w", err)
 			}
 			result.Swaps = append(result.Swaps, swap)
-
-		case "AddLiquidity":
-			liq, err := extractCryptoswapAddLiquidity(eventData, pool, logIndex, txHash)
-			if err != nil {
-				return DecodedEvents{}, fmt.Errorf("extracting AddLiquidity: %w", err)
-			}
-			result.Liquidity = append(result.Liquidity, liq)
-
-		case "RemoveLiquidity":
-			liq, err := extractCryptoswapRemoveLiquidity(eventData, pool, logIndex, txHash)
-			if err != nil {
-				return DecodedEvents{}, fmt.Errorf("extracting RemoveLiquidity: %w", err)
-			}
-			result.Liquidity = append(result.Liquidity, liq)
-
-		case "RemoveLiquidityOne":
-			liq, err := extractCryptoswapRemoveLiquidityOne(eventData, pool, logIndex, txHash)
-			if err != nil {
-				return DecodedEvents{}, fmt.Errorf("extracting RemoveLiquidityOne: %w", err)
-			}
-			result.Liquidity = append(result.Liquidity, liq)
 		}
 
 		// Capture net: all known pool-address logs are also stored in Captured.
@@ -384,7 +383,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// 8. price_scale(i) for i=0..n-2
 	nPriceEntries := pool.NCoins - 1
 	priceScale := make([]*big.Int, nPriceEntries)
-	for i := 0; i < nPriceEntries; i++ {
+	for i := range nPriceEntries {
 		v, err := shared.UnpackUint(h.cryptoABI, "price_scale", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("price_scale(%d): %w", i, err)
@@ -395,7 +394,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 
 	// 9. price_oracle(i) for i=0..n-2
 	priceOracle := make([]*big.Int, nPriceEntries)
-	for i := 0; i < nPriceEntries; i++ {
+	for i := range nPriceEntries {
 		v, err := shared.UnpackUint(h.cryptoABI, "price_oracle", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("price_oracle(%d): %w", i, err)
@@ -406,7 +405,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 
 	// 10. last_prices(i) for i=0..n-2
 	lastPrices := make([]*big.Int, nPriceEntries)
-	for i := 0; i < nPriceEntries; i++ {
+	for i := range nPriceEntries {
 		v, err := shared.UnpackUint(h.cryptoABI, "last_prices", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("last_prices(%d): %w", i, err)
@@ -494,108 +493,5 @@ func extractCryptoswapTokenExchange(
 		TokensSold:   tokensSold,
 		TokensBought: tokensBought,
 		Fee:          fee,
-	}, nil
-}
-
-func extractCryptoswapAddLiquidity(
-	data map[string]any,
-	pool RegisteredPool,
-	logIndex uint,
-	txHash common.Hash,
-) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	amounts, err := getBigIntSliceField(data, "token_amounts")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	// fee is a single uint256; store as 1-element slice for uniform Fees representation.
-	feeVal, err := getBigIntField(data, "fee")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	supply, err := getBigIntField(data, "token_supply")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	return LiquidityRecord{
-		Pool:         pool,
-		LogIndex:     logIndex,
-		TxHash:       txHash,
-		Provider:     provider,
-		Kind:         LiquidityAdd,
-		TokenAmounts: amounts,
-		Fees:         []*big.Int{feeVal},
-		TokenSupply:  supply,
-	}, nil
-}
-
-func extractCryptoswapRemoveLiquidity(
-	data map[string]any,
-	pool RegisteredPool,
-	logIndex uint,
-	txHash common.Hash,
-) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	amounts, err := getBigIntSliceField(data, "token_amounts")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	supply, err := getBigIntField(data, "token_supply")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	return LiquidityRecord{
-		Pool:         pool,
-		LogIndex:     logIndex,
-		TxHash:       txHash,
-		Provider:     provider,
-		Kind:         LiquidityRemove,
-		TokenAmounts: amounts,
-		TokenSupply:  supply,
-	}, nil
-}
-
-// extractCryptoswapRemoveLiquidityOne handles the cryptoswap variant which DOES
-// carry coin_index (unlike some stableswap versions). TokenAmounts is set to
-// [token_amount, coin_amount] for storage parity.
-func extractCryptoswapRemoveLiquidityOne(
-	data map[string]any,
-	pool RegisteredPool,
-	logIndex uint,
-	txHash common.Hash,
-) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	tokenAmount, err := getBigIntField(data, "token_amount")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	coinIndexBig, err := getBigIntField(data, "coin_index")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	coinAmount, err := getBigIntField(data, "coin_amount")
-	if err != nil {
-		return LiquidityRecord{}, err
-	}
-	// approx_fee is present in the event but not stored in LiquidityRecord.
-
-	coinIdx := int(coinIndexBig.Int64())
-	return LiquidityRecord{
-		Pool:         pool,
-		LogIndex:     logIndex,
-		TxHash:       txHash,
-		Provider:     provider,
-		Kind:         LiquidityRemoveOne,
-		TokenAmounts: []*big.Int{tokenAmount, coinAmount},
-		CoinIndex:    &coinIdx,
 	}, nil
 }

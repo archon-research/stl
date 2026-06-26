@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sort"
 	"time"
 
@@ -230,9 +231,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 // convention in the DB trigger.
 func (c *Coordinator) buildSnapshotSet(bn int64) []RegisteredPool {
 	byID := make(map[int64]RegisteredPool)
-	for id, pool := range c.touched {
-		byID[id] = pool
-	}
+	maps.Copy(byID, c.touched)
 	if c.heartbeatBlocks > 0 {
 		for _, pool := range c.pools {
 			last, seen := c.lastSnapshotBlock[pool.ID]

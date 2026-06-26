@@ -26,7 +26,6 @@ type StableswapHandler struct {
 func NewStableswapHandler(stableABI *abi.ABI) *StableswapHandler {
 	eventsByID := make(map[common.Hash]*abi.Event, len(stableABI.Events))
 	for _, ev := range stableABI.Events {
-		ev := ev
 		eventsByID[ev.ID] = &ev
 	}
 	return &StableswapHandler{
@@ -73,6 +72,28 @@ func (h *StableswapHandler) DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		topic0 := common.HexToHash(log.Topics[0])
+
+		// Pre-NG pools emit fixed-array liquidity events whose topic0s differ from the
+		// NG ABI. Dispatch them via word-slicing before falling back to the ABI lookup.
+		if pool.Kind == KindStableswapPreNG {
+			rec, matched, err := decodeClassicLiquidity(log, pool)
+			if err != nil {
+				return DecodedEvents{}, fmt.Errorf("decoding classic liquidity log (index %s): %w", log.LogIndex, err)
+			}
+			if matched {
+				result.Liquidity = append(result.Liquidity, *rec)
+				payload, _ := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+				result.Captured = append(result.Captured, CapturedEvent{
+					Pool:      pool,
+					LogIndex:  logIndex,
+					TxHash:    txHash,
+					EventName: log.Topics[0],
+					Payload:   payload,
+				})
+				continue
+			}
+		}
+
 		ev, known := h.eventsByID[topic0]
 
 		if !known {
@@ -352,7 +373,6 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		if lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx]); err == nil {
 			lastPrice = lp
 		}
-		idx++
 	}
 
 	return entity.NewCurveStableswapState(entity.CurveStableswapStateParams{
@@ -499,6 +519,11 @@ func extractStableswapRemoveLiquidityOne(
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
+	// token_id is int128 in the NG ABI; go-ethereum decodes it as *big.Int.
+	tokenID, err := getBigIntField(data, "token_id")
+	if err != nil {
+		return LiquidityRecord{}, err
+	}
 	tokenAmount, err := getBigIntField(data, "token_amount")
 	if err != nil {
 		return LiquidityRecord{}, err
@@ -511,6 +536,7 @@ func extractStableswapRemoveLiquidityOne(
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
+	coinIdx := int(tokenID.Int64())
 	return LiquidityRecord{
 		Pool:         pool,
 		LogIndex:     logIndex,
@@ -518,6 +544,7 @@ func extractStableswapRemoveLiquidityOne(
 		Provider:     provider,
 		Kind:         LiquidityRemoveOne,
 		TokenAmounts: []*big.Int{tokenAmount, coinAmount},
+		CoinIndex:    &coinIdx,
 		TokenSupply:  supply,
 	}, nil
 }

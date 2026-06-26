@@ -52,6 +52,7 @@ const curveStableswapJSON = `[
 		"anonymous": false,
 		"inputs": [
 			{"indexed": true,  "name": "provider",     "type": "address"},
+			{"indexed": false, "name": "token_id",     "type": "int128"},
 			{"indexed": false, "name": "token_amount",  "type": "uint256"},
 			{"indexed": false, "name": "coin_amount",   "type": "uint256"},
 			{"indexed": false, "name": "token_supply",  "type": "uint256"}

@@ -642,13 +642,20 @@ END $$;
 DO $$
 DECLARE trigger_count INT;
 BEGIN
+    -- Count via pg_trigger joined to our own trigger functions, NOT
+    -- information_schema.triggers: on a TimescaleDB hypertable the latter also
+    -- surfaces the ts_insert_blocker trigger, double-counting to 8. Matching on
+    -- the assign_processing_version_curve* functions counts exactly our 4.
     SELECT COUNT(*) INTO trigger_count
-    FROM information_schema.triggers
-    WHERE trigger_name = 'trigger_assign_processing_version'
-      AND event_object_table IN (
+    FROM pg_trigger tg
+    JOIN pg_class c ON c.oid = tg.tgrelid
+    JOIN pg_proc p ON p.oid = tg.tgfoid
+    WHERE NOT tg.tgisinternal
+      AND c.relname IN (
           'curve_swap', 'curve_liquidity_event',
           'curve_stableswap_state', 'curve_cryptoswap_state'
-      );
+      )
+      AND p.proname LIKE 'assign_processing_version_curve%';
     IF trigger_count <> 4 THEN
         RAISE EXCEPTION 'expected 4 processing_version triggers on curve fact tables, found %', trigger_count;
     END IF;
