@@ -13,7 +13,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.25
 	github.com/aws/smithy-go v1.24.3
 	github.com/ethereum/go-ethereum v1.17.2
-	github.com/jackc/pgx/v5 v5.9.1
+	github.com/jackc/pgx/v5 v5.9.2
 	github.com/klauspost/compress v1.18.5
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/testcontainers/testcontainers-go v0.42.0

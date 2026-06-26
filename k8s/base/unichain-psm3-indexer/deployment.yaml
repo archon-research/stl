@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unichain-psm3-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unichain-psm3-indexer
+  template:
+    metadata:
+      labels:
+        app: unichain-psm3-indexer
+    spec:
+      serviceAccountName: unichain-psm3-indexer
+      containers:
+        - name: unichain-psm3-indexer
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: unichain-psm3-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: unichain-psm3-indexer
+            - secretRef:
+                # Populated by ExternalSecret; secret name mirrors the service.
+                name: unichain-psm3-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f psm3-indexer"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -358,7 +358,7 @@ dev-up:
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker avalanche-oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOB_DEPLOYMENTS)"; \
+	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker avalanche-oracle-price-worker sparklend-position-tracker prime-debt-indexer base-psm3-indexer python-api $(CRONJOB_DEPLOYMENTS)"; \
 	else \
 	  DEPS="mock-blockchain-server watcher python-api $(CRONJOB_DEPLOYMENTS)"; \
 	fi; \
@@ -417,8 +417,9 @@ _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-morpho-indexer:local,docker-build-morpho-indexer LOCAL=1)
 	$(call build-if-needed,stl-sparklend-position-tracker:local,docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:local,docker-build-prime-debt-indexer LOCAL=1)
+	$(call build-if-needed,stl-psm3-indexer:local,docker-build-psm3-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer; do \
+	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer psm3-indexer; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
 	    { echo "ERROR: deployment $$dep not ready after 300s"; exit 1; }; \
 	done
@@ -1733,7 +1734,7 @@ kind-load-watcher:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:local"
 
 kind-load-workers:
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local stl-psm3-indexer:local"
 
 # Guard against drift now that cronjobs are hand-maintained (generator retired):
 # the dev overlay's Deployment set must equal {watcher, python-api} + CRONJOB_DEPLOYMENTS.
@@ -1755,7 +1756,7 @@ kind-deploy-apps: check-dev-overlay-sync
 
 kind-deploy-workers:
 	kubectl --context=$(KUBE_CONTEXT) apply -k ../k8s/overlays/dev/workers
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer deployment/base-psm3-indexer -n $(KUBE_NS)
 
 # Opt-in: build + deploy the watcher-data-validator cron (excluded from `make dev-up`).
 # It verifies stored blocks against real Etherscan, which is meaningless on the mock
