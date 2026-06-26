@@ -66,9 +66,13 @@ type CurveRepository interface {
 	// SaveLiquidityEvent persists a Curve add/remove liquidity event within an external transaction.
 	SaveLiquidityEvent(ctx context.Context, tx pgx.Tx, in LiquidityInput) error
 
-	// SaveStableswapState persists a stableswap pool state snapshot within an external transaction.
-	SaveStableswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveStableswapState) error
+	// SaveStableswapState persists a stableswap pool state snapshot within an
+	// external transaction, returning the number of rows actually written (0 when
+	// the ON CONFLICT DO NOTHING upsert is a no-op, e.g. an SQS redelivery).
+	SaveStableswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveStableswapState) (int64, error)
 
-	// SaveCryptoswapState persists a cryptoswap pool state snapshot within an external transaction.
-	SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveCryptoswapState) error
+	// SaveCryptoswapState persists a cryptoswap pool state snapshot within an
+	// external transaction, returning the number of rows actually written (0 when
+	// the ON CONFLICT DO NOTHING upsert is a no-op, e.g. an SQS redelivery).
+	SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveCryptoswapState) (int64, error)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -52,15 +51,27 @@ func fakeCacheWithReceipts(t *testing.T, n int) outbound.BlockCacheReader {
 	return &fakeCache{receipts: receiptsJSON(t, n)}
 }
 
-func TestBlockProcessor_ProcessesEachReceiptWithBlockCoordinates(t *testing.T) {
+// failHandler returns a BlockHandler that fails the test if it is ever called.
+func failHandler(t *testing.T) BlockHandler {
+	t.Helper()
+	return func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error {
+		t.Error("BlockHandler must not be called on this path")
+		return nil
+	}
+}
+
+// TestBlockProcessor_HandlerReceivesAllReceiptsAndBlockCoordinates: the handler
+// is called once with the full receipts slice and the correct event coordinates.
+func TestBlockProcessor_HandlerReceivesAllReceiptsAndBlockCoordinates(t *testing.T) {
 	cache := &fakeCache{receipts: receiptsJSON(t, 3)}
 	var calls int
-	var gotChain, gotBlock int64
-	var gotVer int
-	var gotTS time.Time
-	bp := NewBlockProcessor(cache, nil, func(_ context.Context, _ shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
+	var gotEvent outbound.BlockEvent
+	var gotReceipts []shared.TransactionReceipt
+
+	bp := NewBlockProcessor(cache, nil, func(_ context.Context, ev outbound.BlockEvent, recs []shared.TransactionReceipt) error {
 		calls++
-		gotChain, gotBlock, gotVer, gotTS = chainID, blockNumber, version, ts
+		gotEvent = ev
+		gotReceipts = recs
 		return nil
 	})
 
@@ -69,32 +80,52 @@ func TestBlockProcessor_ProcessesEachReceiptWithBlockCoordinates(t *testing.T) {
 		t.Fatalf("ProcessBlockEvent: %v", err)
 	}
 
-	if calls != 3 {
-		t.Errorf("receipt handler called %d times, want 3", calls)
+	if calls != 1 {
+		t.Errorf("handler called %d times, want 1", calls)
 	}
 	if cache.gotChain != 8453 || cache.gotBlock != 100 || cache.gotVer != 2 {
 		t.Errorf("GetReceipts(%d,%d,%d), want (8453,100,2)", cache.gotChain, cache.gotBlock, cache.gotVer)
 	}
-	if gotChain != 8453 || gotBlock != 100 || gotVer != 2 {
-		t.Errorf("handler got block coords (%d,%d,%d), want (8453,100,2)", gotChain, gotBlock, gotVer)
+	if gotEvent.ChainID != 8453 || gotEvent.BlockNumber != 100 || gotEvent.Version != 2 {
+		t.Errorf("handler got event coords (%d,%d,%d), want (8453,100,2)",
+			gotEvent.ChainID, gotEvent.BlockNumber, gotEvent.Version)
 	}
-	if want := time.Unix(1_700_000_000, 0).UTC(); !gotTS.Equal(want) || gotTS.Location() != time.UTC {
-		t.Errorf("handler got timestamp %v (%v), want %v UTC", gotTS, gotTS.Location(), want)
+	wantTS := time.Unix(1_700_000_000, 0).UTC()
+	ts := time.Unix(gotEvent.BlockTimestamp, 0).UTC()
+	if !ts.Equal(wantTS) {
+		t.Errorf("handler got timestamp %v, want %v", ts, wantTS)
+	}
+	if len(gotReceipts) != 3 {
+		t.Errorf("handler got %d receipts, want 3", len(gotReceipts))
+	}
+	// Verify receipt identity: the handler receives the exact objects from the cache,
+	// not a re-serialised copy with lost fields.
+	if len(gotReceipts) > 0 && gotReceipts[0].TransactionHash != "0xabc" {
+		t.Errorf("gotReceipts[0].TransactionHash = %q, want %q", gotReceipts[0].TransactionHash, "0xabc")
 	}
 }
 
-func TestBlockProcessor_NoReceipts_DoesNotCallHandler(t *testing.T) {
+// TestBlockProcessor_EmptyBlock_StillCallsHandler: a block with zero receipts
+// must still invoke the handler once with an empty slice so the coordinator can
+// take heartbeat snapshots.
+func TestBlockProcessor_EmptyBlock_StillCallsHandler(t *testing.T) {
 	cache := &fakeCache{receipts: receiptsJSON(t, 0)}
-	called := false
-	bp := NewBlockProcessor(cache, nil, func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error {
-		called = true
+	var calls int
+	var gotLen int
+	bp := NewBlockProcessor(cache, nil, func(_ context.Context, _ outbound.BlockEvent, recs []shared.TransactionReceipt) error {
+		calls++
+		gotLen = len(recs)
 		return nil
 	})
+
 	if err := bp.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 1}); err != nil {
 		t.Fatalf("ProcessBlockEvent: %v", err)
 	}
-	if called {
-		t.Error("receipt handler must not be called when the block has no receipts")
+	if calls != 1 {
+		t.Errorf("handler called %d times, want 1 (empty block must still call handler)", calls)
+	}
+	if gotLen != 0 {
+		t.Errorf("handler got %d receipts, want 0", gotLen)
 	}
 }
 
@@ -140,54 +171,21 @@ func TestBlockProcessor_UndecodableReceipts_Errors(t *testing.T) {
 	}
 }
 
-func TestBlockProcessor_AggregatesReceiptErrorsAndProcessesAll(t *testing.T) {
-	cache := &fakeCache{receipts: receiptsJSON(t, 3)}
-	errA := errors.New("receipt 0 boom")
-	errC := errors.New("receipt 2 boom")
-	var calls int
-	bp := NewBlockProcessor(cache, nil, func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error {
-		defer func() { calls++ }()
-		switch calls {
-		case 0:
-			return errA
-		case 2:
-			return errC
-		default:
-			return nil
-		}
+// TestBlockProcessor_HandlerError_PropagatesForRedelivery: when the handler
+// returns an error the SQS message must NOT be acked; ProcessBlockEvent returns
+// that same error so the message redelivers.
+func TestBlockProcessor_HandlerError_PropagatesForRedelivery(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	handlerErr := errors.New("handler boom")
+	bp := NewBlockProcessor(cache, nil, func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error {
+		return handlerErr
 	})
-
 	err := bp.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 1})
 	if err == nil {
-		t.Fatal("expected a joined error")
+		t.Fatal("expected error from failing handler")
 	}
-	if calls != 3 {
-		t.Errorf("handler called %d times, want 3 (a failing receipt must not abort the rest)", calls)
-	}
-	if !errors.Is(err, errA) || !errors.Is(err, errC) {
-		t.Errorf("joined error %v must wrap both failing receipts", err)
-	}
-}
-
-func TestBlockProcessor_StopsOnContextCancellation(t *testing.T) {
-	cache := &fakeCache{receipts: receiptsJSON(t, 5)}
-	ctx, cancel := context.WithCancel(context.Background())
-	var calls int
-	bp := NewBlockProcessor(cache, nil, func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error {
-		calls++
-		cancel() // a deadline/shutdown fires after the first receipt
-		return nil
-	})
-
-	err := bp.ProcessBlockEvent(ctx, outbound.BlockEvent{ChainID: 1, BlockNumber: 1})
-	if err == nil {
-		t.Fatal("expected an error when the context is cancelled mid-block")
-	}
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("error %v should wrap context.Canceled", err)
-	}
-	if calls != 1 {
-		t.Errorf("processReceipt called %d times, want 1 (loop must stop once ctx is cancelled)", calls)
+	if !errors.Is(err, handlerErr) {
+		t.Errorf("error %v does not wrap the handler error", err)
 	}
 }
 
@@ -206,14 +204,14 @@ func TestBlockProcessor_RecordsTelemetryByStatus(t *testing.T) {
 		t.Fatalf("NewTelemetry: %v", err)
 	}
 
-	okCache := &fakeCache{receipts: receiptsJSON(t, 1)}
-	okBP := NewBlockProcessor(okCache, tel, func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error { return nil })
+	okCache := fakeCacheWithReceipts(t, 1)
+	okBP := NewBlockProcessor(okCache, tel, func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error { return nil })
 	if err := okBP.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 1}); err != nil {
 		t.Fatalf("happy ProcessBlockEvent: %v", err)
 	}
 
 	failCache := &fakeCache{err: errors.New("boom")}
-	failBP := NewBlockProcessor(failCache, tel, func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error { return nil })
+	failBP := NewBlockProcessor(failCache, tel, func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error { return nil })
 	if err := failBP.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 2}); err == nil {
 		t.Fatal("expected error from failing cache")
 	}
@@ -231,14 +229,6 @@ func TestBlockProcessor_RecordsTelemetryByStatus(t *testing.T) {
 	}
 	if got := readSumCount(t, &rm, "curve.errors.total"); got != 1 {
 		t.Errorf("curve.errors.total = %d, want 1", got)
-	}
-}
-
-func failHandler(t *testing.T) ReceiptHandler {
-	t.Helper()
-	return func(context.Context, shared.TransactionReceipt, int64, int64, int, time.Time) error {
-		t.Error("receipt handler must not be called on this path")
-		return nil
 	}
 }
 
@@ -289,60 +279,4 @@ func readSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name string) int
 	}
 	t.Fatalf("metric %s not found", name)
 	return 0
-}
-
-func TestProcessBlockEvent_FinalizerRunsAfterReceipts(t *testing.T) {
-	var order []string
-	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
-		order = append(order, "receipt")
-		return nil
-	}
-	fin := func(ctx context.Context, event outbound.BlockEvent) error {
-		order = append(order, "finalize")
-		return nil
-	}
-	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 2), nil, rh, fin)
-	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := []string{"receipt", "receipt", "finalize"}
-	if !reflect.DeepEqual(order, want) {
-		t.Fatalf("order = %v, want %v", order, want)
-	}
-}
-
-func TestProcessBlockEvent_FinalizerErrorPropagates(t *testing.T) {
-	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
-		return nil
-	}
-	fin := func(ctx context.Context, event outbound.BlockEvent) error { return errors.New("boom") }
-	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 1), nil, rh, fin)
-	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("expected finalize error to propagate, got %v", err)
-	}
-}
-
-func TestProcessBlockEvent_FinalizerSkippedOnReceiptError(t *testing.T) {
-	receiptErr := errors.New("receipt boom")
-	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
-		return receiptErr
-	}
-	finalizeCalled := false
-	fin := func(ctx context.Context, event outbound.BlockEvent) error {
-		finalizeCalled = true
-		return nil
-	}
-	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 1), nil, rh, fin)
-	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
-	if err == nil {
-		t.Fatal("expected error from receipt handler")
-	}
-	if !errors.Is(err, receiptErr) {
-		t.Errorf("error %v does not wrap receipt error", err)
-	}
-	if finalizeCalled {
-		t.Error("finalizer must not run when a receipt handler returned an error")
-	}
 }

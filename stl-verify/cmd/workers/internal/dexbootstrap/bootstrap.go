@@ -17,6 +17,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -182,13 +183,6 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	d.cleanups = append(d.cleanups, func() { ethClient.Close() })
 	logger.Info("Ethereum node connected")
 
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		d.Close()
-		return nil, fmt.Errorf("creating multicall client: %w", err)
-	}
-	d.Multicaller = mc
-
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))
 	if err != nil {
 		d.Close()
@@ -231,6 +225,26 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		return nil, fmt.Errorf("creating dex telemetry: %w", err)
 	}
 	d.DexTelemetry = dexTel
+
+	// Multicaller is built after InitOTEL so its telemetry binds to the real
+	// meter provider (emits multicall_batch_size{chain}); resolving the chain
+	// name fails hard rather than emitting an empty chain label.
+	chainName, err := entity.ChainName(cfg.ChainID)
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("creating multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("creating multicall client: %w", err)
+	}
+	d.Multicaller = mc
 
 	d.TxManager, err = postgres.NewTxManager(pool, logger)
 	if err != nil {

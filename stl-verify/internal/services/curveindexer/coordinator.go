@@ -33,12 +33,6 @@ type CoordinatorDeps struct {
 	Telemetry       *dextelemetry.Telemetry
 }
 
-// blockKey identifies a (blockNumber, version) pair for the per-block buffer.
-type blockKey struct {
-	bn  int64
-	ver int
-}
-
 // snapshotKey records the (blockNumber, version) of the last persisted snapshot
 // for a pool, so heartbeat logic correctly detects reorgs where bn == lastBn but
 // version changed.
@@ -51,7 +45,9 @@ type snapshotKey struct {
 // the Curve indexer.
 //
 // Single-goroutine contract: sqsutil.RunLoop processes one SQS message at a
-// time, so no synchronisation is required on any Coordinator field.
+// time, so no synchronisation is required on any Coordinator field. All
+// per-block work happens in local variables inside BlockHandler; the only
+// cross-block state is the pool registry and lastSnapshot (heartbeat tracking).
 type Coordinator struct {
 	poolsByAddr     map[common.Address]RegisteredPool
 	pools           []RegisteredPool // ordered for deterministic iteration
@@ -66,13 +62,6 @@ type Coordinator struct {
 	telemetry       *dextelemetry.Telemetry
 
 	lastSnapshot map[int64]snapshotKey // pool.ID -> last snapshotted (block, version)
-
-	// per-block buffer
-	curKey    blockKey
-	swaps     []SwapRecord
-	liquidity []LiquidityRecord
-	captured  []CapturedEvent
-	touched   map[int64]RegisteredPool
 }
 
 // NewCoordinator validates deps and builds a Coordinator. Every registered
@@ -118,75 +107,88 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 		logger:          deps.Logger,
 		telemetry:       deps.Telemetry,
 		lastSnapshot:    make(map[int64]snapshotKey),
-		touched:         make(map[int64]RegisteredPool),
 	}, nil
 }
 
-// ReceiptHandler returns the dexconsumer.ReceiptHandler for this coordinator.
-func (c *Coordinator) ReceiptHandler() dexconsumer.ReceiptHandler {
-	return func(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
-		key := blockKey{bn: blockNumber, ver: version}
-		if key != c.curKey {
-			c.swaps = nil
-			c.liquidity = nil
-			c.captured = nil
-			c.touched = make(map[int64]RegisteredPool)
-			c.curKey = key
-		}
-
-		// Collect pool addresses present in this receipt's logs.
-		presentAddrs := make(map[common.Address]struct{}, len(receipt.Logs))
-		for _, log := range receipt.Logs {
-			presentAddrs[common.HexToAddress(log.Address)] = struct{}{}
-		}
-
-		for addr, pool := range c.poolsByAddr {
-			if _, touched := presentAddrs[addr]; !touched {
-				continue
-			}
-			decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, chainID, blockNumber, version, ts)
-			if err != nil {
-				return fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, blockNumber, err)
-			}
-			c.swaps = append(c.swaps, decoded.Swaps...)
-			c.liquidity = append(c.liquidity, decoded.Liquidity...)
-			c.captured = append(c.captured, decoded.Captured...)
-			c.touched[pool.ID] = pool
-		}
-		return nil
-	}
-}
-
-// Finalizer returns the dexconsumer.BlockFinalizer for this coordinator.
-func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
-	return func(ctx context.Context, event outbound.BlockEvent) error {
+// BlockHandler returns the dexconsumer.BlockHandler for this coordinator. It
+// decodes every receipt in the block into local accumulators, snapshots the
+// touched and heartbeat-due pools (via multicall, before opening the
+// transaction), and persists swaps, liquidity events, captured logs, and pool
+// state in one transaction. Returning a non-nil error leaves the block for SQS
+// redelivery; nil is returned only after a successful commit. All per-block
+// state is local, so a redelivery reprocesses from scratch with no carryover.
+func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
+	return func(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 		bn := event.BlockNumber
 		ver := event.Version
 		ts := time.Unix(event.BlockTimestamp, 0).UTC()
 
-		// Always clear the buffer on return so a failed finalize followed by SQS
-		// redelivery re-accumulates from empty rather than doubling.
-		defer func() {
-			c.swaps = nil
-			c.liquidity = nil
-			c.captured = nil
-			c.touched = make(map[int64]RegisteredPool)
-		}()
+		var (
+			swaps     []SwapRecord
+			liquidity []LiquidityRecord
+			captured  []CapturedEvent
+		)
+		touched := make(map[int64]RegisteredPool)
 
-		snapshotSet := c.buildSnapshotSet(bn, ver)
+		for _, receipt := range receipts {
+			// Bail early (with an error, never a silent ack) if the handler-timeout
+			// budget or a shutdown cancelled ctx, rather than decoding the rest.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			presentAddrs := make(map[common.Address]struct{}, len(receipt.Logs))
+			for _, log := range receipt.Logs {
+				presentAddrs[common.HexToAddress(log.Address)] = struct{}{}
+			}
+			for addr, pool := range c.poolsByAddr {
+				if _, ok := presentAddrs[addr]; !ok {
+					continue
+				}
+				decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, c.chainID, bn, ver, ts)
+				if err != nil {
+					return fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
+				}
+				swaps = append(swaps, decoded.Swaps...)
+				liquidity = append(liquidity, decoded.Liquidity...)
+				captured = append(captured, decoded.Captured...)
+				touched[pool.ID] = pool
+			}
+		}
 
+		snapshotSet := c.buildSnapshotSet(bn, ver, touched)
+
+		// Read pool state via multicall BEFORE opening the transaction so archive-RPC
+		// latency never pins a pgx connection (connection-pool exhaustion is a stall cause).
+		snapshots := make([]StateSnapshot, 0, len(snapshotSet))
+		for _, pool := range snapshotSet {
+			snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
+			if err != nil {
+				return fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
+			}
+			if err := snap.Validate(); err != nil {
+				return fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
+			}
+			snapshots = append(snapshots, snap)
+		}
+
+		// Quiet block: nothing decoded and no snapshot due. Skip the empty transaction.
+		if len(swaps) == 0 && len(liquidity) == 0 && len(captured) == 0 && len(snapshots) == 0 {
+			return nil
+		}
+
+		var stateRows int64
 		err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-			for _, s := range c.swaps {
-				if err := c.repo.SaveSwap(ctx, tx, toSwapInput(s, c.chainID, bn, ver, ts)); err != nil {
+			for _, s := range swaps {
+				if err := c.repo.SaveSwap(ctx, tx, toSwapInput(s, bn, ver, ts)); err != nil {
 					return fmt.Errorf("saving swap block %d log %d: %w", bn, s.LogIndex, err)
 				}
 			}
-			for _, l := range c.liquidity {
+			for _, l := range liquidity {
 				if err := c.repo.SaveLiquidityEvent(ctx, tx, toLiquidityInput(l, bn, ver, ts)); err != nil {
 					return fmt.Errorf("saving liquidity event block %d log %d: %w", bn, l.LogIndex, err)
 				}
 			}
-			for _, cap := range c.captured {
+			for _, cap := range captured {
 				in := dexconsumer.ProtocolEventInput{
 					ContractAddress: cap.Pool.Address,
 					ChainID:         c.chainID,
@@ -202,23 +204,20 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 					return fmt.Errorf("saving captured event block %d log %d: %w", bn, cap.LogIndex, err)
 				}
 			}
-			for _, pool := range snapshotSet {
-				snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
-				if err != nil {
-					return fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
-				}
-				if err := snap.Validate(); err != nil {
-					return fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
-				}
+			for _, snap := range snapshots {
 				switch {
 				case snap.Stableswap != nil:
-					if err := c.repo.SaveStableswapState(ctx, tx, snap.Stableswap); err != nil {
-						return fmt.Errorf("saving stableswap state pool %s block %d: %w", pool.Address, bn, err)
+					n, err := c.repo.SaveStableswapState(ctx, tx, snap.Stableswap)
+					if err != nil {
+						return fmt.Errorf("saving stableswap state pool %s block %d: %w", snap.Pool.Address, bn, err)
 					}
+					stateRows += n
 				case snap.Cryptoswap != nil:
-					if err := c.repo.SaveCryptoswapState(ctx, tx, snap.Cryptoswap); err != nil {
-						return fmt.Errorf("saving cryptoswap state pool %s block %d: %w", pool.Address, bn, err)
+					n, err := c.repo.SaveCryptoswapState(ctx, tx, snap.Cryptoswap)
+					if err != nil {
+						return fmt.Errorf("saving cryptoswap state pool %s block %d: %w", snap.Pool.Address, bn, err)
 					}
+					stateRows += n
 				}
 			}
 			return nil
@@ -230,7 +229,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 		for _, pool := range snapshotSet {
 			c.lastSnapshot[pool.ID] = snapshotKey{bn: bn, ver: ver}
 		}
-		c.telemetry.RecordStateRows(ctx, len(snapshotSet))
+		c.telemetry.RecordStateRows(ctx, int(stateRows))
 		return nil
 	}
 }
@@ -238,9 +237,9 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 // buildSnapshotSet returns the sorted (by pool.ID ASC) union of touched pools
 // and heartbeat-due pools. Consistent ordering is required by the advisory-lock
 // convention in the DB trigger.
-func (c *Coordinator) buildSnapshotSet(bn int64, ver int) []RegisteredPool {
+func (c *Coordinator) buildSnapshotSet(bn int64, ver int, touched map[int64]RegisteredPool) []RegisteredPool {
 	byID := make(map[int64]RegisteredPool)
-	maps.Copy(byID, c.touched)
+	maps.Copy(byID, touched)
 	if c.heartbeatBlocks > 0 {
 		for _, pool := range c.pools {
 			last, seen := c.lastSnapshot[pool.ID]
@@ -263,7 +262,7 @@ func (c *Coordinator) buildSnapshotSet(bn int64, ver int) []RegisteredPool {
 // Mapping helpers: domain records -> repo input structs
 // ---------------------------------------------------------------------------
 
-func toSwapInput(s SwapRecord, chainID, bn int64, ver int, ts time.Time) outbound.SwapInput {
+func toSwapInput(s SwapRecord, bn int64, ver int, ts time.Time) outbound.SwapInput {
 	return outbound.SwapInput{
 		CurvePoolID:    s.Pool.ID,
 		BlockNumber:    bn,

@@ -11,9 +11,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -23,13 +27,17 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
-// fakeCurveRepo counts Save* calls; it ignores the pgx.Tx (nil is fine).
+// fakeCurveRepo counts Save* calls; it ignores the pgx.Tx (nil is fine). The
+// state-save methods report stateRowsReturn rows affected so tests can simulate
+// an idempotent no-op (ON CONFLICT DO NOTHING -> 0 rows) on redelivery; a zero
+// value left by the struct literal means newTestCoordinator must set it to 1.
 type fakeCurveRepo struct {
 	swapSaves       int
 	liquiditySaves  int
 	stableswapSaves int
 	cryptoswapSaves int
 	snapshotPoolIDs []int64
+	stateRowsReturn int64
 }
 
 func (r *fakeCurveRepo) LoadPools(_ context.Context, _ int64) ([]outbound.CurvePoolRow, error) {
@@ -46,16 +54,16 @@ func (r *fakeCurveRepo) SaveLiquidityEvent(_ context.Context, _ pgx.Tx, _ outbou
 	return nil
 }
 
-func (r *fakeCurveRepo) SaveStableswapState(_ context.Context, _ pgx.Tx, s *entity.CurveStableswapState) error {
+func (r *fakeCurveRepo) SaveStableswapState(_ context.Context, _ pgx.Tx, s *entity.CurveStableswapState) (int64, error) {
 	r.stableswapSaves++
 	r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
-	return nil
+	return r.stateRowsReturn, nil
 }
 
-func (r *fakeCurveRepo) SaveCryptoswapState(_ context.Context, _ pgx.Tx, s *entity.CurveCryptoswapState) error {
+func (r *fakeCurveRepo) SaveCryptoswapState(_ context.Context, _ pgx.Tx, s *entity.CurveCryptoswapState) (int64, error) {
 	r.cryptoswapSaves++
 	r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
-	return nil
+	return r.stateRowsReturn, nil
 }
 
 // fakeTxManager calls fn with a nil pgx.Tx; sufficient since fakeCurveRepo
@@ -64,6 +72,36 @@ type fakeTxManager struct{}
 
 func (m *fakeTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error) error {
 	return fn(nil)
+}
+
+// inTxTrackingTxManager flips inTx for the duration of the transaction callback
+// so a multicaller can assert it is invoked OUTSIDE the transaction scope.
+type inTxTrackingTxManager struct {
+	inTx bool
+}
+
+func (m *inTxTrackingTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error) error {
+	m.inTx = true
+	defer func() { m.inTx = false }()
+	return fn(nil)
+}
+
+// txCheckingMulticaller fails if Execute runs while the tracked tx manager is
+// inside a transaction, proving snapshot reads happen before the tx opens.
+type txCheckingMulticaller struct {
+	tracker *inTxTrackingTxManager
+	results []outbound.Result
+}
+
+func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	if m.tracker.inTx {
+		return nil, fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
+	}
+	return m.results, nil
+}
+
+func (m *txCheckingMulticaller) Address() common.Address {
+	return common.Address{}
 }
 
 // fakeEventRepo swallows saves silently.
@@ -120,7 +158,7 @@ func newTestCoordinator(t *testing.T, heartbeatBlocks int64) (*Coordinator, *fak
 		KindStableswapNG:    stable,
 	}
 
-	repo := &fakeCurveRepo{}
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
 
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
@@ -154,6 +192,22 @@ func blockEvent(bn int64) outbound.BlockEvent {
 	}
 }
 
+// swapReceipt builds a receipt containing one TokenExchange log for the given pool.
+func swapReceipt(t *testing.T) shared.TransactionReceipt {
+	t.Helper()
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	return buildReceiptWithTokenExchange(
+		t, a, newTestPool().Address,
+		common.HexToAddress("0xabc"),
+		1, big.NewInt(1000),
+		0, big.NewInt(999),
+		0,
+	)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -163,29 +217,14 @@ func blockEvent(bn int64) outbound.BlockEvent {
 func TestCoordinator_EventBlockSnapshotsTouchedPool(t *testing.T) {
 	// HeartbeatBlocks=0 disables heartbeat; only touched-pool snapshot fires.
 	c, repo := newTestCoordinator(t, 0)
-	rh := c.ReceiptHandler()
-	fin := c.Finalizer()
+	bh := c.BlockHandler()
 
-	a, err := abis.CurveStableswapABI()
-	if err != nil {
-		t.Fatalf("loading ABI: %v", err)
-	}
-	pool := newTestPool()
-	receipt := buildReceiptWithTokenExchange(
-		t, a, pool.Address,
-		common.HexToAddress("0xabc"),
-		1, big.NewInt(1000),
-		0, big.NewInt(999),
-		0,
-	)
+	receipt := swapReceipt(t)
+	event := blockEvent(200)
+	event.BlockTimestamp = 200
 
-	bn := int64(200)
-	ts := time.Unix(bn, 0).UTC()
-	if err := rh(context.Background(), receipt, testChainID, bn, 0, ts); err != nil {
-		t.Fatalf("ReceiptHandler: %v", err)
-	}
-	if err := fin(context.Background(), blockEvent(bn)); err != nil {
-		t.Fatalf("Finalizer: %v", err)
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
 	}
 
 	if repo.stableswapSaves != 1 {
@@ -194,6 +233,7 @@ func TestCoordinator_EventBlockSnapshotsTouchedPool(t *testing.T) {
 	if repo.swapSaves != 1 {
 		t.Errorf("swap saves = %d, want 1", repo.swapSaves)
 	}
+	pool := newTestPool()
 	if len(repo.snapshotPoolIDs) != 1 || repo.snapshotPoolIDs[0] != pool.ID {
 		t.Errorf("snapshotted pool IDs = %v, want [%d]", repo.snapshotPoolIDs, pool.ID)
 	}
@@ -205,14 +245,14 @@ func TestCoordinator_EventBlockSnapshotsTouchedPool(t *testing.T) {
 // blocks 101-104.
 func TestCoordinator_HeartbeatSnapshotsQuietPool(t *testing.T) {
 	// HeartbeatBlocks=5. The pool has never been snapshotted, so the first
-	// finalize (block 100) triggers an initial snapshot. After that, blocks
+	// call (block 100) triggers an initial snapshot. After that, blocks
 	// 101-104 are below the threshold; block 105 (>= 100+5) triggers the second.
 	c, repo := newTestCoordinator(t, 5)
-	fin := c.Finalizer()
+	bh := c.BlockHandler()
 
 	for bn := int64(100); bn <= 105; bn++ {
-		if err := fin(context.Background(), blockEvent(bn)); err != nil {
-			t.Fatalf("finalize %d: %v", bn, err)
+		if err := bh(context.Background(), blockEvent(bn), nil); err != nil {
+			t.Fatalf("BlockHandler %d: %v", bn, err)
 		}
 	}
 
@@ -228,18 +268,18 @@ func TestCoordinator_HeartbeatSnapshotsQuietPool(t *testing.T) {
 // blocks 101-104 produce no snapshots when last snapshot was at block 100.
 func TestCoordinator_HeartbeatDoesNotFireBeforeInterval(t *testing.T) {
 	c, repo := newTestCoordinator(t, 5)
-	fin := c.Finalizer()
+	bh := c.BlockHandler()
 
 	// Block 100 fires the initial snapshot.
-	if err := fin(context.Background(), blockEvent(100)); err != nil {
-		t.Fatalf("finalize 100: %v", err)
+	if err := bh(context.Background(), blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler 100: %v", err)
 	}
 	snapshotsAfterInitial := repo.stableswapSaves
 
 	// Blocks 101-104 must not snapshot.
 	for bn := int64(101); bn <= 104; bn++ {
-		if err := fin(context.Background(), blockEvent(bn)); err != nil {
-			t.Fatalf("finalize %d: %v", bn, err)
+		if err := bh(context.Background(), blockEvent(bn), nil); err != nil {
+			t.Fatalf("BlockHandler %d: %v", bn, err)
 		}
 	}
 
@@ -249,140 +289,40 @@ func TestCoordinator_HeartbeatDoesNotFireBeforeInterval(t *testing.T) {
 	}
 }
 
-// TestCoordinator_BufferResetsAcrossBlocks: events on block N are NOT persisted
-// when finalize is called for block N+1 with different receipts.
-func TestCoordinator_BufferResetsAcrossBlocks(t *testing.T) {
-	// HeartbeatBlocks=0 keeps snapshots tied strictly to touched pools.
+// TestCoordinator_RedeliveryDoesNotDouble: calling BlockHandler twice for the
+// same block+receipts must save each row set exactly once. Local vars are fresh
+// each call so there is no carryover from the first invocation.
+func TestCoordinator_RedeliveryDoesNotDouble(t *testing.T) {
 	c, repo := newTestCoordinator(t, 0)
-	rh := c.ReceiptHandler()
-	fin := c.Finalizer()
+	bh := c.BlockHandler()
 
-	a, err := abis.CurveStableswapABI()
-	if err != nil {
-		t.Fatalf("loading ABI: %v", err)
+	receipt := swapReceipt(t)
+	event := blockEvent(200)
+
+	// First call succeeds.
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler first call: %v", err)
 	}
-	receipt := buildReceiptWithTokenExchange(
-		t, a, newTestPool().Address,
-		common.HexToAddress("0xabc"),
-		1, big.NewInt(500),
-		0, big.NewInt(499),
-		0,
-	)
-
-	// Block 10: inject a receipt but do NOT call fin(10) — simulate a gap where
-	// the processor only calls ReceiptHandler, then moves directly to block 11.
-	ts10 := time.Unix(10, 0).UTC()
-	if err := rh(context.Background(), receipt, testChainID, 10, 0, ts10); err != nil {
-		t.Fatalf("ReceiptHandler block 10: %v", err)
+	// Second call (SQS redelivery) must persist the same row set, not accumulate.
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler second call: %v", err)
 	}
 
-	// Block 11: different block; ReceiptHandler must reset the buffer.
-	ts11 := time.Unix(11, 0).UTC()
-	if err := rh(context.Background(), receipt, testChainID, 11, 0, ts11); err != nil {
-		t.Fatalf("ReceiptHandler block 11: %v", err)
-	}
-
-	// Finalize block 11 — only block-11 events should be present (1 swap).
-	if err := fin(context.Background(), blockEvent(11)); err != nil {
-		t.Fatalf("Finalizer block 11: %v", err)
-	}
-
-	// If the buffer leaked from block 10, we'd see 2 swaps.
-	if repo.swapSaves != 1 {
-		t.Errorf("swap saves = %d, want 1 (no leakage from block 10)", repo.swapSaves)
-	}
-}
-
-// TestCoordinator_BufferClearedAfterFailedFinalize: a failed finalize clears
-// the buffer so a subsequent redelivery re-accumulates from empty.
-func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
-	a, err := abis.CurveStableswapABI()
-	if err != nil {
-		t.Fatalf("loading ABI: %v", err)
-	}
-
-	stable := NewStableswapHandler(a)
-	handlers := map[PoolKind]PoolClassHandler{
-		KindStableswapPreNG: stable,
-	}
-
-	goodRepo := &fakeCurveRepo{}
-
-	// txMgr that fails once then succeeds.
-	var calls int
-	failOnce := &callCountingTxManager{
-		fn: func(ctx context.Context, fn func(pgx.Tx) error) error {
-			calls++
-			if calls == 1 {
-				return fmt.Errorf("transient failure")
-			}
-			return fn(nil)
-		},
-	}
-
-	eventRepo := &fakeEventRepo{}
-	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
-
-	c, err := NewCoordinator(CoordinatorDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            goodRepo,
-		EventWriter:     writer,
-		TxManager:       failOnce,
-		HeartbeatBlocks: 0,
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
-	})
-	if err != nil {
-		t.Fatalf("NewCoordinator: %v", err)
-	}
-
-	receipt := buildReceiptWithTokenExchange(
-		t, a, newTestPool().Address,
-		common.HexToAddress("0xabc"),
-		1, big.NewInt(1000),
-		0, big.NewInt(999),
-		0,
-	)
-
-	rh := c.ReceiptHandler()
-	fin := c.Finalizer()
-	ts := time.Unix(200, 0).UTC()
-
-	if err := rh(context.Background(), receipt, testChainID, 200, 0, ts); err != nil {
-		t.Fatalf("ReceiptHandler: %v", err)
-	}
-
-	// First finalize fails — buffer should be cleared.
-	if err := fin(context.Background(), blockEvent(200)); err == nil {
-		t.Fatal("expected error from first finalize, got nil")
-	}
-
-	// Re-accumulate for the redelivery.
-	if err := rh(context.Background(), receipt, testChainID, 200, 0, ts); err != nil {
-		t.Fatalf("ReceiptHandler redelivery: %v", err)
-	}
-
-	// Second finalize should succeed with exactly 1 swap (not 2).
-	if err := fin(context.Background(), blockEvent(200)); err != nil {
-		t.Fatalf("Finalizer redelivery: %v", err)
-	}
-
-	if goodRepo.swapSaves != 1 {
-		t.Errorf("swap saves = %d after redelivery, want 1 (buffer cleared on first failure)", goodRepo.swapSaves)
+	// Each call is independent: 1 swap per call -> 2 total, not 1 (no doubling
+	// within a single call) and not more (no cross-call carryover).
+	if repo.swapSaves != 2 {
+		t.Errorf("swap saves = %d after two independent calls, want 2 (1 per call, no cross-call carryover)", repo.swapSaves)
 	}
 }
 
 // TestCoordinator_NilNilSnapshotErrors: when SnapshotState returns both
-// Stableswap and Cryptoswap as nil, Finalizer should return an error.
+// Stableswap and Cryptoswap as nil, BlockHandler should return an error.
 func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
 	handlers := map[PoolKind]PoolClassHandler{
 		KindStableswapPreNG: &nilNilHandler{},
 	}
 
-	repo := &fakeCurveRepo{}
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
@@ -401,11 +341,11 @@ func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
 		t.Fatalf("NewCoordinator: %v", err)
 	}
 
-	fin := c.Finalizer()
+	bh := c.BlockHandler()
 
-	// Finalizer should error because the handler returns StateSnapshot with both nil.
-	if err := fin(context.Background(), blockEvent(100)); err == nil {
-		t.Fatal("expected error from Finalizer, got nil")
+	// BlockHandler should error because the handler returns StateSnapshot with both nil.
+	if err := bh(context.Background(), blockEvent(100), nil); err == nil {
+		t.Fatal("expected error from BlockHandler, got nil")
 	}
 
 	// lastSnapshot should NOT be advanced (no DB write occurred).
@@ -435,7 +375,7 @@ func TestCoordinator_CaptureNetReachesEventWriter(t *testing.T) {
 		KindStableswapNG:    stable,
 	}
 
-	repo := &fakeCurveRepo{}
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &countingEventRepo{}
 	pool := newTestPool()
 
@@ -465,21 +405,233 @@ func TestCoordinator_CaptureNetReachesEventWriter(t *testing.T) {
 		0,
 	)
 
-	rh := c.ReceiptHandler()
-	fin := c.Finalizer()
-	ts := time.Unix(300, 0).UTC()
+	bh := c.BlockHandler()
+	event := blockEvent(300)
+	event.BlockTimestamp = 300
 
-	if err := rh(context.Background(), receipt, testChainID, 300, 0, ts); err != nil {
-		t.Fatalf("ReceiptHandler: %v", err)
-	}
-	if err := fin(context.Background(), blockEvent(300)); err != nil {
-		t.Fatalf("Finalizer: %v", err)
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
 	}
 
 	// One TokenExchange log -> exactly one captured event forwarded to EventWriter.
 	if eventRepo.saves != 1 {
 		t.Errorf("eventRepo.saves = %d, want 1 (capture-net forwarded to EventWriter)", eventRepo.saves)
 	}
+}
+
+// TestCoordinator_SnapshotMulticallRunsOutsideTransaction: snapshot reads must
+// happen before the transaction opens so archive-RPC latency never pins a pgx
+// connection.
+func TestCoordinator_SnapshotMulticallRunsOutsideTransaction(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	tracker := &inTxTrackingTxManager{}
+	mc := &txCheckingMulticaller{tracker: tracker, results: stableswapPreNGResults(t, a)}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{newTestPool()},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       tracker,
+		HeartbeatBlocks: 1, // force a snapshot even with no events
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler: %v (multicall must run outside the tx)", err)
+	}
+	if repo.stableswapSaves != 1 {
+		t.Errorf("stableswap snapshots = %d, want 1", repo.stableswapSaves)
+	}
+}
+
+// TestCoordinator_RecordsActualStateRowsNotSnapshotCount: a redelivery where the
+// state insert is a no-op (ON CONFLICT DO NOTHING -> 0 rows) must record 0 state
+// rows, not the snapshot-set size.
+func TestCoordinator_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := dextelemetry.NewTelemetry("curve", testChainID)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	// stateRowsReturn=0 simulates the idempotent ON CONFLICT DO NOTHING no-op.
+	repo := &fakeCurveRepo{stateRowsReturn: 0}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{newTestPool()},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 1, // force a snapshot
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:       tel,
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := stateRowsWritten(t, &rm); got != 0 {
+		t.Errorf("state_rows_written = %d, want 0 (must reflect actual rows affected, not snapshot-set size)", got)
+	}
+}
+
+// TestCoordinator_DecodeError_ReturnsNonNil: a receipt with corrupt event data
+// causes BlockHandler to return a non-nil error so the SQS message redelivers.
+func TestCoordinator_DecodeError_ReturnsNonNil(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+	}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{newTestPool()},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 0,
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	// Build a receipt with a known-event topic but truncated data so decode fails.
+	ev := a.Events["TokenExchange"]
+	pool := newTestPool()
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address: pool.Address.Hex(),
+		Topics: []string{
+			ev.ID.Hex(),
+			common.BytesToHash(common.HexToAddress("0xabc").Bytes()).Hex(),
+		},
+		Data:            "0xdead", // too short to unpack
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	badReceipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), blockEvent(50), []shared.TransactionReceipt{badReceipt}); err == nil {
+		t.Fatal("expected non-nil error from BlockHandler on decode failure")
+	}
+}
+
+// TestCoordinator_ReorgBlock_Resnapshots: when the same block number arrives
+// with a different version (reorg), the pool is re-snapshotted even though
+// bn == lastBn.
+func TestCoordinator_ReorgBlock_Resnapshots(t *testing.T) {
+	c, repo := newTestCoordinator(t, 5)
+	bh := c.BlockHandler()
+
+	// Block 100 version 0: initial snapshot.
+	ev0 := outbound.BlockEvent{ChainID: testChainID, BlockNumber: 100, Version: 0, BlockTimestamp: 100}
+	if err := bh(context.Background(), ev0, nil); err != nil {
+		t.Fatalf("BlockHandler v0: %v", err)
+	}
+	after0 := repo.stableswapSaves
+
+	// Block 100 version 1 (reorg): same bn, new version -> must re-snapshot.
+	ev1 := outbound.BlockEvent{ChainID: testChainID, BlockNumber: 100, Version: 1, BlockTimestamp: 100}
+	if err := bh(context.Background(), ev1, nil); err != nil {
+		t.Fatalf("BlockHandler v1: %v", err)
+	}
+
+	if repo.stableswapSaves != after0+1 {
+		t.Errorf("snapshots after reorg = %d, want %d (reorg must trigger re-snapshot)", repo.stableswapSaves, after0+1)
+	}
+}
+
+// stateRowsWritten reads the curve.state.rows.written counter total, returning 0
+// if the metric was never recorded.
+func stateRowsWritten(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "curve.state.rows.written" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("curve.state.rows.written: unexpected metric type %T", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	return 0
 }
 
 // nilNilHandler is a PoolClassHandler stub that returns StateSnapshot with both
@@ -506,11 +658,122 @@ func (h *nilNilHandler) SnapshotState(ctx context.Context, mc outbound.Multicall
 	}, nil
 }
 
-// callCountingTxManager delegates to a custom fn.
-type callCountingTxManager struct {
-	fn func(ctx context.Context, fn func(pgx.Tx) error) error
+// countingTxManager delegates to a real fakeTxManager but increments a counter
+// each time WithTransaction is called, so tests can assert it was (or was not) invoked.
+type countingTxManager struct {
+	calls int
+	err   error // if non-nil, returned on the FIRST call then cleared
 }
 
-func (m *callCountingTxManager) WithTransaction(ctx context.Context, fn func(pgx.Tx) error) error {
-	return m.fn(ctx, fn)
+func (m *countingTxManager) WithTransaction(ctx context.Context, fn func(pgx.Tx) error) error {
+	m.calls++
+	if m.err != nil {
+		err := m.err
+		m.err = nil
+		return err
+	}
+	return fn(nil)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 3: quiet-block early-return must not open a transaction
+// ---------------------------------------------------------------------------
+
+// TestCoordinator_QuietBlock_NoTransaction: a block with receipts that contain
+// no logs for any registered pool must return nil and must NOT call
+// WithTransaction (the quiet-block early-return saves the empty DB round-trip).
+func TestCoordinator_QuietBlock_NoTransaction(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	txMgr := &countingTxManager{}
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{newTestPool()},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       txMgr,
+		HeartbeatBlocks: 0, // no heartbeat -> no snapshot on quiet block
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	// A receipt whose log is from an unrelated address (not a registered pool).
+	unrelatedLog := shared.Log{
+		Address:         "0x0000000000000000000000000000000000001234",
+		Topics:          []string{"0xdeadbeef"},
+		Data:            "0x",
+		TransactionHash: "0xdeadbeef",
+		LogIndex:        "0x0",
+	}
+	quietReceipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{unrelatedLog},
+		TransactionHash: "0xdeadbeef",
+	}
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), blockEvent(500), []shared.TransactionReceipt{quietReceipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if txMgr.calls != 0 {
+		t.Errorf("WithTransaction called %d time(s), want 0 (quiet block must skip the transaction)", txMgr.calls)
+	}
+	if repo.swapSaves != 0 {
+		t.Errorf("swapSaves = %d, want 0", repo.swapSaves)
+	}
+	if repo.stableswapSaves != 0 {
+		t.Errorf("stableswapSaves = %d, want 0", repo.stableswapSaves)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: transient tx error then retry must persist exactly once, not double
+// ---------------------------------------------------------------------------
+
+// TestCoordinator_TxErrorThenRetry_PersistsOnce: on first call WithTransaction
+// returns an error (transient DB failure); BlockHandler must return non-nil and
+// nothing is persisted. On second call (SQS redelivery) the tx succeeds; exactly
+// one swap is saved, not two.
+func TestCoordinator_TxErrorThenRetry_PersistsOnce(t *testing.T) {
+	c, repo := newTestCoordinator(t, 0)
+
+	txMgr := &countingTxManager{err: fmt.Errorf("transient DB failure")}
+	c.txMgr = txMgr
+
+	bh := c.BlockHandler()
+	receipt := swapReceipt(t)
+	event := blockEvent(700)
+
+	// First call: WithTransaction errors.
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err == nil {
+		t.Fatal("expected non-nil error from first BlockHandler call (transient tx failure)")
+	}
+	if repo.swapSaves != 0 {
+		t.Errorf("swapSaves after first (failed) call = %d, want 0", repo.swapSaves)
+	}
+
+	// Second call: WithTransaction succeeds; must save exactly once.
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler second call: %v", err)
+	}
+	if repo.swapSaves != 1 {
+		t.Errorf("swapSaves after retry = %d, want 1 (no doubling from the failed first attempt)", repo.swapSaves)
+	}
 }

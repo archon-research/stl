@@ -26,6 +26,12 @@ var (
 	BuildTime string
 )
 
+// curveStableswapNGFactory is the Curve Stableswap-NG factory on Ethereum
+// mainnet (cast-verified: pool_count() > 900, admin() is the Curve DAO). It is
+// the canonical (chain_id, address) identifier for the Curve protocol row; the
+// migration seeds the protocol at this address, and curve_pool FKs it.
+const curveStableswapNGFactory = "0x6A8cbed756804B16E05E741eDaBd5cB544AE21bf"
+
 func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
@@ -78,7 +84,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	protocolID, err := dexconsumer.ResolveProtocolID(ctx, deps.TxManager, deps.ProtocolRepo, dexconsumer.ProtocolDescriptor{
-		Address:      common.HexToAddress("0x6A8cbed756804B16E05E741eDaBd5cB544AE21bf"),
+		Address:      common.HexToAddress(curveStableswapNGFactory),
 		Name:         "Curve",
 		ProtocolType: "dex",
 		DeployBlock:  19421686,
@@ -104,7 +110,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating coordinator: %w", err)
 	}
 
-	bp := dexconsumer.NewBlockProcessorWithFinalizer(deps.CacheReader, deps.DexTelemetry, coord.ReceiptHandler(), coord.Finalizer())
+	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, coord.BlockHandler())
 	deps.Logger.Info("curve-indexer started", "pools", len(poolRows), "heartbeatBlocks", cfg.HeartbeatBlocks)
 	sqsutil.RunLoop(ctx, sqsutil.Config{
 		Consumer:     deps.SQSConsumer,

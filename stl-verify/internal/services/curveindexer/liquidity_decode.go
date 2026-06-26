@@ -3,7 +3,9 @@ package curveindexer
 import (
 	"fmt"
 	"math/big"
+	"reflect"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	gocrypto "github.com/ethereum/go-ethereum/crypto"
 
@@ -15,18 +17,45 @@ func eventTopic0(sig string) common.Hash {
 	return gocrypto.Keccak256Hash([]byte(sig))
 }
 
-// wordsFromData splits a hex-encoded log data field into 32-byte big-endian words.
-// Returns an error if the byte length is not a multiple of 32.
-func wordsFromData(dataHex string) ([]*big.Int, error) {
-	b := common.FromHex(dataHex)
-	if len(b)%32 != 0 {
-		return nil, fmt.Errorf("data length %d is not a multiple of 32", len(b))
+// uint256ArrayType returns an abi.Type for uint256[n].
+func uint256ArrayType(n int) (abi.Type, error) {
+	return abi.NewType(fmt.Sprintf("uint256[%d]", n), "", nil)
+}
+
+// uint256Type returns an abi.Type for uint256.
+func uint256Type() (abi.Type, error) {
+	return abi.NewType("uint256", "", nil)
+}
+
+// asBigInt reads the i-th unpacked ABI value as a *big.Int, erroring (not panicking)
+// on an unexpected type.
+func asBigInt(vals []any, i int) (*big.Int, error) {
+	if i >= len(vals) {
+		return nil, fmt.Errorf("abi value index %d out of range (len %d)", i, len(vals))
 	}
-	words := make([]*big.Int, len(b)/32)
-	for i := range words {
-		words[i] = new(big.Int).SetBytes(b[i*32 : (i+1)*32])
+	bi, ok := vals[i].(*big.Int)
+	if !ok {
+		return nil, fmt.Errorf("abi value %d is %T, not *big.Int", i, vals[i])
 	}
-	return words, nil
+	return bi, nil
+}
+
+// toBigIntSlice converts a Go fixed-size array or slice of *big.Int (as returned
+// by abi.Arguments.Unpack for uint256[N]) into []*big.Int.
+func toBigIntSlice(v any) ([]*big.Int, error) {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Array && rv.Kind() != reflect.Slice {
+		return nil, fmt.Errorf("expected array/slice of *big.Int, got %T", v)
+	}
+	out := make([]*big.Int, rv.Len())
+	for i := range out {
+		bi, ok := rv.Index(i).Interface().(*big.Int)
+		if !ok {
+			return nil, fmt.Errorf("element %d is not *big.Int (got %T)", i, rv.Index(i).Interface())
+		}
+		out[i] = bi
+	}
+	return out, nil
 }
 
 // classicLiquiditySigs holds the precomputed topic0 hashes for all classic (pre-NG)
@@ -87,20 +116,45 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 		return nil, false, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
 
+	raw := common.FromHex(log.Data)
+
 	switch topic0 {
 	case sigs.addLiquidity:
-		// word layout: token_amounts[0..N-1], fees[N..2N-1], invariant[2N], token_supply[2N+1]
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amounts[N], fees[N], invariant, token_supply
+		arrT, err := uint256ArrayType(n)
 		if err != nil {
-			return nil, false, fmt.Errorf("classic AddLiquidity word decode: %w", err)
+			return nil, false, fmt.Errorf("classic AddLiquidity unpack: %w", err)
 		}
-		if len(words) < 2*n+2 {
-			return nil, false, fmt.Errorf("classic AddLiquidity: expected %d words, got %d", 2*n+2, len(words))
+		u256T, err := uint256Type()
+		if err != nil {
+			return nil, false, fmt.Errorf("classic AddLiquidity unpack: %w", err)
 		}
-		amounts := make([]*big.Int, n)
-		copy(amounts, words[0:n])
-		fees := make([]*big.Int, n)
-		copy(fees, words[n:2*n])
+		args := abi.Arguments{
+			{Name: "token_amounts", Type: arrT},
+			{Name: "fees", Type: arrT},
+			{Name: "invariant", Type: u256T},
+			{Name: "token_supply", Type: u256T},
+		}
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic AddLiquidity unpack: %w", err)
+		}
+		amounts, err := toBigIntSlice(vals[0])
+		if err != nil {
+			return nil, false, fmt.Errorf("classic AddLiquidity unpack: %w", err)
+		}
+		fees, err := toBigIntSlice(vals[1])
+		if err != nil {
+			return nil, false, fmt.Errorf("classic AddLiquidity unpack: %w", err)
+		}
+		invariant, err := asBigInt(vals, 2)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic AddLiquidity invariant: %w", err)
+		}
+		tokenSupply, err := asBigInt(vals, 3)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic AddLiquidity token_supply: %w", err)
+		}
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,
@@ -109,24 +163,42 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 			Kind:         LiquidityAdd,
 			TokenAmounts: amounts,
 			Fees:         fees,
-			Invariant:    words[2*n],
-			TokenSupply:  words[2*n+1],
+			Invariant:    invariant,
+			TokenSupply:  tokenSupply,
 		}
 		return rec, true, nil
 
 	case sigs.removeLiquidity:
-		// word layout: token_amounts[0..N-1], fees[N..2N-1], token_supply[2N]
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amounts[N], fees[N], token_supply
+		arrT, err := uint256ArrayType(n)
 		if err != nil {
-			return nil, false, fmt.Errorf("classic RemoveLiquidity word decode: %w", err)
+			return nil, false, fmt.Errorf("classic RemoveLiquidity unpack: %w", err)
 		}
-		if len(words) < 2*n+1 {
-			return nil, false, fmt.Errorf("classic RemoveLiquidity: expected %d words, got %d", 2*n+1, len(words))
+		u256T, err := uint256Type()
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidity unpack: %w", err)
 		}
-		amounts := make([]*big.Int, n)
-		copy(amounts, words[0:n])
-		fees := make([]*big.Int, n)
-		copy(fees, words[n:2*n])
+		args := abi.Arguments{
+			{Name: "token_amounts", Type: arrT},
+			{Name: "fees", Type: arrT},
+			{Name: "token_supply", Type: u256T},
+		}
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidity unpack: %w", err)
+		}
+		amounts, err := toBigIntSlice(vals[0])
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidity unpack: %w", err)
+		}
+		fees, err := toBigIntSlice(vals[1])
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidity unpack: %w", err)
+		}
+		tokenSupply, err := asBigInt(vals, 2)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidity token_supply: %w", err)
+		}
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,
@@ -135,18 +207,31 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 			Kind:         LiquidityRemove,
 			TokenAmounts: amounts,
 			Fees:         fees,
-			TokenSupply:  words[2*n],
+			TokenSupply:  tokenSupply,
 		}
 		return rec, true, nil
 
 	case sigs.removeLiquidityOne:
-		// word layout: token_amount[0] (LP burned), coin_amount[1]; no coin_index in classic
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amount, coin_amount (no coin_index in classic)
+		u256T, err := uint256Type()
 		if err != nil {
-			return nil, false, fmt.Errorf("classic RemoveLiquidityOne word decode: %w", err)
+			return nil, false, fmt.Errorf("classic RemoveLiquidityOne unpack: %w", err)
 		}
-		if len(words) < 2 {
-			return nil, false, fmt.Errorf("classic RemoveLiquidityOne: expected 2 words, got %d", len(words))
+		args := abi.Arguments{
+			{Name: "token_amount", Type: u256T},
+			{Name: "coin_amount", Type: u256T},
+		}
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityOne unpack: %w", err)
+		}
+		tokenAmount, err := asBigInt(vals, 0)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityOne token_amount: %w", err)
+		}
+		coinAmount, err := asBigInt(vals, 1)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityOne coin_amount: %w", err)
 		}
 		rec := &LiquidityRecord{
 			Pool:         pool,
@@ -154,23 +239,46 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 			TxHash:       txHash,
 			Provider:     provider,
 			Kind:         LiquidityRemoveOne,
-			TokenAmounts: []*big.Int{words[0], words[1]},
+			TokenAmounts: []*big.Int{tokenAmount, coinAmount},
 		}
 		return rec, true, nil
 
 	case sigs.removeLiquidityImbalance:
-		// word layout: token_amounts[0..N-1], fees[N..2N-1], invariant[2N], token_supply[2N+1]
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amounts[N], fees[N], invariant, token_supply
+		arrT, err := uint256ArrayType(n)
 		if err != nil {
-			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance word decode: %w", err)
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance unpack: %w", err)
 		}
-		if len(words) < 2*n+2 {
-			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance: expected %d words, got %d", 2*n+2, len(words))
+		u256T, err := uint256Type()
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance unpack: %w", err)
 		}
-		amounts := make([]*big.Int, n)
-		copy(amounts, words[0:n])
-		fees := make([]*big.Int, n)
-		copy(fees, words[n:2*n])
+		args := abi.Arguments{
+			{Name: "token_amounts", Type: arrT},
+			{Name: "fees", Type: arrT},
+			{Name: "invariant", Type: u256T},
+			{Name: "token_supply", Type: u256T},
+		}
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance unpack: %w", err)
+		}
+		amounts, err := toBigIntSlice(vals[0])
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance unpack: %w", err)
+		}
+		fees, err := toBigIntSlice(vals[1])
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance unpack: %w", err)
+		}
+		invariant, err := asBigInt(vals, 2)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance invariant: %w", err)
+		}
+		tokenSupply, err := asBigInt(vals, 3)
+		if err != nil {
+			return nil, false, fmt.Errorf("classic RemoveLiquidityImbalance token_supply: %w", err)
+		}
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,
@@ -179,8 +287,8 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 			Kind:         LiquidityRemoveImbalance,
 			TokenAmounts: amounts,
 			Fees:         fees,
-			Invariant:    words[2*n],
-			TokenSupply:  words[2*n+1],
+			Invariant:    invariant,
+			TokenSupply:  tokenSupply,
 		}
 		return rec, true, nil
 	}
@@ -212,18 +320,41 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecor
 		return nil, false, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
 
+	raw := common.FromHex(log.Data)
+
 	switch topic0 {
 	case sigs.addLiquidity:
-		// word layout: token_amounts[0..N-1], fee[N], token_supply[N+1], packed_price_scale[N+2] (ignored)
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amounts[N], fee, token_supply, packed_price_scale (ignored)
+		arrT, err := uint256ArrayType(n)
 		if err != nil {
-			return nil, false, fmt.Errorf("cryptoswap AddLiquidity word decode: %w", err)
+			return nil, false, fmt.Errorf("cryptoswap AddLiquidity unpack: %w", err)
 		}
-		if len(words) < n+2 {
-			return nil, false, fmt.Errorf("cryptoswap AddLiquidity: expected %d words, got %d", n+2, len(words))
+		u256T, err := uint256Type()
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap AddLiquidity unpack: %w", err)
 		}
-		amounts := make([]*big.Int, n)
-		copy(amounts, words[0:n])
+		args := abi.Arguments{
+			{Name: "token_amounts", Type: arrT},
+			{Name: "fee", Type: u256T},
+			{Name: "token_supply", Type: u256T},
+			{Name: "packed_price_scale", Type: u256T},
+		}
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap AddLiquidity unpack: %w", err)
+		}
+		amounts, err := toBigIntSlice(vals[0])
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap AddLiquidity unpack: %w", err)
+		}
+		fee, err := asBigInt(vals, 1)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap AddLiquidity fee: %w", err)
+		}
+		tokenSupply, err := asBigInt(vals, 2)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap AddLiquidity token_supply: %w", err)
+		}
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,
@@ -231,22 +362,37 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecor
 			Provider:     provider,
 			Kind:         LiquidityAdd,
 			TokenAmounts: amounts,
-			Fees:         []*big.Int{words[n]},
-			TokenSupply:  words[n+1],
+			Fees:         []*big.Int{fee},
+			TokenSupply:  tokenSupply,
 		}
 		return rec, true, nil
 
 	case sigs.removeLiquidity:
-		// word layout: token_amounts[0..N-1], token_supply[N]
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amounts[N], token_supply
+		arrT, err := uint256ArrayType(n)
 		if err != nil {
-			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity word decode: %w", err)
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity unpack: %w", err)
 		}
-		if len(words) < n+1 {
-			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity: expected %d words, got %d", n+1, len(words))
+		u256T, err := uint256Type()
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity unpack: %w", err)
 		}
-		amounts := make([]*big.Int, n)
-		copy(amounts, words[0:n])
+		args := abi.Arguments{
+			{Name: "token_amounts", Type: arrT},
+			{Name: "token_supply", Type: u256T},
+		}
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity unpack: %w", err)
+		}
+		amounts, err := toBigIntSlice(vals[0])
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity unpack: %w", err)
+		}
+		tokenSupply, err := asBigInt(vals, 1)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidity token_supply: %w", err)
+		}
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,
@@ -254,28 +400,47 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecor
 			Provider:     provider,
 			Kind:         LiquidityRemove,
 			TokenAmounts: amounts,
-			TokenSupply:  words[n],
+			TokenSupply:  tokenSupply,
 		}
 		return rec, true, nil
 
 	case sigs.removeLiquidityOne:
-		// word layout: token_amount[0] (LP burned), coin_index[1], coin_amount[2],
-		// approx_fee[3] (ignored), packed_price_scale[4] (ignored)
-		words, err := wordsFromData(log.Data)
+		// non-indexed: token_amount, coin_index, coin_amount, approx_fee (ignored), packed_price_scale (ignored)
+		u256T, err := uint256Type()
 		if err != nil {
-			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne word decode: %w", err)
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne unpack: %w", err)
 		}
-		if len(words) < 3 {
-			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne: expected 3+ words, got %d", len(words))
+		args := abi.Arguments{
+			{Name: "token_amount", Type: u256T},
+			{Name: "coin_index", Type: u256T},
+			{Name: "coin_amount", Type: u256T},
+			{Name: "approx_fee", Type: u256T},
+			{Name: "packed_price_scale", Type: u256T},
 		}
-		coinIdx := int(words[1].Int64())
+		vals, err := args.Unpack(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne unpack: %w", err)
+		}
+		tokenAmount, err := asBigInt(vals, 0)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne token_amount: %w", err)
+		}
+		coinIdxBig, err := asBigInt(vals, 1)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_index: %w", err)
+		}
+		coinAmount, err := asBigInt(vals, 2)
+		if err != nil {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_amount: %w", err)
+		}
+		coinIdx := int(coinIdxBig.Int64())
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,
 			TxHash:       txHash,
 			Provider:     provider,
 			Kind:         LiquidityRemoveOne,
-			TokenAmounts: []*big.Int{words[0], words[2]},
+			TokenAmounts: []*big.Int{tokenAmount, coinAmount},
 			CoinIndex:    &coinIdx,
 		}
 		return rec, true, nil

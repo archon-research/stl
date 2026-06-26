@@ -433,6 +433,143 @@ func TestCryptoswap_RemoveLiquidityOne(t *testing.T) {
 	}
 }
 
+// TestStableswapPreNG_ClassicRemoveLiquidityImbalance verifies a 3-coin
+// RemoveLiquidityImbalance log is decoded as LiquidityRemoveImbalance with
+// correct TokenAmounts, Fees, Invariant, TokenSupply, and Provider.
+func TestStableswapPreNG_ClassicRemoveLiquidityImbalance(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+
+	pool := RegisteredPool{
+		ID:      5,
+		Address: common.HexToAddress("0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  3,
+	}
+	provider := common.HexToAddress("0x8888000000000000000000000000000000000008")
+
+	// RemoveLiquidityImbalance(address,uint256[3],uint256[3],uint256,uint256)
+	// non-indexed layout: token_amounts[3], fees[3], invariant, token_supply
+	topic0 := eventTopic0("RemoveLiquidityImbalance(address,uint256[3],uint256[3],uint256,uint256)")
+	data := packWords(
+		word(111), word(222), word(333), // token_amounts[0..2]
+		word(11), word(22), word(33), // fees[0..2]
+		word(77777), // invariant
+		word(99999), // token_supply
+	)
+	log := buildLiquidityLog(pool.Address, topic0, provider, data, 9)
+	receipt := buildReceiptFromLog(log)
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 400, 0, time.Unix(4, 0).UTC())
+	if err != nil {
+		t.Fatalf("DecodeEvents: %v", err)
+	}
+
+	if len(got.Liquidity) != 1 {
+		t.Fatalf("liquidity len = %d, want 1", len(got.Liquidity))
+	}
+	rec := got.Liquidity[0]
+	if rec.Kind != LiquidityRemoveImbalance {
+		t.Errorf("Kind = %q, want remove_imbalance", rec.Kind)
+	}
+	if len(rec.TokenAmounts) != 3 {
+		t.Errorf("TokenAmounts len = %d, want 3", len(rec.TokenAmounts))
+	}
+	if rec.TokenAmounts[0].Int64() != 111 || rec.TokenAmounts[1].Int64() != 222 || rec.TokenAmounts[2].Int64() != 333 {
+		t.Errorf("TokenAmounts = [%s,%s,%s], want [111,222,333]", rec.TokenAmounts[0], rec.TokenAmounts[1], rec.TokenAmounts[2])
+	}
+	if len(rec.Fees) != 3 {
+		t.Errorf("Fees len = %d, want 3", len(rec.Fees))
+	}
+	if rec.Fees[0].Int64() != 11 || rec.Fees[1].Int64() != 22 || rec.Fees[2].Int64() != 33 {
+		t.Errorf("Fees = [%s,%s,%s], want [11,22,33]", rec.Fees[0], rec.Fees[1], rec.Fees[2])
+	}
+	if rec.Invariant == nil {
+		t.Fatal("Invariant must be non-nil")
+	}
+	if rec.Invariant.Int64() != 77777 {
+		t.Errorf("Invariant = %s, want 77777", rec.Invariant)
+	}
+	if rec.TokenSupply == nil {
+		t.Fatal("TokenSupply must be non-nil")
+	}
+	if rec.TokenSupply.Int64() != 99999 {
+		t.Errorf("TokenSupply = %s, want 99999", rec.TokenSupply)
+	}
+	if rec.Provider != provider {
+		t.Errorf("Provider = %s, want %s", rec.Provider, provider)
+	}
+	if rec.LogIndex != 9 {
+		t.Errorf("LogIndex = %d, want 9", rec.LogIndex)
+	}
+}
+
+// TestCryptoswap_RemoveLiquidity verifies a 2-coin cryptoswap RemoveLiquidity
+// log is decoded as LiquidityRemove with correct TokenAmounts, TokenSupply,
+// and Provider; CoinIndex must be nil.
+func TestCryptoswap_RemoveLiquidity(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+
+	pool := RegisteredPool{
+		ID:      20,
+		Address: common.HexToAddress("0xA5407eAE9Ba41422680e2e00537571bcC53efBfD"),
+		Kind:    KindCryptoswap,
+		NCoins:  2,
+	}
+	provider := common.HexToAddress("0x9999000000000000000000000000000000000009")
+
+	// RemoveLiquidity(address,uint256[2],uint256)
+	// non-indexed layout: token_amounts[2], token_supply
+	topic0 := eventTopic0("RemoveLiquidity(address,uint256[2],uint256)")
+	data := packWords(
+		word(4444), word(5555), // token_amounts[0..1]
+		word(88888), // token_supply
+	)
+	log := buildLiquidityLog(pool.Address, topic0, provider, data, 6)
+	receipt := buildReceiptFromLog(log)
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 600, 0, time.Unix(6, 0).UTC())
+	if err != nil {
+		t.Fatalf("DecodeEvents: %v", err)
+	}
+
+	if len(got.Liquidity) != 1 {
+		t.Fatalf("liquidity len = %d, want 1", len(got.Liquidity))
+	}
+	rec := got.Liquidity[0]
+	if rec.Kind != LiquidityRemove {
+		t.Errorf("Kind = %q, want remove", rec.Kind)
+	}
+	if len(rec.TokenAmounts) != 2 {
+		t.Errorf("TokenAmounts len = %d, want 2", len(rec.TokenAmounts))
+	}
+	if rec.TokenAmounts[0].Int64() != 4444 || rec.TokenAmounts[1].Int64() != 5555 {
+		t.Errorf("TokenAmounts = [%s,%s], want [4444,5555]", rec.TokenAmounts[0], rec.TokenAmounts[1])
+	}
+	if rec.TokenSupply == nil {
+		t.Fatal("TokenSupply must be non-nil")
+	}
+	if rec.TokenSupply.Int64() != 88888 {
+		t.Errorf("TokenSupply = %s, want 88888", rec.TokenSupply)
+	}
+	if rec.Provider != provider {
+		t.Errorf("Provider = %s, want %s", rec.Provider, provider)
+	}
+	if rec.CoinIndex != nil {
+		t.Errorf("CoinIndex must be nil for RemoveLiquidity, got %d", *rec.CoinIndex)
+	}
+	if rec.LogIndex != 6 {
+		t.Errorf("LogIndex = %d, want 6", rec.LogIndex)
+	}
+}
+
 // TestStableswapPreNG_ClassicTypedNotOnlyCapture is a regression guard asserting
 // that a classic AddLiquidity log on a KindStableswapPreNG pool produces a
 // LiquidityRecord (was previously only captured-not-typed).

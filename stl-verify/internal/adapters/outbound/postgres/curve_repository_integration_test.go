@@ -141,22 +141,29 @@ func TestCurveRepository_SaveStableswapState_Idempotent(t *testing.T) {
 		t.Fatalf("NewCurveStableswapState: %v", err)
 	}
 
-	save := func() {
+	save := func() int64 {
 		tx, err := curveTestPool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin tx: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		if err := repo.SaveStableswapState(ctx, tx, st); err != nil {
+		n, err := repo.SaveStableswapState(ctx, tx, st)
+		if err != nil {
 			t.Fatalf("SaveStableswapState: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
+		return n
 	}
 
-	save()
-	save() // redelivery; same build -> trigger reuses pv -> ON CONFLICT DO NOTHING
+	if n := save(); n != 1 {
+		t.Errorf("first save rows affected = %d, want 1", n)
+	}
+	// redelivery; same build -> trigger reuses pv -> ON CONFLICT DO NOTHING
+	if n := save(); n != 0 {
+		t.Errorf("redelivery rows affected = %d, want 0 (ON CONFLICT DO NOTHING)", n)
+	}
 
 	var count int
 	if err := curveTestPool.QueryRow(ctx,
@@ -205,8 +212,12 @@ func TestCurveRepository_SaveCryptoswapState_RoundTrip(t *testing.T) {
 		t.Fatalf("begin tx: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := repo.SaveCryptoswapState(ctx, tx, st); err != nil {
+	n, err := repo.SaveCryptoswapState(ctx, tx, st)
+	if err != nil {
 		t.Fatalf("SaveCryptoswapState: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("rows affected = %d, want 1", n)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
@@ -401,4 +412,96 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 			t.Errorf("CoinDecimals[1] = %d, want 6", found.CoinDecimals[1])
 		}
 	}
+}
+
+// TestCurveRepository_LoadPools_NullDeployBlock verifies that a pool whose
+// deploy_block is NULL (registered before its deploy height was backfilled) is
+// still returned by LoadPools, with DeployBlock mapped to 0 rather than a scan
+// error.
+func TestCurveRepository_LoadPools_NullDeployBlock(t *testing.T) {
+	ctx := context.Background()
+	repo := newCurveRepo(t)
+	poolID := seedCurvePoolWithNullDeployBlock(t, ctx)
+
+	pools, err := repo.LoadPools(ctx, 999)
+	if err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
+
+	var found *outbound.CurvePoolRow
+	for i := range pools {
+		if pools[i].ID == poolID {
+			found = &pools[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("pool id=%d with NULL deploy_block not returned by LoadPools", poolID)
+	}
+	if found.DeployBlock != 0 {
+		t.Errorf("DeployBlock = %d, want 0 for a NULL deploy_block", found.DeployBlock)
+	}
+}
+
+// seedCurvePoolWithNullDeployBlock inserts a 2-coin pool with deploy_block = NULL
+// and returns its id. Idempotent: re-running forces deploy_block back to NULL.
+func seedCurvePoolWithNullDeployBlock(t *testing.T, ctx context.Context) int64 {
+	t.Helper()
+
+	if _, err := curveTestPool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES (999, 'testchain')
+		 ON CONFLICT (chain_id) DO NOTHING`,
+	); err != nil {
+		t.Fatalf("seed chain: %v", err)
+	}
+
+	var protoID int64
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (999, '\xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC'::bytea, 'Curve', 'dex', 0, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`,
+	).Scan(&protoID); err != nil {
+		t.Fatalf("seed protocol: %v", err)
+	}
+
+	var tokenID0, tokenID1 int64
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals)
+		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA02'::bytea, 'TOKN', 18)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
+		 RETURNING id`,
+	).Scan(&tokenID0); err != nil {
+		t.Fatalf("seed token0: %v", err)
+	}
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals)
+		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA03'::bytea, 'TOKM', 6)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
+		 RETURNING id`,
+	).Scan(&tokenID1); err != nil {
+		t.Fatalf("seed token1: %v", err)
+	}
+
+	var poolID int64
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block)
+		 VALUES (999, $1, '\xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD'::bytea, 'plain_pre_ng', 2, NULL)
+		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET deploy_block = NULL
+		 RETURNING id`,
+		protoID,
+	).Scan(&poolID); err != nil {
+		t.Fatalf("seed curve_pool: %v", err)
+	}
+
+	if _, err := curveTestPool.Exec(ctx,
+		`INSERT INTO curve_pool_coin (curve_pool_id, coin_index, token_id)
+		 VALUES ($1, 0, $2), ($1, 1, $3)
+		 ON CONFLICT (curve_pool_id, coin_index) DO NOTHING`,
+		poolID, tokenID0, tokenID1,
+	); err != nil {
+		t.Fatalf("seed curve_pool_coin: %v", err)
+	}
+
+	return poolID
 }

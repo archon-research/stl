@@ -12,6 +12,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -71,7 +72,10 @@ func (h *StableswapHandler) DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		if len(log.Topics) == 0 {
-			payload, _ := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+			payload, marshalErr := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+			if marshalErr != nil {
+				return DecodedEvents{}, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, marshalErr)
+			}
 			result.Captured = append(result.Captured, CapturedEvent{
 				Pool:      pool,
 				LogIndex:  logIndex,
@@ -93,7 +97,10 @@ func (h *StableswapHandler) DecodeEvents(
 			}
 			if matched {
 				result.Liquidity = append(result.Liquidity, *rec)
-				payload, _ := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+				payload, marshalErr := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+				if marshalErr != nil {
+					return DecodedEvents{}, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, marshalErr)
+				}
 				result.Captured = append(result.Captured, CapturedEvent{
 					Pool:      pool,
 					LogIndex:  logIndex,
@@ -108,10 +115,13 @@ func (h *StableswapHandler) DecodeEvents(
 		ev, known := h.eventsByID[topic0]
 
 		if !known {
-			payload, _ := json.Marshal(map[string]any{
+			payload, marshalErr := json.Marshal(map[string]any{
 				"topics": log.Topics,
 				"data":   log.Data,
 			})
+			if marshalErr != nil {
+				return DecodedEvents{}, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, marshalErr)
+			}
 			result.Captured = append(result.Captured, CapturedEvent{
 				Pool:      pool,
 				LogIndex:  logIndex,
@@ -321,7 +331,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	// 1. balances
 	balances := make([]*big.Int, pool.NCoins)
 	for i := 0; i < pool.NCoins; i++ {
-		v, err := shared.UnpackUint(h.stableABI, "balances", results[idx])
+		v, err := dexconsumer.UnpackUint(h.stableABI, "balances", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("balances(%d): %w", i, err)
 		}
@@ -330,28 +340,28 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	}
 
 	// 2. get_virtual_price
-	virtualPrice, err := shared.UnpackUint(h.stableABI, "get_virtual_price", results[idx])
+	virtualPrice, err := dexconsumer.UnpackUint(h.stableABI, "get_virtual_price", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("get_virtual_price: %w", err)
 	}
 	idx++
 
 	// 3. totalSupply
-	totalSupply, err := shared.UnpackUint(h.stableABI, "totalSupply", results[idx])
+	totalSupply, err := dexconsumer.UnpackUint(h.stableABI, "totalSupply", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("totalSupply: %w", err)
 	}
 	idx++
 
 	// 4. A
-	a, err := shared.UnpackUint(h.stableABI, "A", results[idx])
+	a, err := dexconsumer.UnpackUint(h.stableABI, "A", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("decoding A: %w", err)
 	}
 	idx++
 
 	// 5. fee
-	fee, err := shared.UnpackUint(h.stableABI, "fee", results[idx])
+	fee, err := dexconsumer.UnpackUint(h.stableABI, "fee", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("fee: %w", err)
 	}
@@ -365,7 +375,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 			if i == j {
 				continue
 			}
-			v, err := shared.UnpackUint(h.stableABI, "get_dy", results[idx])
+			v, err := dexconsumer.UnpackUint(h.stableABI, "get_dy", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("get_dy(%d,%d): %w", i, j, err)
 			}
@@ -378,7 +388,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	var priceOracle, lastPrice *big.Int
 	if pool.Kind == KindStableswapNG {
 		if results[idx].Success {
-			po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx])
+			po, err := dexconsumer.UnpackUint(h.stableABI, "price_oracle", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("price_oracle: %w", err)
 			}
@@ -386,7 +396,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		}
 		idx++
 		if results[idx].Success {
-			lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx])
+			lp, err := dexconsumer.UnpackUint(h.stableABI, "last_price", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("last_price: %w", err)
 			}

@@ -64,7 +64,7 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 			poolAddress []byte
 			kind        string
 			nCoins      int
-			deployBlock int64
+			deployBlock *int64
 			tokenID     int64
 			decimals    int
 		)
@@ -74,6 +74,12 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 
 		idx, exists := index[poolID]
 		if !exists {
+			// A NULL deploy_block (pool registered before its deploy height was
+			// backfilled) maps to 0 so LoadPools still returns the pool.
+			var db int64
+			if deployBlock != nil {
+				db = *deployBlock
+			}
 			idx = len(result)
 			index[poolID] = idx
 			result = append(result, outbound.CurvePoolRow{
@@ -81,7 +87,7 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 				Address:     common.BytesToAddress(poolAddress),
 				Kind:        kind,
 				NCoins:      nCoins,
-				DeployBlock: deployBlock,
+				DeployBlock: db,
 			})
 		}
 		result[idx].CoinTokenIDs = append(result[idx].CoinTokenIDs, tokenID)
@@ -149,33 +155,34 @@ func (r *CurveRepository) SaveLiquidityEvent(ctx context.Context, tx pgx.Tx, in 
 	return nil
 }
 
-// SaveStableswapState persists a stableswap pool state snapshot within an external transaction.
-func (r *CurveRepository) SaveStableswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveStableswapState) error {
+// SaveStableswapState persists a stableswap pool state snapshot within an external
+// transaction, returning the number of rows actually written (0 on an ON CONFLICT no-op).
+func (r *CurveRepository) SaveStableswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveStableswapState) (int64, error) {
 	balances, err := BigIntsToNumericArray(s.Balances)
 	if err != nil {
-		return fmt.Errorf("converting balances: %w", err)
+		return 0, fmt.Errorf("converting balances: %w", err)
 	}
 	spotDy, err := BigIntsToNumericArray(s.SpotDy)
 	if err != nil {
-		return fmt.Errorf("converting spot_dy: %w", err)
+		return 0, fmt.Errorf("converting spot_dy: %w", err)
 	}
 	vp, err := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
 	if err != nil {
-		return fmt.Errorf("converting virtual_price: %w", err)
+		return 0, fmt.Errorf("converting virtual_price: %w", err)
 	}
 	ts, err := BigIntToNumericRequired(s.TotalSupply, "total_supply")
 	if err != nil {
-		return fmt.Errorf("converting total_supply: %w", err)
+		return 0, fmt.Errorf("converting total_supply: %w", err)
 	}
 	a, err := BigIntToNumericRequired(s.A, "a")
 	if err != nil {
-		return fmt.Errorf("converting a: %w", err)
+		return 0, fmt.Errorf("converting a: %w", err)
 	}
 	fee, err := BigIntToNumericRequired(s.Fee, "fee")
 	if err != nil {
-		return fmt.Errorf("converting fee: %w", err)
+		return 0, fmt.Errorf("converting fee: %w", err)
 	}
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO curve_stableswap_state
 		   (curve_pool_id, block_number, block_version, block_timestamp,
 		    balances, virtual_price, total_supply, a, fee, spot_dy,
@@ -187,54 +194,55 @@ func (r *CurveRepository) SaveStableswapState(ctx context.Context, tx pgx.Tx, s 
 		BigIntToNullableNumeric(s.LastPrice), BigIntToNullableNumeric(s.PriceOracle), int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("saving curve stableswap state: %w", err)
+		return 0, fmt.Errorf("saving curve stableswap state: %w", err)
 	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
-// SaveCryptoswapState persists a cryptoswap pool state snapshot within an external transaction.
-func (r *CurveRepository) SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveCryptoswapState) error {
+// SaveCryptoswapState persists a cryptoswap pool state snapshot within an external
+// transaction, returning the number of rows actually written (0 on an ON CONFLICT no-op).
+func (r *CurveRepository) SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveCryptoswapState) (int64, error) {
 	balances, err := BigIntsToNumericArray(s.Balances)
 	if err != nil {
-		return fmt.Errorf("converting balances: %w", err)
+		return 0, fmt.Errorf("converting balances: %w", err)
 	}
 	vp, err := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
 	if err != nil {
-		return fmt.Errorf("converting virtual_price: %w", err)
+		return 0, fmt.Errorf("converting virtual_price: %w", err)
 	}
 	ts, err := BigIntToNumericRequired(s.TotalSupply, "total_supply")
 	if err != nil {
-		return fmt.Errorf("converting total_supply: %w", err)
+		return 0, fmt.Errorf("converting total_supply: %w", err)
 	}
 	a, err := BigIntToNumericRequired(s.A, "a")
 	if err != nil {
-		return fmt.Errorf("converting a: %w", err)
+		return 0, fmt.Errorf("converting a: %w", err)
 	}
 	gamma, err := BigIntToNumericRequired(s.Gamma, "gamma")
 	if err != nil {
-		return fmt.Errorf("converting gamma: %w", err)
+		return 0, fmt.Errorf("converting gamma: %w", err)
 	}
 	fee, err := BigIntToNumericRequired(s.Fee, "fee")
 	if err != nil {
-		return fmt.Errorf("converting fee: %w", err)
+		return 0, fmt.Errorf("converting fee: %w", err)
 	}
 	priceScale, err := BigIntsToNumericArray(s.PriceScale)
 	if err != nil {
-		return fmt.Errorf("converting price_scale: %w", err)
+		return 0, fmt.Errorf("converting price_scale: %w", err)
 	}
 	priceOracle, err := BigIntsToNumericArray(s.PriceOracle)
 	if err != nil {
-		return fmt.Errorf("converting price_oracle: %w", err)
+		return 0, fmt.Errorf("converting price_oracle: %w", err)
 	}
 	lastPrices, err := BigIntsToNumericArray(s.LastPrices)
 	if err != nil {
-		return fmt.Errorf("converting last_prices: %w", err)
+		return 0, fmt.Errorf("converting last_prices: %w", err)
 	}
 	spotDy, err := BigIntsToNumericArray(s.SpotDy)
 	if err != nil {
-		return fmt.Errorf("converting spot_dy: %w", err)
+		return 0, fmt.Errorf("converting spot_dy: %w", err)
 	}
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO curve_cryptoswap_state
 		   (curve_pool_id, block_number, block_version, block_timestamp,
 		    balances, virtual_price, total_supply, a, gamma, fee,
@@ -247,7 +255,7 @@ func (r *CurveRepository) SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s 
 		priceScale, priceOracle, lastPrices, spotDy, int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("saving curve cryptoswap state: %w", err)
+		return 0, fmt.Errorf("saving curve cryptoswap state: %w", err)
 	}
-	return nil
+	return tag.RowsAffected(), nil
 }

@@ -440,6 +440,11 @@ cannot see.
   `SELECT count(*) FROM curve_pool WHERE chain_id = <id>`.
 - Contract address mismatch (new pool deployed at different address) -> update
   the pool registry.
+- Sustained SQS replay / redrive: every message is a block already persisted at
+  this build, so each state INSERT hits ON CONFLICT DO NOTHING (0 rows) and
+  `curve_state_rows_written_total` does not advance even though processing
+  succeeds. Check the queue for a redrive or a backlog of already-seen blocks
+  before assuming a logic stall.
 
 ### Verify recovery
 

@@ -32,6 +32,9 @@
 
 -- ============================================================================
 -- curve_pool: registry of Curve AMM pools (one row per deployed pool).
+-- Migration-seeded and read-only at runtime: the indexer only LoadPools()s this
+-- table, there is no application write path. Do not add an UPDATE/DELETE path
+-- (or an ON CONFLICT DO UPDATE upsert) without a deliberate design decision.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS curve_pool
 (
@@ -47,13 +50,15 @@ CREATE TABLE IF NOT EXISTS curve_pool
     UNIQUE (chain_id, pool_address)
 );
 
-CREATE INDEX IF NOT EXISTS idx_curve_pool_chain ON curve_pool (chain_id);
-CREATE INDEX IF NOT EXISTS idx_curve_pool_kind  ON curve_pool (pool_kind);
+-- chain_id lookups (LoadPools) are served by the UNIQUE (chain_id, pool_address)
+-- index, so no separate chain_id index is needed; pool_kind is filtered in
+-- application code, not SQL, so it is not indexed.
 CREATE INDEX IF NOT EXISTS idx_curve_pool_protocol ON curve_pool (protocol_id);
 
 -- ============================================================================
 -- curve_pool_coin: coins within a pool, FK'd to token by (chain_id, address).
 -- Join on (chain_id, address) only -- NEVER join by symbol.
+-- Migration-seeded and read-only at runtime, like curve_pool.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS curve_pool_coin
 (
