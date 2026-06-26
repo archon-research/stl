@@ -1,21 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: watcher-data-validator
+  name: unichain-watcher-data-validator
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: watcher-data-validator
+      app: unichain-watcher-data-validator
   template:
     metadata:
       labels:
-        app: watcher-data-validator
+        app: unichain-watcher-data-validator
     spec:
-      serviceAccountName: watcher-data-validator
+      serviceAccountName: unichain-watcher-data-validator
       containers:
-        - name: watcher-data-validator
-          image: watcher-data-validator
+        - name: unichain-watcher-data-validator
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: unichain-watcher-data-validator
           env:
             # Inject the deployment name so this validator registers its own
             # Temporal schedule/task queue (cfg.Name) distinct from other chains.
@@ -27,9 +29,9 @@ spec:
             - configMapRef:
                 name: otel-config
             - configMapRef:
-                name: watcher-data-validator
+                name: unichain-watcher-data-validator
             - secretRef:
-                name: watcher-data-validator
+                name: unichain-watcher-data-validator
           resources:
             requests:
               cpu: "50m"

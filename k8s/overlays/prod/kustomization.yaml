@@ -27,6 +27,11 @@ resources:
   - ../../base/offchain-price-indexer
   - ../../base/maple-graphql-indexer
   - ../../base/watcher-data-validator
+  - ../../base/optimism-watcher-data-validator
+  - ../../base/unichain-watcher-data-validator
+  - ../../base/base-watcher-data-validator
+  - ../../base/arbitrum-watcher-data-validator
+  - ../../base/avalanche-watcher-data-validator
   - ../../base/migrate
   - ../../base/python-api
   - external-secrets.yaml
@@ -115,6 +120,26 @@ images:
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "maple-graphql-indexer-cc21a9054e06d2fc914469801191ceab7b939ee5"
   - name: watcher-data-validator
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "watcher-data-validator-cc21a9054e06d2fc914469801191ceab7b939ee5"
+  - name: optimism-watcher-data-validator
+    # Shares the cronjob image, same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "watcher-data-validator-cc21a9054e06d2fc914469801191ceab7b939ee5"
+  - name: unichain-watcher-data-validator
+    # Shares the cronjob image, same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "watcher-data-validator-cc21a9054e06d2fc914469801191ceab7b939ee5"
+  - name: base-watcher-data-validator
+    # Shares the cronjob image, same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "watcher-data-validator-cc21a9054e06d2fc914469801191ceab7b939ee5"
+  - name: arbitrum-watcher-data-validator
+    # Shares the cronjob image, same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "watcher-data-validator-cc21a9054e06d2fc914469801191ceab7b939ee5"
+  - name: avalanche-watcher-data-validator
+    # Shares the cronjob image, same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "watcher-data-validator-cc21a9054e06d2fc914469801191ceab7b939ee5"
   - name: migrate

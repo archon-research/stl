@@ -39,7 +39,7 @@ include lint.mk
 		build-sparklend-backfill-arm64 deploy-sparklend-backfill erigon-sparklend-backfill \
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
-		kind-deploy-watcher kind-deploy-workers kind-deploy-python-api kind-deploy-cronjobs generate-cronjob-manifests \
+		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -320,16 +320,26 @@ dev-up:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-mock-blockchain-server:local,kind-build-mock-blockchain-server)
 	$(MAKE) kind-load-mock-blockchain-server
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/mock-blockchain-server.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for mock-blockchain-server to be ready..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/mock-blockchain-server -n $(KUBE_NS) --timeout=300s
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  Watcher"
+	@echo "  Watcher, API & Cronjobs"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	$(call build-if-needed,stl-watcher:local,docker-build-watcher LOCAL=1)
-	$(MAKE) kind-load-watcher kind-deploy-watcher
-	$(MAKE) kind-use-mock
+	$(call build-if-needed,stl-python-api:local,docker-build-python-api LOCAL=1)
+	@for cj in $(CRONJOBS); do \
+	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
+	    $(MAKE) docker-build-cronjob-$$cj; \
+	  else \
+	    echo "  stl-$$cj:local already present — skipping build (use COLD=1 to force rebuild)"; \
+	  fi; \
+	done
+	# Build/load all core images first, then apply the dev overlay once (a single
+	# kustomize apply replaces the old per-service watcher/python-api/cronjob deploys).
+	$(MAKE) kind-load-watcher kind-load-python-api kind-load-cronjobs
+	$(MAKE) kind-deploy-apps
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  Workers"
@@ -343,32 +353,14 @@ dev-up:
 	fi
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  Python API"
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	$(call build-if-needed,stl-python-api:local,docker-build-python-api LOCAL=1)
-	$(MAKE) kind-load-python-api kind-deploy-python-api
-	@echo ""
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "  Cronjobs (Temporal)"
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@for cj in $(CRONJOBS); do \
-	  if [ "$(COLD)" = "1" ] || ! docker image inspect stl-$$cj:local >/dev/null 2>&1; then \
-	    $(MAKE) docker-build-cronjob-$$cj; \
-	  else \
-	    echo "  stl-$$cj:local already present — skipping build (use COLD=1 to force rebuild)"; \
-	  fi; \
-	done
-	$(MAKE) kind-load-cronjobs kind-deploy-cronjobs
-	@echo ""
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "  Ready"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOBS)"; \
+	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker avalanche-oracle-price-worker sparklend-position-tracker prime-debt-indexer python-api $(CRONJOB_DEPLOYMENTS)"; \
 	else \
-	  DEPS="mock-blockchain-server watcher python-api $(CRONJOBS)"; \
+	  DEPS="mock-blockchain-server watcher python-api $(CRONJOB_DEPLOYMENTS)"; \
 	fi; \
 	for dep in $$DEPS; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
@@ -387,9 +379,11 @@ dev-up:
 	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer,"; \
 	  echo "                         sparklend-position-tracker, prime-debt-indexer"; \
 	  echo "    COINGECKO_API_KEY  — offchain-price-indexer"; \
-	  echo "    ETHERSCAN_API_KEY  — watcher-data-validator"; \
 	  echo ""; \
 	  echo "  Once set, run: make kind-secrets && make dev-up-workers"; \
+	  echo ""; \
+	  echo "  watcher-data-validator is opt-in (it needs real chain data, not the mock):"; \
+	  echo "    make kind-use-alchemy && make kind-secrets && make kind-deploy-data-validator"; \
 	  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
 	fi
 
@@ -404,9 +398,6 @@ dev-up-workers:
 	fi; \
 	if [ -z "$$COINGECKO_API_KEY" ]; then \
 	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — offchain-price-indexer"; \
-	fi; \
-	if [ -z "$$ETHERSCAN_API_KEY" ]; then \
-	  MISSING="$$MISSING\n    ETHERSCAN_API_KEY  — watcher-data-validator"; \
 	fi; \
 	if [ -n "$$MISSING" ]; then \
 	  echo "==> Missing API keys:"; \
@@ -438,7 +429,7 @@ dev-db:
 	$(MAKE) kind-create
 	kubectl --context=$(KUBE_CONTEXT) create namespace $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	$(MAKE) kind-config kind-secrets
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/timescaledb.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=300s
 	$(call build-if-needed,stl-migrate:local,docker-build-migrate)
@@ -1657,7 +1648,7 @@ kind-create:
 	  echo ""; \
 	fi
 	kind get clusters | grep -qx $(KIND_CLUSTER) || \
-	  sed "s|STL_DATA_DIR|$$HOME/.$(KIND_CLUSTER)|g" k8s/kind.yaml | kind create cluster --config -
+	  sed "s|STL_DATA_DIR|$$HOME/.$(KIND_CLUSTER)|g" ../k8s/dev-infra/kind.yaml | kind create cluster --config -
 
 kind-delete:
 	kind get clusters | grep -qx $(KIND_CLUSTER) && kind delete cluster --name $(KIND_CLUSTER) || true
@@ -1669,23 +1660,23 @@ kind-infra:
 	@echo "==> Waiting for CNPG operator to be ready..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/cnpg-controller-manager -n cnpg-system --timeout=300s
 	# Apply temporal resources to the temporal namespace (namespace declared in each manifest).
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-00-namespace.yaml
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal-db.yaml
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/temporal-00-namespace.yaml
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/temporal-db.yaml
 	@echo "==> Waiting for temporal-db CNPG cluster to be ready..."
 	kubectl --context=$(KUBE_CONTEXT) wait cluster/temporal-db -n temporal --for=condition=Ready --timeout=300s
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/temporal.yaml
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/temporal.yaml
 	# Apply remaining infra resources to the app namespace.
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/jaeger.yaml       -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/localstack.yaml   -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/redis.yaml        -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/infra/timescaledb.yaml  -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jaeger.yaml       -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/localstack.yaml   -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/redis.yaml        -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/timescaledb.yaml  -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status statefulset/timescaledb -n $(KUBE_NS) --timeout=300s
 	@echo "==> Waiting for localstack to be ready..."
 	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/localstack   -n $(KUBE_NS) --timeout=300s
 
 kind-config:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/config/configmap.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/overlays/dev/config.yaml -n $(KUBE_NS)
 
 kind-secrets:
 	@test -f ../.env.secrets || { printf 'ALCHEMY_API_KEY=\nCOINGECKO_API_KEY=\nETHERSCAN_API_KEY=\nANCHORAGE_API_KEY=\n' > ../.env.secrets && chmod 600 ../.env.secrets; }
@@ -1724,7 +1715,7 @@ kind-load-migrate:
 
 kind-bootstrap-db:
 	kubectl --context=$(KUBE_CONTEXT) delete job/bootstrap-db --ignore-not-found -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/bootstrap-db.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jobs/bootstrap-db.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for database bootstrap to complete..."
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/bootstrap-db -n $(KUBE_NS) --timeout=300s
 	@echo "==> Bootstrap logs:"
@@ -1732,7 +1723,7 @@ kind-bootstrap-db:
 
 kind-migrate: kind-bootstrap-db
 	kubectl --context=$(KUBE_CONTEXT) delete job/migrate --ignore-not-found -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/jobs/migrate.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jobs/migrate.yaml -n $(KUBE_NS)
 	@echo "==> Waiting for migration to complete..."
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/migrate -n $(KUBE_NS) --timeout=300s
 	@echo "==> Migration logs:"
@@ -1744,25 +1735,60 @@ kind-load-watcher:
 kind-load-workers:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:local stl-morpho-indexer:local stl-sparklend-position-tracker:local stl-prime-debt-indexer:local"
 
-kind-deploy-watcher:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/watcher.yaml -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
+# Guard against drift now that cronjobs are hand-maintained (generator retired):
+# the dev overlay's Deployment set must equal {watcher, python-api} + CRONJOB_DEPLOYMENTS.
+# Catches a cronjob added to the overlay but not the Makefile list (or vice versa).
+check-dev-overlay-sync:
+	@rendered=$$(kubectl kustomize ../k8s/overlays/dev | awk '/^kind: Deployment$$/{d=1} d&&/^  name:/{print $$2; d=0}' | sort | tr '\n' ' '); \
+	expected=$$(printf '%s\n' watcher python-api $(CRONJOB_DEPLOYMENTS) | sort | tr '\n' ' '); \
+	if [ "$$rendered" != "$$expected" ]; then \
+	  echo "ERROR: dev overlay Deployments [$$rendered] != Makefile CRONJOB_DEPLOYMENTS+core [$$expected]."; \
+	  echo "       Reconcile CRONJOB_DEPLOYMENTS and k8s/overlays/dev/kustomization.yaml."; \
+	  exit 1; \
+	fi
+
+# Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
+# Images must already be built + loaded into kind.
+kind-deploy-apps: check-dev-overlay-sync
+	kubectl --context=$(KUBE_CONTEXT) apply -k ../k8s/overlays/dev
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher deployment/python-api $(addprefix deployment/,$(CRONJOB_DEPLOYMENTS)) -n $(KUBE_NS)
 
 kind-deploy-workers:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/workers/ -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -k ../k8s/overlays/dev/workers
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer -n $(KUBE_NS)
+
+# Opt-in: build + deploy the watcher-data-validator cron (excluded from `make dev-up`).
+# It verifies stored blocks against real Etherscan, which is meaningless on the mock
+# blockchain server — use only when developing the validator against real chain data:
+# run `make kind-use-alchemy` first, and set ETHERSCAN_API_KEY in .env.secrets.
+# Usage: make kind-secrets && make kind-deploy-data-validator
+kind-deploy-data-validator:
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	if [ -z "$$ETHERSCAN_API_KEY" ]; then \
+	  echo "==> ETHERSCAN_API_KEY not set in .env.secrets — watcher-data-validator requires it."; \
+	  echo "    Set it, then run: make kind-secrets && make kind-deploy-data-validator"; \
+	  exit 1; \
+	fi
+	$(call build-if-needed,stl-watcher-data-validator:local,docker-build-cronjob-watcher-data-validator)
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher-data-validator:local"
+	kubectl --context=$(KUBE_CONTEXT) apply -k ../k8s/overlays/dev/data-validator
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher-data-validator -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout status deployment/watcher-data-validator -n $(KUBE_NS) --timeout=300s
 
 kind-load-python-api:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-python-api:local"
 
-kind-deploy-python-api:
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/python-api.yaml -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/python-api -n $(KUBE_NS)
-
 # --- Cronjobs (Temporal workers) ---
-# Auto-discovered from cmd/cronjobs/*/main.go — no changes needed when adding a new cronjob.
+# CRONJOBS (cmd dir names) drive image builds — auto-discovered from cmd/cronjobs/*/main.go.
+# CRONJOB_DEPLOYMENTS are the k8s Deployment names from k8s/base that the core dev
+# overlay reuses. They mostly match the cmd dir name; anchorage-indexer is deployed as
+# spark-anchorage-indexer (matching prod/staging). Keep these in sync with the cronjob
+# resources listed in k8s/overlays/dev/kustomization.yaml.
+# watcher-data-validator is intentionally excluded — it's opt-in via
+# `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
@@ -1779,16 +1805,6 @@ _docker-release-cronjob-%-internal:
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"
 
-# Regenerate k8s manifests from cmd/cronjobs/ and apply them.
-kind-deploy-cronjobs:
-	go run ./cmd/util/cronjob-manifest
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/cronjobs/ -n $(KUBE_NS)
-	@kubectl --context=$(KUBE_CONTEXT) rollout restart $(addprefix deployment/,$(CRONJOBS)) -n $(KUBE_NS)
-
-# Regenerate cronjob manifests without deploying (for committing to source control).
-generate-cronjob-manifests:
-	go run ./cmd/util/cronjob-manifest
-
 # Rebuild and redeploy a specific worker or cronjob.
 # Usage: make kind-redeploy-worker NAME=morpho-indexer
 #        make kind-redeploy-worker NAME=anchorage-indexer
@@ -1800,7 +1816,8 @@ kind-redeploy-worker:
 	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
 	fi
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(NAME):local"
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(NAME) -n $(KUBE_NS)
+	@DEPLOY="$(NAME)"; [ "$(NAME)" = "anchorage-indexer" ] && DEPLOY="spark-anchorage-indexer"; \
+	  kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$$DEPLOY -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
@@ -1943,11 +1960,11 @@ kind-load-mock-blockchain-server: kind-build-mock-blockchain-server
 # Deploy mock-blockchain-server to kind cluster (uses fixture data by default).
 # To load real blocks for stress testing, run: make stress-test-data && make kind-deploy-mock-blockchain-server-s3
 kind-deploy-mock-blockchain-server: kind-load-mock-blockchain-server
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/mock-blockchain-server.yaml -n $(KUBE_NS)
 
 # Deploy mock-blockchain-server with S3 block data (for stress testing).
 kind-deploy-mock-blockchain-server-s3: kind-load-mock-blockchain-server stress-test-data
-	kubectl --context=$(KUBE_CONTEXT) apply -f k8s/apps/mock-blockchain-server.yaml -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/mock-blockchain-server.yaml -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) patch deployment mock-blockchain-server -n $(KUBE_NS) --type=json \
 	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args","value":["--addr=:8546","--admin-addr=:8547","--s3-bucket=stress-test-data","--s3-prefix=blocks/chain-1","--s3-endpoint=http://localstack:4566","--region=us-east-1"]}]'
 
@@ -2066,7 +2083,7 @@ endif
 	    -e 's|$${REORG}|$(or $(REORG),)|g' \
 	    -e 's|$${REORG_DEPTH}|$(or $(REORG_DEPTH),5)|g' \
 	    -e 's|$${REORG_INTERVAL_S}|$(or $(REORG_INTERVAL_S),30)|g' \
-	    k8s/jobs/k6-stress-test.yaml | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
+	    ../k8s/dev-infra/jobs/k6-stress-test.yaml | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=ready pod -l job-name=k6-stress-test -n $(KUBE_NS) --timeout=60s
 	kubectl --context=$(KUBE_CONTEXT) logs job/k6-stress-test -n $(KUBE_NS) -f
 	kubectl --context=$(KUBE_CONTEXT) wait --for=condition=complete job/k6-stress-test -n $(KUBE_NS) --timeout=10s
