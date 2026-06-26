@@ -177,10 +177,11 @@ func run(ctx context.Context, makeProvider providerFactory) error {
 	}
 
 	service, err := cex_orderbook_indexer.NewService(cex_orderbook_indexer.Config{
-		Symbols:  cfg.symbols,
-		Depth:    cfg.depth,
-		Interval: cfg.interval,
-		Logger:   logger,
+		Symbols:       cfg.symbols,
+		Depth:         cfg.depth,
+		Interval:      cfg.interval,
+		Logger:        logger,
+		MeterProvider: otel.GetMeterProvider(),
 	}, provider, repo)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)

@@ -34,8 +34,10 @@ CREATE TABLE IF NOT EXISTS cex_orderbook_snapshots
     exchange     TEXT        NOT NULL,
     symbol       TEXT        NOT NULL,
     event_time   TIMESTAMPTZ,           -- nullable: NULL when the feed carried no event time
-    ingested_at  TIMESTAMPTZ NOT NULL,
-    persisted_at TIMESTAMPTZ NOT NULL,
+    -- Two clocks, not one: ingested_at is data freshness, persisted_at is sampling time.
+    ingested_at  TIMESTAMPTZ NOT NULL,  -- when the feed last refreshed THIS symbol's book; drives the staleness skip
+    persisted_at TIMESTAMPTZ NOT NULL,  -- the tick clock, shared by all symbols in a tick; the partition column
+    -- A single created_at would conflate the two and break the staleness check.
     bids         JSONB       NOT NULL,   -- [["price","size"], ...] best (highest) first
     asks         JSONB       NOT NULL    -- [["price","size"], ...] best (lowest) first
 ) WITH (

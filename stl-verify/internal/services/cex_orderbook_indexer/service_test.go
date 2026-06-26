@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -321,6 +324,57 @@ func TestPersistErrorDoesNotKillLoop(t *testing.T) {
 	// Two ticks should both attempt a save despite the error.
 	waitForSaves(t, r, 2)
 	_ = svc.Stop()
+}
+
+// TestPersistErrorIncrementsFailureMetric verifies a Save error bumps
+// orderbook.persist.failures.total — the signal the persist-failure alert fires
+// on — rather than only being logged.
+func TestPersistErrorIncrementsFailureMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	p := &fakeProvider{name: "test-exchange", updates: make(chan entity.OrderbookUpdate, 4)}
+	r := newFakeRepo()
+	r.saveErr = context.DeadlineExceeded
+	svc := newTestService(t, Config{Symbols: []string{"BTC-USD"}, Interval: 15 * time.Millisecond, MeterProvider: mp}, p, r)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p.updates <- bookWith("BTC-USD", map[string]string{"100": "1"}, map[string]string{"101": "2"}, time.Time{})
+	waitForSaves(t, r, 2)
+	_ = svc.Stop() // final flush attempts one more (also failing) save
+
+	if got := persistFailureCount(t, reader); got < 2 {
+		t.Fatalf("orderbook.persist.failures.total = %d, want >= 2", got)
+	}
+}
+
+// persistFailureCount collects the manual reader and sums the persist-failure
+// counter's data points.
+func persistFailureCount(t *testing.T, reader sdkmetric.Reader) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "orderbook.persist.failures.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric is %T, want metricdata.Sum[int64]", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	t.Fatal("orderbook.persist.failures.total not recorded")
+	return 0
 }
 
 // TestStaleBookSkipped: a symbol whose last provider update predates the

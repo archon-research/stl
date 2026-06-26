@@ -11,9 +11,16 @@ import (
 	"slices"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+// instrumentationName scopes this service's OpenTelemetry instruments.
+const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/cex_orderbook_indexer"
 
 // Config tunes the indexer. Depth and Interval fall back to defaults when unset.
 type Config struct {
@@ -27,6 +34,9 @@ type Config struct {
 	Interval time.Duration
 	// Logger is the structured logger; defaults to slog.Default().
 	Logger *slog.Logger
+	// MeterProvider supplies the persist-failure counter; defaults to the global
+	// provider (otel.GetMeterProvider()).
+	MeterProvider metric.MeterProvider
 }
 
 const (
@@ -54,6 +64,9 @@ type Service struct {
 	interval   time.Duration
 	staleAfter time.Duration
 	logger     *slog.Logger
+
+	persistFailures metric.Int64Counter
+	exchangeAttr    attribute.KeyValue
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -86,14 +99,28 @@ func NewService(cfg Config, provider outbound.OrderbookProvider, repo outbound.O
 		logger = slog.Default()
 	}
 
+	mp := cfg.MeterProvider
+	if mp == nil {
+		mp = otel.GetMeterProvider()
+	}
+	persistFailures, err := mp.Meter(instrumentationName).Int64Counter(
+		"orderbook.persist.failures.total",
+		metric.WithDescription("Total order book snapshot persistence failures (one per failed tick batch)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating persist-failures counter: %w", err)
+	}
+
 	return &Service{
-		provider:   provider,
-		repo:       repo,
-		symbols:    slices.Clone(cfg.Symbols),
-		depth:      depth,
-		interval:   interval,
-		staleAfter: staleAfter,
-		logger:     logger.With("component", "cex-orderbook-indexer", "exchange", provider.Name()),
+		provider:        provider,
+		repo:            repo,
+		symbols:         slices.Clone(cfg.Symbols),
+		depth:           depth,
+		interval:        interval,
+		staleAfter:      staleAfter,
+		logger:          logger.With("component", "cex-orderbook-indexer", "exchange", provider.Name()),
+		persistFailures: persistFailures,
+		exchangeAttr:    attribute.String("exchange", provider.Name()),
 	}, nil
 }
 
@@ -181,9 +208,19 @@ func (s *Service) flush(ctx context.Context, latest map[string]entity.OrderbookU
 }
 
 // persistTick builds a trimmed snapshot for every symbol seen so far and saves
-// them in one batch. A persist error is logged and the tick dropped rather than
-// killing the loop: dropping a single 5s snapshot is preferable to tearing down a
-// healthy WebSocket, and the next tick retries with fresher data.
+// them in one batch.
+//
+// Error policy (deliberate — VEC-374 PR discussion): a Save failure increments
+// orderbook.persist.failures.total, is logged, and the tick is dropped; the loop
+// keeps running. We do NOT bubble the error up to crash the pod:
+//   - Unlike the repo's SQS-backed indexers, there is no queue to NACK to — the
+//     input is a continuous stream we sample on a tick, so a dropped sample
+//     self-heals on the next tick with fresher data (a transient DB blip costs
+//     one row). Tearing down a healthy WebSocket would lose far more.
+//   - A permanent failure (auth, missing table) fails every tick. Rather than
+//     self-crash — no service in this repo does; they lean on external signals —
+//     we surface it via the failure counter so the persist-failure alert fires,
+//     mirroring how the SQS indexers rely on queue-depth alarms.
 func (s *Service) persistTick(ctx context.Context, latest map[string]entity.OrderbookUpdate) {
 	if len(latest) == 0 {
 		return
@@ -211,7 +248,8 @@ func (s *Service) persistTick(ctx context.Context, latest map[string]entity.Orde
 	}
 
 	if err := s.repo.Save(ctx, snapshots); err != nil {
-		s.logger.Error("persisting order book snapshots", "count", len(snapshots), "error", err)
+		s.persistFailures.Add(context.Background(), 1, metric.WithAttributes(s.exchangeAttr))
+		s.logger.Error("failed to persist order book snapshots", "count", len(snapshots), "error", err)
 	}
 }
 
