@@ -1049,6 +1049,31 @@ func TestMapleRecordLoans_ReplayedOlderCycleReusesVersionAtCycle(t *testing.T) {
 	}
 }
 
+func TestMapleRecordLoans_LatestIsBySyncedAtNotInsertOrder(t *testing.T) {
+	// The current version is the greatest synced_at, NOT the greatest id. Insert
+	// a later-synced_at row first, then an earlier-synced_at row (which gets a
+	// higher id), and assert the earlier-synced_at row is NOT selected as latest.
+	// A regression to ORDER BY id DESC alone would pass every other test (they
+	// all use monotonically increasing synced_at) but fail here.
+	ctx := context.Background()
+	truncateMaple(t, ctx)
+	repo := newMapleRepo(t, 0)
+	poolID := upsertTestPool(t, ctx, repo, 0x20)
+
+	earlier := mapleSyncedAt()
+	later := earlier.Add(time.Hour)
+
+	laterID := recordTestLoan(t, ctx, repo, poolID, 0x64, &maple.LoanMeta{Type: "intercompany"}, later)
+	earlierID := recordTestLoan(t, ctx, repo, poolID, 0x64, &maple.LoanMeta{Type: "amm"}, earlier)
+
+	if earlierID <= laterID {
+		t.Fatalf("expected the earlier-synced_at row to get a higher id (inserted second): earlier %d, later %d", earlierID, laterID)
+	}
+	if latest := latestMapleLoanID(t, ctx, 0x64); latest != laterID {
+		t.Errorf("latest id = %d, want the greater-synced_at row %d, not the greater-id row %d", latest, laterID, earlierID)
+	}
+}
+
 func TestMapleRecordLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 	// The immutable maple_pool_id guard runs before the loanMeta append decision:
 	// a loan changing BOTH its pool and its metadata fails on the pool change and

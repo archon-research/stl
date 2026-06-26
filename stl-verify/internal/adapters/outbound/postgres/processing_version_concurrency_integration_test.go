@@ -712,6 +712,7 @@ func seedMapleRegistryDeps(t *testing.T, ctx context.Context) mapleRegistryDeps 
 	if err := concurrencyPool.QueryRow(ctx,
 		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
 		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, 'Race Pool', $2, false)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
 		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
 		t.Fatalf("seed maple pool: %v", err)
 	}
@@ -757,6 +758,7 @@ func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey 
 	if err := concurrencyPool.QueryRow(ctx,
 		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
 		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, 'Race Pool', $2, false)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
 		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
 		t.Fatalf("seed maple pool: %v", err)
 	}

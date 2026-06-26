@@ -203,6 +203,38 @@ func loanMetaEqual(a, b loanMetaCols) bool {
 		equalStringPtr(a.location, b.location)
 }
 
+const advisoryLockLoanSQL = `SELECT pg_advisory_xact_lock(hashtextextended(format('maple_loan|%s|%s', $1::int, encode($2::bytea, 'hex')), 0))`
+
+// loanLatestAndCycleSQL returns exactly one row (anchored on (SELECT 1)); each
+// LEFT JOIN LATERAL leaves its columns NULL when no matching version exists.
+// `latest` is the absolute latest row (immutable-field guard); `cyc` is the
+// version current at $3 = syncedAt (loanMeta dedup).
+const loanLatestAndCycleSQL = `
+	SELECT latest.maple_pool_id, latest.borrower_user_id,
+	       cyc.id, cyc.loan_meta_type, cyc.loan_meta_asset_symbol, cyc.loan_meta_dex,
+	       cyc.loan_meta_wallet_address, cyc.loan_meta_wallet_type, cyc.loan_meta_location
+	  FROM (SELECT 1) anchor
+	  LEFT JOIN LATERAL (
+	      SELECT maple_pool_id, borrower_user_id
+	        FROM maple_loan
+	       WHERE chain_id = $1 AND loan_address = $2
+	       ORDER BY synced_at DESC, id DESC LIMIT 1
+	  ) latest ON true
+	  LEFT JOIN LATERAL (
+	      SELECT id, loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
+	             loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location
+	        FROM maple_loan
+	       WHERE chain_id = $1 AND loan_address = $2 AND synced_at <= $3
+	       ORDER BY synced_at DESC, id DESC LIMIT 1
+	  ) cyc ON true`
+
+const insertLoanSQL = `
+	INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
+	                        loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
+	                        loan_meta_wallet_type, loan_meta_location, synced_at)
+	 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+	 RETURNING id`
+
 // RecordLoans records loan registry rows and returns loan address ->
 // maple_loan.id of the row matching THIS cycle's metadata.
 //
@@ -218,10 +250,22 @@ func loanMetaEqual(a, b loanMetaCols) bool {
 // metadata that was live then. The latest version per loan is the row with the
 // greatest (synced_at, id), where synced_at is the cycle timestamp passed in.
 //
-// The insert decision is made from a prior read of existing rows, which
-// ON CONFLICT cannot guard, so a per-loan pg_advisory_xact_lock on the natural
-// key serializes concurrent writers (ADR-0002 §3). Loans are processed in sorted
-// address order, so locks are acquired in a consistent order (deadlock-free).
+// Each loan is checked against two reference rows, on purpose:
+//   - Immutable fields are validated against the absolute latest row — they
+//     never change, so any version is a valid witness.
+//   - The loanMeta equality decision is made against the version current at
+//     syncedAt (the greatest synced_at <= syncedAt), NOT the absolute latest.
+//     Comparing against the latest would, when a newer version already exists,
+//     re-append a duplicate every time an older cycle is replayed with metadata
+//     that already matches the version live at that cycle. Deduping at the cycle
+//     boundary keeps replay/backfill idempotent.
+//
+// The append decision is made from a prior read, which ON CONFLICT cannot guard,
+// so each loan takes a per-loan pg_advisory_xact_lock on its natural key
+// (ADR-0002 §3). Locks and reads are issued in one batched round-trip in sorted
+// address order, so locks are acquired in a consistent order (deadlock-free) and
+// the lock+read phase costs one round-trip instead of two per loan; only loans
+// that actually changed get an insert, batched in a second round-trip.
 func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
@@ -229,115 +273,125 @@ func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, loa
 
 	sorted := sortedByBytesKey(loans, func(l *maple.Loan) []byte { return l.LoanAddress })
 
+	reads, err := r.lockAndReadLoans(ctx, tx, sorted, syncedAt)
+	if err != nil {
+		return nil, err
+	}
+
 	result := make(map[common.Address]int64, len(sorted))
-	for _, l := range sorted {
-		id, err := r.appendLoanVersion(ctx, tx, l, syncedAt)
-		if err != nil {
+	var toInsert []*maple.Loan
+	for i, l := range sorted {
+		addr := common.BytesToAddress(l.LoanAddress)
+		rd := reads[i]
+
+		if rd.latestPool == nil {
+			toInsert = append(toInsert, l) // brand-new loan
+			continue
+		}
+
+		var mismatches []string
+		if *rd.latestPool != l.PoolID {
+			mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", *rd.latestPool, l.PoolID))
+		}
+		if *rd.latestBorrower != l.BorrowerUserID {
+			mismatches = append(mismatches, fmt.Sprintf("borrower_user_id (stored %d, incoming %d)", *rd.latestBorrower, l.BorrowerUserID))
+		}
+		if err := registryMismatchError("maple loan", addr, mismatches); err != nil {
 			return nil, err
 		}
-		result[common.BytesToAddress(l.LoanAddress)] = id
+
+		if rd.cycleID != nil && loanMetaEqual(rd.cycle, loanMetaColsOf(l)) {
+			result[addr] = *rd.cycleID // unchanged: reuse the version current at syncedAt
+			continue
+		}
+		toInsert = append(toInsert, l) // changed metadata, or a cycle older than every stored version
+	}
+
+	if err := r.insertLoanVersions(ctx, tx, toInsert, syncedAt, result); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
-// appendLoanVersion locks the loan's natural key, validates the immutable
-// fields against the latest stored row, then reuses the version current at
-// syncedAt when loanMeta is unchanged or inserts a new version stamped with
-// syncedAt when it differs. It fails the run when an immutable
-// maple_pool_id / borrower_user_id changed.
-//
-// Two reads, two different reference rows, on purpose:
-//   - Immutable fields (maple_pool_id, borrower_user_id) are validated against
-//     the absolute latest row — they never change, so any version is a valid
-//     witness and the latest is the cheapest to reach.
-//   - The loanMeta equality decision is made against the version current at
-//     syncedAt (the greatest synced_at <= syncedAt), NOT the absolute latest.
-//     Comparing against the latest would, when a newer version already exists,
-//     re-append a duplicate every time an older cycle is replayed with metadata
-//     that already matches the version live at that cycle. Deduping at the cycle
-//     boundary keeps replay/backfill idempotent and stable.
-func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.Tx, l *maple.Loan, syncedAt time.Time) (int64, error) {
-	addr := common.BytesToAddress(l.LoanAddress)
-	incoming := loanMetaColsOf(l)
-
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended(format('maple_loan|%s|%s', $1::int, encode($2::bytea, 'hex')), 0))`,
-		l.ChainID, l.LoanAddress,
-	); err != nil {
-		return 0, fmt.Errorf("locking maple loan %s: %w", addr, err)
-	}
-
-	var storedPoolID, storedBorrower int64
-	err := tx.QueryRow(ctx,
-		`SELECT maple_pool_id, borrower_user_id
-		   FROM maple_loan
-		  WHERE chain_id = $1 AND loan_address = $2
-		  ORDER BY synced_at DESC, id DESC
-		  LIMIT 1`,
-		l.ChainID, l.LoanAddress,
-	).Scan(&storedPoolID, &storedBorrower)
-
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return r.insertLoanRow(ctx, tx, l, incoming, syncedAt)
-	case err != nil:
-		return 0, fmt.Errorf("reading latest maple loan %s: %w", addr, err)
-	}
-
-	var mismatches []string
-	if storedPoolID != l.PoolID {
-		mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, l.PoolID))
-	}
-	if storedBorrower != l.BorrowerUserID {
-		mismatches = append(mismatches, fmt.Sprintf("borrower_user_id (stored %d, incoming %d)", storedBorrower, l.BorrowerUserID))
-	}
-	if err := registryMismatchError("maple loan", addr, mismatches); err != nil {
-		return 0, err
-	}
-
-	var cycleID int64
-	var cycle loanMetaCols
-	err = tx.QueryRow(ctx,
-		`SELECT id,
-		        loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
-		        loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location
-		   FROM maple_loan
-		  WHERE chain_id = $1 AND loan_address = $2 AND synced_at <= $3
-		  ORDER BY synced_at DESC, id DESC
-		  LIMIT 1`,
-		l.ChainID, l.LoanAddress, syncedAt,
-	).Scan(&cycleID,
-		&cycle.typ, &cycle.assetSymbol, &cycle.dex,
-		&cycle.walletAddress, &cycle.walletType, &cycle.location)
-
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		// syncedAt predates every stored version: this is a new earliest version.
-		return r.insertLoanRow(ctx, tx, l, incoming, syncedAt)
-	case err != nil:
-		return 0, fmt.Errorf("reading maple loan %s version at cycle: %w", addr, err)
-	}
-
-	if loanMetaEqual(cycle, incoming) {
-		return cycleID, nil
-	}
-	return r.insertLoanRow(ctx, tx, l, incoming, syncedAt)
+// loanRead is one loan's pre-decision state: its latest immutable fields (nil
+// when the loan has no rows yet) and the loanMeta of the version current at
+// syncedAt (cycleID nil when syncedAt predates every stored version).
+type loanRead struct {
+	latestPool, latestBorrower *int64
+	cycleID                    *int64
+	cycle                      loanMetaCols
 }
 
-func (r *MapleGraphQLRepository) insertLoanRow(ctx context.Context, tx pgx.Tx, l *maple.Loan, m loanMetaCols, syncedAt time.Time) (int64, error) {
-	var id int64
-	if err := tx.QueryRow(ctx,
-		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
-		                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
-		                         loan_meta_wallet_type, loan_meta_location, synced_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		 RETURNING id`,
-		l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
-		m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location, syncedAt,
-	).Scan(&id); err != nil {
-		return 0, fmt.Errorf("inserting maple loan %s: %w", common.BytesToAddress(l.LoanAddress), err)
+// lockAndReadLoans takes every loan's advisory lock and reads its latest row
+// plus the version current at syncedAt, in a single batched round-trip. Locks
+// are queued in the callers' sorted address order, so they are acquired in a
+// consistent order across concurrent writers (deadlock-free).
+func (r *MapleGraphQLRepository) lockAndReadLoans(ctx context.Context, tx pgx.Tx, sorted []*maple.Loan, syncedAt time.Time) ([]loanRead, error) {
+	batch := &pgx.Batch{}
+	for _, l := range sorted {
+		batch.Queue(advisoryLockLoanSQL, l.ChainID, l.LoanAddress)
+		batch.Queue(loanLatestAndCycleSQL, l.ChainID, l.LoanAddress, syncedAt)
 	}
-	return id, nil
+	br := tx.SendBatch(ctx, batch)
+
+	reads := make([]loanRead, len(sorted))
+	var firstErr error
+	for i, l := range sorted {
+		addr := common.BytesToAddress(l.LoanAddress)
+		if _, err := br.Exec(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("locking maple loan %s: %w", addr, err)
+		}
+		var rd loanRead
+		if err := br.QueryRow().Scan(
+			&rd.latestPool, &rd.latestBorrower,
+			&rd.cycleID, &rd.cycle.typ, &rd.cycle.assetSymbol, &rd.cycle.dex,
+			&rd.cycle.walletAddress, &rd.cycle.walletType, &rd.cycle.location,
+		); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("reading maple loan %s: %w", addr, err)
+		}
+		reads[i] = rd
+	}
+	if err := br.Close(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("closing maple loan read batch: %w", err)
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return reads, nil
+}
+
+// insertLoanVersions appends the changed/new loans in one batched round-trip,
+// recording each new id in result.
+func (r *MapleGraphQLRepository) insertLoanVersions(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time, result map[common.Address]int64) error {
+	if len(loans) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, l := range loans {
+		m := loanMetaColsOf(l)
+		batch.Queue(insertLoanSQL,
+			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
+			m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location, syncedAt)
+	}
+	br := tx.SendBatch(ctx, batch)
+
+	var firstErr error
+	for _, l := range loans {
+		addr := common.BytesToAddress(l.LoanAddress)
+		var id int64
+		if err := br.QueryRow().Scan(&id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("inserting maple loan %s: %w", addr, err)
+			}
+			continue
+		}
+		result[addr] = id
+	}
+	if err := br.Close(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("closing maple loan insert batch: %w", err)
+	}
+	return firstErr
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict

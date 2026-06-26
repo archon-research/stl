@@ -864,7 +864,7 @@ func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 	}
 }
 
-func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
+func TestSync_LoanMissingFromRecordResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
 	repo.RecordLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
@@ -876,7 +876,7 @@ func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "missing from upsert result") {
+	if !strings.Contains(err.Error(), "missing from record result") {
 		t.Errorf("error = %q", err.Error())
 	}
 }
