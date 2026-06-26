@@ -18,6 +18,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
@@ -96,6 +97,12 @@ func run(ctx context.Context, args []string) error {
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
+	}
+	// Resolved once at startup; fails hard on an unknown chain rather than
+	// silently emitting an empty `chain` metric label.
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
 	}
 
 	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
@@ -199,8 +206,12 @@ func run(ctx context.Context, args []string) error {
 	defer ethClient.Close()
 	logger.Info("eth rpc client connected", "rpc", rpchttp.MaskURL(*rpcURL))
 
-	// Multicaller
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	// Multicaller (instrumented: emits multicall_batch_size{chain})
+	mcTelemetry, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTelemetry))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
@@ -218,6 +229,12 @@ func run(ctx context.Context, args []string) error {
 	}
 	reservesRepo := postgres.NewPSM3ReservesRepository(txm, logger, buildReg.BuildID())
 
+	// PSM3 service telemetry (emits psm3_* metrics labelled by chain)
+	svcTelemetry, err := psm3.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("psm3 telemetry: %w", err)
+	}
+
 	// PSM3 service
 	svc, err := psm3.NewService(
 		psm3.Config{
@@ -227,6 +244,7 @@ func run(ctx context.Context, args []string) error {
 			MaxMessages:       10,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,
+			Telemetry:         svcTelemetry,
 		},
 		psm3Caller,
 		reservesRepo,
