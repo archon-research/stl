@@ -30,6 +30,8 @@ spec:
                   fieldPath: metadata.labels['app']
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: avalanche-watcher-data-validator
             - secretRef:
                 name: avalanche-watcher-data-validator
