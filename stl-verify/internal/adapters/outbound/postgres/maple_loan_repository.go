@@ -523,17 +523,5 @@ func (r *MapleGraphQLRepository) execInsert(ctx context.Context, tx pgx.Tx, tabl
 // loud by design. Single-row saves (expected == 1) can only ever hit the
 // full-dedup warn path.
 func (r *MapleGraphQLRepository) checkDedupedRows(table string, inserted int64, expected int) error {
-	switch {
-	case inserted == int64(expected):
-		return nil
-	case inserted == 0:
-		r.logger.Warn("state insert fully deduplicated by ON CONFLICT DO NOTHING (expected on activity retries)",
-			"table", table,
-			"expected", expected,
-			"inserted", inserted,
-		)
-		return nil
-	default:
-		return fmt.Errorf("state insert into %s partially deduplicated by ON CONFLICT DO NOTHING (%d of %d rows inserted); failing the save so the caller rolls back instead of silently dropping the collided rows", table, inserted, expected)
-	}
+	return checkDedupedStateRows(r.logger, table, inserted, expected)
 }
