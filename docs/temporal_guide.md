@@ -1,384 +1,218 @@
-# Temporal Implementation
-
-This document describes the Temporal scheduled jobs implementation in STL Verify — what exists, how it works, and how to add new jobs.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Scheduled Jobs](#scheduled-jobs)
-  - [Price Fetch](#price-fetch)
-  - [Data Validation](#data-validation)
-- [Composition Root (main.go)](#composition-root-maingo)
-  - [Startup Flow](#startup-flow)
-  - [Optional Job Registration](#optional-job-registration)
-  - [Schedule Management](#schedule-management)
-- [Local Development](#local-development)
-- [Docker Build & Push](#docker-build--push)
-- [Environment Variables](#environment-variables)
-- [Adding a New Job](#adding-a-new-job)
-- [Gotchas](#gotchas)
-
+---
+title: Temporal Cronjobs - Developer Guide
+audience: [developers, ai-agents]
+repo: stl
+applies_to: stl-verify
+shared_package: stl-verify/internal/adapters/outbound/temporal
+entrypoint: temporal.RunCronjob
+job_dir: stl-verify/cmd/cronjobs
+key_files:
+  - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, client dial, ensureSchedule
+  - stl-verify/internal/adapters/outbound/temporal/workflow.go   # cronjobWorkflow, cronjobActivities, Runner, RunnerFunc, ScheduledAtFromContext
+  - stl-verify/internal/adapters/outbound/temporal/metrics.go    # cronjob.runs.total, cronjob.run.duration_seconds
+  - stl-verify/cmd/cronjobs/offchain-price-indexer/main.go       # canonical example to copy
+related_docs:
+  - infrastructure repo: docs/temporal-workflow-automation-guide.md   # platform + cross-repo onboarding
+task_recipes: [add-a-new-cronjob]
 ---
 
-## Overview
+# Temporal Cronjobs - Developer Guide
 
-STL Verify uses [Temporal](https://temporal.io) for recurring scheduled jobs. A single worker process polls one shared task queue (`sentinel-workers`) and executes two types of work:
+How to develop, run, and add Temporal scheduled jobs ("cronjobs") in STL Verify.
 
-| Job | Schedule | Purpose |
-|-----|----------|---------|
-| Price Fetch | Every 5m | Fetch off-chain token prices from CoinGecko |
-| Data Validation | Every 1h | Cross-check stored block data against Etherscan |
+For the platform itself (where the central Temporal server lives, how to provision a
+namespace, how *other* repos onboard) see the infrastructure repo's
+`docs/temporal-workflow-automation-guide.md`. This guide is the application-side view.
 
-Price Fetch is always enabled. Data Validation is optional — it activates only when `ETHERSCAN_API_KEY` is set.
+## For agents: read these first
 
----
+To add or modify a cronjob, load these files (paths are repo-relative from the stl root):
 
-## Architecture
+1. `stl-verify/cmd/cronjobs/offchain-price-indexer/main.go` - the canonical example. Copy its shape.
+2. `stl-verify/internal/adapters/outbound/temporal/temporal.go` - `RunCronjob` and `CronjobConfig` (the contract you fill in).
+3. `stl-verify/internal/adapters/outbound/temporal/workflow.go` - the `Runner` interface (the only thing you implement) and `ScheduledAtFromContext`.
 
-Temporal adapters live in `internal/adapters/inbound/temporal/` following hexagonal architecture:
+Do NOT edit the shared package to add a job. Adding a job = one new `main.go` + k8s manifests + a `dev-env` block. The shared package is generic.
+
+## How it works
+
+Each cronjob is a small `main.go` under `stl-verify/cmd/cronjobs/<name>/` that calls one
+shared entry point, `temporal.RunCronjob`. All the Temporal plumbing (client connection,
+worker, workflow, activity, retries, schedule creation, metrics, graceful shutdown) lives
+in `stl-verify/internal/adapters/outbound/temporal/`. A job supplies a config and a
+`Setup` function; the only interface it implements is `Runner`.
 
 ```text
-cmd/cronjobs/
-├── Dockerfile                           ← Shared multi-stage Dockerfile for all cronjobs
-├── offchain-price-indexer/main.go       ← Price fetch cronjob
-├── watcher-data-validator/main.go       ← Data validation cronjob
-└── anchorage-indexer/main.go            ← Anchorage collateral snapshot cronjob
-
-internal/adapters/inbound/temporal/
-├── constants.go                         ← Shared task queue name + schedule IDs
-├── price_fetch_activities.go             ← Price fetch activity (PriceFetcher interface)
-├── price_fetch_workflow.go               ← Price fetch workflow
-├── data_validation_activities.go        ← Data validation activity (DataValidator interface)
-├── data_validation_workflow.go          ← Data validation workflow
-└── *_test.go                            ← Unit tests for all of the above
+Temporal Schedule (per job)
+  -> cronjobWorkflow (generic, shared)
+    -> cronjobActivities.Execute (generic, shared; retries + metrics)
+      -> Runner.Run(ctx)            # your domain service
 ```
 
-Each activity file defines a **port interface** that a domain service satisfies:
+The orchestration is an **outbound adapter**. The activity calls a `Runner`, satisfied by
+a domain service that knows nothing about Temporal. Keep Temporal types out of the domain
+and application layers; wire the concrete service to a `RunnerFunc` only in the `cmd/`
+composition root.
 
-```text
-Temporal Schedule → Workflow (orchestration) → Activity (delegates to interface) → Domain Service
-```
+**Naming convention:** task queue, schedule ID, and workflow ID are all derived from
+`CronjobConfig.Name`. One task queue and one schedule per job.
 
-Activities never import domain services directly — they depend on an interface defined in the same file. The composition root (`main.go`) wires the concrete service implementation at startup.
+### Shared package (`stl-verify/internal/adapters/outbound/temporal/`)
 
----
+| File | Responsibility | Key symbols |
+|------|----------------|-------------|
+| `temporal.go` | worker lifecycle, schedule | `RunCronjob`, `CronjobConfig`, `BuildMeta`, `Dependencies`, `ensureSchedule` |
+| `workflow.go` | generic workflow + activity | `cronjobWorkflow`, `cronjobActivities`, `Runner`, `RunnerFunc`, `ContextWithScheduledAt`, `ScheduledAtFromContext` |
+| `metrics.go` | OTel metrics | `cronjob.runs.total{status}`, `cronjob.run.duration_seconds` |
 
-## Scheduled Jobs
+You normally never touch these to add a job.
 
-### Price Fetch
+## Current cronjobs
 
-**Files:** `price_fetch_activities.go`, `price_fetch_workflow.go`
+| Job (`stl-verify/cmd/cronjobs/`) | Interval env | Default | Purpose |
+|-----------------------|--------------|---------|---------|
+| `offchain-price-indexer` | `PRICE_FETCH_INTERVAL` | 5m | Fetch off-chain token prices from CoinGecko |
+| `watcher-data-validator` | `DATA_VALIDATION_INTERVAL` | 1h | Cross-check stored block data (per chain; `SERVICE_NAME` sets the queue) |
+| `anchorage-indexer` | `ANCHORAGE_INDEX_INTERVAL` | 15m | Snapshot Anchorage collateral |
+| `maple-graphql-indexer` | `MAPLE_SYNC_INTERVAL` | 10m | Sync Maple positions via GraphQL |
 
-Fetches current token prices from CoinGecko and stores them in PostgreSQL.
+## Recipe: add a new cronjob
 
-| Property | Value |
-|----------|-------|
-| Schedule ID | `coingecko-price-fetch` |
-| Default Interval | 5m (`PRICE_FETCH_INTERVAL`) |
-| Start-To-Close Timeout | 2 minutes |
-| Schedule-To-Close Timeout | 4 minutes |
-| Retry Policy | 1s initial, 2x backoff, 30s max interval |
-| Required Env | `COINGECKO_API_KEY` |
-| Domain Service | `offchain_price_fetcher.Service` |
-| Outbound Deps | CoinGecko API, PostgreSQL price repository |
+Replace `<your-job>` with a kebab-case name and `<YOUR_JOB>` with the upper-snake form.
 
-**Port interface:**
-```go
-type PriceFetcher interface {
-    FetchCurrentPrices(ctx context.Context, assetIDs []string) error
-}
-```
+### Step 1 - Create `stl-verify/cmd/cronjobs/<your-job>/main.go`
 
----
-
-### Data Validation
-
-**Files:** `data_validation_activities.go`, `data_validation_workflow.go`
-
-Cross-checks stored block data against Etherscan's API to detect discrepancies. Returns a detailed report with pass/fail/error counts.
-
-| Property | Value |
-|----------|-------|
-| Schedule ID | `data-validation` |
-| Default Interval | 1h (`DATA_VALIDATION_INTERVAL`) |
-| Start-To-Close Timeout | 10 minutes |
-| Schedule-To-Close Timeout | 30 minutes |
-| Retry Policy | 2s initial, 2x backoff, 1m max interval |
-| Required Env | `ETHERSCAN_API_KEY` |
-| Domain Service | `data_validator.Service` |
-| Outbound Deps | Etherscan API, PostgreSQL block state repository |
-
-**Port interface:**
-```go
-type DataValidator interface {
-    Validate(ctx context.Context) (*data_validator.Report, error)
-}
-```
-
-The activity converts the `Report` struct into a flat `ValidateDataOutput` with serializable fields (no `time.Duration`, just `DurationMs`).
-
----
-
-## Composition Root (main.go)
-
-Each cronjob under `cmd/cronjobs/` is its own entry point. It wires its dependencies and runs a single Temporal worker.
-
-### Startup Flow
-
-```text
-1. Parse log level, create logger
-2. Connect to Temporal Server (TEMPORAL_HOST_PORT, namespace "sentinel")
-3. Connect to PostgreSQL (DATABASE_URL)
-4. Parse chain ID (CHAIN_ID, default "1")
-5. Create a single worker on task queue "sentinel-workers"
-6. Register price fetch (required — fails if COINGECKO_API_KEY missing)
-7. Attempt to register data validation (skip if ETHERSCAN_API_KEY missing)
-8. Ensure schedules exist for all enabled jobs (idempotent create-if-not-exists)
-9. Start worker polling loop (blocks until SIGINT/SIGTERM)
-```
-
-### Optional Job Registration
-
-Each optional job follows the same pattern:
+This is usually the only Go file you write.
 
 ```go
-activities, err := createXxxActivities(pool, logger, chainID)
-if err != nil {
-    logger.Warn("xxx disabled", "reason", err)  // Log + skip
-} else {
-    w.RegisterWorkflow(temporaladapter.XxxWorkflow)
-    w.RegisterActivity(activities)
-    logger.Info("xxx registered")
-}
-```
+// Package main implements a Temporal cronjob worker for <your-job>.
+package main
 
-If the factory fails (usually because the env var is missing), the job is disabled — no activity registered, no schedule created. The worker continues with whatever jobs succeeded.
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
 
-### Schedule Management
-
-Schedules are created idempotently on startup via `ensureSchedule()`. It uses a generalized `scheduleConfig` struct:
-
-```go
-type scheduleConfig struct {
-    ID              string        // e.g. "coingecko-price-fetch"
-    IntervalEnv     string        // e.g. "PRICE_FETCH_INTERVAL"
-    IntervalDefault string        // e.g. "5m"
-    Workflow        any           // e.g. temporaladapter.PriceFetchWorkflow
-    Args            []any         // Workflow input (nil for no-arg workflows)
-    WorkflowID      string        // e.g. "scheduled-price-fetch"
-}
-```
-
-If a schedule with the given ID already exists, it's skipped. This means **changing the interval of an existing schedule requires deleting it first** (via UI or CLI) so it gets recreated with the new value.
-
----
-
-## Local Development
-
-### 1. Start infrastructure
-
-```bash
-make dev-up
-```
-
-This starts PostgreSQL, Redis, LocalStack, Jaeger, **and** the Temporal stack:
-
-| Container | Port | Purpose |
-|-----------|------|---------|
-| `stl-verify-temporal-db` | 5433 | PostgreSQL for Temporal internal state |
-| `stl-verify-temporal` | 7233 | Temporal Server (gRPC) |
-| `stl-verify-temporal-ui` | 8233 | Temporal Web UI |
-
-The `temporalio/auto-setup` image automatically creates the `sentinel` namespace.
-
-### 2. Start the worker
-
-```bash
-# Run a specific cronjob locally:
-COINGECKO_API_KEY=xxx go run ./cmd/cronjobs/offchain-price-indexer
-ETHERSCAN_API_KEY=xxx go run ./cmd/cronjobs/watcher-data-validator
-go run ./cmd/cronjobs/anchorage-indexer
-```
-
-### 3. Verify
-
-Open **http://localhost:8233** → namespace `sentinel`. You should see:
-- Active schedules in the Schedules tab
-- Workflow executions as they run
-
----
-
-## Docker Build & Push
-
-All cronjobs (and every Go service) share the unified multi-stage `Dockerfile`. The `CMD_PATH` build arg selects which package to build and `BIN` names the output binary:
-
-```bash
-# Build a specific cronjob image
-make docker-build-cronjob-offchain-price-indexer
-
-# Or directly:
-docker build --build-arg GO_VERSION="$(cat ../.go-version)" --build-arg CMD_PATH=cmd/cronjobs/offchain-price-indexer --build-arg BIN=cronjob -t stl-offchain-price-indexer:local -f Dockerfile.common .
-```
-
-The image injects `GitCommit`, `GitBranch`, and `BuildTime` via ldflags for observability.
-
----
-
-## Environment Variables
-
-### Worker Configuration
-
-| Variable | Default | Required | Purpose |
-|----------|---------|----------|---------|
-| `TEMPORAL_HOST_PORT` | `localhost:7233` | No | Temporal Server gRPC address |
-| `TEMPORAL_NAMESPACE` | `sentinel` | No | Temporal namespace |
-| `DATABASE_URL` | `postgres://...localhost:5432/stl_verify` | No | App database (blocks, prices, etc.) |
-| `CHAIN_ID` | `1` | No | Ethereum chain ID |
-| `LOG_LEVEL` | `info` | No | Log verbosity |
-| `COINGECKO_API_KEY` | — | **Yes** | CoinGecko API key (price fetch) |
-| `COINGECKO_BASE_URL` | CoinGecko default | No | Override for Pro API |
-| `ETHERSCAN_API_KEY` | — | No | Enables data validation |
-
-### Schedule Intervals (override defaults)
-
-| Variable | Default | Affects |
-|----------|---------|---------|
-| `PRICE_FETCH_INTERVAL` | `5m` | Price fetch schedule |
-| `DATA_VALIDATION_INTERVAL` | `1h` | Data validation schedule |
-
-### Temporal Server (docker-compose only)
-
-| Variable | Value | Purpose |
-|----------|-------|---------|
-| `DB` | `postgres12` | Database driver |
-| `POSTGRES_SEEDS` | `temporal-db` | Database host |
-| `POSTGRES_USER` | `temporal` | Database user |
-| `POSTGRES_PWD` | `temporal` | Database password |
-| `DEFAULT_NAMESPACE` | `sentinel` | Namespace auto-created on boot |
-
----
-
-## Adding a New Job
-
-Follow this pattern to add a new scheduled job.
-
-### 1. Add a schedule ID to `constants.go`
-
-```go
-const (
-    PriceFetchScheduleID     = "coingecko-price-fetch"
-    DataValidationScheduleID = "data-validation"
-    NewJobScheduleID         = "new-job"  // ← add
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
-```
 
-### 2. Create the activity file
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
 
-Create `internal/adapters/inbound/temporal/new_job_activities.go`:
+func init() { buildinfo.PopulateFromVCS(&GitCommit, &BuildTime) }
 
-```go
-package temporal
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-// 1. Define a port interface (satisfied by a domain service)
-type NewJobRunner interface {
-    Run(ctx context.Context) error
+	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporal.CronjobConfig{
+		Name:            "<your-job>",
+		IntervalEnv:     "<YOUR_JOB>_INTERVAL",
+		IntervalDefault: "10m",
+		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
+		Setup:           setupRunner,
+	}); err != nil {
+		slog.Error("fatal", "error", err)
+		os.Exit(1)
+	}
 }
 
-// 2. Activity struct holds the interface
-type NewJobActivities struct {
-    runner NewJobRunner
-}
-
-// 3. Constructor with nil check
-func NewNewJobActivities(runner NewJobRunner) (*NewJobActivities, error) { ... }
-
-// 4. Activity method — delegates to the interface
-func (a *NewJobActivities) RunNewJob(ctx context.Context) (*NewJobOutput, error) { ... }
-```
-
-### 3. Create the workflow file
-
-Create `internal/adapters/inbound/temporal/new_job_workflow.go`:
-
-```go
-package temporal
-
-func NewJobWorkflow(ctx workflow.Context) (*NewJobWorkflowOutput, error) {
-    ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-        StartToCloseTimeout:    10 * time.Minute,
-        ScheduleToCloseTimeout: 30 * time.Minute,
-        RetryPolicy: &temporal.RetryPolicy{
-            InitialInterval:    time.Second,
-            BackoffCoefficient: 2.0,
-            MaximumInterval:    time.Minute,
-        },
-    })
-
-    var activities *NewJobActivities
-    var result NewJobOutput
-    err := workflow.ExecuteActivity(ctx, activities.RunNewJob).Get(ctx, &result)
-    // ...
+// setupRunner wires dependencies (from deps.Pool / deps.Logger) and returns the
+// business logic as a Runner. Return an error to fail fast on bad config.
+func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+	service, err := newYourService(deps) // build clients, repositories, the domain service
+	if err != nil {
+		return nil, fmt.Errorf("creating service: %w", err)
+	}
+	return temporal.RunnerFunc(func(ctx context.Context) error {
+		return service.Run(ctx)
+	}), nil
 }
 ```
 
-Key rules:
-- Workflows are **standalone functions** (not methods)
-- Use `workflow.Context`, not `context.Context`
-- `var activities *NewJobActivities` — nil pointer is a Temporal convention for method reference resolution
-- Workflows must be **deterministic**: no `time.Now()`, no random, no network calls
+### Step 2 - Add Kubernetes manifests
 
-### 4. Create tests
+Create `k8s/base/<your-job>/deployment.yaml` and `serviceaccount.yaml`, modelled on
+`k8s/base/offchain-price-indexer/`. A worker is a normal long-running Deployment that
+polls a task queue, NOT a Kubernetes `CronJob`. Use `replicas: 1` (Temporal serializes a
+schedule's executions). The ConfigMap must set `TEMPORAL_HOST_PORT`, `TEMPORAL_NAMESPACE`,
+`DATABASE_URL`, and `<YOUR_JOB>_INTERVAL`. Add the deployment to the relevant overlays
+(`k8s/overlays/{dev,staging,prod}/`).
 
-Create `*_activities_test.go` and `*_workflow_test.go` with:
-- Mock implementation of the port interface
-- Table-driven tests for the activity
-- `testsuite.WorkflowTestSuite` for the workflow
+### Step 3 - Add a local `.env` block
 
-### 5. Register in main.go
+In `stl-verify/Makefile`, extend the `dev-env` target with a block that writes
+`cmd/cronjobs/<your-job>/.env` (copy an existing block; include `TEMPORAL_HOST_PORT=127.0.0.1:7233`,
+`TEMPORAL_NAMESPACE=vector`, `DATABASE_URL`, `CHAIN_ID`, `BUILD_GIT_HASH=dev`, `LOG_LEVEL=debug`).
 
-Add a factory function and register with the worker:
+### Step 4 - Build, run, verify
 
-```go
-// In main.go:
-func createNewJobActivities(...) (*temporaladapter.NewJobActivities, error) { ... }
-
-// In run():
-newJobActivities, err := createNewJobActivities(...)
-if err != nil {
-    logger.Warn("new job disabled", "reason", err)
-} else {
-    w.RegisterWorkflow(temporaladapter.NewJobWorkflow)
-    w.RegisterActivity(newJobActivities)
-}
-
-// Add schedule in ensureSchedules():
-func ensureNewJobSchedule(ctx context.Context, c client.Client, logger *slog.Logger) error {
-    return ensureSchedule(ctx, c, logger, scheduleConfig{
-        ID:              temporaladapter.NewJobScheduleID,
-        IntervalEnv:     "NEW_JOB_INTERVAL",
-        IntervalDefault: "1h",
-        Workflow:        temporaladapter.NewJobWorkflow,
-        Args:            nil,
-        WorkflowID:      "scheduled-new-job",
-    })
-}
+```bash
+cd stl-verify
+make build-cronjob-<your-job>            # compile binary to dist/<your-job>
+make dev-env                             # regenerate .env files
+make run-cronjob-<your-job>              # run locally against the kind Temporal
 ```
 
----
+Cronjob images are discovered automatically from `cmd/cronjobs/*`:
+`make docker-build-cronjob-<your-job>` and `make docker-release-cronjob-<your-job> ENV=...`.
+
+**Verify:** open the local Temporal UI, select namespace `vector`, confirm a schedule
+named `<your-job>` appears under Schedules and that a workflow execution runs.
+
+### Step 5 - Alerts
+
+No new rules are needed for liveness/errors: the shared `cronjob.runs.*` metrics are
+already covered by `alerts/vector-cronjobs.yaml`. Add job-specific data-quality alerts and
+matching runbook sections in `docs/runbooks/` only if the generic error path cannot catch a
+silent hole (e.g. "ran successfully but wrote zero rows").
+
+## Local development
+
+```bash
+cd stl-verify
+make dev-up                                  # kind cluster incl. Temporal (server, DB, UI)
+make dev-env                                 # generate cmd/cronjobs/*/.env
+make run-cronjob-offchain-price-indexer      # run one cronjob, sourcing its .env
+```
+
+`make dev-up` applies `k8s/dev-infra/temporal*.yaml`. The `temporalio/auto-setup` server
+auto-creates the `vector` namespace and exposes the Temporal UI via a nodePort; open it and
+select namespace `vector` to watch schedules and executions.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TEMPORAL_HOST_PORT` | `localhost:7233` | Temporal server gRPC address (in-cluster: `temporal-server.temporal:7233`) |
+| `TEMPORAL_NAMESPACE` | `sentinel` | Temporal namespace (deployed envs use `vector`) |
+| `DATABASE_URL` | local default | **App** database, separate from Temporal's own DB |
+| `<JOB>_INTERVAL` | per job | Override the schedule interval |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset | Where metrics export; unset means metrics are no-ops (logged at startup) |
 
 ## Gotchas
 
-1. **Schedule intervals are only set on creation.** Changing `IntervalDefault` or the env var has no effect on an existing schedule. Delete the old schedule first (UI or `temporal schedule delete --schedule-id <id> --namespace sentinel`), then restart the worker.
-
-2. **Renaming a schedule ID creates a duplicate.** The old schedule persists until manually deleted.
-
-3. **Worker connects to two databases.** `TEMPORAL_HOST_PORT` → Temporal Server (workflow orchestration). `DATABASE_URL` → App database (blocks, prices, etc.). These are completely separate databases.
-
-4. **No `.env` files for cronjobs.** Unlike the watcher, `make dev-env` does not generate one. Pass env vars directly.
-
-5. **Workflows must be deterministic.** No `time.Now()`, no `rand`, no network calls, no goroutines. All side effects go through activities.
-
-6. **`temporalio/auto-setup` runs migrations on every start.** It creates `temporal` and `temporal_visibility` databases automatically. Pin the image tag in production to avoid unexpected schema changes.
-
-7. **Prefer defining schedules in code.** The Temporal UI supports creating and managing schedules, but defining them in `main.go` ensures they are version-controlled, reproducible, and created automatically on startup.
+1. **Schedule interval is set only on creation.** `ensureSchedule` skips an existing
+   schedule, so changing the default or env var has no effect until you delete the schedule
+   (`temporal schedule delete --schedule-id <name> --namespace <ns>`) and let the worker
+   recreate it.
+2. **Renaming `Name` orphans the old schedule** - it keeps firing until deleted manually.
+3. **Workflows must be deterministic.** No `time.Now()`, `rand`, network calls, or
+   goroutines in the workflow. All side effects go through the activity (your `Runner`).
+4. **Make your `Runner` idempotent.** Activities retry (5x by default) and every retry sees
+   the same `scheduledAt` (read it with `ScheduledAtFromContext`); key time-bucketed writes
+   off it so retries do not double-write.
+5. **Two databases.** `TEMPORAL_HOST_PORT` points at Temporal's orchestration DB.
+   `DATABASE_URL` points at the app DB. They are completely separate.
+</content>
