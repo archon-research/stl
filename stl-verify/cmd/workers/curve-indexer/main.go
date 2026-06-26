@@ -77,13 +77,16 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading cryptoswap abi: %w", err)
 	}
 
-	resolver := dexconsumer.NewProtocolIDResolver(deps.ProtocolRepo, dexconsumer.ProtocolDescriptor{
+	protocolID, err := dexconsumer.ResolveProtocolID(ctx, deps.TxManager, deps.ProtocolRepo, dexconsumer.ProtocolDescriptor{
 		Address:      common.HexToAddress("0x6A8cbed756804B16E05E741eDaBd5cB544AE21bf"),
 		Name:         "Curve",
 		ProtocolType: "dex",
 		DeployBlock:  19421686,
-	})
-	eventWriter := dexconsumer.NewProtocolEventWriter(resolver, deps.EventRepo)
+	}, cfg.ChainID)
+	if err != nil {
+		return fmt.Errorf("resolving curve protocol_id: %w", err)
+	}
+	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
 	coord, err := curveindexer.NewCoordinator(curveindexer.CoordinatorDeps{
 		Pools:           pools,

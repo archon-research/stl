@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,6 +51,17 @@ func (r *fakeEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, e *entity.Protoco
 	return nil
 }
 
+// fakeTxManager runs the function with a nil tx (the fakes ignore it), standing
+// in for the committed transaction ResolveProtocolID opens.
+type fakeTxManager struct{ err error }
+
+func (m fakeTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error) error {
+	if m.err != nil {
+		return m.err
+	}
+	return fn(nil)
+}
+
 func curveDescriptor() ProtocolDescriptor {
 	return ProtocolDescriptor{
 		Address:      common.HexToAddress("0x1111111111111111111111111111111111111111"),
@@ -61,13 +71,11 @@ func curveDescriptor() ProtocolDescriptor {
 	}
 }
 
-func TestProtocolIDResolver_CreatesThenCaches(t *testing.T) {
+func TestResolveProtocolID(t *testing.T) {
 	repo := &fakeProtocolRepo{id: 7}
-	r := NewProtocolIDResolver(repo, curveDescriptor())
-
-	id, err := r.Resolve(context.Background(), nil, 1)
+	id, err := ResolveProtocolID(context.Background(), fakeTxManager{}, repo, curveDescriptor(), 1)
 	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+		t.Fatalf("ResolveProtocolID: %v", err)
 	}
 	if id != 7 {
 		t.Errorf("id = %d, want 7", id)
@@ -79,25 +87,14 @@ func TestProtocolIDResolver_CreatesThenCaches(t *testing.T) {
 	if repo.gotAddr != curveDescriptor().Address {
 		t.Errorf("GetOrCreateProtocol address = %s, want %s", repo.gotAddr, curveDescriptor().Address)
 	}
-
-	id2, err := r.Resolve(context.Background(), nil, 1)
-	if err != nil {
-		t.Fatalf("second Resolve: %v", err)
-	}
-	if id2 != 7 {
-		t.Errorf("cached id = %d, want 7", id2)
-	}
 	if got := repo.calls.Load(); got != 1 {
-		t.Errorf("GetOrCreateProtocol called %d times, want 1 (result must be cached)", got)
+		t.Errorf("GetOrCreateProtocol called %d times, want 1", got)
 	}
 }
 
-func TestProtocolIDResolver_PropagatesRepoError(t *testing.T) {
+func TestResolveProtocolID_PropagatesRepoError(t *testing.T) {
 	sentinel := errors.New("db down")
-	repo := &fakeProtocolRepo{err: sentinel}
-	r := NewProtocolIDResolver(repo, curveDescriptor())
-
-	_, err := r.Resolve(context.Background(), nil, 1)
+	_, err := ResolveProtocolID(context.Background(), fakeTxManager{}, &fakeProtocolRepo{err: sentinel}, curveDescriptor(), 1)
 	if err == nil {
 		t.Fatal("expected error when the repo fails")
 	}
@@ -106,121 +103,20 @@ func TestProtocolIDResolver_PropagatesRepoError(t *testing.T) {
 	}
 }
 
-func TestProtocolIDResolver_RejectsDifferentChain(t *testing.T) {
-	repo := &fakeProtocolRepo{id: 7}
-	r := NewProtocolIDResolver(repo, curveDescriptor())
-
-	if _, err := r.Resolve(context.Background(), nil, 1); err != nil {
-		t.Fatalf("first Resolve: %v", err)
-	}
-
-	_, err := r.Resolve(context.Background(), nil, 2)
+func TestResolveProtocolID_PropagatesTxError(t *testing.T) {
+	sentinel := errors.New("tx begin failed")
+	_, err := ResolveProtocolID(context.Background(), fakeTxManager{err: sentinel}, &fakeProtocolRepo{id: 1}, curveDescriptor(), 1)
 	if err == nil {
-		t.Fatal("expected error resolving for a different chain than first cached")
+		t.Fatal("expected error when the transaction fails")
 	}
-	if !strings.Contains(err.Error(), "chain") {
-		t.Errorf("error %q should describe the chain mismatch", err)
-	}
-	if calls := repo.calls.Load(); calls != 1 {
-		t.Errorf("GetOrCreateProtocol called %d times, want 1 (must not re-resolve for the wrong chain)", calls)
-	}
-}
-
-func TestProtocolIDResolver_ResolvesOnceUnderConcurrency(t *testing.T) {
-	repo := &fakeProtocolRepo{id: 42}
-	r := NewProtocolIDResolver(repo, curveDescriptor())
-
-	const goroutines = 50
-	var wg sync.WaitGroup
-	ids := make([]int64, goroutines)
-	for i := range goroutines {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			id, err := r.Resolve(context.Background(), nil, 1)
-			if err != nil {
-				t.Errorf("Resolve: %v", err)
-				return
-			}
-			ids[i] = id
-		}(i)
-	}
-	wg.Wait()
-
-	if got := repo.calls.Load(); got != 1 {
-		t.Errorf("GetOrCreateProtocol called %d times under concurrency, want exactly 1", got)
-	}
-	for i, id := range ids {
-		if id != 42 {
-			t.Errorf("goroutine %d got id %d, want 42", i, id)
-		}
-	}
-}
-
-// blockingProtocolRepo holds the mutex inside GetOrCreateProtocol until released,
-// so a second resolver caller is forced to park on the lock and then return via
-// the double-checked inner branch rather than calling the repo again.
-type blockingProtocolRepo struct {
-	outbound.ProtocolRepository
-	id      int64
-	calls   atomic.Int64
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (r *blockingProtocolRepo) GetOrCreateProtocol(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _, _ string, _ int64) (int64, error) {
-	r.calls.Add(1)
-	close(r.entered)
-	<-r.release
-	return r.id, nil
-}
-
-func TestProtocolIDResolver_SecondCallerThroughLockUsesCache(t *testing.T) {
-	repo := &blockingProtocolRepo{id: 99, entered: make(chan struct{}), release: make(chan struct{})}
-	r := NewProtocolIDResolver(repo, curveDescriptor())
-
-	resA := make(chan int64, 1)
-	go func() {
-		id, err := r.Resolve(context.Background(), nil, 1)
-		if err != nil {
-			t.Errorf("first Resolve: %v", err)
-		}
-		resA <- id
-	}()
-	<-repo.entered // first caller holds the mutex inside GetOrCreateProtocol; id still unset
-
-	resB := make(chan int64, 1)
-	go func() {
-		id, err := r.Resolve(context.Background(), nil, 1)
-		if err != nil {
-			t.Errorf("second Resolve: %v", err)
-		}
-		resB <- id
-	}()
-
-	// The second caller reads id==0 on the outer fast-path (the first caller has
-	// not stored yet) and parks on the mutex. Releasing the first caller now lets
-	// it store the id; the second caller then acquires the lock and must return
-	// the cached id via the inner re-check, without a second repo call.
-	time.Sleep(50 * time.Millisecond)
-	close(repo.release)
-
-	if id := <-resA; id != 99 {
-		t.Errorf("first caller got %d, want 99", id)
-	}
-	if id := <-resB; id != 99 {
-		t.Errorf("second caller got %d, want 99", id)
-	}
-	if got := repo.calls.Load(); got != 1 {
-		t.Errorf("GetOrCreateProtocol called %d times, want 1 (second caller must hit the cache through the lock)", got)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error %v does not wrap the tx error", err)
 	}
 }
 
 func TestProtocolEventWriter_BuildsAndPersistsEvent(t *testing.T) {
-	repo := &fakeProtocolRepo{id: 5}
-	resolver := NewProtocolIDResolver(repo, curveDescriptor())
 	events := &fakeEventRepo{}
-	w := NewProtocolEventWriter(resolver, events)
+	w := NewProtocolEventWriter(5, events)
 
 	in := ProtocolEventInput{
 		ContractAddress: common.HexToAddress("0x2222222222222222222222222222222222222222"),
@@ -259,24 +155,9 @@ func TestProtocolEventWriter_BuildsAndPersistsEvent(t *testing.T) {
 	}
 }
 
-func TestProtocolEventWriter_PropagatesResolverError(t *testing.T) {
-	sentinel := errors.New("resolve failed")
-	resolver := NewProtocolIDResolver(&fakeProtocolRepo{err: sentinel}, curveDescriptor())
-	w := NewProtocolEventWriter(resolver, &fakeEventRepo{})
-
-	err := w.Save(context.Background(), nil, validInput())
-	if err == nil {
-		t.Fatal("expected error when protocol-id resolution fails")
-	}
-	if !errors.Is(err, sentinel) {
-		t.Errorf("error %v does not wrap the resolver error", err)
-	}
-}
-
 func TestProtocolEventWriter_PropagatesSaveError(t *testing.T) {
 	sentinel := errors.New("insert failed")
-	resolver := NewProtocolIDResolver(&fakeProtocolRepo{id: 1}, curveDescriptor())
-	w := NewProtocolEventWriter(resolver, &fakeEventRepo{err: sentinel})
+	w := NewProtocolEventWriter(1, &fakeEventRepo{err: sentinel})
 
 	err := w.Save(context.Background(), nil, validInput())
 	if err == nil {
@@ -288,9 +169,8 @@ func TestProtocolEventWriter_PropagatesSaveError(t *testing.T) {
 }
 
 func TestProtocolEventWriter_InvalidEventIsRejected(t *testing.T) {
-	resolver := NewProtocolIDResolver(&fakeProtocolRepo{id: 1}, curveDescriptor())
 	events := &fakeEventRepo{}
-	w := NewProtocolEventWriter(resolver, events)
+	w := NewProtocolEventWriter(1, events)
 
 	in := validInput()
 	in.BlockTimestamp = time.Time{} // zero CreatedAt fails entity validation

@@ -66,17 +66,6 @@ func (m *fakeTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error
 	return fn(nil)
 }
 
-// fakeProtocolRepo returns a fixed protocol id and implements outbound.ProtocolRepository.
-type fakeProtocolRepo struct{}
-
-func (r *fakeProtocolRepo) GetOrCreateProtocol(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _, _ string, _ int64) (int64, error) {
-	return 1, nil
-}
-
-func (r *fakeProtocolRepo) UpsertReserveData(_ context.Context, _ pgx.Tx, _ []*entity.SparkLendReserveData) error {
-	return nil
-}
-
 // fakeEventRepo swallows saves silently.
 type fakeEventRepo struct{}
 
@@ -133,15 +122,8 @@ func newTestCoordinator(t *testing.T, heartbeatBlocks int64) (*Coordinator, *fak
 
 	repo := &fakeCurveRepo{}
 
-	protoRepo := &fakeProtocolRepo{}
 	eventRepo := &fakeEventRepo{}
-	resolver := dexconsumer.NewProtocolIDResolver(protoRepo, dexconsumer.ProtocolDescriptor{
-		Address:      common.HexToAddress("0x0000000000000000000000000000000000000001"),
-		Name:         "curve",
-		ProtocolType: "dex",
-		DeployBlock:  1,
-	})
-	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
@@ -338,13 +320,8 @@ func TestCoordinator_BufferClearedAfterFailedFinalize(t *testing.T) {
 		},
 	}
 
-	protoRepo := &fakeProtocolRepo{}
 	eventRepo := &fakeEventRepo{}
-	resolver := dexconsumer.NewProtocolIDResolver(protoRepo, dexconsumer.ProtocolDescriptor{
-		Address: common.HexToAddress("0x0000000000000000000000000000000000000001"),
-		Name:    "curve", ProtocolType: "dex", DeployBlock: 1,
-	})
-	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCoordinator(CoordinatorDeps{
@@ -406,15 +383,8 @@ func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
 	}
 
 	repo := &fakeCurveRepo{}
-	protoRepo := &fakeProtocolRepo{}
 	eventRepo := &fakeEventRepo{}
-	resolver := dexconsumer.NewProtocolIDResolver(protoRepo, dexconsumer.ProtocolDescriptor{
-		Address:      common.HexToAddress("0x0000000000000000000000000000000000000001"),
-		Name:         "curve",
-		ProtocolType: "dex",
-		DeployBlock:  1,
-	})
-	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	c, err := NewCoordinator(CoordinatorDeps{
 		Pools:           []RegisteredPool{newTestPool()},
@@ -466,17 +436,10 @@ func TestCoordinator_CaptureNetReachesEventWriter(t *testing.T) {
 	}
 
 	repo := &fakeCurveRepo{}
-	protoRepo := &fakeProtocolRepo{}
 	eventRepo := &countingEventRepo{}
 	pool := newTestPool()
 
-	resolver := dexconsumer.NewProtocolIDResolver(protoRepo, dexconsumer.ProtocolDescriptor{
-		Address:      common.HexToAddress("0x0000000000000000000000000000000000000001"),
-		Name:         "curve",
-		ProtocolType: "dex",
-		DeployBlock:  1,
-	})
-	writer := dexconsumer.NewProtocolEventWriter(resolver, eventRepo)
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCoordinator(CoordinatorDeps{

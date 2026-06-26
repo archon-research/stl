@@ -18,7 +18,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -69,76 +68,6 @@ func ilkBytes32Hex(name string) string {
 // bigIntHex64 formats a *big.Int as a zero-padded 64-char hex string.
 func bigIntHex64(v *big.Int) string {
 	return fmt.Sprintf("%064x", v)
-}
-
-// ---------------------------------------------------------------------------
-// Multicall3 mock helpers
-// ---------------------------------------------------------------------------
-
-const multicall3ABIJSON = `[{
-	"name":"aggregate3",
-	"type":"function",
-	"inputs":[{"name":"calls","type":"tuple[]","components":[
-		{"name":"target","type":"address"},
-		{"name":"allowFailure","type":"bool"},
-		{"name":"callData","type":"bytes"}
-	]}],
-	"outputs":[{"name":"returnData","type":"tuple[]","components":[
-		{"name":"success","type":"bool"},
-		{"name":"returnData","type":"bytes"}
-	]}]
-}]`
-
-type subcallDispatcher func(target common.Address, callData []byte) ([]byte, bool)
-
-var parsedMulticall3ABI abi.ABI
-
-func init() {
-	var err error
-	parsedMulticall3ABI, err = abi.JSON(strings.NewReader(multicall3ABIJSON))
-	if err != nil {
-		panic("parse multicall3 ABI: " + err.Error())
-	}
-}
-
-// handleMulticall3 decodes an aggregate3 eth_call, dispatches each sub-call,
-// and returns the ABI-encoded aggregate3 result.
-func handleMulticall3(calldata []byte, dispatch subcallDispatcher) (string, error) {
-	if len(calldata) < 4 {
-		return "", fmt.Errorf("calldata too short")
-	}
-
-	args, err := parsedMulticall3ABI.Methods["aggregate3"].Inputs.Unpack(calldata[4:])
-	if err != nil {
-		return "", fmt.Errorf("unpack aggregate3 inputs: %w", err)
-	}
-
-	rawCalls, ok := args[0].([]struct {
-		Target       common.Address `json:"target"`
-		AllowFailure bool           `json:"allowFailure"`
-		CallData     []byte         `json:"callData"`
-	})
-	if !ok {
-		return "", fmt.Errorf("unexpected type for calls: %T", args[0])
-	}
-
-	type abiResult struct {
-		Success    bool   `abi:"success"`
-		ReturnData []byte `abi:"returnData"`
-	}
-
-	encoded := make([]abiResult, len(rawCalls))
-	for i, c := range rawCalls {
-		returnData, success := dispatch(c.Target, c.CallData)
-		encoded[i] = abiResult{Success: success, ReturnData: returnData}
-	}
-
-	packed, err := parsedMulticall3ABI.Methods["aggregate3"].Outputs.Pack(encoded)
-	if err != nil {
-		return "", fmt.Errorf("pack aggregate3 outputs: %w", err)
-	}
-
-	return "0x" + hex.EncodeToString(packed), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +172,7 @@ func mockVatRPCMulti(t *testing.T, _ string, primes []primeFixture, rate, art *b
 			return
 		}
 
-		result, err := handleMulticall3(calldataBytes, dispatch)
+		result, err := testutil.HandleMulticall3(calldataBytes, dispatch)
 		if err != nil {
 			t.Logf("handleMulticall3 error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
