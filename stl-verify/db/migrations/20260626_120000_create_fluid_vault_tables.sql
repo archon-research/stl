@@ -75,7 +75,10 @@ CREATE TABLE IF NOT EXISTS fluid_vault_state
     borrow_rate           NUMERIC,
     processing_version    INT         NOT NULL DEFAULT 0,
     build_id              INT         NOT NULL DEFAULT 0,
-    PRIMARY KEY (fluid_vault_id, block_number, block_version, processing_version, timestamp)
+    -- processing_version last so the trigger's (fluid_vault_id, block_number,
+    -- block_version, timestamp) lookup is a contiguous PK-index prefix (ADR-0002,
+    -- matching maple_*_state).
+    PRIMARY KEY (fluid_vault_id, block_number, block_version, timestamp, processing_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'timestamp',

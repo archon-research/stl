@@ -171,7 +171,7 @@ func (r *FluidVaultRepository) saveVaultStateBatch(ctx context.Context, tx pgx.T
 			totalCollateral, totalDebt, optionalNumeric(s.SupplyExchangePrice), optionalNumeric(s.BorrowExchangePrice),
 			optionalNumeric(s.SupplyRate), optionalNumeric(s.BorrowRate), int(r.buildID))
 	}
-	sb.WriteString(` ON CONFLICT (fluid_vault_id, block_number, block_version, processing_version, timestamp) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (fluid_vault_id, block_number, block_version, timestamp, processing_version) DO NOTHING`)
 
 	tag, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
