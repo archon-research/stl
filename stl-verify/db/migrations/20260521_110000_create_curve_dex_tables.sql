@@ -643,11 +643,14 @@ END $$;
 DO $$
 DECLARE trigger_count INT;
 BEGIN
-    -- Count via pg_trigger joined to our own trigger functions, NOT
-    -- information_schema.triggers: on a TimescaleDB hypertable the latter also
-    -- surfaces the ts_insert_blocker trigger, double-counting to 8. Matching on
-    -- the assign_processing_version_curve* functions counts exactly our 4.
-    SELECT COUNT(*) INTO trigger_count
+    -- Assert each of the 4 curve fact tables has its processing_version trigger.
+    -- Count DISTINCT table name, not rows: some integration harnesses apply the
+    -- migrations into more than one schema of the same database, so an unscoped
+    -- pg_trigger/pg_class join sees the same table name in several schemas (e.g.
+    -- 8 rows). DISTINCT relname collapses that to the 4 required tables while
+    -- still catching a genuinely missing trigger (count < 4). Matching on the
+    -- assign_processing_version_curve* functions excludes ts_insert_blocker.
+    SELECT COUNT(DISTINCT c.relname) INTO trigger_count
     FROM pg_trigger tg
     JOIN pg_class c ON c.oid = tg.tgrelid
     JOIN pg_proc p ON p.oid = tg.tgfoid
@@ -658,7 +661,7 @@ BEGIN
       )
       AND p.proname LIKE 'assign_processing_version_curve%';
     IF trigger_count <> 4 THEN
-        RAISE EXCEPTION 'expected 4 processing_version triggers on curve fact tables, found %', trigger_count;
+        RAISE EXCEPTION 'expected processing_version triggers on all 4 curve fact tables, found % distinct', trigger_count;
     END IF;
 END $$;
 
