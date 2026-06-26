@@ -191,6 +191,51 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: optimism-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "10"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "130"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "8453"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "42161"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "43114"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: base-watcher-config
 data:
   CHAIN_ID: "8453"
