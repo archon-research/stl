@@ -13,7 +13,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/metrictest"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -1509,15 +1513,15 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 
 // --- Test: Data-freshness watchdog ---
 
-func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
-	connectCount := atomic.Int32{}
-
-	server := newMockWSServer(func(conn *websocket.Conn) {
+// newPongAliveSilentServer returns a mock server that completes the handshake,
+// answers client pings with pongs (keeping the transport alive), delivers one
+// header on the first connection, then goes silent. This is the VEC-388 stall:
+// zero newHeads while the pong keepalive holds the socket open, so ReadTimeout
+// never fires.
+func newPongAliveSilentServer(connectCount *atomic.Int32) *mockWSServer {
+	return newMockWSServer(func(conn *websocket.Conn) {
 		count := connectCount.Add(1)
 
-		// Answer client pings with pongs. Every pong refreshes the client's
-		// read deadline, which is exactly what kept ReadTimeout from firing
-		// during the prod stall (VEC-388).
 		conn.SetPingHandler(func(data string) error {
 			return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
 		})
@@ -1532,8 +1536,6 @@ func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
 		}
 
 		if count == 1 {
-			// First connection delivers one header, then goes silent while
-			// staying transport-alive: zero newHeads but answering pings.
 			header := outbound.BlockHeader{Number: "0x100", Hash: "0xabc", ParentHash: "0xdef"}
 			_ = conn.WriteJSON(map[string]any{
 				"jsonrpc": "2.0",
@@ -1552,6 +1554,11 @@ func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
+	connectCount := atomic.Int32{}
+	server := newPongAliveSilentServer(&connectCount)
 	defer server.Close()
 
 	sub, err := NewSubscriber(SubscriberConfig{
@@ -1584,6 +1591,63 @@ func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
 			t.Fatalf("expected reconnect within HealthTimeout, connectCount=%d", connectCount.Load())
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+}
+
+func TestSubscribe_DataSilenceRecordsStallMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "base")
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+
+	connectCount := atomic.Int32{}
+	server := newPongAliveSilentServer(&connectCount)
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		ReadTimeout:    5 * time.Second,
+		HealthTimeout:  200 * time.Millisecond,
+		PingInterval:   50 * time.Millisecond,
+		PongTimeout:    time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+		Telemetry:      tel,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Wait for the watchdog to fire and force the reconnect.
+	deadline := time.After(2 * time.Second)
+	for connectCount.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("watchdog did not fire, connectCount=%d", connectCount.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	chain, ok := metrictest.ChainValue(rm, "alchemy.subscriber.stalls.total")
+	if !ok {
+		t.Fatal("expected alchemy.subscriber.stalls.total to be recorded when the watchdog fires")
+	}
+	if chain != "base" {
+		t.Errorf("stall metric chain = %q, want base", chain)
 	}
 }
 

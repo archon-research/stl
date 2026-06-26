@@ -397,6 +397,10 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 			s.closeConnection()
 			return fmt.Errorf("read error: %w", err)
 		case <-dataWatchdog.C:
+			logger.Warn("data-freshness watchdog: no newHeads within HealthTimeout, forcing reconnect", "timeout", s.config.HealthTimeout)
+			if s.telemetry != nil {
+				s.telemetry.RecordStall(s.ctx)
+			}
 			s.closeConnection()
 			return fmt.Errorf("no newHeads received for %v, forcing reconnect", s.config.HealthTimeout)
 		case header := <-blockChan:
