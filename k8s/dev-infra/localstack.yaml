@@ -58,6 +58,31 @@ data:
         --region $REGION
     }
 
+    # Helper: create a consumer queue (with DLQ) subscribed to a chain's SNS topic.
+    # Mirrors the helper in localstack-init/init-aws.sh; keep the two in sync.
+    create_consumer_queue() {
+      local CHAIN_NAME=$1
+      local QUEUE_NAME=$2
+
+      echo "Creating ${CHAIN_NAME} ${QUEUE_NAME} queues..."
+      $AWS sqs create-queue \
+        --queue-name "stl-${CHAIN_NAME}-${QUEUE_NAME}-dlq.fifo" \
+        --attributes FifoQueue=true,ContentBasedDeduplication=true \
+        --region $REGION
+
+      $AWS sqs create-queue \
+        --queue-name "stl-${CHAIN_NAME}-${QUEUE_NAME}.fifo" \
+        --attributes FifoQueue=true,ContentBasedDeduplication=true \
+        --region $REGION
+
+      $AWS sns subscribe \
+        --topic-arn "arn:aws:sns:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-blocks.fifo" \
+        --protocol sqs \
+        --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-${QUEUE_NAME}.fifo" \
+        --attributes RawMessageDelivery=true \
+        --region $REGION
+    }
+
     # Create resources for each supported chain
     create_chain_resources "ethereum"
     create_chain_resources "avalanche"
@@ -176,6 +201,11 @@ data:
       --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-ethereum-allocation-tracker.fifo" \
       --attributes RawMessageDelivery=true \
       --region $REGION
+
+    # PSM3 indexer runs on the four L2 chains
+    for chain in base optimism unichain arbitrum; do
+      create_consumer_queue "$chain" "psm3-indexer"
+    done
 
     echo "Creating S3 buckets..."
     $AWS s3 mb s3://${S3_BUCKET} --region $REGION

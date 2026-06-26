@@ -23,6 +23,10 @@ resources:
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
   - ../../base/prime-debt-indexer
+  - ../../base/base-psm3-indexer
+  - ../../base/optimism-psm3-indexer
+  - ../../base/unichain-psm3-indexer
+  - ../../base/arbitrum-psm3-indexer
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
   - ../../base/maple-graphql-indexer
@@ -109,6 +113,22 @@ images:
     newTag: "f3bcf539cddb3a7673e3b30158991555fa413cd5"
   - name: prime-debt-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
+    newTag: "f3bcf539cddb3a7673e3b30158991555fa413cd5"
+  - name: base-psm3-indexer
+    # Shares the psm3-indexer image; same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
+    newTag: "f3bcf539cddb3a7673e3b30158991555fa413cd5"
+  - name: optimism-psm3-indexer
+    # Shares the psm3-indexer image; same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
+    newTag: "f3bcf539cddb3a7673e3b30158991555fa413cd5"
+  - name: unichain-psm3-indexer
+    # Shares the psm3-indexer image; same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
+    newTag: "f3bcf539cddb3a7673e3b30158991555fa413cd5"
+  - name: arbitrum-psm3-indexer
+    # Shares the psm3-indexer image; same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-psm3-indexer
     newTag: "f3bcf539cddb3a7673e3b30158991555fa413cd5"
   - name: spark-anchorage-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
