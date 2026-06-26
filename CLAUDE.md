@@ -8,10 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repository contains the application code:
 - **stl-verify/** - Main Go service (block watcher, backfill, backup worker)
-- **k8s/** - Kubernetes manifests (Kustomize) for EKS deployment
-  - `k8s/base/` — one subdirectory per service: `Deployment`, `ServiceAccount`
+- **k8s/** - Kubernetes manifests (Kustomize) for all environments
+  - `k8s/base/` — one subdirectory per service: `Deployment`, `ServiceAccount` (reused by every overlay)
   - `k8s/overlays/prod/` — prod-specific patches (namespace, images/image tags)
   - `k8s/overlays/staging/` — staging-specific patches (namespace, images/image tags)
+  - `k8s/overlays/dev/` — local kind overlay (localhost/*:local images, shared stl-config/stl-secrets via a runtime Component); `workers/` sub-overlay for Alchemy-key workers
+  - `k8s/dev-infra/` — local-only artifacts with no EKS equivalent: infra (timescaledb, redis, localstack, temporal, jaeger, mock-blockchain-server), `jobs/`, and `kind.yaml` (the kind cluster definition); applied imperatively by `stl-verify/Makefile`
 - **experiments/** - Exploration projects
 - **docs/** - Architecture diagrams and entity relations
 
