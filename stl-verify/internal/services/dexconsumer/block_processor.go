@@ -108,7 +108,7 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 	// Per-block finalize (snapshot + transactional persist). Skipped if ctx is
 	// already cancelled (its work would not complete); its error joins the
 	// receipt errors so any failure leaves the message for redelivery.
-	if p.finalize != nil && ctx.Err() == nil {
+	if p.finalize != nil && ctx.Err() == nil && len(errs) == 0 {
 		if err := p.finalize(ctx, event); err != nil {
 			errs = append(errs, err)
 		}

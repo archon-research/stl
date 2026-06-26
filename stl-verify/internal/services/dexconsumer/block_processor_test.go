@@ -323,3 +323,26 @@ func TestProcessBlockEvent_FinalizerErrorPropagates(t *testing.T) {
 		t.Fatalf("expected finalize error to propagate, got %v", err)
 	}
 }
+
+func TestProcessBlockEvent_FinalizerSkippedOnReceiptError(t *testing.T) {
+	receiptErr := errors.New("receipt boom")
+	rh := func(ctx context.Context, r shared.TransactionReceipt, chainID, blockNumber int64, version int, ts time.Time) error {
+		return receiptErr
+	}
+	finalizeCalled := false
+	fin := func(ctx context.Context, event outbound.BlockEvent) error {
+		finalizeCalled = true
+		return nil
+	}
+	p := NewBlockProcessorWithFinalizer(fakeCacheWithReceipts(t, 1), nil, rh, fin)
+	err := p.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0})
+	if err == nil {
+		t.Fatal("expected error from receipt handler")
+	}
+	if !errors.Is(err, receiptErr) {
+		t.Errorf("error %v does not wrap receipt error", err)
+	}
+	if finalizeCalled {
+		t.Error("finalizer must not run when a receipt handler returned an error")
+	}
+}

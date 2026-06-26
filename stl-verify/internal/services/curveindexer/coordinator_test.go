@@ -408,9 +408,9 @@ func TestCoordinator_NilNilSnapshotErrors(t *testing.T) {
 		t.Fatal("expected error from Finalizer, got nil")
 	}
 
-	// lastSnapshotBlock should NOT be advanced (no DB write occurred).
-	if _, ok := c.lastSnapshotBlock[newTestPool().ID]; ok {
-		t.Errorf("lastSnapshotBlock[%d] should not be set after error", newTestPool().ID)
+	// lastSnapshot should NOT be advanced (no DB write occurred).
+	if _, ok := c.lastSnapshot[newTestPool().ID]; ok {
+		t.Errorf("lastSnapshot[%d] should not be set after error", newTestPool().ID)
 	}
 
 	// No snapshot should be persisted.

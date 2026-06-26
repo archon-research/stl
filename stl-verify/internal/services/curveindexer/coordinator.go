@@ -39,6 +39,14 @@ type blockKey struct {
 	ver int
 }
 
+// snapshotKey records the (blockNumber, version) of the last persisted snapshot
+// for a pool, so heartbeat logic correctly detects reorgs where bn == lastBn but
+// version changed.
+type snapshotKey struct {
+	bn  int64
+	ver int
+}
+
 // Coordinator drives per-block event decoding and transactional persistence for
 // the Curve indexer.
 //
@@ -57,7 +65,7 @@ type Coordinator struct {
 	logger          *slog.Logger
 	telemetry       *dextelemetry.Telemetry
 
-	lastSnapshotBlock map[int64]int64 // pool.ID -> last snapshotted block
+	lastSnapshot map[int64]snapshotKey // pool.ID -> last snapshotted (block, version)
 
 	// per-block buffer
 	curKey    blockKey
@@ -98,19 +106,19 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 	}
 
 	return &Coordinator{
-		poolsByAddr:       poolsByAddr,
-		pools:             deps.Pools,
-		handlers:          deps.Handlers,
-		multicaller:       deps.Multicaller,
-		repo:              deps.Repo,
-		eventWriter:       deps.EventWriter,
-		txMgr:             deps.TxManager,
-		heartbeatBlocks:   deps.HeartbeatBlocks,
-		chainID:           deps.ChainID,
-		logger:            deps.Logger,
-		telemetry:         deps.Telemetry,
-		lastSnapshotBlock: make(map[int64]int64),
-		touched:           make(map[int64]RegisteredPool),
+		poolsByAddr:     poolsByAddr,
+		pools:           deps.Pools,
+		handlers:        deps.Handlers,
+		multicaller:     deps.Multicaller,
+		repo:            deps.Repo,
+		eventWriter:     deps.EventWriter,
+		txMgr:           deps.TxManager,
+		heartbeatBlocks: deps.HeartbeatBlocks,
+		chainID:         deps.ChainID,
+		logger:          deps.Logger,
+		telemetry:       deps.Telemetry,
+		lastSnapshot:    make(map[int64]snapshotKey),
+		touched:         make(map[int64]RegisteredPool),
 	}, nil
 }
 
@@ -165,7 +173,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 			c.touched = make(map[int64]RegisteredPool)
 		}()
 
-		snapshotSet := c.buildSnapshotSet(bn)
+		snapshotSet := c.buildSnapshotSet(bn, ver)
 
 		err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 			for _, s := range c.swaps {
@@ -199,6 +207,9 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 				if err != nil {
 					return fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
 				}
+				if err := snap.Validate(); err != nil {
+					return fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
+				}
 				switch {
 				case snap.Stableswap != nil:
 					if err := c.repo.SaveStableswapState(ctx, tx, snap.Stableswap); err != nil {
@@ -208,8 +219,6 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 					if err := c.repo.SaveCryptoswapState(ctx, tx, snap.Cryptoswap); err != nil {
 						return fmt.Errorf("saving cryptoswap state pool %s block %d: %w", pool.Address, bn, err)
 					}
-				default:
-					return fmt.Errorf("pool %s (id=%d) snapshot has neither stableswap nor cryptoswap state", pool.Address, pool.ID)
 				}
 			}
 			return nil
@@ -219,7 +228,7 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 		}
 
 		for _, pool := range snapshotSet {
-			c.lastSnapshotBlock[pool.ID] = bn
+			c.lastSnapshot[pool.ID] = snapshotKey{bn: bn, ver: ver}
 		}
 		c.telemetry.RecordStateRows(ctx, len(snapshotSet))
 		return nil
@@ -229,13 +238,13 @@ func (c *Coordinator) Finalizer() dexconsumer.BlockFinalizer {
 // buildSnapshotSet returns the sorted (by pool.ID ASC) union of touched pools
 // and heartbeat-due pools. Consistent ordering is required by the advisory-lock
 // convention in the DB trigger.
-func (c *Coordinator) buildSnapshotSet(bn int64) []RegisteredPool {
+func (c *Coordinator) buildSnapshotSet(bn int64, ver int) []RegisteredPool {
 	byID := make(map[int64]RegisteredPool)
 	maps.Copy(byID, c.touched)
 	if c.heartbeatBlocks > 0 {
 		for _, pool := range c.pools {
-			last, seen := c.lastSnapshotBlock[pool.ID]
-			if !seen || bn-last >= c.heartbeatBlocks {
+			last, seen := c.lastSnapshot[pool.ID]
+			if !seen || bn-last.bn >= c.heartbeatBlocks || (bn == last.bn && ver != last.ver) {
 				byID[pool.ID] = pool
 			}
 		}

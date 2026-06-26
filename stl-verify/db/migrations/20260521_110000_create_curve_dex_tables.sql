@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS curve_pool
 
 CREATE INDEX IF NOT EXISTS idx_curve_pool_chain ON curve_pool (chain_id);
 CREATE INDEX IF NOT EXISTS idx_curve_pool_kind  ON curve_pool (pool_kind);
+CREATE INDEX IF NOT EXISTS idx_curve_pool_protocol ON curve_pool (protocol_id);
 
 -- ============================================================================
 -- curve_pool_coin: coins within a pool, FK'd to token by (chain_id, address).
@@ -454,7 +455,7 @@ ON CONFLICT (chain_id, address) DO NOTHING;
 -- ---------------------------------------------------------------------------
 WITH proto AS (
     SELECT id FROM protocol
-    WHERE chain_id = 1 AND name = 'Curve'
+    WHERE chain_id = 1 AND address = '\x6a8cbed756804b16e05e741edabd5cb544ae21bf'::bytea
     LIMIT 1
 ),
 pool_ins AS (
@@ -491,7 +492,7 @@ ON CONFLICT (curve_pool_id, coin_index) DO NOTHING;
 -- ---------------------------------------------------------------------------
 WITH proto AS (
     SELECT id FROM protocol
-    WHERE chain_id = 1 AND name = 'Curve'
+    WHERE chain_id = 1 AND address = '\x6a8cbed756804b16e05e741edabd5cb544ae21bf'::bytea
     LIMIT 1
 ),
 pool_ins AS (
@@ -526,7 +527,7 @@ ON CONFLICT (curve_pool_id, coin_index) DO NOTHING;
 -- ---------------------------------------------------------------------------
 WITH proto AS (
     SELECT id FROM protocol
-    WHERE chain_id = 1 AND name = 'Curve'
+    WHERE chain_id = 1 AND address = '\x6a8cbed756804b16e05e741edabd5cb544ae21bf'::bytea
     LIMIT 1
 ),
 pool_ins AS (
@@ -567,7 +568,7 @@ ON CONFLICT (curve_pool_id, coin_index) DO NOTHING;
 -- ---------------------------------------------------------------------------
 WITH proto AS (
     SELECT id FROM protocol
-    WHERE chain_id = 1 AND name = 'Curve'
+    WHERE chain_id = 1 AND address = '\x6a8cbed756804b16e05e741edabd5cb544ae21bf'::bytea
     LIMIT 1
 ),
 pool_ins AS (

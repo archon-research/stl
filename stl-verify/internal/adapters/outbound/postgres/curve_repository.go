@@ -98,11 +98,11 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 func (r *CurveRepository) SaveSwap(ctx context.Context, tx pgx.Tx, in outbound.SwapInput) error {
 	tokensSold, err := BigIntToNumericRequired(in.TokensSold, "tokens_sold")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting tokens_sold: %w", err)
 	}
 	tokensBought, err := BigIntToNumericRequired(in.TokensBought, "tokens_bought")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting tokens_bought: %w", err)
 	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO curve_swap
@@ -161,19 +161,19 @@ func (r *CurveRepository) SaveStableswapState(ctx context.Context, tx pgx.Tx, s 
 	}
 	vp, err := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting virtual_price: %w", err)
 	}
 	ts, err := BigIntToNumericRequired(s.TotalSupply, "total_supply")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting total_supply: %w", err)
 	}
 	a, err := BigIntToNumericRequired(s.A, "a")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting a: %w", err)
 	}
 	fee, err := BigIntToNumericRequired(s.Fee, "fee")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting fee: %w", err)
 	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO curve_stableswap_state
@@ -200,23 +200,23 @@ func (r *CurveRepository) SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s 
 	}
 	vp, err := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting virtual_price: %w", err)
 	}
 	ts, err := BigIntToNumericRequired(s.TotalSupply, "total_supply")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting total_supply: %w", err)
 	}
 	a, err := BigIntToNumericRequired(s.A, "a")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting a: %w", err)
 	}
 	gamma, err := BigIntToNumericRequired(s.Gamma, "gamma")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting gamma: %w", err)
 	}
 	fee, err := BigIntToNumericRequired(s.Fee, "fee")
 	if err != nil {
-		return err
+		return fmt.Errorf("converting fee: %w", err)
 	}
 	priceScale, err := BigIntsToNumericArray(s.PriceScale)
 	if err != nil {

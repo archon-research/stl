@@ -56,12 +56,11 @@ func (h *CryptoswapHandler) DecodeEvents(
 	var result DecodedEvents
 
 	for _, log := range receipt.Logs {
+		if !common.IsHexAddress(log.Address) {
+			return DecodedEvents{}, fmt.Errorf("invalid log address %q", log.Address)
+		}
 		addr := common.HexToAddress(log.Address)
 		if addr != pool.Address {
-			continue
-		}
-
-		if len(log.Topics) == 0 {
 			continue
 		}
 
@@ -70,6 +69,18 @@ func (h *CryptoswapHandler) DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 		}
 		txHash := common.HexToHash(log.TransactionHash)
+
+		if len(log.Topics) == 0 {
+			payload, _ := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+			result.Captured = append(result.Captured, CapturedEvent{
+				Pool:      pool,
+				LogIndex:  logIndex,
+				TxHash:    txHash,
+				EventName: "",
+				Payload:   payload,
+			})
+			continue
+		}
 
 		topic0 := common.HexToHash(log.Topics[0])
 
@@ -416,14 +427,22 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 
 	// 11. D() - AllowFailure=true; nil on revert.
 	var d *big.Int
-	if v, err := shared.UnpackUint(h.cryptoABI, "D", results[idx]); err == nil {
+	if results[idx].Success {
+		v, err := shared.UnpackUint(h.cryptoABI, "D", results[idx])
+		if err != nil {
+			return nil, fmt.Errorf("decoding D: %w", err)
+		}
 		d = v
 	}
 	idx++
 
 	// 12. xcp_profit() - AllowFailure=true; nil on revert.
 	var xcpProfit *big.Int
-	if v, err := shared.UnpackUint(h.cryptoABI, "xcp_profit", results[idx]); err == nil {
+	if results[idx].Success {
+		v, err := shared.UnpackUint(h.cryptoABI, "xcp_profit", results[idx])
+		if err != nil {
+			return nil, fmt.Errorf("xcp_profit: %w", err)
+		}
 		xcpProfit = v
 	}
 

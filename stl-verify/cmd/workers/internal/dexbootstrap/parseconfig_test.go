@@ -301,6 +301,7 @@ func TestParseConfig_HeartbeatBlocks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			envSet(t, happyEnv())
+			t.Setenv("HEARTBEAT_BLOCKS", "")
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}

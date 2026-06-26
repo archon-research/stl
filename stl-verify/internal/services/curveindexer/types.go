@@ -3,6 +3,7 @@ package curveindexer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"time"
 
@@ -88,6 +89,23 @@ type StateSnapshot struct {
 	Timestamp    time.Time
 	Stableswap   *entity.CurveStableswapState
 	Cryptoswap   *entity.CurveCryptoswapState
+}
+
+// Validate enforces that exactly one state pointer is set and it matches Pool.Kind.
+func (s StateSnapshot) Validate() error {
+	switch s.Pool.Kind {
+	case KindStableswapPreNG, KindStableswapNG:
+		if s.Stableswap == nil || s.Cryptoswap != nil {
+			return fmt.Errorf("pool %s (kind %s): expected stableswap snapshot only", s.Pool.Address, s.Pool.Kind)
+		}
+	case KindCryptoswap:
+		if s.Cryptoswap == nil || s.Stableswap != nil {
+			return fmt.Errorf("pool %s (kind %s): expected cryptoswap snapshot only", s.Pool.Address, s.Pool.Kind)
+		}
+	default:
+		return fmt.Errorf("pool %s: unknown kind %s", s.Pool.Address, s.Pool.Kind)
+	}
+	return nil
 }
 
 type PoolClassHandler interface {

@@ -517,7 +517,7 @@ groups:
       - alert: VectorCurveIndexerStalled
         expr: |
           sum by (chain, cluster) (
-            rate(curve_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+            rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
         labels:

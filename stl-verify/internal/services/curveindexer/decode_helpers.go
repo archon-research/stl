@@ -88,13 +88,12 @@ func getBigIntSliceField(data map[string]any, key string) ([]*big.Int, error) {
 // parseHexUint parses a 0x-prefixed hex string into a uint, as used in
 // shared.Log.LogIndex.
 func parseHexUint(s string) (uint, error) {
-	s = strings.TrimPrefix(s, "0x")
-	if s == "" {
-		return 0, nil
+	if !strings.HasPrefix(s, "0x") || len(s) == 2 {
+		return 0, fmt.Errorf("invalid hex uint %q", s)
 	}
-	n, err := strconv.ParseUint(s, 16, 64)
+	n, err := strconv.ParseUint(s[2:], 16, strconv.IntSize)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("parsing hex uint %q: %w", s, err)
 	}
 	return uint(n), nil
 }

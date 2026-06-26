@@ -56,12 +56,11 @@ func (h *StableswapHandler) DecodeEvents(
 	var result DecodedEvents
 
 	for _, log := range receipt.Logs {
+		if !common.IsHexAddress(log.Address) {
+			return DecodedEvents{}, fmt.Errorf("invalid log address %q", log.Address)
+		}
 		addr := common.HexToAddress(log.Address)
 		if addr != pool.Address {
-			continue
-		}
-
-		if len(log.Topics) == 0 {
 			continue
 		}
 
@@ -70,6 +69,18 @@ func (h *StableswapHandler) DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 		}
 		txHash := common.HexToHash(log.TransactionHash)
+
+		if len(log.Topics) == 0 {
+			payload, _ := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+			result.Captured = append(result.Captured, CapturedEvent{
+				Pool:      pool,
+				LogIndex:  logIndex,
+				TxHash:    txHash,
+				EventName: "",
+				Payload:   payload,
+			})
+			continue
+		}
 
 		topic0 := common.HexToHash(log.Topics[0])
 
@@ -366,11 +377,19 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	// 7. NG-only: price_oracle and last_price
 	var priceOracle, lastPrice *big.Int
 	if pool.Kind == KindStableswapNG {
-		if po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx]); err == nil {
+		if results[idx].Success {
+			po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx])
+			if err != nil {
+				return nil, fmt.Errorf("price_oracle: %w", err)
+			}
 			priceOracle = po
 		}
 		idx++
-		if lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx]); err == nil {
+		if results[idx].Success {
+			lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx])
+			if err != nil {
+				return nil, fmt.Errorf("last_price: %w", err)
+			}
 			lastPrice = lp
 		}
 	}
