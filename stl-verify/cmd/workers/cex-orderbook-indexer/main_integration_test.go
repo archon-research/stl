@@ -55,6 +55,7 @@ func TestRunHappyPath(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(ctx, factory) }()
 
@@ -122,12 +123,12 @@ func TestParseConfig(t *testing.T) {
 		name    string
 		env     map[string]string
 		wantErr bool
-		check   func(t *testing.T, c cliConfig)
+		check   func(t *testing.T, c config)
 	}{
 		{
 			name: "defaults applied",
 			env:  map[string]string{"EXCHANGE": "Coinbase", "SYMBOLS": "BTC-USD, ETH-USD ,", "DATABASE_URL": "postgres://x"},
-			check: func(t *testing.T, c cliConfig) {
+			check: func(t *testing.T, c config) {
 				if c.exchange != "coinbase" {
 					t.Errorf("exchange = %q, want lowercased coinbase", c.exchange)
 				}

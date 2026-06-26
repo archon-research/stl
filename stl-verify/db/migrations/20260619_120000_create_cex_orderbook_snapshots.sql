@@ -1,4 +1,4 @@
--- CEX L2 order book snapshots (VEC-3d): one row per (exchange, symbol) per tick,
+-- CEX L2 order book snapshots (VEC-374): one row per (exchange, symbol) per tick,
 -- written by the cex-orderbook-indexer (one pod per exchange).
 --
 -- SNAPSHOT-PER-ROW, not row-per-level: each row carries the full top-N book for a

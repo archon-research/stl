@@ -102,12 +102,16 @@ func NewService(cfg Config, provider outbound.OrderbookProvider, repo outbound.O
 // synchronous Watch failure; once the loop is running, transient issues are
 // handled inside it.
 func (s *Service) Start(ctx context.Context) error {
-	updates, err := s.provider.Watch(ctx, s.symbols)
+	// Watch and the run loop share one cancelable context so Stop tears down the
+	// provider's WebSocket/reconnect goroutines too, not just the loop.
+	loopCtx, cancel := context.WithCancel(ctx)
+
+	updates, err := s.provider.Watch(loopCtx, s.symbols)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("watching order books: %w", err)
 	}
 
-	loopCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	s.done = make(chan struct{})
 

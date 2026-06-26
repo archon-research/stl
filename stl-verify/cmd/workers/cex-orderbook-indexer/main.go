@@ -45,13 +45,11 @@ func main() {
 	}
 }
 
-// providerFactory builds the order book provider for an exchange. main passes
-// newProvider; tests inject a fake so run() can be exercised without dialing a
-// real exchange.
+// providerFactory builds the order book provider for an exchange.
 type providerFactory func(exchange string, cfg orderbook.Config) (outbound.OrderbookProvider, error)
 
-// cliConfig is the resolved environment configuration for one exchange worker.
-type cliConfig struct {
+// config is the resolved environment configuration for one exchange worker.
+type config struct {
 	exchange string
 	symbols  []string
 	dbURL    string
@@ -62,39 +60,39 @@ type cliConfig struct {
 // parseConfig reads the worker's environment. EXCHANGE, SYMBOLS and DATABASE_URL
 // are required; ORDERBOOK_DEPTH and ORDERBOOK_INTERVAL fall back to the indexer's
 // defaults when unset.
-func parseConfig() (cliConfig, error) {
+func parseConfig() (config, error) {
 	exchange := strings.ToLower(strings.TrimSpace(env.Get("EXCHANGE", "")))
 	if exchange == "" {
-		return cliConfig{}, fmt.Errorf("EXCHANGE environment variable is required")
+		return config{}, fmt.Errorf("EXCHANGE environment variable is required")
 	}
 
 	symbols := parseSymbols(env.Get("SYMBOLS", ""))
 	if len(symbols) == 0 {
-		return cliConfig{}, fmt.Errorf("SYMBOLS environment variable is required (comma-separated)")
+		return config{}, fmt.Errorf("SYMBOLS environment variable is required (comma-separated)")
 	}
 
 	dbURL := env.Get("DATABASE_URL", "")
 	if dbURL == "" {
-		return cliConfig{}, fmt.Errorf("DATABASE_URL environment variable is required")
+		return config{}, fmt.Errorf("DATABASE_URL environment variable is required")
 	}
 
 	depth, err := env.GetInt("ORDERBOOK_DEPTH", 100)
 	if err != nil {
-		return cliConfig{}, err
+		return config{}, fmt.Errorf("parsing ORDERBOOK_DEPTH: %w", err)
 	}
 	if depth <= 0 {
-		return cliConfig{}, fmt.Errorf("ORDERBOOK_DEPTH must be > 0, got %d", depth)
+		return config{}, fmt.Errorf("ORDERBOOK_DEPTH must be > 0, got %d", depth)
 	}
 
 	interval, err := env.GetDuration("ORDERBOOK_INTERVAL", 5*time.Second)
 	if err != nil {
-		return cliConfig{}, err
+		return config{}, fmt.Errorf("parsing ORDERBOOK_INTERVAL: %w", err)
 	}
 	if interval <= 0 {
-		return cliConfig{}, fmt.Errorf("ORDERBOOK_INTERVAL must be > 0, got %s", interval)
+		return config{}, fmt.Errorf("ORDERBOOK_INTERVAL must be > 0, got %s", interval)
 	}
 
-	return cliConfig{exchange: exchange, symbols: symbols, dbURL: dbURL, depth: depth, interval: interval}, nil
+	return config{exchange: exchange, symbols: symbols, dbURL: dbURL, depth: depth, interval: interval}, nil
 }
 
 // parseSymbols splits a comma-separated symbol list, trimming whitespace and
@@ -128,7 +126,7 @@ func newProvider(exchange string, cfg orderbook.Config) (outbound.OrderbookProvi
 func run(ctx context.Context, makeProvider providerFactory) error {
 	cfg, err := parseConfig()
 	if err != nil {
-		return err
+		return fmt.Errorf("parsing config: %w", err)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -163,7 +161,7 @@ func run(ctx context.Context, makeProvider providerFactory) error {
 	obCfg.MeterProvider = otel.GetMeterProvider()
 	provider, err := makeProvider(cfg.exchange, obCfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating orderbook provider: %w", err)
 	}
 
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
