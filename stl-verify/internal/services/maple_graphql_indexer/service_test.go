@@ -55,7 +55,7 @@ type mockRepo struct {
 	GetMapleProtocolIDFn    func(ctx context.Context, chainID int64) (int64, error)
 	UpsertPoolsFn           func(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error)
 	SavePoolStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.PoolState) error
-	UpsertLoansFn           func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
+	UpsertLoansFn           func(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error)
 	SaveLoanStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
 	SaveLoanCollateralsFn   func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
 	UpsertSkyStrategiesFn   func(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
@@ -116,7 +116,7 @@ func newMockRepo() *mockRepo {
 		r.savedPoolStates = append(r.savedPoolStates, states...)
 		return nil
 	}
-	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
+	r.UpsertLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.Loan, _ time.Time) (map[common.Address]int64, error) {
 		r.upsertedLoans = append(r.upsertedLoans, loans...)
 		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
@@ -162,8 +162,8 @@ func (m *mockRepo) SavePoolStates(ctx context.Context, tx pgx.Tx, states []*mapl
 	return m.SavePoolStatesFn(ctx, tx, states)
 }
 
-func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
-	return m.UpsertLoansFn(ctx, tx, loans)
+func (m *mockRepo) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
+	return m.UpsertLoansFn(ctx, tx, loans, syncedAt)
 }
 
 func (m *mockRepo) SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error {
@@ -867,7 +867,7 @@ func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 func TestSync_LoanMissingFromUpsertResult(t *testing.T) {
 	client := happyClient()
 	repo := newMockRepo()
-	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan) (map[common.Address]int64, error) {
+	repo.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
 		return map[common.Address]int64{}, nil
 	}
 	service := newTestService(t, client, repo)
@@ -1140,7 +1140,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 		{
 			name: "loan upsert fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan) (map[common.Address]int64, error) {
+				r.UpsertLoansFn = func(context.Context, pgx.Tx, []*maple.Loan, time.Time) (map[common.Address]int64, error) {
 					return nil, errors.New("upsert failed")
 				}
 			},

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -215,13 +216,13 @@ func loanMetaEqual(a, b loanMetaCols) bool {
 // loanMeta difference appends a NEW row, leaving prior rows intact. State
 // snapshots FK the row current at their sync cycle, so a join reproduces the
 // metadata that was live then. The latest version per loan is the row with the
-// greatest (first_seen_at, id).
+// greatest (synced_at, id), where synced_at is the cycle timestamp passed in.
 //
 // The insert decision is made from a prior read of the latest row, which
 // ON CONFLICT cannot guard, so a per-loan pg_advisory_xact_lock on the natural
 // key serializes concurrent writers (ADR-0002 §3). Loans are processed in sorted
 // address order, so locks are acquired in a consistent order (deadlock-free).
-func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
+func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
 	}
@@ -230,7 +231,7 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 
 	result := make(map[common.Address]int64, len(sorted))
 	for _, l := range sorted {
-		id, err := r.appendLoanVersion(ctx, tx, l)
+		id, err := r.appendLoanVersion(ctx, tx, l, syncedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -240,18 +241,14 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 }
 
 // appendLoanVersion locks the loan's natural key, reads the latest stored row,
-// and returns its id when nothing changed (or when only loanMeta is unchanged),
-// inserts and returns a new version row when loanMeta differs, and fails the run
+// and returns its id when loanMeta is unchanged, inserts and returns a new
+// version row stamped with syncedAt when loanMeta differs, and fails the run
 // when an immutable maple_pool_id / borrower_user_id changed.
 //
-// This compares the incoming metadata against the row with the greatest
-// first_seen_at, which is correct only for forward-only ingestion (the live
-// cron advances synced_at monotonically). A backfill or replay that runs an
-// older cycle after a newer one would compare stale metadata against the newest
-// version and append it as the new latest — so a backfill path must not reuse
-// this method; it would need version ordering keyed on snapshot time, not
-// insert time.
-func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.Tx, l *maple.Loan) (int64, error) {
+// Versions are ordered by synced_at (the sync-cycle timestamp), so the
+// comparison is against the row from the most recent cycle regardless of insert
+// wall-clock — a replayed older cycle does not become the new latest.
+func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.Tx, l *maple.Loan, syncedAt time.Time) (int64, error) {
 	addr := common.BytesToAddress(l.LoanAddress)
 	incoming := loanMetaColsOf(l)
 
@@ -270,7 +267,7 @@ func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.T
 		        loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location
 		   FROM maple_loan
 		  WHERE chain_id = $1 AND loan_address = $2
-		  ORDER BY first_seen_at DESC, id DESC
+		  ORDER BY synced_at DESC, id DESC
 		  LIMIT 1`,
 		l.ChainID, l.LoanAddress,
 	).Scan(&storedID, &storedPoolID, &storedBorrower,
@@ -279,7 +276,7 @@ func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.T
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return r.insertLoanRow(ctx, tx, l, incoming)
+		return r.insertLoanRow(ctx, tx, l, incoming, syncedAt)
 	case err != nil:
 		return 0, fmt.Errorf("reading latest maple loan %s: %w", addr, err)
 	}
@@ -298,19 +295,19 @@ func (r *MapleGraphQLRepository) appendLoanVersion(ctx context.Context, tx pgx.T
 	if loanMetaEqual(stored, incoming) {
 		return storedID, nil
 	}
-	return r.insertLoanRow(ctx, tx, l, incoming)
+	return r.insertLoanRow(ctx, tx, l, incoming, syncedAt)
 }
 
-func (r *MapleGraphQLRepository) insertLoanRow(ctx context.Context, tx pgx.Tx, l *maple.Loan, m loanMetaCols) (int64, error) {
+func (r *MapleGraphQLRepository) insertLoanRow(ctx context.Context, tx pgx.Tx, l *maple.Loan, m loanMetaCols, syncedAt time.Time) (int64, error) {
 	var id int64
 	if err := tx.QueryRow(ctx,
 		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
 		                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
-		                         loan_meta_wallet_type, loan_meta_location)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		                         loan_meta_wallet_type, loan_meta_location, synced_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id`,
 		l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
-		m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location,
+		m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location, syncedAt,
 	).Scan(&id); err != nil {
 		return 0, fmt.Errorf("inserting maple loan %s: %w", common.BytesToAddress(l.LoanAddress), err)
 	}

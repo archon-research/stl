@@ -9,20 +9,29 @@
 -- loanMeta differs, leaving prior versions intact; each state snapshot keeps its
 -- FK to the maple_loan row that was current at its sync cycle.
 --
--- Drop the one-row-per-loan unique constraint so versions can coexist. The
--- current version of a loan is the row with the greatest (first_seen_at, id) for
--- its (chain_id, loan_address) — id breaks ties when two versions share a
--- first_seen_at (same NOW()). This insert-time ordering is correct only for
--- forward-only ingestion (the live cron advances synced_at monotonically); a
--- backfill that replays an older cycle after a newer one would mis-order
--- versions and must instead key the timeline on snapshot time. maple_pool_id and
--- borrower_user_id remain immutable per loan — enforced in the repository (a
+-- Drop the one-row-per-loan unique constraint so versions can coexist. Rename
+-- first_seen_at -> synced_at: the column now records the sync-cycle timestamp of
+-- each version (the same key the maple_*_state tables use), so the current
+-- version of a loan is the row with the greatest (synced_at, id) for its
+-- (chain_id, loan_address) — id breaks ties when two versions share a synced_at.
+-- Keying the timeline on snapshot time (not insert wall-clock) means even a
+-- backfill that replays an older cycle orders versions correctly. The repository
+-- supplies synced_at explicitly, so drop the NOW() default. Existing rows keep
+-- their former first_seen_at value as their synced_at (best available). maple_pool_id
+-- and borrower_user_id remain immutable per loan — enforced in the repository (a
 -- change fails the run), not by a schema constraint.
 
 ALTER TABLE maple_loan DROP CONSTRAINT IF EXISTS maple_loan_chain_id_loan_address_key;
 
-CREATE INDEX IF NOT EXISTS idx_maple_loan_latest
-    ON maple_loan (chain_id, loan_address, first_seen_at DESC, id DESC);
+ALTER TABLE maple_loan RENAME COLUMN first_seen_at TO synced_at;
+ALTER TABLE maple_loan ALTER COLUMN synced_at DROP DEFAULT;
 
-COMMENT ON COLUMN maple_loan.first_seen_at IS
-    'Insert time of THIS metadata version row (maple_loan is append-only). A loan was first observed at MIN(first_seen_at) over its (chain_id, loan_address); its current version is the row with the greatest (first_seen_at, id).';
+CREATE INDEX IF NOT EXISTS idx_maple_loan_latest
+    ON maple_loan (chain_id, loan_address, synced_at DESC, id DESC);
+
+COMMENT ON COLUMN maple_loan.synced_at IS
+    'Sync-cycle timestamp of THIS metadata version row (maple_loan is append-only). A loan was first observed at MIN(synced_at) over its (chain_id, loan_address); its current version is the row with the greatest (synced_at, id).';
+
+INSERT INTO migrations (filename)
+VALUES ('20260625_120000_maple_loan_append_only_registry.sql')
+ON CONFLICT (filename) DO NOTHING;

@@ -158,7 +158,7 @@ func upsertTestPool(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 	return id
 }
 
-func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, poolID int64, addrByte byte, meta *maple.LoanMeta) int64 {
+func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLRepository, poolID int64, addrByte byte, meta *maple.LoanMeta, syncedAt time.Time) int64 {
 	t.Helper()
 	protocolID := mapleProtocolID(t, ctx, repo)
 
@@ -169,7 +169,7 @@ func upsertTestLoan(t *testing.T, ctx context.Context, repo *MapleGraphQLReposit
 		if err != nil {
 			return err
 		}
-		ids, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan})
+		ids, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, syncedAt)
 		if err != nil {
 			return err
 		}
@@ -581,8 +581,8 @@ func TestMapleLoans_FullRoundTrip(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x21)
 
-	internalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x30, &maple.LoanMeta{Type: "amm", DexName: "Uniswap"})
-	externalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x31, nil)
+	internalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x30, &maple.LoanMeta{Type: "amm", DexName: "Uniswap"}, mapleSyncedAt())
+	externalLoanID := upsertTestLoan(t, ctx, repo, poolID, 0x31, nil, mapleSyncedAt())
 
 	// is_internal generated column follows loan_meta_type.
 	var isInternal bool
@@ -689,9 +689,11 @@ func TestMapleUpsertLoans_NoOpOnUnchangedMeta(t *testing.T) {
 	poolID := upsertTestPool(t, ctx, repo, 0x22)
 
 	meta := &maple.LoanMeta{Type: "strategy", Location: "base"}
-	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta)
+	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta, mapleSyncedAt())
 
-	sameID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta)
+	// A later cycle re-reading the same metadata reuses the row (no new version),
+	// even though its synced_at is newer.
+	sameID := upsertTestLoan(t, ctx, repo, poolID, 0x32, meta, mapleSyncedAt().Add(time.Hour))
 	if sameID != loanID {
 		t.Fatalf("unchanged re-upsert appended a new row: %d vs %d", sameID, loanID)
 	}
@@ -728,7 +730,7 @@ func latestMapleLoanID(t *testing.T, ctx context.Context, addrByte byte) int64 {
 	var id int64
 	if err := maplePool.QueryRow(ctx,
 		`SELECT id FROM maple_loan WHERE chain_id = 1 AND loan_address = $1
-		 ORDER BY first_seen_at DESC, id DESC LIMIT 1`,
+		 ORDER BY synced_at DESC, id DESC LIMIT 1`,
 		mapleAddr(addrByte)).Scan(&id); err != nil {
 		t.Fatalf("latest loan id: %v", err)
 	}
@@ -775,7 +777,7 @@ func TestMapleUpsertLoans_RejectsPoolChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -824,8 +826,8 @@ func TestMapleUpsertLoans_AppendsRowOnMetaChange(t *testing.T) {
 			truncateMaple(t, ctx)
 			poolID := upsertTestPool(t, ctx, repo, 0x20)
 
-			oldID := upsertTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.from)
-			newID := upsertTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.to)
+			oldID := upsertTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.from, mapleSyncedAt())
+			newID := upsertTestLoan(t, ctx, repo, poolID, tc.addrByte, tc.to, mapleSyncedAt().Add(time.Hour))
 			if newID == oldID {
 				t.Fatalf("meta change reused id %d; expected a new appended row", oldID)
 			}
@@ -884,7 +886,7 @@ func TestMapleUpsertLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
 	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
 	// Cycle 1: external loan (type null). Snapshot S1 points to version v1.
-	v1 := upsertTestLoan(t, ctx, repo, poolID, 0x50, nil)
+	v1 := upsertTestLoan(t, ctx, repo, poolID, 0x50, nil, mapleSyncedAt())
 	s1, err := maple.NewLoanState(v1, mapleSyncedAt(), "Active", big.NewInt(100), big.NewInt(1000000))
 	if err != nil {
 		t.Fatalf("NewLoanState s1: %v", err)
@@ -895,7 +897,7 @@ func TestMapleUpsertLoans_StateSnapshotsPinToMetaVersion(t *testing.T) {
 
 	// Cycle 2: Maple reclassifies the loan internal ("amm"). New version v2;
 	// snapshot S2 points to it.
-	v2 := upsertTestLoan(t, ctx, repo, poolID, 0x50, &maple.LoanMeta{Type: "amm"})
+	v2 := upsertTestLoan(t, ctx, repo, poolID, 0x50, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(time.Hour))
 	if v2 == v1 {
 		t.Fatal("expected a new version row for the reclassified loan")
 	}
@@ -959,7 +961,7 @@ func TestMapleUpsertLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
 	keyA := common.BytesToAddress(addrA)
 	keyB := common.BytesToAddress(addrB)
 
-	upsertBatch := func(metaA, metaB *maple.LoanMeta) map[common.Address]int64 {
+	upsertBatch := func(metaA, metaB *maple.LoanMeta, syncedAt time.Time) map[common.Address]int64 {
 		t.Helper()
 		var ids map[common.Address]int64
 		inMapleTx(t, ctx, func(tx pgx.Tx) error {
@@ -972,15 +974,15 @@ func TestMapleUpsertLoans_BatchAppendsOnlyChangedLoan(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			ids, err = repo.UpsertLoans(ctx, tx, []*maple.Loan{loanA, loanB})
+			ids, err = repo.UpsertLoans(ctx, tx, []*maple.Loan{loanA, loanB}, syncedAt)
 			return err
 		})
 		return ids
 	}
 
-	first := upsertBatch(nil, &maple.LoanMeta{Type: "amm"})
+	first := upsertBatch(nil, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt())
 	// Cycle 2: A enriched null->intercompany; B unchanged.
-	second := upsertBatch(&maple.LoanMeta{Type: "intercompany"}, &maple.LoanMeta{Type: "amm"})
+	second := upsertBatch(&maple.LoanMeta{Type: "intercompany"}, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(time.Hour))
 
 	if second[keyA] == first[keyA] {
 		t.Errorf("loan A meta changed but reused id %d; expected a new version", first[keyA])
@@ -1005,9 +1007,9 @@ func TestMapleUpsertLoans_MetaRoundTripAppendsDistinctVersions(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x20)
 
-	id1 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"})
-	id2 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "intercompany"})
-	id3 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"})
+	id1 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt())
+	id2 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "intercompany"}, mapleSyncedAt().Add(time.Hour))
+	id3 := upsertTestLoan(t, ctx, repo, poolID, 0x62, &maple.LoanMeta{Type: "amm"}, mapleSyncedAt().Add(2*time.Hour))
 
 	if id1 == id2 || id2 == id3 || id1 == id3 {
 		t.Fatalf("expected three distinct version ids, got %d, %d, %d", id1, id2, id3)
@@ -1044,7 +1046,7 @@ func TestMapleUpsertLoans_PoolChangeWithMetaChangeStillRejected(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -1147,7 +1149,7 @@ func TestMapleUpsertLoans_NullMetaTypeIsNotInternal(t *testing.T) {
 	repo := newMapleRepo(t, 0)
 	poolID := upsertTestPool(t, ctx, repo, 0x33)
 
-	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x34, &maple.LoanMeta{Type: "", Location: "Cayman"})
+	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x34, &maple.LoanMeta{Type: "", Location: "Cayman"}, mapleSyncedAt())
 
 	var metaType, location *string
 	var isInternal bool
@@ -1190,7 +1192,7 @@ func TestMapleUpsertLoans_RejectsBorrowerChange(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewLoan: %v", err)
 		}
-		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}); err != nil {
+		if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{loan}, mapleSyncedAt()); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -1219,7 +1221,7 @@ func TestMapleStates_IdempotencyAndReprocessing(t *testing.T) {
 	repoBuild0 := newMapleRepo(t, 0)
 	repoBuild9 := newMapleRepo(t, 9)
 	poolID := upsertTestPool(t, ctx, repoBuild0, 0x23)
-	loanID := upsertTestLoan(t, ctx, repoBuild0, poolID, 0x33, nil)
+	loanID := upsertTestLoan(t, ctx, repoBuild0, poolID, 0x33, nil, mapleSyncedAt())
 
 	newState := func(principal int64) *maple.LoanState {
 		s, err := maple.NewLoanState(loanID, mapleSyncedAt(), "Active", big.NewInt(principal), big.NewInt(1))

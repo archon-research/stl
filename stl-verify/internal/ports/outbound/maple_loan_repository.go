@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -51,9 +52,10 @@ type MapleGraphQLRepository interface {
 	// immutable per loan and implementations must fail when they differ from the
 	// latest stored row. The loanMeta columns are off-chain editorial metadata
 	// Maple enriches after origination, so any loanMeta difference appends a NEW
-	// version row (leaving prior rows intact) rather than mutating in place;
-	// unchanged metadata reuses the existing row.
-	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error)
+	// version row stamped with syncedAt (leaving prior rows intact) rather than
+	// mutating in place; unchanged metadata reuses the existing row. syncedAt is
+	// the sync-cycle timestamp and is the key versions are ordered by.
+	UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan, syncedAt time.Time) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
 	SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error

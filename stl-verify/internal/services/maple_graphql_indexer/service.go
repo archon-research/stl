@@ -438,7 +438,7 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 			return err
 		}
 
-		loanIDs, err := s.repo.UpsertLoans(ctx, tx, loanEntities)
+		loanIDs, err := s.repo.UpsertLoans(ctx, tx, loanEntities, syncedAt)
 		if err != nil {
 			return fmt.Errorf("upserting loans: %w", err)
 		}

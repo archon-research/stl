@@ -763,8 +763,8 @@ func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey 
 
 	var loanID int64
 	if err := concurrencyPool.QueryRow(ctx,
-		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-		 VALUES (1, $1, '\x7733333333333333333333333333333333333377'::bytea, $2, $3)
+		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, synced_at)
+		 VALUES (1, $1, '\x7733333333333333333333333333333333333377'::bytea, $2, $3, NOW())
 		 RETURNING id`, protocolID, poolID, userID).Scan(&loanID); err != nil {
 		t.Fatalf("seed maple loan: %v", err)
 	}
@@ -865,12 +865,15 @@ func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 		return loan
 	}
 
+	baseSyncedAt := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	raceSyncedAt := baseSyncedAt.Add(time.Hour)
+
 	// Baseline version: external loan (type null), committed.
 	tx, err := concurrencyPool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin baseline: %v", err)
 	}
-	if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(nil)}); err != nil {
+	if _, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(nil)}, baseSyncedAt); err != nil {
 		_ = tx.Rollback(ctx)
 		t.Fatalf("baseline upsert: %v", err)
 	}
@@ -880,7 +883,7 @@ func TestMapleUpsertLoans_ConcurrentMetaChangeAppendsExactlyOnce(t *testing.T) {
 
 	// Two concurrent cycles both reclassify to the same internal type.
 	errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, _ int) error {
-		_, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(&maple.LoanMeta{Type: "intercompany"})})
+		_, err := repo.UpsertLoans(ctx, tx, []*maple.Loan{makeLoan(&maple.LoanMeta{Type: "intercompany"})}, raceSyncedAt)
 		return err
 	})
 	for i, err := range errs {
@@ -931,8 +934,8 @@ func TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
 
 		// Baseline external version (type null), committed.
 		if _, err := concurrencyPool.Exec(ctx,
-			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
-			 VALUES (1, $1, $2, $3, $4)`,
+			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, synced_at)
+			 VALUES (1, $1, $2, $3, $4, NOW())`,
 			deps.protocolID, loanAddr, deps.poolID, deps.borrowerID); err != nil {
 			t.Fatalf("seed baseline: %v", err)
 		}
@@ -944,7 +947,7 @@ func TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
 			var id int64
 			if err := tx.QueryRow(ctx,
 				`SELECT id FROM maple_loan WHERE chain_id = 1 AND loan_address = $1
-				 ORDER BY first_seen_at DESC, id DESC LIMIT 1`,
+				 ORDER BY synced_at DESC, id DESC LIMIT 1`,
 				loanAddr).Scan(&id); err != nil {
 				return err
 			}
@@ -952,8 +955,8 @@ func TestMapleUpsertLoans_NegativeControl_LocklessAppendRaces(t *testing.T) {
 				return err
 			}
 			_, err := tx.Exec(ctx,
-				`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, loan_meta_type)
-				 VALUES (1, $1, $2, $3, $4, 'intercompany')`,
+				`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id, loan_meta_type, synced_at)
+				 VALUES (1, $1, $2, $3, $4, 'intercompany', NOW())`,
 				deps.protocolID, loanAddr, deps.poolID, deps.borrowerID)
 			return err
 		})
