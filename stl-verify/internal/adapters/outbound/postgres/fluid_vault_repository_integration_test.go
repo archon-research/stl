@@ -28,6 +28,12 @@ func init() {
 	})
 }
 
+// truncateFluid clears only the fluid-owned tables. The shared protocol and
+// token registries are NOT truncated here: with schema-per-file isolation,
+// unqualified protocol/token resolve to public (CREATE TABLE IF NOT EXISTS
+// finds the public copy first), so a TRUNCATE here wipes rows sibling test
+// files (e.g. maple) rely on. The fixtures below seed protocol/token
+// idempotently instead.
 func truncateFluid(t *testing.T, ctx context.Context) {
 	t.Helper()
 	if _, err := fluidPool.Exec(ctx, `DELETE FROM fluid_vault_state`); err != nil {
@@ -35,12 +41,6 @@ func truncateFluid(t *testing.T, ctx context.Context) {
 	}
 	if _, err := fluidPool.Exec(ctx, `DELETE FROM fluid_vault`); err != nil {
 		t.Fatalf("failed to truncate fluid_vault: %v", err)
-	}
-	if _, err := fluidPool.Exec(ctx, `TRUNCATE protocol CASCADE`); err != nil {
-		t.Fatalf("failed to truncate protocol: %v", err)
-	}
-	if _, err := fluidPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
-		t.Fatalf("failed to truncate token: %v", err)
 	}
 }
 
@@ -82,7 +82,9 @@ func (f *fluidTestFixture) createTestFixtures(t *testing.T, ctx context.Context)
 	}
 
 	err = f.pool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4) RETURNING id`,
+		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`,
 		1, bytes20(0x01), "WETH", 18,
 	).Scan(&f.collTokenID)
 	if err != nil {
@@ -90,7 +92,9 @@ func (f *fluidTestFixture) createTestFixtures(t *testing.T, ctx context.Context)
 	}
 
 	err = f.pool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4) RETURNING id`,
+		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`,
 		1, bytes20(0x02), "USDC", 6,
 	).Scan(&f.debtTokenID)
 	if err != nil {
