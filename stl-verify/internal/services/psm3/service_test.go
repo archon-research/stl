@@ -16,6 +16,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const (
@@ -580,6 +582,91 @@ func TestSweep_SaveReservesError_ACKsAndSkips(t *testing.T) {
 	if got := repo.savedCount(); got != 0 {
 		t.Errorf("expected 0 saved snapshots, got %d", got)
 	}
+}
+
+func TestSweep_RecordsSuccessMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tel, err := psm3.NewTelemetryWithProvider(mp, "base")
+	if err != nil {
+		t.Fatalf("telemetry: %v", err)
+	}
+
+	cfg := defaultConfig(1)
+	cfg.Telemetry = tel
+	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, 1, 0))
+	svc := newService(t, cfg, newFakePSM3Caller(), &fakePSM3Repo{}, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not processed")
+	cancel()
+	_ = svc.Stop()
+
+	if got := sweepCount(t, reader, "success"); got != 1 {
+		t.Errorf("psm3.sweeps.total{status=success} = %d, want 1", got)
+	}
+}
+
+func TestSweep_RecordsErrorMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tel, err := psm3.NewTelemetryWithProvider(mp, "base")
+	if err != nil {
+		t.Fatalf("telemetry: %v", err)
+	}
+
+	caller := newFakePSM3Caller()
+	caller.readErr = errors.New("multicall RPC failure")
+	cfg := defaultConfig(1)
+	cfg.Telemetry = tel
+	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, 1, 0))
+	svc := newService(t, cfg, caller, &fakePSM3Repo{}, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not processed")
+	cancel()
+	_ = svc.Stop()
+
+	if got := sweepCount(t, reader, "error"); got != 1 {
+		t.Errorf("psm3.sweeps.total{status=error} = %d, want 1", got)
+	}
+}
+
+// sweepCount sums psm3.sweeps.total data points matching the given status.
+func sweepCount(t *testing.T, reader sdkmetric.Reader, status string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var total int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "psm3.sweeps.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("psm3.sweeps.total is %T", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				if s, _ := dp.Attributes.Value("status"); s.AsString() == status {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	return total
 }
 
 func TestSweep_InvalidStateFromCaller_NoSave(t *testing.T) {
