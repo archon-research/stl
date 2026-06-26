@@ -27,7 +27,7 @@ ALTER TABLE maple_loan RENAME COLUMN first_seen_at TO synced_at;
 ALTER TABLE maple_loan ALTER COLUMN synced_at DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_maple_loan_latest
-    ON maple_loan (chain_id, loan_address, synced_at DESC, id DESC);
+    ON maple_loan (chain_id, loan_address, synced_at DESC);
 
 COMMENT ON COLUMN maple_loan.synced_at IS
     'Sync-cycle timestamp of THIS metadata version row (maple_loan is append-only). A loan was first observed at MIN(synced_at) over its (chain_id, loan_address); its current version is the row with the greatest (synced_at, id).';
