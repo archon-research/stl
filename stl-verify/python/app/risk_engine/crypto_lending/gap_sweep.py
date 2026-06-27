@@ -1,7 +1,18 @@
 from collections.abc import Iterable
 from decimal import Decimal
 
-from axis_synome.spec.risk_capital.formulas.required_risk_capital import loss_given_default
+# TODO(TEN-224): drop the fallback once the published axis-synome wheel
+# carries the spec.draft layout.
+try:
+    from axis_synome.spec.draft.risk_capital.formulas.required_risk_capital import (  # ty: ignore[unresolved-import]
+        loss_given_default,
+    )
+except ModuleNotFoundError as e:
+    if e.name and not e.name.startswith("axis_synome.spec.draft"):
+        raise
+    from axis_synome.spec.risk_capital.formulas.required_risk_capital import (  # ty: ignore[unresolved-import]
+        loss_given_default,
+    )
 
 from app.domain.entities.risk import RiskEnrichedCollateral
 
