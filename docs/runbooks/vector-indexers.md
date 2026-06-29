@@ -344,6 +344,42 @@ are stale and stale symbols stop being written, so the series flat-lines.
 
 ---
 
+## VectorCexOrderbookDown
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The labelled `deployment` has <1 available replica for >10m (kube-state-metrics,
+independent of the pod's own OTLP export). The order book indexer is not
+running, so no snapshots are taken. This is the availability companion to
+`VectorCexOrderbookStreamStalled`: that one reads the pod's own
+`orderbook_last_update_age` gauge, which vanishes on a pod/exporter outage — so
+`Down` catches the total-outage case `StreamStalled` cannot. If both fire,
+**this is the root cause.**
+
+### First checks (≤5 min)
+
+1. `kubectl -n vector get deploy,pods -l app=<deployment>` — pod state and
+   restart count.
+2. **Not Running?** describe for the reason:
+   `kubectl -n vector describe pod -l app=<deployment> | sed -n '/Events:/,$p'`
+   - `CreateContainerConfigError` → missing config/secret; check the
+     `<deployment>-config` ConfigMap and its ExternalSecret (DB URL).
+   - `CrashLoopBackOff` → read logs; common: bad `DATABASE_URL`, unreachable
+     TimescaleDB, or a startup panic (e.g. unknown `EXCHANGE`).
+   - `Pending` / `FailedScheduling` → no node capacity; check the node group.
+3. **ExternalSecret synced?**
+   `kubectl -n vector get externalsecret <deployment>` — a failed sync leaves
+   the pod unable to start.
+
+### Verify recovery
+
+`kube_deployment_status_replicas_available{deployment="<deployment>"} == 1` and
+updates resume (see StreamStalled recovery check).
+
+---
+
 ## VectorRPCRetryRatioHigh
 
 **Severity:** warning · **For:** 15m

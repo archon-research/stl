@@ -563,6 +563,35 @@ groups:
             written, so the series goes flat).
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookstreamstalled
 
+      - alert: VectorCexOrderbookDown
+        # Availability companion to StreamStalled, mirroring the Maple
+        # Stalled/Down pair (VEC-360). orderbook_last_update_age is a gauge from
+        # the pod's own OTLP export, so it disappears on a pod/exporter outage
+        # and StreamStalled goes silent (no series to compare). kube-state-metrics
+        # is independent of that export, so this still fires when the process or
+        # the metrics pipeline is the thing that died. Regex covers the
+        # per-exchange fleet (coinbase|okx|kraken).
+        expr: |
+          max by (deployment, cluster) (
+            kube_deployment_status_replicas_available{
+              deployment=~"cex-orderbook-indexer-.*", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer `{{ $labels.deployment }}` has no available replica"
+          description: |
+            `{{ $labels.deployment }}` has <1 available replica for >10m. The
+            order book indexer is not running; no snapshots are being taken. If
+            VectorCexOrderbookStreamStalled is firing too, this is the root
+            cause (process down, not a metrics-pipeline issue).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookdown
+
   # =====================================================================
   # RPC transport (internal/pkg/rpchttp retry transport) — PR #505
   # =====================================================================
