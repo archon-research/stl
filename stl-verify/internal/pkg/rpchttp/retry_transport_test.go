@@ -12,7 +12,267 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+// collectCounter sums the int64 data points of counter `name` whose attribute
+// `attrKey` equals `attrVal`. Fails the test if the metric is absent or not an
+// int64 sum.
+func collectCounter(t *testing.T, reader sdkmetric.Reader, name, attrKey, attrVal string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				if v, ok := dp.Attributes.Value(attribute.Key(attrKey)); ok && v.AsString() == attrVal {
+					total += dp.Value
+				}
+			}
+			return total
+		}
+	}
+	t.Fatalf("metric %s not found", name)
+	return 0
+}
+
+// newMeteredClient builds a client whose retry transport reports to a manual
+// reader, with the given retry budget and base round-tripper. Only the
+// meter/reader wiring is hoisted (not a fixed response sequence), so each test
+// supplies its own base behavior — a real server, a stub status code, or a
+// network error.
+func newMeteredClient(t *testing.T, maxRetries int, base http.RoundTripper) (*http.Client, sdkmetric.Reader) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	client := NewClient(Config{
+		MaxRetries:  maxRetries,
+		BaseBackoff: time.Millisecond,
+		MaxBackoff:  5 * time.Millisecond,
+		Transport:   base,
+		Meter:       mp.Meter("rpchttp_test"),
+	})
+	return client, reader
+}
+
+// codeRoundTripper returns a response with a fixed status code and empty body
+// without any network, for deterministically exercising status-code paths.
+type codeRoundTripper struct{ code int }
+
+func (c codeRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: c.code,
+		Body:       io.NopCloser(bytes.NewReader(nil)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// TestRetryTransport_RecordsAttemptCountByStatusCode verifies every HTTP
+// attempt is counted under its status code, so we can distinguish "one slow
+// 200" from "a storm of 429s" — invisible before this instrumentation.
+func TestRetryTransport_RecordsAttemptCountByStatusCode(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 { // 429, 429, then 200
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	client, reader := newMeteredClient(t, 5, http.DefaultTransport)
+	resp, err := client.Post(srv.URL, "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := collectCounter(t, reader, "rpc.http.attempts", "rpc.http.status_code", "429"); got != 2 {
+		t.Errorf("attempts status=429 = %d; want 2", got)
+	}
+	if got := collectCounter(t, reader, "rpc.http.attempts", "rpc.http.status_code", "200"); got != 1 {
+		t.Errorf("attempts status=200 = %d; want 1", got)
+	}
+}
+
+// TestRetryTransport_CountsRetriesByReasonAndStopsAtBudget drives the transport
+// against a base that never recovers, exhausting the budget. With MaxRetries=2
+// that is exactly 3 attempts and 2 retries — pinning both the reason label
+// (429/5xx/network) and the boundary invariant that the final, exhausted
+// attempt is counted as an attempt but NOT as a retry.
+func TestRetryTransport_CountsRetriesByReasonAndStopsAtBudget(t *testing.T) {
+	cases := []struct {
+		name    string
+		base    http.RoundTripper
+		reason  string
+		code    string
+		wantErr bool
+	}{
+		{"429 throttle", codeRoundTripper{http.StatusTooManyRequests}, "429", "429", false},
+		{"5xx server error", codeRoundTripper{http.StatusBadGateway}, "5xx", "502", false},
+		{"network error", &errRoundTripper{}, "network", "network_error", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client, reader := newMeteredClient(t, 2, tc.base)
+			resp, err := client.Get("http://oracle.test/")
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error after exhausting retries")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if got := collectCounter(t, reader, "rpc.http.retries", "reason", tc.reason); got != 2 {
+				t.Errorf("retries reason=%s = %d; want 2 (MaxRetries=2)", tc.reason, got)
+			}
+			if got := collectCounter(t, reader, "rpc.http.attempts", "rpc.http.status_code", tc.code); got != 3 {
+				t.Errorf("attempts status=%s = %d; want 3 (final attempt counted, not retried)", tc.code, got)
+			}
+		})
+	}
+}
+
+// TestAttemptCode covers every bucket of the attempts-counter label, including
+// the synthetic error buckets that no metered HTTP test reaches.
+func TestAttemptCode(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *http.Response
+		err  error
+		want string
+	}{
+		{"http 200", &http.Response{StatusCode: 200}, nil, "200"},
+		{"http 429", &http.Response{StatusCode: 429}, nil, "429"},
+		{"context canceled", nil, context.Canceled, "canceled"},
+		{"context deadline", nil, context.DeadlineExceeded, "deadline"},
+		{"wrapped canceled", nil, fmt.Errorf("dial: %w", context.Canceled), "canceled"},
+		{"generic network", nil, errors.New("connection refused"), "network_error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := attemptCode(tc.resp, tc.err); got != tc.want {
+				t.Errorf("attemptCode = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetryReason covers the retry-counter label classification across the
+// three triggers shouldRetry can produce.
+func TestRetryReason(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *http.Response
+		err  error
+		want string
+	}{
+		{"429", &http.Response{StatusCode: 429}, nil, "429"},
+		{"503", &http.Response{StatusCode: 503}, nil, "5xx"},
+		{"network", nil, errors.New("connection reset"), "network"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryReason(tc.resp, tc.err); got != tc.want {
+				t.Errorf("retryReason = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetryTransport_NilMeterEmitsNothing pins the documented zero-overhead
+// default: with no meter the retry path still runs (and retries) without
+// panicking on the nil instruments.
+func TestRetryTransport_NilMeterEmitsNothing(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(Config{MaxRetries: 3, BaseBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond})
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d; want 200", resp.StatusCode)
+	}
+}
+
+// TestRetryTransport_AddsRetryEventsToActiveSpan verifies each retry adds an
+// event to the caller's active span, so a slow logical RPC span (e.g.
+// oracle.fetchPrices) carries inline evidence of why it was slow — without
+// needing to correlate separate metrics by timestamp.
+func TestRetryTransport_AddsRetryEventsToActiveSpan(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	tracer := tp.Tracer("rpchttp_test")
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := NewClient(Config{MaxRetries: 5, BaseBackoff: time.Millisecond, MaxBackoff: 5 * time.Millisecond})
+	ctx, span := tracer.Start(context.Background(), "rpc.call")
+	req, err := http.NewRequestWithContext(ctx, "POST", srv.URL, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	span.End()
+
+	var retryEvents int
+	for _, s := range sr.Ended() {
+		if s.Name() != "rpc.call" {
+			continue
+		}
+		for _, ev := range s.Events() {
+			if ev.Name == "rpc.retry" {
+				retryEvents++
+			}
+		}
+	}
+	if retryEvents != 2 {
+		t.Errorf("rpc.retry span events = %d; want 2", retryEvents)
+	}
+}
 
 func newTestClient(base http.RoundTripper, maxRetries int) *http.Client {
 	return &http.Client{
@@ -516,6 +776,60 @@ func TestDialEthereum_RedactsAPIKeyInDialError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), apiKey) {
 		t.Errorf("error must redact the API key; got %q", err)
+	}
+}
+
+// TestDialEthereum_DefaultsClientTimeout verifies DialEthereum bounds the whole
+// request (all retries) by default, so a hung connection or retry storm can't
+// block a worker indefinitely, and that WithClientTimeout still overrides it.
+func TestDialEthereum_DefaultsClientTimeout(t *testing.T) {
+	if got := dialConfig().Timeout; got != defaultDialTimeout {
+		t.Errorf("default Timeout = %v; want %v", got, defaultDialTimeout)
+	}
+	if got := dialConfig(WithClientTimeout(7 * time.Second)).Timeout; got != 7*time.Second {
+		t.Errorf("WithClientTimeout override = %v; want 7s", got)
+	}
+}
+
+// TestDialEthereum_EmitsRetryTelemetryByDefault verifies that DialEthereum
+// wires the global meter provider in by default, so every worker that dials
+// through it emits rpc_http_attempts_total without per-call opt-in — that is
+// what makes the throttle-vs-slow signal fleet-wide.
+func TestDialEthereum_EmitsRetryTelemetryByDefault(t *testing.T) {
+	// Must not t.Parallel(): this mutates the global OTel meter provider, which
+	// would race any sibling test dialing through DialEthereum.
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	defer otel.SetMeterProvider(prev)
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) < 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
+	}))
+	defer srv.Close()
+
+	client, err := DialEthereum(context.Background(), srv.URL,
+		WithMaxRetries(3),
+		WithBaseBackoff(time.Millisecond),
+		WithMaxBackoff(5*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("DialEthereum: %v", err)
+	}
+	defer client.Close()
+	if _, err := client.BlockNumber(context.Background()); err != nil {
+		t.Fatalf("BlockNumber: %v", err)
+	}
+
+	if got := collectCounter(t, reader, "rpc.http.attempts", "rpc.http.status_code", "429"); got < 1 {
+		t.Errorf("expected >=1 attempt with status=429 via default global meter; got %d", got)
 	}
 }
 
