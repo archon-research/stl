@@ -65,7 +65,7 @@ type mockRepo struct {
 	RecordLoansFn           func(ctx context.Context, tx pgx.Tx, syncedAt time.Time, loans []*maple.Loan) (map[common.Address]int64, error)
 	SaveLoanStatesFn        func(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
 	SaveLoanCollateralsFn   func(ctx context.Context, tx pgx.Tx, collaterals []*maple.LoanCollateral) error
-	UpsertFixedTermLoansFn  func(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error)
+	RecordFixedTermLoansFn  func(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error)
 	SaveFTLLoanStatesFn     func(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) error
 	RecordSkyStrategiesFn   func(ctx context.Context, tx pgx.Tx, syncedAt time.Time, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
 	SaveSkyStrategyStatesFn func(ctx context.Context, tx pgx.Tx, states []*maple.SkyStrategyState) error
@@ -79,9 +79,9 @@ type mockRepo struct {
 	// Captured arguments for assertions.
 	borrowerCalls    [][]entity.User
 	assetTokenCalls  [][]outbound.TokenInput
-	upsertedPools    []*maple.Pool
-	upsertedLoans    []*maple.Loan
-	upsertedFTLLoans []*maple.FTLLoan
+	recordedPools    []*maple.Pool
+	recordedLoans    []*maple.Loan
+	recordedFTLLoans []*maple.FTLLoan
 	savedPoolStates  []*maple.PoolState
 	savedLoanStates  []*maple.LoanState
 	savedFTLStates   []*maple.FTLLoanState
@@ -90,7 +90,7 @@ type mockRepo struct {
 	savedGlobals     []*maple.SyrupGlobalState
 }
 
-// newMockRepo returns a repo whose registry upserts assign sequential ids
+// newMockRepo returns a repo whose registry records assign sequential ids
 // keyed by address and whose saves capture their inputs.
 func newMockRepo() *mockRepo {
 	r := &mockRepo{}
@@ -116,7 +116,7 @@ func newMockRepo() *mockRepo {
 		},
 	}
 	r.RecordPoolsFn = func(_ context.Context, _ pgx.Tx, _ time.Time, pools []*maple.Pool) (map[common.Address]int64, error) {
-		r.upsertedPools = append(r.upsertedPools, pools...)
+		r.recordedPools = append(r.recordedPools, pools...)
 		ids := make(map[common.Address]int64, len(pools))
 		for i, p := range pools {
 			ids[common.BytesToAddress(p.Address)] = int64(10 + i)
@@ -128,7 +128,7 @@ func newMockRepo() *mockRepo {
 		return nil
 	}
 	r.RecordLoansFn = func(_ context.Context, _ pgx.Tx, _ time.Time, loans []*maple.Loan) (map[common.Address]int64, error) {
-		r.upsertedLoans = append(r.upsertedLoans, loans...)
+		r.recordedLoans = append(r.recordedLoans, loans...)
 		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
 			ids[common.BytesToAddress(l.LoanAddress)] = int64(20 + i)
@@ -143,8 +143,8 @@ func newMockRepo() *mockRepo {
 		r.savedCollats = append(r.savedCollats, collaterals...)
 		return nil
 	}
-	r.UpsertFixedTermLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
-		r.upsertedFTLLoans = append(r.upsertedFTLLoans, loans...)
+	r.RecordFixedTermLoansFn = func(_ context.Context, _ pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
+		r.recordedFTLLoans = append(r.recordedFTLLoans, loans...)
 		ids := make(map[common.Address]int64, len(loans))
 		for i, l := range loans {
 			ids[common.BytesToAddress(l.LoanAddress)] = int64(40 + i)
@@ -197,8 +197,8 @@ func (m *mockRepo) SaveLoanCollaterals(ctx context.Context, tx pgx.Tx, collatera
 	return m.SaveLoanCollateralsFn(ctx, tx, collaterals)
 }
 
-func (m *mockRepo) UpsertFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
-	return m.UpsertFixedTermLoansFn(ctx, tx, loans)
+func (m *mockRepo) RecordFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
+	return m.RecordFixedTermLoansFn(ctx, tx, loans)
 }
 
 func (m *mockRepo) SaveFixedTermLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) error {
@@ -508,11 +508,11 @@ func TestSync_HappyPath(t *testing.T) {
 
 	// Loan meta maps field-for-field into the registry entity; the loan
 	// without API meta keeps a nil meta.
-	if len(repo.upsertedLoans) != 3 {
-		t.Fatalf("upserted loans = %d, want 3", len(repo.upsertedLoans))
+	if len(repo.recordedLoans) != 3 {
+		t.Fatalf("recorded loans = %d, want 3", len(repo.recordedLoans))
 	}
 	metaByAddr := map[common.Address]*maple.LoanMeta{}
-	for _, l := range repo.upsertedLoans {
+	for _, l := range repo.recordedLoans {
 		metaByAddr[common.BytesToAddress(l.LoanAddress)] = l.LoanMeta
 	}
 	wantMeta := maple.LoanMeta{Type: "amm", DexName: "Uniswap"}
@@ -537,16 +537,16 @@ func TestSync_HappyPath(t *testing.T) {
 		t.Errorf("asset 0 = %+v, want USDC/6", gotAssets[0])
 	}
 	// GraphQL data has no block context: the block must be nil so the shared
-	// upsert preserves any existing on-chain block.
+	// record preserves any existing on-chain block.
 	if gotAssets[0].CreatedAtBlock != nil || gotAssets[1].CreatedAtBlock != nil {
 		t.Errorf("asset CreatedAtBlock = %v/%v, want nil/nil", gotAssets[0].CreatedAtBlock, gotAssets[1].CreatedAtBlock)
 	}
-	if len(repo.upsertedPools) != 2 {
-		t.Fatalf("upserted pools = %d, want 2", len(repo.upsertedPools))
+	if len(repo.recordedPools) != 2 {
+		t.Fatalf("recorded pools = %d, want 2", len(repo.recordedPools))
 	}
-	if repo.upsertedPools[0].AssetTokenID != 500 || repo.upsertedPools[1].AssetTokenID != 501 {
+	if repo.recordedPools[0].AssetTokenID != 500 || repo.recordedPools[1].AssetTokenID != 501 {
 		t.Errorf("pool asset token ids = %d/%d, want 500/501",
-			repo.upsertedPools[0].AssetTokenID, repo.upsertedPools[1].AssetTokenID)
+			repo.recordedPools[0].AssetTokenID, repo.recordedPools[1].AssetTokenID)
 	}
 
 	// Borrower resolution: one call, two distinct borrowers (0xa0 deduped).
@@ -1008,12 +1008,12 @@ func TestSync_SharedAssetIsDeduplicated(t *testing.T) {
 	if len(repo.assetTokenCalls) != 1 || len(repo.assetTokenCalls[0]) != 1 {
 		t.Fatalf("asset token calls = %v, want one call with one asset", repo.assetTokenCalls)
 	}
-	if len(repo.upsertedPools) != 2 {
-		t.Fatalf("upserted pools = %d, want 2", len(repo.upsertedPools))
+	if len(repo.recordedPools) != 2 {
+		t.Fatalf("recorded pools = %d, want 2", len(repo.recordedPools))
 	}
-	if repo.upsertedPools[0].AssetTokenID != 500 || repo.upsertedPools[1].AssetTokenID != 500 {
+	if repo.recordedPools[0].AssetTokenID != 500 || repo.recordedPools[1].AssetTokenID != 500 {
 		t.Errorf("pool asset token ids = %d/%d, want 500/500",
-			repo.upsertedPools[0].AssetTokenID, repo.upsertedPools[1].AssetTokenID)
+			repo.recordedPools[0].AssetTokenID, repo.recordedPools[1].AssetTokenID)
 	}
 }
 
@@ -1162,16 +1162,16 @@ func TestSync_SaveErrorsPropagate(t *testing.T) {
 	}
 }
 
-func TestSync_UpsertErrorsPropagate(t *testing.T) {
+func TestSync_RegistryWriteErrorsPropagate(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(r *mockRepo)
 	}{
 		{
-			name: "pool upsert fails",
+			name: "pool record fails",
 			mutate: func(r *mockRepo) {
 				r.RecordPoolsFn = func(context.Context, pgx.Tx, time.Time, []*maple.Pool) (map[common.Address]int64, error) {
-					return nil, errors.New("upsert failed")
+					return nil, errors.New("write failed")
 				}
 			},
 		},
@@ -1179,7 +1179,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 			name: "asset token upsert fails",
 			mutate: func(r *mockRepo) {
 				r.tokenRepo.GetOrCreateTokensFn = func(context.Context, pgx.Tx, []outbound.TokenInput) (map[common.Address]int64, error) {
-					return nil, errors.New("upsert failed")
+					return nil, errors.New("write failed")
 				}
 			},
 		},
@@ -1187,23 +1187,23 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 			name: "borrower upsert fails",
 			mutate: func(r *mockRepo) {
 				r.userRepo.GetOrCreateUsersFn = func(context.Context, pgx.Tx, []entity.User) (map[common.Address]int64, error) {
-					return nil, errors.New("upsert failed")
+					return nil, errors.New("write failed")
 				}
 			},
 		},
 		{
-			name: "loan upsert fails",
+			name: "loan record fails",
 			mutate: func(r *mockRepo) {
 				r.RecordLoansFn = func(context.Context, pgx.Tx, time.Time, []*maple.Loan) (map[common.Address]int64, error) {
-					return nil, errors.New("upsert failed")
+					return nil, errors.New("write failed")
 				}
 			},
 		},
 		{
-			name: "strategy upsert fails",
+			name: "strategy record fails",
 			mutate: func(r *mockRepo) {
 				r.RecordSkyStrategiesFn = func(context.Context, pgx.Tx, time.Time, []*maple.SkyStrategy) (map[common.Address]int64, error) {
-					return nil, errors.New("upsert failed")
+					return nil, errors.New("write failed")
 				}
 			},
 		},
@@ -1219,7 +1219,7 @@ func TestSync_UpsertErrorsPropagate(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), "upsert failed") {
+			if !strings.Contains(err.Error(), "write failed") {
 				t.Errorf("error = %q", err.Error())
 			}
 		})
@@ -1503,8 +1503,8 @@ func TestSync_FixedTermLoansHappyPath(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 
-	if len(repo.upsertedFTLLoans) != 2 {
-		t.Fatalf("upserted ftl loans = %d, want 2", len(repo.upsertedFTLLoans))
+	if len(repo.recordedFTLLoans) != 2 {
+		t.Fatalf("recorded ftl loans = %d, want 2", len(repo.recordedFTLLoans))
 	}
 	if len(repo.savedFTLStates) != 2 {
 		t.Fatalf("ftl states = %d, want 2", len(repo.savedFTLStates))
@@ -1536,7 +1536,7 @@ func TestSync_FixedTermLoansHappyPath(t *testing.T) {
 
 	// Each registry entity carries the ids mapped from ITS pool/borrower/tokens.
 	entByAddr := map[common.Address]*maple.FTLLoan{}
-	for _, l := range repo.upsertedFTLLoans {
+	for _, l := range repo.recordedFTLLoans {
 		entByAddr[common.BytesToAddress(l.LoanAddress)] = l
 	}
 	first := entByAddr[addr(0x70)]
@@ -1592,8 +1592,8 @@ func TestSync_FixedTermLoansEmptyIsInfoNotError(t *testing.T) {
 	if !client.ftlLoansCalled {
 		t.Error("FTL fetch must still run")
 	}
-	if len(repo.upsertedFTLLoans) != 0 || len(repo.savedFTLStates) != 0 {
-		t.Errorf("ftl writes = %d/%d, want 0/0 for the dormant book", len(repo.upsertedFTLLoans), len(repo.savedFTLStates))
+	if len(repo.recordedFTLLoans) != 0 || len(repo.savedFTLStates) != 0 {
+		t.Errorf("ftl writes = %d/%d, want 0/0 for the dormant book", len(repo.recordedFTLLoans), len(repo.savedFTLStates))
 	}
 	// Only the pools and loans phases resolve tokens/borrowers; the empty FTL
 	// phase adds no calls.
@@ -1695,10 +1695,10 @@ func TestSync_FixedTermLoanErrorsPropagate(t *testing.T) {
 		mutate func(r *mockRepo)
 	}{
 		{
-			name: "ftl upsert fails",
+			name: "ftl record fails",
 			mutate: func(r *mockRepo) {
-				r.UpsertFixedTermLoansFn = func(context.Context, pgx.Tx, []*maple.FTLLoan) (map[common.Address]int64, error) {
-					return nil, errors.New("ftl upsert failed")
+				r.RecordFixedTermLoansFn = func(context.Context, pgx.Tx, []*maple.FTLLoan) (map[common.Address]int64, error) {
+					return nil, errors.New("ftl record failed")
 				}
 			},
 		},

@@ -16,8 +16,8 @@ import (
 // standalone registry read. Borrower users and pool asset tokens are upserted
 // through the shared UserRepository/TokenRepository, not this port.
 //
-// Registry upserts (pools, loans, strategies) return address -> database-id
-// maps and resolve ids even when the row already exists
+// Registry records (pools, loans, strategies, fixed-term loans) return
+// address -> database-id maps and resolve ids even when the row already exists
 // (ON CONFLICT DO UPDATE ... RETURNING id).
 //
 // State saves use ON CONFLICT DO NOTHING on the
@@ -59,13 +59,14 @@ type MapleGraphQLRepository interface {
 	// SaveLoanStates inserts loan state snapshots.
 	SaveLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.LoanState) error
 
-	// UpsertFixedTermLoans upserts fixed-term loan registry rows (maple_pool_id,
+	// RecordFixedTermLoans registers fixed-term loan identity rows (maple_pool_id,
 	// borrower_user_id, collateral_token_id and funds_token_id already resolved
 	// by the service) and returns loan address -> maple_ftl_loan.id. Those four
 	// FK columns are immutable per loan: nothing is refreshed on conflict, and
 	// implementations must fail when any stored value differs from the incoming
-	// one.
-	UpsertFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error)
+	// one. The FTL registry has no editorial attributes, so it appends no
+	// satellite row (no syncedAt parameter, unlike RecordPools/RecordLoans).
+	RecordFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error)
 
 	// SaveFixedTermLoanStates inserts fixed-term loan state snapshots.
 	SaveFixedTermLoanStates(ctx context.Context, tx pgx.Tx, states []*maple.FTLLoanState) error

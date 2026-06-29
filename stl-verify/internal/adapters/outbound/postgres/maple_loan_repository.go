@@ -359,14 +359,16 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	return r.execInsert(ctx, tx, "maple_loan_collateral", sb.String(), args)
 }
 
-// UpsertFixedTermLoans upserts fixed-term loan registry rows and returns loan
+// RecordFixedTermLoans registers fixed-term loan identity rows and returns loan
 // address -> maple_ftl_loan.id. maple_pool_id, borrower_user_id,
 // collateral_token_id and funds_token_id are immutable per loan (fundingPool
-// and the underlying assets are fixed at origination), so the upsert refreshes
-// nothing on conflict (the no-op DO UPDATE keeps RETURNING yielding the stored
-// row) and the scan fails the run if any stored value differs from the incoming
-// one. Refinance-mutable terms live in maple_ftl_loan_state, not here.
-func (r *MapleGraphQLRepository) UpsertFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
+// and the underlying assets are fixed at origination), so the hub insert
+// refreshes nothing on conflict (the no-op DO UPDATE keeps RETURNING yielding
+// the stored row) and the scan fails the run if any stored value differs from
+// the incoming one. The FTL registry has no editorial attributes, so unlike
+// RecordPools/RecordLoans it appends no satellite row. Refinance-mutable terms
+// live in maple_ftl_loan_state, not here.
+func (r *MapleGraphQLRepository) RecordFixedTermLoans(ctx context.Context, tx pgx.Tx, loans []*maple.FTLLoan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
 	}
@@ -391,7 +393,7 @@ func (r *MapleGraphQLRepository) UpsertFixedTermLoans(ctx context.Context, tx pg
 			addr := common.BytesToAddress(l.LoanAddress)
 			var id, storedPoolID, storedBorrower, storedCollateralToken, storedFundsToken int64
 			if err := row.Scan(&id, &storedPoolID, &storedBorrower, &storedCollateralToken, &storedFundsToken); err != nil {
-				return common.Address{}, 0, fmt.Errorf("upserting maple ftl loan %s: %w", addr, err)
+				return common.Address{}, 0, fmt.Errorf("recording maple ftl loan %s: %w", addr, err)
 			}
 			var mismatches []string
 			for _, c := range []struct {

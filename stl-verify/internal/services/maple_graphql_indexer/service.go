@@ -636,9 +636,9 @@ func (s *Service) syncFixedTermLoans(ctx context.Context, syncedAt time.Time, po
 			return err
 		}
 
-		loanIDs, err := s.repo.UpsertFixedTermLoans(ctx, tx, loanEntities)
+		loanIDs, err := s.repo.RecordFixedTermLoans(ctx, tx, loanEntities)
 		if err != nil {
-			return fmt.Errorf("upserting fixed-term loans: %w", err)
+			return fmt.Errorf("recording fixed-term loans: %w", err)
 		}
 
 		states, err := buildFTLLoanStates(loans, loanIDs, syncedAt)
@@ -702,7 +702,7 @@ func buildFTLLoanStates(loans []outbound.MapleFixedTermLoan, loanIDs map[common.
 	for _, l := range loans {
 		loanID, ok := loanIDs[l.LoanID]
 		if !ok {
-			return nil, fmt.Errorf("fixed-term loan %s missing from upsert result", lowerHex(l.LoanID))
+			return nil, fmt.Errorf("fixed-term loan %s missing from record result", lowerHex(l.LoanID))
 		}
 		state, err := maple.NewFTLLoanState(maple.FTLLoanStateParams{
 			LoanID:              loanID,
