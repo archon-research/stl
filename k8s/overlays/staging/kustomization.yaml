@@ -147,7 +147,7 @@ images:
     # One image shared by every per-exchange order book pod (coinbase/okx/kraken),
     # selected at runtime via the EXCHANGE env var.
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cex-orderbook-indexer
-    newTag: "52845f5a1f54011206909f436b5750b94f8e2329"
+    newTag: "ecd426e8459df38e616cb98bb29e48a57eb769cd"
   - name: watcher-data-validator
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
     newTag: "watcher-data-validator-68c79ebe"
