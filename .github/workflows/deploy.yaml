@@ -315,6 +315,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Fail closed on a malformed deploy SHA before we touch main.
+          if [[ ! "$DEPLOY_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::DEPLOY_SHA must be a 40-char lowercase git SHA: ${DEPLOY_SHA}"
+            exit 1
+          fi
+
           MAX_RETRIES=3
           for attempt in $(seq 1 "$MAX_RETRIES"); do
             echo "Attempt ${attempt}/${MAX_RETRIES}"
@@ -353,13 +359,28 @@ jobs:
               exit 1
             fi
 
-            # GUARD 3: every image must resolve to our prod ECR account.
-            BAD_IMAGES=$(grep -E '^\s*newName:' "$KUSTOMIZATION" \
-              | grep -Fv "$PROD_ECR_PREFIX" \
-              || true)
+            # GUARD 3: every image name must START WITH our prod ECR account.
+            # Anchored (not substring) so a name that merely embeds the prefix
+            # elsewhere (e.g. evil.example/030797...) cannot pass.
+            BAD_IMAGES=$(awk -v p="$PROD_ECR_PREFIX" '
+              /^[[:space:]]*newName:/ {
+                v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
+                if (index(v,p)!=1) print
+              }' "$KUSTOMIZATION")
             if [ -n "$BAD_IMAGES" ]; then
               echo "::error::Prod kustomization references images outside the prod ECR account:"
               echo "$BAD_IMAGES"
+              exit 1
+            fi
+
+            # GUARD 4: every tag must be (optional name prefix +) exactly this
+            # deploy SHA — fail closed on any unexpected tag value.
+            BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+              | grep -Ev "^[[:space:]]*newTag:[[:space:]]*\"([a-z0-9]+-)*${DEPLOY_SHA}\"[[:space:]]*$" \
+              || true)
+            if [ -n "$BAD_TAGS" ]; then
+              echo "::error::Prod tags do not all target ${DEPLOY_SHA}:"
+              echo "$BAD_TAGS"
               exit 1
             fi
 
@@ -647,10 +668,26 @@ jobs:
             exit 1
           fi
 
-          BAD_IMAGES=$(grep -E '^\s*newName:' "$KUSTOMIZATION" | grep -Fv "$PROD_ECR_PREFIX" || true)
+          # Anchored: image name must START WITH the prod ECR prefix, not merely
+          # contain it. DEPLOY_SHA here is the commit revision, not the image
+          # tag, so tags are validated by shape (optional prefix + 40-hex sha).
+          BAD_IMAGES=$(awk -v p="$PROD_ECR_PREFIX" '
+            /^[[:space:]]*newName:/ {
+              v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
+              if (index(v,p)!=1) print
+            }' "$KUSTOMIZATION")
           if [ -n "$BAD_IMAGES" ]; then
             echo "::error::Prod kustomization references images outside the prod ECR account:"
             echo "$BAD_IMAGES"
+            exit 1
+          fi
+
+          BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+            | grep -Ev '^[[:space:]]*newTag:[[:space:]]*"([a-z0-9]+-)*[a-f0-9]{40}"[[:space:]]*$' \
+            || true)
+          if [ -n "$BAD_TAGS" ]; then
+            echo "::error::Prod kustomization has malformed image tags:"
+            echo "$BAD_TAGS"
             exit 1
           fi
           echo "Re-validation passed: ${DEPLOY_SHA} is a prod-ECR tag-only bump."

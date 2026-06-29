@@ -51,9 +51,12 @@ runs:
           });
 
           // Filter to the requested environment + state, then take the most recent.
-          const matches = reviews
-            .filter(r => r.state === targetState)
-            .filter(r => !r.environment || r.environment.name === targetEnv);
+          // The approvals payload exposes an `environments` array (not a scalar
+          // `environment`), so match against that.
+          const matches = reviews.filter(r =>
+            r.state === targetState &&
+            (r.environments || []).some(e => e.name === targetEnv)
+          );
 
           if (matches.length === 0) {
             core.setOutput('found', 'false');
