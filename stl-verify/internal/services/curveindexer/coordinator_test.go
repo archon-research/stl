@@ -27,43 +27,40 @@ import (
 // Fakes
 // ---------------------------------------------------------------------------
 
-// fakeCurveRepo counts Save* calls; it ignores the pgx.Tx (nil is fine). The
-// state-save methods report stateRowsReturn rows affected so tests can simulate
-// an idempotent no-op (ON CONFLICT DO NOTHING -> 0 rows) on redelivery; a zero
-// value left by the struct literal means newTestCoordinator must set it to 1.
+// fakeCurveRepo counts saves via SaveBlock; it ignores the pgx.Tx (nil is fine).
+// stateRowsReturn controls whether SaveBlock returns 0 (simulate ON CONFLICT DO NOTHING
+// no-op) or the actual count; a zero value means newTestCoordinator must set it to 1.
 type fakeCurveRepo struct {
+	lastWrites      outbound.BlockWrites
+	snapshotPoolIDs []int64
+	stateRowsReturn int64
+	// computed counts for test assertions
 	swapSaves       int
 	liquiditySaves  int
 	stableswapSaves int
 	cryptoswapSaves int
-	snapshotPoolIDs []int64
-	stateRowsReturn int64
 }
 
 func (r *fakeCurveRepo) LoadPools(_ context.Context, _ int64) ([]outbound.CurvePoolRow, error) {
 	return nil, nil
 }
 
-func (r *fakeCurveRepo) SaveSwap(_ context.Context, _ pgx.Tx, _ outbound.SwapInput) error {
-	r.swapSaves++
-	return nil
-}
-
-func (r *fakeCurveRepo) SaveLiquidityEvent(_ context.Context, _ pgx.Tx, _ outbound.LiquidityInput) error {
-	r.liquiditySaves++
-	return nil
-}
-
-func (r *fakeCurveRepo) SaveStableswapState(_ context.Context, _ pgx.Tx, s *entity.CurveStableswapState) (int64, error) {
-	r.stableswapSaves++
-	r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
-	return r.stateRowsReturn, nil
-}
-
-func (r *fakeCurveRepo) SaveCryptoswapState(_ context.Context, _ pgx.Tx, s *entity.CurveCryptoswapState) (int64, error) {
-	r.cryptoswapSaves++
-	r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
-	return r.stateRowsReturn, nil
+func (r *fakeCurveRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.BlockWrites) (int64, error) {
+	r.lastWrites = w
+	r.swapSaves += len(w.Swaps)
+	r.liquiditySaves += len(w.Liquidity)
+	r.stableswapSaves += len(w.StableStates)
+	r.cryptoswapSaves += len(w.CryptoStates)
+	for _, s := range w.StableStates {
+		r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
+	}
+	for _, s := range w.CryptoStates {
+		r.snapshotPoolIDs = append(r.snapshotPoolIDs, s.CurvePoolID)
+	}
+	if r.stateRowsReturn == 0 {
+		return 0, nil
+	}
+	return int64(len(w.StableStates) + len(w.CryptoStates)), nil
 }
 
 // fakeTxManager calls fn with a nil pgx.Tx; sufficient since fakeCurveRepo
@@ -111,13 +108,22 @@ func (r *fakeEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, _ *entity.Protoco
 	return nil
 }
 
-// countingEventRepo counts SaveEvent calls so capture-net tests can assert forwarding.
+func (r *fakeEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, _ []*entity.ProtocolEvent) error {
+	return nil
+}
+
+// countingEventRepo counts saves so capture-net tests can assert forwarding.
 type countingEventRepo struct {
 	saves int
 }
 
 func (r *countingEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error {
 	r.saves++
+	return nil
+}
+
+func (r *countingEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, evts []*entity.ProtocolEvent) error {
+	r.saves += len(evts)
 	return nil
 }
 

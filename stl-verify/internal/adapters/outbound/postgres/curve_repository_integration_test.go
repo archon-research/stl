@@ -147,9 +147,9 @@ func TestCurveRepository_SaveStableswapState_Idempotent(t *testing.T) {
 			t.Fatalf("begin tx: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		n, err := repo.SaveStableswapState(ctx, tx, st)
+		n, err := repo.SaveBlock(ctx, tx, outbound.BlockWrites{StableStates: []*entity.CurveStableswapState{st}})
 		if err != nil {
-			t.Fatalf("SaveStableswapState: %v", err)
+			t.Fatalf("SaveBlock: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
@@ -212,9 +212,9 @@ func TestCurveRepository_SaveCryptoswapState_RoundTrip(t *testing.T) {
 		t.Fatalf("begin tx: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	n, err := repo.SaveCryptoswapState(ctx, tx, st)
+	n, err := repo.SaveBlock(ctx, tx, outbound.BlockWrites{CryptoStates: []*entity.CurveCryptoswapState{st}})
 	if err != nil {
-		t.Fatalf("SaveCryptoswapState: %v", err)
+		t.Fatalf("SaveBlock: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("rows affected = %d, want 1", n)
@@ -284,8 +284,8 @@ func TestCurveRepository_SaveSwap_Idempotent(t *testing.T) {
 			t.Fatalf("begin tx: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		if err := repo.SaveSwap(ctx, tx, in); err != nil {
-			t.Fatalf("SaveSwap: %v", err)
+		if _, err := repo.SaveBlock(ctx, tx, outbound.BlockWrites{Swaps: []outbound.SwapInput{in}}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
@@ -337,8 +337,8 @@ func TestCurveRepository_SaveLiquidityEvent_Idempotent(t *testing.T) {
 			t.Fatalf("begin tx: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		if err := repo.SaveLiquidityEvent(ctx, tx, in); err != nil {
-			t.Fatalf("SaveLiquidityEvent: %v", err)
+		if _, err := repo.SaveBlock(ctx, tx, outbound.BlockWrites{Liquidity: []outbound.LiquidityInput{in}}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)

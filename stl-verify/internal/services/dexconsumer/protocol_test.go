@@ -51,6 +51,14 @@ func (r *fakeEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, e *entity.Protoco
 	return nil
 }
 
+func (r *fakeEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, evts []*entity.ProtocolEvent) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.saved = append(r.saved, evts...)
+	return nil
+}
+
 // fakeTxManager runs the function with a nil tx (the fakes ignore it), standing
 // in for the committed transaction ResolveProtocolID opens.
 type fakeTxManager struct{ err error }

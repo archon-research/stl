@@ -58,24 +58,19 @@ type LiquidityInput struct {
 	TokenSupply    *big.Int   // nullable
 }
 
+// BlockWrites groups all of a block's curve-table rows for a single batched persist.
+type BlockWrites struct {
+	Swaps        []SwapInput
+	Liquidity    []LiquidityInput
+	StableStates []*entity.CurveStableswapState
+	CryptoStates []*entity.CurveCryptoswapState
+}
+
 // CurveRepository defines the interface for Curve DEX data persistence.
 type CurveRepository interface {
-	// LoadPools returns all pools for a chain with their coin decimals in coin_index order.
 	LoadPools(ctx context.Context, chainID int64) ([]CurvePoolRow, error)
-
-	// SaveSwap persists a Curve exchange event within an external transaction.
-	SaveSwap(ctx context.Context, tx pgx.Tx, in SwapInput) error
-
-	// SaveLiquidityEvent persists a Curve add/remove liquidity event within an external transaction.
-	SaveLiquidityEvent(ctx context.Context, tx pgx.Tx, in LiquidityInput) error
-
-	// SaveStableswapState persists a stableswap pool state snapshot within an
-	// external transaction, returning the number of rows actually written (0 when
-	// the ON CONFLICT DO NOTHING upsert is a no-op, e.g. an SQS redelivery).
-	SaveStableswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveStableswapState) (int64, error)
-
-	// SaveCryptoswapState persists a cryptoswap pool state snapshot within an
-	// external transaction, returning the number of rows actually written (0 when
-	// the ON CONFLICT DO NOTHING upsert is a no-op, e.g. an SQS redelivery).
-	SaveCryptoswapState(ctx context.Context, tx pgx.Tx, s *entity.CurveCryptoswapState) (int64, error)
+	// SaveBlock persists all of a block's curve rows in one pgx.Batch within tx and
+	// returns the number of state rows actually inserted (ON CONFLICT DO NOTHING means
+	// a redelivery returns 0), for the curve_state_rows_written_total metric.
+	SaveBlock(ctx context.Context, tx pgx.Tx, w BlockWrites) (stateRows int64, err error)
 }

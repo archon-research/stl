@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
@@ -182,54 +183,64 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 			return nil
 		}
 
+		// Build DB inputs before opening the transaction so conversion errors fail
+		// fast without touching the connection pool.
+		swapIns := make([]outbound.SwapInput, 0, len(swaps))
+		for _, s := range swaps {
+			swapIns = append(swapIns, toSwapInput(s, bn, ver, ts))
+		}
+
+		liqIns := make([]outbound.LiquidityInput, 0, len(liquidity))
+		for _, l := range liquidity {
+			liqIns = append(liqIns, toLiquidityInput(l, bn, ver, ts))
+		}
+
+		var stableStates []*entity.CurveStableswapState
+		var cryptoStates []*entity.CurveCryptoswapState
+		for _, snap := range snapshots {
+			switch {
+			case snap.Stableswap != nil:
+				stableStates = append(stableStates, snap.Stableswap)
+			case snap.Cryptoswap != nil:
+				cryptoStates = append(cryptoStates, snap.Cryptoswap)
+			}
+		}
+
+		capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(captured))
+		for _, cap := range captured {
+			capturedIns = append(capturedIns, dexconsumer.ProtocolEventInput{
+				ContractAddress: cap.Pool.Address,
+				ChainID:         c.chainID,
+				BlockNumber:     bn,
+				BlockVersion:    ver,
+				BlockTimestamp:  ts,
+				TxHash:          cap.TxHash,
+				LogIndex:        cap.LogIndex,
+				EventName:       cap.EventName,
+				Payload:         cap.Payload,
+			})
+		}
+
 		var stateRows int64
 		err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-			for _, s := range swaps {
-				if err := c.repo.SaveSwap(ctx, tx, toSwapInput(s, bn, ver, ts)); err != nil {
-					return fmt.Errorf("saving swap block %d log %d: %w", bn, s.LogIndex, err)
-				}
+			var txErr error
+			stateRows, txErr = c.repo.SaveBlock(ctx, tx, outbound.BlockWrites{
+				Swaps:        swapIns,
+				Liquidity:    liqIns,
+				StableStates: stableStates,
+				CryptoStates: cryptoStates,
+			})
+			if txErr != nil {
+				c.telemetry.RecordError(ctx, "persistBlock", txErr)
+				return fmt.Errorf("persisting curve block %d: %w", bn, txErr)
 			}
-			for _, l := range liquidity {
-				if err := c.repo.SaveLiquidityEvent(ctx, tx, toLiquidityInput(l, bn, ver, ts)); err != nil {
-					return fmt.Errorf("saving liquidity event block %d log %d: %w", bn, l.LogIndex, err)
-				}
-			}
-			for _, cap := range captured {
-				in := dexconsumer.ProtocolEventInput{
-					ContractAddress: cap.Pool.Address,
-					ChainID:         c.chainID,
-					BlockNumber:     bn,
-					BlockVersion:    ver,
-					BlockTimestamp:  ts,
-					TxHash:          cap.TxHash,
-					LogIndex:        cap.LogIndex,
-					EventName:       cap.EventName,
-					Payload:         cap.Payload,
-				}
-				if err := c.eventWriter.Save(ctx, tx, in); err != nil {
-					return fmt.Errorf("saving captured event block %d log %d: %w", bn, cap.LogIndex, err)
-				}
-			}
-			for _, snap := range snapshots {
-				switch {
-				case snap.Stableswap != nil:
-					n, err := c.repo.SaveStableswapState(ctx, tx, snap.Stableswap)
-					if err != nil {
-						return fmt.Errorf("saving stableswap state pool %s block %d: %w", snap.Pool.Address, bn, err)
-					}
-					stateRows += n
-				case snap.Cryptoswap != nil:
-					n, err := c.repo.SaveCryptoswapState(ctx, tx, snap.Cryptoswap)
-					if err != nil {
-						return fmt.Errorf("saving cryptoswap state pool %s block %d: %w", snap.Pool.Address, bn, err)
-					}
-					stateRows += n
-				}
+			if txErr := c.eventWriter.SaveBatch(ctx, tx, capturedIns); txErr != nil {
+				c.telemetry.RecordError(ctx, "persistBlock", txErr)
+				return fmt.Errorf("persisting captured events block %d: %w", bn, txErr)
 			}
 			return nil
 		})
 		if err != nil {
-			c.telemetry.RecordError(ctx, "persistBlock", err)
 			return err
 		}
 

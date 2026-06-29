@@ -100,3 +100,34 @@ func (w *ProtocolEventWriter) Save(ctx context.Context, tx pgx.Tx, in ProtocolEv
 	}
 	return nil
 }
+
+// SaveBatch builds validated ProtocolEvents for each input and persists them
+// in a single batch within tx. Empty input returns nil.
+func (w *ProtocolEventWriter) SaveBatch(ctx context.Context, tx pgx.Tx, ins []ProtocolEventInput) error {
+	if len(ins) == 0 {
+		return nil
+	}
+	evts := make([]*entity.ProtocolEvent, 0, len(ins))
+	for _, in := range ins {
+		evt, err := entity.NewProtocolEvent(
+			int(in.ChainID),
+			w.protocolID,
+			in.BlockNumber,
+			in.BlockVersion,
+			in.TxHash.Bytes(),
+			int(in.LogIndex),
+			in.ContractAddress.Bytes(),
+			in.EventName,
+			in.Payload,
+			in.BlockTimestamp,
+		)
+		if err != nil {
+			return fmt.Errorf("building protocol_event: %w", err)
+		}
+		evts = append(evts, evt)
+	}
+	if err := w.eventRepo.SaveBatch(ctx, tx, evts); err != nil {
+		return fmt.Errorf("saving protocol_events: %w", err)
+	}
+	return nil
+}
