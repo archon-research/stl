@@ -979,7 +979,7 @@ db-migrate:
 		exit 1; \
 	fi
 	@echo "==> Running database migrations..."
-	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate
+	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/util/migrate
 	@echo "==> Migrations complete"
 
 # Set database user passwords from Secrets Manager
@@ -1832,7 +1832,7 @@ kind-infra-ci: kind-create
 	$(MAKE) kind-config kind-infra
 	@echo "==> Running migrations..."
 	DATABASE_URL=postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable \
-	  go run ./cmd/migrate/...
+	  go run ./cmd/util/migrate/...
 	@echo "==> CI infra ready"
 
 kind-ci-up: kind-infra-ci
