@@ -684,7 +684,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: archon-research/github-actions
-          ref: 8a5c402f6fe5dce2b45e24ca0086a1c0467ee878 # argocd-sync (github-actions #29) — REPIN to merge SHA
+          ref: aa058240b17bec94388285d36bb43989c0f9382b # argocd-sync (github-actions #29)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
