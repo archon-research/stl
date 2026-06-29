@@ -378,6 +378,56 @@ func persistFailureCount(t *testing.T, reader sdkmetric.Reader) int64 {
 	return 0
 }
 
+// TestPersistRecordsLatency verifies a successful persist records a data point on
+// orderbook.persist.duration_seconds — the histogram the latency alert reads.
+func TestPersistRecordsLatency(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	p := &fakeProvider{name: "test-exchange", updates: make(chan entity.OrderbookUpdate, 4)}
+	r := newFakeRepo()
+	svc := newTestService(t, Config{Symbols: []string{"BTC-USD"}, Interval: 15 * time.Millisecond, MeterProvider: mp}, p, r)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Stop() })
+	p.updates <- bookWith("BTC-USD", map[string]string{"100": "1"}, map[string]string{"101": "2"}, time.Time{})
+	waitForSaves(t, r, 1)
+	_ = svc.Stop() // blocks until the loop drains so the record has happened
+
+	if got := persistDurationCount(t, reader); got == 0 {
+		t.Fatal("orderbook.persist.duration_seconds recorded 0 data points, want >= 1")
+	}
+}
+
+// persistDurationCount collects the manual reader and sums the persist-duration
+// histogram's observation count.
+func persistDurationCount(t *testing.T, reader sdkmetric.Reader) uint64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "orderbook.persist.duration_seconds" {
+				continue
+			}
+			h, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("metric is %T, want metricdata.Histogram[float64]", m.Data)
+			}
+			var n uint64
+			for _, dp := range h.DataPoints {
+				n += dp.Count
+			}
+			return n
+		}
+	}
+	t.Fatal("orderbook.persist.duration_seconds not recorded")
+	return 0
+}
+
 // TestStaleBookSkipped: a symbol whose last provider update predates the
 // staleness window must NOT be re-persisted (it would flat-line the series during
 // an outage), while a fresh symbol in the same tick still is.

@@ -380,6 +380,39 @@ updates resume (see StreamStalled recovery check).
 
 ---
 
+## VectorCexOrderbookPersistLatencyHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+p99 latency of a snapshot batch write to TimescaleDB exceeded 1s over 10m. A
+top-N JSONB insert is normally single-digit ms, so this means the DB or the
+connection pool is degraded. The risk: a write slower than the snapshot interval
+(default 5s) makes ticks pile up and drop — this is the precursor to
+`VectorCexOrderbookPersistFailing`, not yet an outage.
+
+### First checks (≤5 min)
+
+1. **Which exchange/pod** — `histogram_quantile(0.99, sum by (exchange, le) (rate(orderbook_persist_duration_seconds_bucket[10m])))`.
+2. **TimescaleDB health** — connection pool saturation, CPU, lock contention, or
+   replication lag on the Postgres dashboard. Latency here is almost always
+   downstream DB pressure, not the indexer.
+3. **Correlate** — is another heavy writer (a backfill, another indexer) loading
+   the same DB right now?
+
+### Common causes
+
+- DB pool saturated / under load → restart is a stopgap; longer-term raise the
+  pool limit or the DB instance size.
+- A slow/locking migration or compaction job running concurrently.
+
+### Verify recovery
+
+`histogram_quantile(0.99, sum by (exchange, le) (rate(orderbook_persist_duration_seconds_bucket[10m]))) < 1`.
+
+---
+
 ## VectorRPCRetryRatioHigh
 
 **Severity:** warning · **For:** 15m

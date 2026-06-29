@@ -592,6 +592,37 @@ groups:
             cause (process down, not a metrics-pipeline issue).
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookdown
 
+      - alert: VectorCexOrderbookPersistLatencyHigh
+        # p99 batch-write latency to TimescaleDB. A top-N JSONB insert is normally
+        # single-digit ms; sustained >1s means the DB/pool is degraded and writes
+        # risk overrunning the snapshot interval (default 5s) and dropping ticks.
+        # Histogram orderbook.persist.duration_seconds. Threshold is a pre-baseline
+        # estimate — tune off a few days of staging data (cf. the maple latency
+        # alert). Warning: a precursor to drops, not yet an outage.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (exchange, cluster, le) (
+              rate(orderbook_persist_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer p99 persist latency >1s on {{ $labels.exchange }}"
+          description: |
+            `cex-orderbook-indexer` for `{{ $labels.exchange }}` p99 snapshot
+            write latency is `{{ $value | printf "%.2fs" }}` over 10m. The DB or
+            connection pool is degraded; writes risk overrunning the snapshot
+            interval and dropping ticks before it escalates to persist failures.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookpersistlatencyhigh
+
   # =====================================================================
   # RPC transport (internal/pkg/rpchttp retry transport) — PR #505
   # =====================================================================

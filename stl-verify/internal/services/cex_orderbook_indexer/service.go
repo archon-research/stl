@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -66,6 +67,7 @@ type Service struct {
 	logger     *slog.Logger
 
 	persistFailures metric.Int64Counter
+	persistDuration metric.Float64Histogram
 	exchangeAttr    attribute.KeyValue
 
 	cancel context.CancelFunc
@@ -103,12 +105,22 @@ func NewService(cfg Config, provider outbound.OrderbookProvider, repo outbound.O
 	if mp == nil {
 		mp = otel.GetMeterProvider()
 	}
-	persistFailures, err := mp.Meter(instrumentationName).Int64Counter(
+	meter := mp.Meter(instrumentationName)
+	persistFailures, err := meter.Int64Counter(
 		"orderbook.persist.failures.total",
 		metric.WithDescription("Total order book snapshot persistence failures (one per failed tick batch)"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating persist-failures counter: %w", err)
+	}
+	persistDuration, err := meter.Float64Histogram(
+		"orderbook.persist.duration_seconds",
+		metric.WithDescription("Duration of a snapshot batch write to the repository, in seconds"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating persist-duration histogram: %w", err)
 	}
 
 	return &Service{
@@ -120,6 +132,7 @@ func NewService(cfg Config, provider outbound.OrderbookProvider, repo outbound.O
 		staleAfter:      staleAfter,
 		logger:          logger.With("component", "cex-orderbook-indexer", "exchange", provider.Name()),
 		persistFailures: persistFailures,
+		persistDuration: persistDuration,
 		exchangeAttr:    attribute.String("exchange", provider.Name()),
 	}, nil
 }
@@ -247,7 +260,10 @@ func (s *Service) persistTick(ctx context.Context, latest map[string]entity.Orde
 		return
 	}
 
-	if err := s.repo.Save(ctx, snapshots); err != nil {
+	start := time.Now()
+	err := s.repo.Save(ctx, snapshots)
+	s.persistDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(s.exchangeAttr))
+	if err != nil {
 		s.persistFailures.Add(context.Background(), 1, metric.WithAttributes(s.exchangeAttr))
 		s.logger.Error("failed to persist order book snapshots", "count", len(snapshots), "error", err)
 	}
