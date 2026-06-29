@@ -76,7 +76,7 @@ func (r *EventRepository) SaveBatch(ctx context.Context, tx pgx.Tx, evts []*enti
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil && err == nil {
-			err = closeErr
+			err = fmt.Errorf("closing protocol_event batch: %w", closeErr)
 		}
 	}()
 	for i := range evts {

@@ -316,7 +316,7 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
 		if closeErr := br.Close(); closeErr != nil && err == nil {
-			err = closeErr
+			err = fmt.Errorf("closing curve SaveBlock batch: %w", closeErr)
 		}
 	}()
 

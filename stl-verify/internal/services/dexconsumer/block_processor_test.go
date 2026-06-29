@@ -196,7 +196,9 @@ func TestBlockProcessor_RecordsTelemetryByStatus(t *testing.T) {
 	otel.SetMeterProvider(mp)
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prev)
-		_ = mp.Shutdown(context.Background())
+		if err := mp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown meter provider: %v", err)
+		}
 	})
 
 	tel, err := dextelemetry.NewTelemetry("curve", 1)
@@ -268,7 +270,9 @@ func TestBlockProcessor_RecordsErrorOperationLabel(t *testing.T) {
 	otel.SetMeterProvider(mp)
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prev)
-		_ = mp.Shutdown(context.Background())
+		if err := mp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown meter provider: %v", err)
+		}
 	})
 
 	tel, err := dextelemetry.NewTelemetry("curve", 1)

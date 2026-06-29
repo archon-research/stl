@@ -195,6 +195,69 @@ func TestProtocolEventWriter_InvalidEventIsRejected(t *testing.T) {
 	}
 }
 
+func TestProtocolEventWriter_SaveBatch_EmptyInputIsNoOp(t *testing.T) {
+	events := &fakeEventRepo{}
+	w := NewProtocolEventWriter(1, events)
+
+	if err := w.SaveBatch(context.Background(), nil, nil); err != nil {
+		t.Fatalf("SaveBatch(empty): %v", err)
+	}
+	if len(events.saved) != 0 {
+		t.Errorf("empty input persisted %d events, want 0", len(events.saved))
+	}
+}
+
+func TestProtocolEventWriter_SaveBatch_BuildsAndPersistsAll(t *testing.T) {
+	events := &fakeEventRepo{}
+	w := NewProtocolEventWriter(5, events)
+
+	in1 := validInput()
+	in2 := validInput()
+	in2.LogIndex = 1
+
+	if err := w.SaveBatch(context.Background(), nil, []ProtocolEventInput{in1, in2}); err != nil {
+		t.Fatalf("SaveBatch: %v", err)
+	}
+	if len(events.saved) != 2 {
+		t.Fatalf("saved %d events, want 2", len(events.saved))
+	}
+	if events.saved[0].ProtocolID != 5 {
+		t.Errorf("protocol id = %d, want 5", events.saved[0].ProtocolID)
+	}
+}
+
+func TestProtocolEventWriter_SaveBatch_InvalidEventIsRejected(t *testing.T) {
+	events := &fakeEventRepo{}
+	w := NewProtocolEventWriter(1, events)
+
+	bad := validInput()
+	bad.BlockTimestamp = time.Time{} // zero CreatedAt fails entity validation
+
+	err := w.SaveBatch(context.Background(), nil, []ProtocolEventInput{validInput(), bad})
+	if err == nil {
+		t.Fatal("expected error building an invalid protocol_event")
+	}
+	if !strings.Contains(err.Error(), "building protocol_event") {
+		t.Errorf("error %q should describe the event-build step", err)
+	}
+	if len(events.saved) != 0 {
+		t.Error("a batch containing an invalid event must persist nothing")
+	}
+}
+
+func TestProtocolEventWriter_SaveBatch_PropagatesRepoError(t *testing.T) {
+	sentinel := errors.New("batch insert failed")
+	w := NewProtocolEventWriter(1, &fakeEventRepo{err: sentinel})
+
+	err := w.SaveBatch(context.Background(), nil, []ProtocolEventInput{validInput()})
+	if err == nil {
+		t.Fatal("expected error when the repo SaveBatch fails")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error %v does not wrap the repo error", err)
+	}
+}
+
 func validInput() ProtocolEventInput {
 	return ProtocolEventInput{
 		ContractAddress: common.HexToAddress("0x2222222222222222222222222222222222222222"),
