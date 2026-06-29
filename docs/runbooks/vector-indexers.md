@@ -286,6 +286,63 @@ Maple API is degraded and a phase risks overrunning the 10m interval.
 
 ---
 
+## VectorRPCRetryRatioHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+For the labelled `service_name` and `server_address` (RPC host), more than 20%
+of RPC attempts over the last 10m were retries, measured by the shared
+`internal/pkg/rpchttp` retry transport (used by every `DialEthereum` caller:
+oracle / morpho / sparklend / prime / psm3 indexers, dex bootstrap, and the
+backfillers). The transport retries 429 / 5xx / network with capped exponential
+backoff and masks the failures as added latency, so this is the leading
+indicator of a throttle-driven latency tail — it typically precedes or
+accompanies a `Vector*IndexerRPCLatencyHigh` warning on the same chain.
+
+### First checks (≤5 min)
+
+1. **Break down by reason** — the single most useful query:
+   ```promql
+   sum by (reason) (rate(rpc_http_retries_total{k8s_namespace_name="vector", service_name="<svc>"}[10m]))
+   ```
+   - `reason="429"` → upstream **rate-limiting** (Alchemy compute-unit
+     throttling). The Alchemy key is shared across all workers and chains, so a
+     burst from any worker can throttle the whole account.
+   - `reason="5xx"` → transient provider **server errors**.
+   - `reason="network"` → connection resets / DNS / TLS / dial failures.
+2. **Confirm latency impact** — check the matching per-service RPC latency
+   metric (e.g. `oracle_rpc_duration_seconds` p99) and whether a
+   `Vector*IndexerRPCLatencyHigh` alert is firing on the same chain. A slow
+   trace also carries inline `rpc.retry` span events with the same labels.
+3. **Alchemy status / quota** — https://status.alchemy.com/ and the account's
+   compute-unit usage.
+
+### Common causes
+
+- **Account-wide CU throttling on the shared Alchemy key** (`reason="429"`):
+  cross-worker bursts exceed the per-second CU budget. The call itself is cheap;
+  the seconds come from our backoff. This is the shape behind the avalanche-c
+  oracle latency tail.
+- **Transient provider degradation** (`reason="5xx"`): wait for recovery.
+- **Network churn** (`reason="network"`): check pod egress / node connectivity
+  if localized to one pod.
+
+### What to do
+
+- Transient (ratio falls back under 20% within an interval or two): no action —
+  the transport is doing its job.
+- Sustained 429s: raise the Alchemy CU/throughput limit, or reduce cross-worker
+  burst pressure (stagger schedules / lower per-worker concurrency). As a
+  freshness-over-completeness lever, a service can lower its dial timeout
+  (`WithClientTimeout`) or retry budget so a throttled call fails fast and the
+  block is reprocessed rather than blocking the worker.
+- Sustained 5xx/network against one host only: consider failing that chain over
+  to an alternate RPC provider if available.
+
+---
+
 ## See also
 
 - Watcher runbook: [vector-watcher.md](vector-watcher.md)
