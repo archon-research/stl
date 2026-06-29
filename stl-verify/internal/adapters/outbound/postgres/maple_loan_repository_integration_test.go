@@ -951,9 +951,9 @@ func TestMapleRecordLoans_AppendsMetaChange(t *testing.T) {
 	t2 := time.Date(2026, 6, 11, 10, 0, 0, 0, time.UTC)
 	t3 := time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC)
 
-	loanID := upsertAt(t1, nil)                                // v1: all meta NULL
+	loanID := upsertAt(t1, nil)                                    // v1: all meta NULL
 	upsertAt(t2, &maple.LoanMeta{Type: "amm", Location: "Cayman"}) // v2: enriched
-	upsertAt(t3, &maple.LoanMeta{Type: "amm"})                 // v3: Location cleared
+	upsertAt(t3, &maple.LoanMeta{Type: "amm"})                     // v3: Location cleared
 
 	var rows int
 	if err := maplePool.QueryRow(ctx,
