@@ -405,7 +405,7 @@ func TestMapleSatellite_BackfillRecipeMatchesGo(t *testing.T) {
 	var equal bool
 	if err := maplePool.QueryRow(ctx,
 		`SELECT hashdiff = decode(md5(
-		     COALESCE(name, E'\x1e') || E'\x1f' ||
+		     COALESCE(name, '') || E'\x1f' ||
 		     (CASE WHEN is_syrup THEN 'true' ELSE 'false' END)
 		 ), 'hex')
 		 FROM maple_pool_meta WHERE maple_pool_id = $1`, poolID).Scan(&equal); err != nil {
