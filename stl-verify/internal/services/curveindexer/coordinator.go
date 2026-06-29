@@ -89,9 +89,13 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 
 	poolsByAddr := make(map[common.Address]RegisteredPool, len(deps.Pools))
 	for _, p := range deps.Pools {
-		if _, ok := deps.Handlers[p.Kind]; !ok {
+		h, ok := deps.Handlers[p.Kind]
+		if !ok {
 			return nil, fmt.Errorf("pool %s (id=%d) has kind %q but no handler registered for it", p.Address, p.ID, p.Kind)
 		}
+		// Warm the handler's per-coin-count caches now, while construction is still
+		// single-threaded, so the per-block decode path performs no lazy cache writes.
+		h.Warm(p.NCoins)
 		poolsByAddr[p.Address] = p
 	}
 

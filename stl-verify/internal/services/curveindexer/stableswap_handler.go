@@ -45,6 +45,10 @@ func (h *StableswapHandler) classicSigsFor(n int) classicLiquiditySigs {
 	return s
 }
 
+// Warm precomputes the classic liquidity-event signatures for an nCoins pool so
+// the per-block decode path only reads the cache.
+func (h *StableswapHandler) Warm(nCoins int) { h.classicSigsFor(nCoins) }
+
 // DecodeEvents extracts typed records from a single transaction receipt.
 //
 // Capture-net design: every log on the pool address is also appended as a

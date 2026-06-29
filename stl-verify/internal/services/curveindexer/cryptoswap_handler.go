@@ -45,6 +45,10 @@ func (h *CryptoswapHandler) cryptoSigsFor(n int) cryptoswapLiquiditySigs {
 	return s
 }
 
+// Warm precomputes the cryptoswap liquidity-event signatures for an nCoins pool
+// so the per-block decode path only reads the cache.
+func (h *CryptoswapHandler) Warm(nCoins int) { h.cryptoSigsFor(nCoins) }
+
 // DecodeEvents extracts typed records from a single transaction receipt.
 //
 // Capture-net design: every log on the pool address is also appended as a

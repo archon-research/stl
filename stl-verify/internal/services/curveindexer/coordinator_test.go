@@ -639,13 +639,46 @@ func stateRowsWritten(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
 	return 0
 }
 
+// TestNewCoordinator_WarmsHandlersForRegisteredPoolCoinCounts verifies the
+// constructor primes each handler's per-coin-count cache for every registered
+// pool, so the per-block decode path performs no lazy cache writes.
+func TestNewCoordinator_WarmsHandlersForRegisteredPoolCoinCounts(t *testing.T) {
+	h := &nilNilHandler{}
+	pool2 := newTestPool() // 2-coin pre-NG
+	pool3 := newTestPool()
+	pool3.ID = 777
+	pool3.NCoins = 3
+	pool3.Address = common.HexToAddress("0x0000000000000000000000000000000000000003")
+
+	_, err := NewCoordinator(CoordinatorDeps{
+		Pools:       []RegisteredPool{pool2, pool3},
+		Handlers:    map[PoolKind]PoolClassHandler{KindStableswapPreNG: h},
+		Multicaller: &fakeMulticaller{},
+		Repo:        &fakeCurveRepo{},
+		EventWriter: dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
+		TxManager:   &fakeTxManager{},
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	got := map[int]bool{}
+	for _, n := range h.warmed {
+		got[n] = true
+	}
+	for _, want := range []int{2, 3} {
+		if !got[want] {
+			t.Errorf("handler not warmed for nCoins=%d; warmed=%v", want, h.warmed)
+		}
+	}
+}
+
 // nilNilHandler is a PoolClassHandler stub that returns StateSnapshot with both
 // Stableswap and Cryptoswap as nil, to test the default case error handling.
-type nilNilHandler struct{}
+type nilNilHandler struct{ warmed []int }
 
-func (h *nilNilHandler) Handles(kind PoolKind) bool {
-	return kind == KindStableswapPreNG
-}
+func (h *nilNilHandler) Warm(nCoins int) { h.warmed = append(h.warmed, nCoins) }
 
 func (h *nilNilHandler) DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error) {
 	return DecodedEvents{}, nil
