@@ -188,28 +188,6 @@ func TestCryptoswapHandler_IgnoresForeignAddress(t *testing.T) {
 	}
 }
 
-func TestCryptoswapHandler_Handles(t *testing.T) {
-	a, err := abis.CurveCryptoswapABI()
-	if err != nil {
-		t.Fatalf("loading ABI: %v", err)
-	}
-	h := NewCryptoswapHandler(a)
-	cases := []struct {
-		kind PoolKind
-		want bool
-	}{
-		{KindCryptoswap, true},
-		{KindStableswapPreNG, false},
-		{KindStableswapNG, false},
-	}
-	for _, tc := range cases {
-		got := h.Handles(tc.kind)
-		if got != tc.want {
-			t.Errorf("Handles(%q) = %v, want %v", tc.kind, got, tc.want)
-		}
-	}
-}
-
 func TestCryptoswapHandler_UnknownTopicCaptured(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {
@@ -380,7 +358,6 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
 		Kind:         KindCryptoswap,
 		NCoins:       3,
-		CoinTokenIDs: []int64{1, 2, 3},
 		CoinDecimals: []int{18, 18, 6},
 	}
 	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
@@ -437,7 +414,6 @@ func TestCryptoswapHandler_SnapshotDNilOnRevert(t *testing.T) {
 		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
 		Kind:         KindCryptoswap,
 		NCoins:       3,
-		CoinTokenIDs: []int64{1, 2, 3},
 		CoinDecimals: []int{18, 18, 6},
 	}
 	mc := &fakeMulticaller{results: cryptoswapResultsDNil(t, a)}
@@ -477,7 +453,6 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 		Address:        poolAddr,
 		Kind:           KindCryptoswap,
 		NCoins:         3,
-		CoinTokenIDs:   []int64{1, 2, 3},
 		CoinDecimals:   []int{18, 18, 6},
 		LpTokenAddress: &lpAddr,
 	}
@@ -523,7 +498,6 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 		Address:        poolAddr,
 		Kind:           KindCryptoswap,
 		NCoins:         3,
-		CoinTokenIDs:   []int64{1, 2, 3},
 		CoinDecimals:   []int{18, 18, 6},
 		LpTokenAddress: nil,
 	}
@@ -555,7 +529,6 @@ func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
 		Kind:         KindCryptoswap,
 		NCoins:       3,
-		CoinTokenIDs: []int64{1, 2, 3},
 		CoinDecimals: []int{18, 18, 6},
 	}
 

@@ -403,7 +403,8 @@ for the affected chain.
 
 ## VectorCurveIndexerNoStateWritten
 
-**Severity:** warning · **For:** 30m
+**Severity:** warning · **For:** 10m
+The 30m rate window must remain above the configured heartbeat interval (default 50 blocks, ~10min on mainnet).
 
 ### What it means
 

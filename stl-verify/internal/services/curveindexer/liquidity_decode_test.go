@@ -595,7 +595,7 @@ func TestDecodeClassicLiquidity_MatchedSigMissingProvider(t *testing.T) {
 		TransactionHash: txHash.Hex(),
 		LogIndex:        "0x0",
 	}
-	rec, matched, err := decodeClassicLiquidity(log, pool)
+	rec, matched, err := decodeClassicLiquidity(log, pool, buildClassicSigs(pool.NCoins))
 	if err == nil {
 		t.Errorf("expected non-nil error for matched classic sig with missing provider, got rec=%v matched=%v", rec, matched)
 	}
@@ -623,7 +623,7 @@ func TestDecodeClassicLiquidity_UnknownTopicMissingProvider(t *testing.T) {
 		TransactionHash: txHash.Hex(),
 		LogIndex:        "0x0",
 	}
-	rec, matched, err := decodeClassicLiquidity(log, pool)
+	rec, matched, err := decodeClassicLiquidity(log, pool, buildClassicSigs(pool.NCoins))
 	if err != nil {
 		t.Errorf("unexpected error for unknown topic with missing provider: %v", err)
 	}
@@ -655,7 +655,7 @@ func TestDecodeCryptoLiquidity_MatchedSigMissingProvider(t *testing.T) {
 		TransactionHash: txHash.Hex(),
 		LogIndex:        "0x0",
 	}
-	rec, matched, err := decodeCryptoLiquidity(log, pool)
+	rec, matched, err := decodeCryptoLiquidity(log, pool, buildCryptoswapSigs(pool.NCoins))
 	if err == nil {
 		t.Errorf("expected non-nil error for matched cryptoswap sig with missing provider, got rec=%v matched=%v", rec, matched)
 	}
@@ -683,7 +683,7 @@ func TestDecodeCryptoLiquidity_UnknownTopicMissingProvider(t *testing.T) {
 		TransactionHash: txHash.Hex(),
 		LogIndex:        "0x0",
 	}
-	rec, matched, err := decodeCryptoLiquidity(log, pool)
+	rec, matched, err := decodeCryptoLiquidity(log, pool, buildCryptoswapSigs(pool.NCoins))
 	if err != nil {
 		t.Errorf("unexpected error for unknown topic with missing provider: %v", err)
 	}
@@ -722,5 +722,51 @@ func TestStableswapPreNG_ClassicTypedNotOnlyCapture(t *testing.T) {
 	}
 	if len(got.Liquidity) == 0 {
 		t.Error("classic AddLiquidity on PreNG pool must produce a typed LiquidityRecord (regression: was captured-only)")
+	}
+}
+
+// TestDecodeCryptoLiquidity_RemoveLiquidityOne_OutOfRangeCoinIndex verifies that
+// a RemoveLiquidityOne log whose coin_index equals pool.NCoins (out of range) is
+// rejected with a non-nil error rather than silently truncating to a wrong index.
+func TestDecodeCryptoLiquidity_RemoveLiquidityOne_OutOfRangeCoinIndex(t *testing.T) {
+	n := 3
+	pool := RegisteredPool{
+		ID:      10,
+		Address: common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:    KindCryptoswap,
+		NCoins:  n,
+	}
+	provider := common.HexToAddress("0x1111000000000000000000000000000000000001")
+
+	sigs := buildCryptoswapSigs(n)
+
+	u256T, err := uint256Type()
+	if err != nil {
+		t.Fatalf("uint256Type: %v", err)
+	}
+	args := abi.Arguments{
+		{Name: "token_amount", Type: u256T},
+		{Name: "coin_index", Type: u256T},
+		{Name: "coin_amount", Type: u256T},
+		{Name: "approx_fee", Type: u256T},
+		{Name: "packed_price_scale", Type: u256T},
+	}
+	// coin_index = n (out of range; valid range is [0, n))
+	packed, err := args.Pack(
+		big.NewInt(500),      // token_amount
+		big.NewInt(int64(n)), // coin_index = n (out of range)
+		big.NewInt(480),      // coin_amount
+		big.NewInt(1),        // approx_fee
+		big.NewInt(999),      // packed_price_scale
+	)
+	if err != nil {
+		t.Fatalf("packing RemoveLiquidityOne: %v", err)
+	}
+
+	log := buildLiquidityLog(pool.Address, sigs.removeLiquidityOne, provider, packed, 1)
+
+	rec, matched, err := decodeCryptoLiquidity(log, pool, sigs)
+	if err == nil {
+		t.Errorf("expected error for out-of-range coin_index, got rec=%v matched=%v", rec, matched)
 	}
 }

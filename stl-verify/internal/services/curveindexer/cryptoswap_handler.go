@@ -12,7 +12,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -21,6 +20,7 @@ import (
 type CryptoswapHandler struct {
 	cryptoABI  *abi.ABI
 	eventsByID map[common.Hash]*abi.Event
+	cryptoSigs map[int]cryptoswapLiquiditySigs
 }
 
 // NewCryptoswapHandler constructs a CryptoswapHandler with a pre-parsed ABI.
@@ -32,12 +32,17 @@ func NewCryptoswapHandler(cryptoABI *abi.ABI) *CryptoswapHandler {
 	return &CryptoswapHandler{
 		cryptoABI:  cryptoABI,
 		eventsByID: eventsByID,
+		cryptoSigs: make(map[int]cryptoswapLiquiditySigs),
 	}
 }
 
-// Handles returns true only for cryptoswap pool kind.
-func (h *CryptoswapHandler) Handles(kind PoolKind) bool {
-	return kind == KindCryptoswap
+func (h *CryptoswapHandler) cryptoSigsFor(n int) cryptoswapLiquiditySigs {
+	if s, ok := h.cryptoSigs[n]; ok {
+		return s
+	}
+	s := buildCryptoswapSigs(n)
+	h.cryptoSigs[n] = s
+	return s
 }
 
 // DecodeEvents extracts typed records from a single transaction receipt.
@@ -55,6 +60,8 @@ func (h *CryptoswapHandler) DecodeEvents(
 	ts time.Time,
 ) (DecodedEvents, error) {
 	var result DecodedEvents
+
+	sigs := h.cryptoSigsFor(pool.NCoins)
 
 	for _, log := range receipt.Logs {
 		if !common.IsHexAddress(log.Address) {
@@ -91,7 +98,7 @@ func (h *CryptoswapHandler) DecodeEvents(
 		// Cryptoswap liquidity events use fixed-size arrays whose topic0s differ
 		// from the dynamic-array ABI. Dispatch them via word-slicing before the
 		// ABI lookup so they are typed rather than falling through to captured-only.
-		rec, matched, err := decodeCryptoLiquidity(log, pool)
+		rec, matched, err := decodeCryptoLiquidity(log, pool, sigs)
 		if err != nil {
 			return DecodedEvents{}, fmt.Errorf("decoding cryptoswap liquidity log (index %s): %w", log.LogIndex, err)
 		}
@@ -348,7 +355,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// 1. balances
 	balances := make([]*big.Int, pool.NCoins)
 	for i := 0; i < pool.NCoins; i++ {
-		v, err := dexconsumer.UnpackUint(h.cryptoABI, "balances", results[idx])
+		v, err := shared.UnpackUint(h.cryptoABI, "balances", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("balances(%d): %w", i, err)
 		}
@@ -357,35 +364,35 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	}
 
 	// 2. get_virtual_price
-	virtualPrice, err := dexconsumer.UnpackUint(h.cryptoABI, "get_virtual_price", results[idx])
+	virtualPrice, err := shared.UnpackUint(h.cryptoABI, "get_virtual_price", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("get_virtual_price: %w", err)
 	}
 	idx++
 
 	// 3. totalSupply
-	totalSupply, err := dexconsumer.UnpackUint(h.cryptoABI, "totalSupply", results[idx])
+	totalSupply, err := shared.UnpackUint(h.cryptoABI, "totalSupply", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("totalSupply: %w", err)
 	}
 	idx++
 
 	// 4. A
-	a, err := dexconsumer.UnpackUint(h.cryptoABI, "A", results[idx])
+	a, err := shared.UnpackUint(h.cryptoABI, "A", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("decoding A: %w", err)
 	}
 	idx++
 
 	// 5. gamma
-	gamma, err := dexconsumer.UnpackUint(h.cryptoABI, "gamma", results[idx])
+	gamma, err := shared.UnpackUint(h.cryptoABI, "gamma", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("gamma: %w", err)
 	}
 	idx++
 
 	// 6. fee
-	fee, err := dexconsumer.UnpackUint(h.cryptoABI, "fee", results[idx])
+	fee, err := shared.UnpackUint(h.cryptoABI, "fee", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("fee: %w", err)
 	}
@@ -399,7 +406,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 			if i == j {
 				continue
 			}
-			v, err := dexconsumer.UnpackUint(h.cryptoABI, "get_dy", results[idx])
+			v, err := shared.UnpackUint(h.cryptoABI, "get_dy", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("get_dy(%d,%d): %w", i, j, err)
 			}
@@ -412,7 +419,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	nPriceEntries := pool.NCoins - 1
 	priceScale := make([]*big.Int, nPriceEntries)
 	for i := range nPriceEntries {
-		v, err := dexconsumer.UnpackUint(h.cryptoABI, "price_scale", results[idx])
+		v, err := shared.UnpackUint(h.cryptoABI, "price_scale", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("price_scale(%d): %w", i, err)
 		}
@@ -423,7 +430,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// 9. price_oracle(i) for i=0..n-2
 	priceOracle := make([]*big.Int, nPriceEntries)
 	for i := range nPriceEntries {
-		v, err := dexconsumer.UnpackUint(h.cryptoABI, "price_oracle", results[idx])
+		v, err := shared.UnpackUint(h.cryptoABI, "price_oracle", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("price_oracle(%d): %w", i, err)
 		}
@@ -434,7 +441,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// 10. last_prices(i) for i=0..n-2
 	lastPrices := make([]*big.Int, nPriceEntries)
 	for i := range nPriceEntries {
-		v, err := dexconsumer.UnpackUint(h.cryptoABI, "last_prices", results[idx])
+		v, err := shared.UnpackUint(h.cryptoABI, "last_prices", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("last_prices(%d): %w", i, err)
 		}
@@ -445,7 +452,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// 11. D() - AllowFailure=true; nil on revert.
 	var d *big.Int
 	if results[idx].Success {
-		v, err := dexconsumer.UnpackUint(h.cryptoABI, "D", results[idx])
+		v, err := shared.UnpackUint(h.cryptoABI, "D", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("decoding D: %w", err)
 		}
@@ -456,7 +463,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// 12. xcp_profit() - AllowFailure=true; nil on revert.
 	var xcpProfit *big.Int
 	if results[idx].Success {
-		v, err := dexconsumer.UnpackUint(h.cryptoABI, "xcp_profit", results[idx])
+		v, err := shared.UnpackUint(h.cryptoABI, "xcp_profit", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("xcp_profit: %w", err)
 		}

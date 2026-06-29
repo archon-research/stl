@@ -365,7 +365,7 @@ func TestCurveRepository_SaveLiquidityEvent_Idempotent(t *testing.T) {
 func TestCurveRepository_LoadPools(t *testing.T) {
 	ctx := context.Background()
 	repo := newCurveRepo(t)
-	poolID, tokenID0, tokenID1 := seedCurvePoolWithTokens(t, ctx)
+	poolID, _, _ := seedCurvePoolWithTokens(t, ctx)
 
 	pools, err := repo.LoadPools(ctx, 999)
 	if err != nil {
@@ -388,19 +388,6 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 	if found.NCoins != 2 {
 		t.Errorf("NCoins = %d, want 2", found.NCoins)
 	}
-	if len(found.CoinTokenIDs) != 2 {
-		t.Fatalf("len(CoinTokenIDs) = %d, want 2", len(found.CoinTokenIDs))
-	}
-
-	// Assert CoinTokenIDs are ordered by coin_index (tokenID0 at [0], tokenID1 at [1]).
-	// seedCurvePool inserts: coin_index 0 -> tokenID0 (TOKA), coin_index 1 -> tokenID1 (TOKB).
-	if found.CoinTokenIDs[0] != tokenID0 {
-		t.Errorf("CoinTokenIDs[0] = %d, want %d (coin_index 0 token)", found.CoinTokenIDs[0], tokenID0)
-	}
-	if found.CoinTokenIDs[1] != tokenID1 {
-		t.Errorf("CoinTokenIDs[1] = %d, want %d (coin_index 1 token)", found.CoinTokenIDs[1], tokenID1)
-	}
-
 	if len(found.CoinDecimals) != 2 {
 		t.Fatalf("len(CoinDecimals) = %d, want 2", len(found.CoinDecimals))
 	}

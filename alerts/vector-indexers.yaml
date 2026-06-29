@@ -601,7 +601,7 @@ groups:
           sum by (chain, cluster) (
             rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[30m])
           ) == 0
-        for: 30m
+        for: 10m
         labels:
           team: vector
           severity: warning

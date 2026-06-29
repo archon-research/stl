@@ -26,7 +26,8 @@ import (
 // cancellation or any failure, so a block is never acked without being
 // persisted ("never ack until success"). Because the handler owns all per-block
 // state in local variables, an SQS redelivery reprocesses from scratch with no
-// carryover.
+// carryover. The handler owns its own error metrics; the block processor does not
+// record metrics for handler errors.
 type BlockHandler func(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error
 
 // BlockProcessor turns a cached block into a single whole-block handler call. It
@@ -57,24 +58,25 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 	start := time.Now()
 	defer func() {
 		p.telemetry.RecordBlockProcessed(ctx, time.Since(start), retErr)
-		if retErr != nil {
-			p.telemetry.RecordError(ctx, "processBlockEvent", retErr)
-		}
 	}()
 
 	receiptsJSON, err := p.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
+		p.telemetry.RecordError(ctx, "fetchReceipts", err)
 		return fmt.Errorf("fetching receipts from cache: %w", err)
 	}
 	if receiptsJSON == nil {
 		// The fallback reader already consulted S3, so a nil here means neither
 		// tier has the block. Error (not skip) so the SQS message is redelivered
 		// until a backfill populates it.
-		return fmt.Errorf("receipts not found in cache or S3 for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
+		err := fmt.Errorf("receipts not found in cache or S3 for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
+		p.telemetry.RecordError(ctx, "fetchReceipts", err)
+		return err
 	}
 
 	var receipts []shared.TransactionReceipt
 	if err := json.Unmarshal(receiptsJSON, &receipts); err != nil {
+		p.telemetry.RecordError(ctx, "unmarshalReceipts", err)
 		return fmt.Errorf("unmarshalling receipts: %w", err)
 	}
 

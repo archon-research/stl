@@ -96,14 +96,13 @@ func buildCryptoswapSigs(n int) cryptoswapLiquiditySigs {
 // It returns (record, true, nil) on a match, (nil, false, nil) when topic0 does not
 // match any classic liquidity signature, and (nil, false, err) when topic0 matches
 // but the word layout is invalid.
-func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecord, bool, error) {
+func decodeClassicLiquidity(log shared.Log, pool RegisteredPool, sigs classicLiquiditySigs) (*LiquidityRecord, bool, error) {
 	if len(log.Topics) == 0 {
 		return nil, false, nil
 	}
 
 	topic0 := common.HexToHash(log.Topics[0])
 	n := pool.NCoins
-	sigs := buildClassicSigs(n)
 
 	// provider is indexed (Topics[1]); once topic0 matches a known liquidity
 	// signature, its absence is a malformed log and must fail decoding rather
@@ -307,14 +306,13 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 // It returns (record, true, nil) on a match, (nil, false, nil) when topic0 does not
 // match any cryptoswap liquidity signature, and (nil, false, err) when topic0 matches
 // but the word layout is invalid.
-func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecord, bool, error) {
+func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool, sigs cryptoswapLiquiditySigs) (*LiquidityRecord, bool, error) {
 	if len(log.Topics) == 0 {
 		return nil, false, nil
 	}
 
 	topic0 := common.HexToHash(log.Topics[0])
 	n := pool.NCoins
-	sigs := buildCryptoswapSigs(n)
 
 	// provider is indexed (Topics[1]); once topic0 matches a known cryptoswap liquidity
 	// signature, its absence is a malformed log and must fail decoding rather
@@ -442,6 +440,9 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecor
 		coinIdxBig, err := asBigInt(vals, 1)
 		if err != nil {
 			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_index: %w", err)
+		}
+		if !coinIdxBig.IsInt64() || coinIdxBig.Sign() < 0 || coinIdxBig.Int64() >= int64(pool.NCoins) {
+			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_index %s out of range [0,%d)", coinIdxBig, pool.NCoins)
 		}
 		coinAmount, err := asBigInt(vals, 2)
 		if err != nil {

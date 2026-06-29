@@ -259,6 +259,56 @@ func readBlockCountersByStatus(t *testing.T, rm *metricdata.ResourceMetrics, nam
 	return 0, 0
 }
 
+// TestBlockProcessor_RecordsErrorOperationLabel: a cache error records
+// curve.errors.total with operation="fetchReceipts".
+func TestBlockProcessor_RecordsErrorOperationLabel(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := dextelemetry.NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	failCache := &fakeCache{err: errors.New("redis down")}
+	bp := NewBlockProcessor(failCache, tel, failHandler(t))
+	if err := bp.ProcessBlockEvent(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 1}); err == nil {
+		t.Fatal("expected error from failing cache")
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "curve.errors.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("curve.errors.total: unexpected metric type %T", m.Data)
+			}
+			if len(sum.DataPoints) == 0 {
+				t.Fatal("curve.errors.total: no datapoints")
+			}
+			op, _ := sum.DataPoints[0].Attributes.Value("operation")
+			if got := op.AsString(); got != "fetchReceipts" {
+				t.Errorf("operation attribute = %q, want %q", got, "fetchReceipts")
+			}
+			return
+		}
+	}
+	t.Fatal("metric curve.errors.total not found")
+}
+
 func readSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name string) int64 {
 	t.Helper()
 	for _, sm := range rm.ScopeMetrics {

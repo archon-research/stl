@@ -11,7 +11,6 @@ func IndexPoolsByAddress(rows []outbound.CurvePoolRow) []RegisteredPool {
 			Address:        row.Address,
 			Kind:           PoolKind(row.Kind),
 			NCoins:         row.NCoins,
-			CoinTokenIDs:   row.CoinTokenIDs,
 			CoinDecimals:   row.CoinDecimals,
 			DeployBlock:    row.DeployBlock,
 			LpTokenAddress: row.LpTokenAddress,

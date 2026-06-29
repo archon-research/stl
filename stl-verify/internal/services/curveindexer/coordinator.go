@@ -149,6 +149,7 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 				}
 				decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, c.chainID, bn, ver, ts)
 				if err != nil {
+					c.telemetry.RecordError(ctx, "decodeEvents", err)
 					return fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
 				}
 				swaps = append(swaps, decoded.Swaps...)
@@ -166,9 +167,11 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		for _, pool := range snapshotSet {
 			snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
 			if err != nil {
+				c.telemetry.RecordError(ctx, "snapshotState", err)
 				return fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
 			}
 			if err := snap.Validate(); err != nil {
+				c.telemetry.RecordError(ctx, "snapshotState", err)
 				return fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
 			}
 			snapshots = append(snapshots, snap)
@@ -226,6 +229,7 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 			return nil
 		})
 		if err != nil {
+			c.telemetry.RecordError(ctx, "persistBlock", err)
 			return err
 		}
 

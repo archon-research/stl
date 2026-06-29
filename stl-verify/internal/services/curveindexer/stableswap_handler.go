@@ -12,15 +12,15 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // StableswapHandler decodes events from Curve stableswap pools (both pre-NG and NG).
 // It implements PoolClassHandler for KindStableswapPreNG and KindStableswapNG.
 type StableswapHandler struct {
-	stableABI  *abi.ABI
-	eventsByID map[common.Hash]*abi.Event
+	stableABI   *abi.ABI
+	eventsByID  map[common.Hash]*abi.Event
+	classicSigs map[int]classicLiquiditySigs
 }
 
 // NewStableswapHandler constructs a StableswapHandler with a pre-parsed ABI.
@@ -30,14 +30,19 @@ func NewStableswapHandler(stableABI *abi.ABI) *StableswapHandler {
 		eventsByID[ev.ID] = &ev
 	}
 	return &StableswapHandler{
-		stableABI:  stableABI,
-		eventsByID: eventsByID,
+		stableABI:   stableABI,
+		eventsByID:  eventsByID,
+		classicSigs: make(map[int]classicLiquiditySigs),
 	}
 }
 
-// Handles returns true for stableswap pool kinds (both pre-NG and NG).
-func (h *StableswapHandler) Handles(kind PoolKind) bool {
-	return kind == KindStableswapPreNG || kind == KindStableswapNG
+func (h *StableswapHandler) classicSigsFor(n int) classicLiquiditySigs {
+	if s, ok := h.classicSigs[n]; ok {
+		return s
+	}
+	s := buildClassicSigs(n)
+	h.classicSigs[n] = s
+	return s
 }
 
 // DecodeEvents extracts typed records from a single transaction receipt.
@@ -55,6 +60,8 @@ func (h *StableswapHandler) DecodeEvents(
 	ts time.Time,
 ) (DecodedEvents, error) {
 	var result DecodedEvents
+
+	sigs := h.classicSigsFor(pool.NCoins)
 
 	for _, log := range receipt.Logs {
 		if !common.IsHexAddress(log.Address) {
@@ -91,7 +98,7 @@ func (h *StableswapHandler) DecodeEvents(
 		// Pre-NG pools emit fixed-array liquidity events whose topic0s differ from the
 		// NG ABI. Dispatch them via word-slicing before falling back to the ABI lookup.
 		if pool.Kind == KindStableswapPreNG {
-			rec, matched, err := decodeClassicLiquidity(log, pool)
+			rec, matched, err := decodeClassicLiquidity(log, pool, sigs)
 			if err != nil {
 				return DecodedEvents{}, fmt.Errorf("decoding classic liquidity log (index %s): %w", log.LogIndex, err)
 			}
@@ -338,7 +345,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	// 1. balances
 	balances := make([]*big.Int, pool.NCoins)
 	for i := 0; i < pool.NCoins; i++ {
-		v, err := dexconsumer.UnpackUint(h.stableABI, "balances", results[idx])
+		v, err := shared.UnpackUint(h.stableABI, "balances", results[idx])
 		if err != nil {
 			return nil, fmt.Errorf("balances(%d): %w", i, err)
 		}
@@ -347,28 +354,28 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	}
 
 	// 2. get_virtual_price
-	virtualPrice, err := dexconsumer.UnpackUint(h.stableABI, "get_virtual_price", results[idx])
+	virtualPrice, err := shared.UnpackUint(h.stableABI, "get_virtual_price", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("get_virtual_price: %w", err)
 	}
 	idx++
 
 	// 3. totalSupply
-	totalSupply, err := dexconsumer.UnpackUint(h.stableABI, "totalSupply", results[idx])
+	totalSupply, err := shared.UnpackUint(h.stableABI, "totalSupply", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("totalSupply: %w", err)
 	}
 	idx++
 
 	// 4. A
-	a, err := dexconsumer.UnpackUint(h.stableABI, "A", results[idx])
+	a, err := shared.UnpackUint(h.stableABI, "A", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("decoding A: %w", err)
 	}
 	idx++
 
 	// 5. fee
-	fee, err := dexconsumer.UnpackUint(h.stableABI, "fee", results[idx])
+	fee, err := shared.UnpackUint(h.stableABI, "fee", results[idx])
 	if err != nil {
 		return nil, fmt.Errorf("fee: %w", err)
 	}
@@ -382,7 +389,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 			if i == j {
 				continue
 			}
-			v, err := dexconsumer.UnpackUint(h.stableABI, "get_dy", results[idx])
+			v, err := shared.UnpackUint(h.stableABI, "get_dy", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("get_dy(%d,%d): %w", i, j, err)
 			}
@@ -395,7 +402,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	var priceOracle, lastPrice *big.Int
 	if pool.Kind == KindStableswapNG {
 		if results[idx].Success {
-			po, err := dexconsumer.UnpackUint(h.stableABI, "price_oracle", results[idx])
+			po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("price_oracle: %w", err)
 			}
@@ -403,7 +410,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		}
 		idx++
 		if results[idx].Success {
-			lp, err := dexconsumer.UnpackUint(h.stableABI, "last_price", results[idx])
+			lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx])
 			if err != nil {
 				return nil, fmt.Errorf("last_price: %w", err)
 			}

@@ -17,8 +17,7 @@ type CurvePoolRow struct {
 	Address      common.Address
 	Kind         string // matches curve_pool.pool_kind
 	NCoins       int
-	CoinTokenIDs []int64 // index-aligned (ordered by coin_index)
-	CoinDecimals []int   // index-aligned (ordered by coin_index), matching CoinTokenIDs
+	CoinDecimals []int // index-aligned (ordered by coin_index)
 	DeployBlock  int64
 	// LpTokenAddress is the pool's LP/share token. For pre-NG pools this is a
 	// separate contract (totalSupply lives there, not on the pool); nil when the
@@ -61,7 +60,7 @@ type LiquidityInput struct {
 
 // CurveRepository defines the interface for Curve DEX data persistence.
 type CurveRepository interface {
-	// LoadPools returns all pools for a chain with their coin token IDs in coin_index order.
+	// LoadPools returns all pools for a chain with their coin decimals in coin_index order.
 	LoadPools(ctx context.Context, chainID int64) ([]CurvePoolRow, error)
 
 	// SaveSwap persists a Curve exchange event within an external transaction.

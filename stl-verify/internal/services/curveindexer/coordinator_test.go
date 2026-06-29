@@ -134,7 +134,6 @@ func newTestPool() RegisteredPool {
 		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
-		CoinTokenIDs: []int64{1, 2},
 		CoinDecimals: []int{18, 18},
 		DeployBlock:  1,
 	}

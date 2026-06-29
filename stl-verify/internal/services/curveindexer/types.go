@@ -27,7 +27,6 @@ type RegisteredPool struct {
 	Address      common.Address
 	Kind         PoolKind
 	NCoins       int
-	CoinTokenIDs []int64 // index-aligned to on-chain coins(i)
 	CoinDecimals []int
 	DeployBlock  int64
 	// LpTokenAddress is the separate LP token for pre-NG pools (where totalSupply
@@ -112,7 +111,6 @@ func (s StateSnapshot) Validate() error {
 }
 
 type PoolClassHandler interface {
-	Handles(kind PoolKind) bool
 	DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error)
 	SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, ts time.Time) (StateSnapshot, error)
 }

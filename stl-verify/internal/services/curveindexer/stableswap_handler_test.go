@@ -167,28 +167,6 @@ func TestStableswapHandler_IgnoresForeignAddress(t *testing.T) {
 	}
 }
 
-func TestStableswapHandler_Handles(t *testing.T) {
-	a, err := abis.CurveStableswapABI()
-	if err != nil {
-		t.Fatalf("loading ABI: %v", err)
-	}
-	h := NewStableswapHandler(a)
-	cases := []struct {
-		kind PoolKind
-		want bool
-	}{
-		{KindStableswapPreNG, true},
-		{KindStableswapNG, true},
-		{KindCryptoswap, false},
-	}
-	for _, tc := range cases {
-		got := h.Handles(tc.kind)
-		if got != tc.want {
-			t.Errorf("Handles(%q) = %v, want %v", tc.kind, got, tc.want)
-		}
-	}
-}
-
 func TestStableswapHandler_EmptyReceipt(t *testing.T) {
 	a, err := abis.CurveStableswapABI()
 	if err != nil {
@@ -373,7 +351,6 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
-		CoinTokenIDs: []int64{1, 2},
 		CoinDecimals: []int{18, 18},
 	}
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
@@ -412,7 +389,6 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
 		Kind:         KindStableswapNG,
 		NCoins:       2,
-		CoinTokenIDs: []int64{1, 2},
 		CoinDecimals: []int{18, 6},
 	}
 	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
@@ -471,7 +447,6 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 		Address:        poolAddr,
 		Kind:           KindStableswapPreNG,
 		NCoins:         2,
-		CoinTokenIDs:   []int64{1, 2},
 		CoinDecimals:   []int{18, 18},
 		LpTokenAddress: &lpAddr,
 	}
@@ -519,7 +494,6 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 		Address:        poolAddr,
 		Kind:           KindStableswapNG,
 		NCoins:         2,
-		CoinTokenIDs:   []int64{1, 2},
 		CoinDecimals:   []int{18, 18},
 		LpTokenAddress: nil, // pool is its own LP token
 	}
@@ -551,7 +525,6 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 		Address:      common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
-		CoinTokenIDs: []int64{1, 2},
 		CoinDecimals: []int{18, 18},
 	}
 

@@ -1,4 +1,4 @@
-package dexconsumer
+package shared
 
 import (
 	"fmt"
@@ -10,10 +10,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// This file holds the pure helpers used across the per-DEX worker packages
-// (review S7/S8): single-uint multicall decoding and big.Int/time conversions
-// shared by the Curve / Uniswap V3 / Balancer workers. They live in this
-// DEX-scoped package rather than the generic services/shared package.
+// Pure helpers for ABI decoding and big.Int/time conversions shared by the per-DEX worker packages.
 
 // UnpackUint decodes a single uint256-returning view method's result from a
 // multicall sub-call. It is the shared implementation used by the per-DEX
@@ -60,9 +57,8 @@ func BigIntCopy(b *big.Int) *big.Int {
 
 // BigIntToTimePtr converts a Unix-seconds big.Int to a *time.Time in UTC,
 // returning nil for a nil or zero value (the on-chain "unset" sentinel), or for
-// a value outside int64 range — that is not a real timestamp (it would be year
-// >2.9e11), and returning nil avoids Int64() silently truncating it to a
-// plausible-looking wrong date.
+// a value outside int64 range (not a real timestamp; would be year >2.9e11),
+// avoiding Int64() silently truncating it to a plausible-looking wrong date.
 func BigIntToTimePtr(b *big.Int) *time.Time {
 	if b == nil || b.Sign() == 0 || !b.IsInt64() {
 		return nil
