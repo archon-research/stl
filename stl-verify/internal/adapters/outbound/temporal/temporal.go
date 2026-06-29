@@ -63,6 +63,10 @@ type CronjobConfig struct {
 	IntervalEnv string
 	// IntervalDefault is the default schedule interval (e.g. "5m", "1h").
 	IntervalDefault string
+	// IntervalOffsetEnv is the env var name for a per-job schedule offset
+	// (optional). An offset phases the interval boundary so jobs sharing an
+	// external rate limit do not all fire at the same wall-clock instant.
+	IntervalOffsetEnv string
 
 	// OpenDatabase opens a database connection pool. Required.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
@@ -217,12 +221,41 @@ func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) er
 	}
 }
 
-func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
-	interval := env.Get(cfg.IntervalEnv, cfg.IntervalDefault)
-
-	intervalDuration, err := time.ParseDuration(interval)
+// buildScheduleSpec resolves the interval and optional offset for a cronjob into
+// a Temporal schedule spec. getenv is injected so the resolution is unit-testable.
+// A non-empty interval env overrides IntervalDefault; an empty or unset offset env
+// leaves the offset at zero (fire on the interval boundary).
+func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.ScheduleSpec, error) {
+	interval := cfg.IntervalDefault
+	if cfg.IntervalEnv != "" {
+		if v := getenv(cfg.IntervalEnv); v != "" {
+			interval = v
+		}
+	}
+	every, err := time.ParseDuration(interval)
 	if err != nil {
-		return fmt.Errorf("parsing %s %q: %w", cfg.IntervalEnv, interval, err)
+		return client.ScheduleSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalEnv, interval, err)
+	}
+
+	var offset time.Duration
+	if cfg.IntervalOffsetEnv != "" {
+		if v := getenv(cfg.IntervalOffsetEnv); v != "" {
+			offset, err = time.ParseDuration(v)
+			if err != nil {
+				return client.ScheduleSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
+			}
+		}
+	}
+
+	return client.ScheduleSpec{
+		Intervals: []client.ScheduleIntervalSpec{{Every: every, Offset: offset}},
+	}, nil
+}
+
+func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
+	spec, err := buildScheduleSpec(cfg, os.Getenv)
+	if err != nil {
+		return err
 	}
 
 	scheduleID := cfg.Name
@@ -232,34 +265,44 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 	// already present (normal after any restart). Skipping a Describe-first check avoids
 	// a race window and also sidesteps the case where Describe returns an internal error
 	// due to a stuck workflow task left over from a previous run.
-	//
-	// Note: changes to the interval env var will NOT take effect until the existing
-	// schedule is deleted from Temporal and the worker is restarted.
-	// Use the Temporal UI or CLI to delete a schedule.
 	_, err = c.ScheduleClient().Create(ctx, client.ScheduleOptions{
-		ID: scheduleID,
-		Spec: client.ScheduleSpec{
-			Intervals: []client.ScheduleIntervalSpec{
-				{Every: intervalDuration},
-			},
-		},
+		ID:   scheduleID,
+		Spec: spec,
 		Action: &client.ScheduleWorkflowAction{
 			Workflow:  cronjobWorkflow,
 			ID:        workflowID,
 			TaskQueue: taskQueue,
 		},
 	})
-	if err != nil {
-		// The Temporal SDK wraps the gRPC AlreadyExists error inconsistently across
-		// SDK versions, so we check both the gRPC status code and the error message.
-		if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
-			logger.Info("schedule already exists", "scheduleID", scheduleID)
-			return nil
-		}
-		return fmt.Errorf("creating schedule %q: %w", scheduleID, err)
+	if err == nil {
+		logger.Info("schedule created", "scheduleID", scheduleID, "spec", spec.Intervals[0])
+		return nil
 	}
 
-	logger.Info("schedule created", "scheduleID", scheduleID, "interval", intervalDuration)
+	// The Temporal SDK wraps the gRPC AlreadyExists error inconsistently across
+	// SDK versions, so we check both the gRPC status code and the error message.
+	if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
+		// Reconcile so a changed interval or offset takes effect on redeploy
+		// without a manual schedule deletion.
+		return reconcileScheduleSpec(ctx, c, logger, scheduleID, spec)
+	}
+	return fmt.Errorf("creating schedule %q: %w", scheduleID, err)
+}
+
+// reconcileScheduleSpec updates an existing schedule's spec in place. The action
+// (workflow + task queue) is left untouched; only the timing spec is reconciled.
+func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleSpec) error {
+	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
+	err := handle.Update(ctx, client.ScheduleUpdateOptions{
+		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
+			in.Description.Schedule.Spec = &want
+			return &client.ScheduleUpdate{Schedule: &in.Description.Schedule}, nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("reconciling schedule %q: %w", scheduleID, err)
+	}
+	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
 	return nil
 }
 

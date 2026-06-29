@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
@@ -49,5 +50,70 @@ func TestRunCronjob_InitializesOTEL(t *testing.T) {
 	}
 	if _, ok := otel.GetMeterProvider().(mnoop.MeterProvider); ok {
 		t.Error("global meter provider is the no-op implementation; cronjob metrics would record nothing")
+	}
+}
+
+func TestBuildScheduleSpec_Offset(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        CronjobConfig
+		env        map[string]string
+		wantEvery  time.Duration
+		wantOffset time.Duration
+		wantErr    bool
+	}{
+		{
+			name:       "no offset env configured",
+			cfg:        CronjobConfig{IntervalDefault: "1h"},
+			wantEvery:  time.Hour,
+			wantOffset: 0,
+		},
+		{
+			name:       "offset env set",
+			cfg:        CronjobConfig{IntervalDefault: "1h", IntervalOffsetEnv: "OFFSET"},
+			env:        map[string]string{"OFFSET": "5m"},
+			wantEvery:  time.Hour,
+			wantOffset: 5 * time.Minute,
+		},
+		{
+			name:       "offset env empty falls back to zero",
+			cfg:        CronjobConfig{IntervalDefault: "1h", IntervalOffsetEnv: "OFFSET"},
+			env:        map[string]string{},
+			wantEvery:  time.Hour,
+			wantOffset: 0,
+		},
+		{
+			name:       "interval env overrides default",
+			cfg:        CronjobConfig{IntervalEnv: "INTERVAL", IntervalDefault: "1h"},
+			env:        map[string]string{"INTERVAL": "30m"},
+			wantEvery:  30 * time.Minute,
+			wantOffset: 0,
+		},
+		{
+			name:    "invalid offset errors",
+			cfg:     CronjobConfig{IntervalDefault: "1h", IntervalOffsetEnv: "OFFSET"},
+			env:     map[string]string{"OFFSET": "not-a-duration"},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			getenv := func(k string) string { return tc.env[k] }
+			spec, err := buildScheduleSpec(tc.cfg, getenv)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := spec.Intervals[0]
+			if got.Every != tc.wantEvery || got.Offset != tc.wantOffset {
+				t.Fatalf("got {Every:%s Offset:%s}, want {Every:%s Offset:%s}",
+					got.Every, got.Offset, tc.wantEvery, tc.wantOffset)
+			}
+		})
 	}
 }
