@@ -274,16 +274,16 @@ func (s *Service) syncPools(ctx context.Context, syncedAt time.Time, protocolID 
 			poolEntities = append(poolEntities, poolEntity)
 		}
 
-		poolIDs, err = s.repo.UpsertPools(ctx, tx, poolEntities)
+		poolIDs, err = s.repo.RecordPools(ctx, tx, syncedAt, poolEntities)
 		if err != nil {
-			return fmt.Errorf("upserting pools: %w", err)
+			return fmt.Errorf("recording pools: %w", err)
 		}
 
 		states := make([]*maple.PoolState, 0, len(pools))
 		for _, p := range pools {
 			poolID, ok := poolIDs[p.Address]
 			if !ok {
-				return fmt.Errorf("pool %s missing from upsert result", lowerHex(p.Address))
+				return fmt.Errorf("pool %s missing from record result", lowerHex(p.Address))
 			}
 			state, err := maple.NewPoolState(maple.PoolStateParams{
 				PoolID:             poolID,
@@ -447,9 +447,9 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 			return err
 		}
 
-		loanIDs, err := s.repo.UpsertLoans(ctx, tx, loanEntities)
+		loanIDs, err := s.repo.RecordLoans(ctx, tx, syncedAt, loanEntities)
 		if err != nil {
-			return fmt.Errorf("upserting loans: %w", err)
+			return fmt.Errorf("recording loans: %w", err)
 		}
 
 		states, collaterals, err := buildLoanSnapshots(loans, loanIDs, syncedAt)
@@ -505,7 +505,7 @@ func buildLoanSnapshots(loans []outbound.MapleActiveLoan, loanIDs map[common.Add
 	for _, l := range loans {
 		loanID, ok := loanIDs[l.LoanID]
 		if !ok {
-			return nil, nil, fmt.Errorf("loan %s missing from upsert result", lowerHex(l.LoanID))
+			return nil, nil, fmt.Errorf("loan %s missing from record result", lowerHex(l.LoanID))
 		}
 
 		state, err := maple.NewLoanState(loanID, syncedAt, l.State, l.PrincipalOwed, l.AcmRatio)
@@ -824,16 +824,16 @@ func (s *Service) syncSkyStrategies(ctx context.Context, syncedAt time.Time, poo
 	}
 
 	err = s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		strategyIDs, err := s.repo.UpsertSkyStrategies(ctx, tx, strategyEntities)
+		strategyIDs, err := s.repo.RecordSkyStrategies(ctx, tx, syncedAt, strategyEntities)
 		if err != nil {
-			return fmt.Errorf("upserting sky strategies: %w", err)
+			return fmt.Errorf("recording sky strategies: %w", err)
 		}
 
 		states := make([]*maple.SkyStrategyState, 0, len(strategies))
 		for _, st := range strategies {
 			strategyID, ok := strategyIDs[st.Address]
 			if !ok {
-				return fmt.Errorf("sky strategy %s missing from upsert result", lowerHex(st.Address))
+				return fmt.Errorf("sky strategy %s missing from record result", lowerHex(st.Address))
 			}
 			state, err := maple.NewSkyStrategyState(maple.SkyStrategyStateParams{
 				SkyStrategyID:      strategyID,

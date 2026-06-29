@@ -13,6 +13,10 @@ export const PARAMS = {
   token: 'token',
   activityAction: 'aa',
   showAllPrimes: 'allp',
+  // Time-range selection (preset, plus from/to for custom ranges)
+  range: 'range',
+  rangeFrom: 'from',
+  rangeTo: 'to',
   // Data table params (shared across tables)
   sort: 'sort',
   search: 'q',

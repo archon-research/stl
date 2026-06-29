@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Local kind overlay (core pipeline). Reuses the same k8s/base manifests as
+# overlays/prod and overlays/staging; the runtime component swaps config
+# sourcing and image pull policy for local dev. Workers live in ./workers so
+# the Makefile can apply them only when an Alchemy API key is present;
+# watcher-data-validator lives in ./data-validator for the same reason (it
+# verifies against real Etherscan, which is meaningless on mock chain data).
+namespace: vector
+
+resources:
+  - ../../base/watcher
+  - ../../base/python-api
+  - ../../base/spark-anchorage-indexer
+  - ../../base/offchain-price-indexer
+  - config.yaml
+
+components:
+  - components/runtime
+
+images:
+  - name: watcher
+    newName: localhost/stl-watcher
+    newTag: local
+  - name: python-api
+    newName: localhost/stl-python-api
+    newTag: local
+  # Cronjobs (Temporal workers). Base names spark-anchorage-indexer; the local
+  # binary/image is stl-anchorage-indexer (cmd/cronjobs/anchorage-indexer).
+  - name: spark-anchorage-indexer
+    newName: localhost/stl-anchorage-indexer
+    newTag: local
+  - name: offchain-price-indexer
+    newName: localhost/stl-offchain-price-indexer
+    newTag: local
+
+patches:
+  # Default the watcher to the in-cluster mock blockchain server. Explicit env
+  # overrides the eth-mainnet ALCHEMY_* values from stl-config. `make
+  # kind-use-alchemy` strips these to fall back to real Alchemy.
+  - path: patches/watcher-mock.yaml
+  # Local kind runs a single python-api replica (base defaults to 2 for prod/staging).
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: python-api
+      spec:
+        replicas: 1

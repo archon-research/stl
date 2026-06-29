@@ -60,10 +60,11 @@ class AllocationResponse(BaseModel):
     Two row shapes share this model:
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
-      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` /
-      ``amount_usd`` are null; ``symbol`` and ``underlying_symbol`` both name
-      the held asset; ``underlying_token_id`` / ``underlying_token_address``
-      point at it.
+      ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
+      null; ``symbol`` and ``underlying_symbol`` both name the held asset;
+      ``underlying_token_id`` / ``underlying_token_address`` point at it.
+      ``amount_usd`` is populated when an oracle price exists for the token and
+      null otherwise (e.g. LP/curve shares with no oracle feed).
     """
 
     chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
@@ -143,25 +144,28 @@ class CapitalMetricsResponse(BaseModel):
 
     prime_id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
-    risk_capital: Decimal = Field(
-        description="Risk capital exposure (USD) sourced from the upstream Star monitor.",
-        examples=["10000000"],
+    exposure: Decimal = Field(
+        description="Total USD exposure across the prime's allocations (upstream `exposure`).",
+        examples=["1900000000"],
     )
     capital_buffer: Decimal = Field(
-        description="`max(total_capital - first_loss_capital, 0)` — distance to first-loss exhaustion (USD).",
+        description="`max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).",
         examples=["2500000"],
     )
-    first_loss_capital: Decimal = Field(
-        description="Financial RRC (first-loss capital) reported by upstream (USD).",
+    required_risk_capital: Decimal = Field(
+        description="Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
         examples=["7500000"],
     )
-    total_capital: Decimal = Field(
-        description="Total RRC reported by upstream (USD).",
+    total_risk_capital: Decimal = Field(
+        description="Total Risk Capital reported by upstream `total_rc` (USD).",
         examples=["10000000"],
     )
-    risk_to_capital_ratio: Decimal | None = Field(
+    encumbrance_ratio: Decimal | None = Field(
         default=None,
-        description="Upstream `risk_tolerance_ratio`. `null` when not validated.",
+        description=(
+            "Required Risk Capital as a share of Total Risk Capital "
+            "(upstream `risk_tolerance_ratio`). `null` when not validated."
+        ),
         examples=["0.85"],
     )
     timestamp: str = Field(
@@ -183,11 +187,11 @@ class CapitalMetricsResponse(BaseModel):
             "example": {
                 "prime_id": "prime-acme",
                 "prime_name": "Acme Prime",
-                "risk_capital": "10000000",
+                "exposure": "1900000000",
                 "capital_buffer": "2500000",
-                "first_loss_capital": "7500000",
-                "total_capital": "10000000",
-                "risk_to_capital_ratio": "0.85",
+                "required_risk_capital": "7500000",
+                "total_risk_capital": "10000000",
+                "encumbrance_ratio": "0.85",
                 "timestamp": "2026-05-07T12:00:00Z",
                 "benchmark_source": "https://example.com/star-rrc",
                 "is_validated": False,
@@ -391,11 +395,11 @@ async def list_capital_metrics(
                 CapitalMetricsResponse(
                     prime_id=prime.id,
                     prime_name=prime.name,
-                    risk_capital=Decimal("0"),
+                    exposure=Decimal("0"),
                     capital_buffer=Decimal("0"),
-                    first_loss_capital=Decimal("0"),
-                    total_capital=Decimal("0"),
-                    risk_to_capital_ratio=None,
+                    required_risk_capital=Decimal("0"),
+                    total_risk_capital=Decimal("0"),
+                    encumbrance_ratio=None,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     benchmark_source=settings.star_risk_capital_upstream_url,
                     is_validated=False,
@@ -412,11 +416,11 @@ async def list_capital_metrics(
             CapitalMetricsResponse(
                 prime_id=prime.id,
                 prime_name=prime.name,
-                risk_capital=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
+                exposure=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
                 capital_buffer=capital_buffer,
-                first_loss_capital=financial_rrc,
-                total_capital=total_rc,
-                risk_to_capital_ratio=_to_decimal(
+                required_risk_capital=financial_rrc,
+                total_risk_capital=total_rc,
+                encumbrance_ratio=_to_decimal(
                     row.risk_tolerance_ratio,
                     field="risk_tolerance_ratio",
                     prime_name=prime.name,
@@ -472,8 +476,9 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "Return every current allocation held by the given prime — both receipt-token "
         "positions (enriched with USD value when a price is available) and direct asset "
         "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
-        "surfaced with `receipt_token_id`, `receipt_token_address`, `protocol_name` and "
-        "`amount_usd` set to `null`). Each row includes the latest on-chain activity "
+        "surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` "
+        "set to `null`, and `amount_usd` valued from the token's oracle price when one "
+        "exists). Each row includes the latest on-chain activity "
         "timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`)."
     ),
 )
@@ -487,7 +492,8 @@ async def list_allocations(
     - Receipt-token positions (e.g. spUSDT wrapping USDT).
     - Direct asset holdings — tokens held in the proxy that are not
       registered as receipt-token wrappers (e.g. PYUSD, syrupUSDT). These
-      rows have null ``receipt_token_*`` / ``protocol_name`` / ``amount_usd``.
+      rows have null ``receipt_token_*`` / ``protocol_name``; ``amount_usd``
+      is valued from the token's oracle price when one exists, else null.
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -531,7 +537,7 @@ async def list_allocations(
             underlying_symbol=h.symbol,
             protocol_name=None,
             balance=h.balance,
-            amount_usd=None,
+            amount_usd=h.amount_usd,
             latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
             category=category_service.classify(None, h.symbol),
         )
@@ -548,6 +554,15 @@ class AllocationActivityBucketResponse(BaseModel):
     total_tx_amount: Decimal = Field(
         description="Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
         examples=["1234567890000000000000"],
+    )
+    net_flow_usd: Decimal = Field(
+        description=(
+            "Signed net flow valued in USD (inflows positive, outflows negative), using the receipt "
+            "token's latest underlying oracle price for wrapped positions and the token's own latest "
+            "oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring "
+            "at the current total and cumulating net flows backwards."
+        ),
+        examples=["1234567.89"],
     )
 
 

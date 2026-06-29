@@ -7,9 +7,15 @@ type AppTooltipProps = {
   trigger: ReactNode;
   content: ReactNode;
   ariaLabel: string;
+  fullWidth?: boolean;
 };
 
-export function AppTooltip({ trigger, content, ariaLabel }: AppTooltipProps) {
+export function AppTooltip({
+  trigger,
+  content,
+  ariaLabel,
+  fullWidth = false,
+}: AppTooltipProps) {
   return (
     <Tooltip.Root positioning={{ placement: 'top', offset: { mainAxis: 8 } }}>
       <Tooltip.Trigger asChild>
@@ -28,6 +34,8 @@ export function AppTooltip({ trigger, content, ariaLabel }: AppTooltipProps) {
             px: '1',
             py: '0.5',
             cursor: 'help',
+            width: fullWidth ? '100%' : 'auto',
+            justifyContent: fullWidth ? 'stretch' : 'flex-start',
           })}
         >
           {trigger}

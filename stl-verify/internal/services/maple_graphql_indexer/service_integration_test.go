@@ -251,9 +251,9 @@ func TestSyncIntegration_FullCycle(t *testing.T) {
 		t.Errorf("token created_at_block = %v, want NULL", *tokenCAB)
 	}
 
-	// is_internal derives from loanMeta type.
+	// is_internal derives from the current loanMeta type (via the view).
 	var internalCount int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM maple_loan WHERE is_internal`).Scan(&internalCount); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM maple_loan_current WHERE is_internal`).Scan(&internalCount); err != nil {
 		t.Fatalf("counting internal loans: %v", err)
 	}
 	if internalCount != 1 {
