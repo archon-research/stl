@@ -266,6 +266,13 @@ func (c *Client) doRequest(ctx context.Context, params url.Values, result any) e
 	if err == nil {
 		return nil
 	}
+	// A cancelled or timed-out caller context is not a source outage: the retry
+	// loop wraps ctx cancellation in a plain (retryable-looking) error, so without
+	// this guard an aborted run would be tagged transient and recorded as a skipped
+	// check, letting the validator report success on a run it never finished.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 	// A retryable failure that survived every retry (rate-limit, 5xx, network) means
 	// the canonical source is temporarily unavailable, not that our stored data is
 	// wrong. Tag it so the validator records an inconclusive check, not a hard error.

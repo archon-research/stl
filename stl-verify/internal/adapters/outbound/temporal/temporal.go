@@ -227,14 +227,16 @@ func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) er
 // leaves the offset at zero (fire on the interval boundary).
 func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.ScheduleSpec, error) {
 	interval := cfg.IntervalDefault
+	intervalSource := "IntervalDefault"
 	if cfg.IntervalEnv != "" {
 		if v := getenv(cfg.IntervalEnv); v != "" {
 			interval = v
+			intervalSource = cfg.IntervalEnv
 		}
 	}
 	every, err := time.ParseDuration(interval)
 	if err != nil {
-		return client.ScheduleSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalEnv, interval, err)
+		return client.ScheduleSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
 	}
 
 	var offset time.Duration
@@ -255,7 +257,7 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
 	spec, err := buildScheduleSpec(cfg, os.Getenv)
 	if err != nil {
-		return err
+		return fmt.Errorf("building schedule spec for %q: %w", cfg.Name, err)
 	}
 
 	scheduleID := cfg.Name
