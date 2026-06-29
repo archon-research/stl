@@ -23,12 +23,12 @@
 #   critical       → pages (Grafana IRM), [CRITICAL], 1h repeat.
 #   warning / info → no page, [WARNING]/[INFO], 4h repeat.
 #
-# Window sizing: steady state is ~5 sweeps/min/chain, so a 5m rate window holds
-# many samples even during brief RPC hiccups. The stall window mirrors the
-# morpho/oracle indexers (rate==0 over 5m, for 15m), but keyed on the
-# status="success" series so a flat counter means no fresh psm3_reserves row is
-# landing — whether the worker is wedged/SQS-starved/crash-looping or every
-# sweep is erroring (the case a `pgrep` liveness probe misses).
+# Window sizing: steady state is ~1 sweep / 10m/chain, so the stall window is
+# [30m] (holds ~3 expected sweeps) — a shorter window reads 0 between normal
+# sweeps and would flap/false-page. Keyed on the status="success" series so a
+# flat counter means no fresh psm3_reserves row is landing — whether the worker
+# is wedged/SQS-starved/crash-looping or every sweep is erroring (the case a
+# `pgrep` liveness probe misses).
 # =============================================================================
 groups:
   - name: vector-psm3
@@ -39,16 +39,18 @@ groups:
       # ---------------------------------------------------------------------
 
       - alert: VectorPSM3IndexerStalled
-        # No SUCCESSFUL sweep wrote a row for >15m. Keyed on status="success" (not
+        # No SUCCESSFUL sweep wrote a row for ~45m. Keyed on status="success" (not
         # all sweeps) so it covers BOTH the no-sweep case (SQS starvation, wedged
         # loop, crash-loop) AND the all-error case (every ReadState/SaveReserves
         # failing): in both, no fresh psm3_reserves row lands, so both must page.
         # Catches the silent alive-but-behind case (pod Running, 0 restarts, hours
         # behind) that the process-liveness probe cannot see. The error RATIO is a
         # warning companion for the partial-failure case where rows still land.
+        # Window is [30m] because steady-state cadence is ~1 sweep / 10m/chain; a
+        # shorter window is 0 between normal sweeps and would flap/false-page.
         expr: |
           sum by (chain, cluster) (
-            rate(psm3_sweeps_total{status="success", k8s_namespace_name="vector"}[5m])
+            rate(psm3_sweeps_total{status="success", k8s_namespace_name="vector"}[30m])
           ) == 0
         for: 15m
         labels:
@@ -60,7 +62,7 @@ groups:
           summary: "Vector psm3-indexer stalled on {{ $labels.chain }}"
           description: |
             `psm3-indexer` on chain `{{ $labels.chain }}` has written no
-            snapshot for >15m (no sweeps, or every sweep erroring). PSM3
+            snapshot for ~45m (no sweeps, or every sweep erroring). PSM3
             reserve state in TimescaleDB is going stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-psm3.md#vectorpsm3indexerstalled
 
