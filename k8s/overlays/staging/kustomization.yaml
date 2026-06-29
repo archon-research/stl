@@ -177,3 +177,20 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1hostname
         value: python-api-staging
+
+# Temporary: scale the per-chain data validators added in #435 to zero while the
+# alert-noise root-cause fix (#501) is reviewed and merged. They share one
+# Etherscan rate-limit and a transient throttle is currently counted as a run
+# failure, which flaps VectorCronjobRunFailing. The mainnet watcher-data-validator
+# is intentionally left running. Revert this block to re-enable.
+replicas:
+  - name: optimism-watcher-data-validator
+    count: 0
+  - name: unichain-watcher-data-validator
+    count: 0
+  - name: base-watcher-data-validator
+    count: 0
+  - name: arbitrum-watcher-data-validator
+    count: 0
+  - name: avalanche-watcher-data-validator
+    count: 0
