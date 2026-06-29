@@ -614,3 +614,53 @@ groups:
             blocks successfully for 30m but written zero pool-state snapshot
             rows. The snapshot loop may be silently empty (all pools skipped,
             heartbeat disabled, or snapshotSet always returning empty).
+
+  # =====================================================================
+  # RPC transport (internal/pkg/rpchttp retry transport) — PR #505
+  # =====================================================================
+  # Cross-cutting: every worker dialing via rpchttp.DialEthereum (oracle /
+  # morpho / sparklend / prime / psm3 indexers, dex bootstrap, and the
+  # backfillers via NewBackfillerClient) emits transport-level retry telemetry:
+  #   rpc_http_attempts_total{server_address,rpc_http_status_code}  (every attempt)
+  #   rpc_http_retries_total{server_address,reason}                 (each retry: 429|5xx|network)
+  # These sit below the per-service logical-RPC metrics above: a slow logical
+  # call times the whole client.Do including silent backoff, so a high retry
+  # ratio attributes that latency tail to its upstream cause. Filed in the
+  # vector-indexers namespace (no dedicated rpc namespace exists); the expr
+  # matches any emitting service via service_name, not just indexers.
+  - name: vector-rpc
+    interval: 1m
+    rules:
+      - alert: VectorRPCRetryRatioHigh
+        # Retries / attempts > 20% over 10m for a (service, rpc host) pair — the
+        # leading indicator of the throttle-driven latency tail (e.g.
+        # VectorOracleIndexerRPCLatencyHigh). clamp_min avoids divide-by-zero
+        # when a worker briefly issues no attempts. <20% is normal retry noise.
+        expr: |
+          sum by (service_name, server_address, cluster) (
+            rate(rpc_http_retries_total{k8s_namespace_name="vector"}[10m])
+          )
+          /
+          clamp_min(
+            sum by (service_name, server_address, cluster) (
+              rate(rpc_http_attempts_total{k8s_namespace_name="vector"}[10m])
+            ),
+            0.001
+          )
+          > 0.2
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: rpc-transport
+          namespace: vector
+        annotations:
+          summary: "Vector RPC retry ratio >20% for {{ $labels.service_name }} → {{ $labels.server_address }}"
+          description: |
+            `{{ $labels.service_name }}` is retrying
+            `{{ $value | humanizePercentage }}` of its RPC attempts to
+            `{{ $labels.server_address }}` over 10m. The transport is masking
+            upstream 429/5xx/network failures as added latency; break down by
+            `reason` on `rpc_http_retries_total` to tell throttling (429) from
+            server errors (5xx) from flaky connections (network).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorrpcretryratiohigh
