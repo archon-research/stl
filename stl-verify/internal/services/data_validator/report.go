@@ -12,7 +12,7 @@ type CheckResult struct {
 	// Name is the check name (e.g., "Chain Integrity", "Reorg 142").
 	Name string `json:"name"`
 
-	// Status is the check result: "passed", "failed", or "error".
+	// Status is the check result: "passed", "failed", "error", or "skipped".
 	Status string `json:"status"`
 
 	// Message is the status message (empty for passed checks).

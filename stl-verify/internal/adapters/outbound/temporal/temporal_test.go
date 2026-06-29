@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel"
 	mnoop "go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.temporal.io/sdk/client"
 )
 
 // TestRunCronjob_InitializesOTEL pins the OTel bootstrap in RunCronjob:
@@ -95,6 +96,12 @@ func TestBuildScheduleSpec_Offset(t *testing.T) {
 			env:     map[string]string{"OFFSET": "not-a-duration"},
 			wantErr: true,
 		},
+		{
+			name:    "invalid interval errors",
+			cfg:     CronjobConfig{IntervalEnv: "INTERVAL", IntervalDefault: "1h"},
+			env:     map[string]string{"INTERVAL": "not-a-duration"},
+			wantErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,5 +122,31 @@ func TestBuildScheduleSpec_Offset(t *testing.T) {
 					got.Every, got.Offset, tc.wantEvery, tc.wantOffset)
 			}
 		})
+	}
+}
+
+func TestApplyScheduleSpecUpdate_PreservesActionReplacesSpec(t *testing.T) {
+	action := &client.ScheduleWorkflowAction{ID: "scheduled-x", TaskQueue: "x"}
+	in := client.ScheduleUpdateInput{
+		Description: client.ScheduleDescription{
+			Schedule: client.Schedule{
+				Action: action,
+				Spec:   &client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{{Every: time.Hour}}},
+			},
+		},
+	}
+	want := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{{Every: time.Hour, Offset: 5 * time.Minute}}}
+
+	upd := applyScheduleSpecUpdate(in, want)
+
+	if upd.Schedule.Spec.Intervals[0].Offset != 5*time.Minute {
+		t.Fatalf("Offset = %s, want 5m (spec must be replaced)", upd.Schedule.Spec.Intervals[0].Offset)
+	}
+	gotAction, ok := upd.Schedule.Action.(*client.ScheduleWorkflowAction)
+	if !ok {
+		t.Fatalf("Action type = %T, want *client.ScheduleWorkflowAction (action must be preserved)", upd.Schedule.Action)
+	}
+	if gotAction.ID != "scheduled-x" || gotAction.TaskQueue != "x" {
+		t.Fatalf("Action = %+v, want ID=scheduled-x TaskQueue=x (action must be untouched)", gotAction)
 	}
 }

@@ -21,13 +21,13 @@
 
 ## File Structure
 
-- `stl-verify/internal/ports/outbound/block_verifier.go` — add the `ErrCanonicalSourceUnavailable` sentinel that the service uses to recognise a transient canonical-source failure.
-- `stl-verify/internal/adapters/outbound/etherscan/client.go` — classify retry-exhausted transient HTTP failures and wrap them with the sentinel.
-- `stl-verify/internal/services/data_validator/report.go` — add the `skipped` status and counter.
-- `stl-verify/internal/services/data_validator/service.go` — map transient canonical errors to `skipped`; surface the skipped count in logs.
-- `stl-verify/internal/adapters/outbound/temporal/temporal.go` — add interval-offset support and reconcile an existing schedule.
-- `stl-verify/cmd/cronjobs/watcher-data-validator/main.go` — wire the offset env into `CronjobConfig`.
-- `k8s/overlays/staging/configmaps.yaml`, `k8s/overlays/prod/configmaps.yaml` — per-chain `DATA_VALIDATION_SCHEDULE_OFFSET` values.
+- `stl-verify/internal/ports/outbound/block_verifier.go`: add the `ErrCanonicalSourceUnavailable` sentinel that the service uses to recognise a transient canonical-source failure.
+- `stl-verify/internal/adapters/outbound/etherscan/client.go`: classify retry-exhausted transient HTTP failures and wrap them with the sentinel.
+- `stl-verify/internal/services/data_validator/report.go`: add the `skipped` status and counter.
+- `stl-verify/internal/services/data_validator/service.go`: map transient canonical errors to `skipped`; surface the skipped count in logs.
+- `stl-verify/internal/adapters/outbound/temporal/temporal.go`: add interval-offset support and reconcile an existing schedule.
+- `stl-verify/cmd/cronjobs/watcher-data-validator/main.go`: wire the offset env into `CronjobConfig`.
+- `k8s/overlays/staging/configmaps.yaml`, `k8s/overlays/prod/configmaps.yaml`: per-chain `DATA_VALIDATION_SCHEDULE_OFFSET` values.
 
 Tasks 1-4 (semantic fix) are independent of tasks 5-7 (staggering). Task 4 depends on 1-3; task 6 depends on 5; task 7 depends on 5-6.
 

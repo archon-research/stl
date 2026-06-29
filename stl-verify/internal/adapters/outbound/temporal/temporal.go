@@ -295,8 +295,7 @@ func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Lo
 	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
 	err := handle.Update(ctx, client.ScheduleUpdateOptions{
 		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-			in.Description.Schedule.Spec = &want
-			return &client.ScheduleUpdate{Schedule: &in.Description.Schedule}, nil
+			return applyScheduleSpecUpdate(in, want), nil
 		},
 	})
 	if err != nil {
@@ -304,6 +303,15 @@ func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Lo
 	}
 	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
 	return nil
+}
+
+// applyScheduleSpecUpdate replaces only the timing spec on the current schedule
+// description, preserving the action (workflow + task queue), policy, and state.
+// Extracted as a pure function so the spec-only guarantee is unit-testable without
+// a live Temporal server.
+func applyScheduleSpecUpdate(in client.ScheduleUpdateInput, want client.ScheduleSpec) *client.ScheduleUpdate {
+	in.Description.Schedule.Spec = &want
+	return &client.ScheduleUpdate{Schedule: &in.Description.Schedule}
 }
 
 func interruptFromContext(ctx context.Context) <-chan any {
