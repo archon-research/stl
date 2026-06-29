@@ -383,8 +383,11 @@ func TestMapleRecordPools_AppendsEditorialChange(t *testing.T) {
 func TestMapleSatellite_BackfillRecipeMatchesGo(t *testing.T) {
 	// The migration backfill computes hashdiff in SQL; the repo computes it in
 	// Go (metaHashdiff). They must be byte-identical or the first post-deploy
-	// sync would see a false change and append a duplicate. This asserts the
-	// stored (Go) hashdiff equals the SQL backfill recipe for the same values.
+	// sync would see a false change and append a duplicate satellite row per
+	// hub. This asserts the stored (Go) hashdiff equals the SQL backfill recipe
+	// for every satellite, covering each editorial encoding: pool (bool), loan
+	// (7-field *string null-sentinel) and strategy (int::text) — the recipe
+	// strings below are byte-for-byte the ones in the migration's backfill.
 	ctx := context.Background()
 	truncateMaple(t, ctx)
 	repo := newMapleRepo(t, 0)
@@ -402,17 +405,57 @@ func TestMapleSatellite_BackfillRecipeMatchesGo(t *testing.T) {
 		return err
 	})
 
-	var equal bool
-	if err := maplePool.QueryRow(ctx,
-		`SELECT hashdiff = decode(md5(
+	// Meta mixes a populated field (Type, Location) with absent ones (asset
+	// symbol, dex, wallet_*) so the *string null-sentinel (E'\x1e') path is
+	// exercised, not just non-null text.
+	loanID := upsertTestLoan(t, ctx, repo, poolID, 0x11, &maple.LoanMeta{Type: "strategy", Location: "base"})
+
+	var strategyID int64
+	inMapleTx(t, ctx, func(tx pgx.Tx) error {
+		strategy, err := maple.NewSkyStrategy(1, mapleAddr(0x12), poolID, 100)
+		if err != nil {
+			t.Fatalf("NewSkyStrategy: %v", err)
+		}
+		ids, err := repo.RecordSkyStrategies(ctx, tx, mapleSyncedAt(), []*maple.SkyStrategy{strategy})
+		strategyID = ids[common.BytesToAddress(strategy.StrategyAddress)]
+		return err
+	})
+
+	tests := []struct {
+		name   string
+		recipe string
+		id     int64
+	}{
+		{"pool", `SELECT hashdiff = decode(md5(
 		     COALESCE(name, '') || E'\x1f' ||
 		     (CASE WHEN is_syrup THEN 'true' ELSE 'false' END)
 		 ), 'hex')
-		 FROM maple_pool_meta WHERE maple_pool_id = $1`, poolID).Scan(&equal); err != nil {
-		t.Fatalf("comparing hashdiff: %v", err)
+		 FROM maple_pool_meta WHERE maple_pool_id = $1`, poolID},
+		{"loan", `SELECT hashdiff = decode(md5(
+		     loan_type || E'\x1f' ||
+		     COALESCE(loan_meta_type, E'\x1e') || E'\x1f' ||
+		     COALESCE(loan_meta_asset_symbol, E'\x1e') || E'\x1f' ||
+		     COALESCE(loan_meta_dex, E'\x1e') || E'\x1f' ||
+		     COALESCE(loan_meta_wallet_address, E'\x1e') || E'\x1f' ||
+		     COALESCE(loan_meta_wallet_type, E'\x1e') || E'\x1f' ||
+		     COALESCE(loan_meta_location, E'\x1e')
+		 ), 'hex')
+		 FROM maple_loan_meta WHERE maple_loan_id = $1`, loanID},
+		{"strategy", `SELECT hashdiff = decode(md5(
+		     COALESCE(version::text, '0')
+		 ), 'hex')
+		 FROM maple_sky_strategy_meta WHERE maple_sky_strategy_id = $1`, strategyID},
 	}
-	if !equal {
-		t.Error("stored Go hashdiff does not match the SQL backfill recipe")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var equal bool
+			if err := maplePool.QueryRow(ctx, tt.recipe, tt.id).Scan(&equal); err != nil {
+				t.Fatalf("comparing hashdiff: %v", err)
+			}
+			if !equal {
+				t.Error("stored Go hashdiff does not match the SQL backfill recipe")
+			}
+		})
 	}
 }
 
