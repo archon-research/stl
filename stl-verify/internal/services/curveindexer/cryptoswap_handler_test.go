@@ -456,6 +456,94 @@ func TestCryptoswapHandler_SnapshotDNilOnRevert(t *testing.T) {
 	}
 }
 
+// cryptoswapTotalSupplyCallIndex is the index of the totalSupply call for a
+// 3-coin cryptoswap pool: balances(0,1,2), get_virtual_price, totalSupply -> index 4.
+const cryptoswapTotalSupplyIdx = 4
+
+// TestCryptoswapHandler_SnapshotTotalSupplyTargetsLpToken verifies that when
+// LpTokenAddress is set, the totalSupply call targets the LP token, not the pool.
+// All other calls must still target the pool address.
+func TestCryptoswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+
+	poolAddr := common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46")
+	lpAddr := common.HexToAddress("0x06325440D014e39736583c165C2963BA99fAf14E")
+	pool := RegisteredPool{
+		ID:             10,
+		Address:        poolAddr,
+		Kind:           KindCryptoswap,
+		NCoins:         3,
+		CoinTokenIDs:   []int64{1, 2, 3},
+		CoinDecimals:   []int{18, 18, 6},
+		LpTokenAddress: &lpAddr,
+	}
+
+	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
+	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	if len(mc.captured) <= cryptoswapTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), cryptoswapTotalSupplyIdx+1)
+	}
+
+	tsCall := mc.captured[cryptoswapTotalSupplyIdx]
+	if tsCall.Target != lpAddr {
+		t.Errorf("totalSupply call Target = %s, want LP token %s", tsCall.Target, lpAddr)
+	}
+
+	// All other calls must target the pool, not the LP token.
+	for i, c := range mc.captured {
+		if i == cryptoswapTotalSupplyIdx {
+			continue
+		}
+		if c.Target != poolAddr {
+			t.Errorf("call[%d].Target = %s, want pool %s", i, c.Target, poolAddr)
+		}
+	}
+}
+
+// TestCryptoswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken verifies that
+// when LpTokenAddress is nil, totalSupply targets the pool address.
+func TestCryptoswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+
+	poolAddr := common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46")
+	pool := RegisteredPool{
+		ID:             10,
+		Address:        poolAddr,
+		Kind:           KindCryptoswap,
+		NCoins:         3,
+		CoinTokenIDs:   []int64{1, 2, 3},
+		CoinDecimals:   []int{18, 18, 6},
+		LpTokenAddress: nil,
+	}
+
+	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
+	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	if len(mc.captured) <= cryptoswapTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), cryptoswapTotalSupplyIdx+1)
+	}
+
+	tsCall := mc.captured[cryptoswapTotalSupplyIdx]
+	if tsCall.Target != poolAddr {
+		t.Errorf("totalSupply call Target = %s, want pool %s", tsCall.Target, poolAddr)
+	}
+}
+
 func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {

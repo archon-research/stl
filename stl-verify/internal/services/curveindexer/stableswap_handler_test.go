@@ -434,6 +434,111 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	}
 }
 
+// capturingMulticaller records the calls it receives and returns preset results.
+// It is used to assert which Target address each call uses.
+type capturingMulticaller struct {
+	captured []outbound.Call
+	results  []outbound.Result
+}
+
+func (c *capturingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	c.captured = append(c.captured, calls...)
+	return c.results, nil
+}
+
+func (c *capturingMulticaller) Address() common.Address {
+	return common.Address{}
+}
+
+// totalSupplyCallIndex returns the index of the totalSupply call in a pre-NG 2-coin
+// call list: balances(0), balances(1), get_virtual_price, totalSupply -> index 3.
+const stableswapPreNG2CoinTotalSupplyIdx = 3
+
+// TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken verifies that when
+// LpTokenAddress is set, the totalSupply call targets the LP token, not the pool.
+// All other calls must still target the pool address.
+func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+
+	poolAddr := common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")
+	lpAddr := common.HexToAddress("0x06325440D014e39736583c165C2963BA99fAf14E")
+	pool := RegisteredPool{
+		ID:             1,
+		Address:        poolAddr,
+		Kind:           KindStableswapPreNG,
+		NCoins:         2,
+		CoinTokenIDs:   []int64{1, 2},
+		CoinDecimals:   []int{18, 18},
+		LpTokenAddress: &lpAddr,
+	}
+
+	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
+	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	if len(mc.captured) <= stableswapPreNG2CoinTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), stableswapPreNG2CoinTotalSupplyIdx+1)
+	}
+
+	tsCall := mc.captured[stableswapPreNG2CoinTotalSupplyIdx]
+	if tsCall.Target != lpAddr {
+		t.Errorf("totalSupply call Target = %s, want LP token %s", tsCall.Target, lpAddr)
+	}
+
+	// All other calls must target the pool, not the LP token.
+	for i, c := range mc.captured {
+		if i == stableswapPreNG2CoinTotalSupplyIdx {
+			continue
+		}
+		if c.Target != poolAddr {
+			t.Errorf("call[%d].Target = %s, want pool %s", i, c.Target, poolAddr)
+		}
+	}
+}
+
+// TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken verifies that
+// when LpTokenAddress is nil (NG pools that are their own LP token), totalSupply
+// targets the pool address.
+func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+
+	poolAddr := common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022")
+	pool := RegisteredPool{
+		ID:             2,
+		Address:        poolAddr,
+		Kind:           KindStableswapPreNG,
+		NCoins:         2,
+		CoinTokenIDs:   []int64{1, 2},
+		CoinDecimals:   []int{18, 18},
+		LpTokenAddress: nil, // pool is its own LP token
+	}
+
+	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
+	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	if len(mc.captured) <= stableswapPreNG2CoinTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), stableswapPreNG2CoinTotalSupplyIdx+1)
+	}
+
+	tsCall := mc.captured[stableswapPreNG2CoinTotalSupplyIdx]
+	if tsCall.Target != poolAddr {
+		t.Errorf("totalSupply call Target = %s, want pool %s", tsCall.Target, poolAddr)
+	}
+}
+
 func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 	a, err := abis.CurveStableswapABI()
 	if err != nil {

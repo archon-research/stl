@@ -20,6 +20,10 @@ type CurvePoolRow struct {
 	CoinTokenIDs []int64 // index-aligned (ordered by coin_index)
 	CoinDecimals []int   // index-aligned (ordered by coin_index), matching CoinTokenIDs
 	DeployBlock  int64
+	// LpTokenAddress is the pool's LP/share token. For pre-NG pools this is a
+	// separate contract (totalSupply lives there, not on the pool); nil when the
+	// pool is its own LP token (NG pools).
+	LpTokenAddress *common.Address
 }
 
 // SwapInput carries primitive values for a curve_swap insert.

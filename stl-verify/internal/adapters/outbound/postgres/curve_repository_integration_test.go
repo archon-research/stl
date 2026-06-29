@@ -443,6 +443,113 @@ func TestCurveRepository_LoadPools_NullDeployBlock(t *testing.T) {
 	}
 }
 
+// TestCurveRepository_LoadPools_LpTokenAddress verifies that LoadPools returns
+// LpTokenAddress when the column is non-null and nil when it is null.
+func TestCurveRepository_LoadPools_LpTokenAddress(t *testing.T) {
+	ctx := context.Background()
+	repo := newCurveRepo(t)
+
+	lpAddr := common.HexToAddress("0x06325440D014e39736583c165C2963BA99fAf14E")
+	withLpPoolID := seedCurvePoolWithLpToken(t, ctx, lpAddr)
+	noLpPoolID := seedCurvePool(t, ctx)
+
+	pools, err := repo.LoadPools(ctx, 999)
+	if err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
+
+	var withLp, noLp *outbound.CurvePoolRow
+	for i := range pools {
+		if pools[i].ID == withLpPoolID {
+			withLp = &pools[i]
+		}
+		if pools[i].ID == noLpPoolID {
+			noLp = &pools[i]
+		}
+	}
+
+	if withLp == nil {
+		t.Fatalf("pool id=%d (with lp_token_address) not found in LoadPools", withLpPoolID)
+	}
+	if withLp.LpTokenAddress == nil {
+		t.Fatal("LpTokenAddress should be non-nil for pool seeded with lp_token_address")
+	}
+	if *withLp.LpTokenAddress != lpAddr {
+		t.Errorf("LpTokenAddress = %s, want %s", withLp.LpTokenAddress, lpAddr)
+	}
+
+	if noLp == nil {
+		t.Fatalf("pool id=%d (null lp_token_address) not found in LoadPools", noLpPoolID)
+	}
+	if noLp.LpTokenAddress != nil {
+		t.Errorf("LpTokenAddress should be nil for pool with no lp_token_address, got %s", noLp.LpTokenAddress)
+	}
+}
+
+// seedCurvePoolWithLpToken inserts a 2-coin pre-NG pool with a non-null
+// lp_token_address and returns its id. Uses a distinct pool/token address
+// to avoid conflicts with seedCurvePool.
+func seedCurvePoolWithLpToken(t *testing.T, ctx context.Context, lpAddr common.Address) int64 {
+	t.Helper()
+
+	if _, err := curveTestPool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES (999, 'testchain')
+		 ON CONFLICT (chain_id) DO NOTHING`,
+	); err != nil {
+		t.Fatalf("seed chain: %v", err)
+	}
+
+	var protoID int64
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (999, '\xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC'::bytea, 'Curve', 'dex', 0, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`,
+	).Scan(&protoID); err != nil {
+		t.Fatalf("seed protocol: %v", err)
+	}
+
+	var tokenID0, tokenID1 int64
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals)
+		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA10'::bytea, 'TOKP', 18)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
+		 RETURNING id`,
+	).Scan(&tokenID0); err != nil {
+		t.Fatalf("seed token0: %v", err)
+	}
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals)
+		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA11'::bytea, 'TOKQ', 18)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
+		 RETURNING id`,
+	).Scan(&tokenID1); err != nil {
+		t.Fatalf("seed token1: %v", err)
+	}
+
+	var poolID int64
+	if err := curveTestPool.QueryRow(ctx,
+		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, lp_token_address)
+		 VALUES (999, $1, '\xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE'::bytea, 'plain_pre_ng', 2, 100, $2)
+		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET lp_token_address = EXCLUDED.lp_token_address
+		 RETURNING id`,
+		protoID, lpAddr.Bytes(),
+	).Scan(&poolID); err != nil {
+		t.Fatalf("seed curve_pool with lp_token: %v", err)
+	}
+
+	if _, err := curveTestPool.Exec(ctx,
+		`INSERT INTO curve_pool_coin (curve_pool_id, coin_index, token_id)
+		 VALUES ($1, 0, $2), ($1, 1, $3)
+		 ON CONFLICT (curve_pool_id, coin_index) DO NOTHING`,
+		poolID, tokenID0, tokenID1,
+	); err != nil {
+		t.Fatalf("seed curve_pool_coin: %v", err)
+	}
+
+	return poolID
+}
+
 // seedCurvePoolWithNullDeployBlock inserts a 2-coin pool with deploy_block = NULL
 // and returns its id. Idempotent: re-running forces deploy_block back to NULL.
 func seedCurvePoolWithNullDeployBlock(t *testing.T, ctx context.Context) int64 {

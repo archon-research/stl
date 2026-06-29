@@ -42,7 +42,7 @@ func NewCurveRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildre
 // LoadPools returns all pools for the given chain with their coin token IDs in coin_index order.
 func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbound.CurvePoolRow, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT cp.id, cp.pool_address, cp.pool_kind, cp.n_coins, cp.deploy_block, cpc.token_id, t.decimals
+		`SELECT cp.id, cp.pool_address, cp.pool_kind, cp.n_coins, cp.deploy_block, cp.lp_token_address, cpc.token_id, t.decimals
 		 FROM curve_pool cp
 		 JOIN curve_pool_coin cpc ON cpc.curve_pool_id = cp.id
 		 JOIN token t ON t.id = cpc.token_id
@@ -65,10 +65,11 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 			kind        string
 			nCoins      int
 			deployBlock *int64
+			lpToken     []byte
 			tokenID     int64
 			decimals    int
 		)
-		if err := rows.Scan(&poolID, &poolAddress, &kind, &nCoins, &deployBlock, &tokenID, &decimals); err != nil {
+		if err := rows.Scan(&poolID, &poolAddress, &kind, &nCoins, &deployBlock, &lpToken, &tokenID, &decimals); err != nil {
 			return nil, fmt.Errorf("scanning curve pool row: %w", err)
 		}
 
@@ -80,14 +81,20 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 			if deployBlock != nil {
 				db = *deployBlock
 			}
+			var lpAddr *common.Address
+			if lpToken != nil {
+				a := common.BytesToAddress(lpToken)
+				lpAddr = &a
+			}
 			idx = len(result)
 			index[poolID] = idx
 			result = append(result, outbound.CurvePoolRow{
-				ID:          poolID,
-				Address:     common.BytesToAddress(poolAddress),
-				Kind:        kind,
-				NCoins:      nCoins,
-				DeployBlock: db,
+				ID:             poolID,
+				Address:        common.BytesToAddress(poolAddress),
+				Kind:           kind,
+				NCoins:         nCoins,
+				DeployBlock:    db,
+				LpTokenAddress: lpAddr,
 			})
 		}
 		result[idx].CoinTokenIDs = append(result[idx].CoinTokenIDs, tokenID)

@@ -233,11 +233,18 @@ func (h *CryptoswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
 
 	// 3. totalSupply()
+	// totalSupply lives on the LP token, which for pre-NG pools is a separate
+	// contract from the pool; fall back to the pool address for NG pools that
+	// are their own LP token.
+	lpTarget := pool.Address
+	if pool.LpTokenAddress != nil {
+		lpTarget = *pool.LpTokenAddress
+	}
 	data, err = h.cryptoABI.Pack("totalSupply")
 	if err != nil {
 		return nil, fmt.Errorf("packing totalSupply: %w", err)
 	}
-	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+	calls = append(calls, outbound.Call{Target: lpTarget, AllowFailure: false, CallData: data})
 
 	// 4. A()
 	data, err = h.cryptoABI.Pack("A")
