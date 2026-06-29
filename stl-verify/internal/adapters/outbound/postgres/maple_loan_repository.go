@@ -127,7 +127,7 @@ func (r *MapleGraphQLRepository) RecordPools(ctx context.Context, tx pgx.Tx, syn
 	}
 	if err := r.appendMeta(ctx, tx, "maple_pool_meta", "maple_pool_id",
 		[]string{"name", "is_syrup"}, syncedAt, rows); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("recording maple pool meta: %w", err)
 	}
 	return ids, nil
 }
@@ -268,7 +268,7 @@ func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, syn
 		[]string{"loan_type", "loan_meta_type", "loan_meta_asset_symbol", "loan_meta_dex",
 			"loan_meta_wallet_address", "loan_meta_wallet_type", "loan_meta_location"},
 		syncedAt, rows); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("recording maple loan meta: %w", err)
 	}
 	return ids, nil
 }
@@ -413,7 +413,7 @@ func (r *MapleGraphQLRepository) RecordSkyStrategies(ctx context.Context, tx pgx
 	}
 	if err := r.appendMeta(ctx, tx, "maple_sky_strategy_meta", "maple_sky_strategy_id",
 		[]string{"version"}, syncedAt, rows); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("recording maple sky strategy meta: %w", err)
 	}
 	return ids, nil
 }

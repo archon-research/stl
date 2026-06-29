@@ -864,54 +864,42 @@ func TestSync_BorrowerMissingFromUpsertResult(t *testing.T) {
 	}
 }
 
-func TestSync_LoanMissingFromRecordResult(t *testing.T) {
-	client := happyClient()
-	repo := newMockRepo()
-	repo.RecordLoansFn = func(context.Context, pgx.Tx, time.Time, []*maple.Loan) (map[common.Address]int64, error) {
-		return map[common.Address]int64{}, nil
+func TestSync_EntityMissingFromRecordResult(t *testing.T) {
+	tests := []struct {
+		name      string
+		emptyRepo func(*mockRepo)
+	}{
+		{"loan", func(r *mockRepo) {
+			r.RecordLoansFn = func(context.Context, pgx.Tx, time.Time, []*maple.Loan) (map[common.Address]int64, error) {
+				return map[common.Address]int64{}, nil
+			}
+		}},
+		{"pool", func(r *mockRepo) {
+			r.RecordPoolsFn = func(context.Context, pgx.Tx, time.Time, []*maple.Pool) (map[common.Address]int64, error) {
+				return map[common.Address]int64{}, nil
+			}
+		}},
+		{"strategy", func(r *mockRepo) {
+			r.RecordSkyStrategiesFn = func(context.Context, pgx.Tx, time.Time, []*maple.SkyStrategy) (map[common.Address]int64, error) {
+				return map[common.Address]int64{}, nil
+			}
+		}},
 	}
-	service := newTestService(t, client, repo)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := happyClient()
+			repo := newMockRepo()
+			tt.emptyRepo(repo)
+			service := newTestService(t, client, repo)
 
-	err := service.Sync(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "missing from record result") {
-		t.Errorf("error = %q", err.Error())
-	}
-}
-
-func TestSync_PoolMissingFromRecordResult(t *testing.T) {
-	client := happyClient()
-	repo := newMockRepo()
-	repo.RecordPoolsFn = func(context.Context, pgx.Tx, time.Time, []*maple.Pool) (map[common.Address]int64, error) {
-		return map[common.Address]int64{}, nil
-	}
-	service := newTestService(t, client, repo)
-
-	err := service.Sync(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "missing from record result") {
-		t.Errorf("error = %q", err.Error())
-	}
-}
-
-func TestSync_StrategyMissingFromRecordResult(t *testing.T) {
-	client := happyClient()
-	repo := newMockRepo()
-	repo.RecordSkyStrategiesFn = func(context.Context, pgx.Tx, time.Time, []*maple.SkyStrategy) (map[common.Address]int64, error) {
-		return map[common.Address]int64{}, nil
-	}
-	service := newTestService(t, client, repo)
-
-	err := service.Sync(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "missing from record result") {
-		t.Errorf("error = %q", err.Error())
+			err := service.Sync(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), "missing from record result") {
+				t.Errorf("error = %q", err.Error())
+			}
+		})
 	}
 }
 
