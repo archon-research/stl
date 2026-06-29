@@ -506,6 +506,123 @@ groups:
             likely degraded; expect lag and possible cycle timeouts.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
 
+  # =========================================================================
+  # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
+  # WebSocket and persists periodic top-N snapshots. One pod per exchange
+  # (service_name="cex-orderbook-indexer-<exchange>", label `exchange`). Unlike
+  # the block-driven indexers there is no SQS queue: a failed write is dropped
+  # and the next tick re-samples, so these fire on the modes that don't
+  # self-heal. (The rules-sync contract only allows the fixed set of file
+  # basenames, so the cex rules live here in the shared indexers file.)
+  # =========================================================================
+  - name: vector-cex-orderbook
+    interval: 1m
+    rules:
+      - alert: VectorCexOrderbookPersistFailing
+        # rate>0 sustained 15m = failures recurring throughout the window; a
+        # single transient blip clears within the [10m] window and resets `for`.
+        # Kept interval-independent rather than a cadence-relative threshold
+        # (ORDERBOOK_INTERVAL is configurable per pod).
+        expr: |
+          sum by (exchange, cluster) (
+            rate(orderbook_persist_failures_total{k8s_namespace_name="vector"}[10m])
+          ) > 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer failing to persist on {{ $labels.exchange }}"
+          description: |
+            `cex-orderbook-indexer` for `{{ $labels.exchange }}` has logged
+            snapshot persistence failures continuously for >15m. The WebSocket
+            is likely fine but nothing is reaching TimescaleDB — a silent data
+            hole the drop-and-continue path will not self-heal (e.g. auth, a
+            missing table, or a saturated DB pool).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookpersistfailing
+
+      - alert: VectorCexOrderbookStreamStalled
+        expr: |
+          max by (exchange, cluster) (
+            orderbook_last_update_age{k8s_namespace_name="vector"}
+          ) > 120
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer stream stalled on {{ $labels.exchange }}"
+          description: |
+            The oldest symbol on `{{ $labels.exchange }}` has had no order book
+            update for >120s sustained over 10m. The feed has silently gone
+            dead; persisted snapshots are stale (and stale symbols stop being
+            written, so the series goes flat).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookstreamstalled
+
+      - alert: VectorCexOrderbookDown
+        # Availability companion to StreamStalled, mirroring the Maple
+        # Stalled/Down pair (VEC-360). orderbook_last_update_age is a gauge from
+        # the pod's own OTLP export, so it disappears on a pod/exporter outage
+        # and StreamStalled goes silent (no series to compare). kube-state-metrics
+        # is independent of that export, so this still fires when the process or
+        # the metrics pipeline is the thing that died. Regex covers the
+        # per-exchange fleet (coinbase|okx|kraken).
+        expr: |
+          max by (deployment, cluster) (
+            kube_deployment_status_replicas_available{
+              deployment=~"cex-orderbook-indexer-.*", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer `{{ $labels.deployment }}` has no available replica"
+          description: |
+            `{{ $labels.deployment }}` has <1 available replica for >10m. The
+            order book indexer is not running; no snapshots are being taken. If
+            VectorCexOrderbookStreamStalled is firing too, this is the root
+            cause (process down, not a metrics-pipeline issue).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookdown
+
+      - alert: VectorCexOrderbookPersistLatencyHigh
+        # p99 batch-write latency to TimescaleDB. A top-N JSONB insert is normally
+        # single-digit ms; sustained >1s means the DB/pool is degraded and writes
+        # risk overrunning the snapshot interval (default 5s) and dropping ticks.
+        # Histogram orderbook.persist.duration_seconds. Threshold is a pre-baseline
+        # estimate — tune off a few days of staging data (cf. the maple latency
+        # alert). Warning: a precursor to drops, not yet an outage.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (exchange, cluster, le) (
+              rate(orderbook_persist_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer p99 persist latency >1s on {{ $labels.exchange }}"
+          description: |
+            `cex-orderbook-indexer` for `{{ $labels.exchange }}` p99 snapshot
+            write latency is `{{ $value | printf "%.2fs" }}` over 10m. The DB or
+            connection pool is degraded; writes risk overrunning the snapshot
+            interval and dropping ticks before it escalates to persist failures.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookpersistlatencyhigh
+
   # =====================================================================
   # RPC transport (internal/pkg/rpchttp retry transport) — PR #505
   # =====================================================================

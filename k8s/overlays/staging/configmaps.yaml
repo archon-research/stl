@@ -167,6 +167,20 @@ data:
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
 ---
+# CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
+# venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
+# uses slash pairs with its own asset names like XBT/USD).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cex-orderbook-indexer-coinbase-config
+data:
+  EXCHANGE: "coinbase"
+  SYMBOLS: "BTC-USD,ETH-USD"
+  ORDERBOOK_DEPTH: "100"
+  ORDERBOOK_INTERVAL: "5s"
+  ENVIRONMENT: "sentinelstaging"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
