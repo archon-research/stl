@@ -215,11 +215,6 @@ REVOKE UPDATE, DELETE ON maple_pool_meta FROM stl_readwrite;
 REVOKE UPDATE, DELETE ON maple_loan_meta FROM stl_readwrite;
 REVOKE UPDATE, DELETE ON maple_sky_strategy_meta FROM stl_readwrite;
 
--- SELECT on the *_current views is granted by ALTER DEFAULT PRIVILEGES … ON
--- TABLES (set in 20260122_140100): default table privileges cover views, and
--- these views are created here by stl_migrator, so stl_readonly/stl_readwrite
--- inherit SELECT automatically — no explicit GRANT needed.
-
 INSERT INTO migrations (filename)
 VALUES ('20260627_120000_create_maple_registry_satellites.sql')
 ON CONFLICT (filename) DO NOTHING;
