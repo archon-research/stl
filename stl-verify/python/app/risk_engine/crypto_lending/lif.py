@@ -5,7 +5,9 @@ Spec: https://docs.morpho.org/learn/concepts/liquidation/
 
 from decimal import Decimal
 
-from axis_synome.spec.crypto_lending.formulas.lif import lif as compute_lif_float
+from app.risk_engine._vendored_synome.crypto_lending.formulas.lif import (
+    lif as compute_lif_float,
+)
 
 
 def compute_lif(lltv: Decimal) -> Decimal:
