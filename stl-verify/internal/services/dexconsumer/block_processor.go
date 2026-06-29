@@ -78,5 +78,8 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 		return fmt.Errorf("unmarshalling receipts: %w", err)
 	}
 
-	return p.handle(ctx, event, receipts)
+	if err := p.handle(ctx, event, receipts); err != nil {
+		return fmt.Errorf("handling block %d (chain=%d, version=%d): %w", event.BlockNumber, event.ChainID, event.Version, err)
+	}
+	return nil
 }

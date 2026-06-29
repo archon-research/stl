@@ -504,7 +504,8 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 
 // TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken verifies that
 // when LpTokenAddress is nil (NG pools that are their own LP token), totalSupply
-// targets the pool address.
+// targets the pool address. Uses KindStableswapNG because that is the real-world
+// case: NG pools embed the LP token into the pool contract itself.
 func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testing.T) {
 	a, err := abis.CurveStableswapABI()
 	if err != nil {
@@ -516,14 +517,14 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 	pool := RegisteredPool{
 		ID:             2,
 		Address:        poolAddr,
-		Kind:           KindStableswapPreNG,
+		Kind:           KindStableswapNG,
 		NCoins:         2,
 		CoinTokenIDs:   []int64{1, 2},
 		CoinDecimals:   []int{18, 18},
 		LpTokenAddress: nil, // pool is its own LP token
 	}
 
-	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := &capturingMulticaller{results: stableswapNGResults(t, a)}
 	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)

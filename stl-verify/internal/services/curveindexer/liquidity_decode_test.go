@@ -570,6 +570,131 @@ func TestCryptoswap_RemoveLiquidity(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// C3: missing provider topic error-path tests
+// ---------------------------------------------------------------------------
+
+// TestDecodeClassicLiquidity_MatchedSigMissingProvider verifies that when a log's
+// topic0 matches a known classic liquidity signature but Topics[1] (provider) is
+// absent, decodeClassicLiquidity returns a non-nil error rather than silently
+// returning (nil, false, nil).
+func TestDecodeClassicLiquidity_MatchedSigMissingProvider(t *testing.T) {
+	pool := RegisteredPool{
+		ID:      1,
+		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  2,
+	}
+	// A classic AddLiquidity topic0 for a 2-coin pool.
+	topic0 := eventTopic0("AddLiquidity(address,uint256[2],uint256[2],uint256,uint256)")
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{topic0.Hex()}, // only one topic -- provider missing
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	rec, matched, err := decodeClassicLiquidity(log, pool)
+	if err == nil {
+		t.Errorf("expected non-nil error for matched classic sig with missing provider, got rec=%v matched=%v", rec, matched)
+	}
+	if matched {
+		t.Errorf("matched must be false when provider topic is missing")
+	}
+}
+
+// TestDecodeClassicLiquidity_UnknownTopicMissingProvider verifies that when a log
+// has an unknown topic0 and only one topic, decodeClassicLiquidity returns
+// (nil, false, nil) -- the unknown-sig path must not error.
+func TestDecodeClassicLiquidity_UnknownTopicMissingProvider(t *testing.T) {
+	pool := RegisteredPool{
+		ID:      1,
+		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  2,
+	}
+	unknownTopic := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{unknownTopic.Hex()}, // unknown sig, one topic
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	rec, matched, err := decodeClassicLiquidity(log, pool)
+	if err != nil {
+		t.Errorf("unexpected error for unknown topic with missing provider: %v", err)
+	}
+	if matched {
+		t.Errorf("matched must be false for unknown topic0")
+	}
+	if rec != nil {
+		t.Errorf("rec must be nil for unknown topic0, got %v", rec)
+	}
+}
+
+// TestDecodeCryptoLiquidity_MatchedSigMissingProvider verifies that when a log's
+// topic0 matches a known cryptoswap liquidity signature but Topics[1] (provider)
+// is absent, decodeCryptoLiquidity returns a non-nil error.
+func TestDecodeCryptoLiquidity_MatchedSigMissingProvider(t *testing.T) {
+	pool := RegisteredPool{
+		ID:      10,
+		Address: common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:    KindCryptoswap,
+		NCoins:  2,
+	}
+	// A cryptoswap AddLiquidity topic0 for a 2-coin pool.
+	topic0 := eventTopic0("AddLiquidity(address,uint256[2],uint256,uint256,uint256)")
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{topic0.Hex()}, // only one topic -- provider missing
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	rec, matched, err := decodeCryptoLiquidity(log, pool)
+	if err == nil {
+		t.Errorf("expected non-nil error for matched cryptoswap sig with missing provider, got rec=%v matched=%v", rec, matched)
+	}
+	if matched {
+		t.Errorf("matched must be false when provider topic is missing")
+	}
+}
+
+// TestDecodeCryptoLiquidity_UnknownTopicMissingProvider verifies that when a log
+// has an unknown topic0 and only one topic, decodeCryptoLiquidity returns
+// (nil, false, nil) -- the unknown-sig path must not error.
+func TestDecodeCryptoLiquidity_UnknownTopicMissingProvider(t *testing.T) {
+	pool := RegisteredPool{
+		ID:      10,
+		Address: common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:    KindCryptoswap,
+		NCoins:  2,
+	}
+	unknownTopic := common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          []string{unknownTopic.Hex()}, // unknown sig, one topic
+		Data:            "0x",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	rec, matched, err := decodeCryptoLiquidity(log, pool)
+	if err != nil {
+		t.Errorf("unexpected error for unknown topic with missing provider: %v", err)
+	}
+	if matched {
+		t.Errorf("matched must be false for unknown topic0")
+	}
+	if rec != nil {
+		t.Errorf("rec must be nil for unknown topic0, got %v", rec)
+	}
+}
+
 // TestStableswapPreNG_ClassicTypedNotOnlyCapture is a regression guard asserting
 // that a classic AddLiquidity log on a KindStableswapPreNG pool produces a
 // LiquidityRecord (was previously only captured-not-typed).

@@ -138,6 +138,9 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 			}
 			presentAddrs := make(map[common.Address]struct{}, len(receipt.Logs))
 			for _, log := range receipt.Logs {
+				if !common.IsHexAddress(log.Address) {
+					return fmt.Errorf("invalid log address %q in block %d", log.Address, bn)
+				}
 				presentAddrs[common.HexToAddress(log.Address)] = struct{}{}
 			}
 			for addr, pool := range c.poolsByAddr {

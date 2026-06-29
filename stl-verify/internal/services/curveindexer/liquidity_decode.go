@@ -105,9 +105,16 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityReco
 	n := pool.NCoins
 	sigs := buildClassicSigs(n)
 
-	// provider is indexed (Topics[1]); if absent the log is malformed and can't match.
+	// provider is indexed (Topics[1]); once topic0 matches a known liquidity
+	// signature, its absence is a malformed log and must fail decoding rather
+	// than silently fall through to the capture net.
 	if len(log.Topics) < 2 {
-		return nil, false, nil
+		switch topic0 {
+		case sigs.addLiquidity, sigs.removeLiquidity, sigs.removeLiquidityOne, sigs.removeLiquidityImbalance:
+			return nil, false, fmt.Errorf("matched classic liquidity signature %s but log is missing the indexed provider topic", topic0)
+		default:
+			return nil, false, nil
+		}
 	}
 	provider := common.HexToAddress(log.Topics[1])
 	txHash := common.HexToHash(log.TransactionHash)
@@ -309,9 +316,16 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool) (*LiquidityRecor
 	n := pool.NCoins
 	sigs := buildCryptoswapSigs(n)
 
-	// provider is indexed (Topics[1]); if absent the log is malformed and can't match.
+	// provider is indexed (Topics[1]); once topic0 matches a known cryptoswap liquidity
+	// signature, its absence is a malformed log and must fail decoding rather
+	// than silently fall through to the capture net.
 	if len(log.Topics) < 2 {
-		return nil, false, nil
+		switch topic0 {
+		case sigs.addLiquidity, sigs.removeLiquidity, sigs.removeLiquidityOne:
+			return nil, false, fmt.Errorf("matched cryptoswap liquidity signature %s but log is missing the indexed provider topic", topic0)
+		default:
+			return nil, false, nil
+		}
 	}
 	provider := common.HexToAddress(log.Topics[1])
 	txHash := common.HexToHash(log.TransactionHash)

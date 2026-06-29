@@ -146,7 +146,7 @@ func TestCurveStableswapABI_RemoveLiquidityOneIsNGForm(t *testing.T) {
 	}
 	// NG form: provider (indexed) + token_id (int128) + token_amount + coin_amount + token_supply = 5 inputs
 	if len(ev.Inputs) != 5 {
-		t.Errorf("RemoveLiquidityOne: want 5 inputs (NG form), got %d", len(ev.Inputs))
+		t.Fatalf("RemoveLiquidityOne: want 5 inputs (NG form), got %d", len(ev.Inputs))
 	}
 	// Verify token_id is the second input and is int128.
 	if ev.Inputs[1].Name != "token_id" {
