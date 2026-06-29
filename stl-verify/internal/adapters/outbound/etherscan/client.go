@@ -262,7 +262,20 @@ func (c *Client) parseBlockResponse(response proxyResponse, expectedNumber int64
 
 func (c *Client) doRequest(ctx context.Context, params url.Values, result any) error {
 	fullURL := fmt.Sprintf("%s?%s", c.config.BaseURL, params.Encode())
-	return c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: fullURL}, result)
+	err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: fullURL}, result)
+	if err == nil {
+		return nil
+	}
+	// A retryable failure that survived every retry (rate-limit, 5xx, network) means
+	// the canonical source is temporarily unavailable, not that our stored data is
+	// wrong. Tag it so the validator records an inconclusive check, not a hard error.
+	// httpclient wraps permanent failures (4xx, parse errors, non-retryable API
+	// errors) in NonRetryableError; those pass through untagged.
+	var nonRetryable *httpclient.NonRetryableError
+	if errors.As(err, &nonRetryable) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", outbound.ErrCanonicalSourceUnavailable, err)
 }
 
 // etherscanErrorParser parses Etherscan-specific error responses.

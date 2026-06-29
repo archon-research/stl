@@ -3,10 +3,13 @@ package etherscan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 func TestNewClient(t *testing.T) {
@@ -412,5 +415,54 @@ func TestParseHexInt64(t *testing.T) {
 				t.Errorf("parseHexInt64(%q) = %d, want %d", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGetBlockByNumber_RateLimitExhausted_IsTransient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"0","message":"NOTOK","result":"Max calls per sec rate limit reached (3/sec)"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{
+		APIKey:         "test-key",
+		ChainID:        1,
+		BaseURL:        srv.URL,
+		MaxRetries:     1,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.GetBlockByNumber(context.Background(), 100)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, outbound.ErrCanonicalSourceUnavailable) {
+		t.Fatalf("expected ErrCanonicalSourceUnavailable, got %v", err)
+	}
+}
+
+func TestGetBlockByNumber_APIError_IsNotTransient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"0","message":"NOTOK","result":"Invalid API Key"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient(ClientConfig{APIKey: "test-key", ChainID: 1, BaseURL: srv.URL, MaxRetries: 1})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.GetBlockByNumber(context.Background(), 100)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if errors.Is(err, outbound.ErrCanonicalSourceUnavailable) {
+		t.Fatalf("non-retryable API error must NOT be tagged transient, got %v", err)
 	}
 }
