@@ -174,6 +174,31 @@ func TestFluidUpsertVaults_CreateAndGetAll(t *testing.T) {
 	}
 }
 
+func TestFluidUpsertVaults_MixedChainsFails(t *testing.T) {
+	f := setupFluidTest(t)
+	ctx := context.Background()
+
+	// Result map is keyed by address alone, so a batch mixing chains with the
+	// same address would silently drop the colliding entry. Reject it instead.
+	v1 := f.newTestVault(0xf1)
+	v2 := f.newTestVault(0xf1)
+	v2.ChainID = 137
+
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = f.repo.UpsertVaults(ctx, tx, []*entity.FluidVault{v1, v2})
+	if err == nil {
+		t.Fatal("expected error on mixed-chain batch, got nil")
+	}
+	if !strings.Contains(err.Error(), "mixed chain IDs") {
+		t.Errorf("error %q should mention mixed chain IDs", err.Error())
+	}
+}
+
 func TestFluidGetAllVaults_Empty(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()

@@ -37,8 +37,8 @@ END $$;
 -- ============================================================================
 -- fluid_vault: registry of discovered Fluid vaults (one row per vault).
 -- collateral_token_id and debt_token_id FK token by surrogate id (resolved
--- from each token's natural key (chain_id, address) per CLAUDE.md registry
--- rules). Both are mainnet ERC-20s for the tracked vaults.
+-- from each token's natural key (chain_id, address)). Both are mainnet ERC-20s
+-- for the tracked vaults.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS fluid_vault
 (

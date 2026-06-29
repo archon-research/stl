@@ -58,6 +58,12 @@ func (r *FluidVaultRepository) UpsertVaults(ctx context.Context, tx pgx.Tx, vaul
 		return make(map[common.Address]int64), nil
 	}
 
+	// Dedup is address-only and the result map is keyed by address, so a
+	// mixed-chain batch would silently drop a colliding address. Reject it first.
+	if err := requireSingleChain(vaults, func(v *entity.FluidVault) int64 { return v.ChainID }, "fluid vaults"); err != nil {
+		return nil, err
+	}
+
 	sorted := sortedByBytesKey(vaults, func(v *entity.FluidVault) []byte { return v.Address })
 
 	batch := &pgx.Batch{}
