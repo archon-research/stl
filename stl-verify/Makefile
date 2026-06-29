@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -27,6 +27,8 @@ include lint.mk
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         docker-build-psm3-indexer docker-push-psm3-indexer docker-release-psm3-indexer \
         docker-build-psm3-indexer-staging docker-push-psm3-indexer-staging docker-release-psm3-indexer-staging \
+        docker-build-cex-orderbook-indexer docker-push-cex-orderbook-indexer docker-release-cex-orderbook-indexer \
+        docker-build-cex-orderbook-indexer-staging docker-push-cex-orderbook-indexer-staging docker-release-cex-orderbook-indexer-staging \
         \
         ecs-deploy-watcher ecs-deploy-watcher-staging \
         ecs-deploy-oracle-price-worker ecs-deploy-oracle-price-worker-staging \
@@ -932,6 +934,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-psm3-indexer-internal ENV=$(ENV)
 	@echo ""
+	@$(MAKE) _docker-release-cex-orderbook-indexer-internal ENV=$(ENV)
+	@echo ""
 	@$(MAKE) _docker-release-python-api-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
@@ -1299,6 +1303,56 @@ docker-push-prime-debt-indexer-staging:
 
 docker-release-prime-debt-indexer-staging:
 	@$(MAKE) docker-release-prime-debt-indexer ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - CEX Order Book Indexer
+# =============================================================================
+
+ECR_REPO_CEX_ORDERBOOK_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cex-orderbook-indexer
+
+# Build Docker image for cex orderbook indexer (ARM64 for EKS Graviton)
+docker-build-cex-orderbook-indexer:
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/cex-orderbook-indexer --build-arg BIN=cex-orderbook-indexer -t stl-cex-orderbook-indexer:local -f Dockerfile.common .
+else
+	@echo "==> Building CEX Order Book Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_CEX_ORDERBOOK_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=cmd/workers/cex-orderbook-indexer \
+		--build-arg BIN=cex-orderbook-indexer \
+		-f Dockerfile.common \
+		-t $(ECR_REPO_CEX_ORDERBOOK_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_CEX_ORDERBOOK_INDEXER):latest \
+		--load .
+endif
+
+# Push cex orderbook indexer Docker image to ECR
+docker-push-cex-orderbook-indexer: ecr-login
+	@echo "==> Pushing CEX Order Book Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_CEX_ORDERBOOK_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_CEX_ORDERBOOK_INDEXER):latest
+
+# Build and push cex orderbook indexer in one step (captures tag at start to ensure consistency)
+docker-release-cex-orderbook-indexer: ecr-login _docker-release-cex-orderbook-indexer-internal
+
+_docker-release-cex-orderbook-indexer-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="CEX Order Book Indexer" GO_REPO="$(ECR_REPO_CEX_ORDERBOOK_INDEXER)" GO_CMD_PATH=cmd/workers/cex-orderbook-indexer GO_BIN=cex-orderbook-indexer GO_CACHE_KEY=cex-orderbook-indexer
+
+docker-build-cex-orderbook-indexer-staging:
+	@$(MAKE) docker-build-cex-orderbook-indexer ENV=sentinelstaging
+
+docker-push-cex-orderbook-indexer-staging:
+	@$(MAKE) docker-push-cex-orderbook-indexer ENV=sentinelstaging
+
+docker-release-cex-orderbook-indexer-staging:
+	@$(MAKE) docker-release-cex-orderbook-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - PSM3 Indexer
