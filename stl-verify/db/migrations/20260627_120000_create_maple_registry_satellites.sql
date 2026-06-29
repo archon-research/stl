@@ -1,28 +1,28 @@
--- Maple registry data lineage: hub + SCD2 satellite (VEC group A).
--- Splits each Maple registry into a stable identity hub and an append-only
--- attribute satellite keyed (hub_id, synced_at). Editorial attributes move off
--- the hub into the satellite; a change appends one satellite row instead of the
--- previous hard-fail-on-change behaviour, giving full editorial history while
--- the hub id (and every FK to it) never moves.
+-- Maple registry data lineage: hub + SCD2 satellite.
+-- Each Maple registry splits into a stable identity hub and an append-only
+-- attribute satellite keyed (hub_id, synced_at). Editorial attributes live in
+-- the satellite; a change appends a satellite row, giving full editorial
+-- history while the hub id (and every FK to it) never moves.
 --
 -- Axis: synced_at only. Maple data is off-chain GraphQL with no reorg concept
 -- (see the create_maple_graphql_tables header), so there is no block_version
 -- and no reorg supersession here. Syncs are monotonic cron cycles, so
 -- append-on-change compares against the latest satellite row.
 --
--- hashdiff: md5 over a frozen canonical encoding of the editorial fields,
--- fields joined by 0x1f, SQL NULL rendered as 0x1e. The application computes
--- the identical hash (metaHashdiff in the postgres adapter); the backfill below
--- must match it byte-for-byte so the first post-deploy sync sees no false
--- change. md5 is sufficient (change detection over tiny registries, not
--- security) and needs no pgcrypto extension.
+-- hashdiff: md5 over a canonical encoding of the editorial fields. Fields are
+-- joined by 0x1f and SQL NULL is rendered as 0x1e so the encoding is injective:
+-- 0x1f delimits fields (else ['a','bc'] and ['ab','c'] would collide) and 0x1e
+-- distinguishes NULL from '' (else a NULL<->'' change would hash identically).
+-- Both bytes are control chars that never occur in the editorial text values.
+-- The application computes the identical hash (metaHashdiff in the postgres
+-- adapter); the backfill below must match it byte-for-byte so the first
+-- post-deploy sync sees no false change. md5 is sufficient (change detection
+-- over tiny registries, not security) and needs no pgcrypto extension.
 --
--- Append-only is enforced, not conventional: UPDATE/DELETE are revoked from the
--- application role. Object-level grants only, per the migration rules.
+-- Append-only is enforced: UPDATE/DELETE are revoked from the application role.
 --
--- is_internal is removed entirely: it was a GENERATED column over
--- loan_meta_type with zero query consumers; internal-ness
--- (loan_meta_type IN ('amm','strategy')) is now derived in code / the view.
+-- is_internal is removed; internal-ness (loan_meta_type IN ('amm','strategy'))
+-- is now derived in code and the *_current view.
 
 -- ============================================================================
 -- Satellites
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS maple_sky_strategy_meta
 -- earliest observed synced_at (its first state snapshot), falling back to the
 -- hub's creation timestamp when no state row exists yet. This single row is a
 -- synthetic "state as of migration" seed carrying the current editorial values,
--- not a reconstruction of pre-migration history (which the old hub overwrote).
+-- not a reconstruction of historical editorial values.
 --
 -- hashdiff must equal metaHashdiff byte-for-byte so the first post-deploy sync
 -- sees no false change. The NULL fallback per column mirrors how the Go encoder
@@ -156,8 +156,8 @@ ALTER TABLE maple_loan
 ALTER TABLE maple_sky_strategy DROP COLUMN IF EXISTS version;
 
 -- ============================================================================
--- Convenience views: hub identity + the latest satellite row, reproducing the
--- pre-split column shape for external SQL consumers (Grafana, analysts). The
+-- Convenience views: hub identity + the latest satellite row, presenting a flat
+-- column shape for external SQL consumers (Grafana, analysts). The
 -- lateral takes the latest row regardless of is_present, then the outer filter
 -- drops entities whose latest row is a tombstone, so "current" means "still
 -- live". internal-ness is derived from the current loan_meta_type.

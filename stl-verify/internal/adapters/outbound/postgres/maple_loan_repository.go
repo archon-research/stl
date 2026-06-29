@@ -74,9 +74,9 @@ func (r *MapleGraphQLRepository) GetMapleProtocolID(ctx context.Context, chainID
 // address -> maple_pool.id. The hub holds identity only: protocol_id and
 // asset_token_id are immutable, so the hub insert refreshes nothing on conflict
 // (the no-op DO UPDATE keeps RETURNING yielding the stored row) and the scan
-// fails the run if either differs from the incoming one. Editorial changes are
-// no longer a hard failure: appendMeta appends a satellite row when the
-// editorial hashdiff differs from the pool's latest one.
+// fails the run if either differs from the incoming one. An editorial change
+// appends a satellite row via appendMeta when the editorial hashdiff differs
+// from the pool's latest one.
 func (r *MapleGraphQLRepository) RecordPools(ctx context.Context, tx pgx.Tx, syncedAt time.Time, pools []*maple.Pool) (map[common.Address]int64, error) {
 	if len(pools) == 0 {
 		return make(map[common.Address]int64), nil
@@ -210,11 +210,11 @@ func loanMetaColsOf(l *maple.Loan) loanMetaCols {
 // RecordLoans registers loan identity rows and records their editorial
 // attributes (loan_type and the six loanMeta columns) in the maple_loan_meta
 // satellite, returning loan address -> maple_loan.id. The hub holds identity
-// only: maple_pool_id and borrower_user_id are immutable, so the hub insert refreshes
-// nothing on conflict and the scan fails the run if either differs
-// from the incoming one. loanMeta changes are no longer a hard failure;
-// appendMeta records them as new satellite rows (nullable columns compared
-// NULL-safely via the hashdiff null sentinel).
+// only: maple_pool_id and borrower_user_id are immutable, so the hub insert
+// refreshes nothing on conflict and the scan fails the run if either differs
+// from the incoming one. A loanMeta change appends a satellite row via
+// appendMeta (nullable columns compared NULL-safely via the hashdiff null
+// sentinel).
 func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, syncedAt time.Time, loans []*maple.Loan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
@@ -362,10 +362,10 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 // RecordSkyStrategies registers strategy identity rows and records their
 // editorial attribute (version) in the maple_sky_strategy_meta satellite,
 // returning strategy address -> maple_sky_strategy.id. The hub holds identity
-// only: maple_pool_id is immutable, so the hub insert
-// refreshes nothing on conflict and the scan fails the run if it differs from the incoming one. A version
-// change (e.g. a Governor-enabled proxy upgrade) is no longer a hard failure;
-// appendMeta records it as a new satellite row.
+// only: maple_pool_id is immutable, so the hub insert refreshes nothing on
+// conflict and the scan fails the run if it differs from the incoming one. A
+// version change (e.g. a Governor-enabled proxy upgrade) appends a satellite
+// row via appendMeta.
 func (r *MapleGraphQLRepository) RecordSkyStrategies(ctx context.Context, tx pgx.Tx, syncedAt time.Time, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 	if len(strategies) == 0 {
 		return make(map[common.Address]int64), nil

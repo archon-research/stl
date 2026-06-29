@@ -40,7 +40,7 @@ type MapleGraphQLRepository interface {
 	// syncedAt, returning address -> maple_pool.id. protocol_id and
 	// asset_token_id are immutable identity: nothing is refreshed on conflict
 	// and implementations must fail when either differs from the incoming one.
-	// Editorial changes append a satellite row instead of failing.
+	// An editorial change appends a satellite row.
 	RecordPools(ctx context.Context, tx pgx.Tx, syncedAt time.Time, pools []*maple.Pool) (map[common.Address]int64, error)
 
 	// SavePoolStates inserts pool state snapshots.
@@ -52,8 +52,8 @@ type MapleGraphQLRepository interface {
 	// maple_loan_meta satellite at syncedAt, returning loan address ->
 	// maple_loan.id. maple_pool_id and borrower_user_id are immutable identity:
 	// nothing is refreshed on conflict and implementations must fail when
-	// either differs from the incoming one. loanMeta changes append a satellite
-	// row instead of failing.
+	// either differs from the incoming one. A loanMeta change appends a
+	// satellite row.
 	RecordLoans(ctx context.Context, tx pgx.Tx, syncedAt time.Time, loans []*maple.Loan) (map[common.Address]int64, error)
 
 	// SaveLoanStates inserts loan state snapshots.
@@ -68,7 +68,7 @@ type MapleGraphQLRepository interface {
 	// syncedAt, returning strategy address -> maple_sky_strategy.id.
 	// maple_pool_id is immutable identity: nothing is refreshed on conflict and
 	// implementations must fail when it differs from the incoming one. A version
-	// change appends a satellite row instead of failing.
+	// change appends a satellite row.
 	RecordSkyStrategies(ctx context.Context, tx pgx.Tx, syncedAt time.Time, strategies []*maple.SkyStrategy) (map[common.Address]int64, error)
 
 	// SaveSkyStrategyStates inserts strategy state snapshots.

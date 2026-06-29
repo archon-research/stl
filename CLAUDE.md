@@ -213,6 +213,7 @@ git commit  # Hooks auto-fix, may stage changes
     - Keep package and exported-API doc comments, but make each say something the signature doesn't.
     - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
     - When unsure, leave it out: a stale or redundant comment is worse than none.
+    - No history in comments: don't duplicate what git tracks. Describe current code, not what it replaced or why something was removed.
 - **Libraries**:
     - Use the standard library as much as possible.
     - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
