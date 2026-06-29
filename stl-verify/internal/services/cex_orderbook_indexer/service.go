@@ -115,7 +115,7 @@ func NewService(cfg Config, provider outbound.OrderbookProvider, repo outbound.O
 	}
 	persistDuration, err := meter.Float64Histogram(
 		"orderbook.persist.duration_seconds",
-		metric.WithDescription("Duration of a snapshot batch write to the repository, in seconds"),
+		metric.WithDescription("Duration of a successful snapshot batch write to the repository, in seconds"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
@@ -261,12 +261,16 @@ func (s *Service) persistTick(ctx context.Context, latest map[string]entity.Orde
 	}
 
 	start := time.Now()
-	err := s.repo.Save(ctx, snapshots)
-	s.persistDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(s.exchangeAttr))
-	if err != nil {
+	if err := s.repo.Save(ctx, snapshots); err != nil {
 		s.persistFailures.Add(context.Background(), 1, metric.WithAttributes(s.exchangeAttr))
 		s.logger.Error("failed to persist order book snapshots", "count", len(snapshots), "error", err)
+		return
 	}
+	// Record latency on success only: a slow *failing* write is already covered by
+	// the persist-failure alert, and feeding its duration here would trip the
+	// latency warning during the same outage and conflate "slow but working" with
+	// "broken".
+	s.persistDuration.Record(context.Background(), time.Since(start).Seconds(), metric.WithAttributes(s.exchangeAttr))
 }
 
 // toSnapshot trims both sides of the update's book to the best s.depth levels and

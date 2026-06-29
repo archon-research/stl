@@ -348,6 +348,11 @@ func TestPersistErrorIncrementsFailureMetric(t *testing.T) {
 	if got := persistFailureCount(t, reader); got < 2 {
 		t.Fatalf("orderbook.persist.failures.total = %d, want >= 2", got)
 	}
+	// A failing Save must NOT feed the latency histogram, or the latency warning
+	// would double-fire alongside the persist-failure alert during an outage.
+	if got := persistDurationCount(t, reader); got != 0 {
+		t.Fatalf("orderbook.persist.duration_seconds recorded %d points on failing saves, want 0", got)
+	}
 }
 
 // persistFailureCount collects the manual reader and sums the persist-failure
@@ -424,8 +429,7 @@ func persistDurationCount(t *testing.T, reader sdkmetric.Reader) uint64 {
 			return n
 		}
 	}
-	t.Fatal("orderbook.persist.duration_seconds not recorded")
-	return 0
+	return 0 // instrument absent = no observations recorded
 }
 
 // TestStaleBookSkipped: a symbol whose last provider update predates the
