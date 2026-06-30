@@ -23,6 +23,257 @@ func init() {
 	})
 }
 
+// TestCurveExtendedDataMigration verifies that the
+// 20260630_100000_curve_extended_data.sql migration applies cleanly on top of
+// the base Curve schema and produces the expected columns, tables, and triggers.
+// It also asserts that curve_pool_coin.precision is seeded for all 10 existing
+// coins.
+func TestCurveExtendedDataMigration(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("new_tables_exist", func(t *testing.T) {
+		tables := []string{
+			"curve_stableswap_config",
+			"curve_cryptoswap_config",
+			"curve_parameter_event",
+			"curve_lp_token_event",
+		}
+		for _, table := range tables {
+			var exists bool
+			if err := curveTestPool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM information_schema.tables
+					WHERE table_name = $1
+				)`, table).Scan(&exists); err != nil {
+				t.Fatalf("checking table %s: %v", table, err)
+			}
+			if !exists {
+				t.Errorf("table %s does not exist", table)
+			}
+		}
+	})
+
+	t.Run("processing_version_triggers_on_new_tables", func(t *testing.T) {
+		tables := []string{
+			"curve_stableswap_config",
+			"curve_cryptoswap_config",
+			"curve_parameter_event",
+			"curve_lp_token_event",
+		}
+		for _, table := range tables {
+			var exists bool
+			if err := curveTestPool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM information_schema.triggers
+					WHERE trigger_name = 'trigger_assign_processing_version'
+					  AND event_object_table = $1
+				)`, table).Scan(&exists); err != nil {
+				t.Fatalf("checking trigger on %s: %v", table, err)
+			}
+			if !exists {
+				t.Errorf("trigger_assign_processing_version missing on %s", table)
+			}
+		}
+	})
+
+	t.Run("is_underlying_column_on_curve_swap", func(t *testing.T) {
+		var exists bool
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'curve_swap' AND column_name = 'is_underlying'
+			)`).Scan(&exists); err != nil {
+			t.Fatalf("checking is_underlying: %v", err)
+		}
+		if !exists {
+			t.Error("is_underlying column missing on curve_swap")
+		}
+	})
+
+	t.Run("precision_column_on_curve_pool_coin", func(t *testing.T) {
+		var exists bool
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_name = 'curve_pool_coin' AND column_name = 'precision'
+			)`).Scan(&exists); err != nil {
+			t.Fatalf("checking precision column: %v", err)
+		}
+		if !exists {
+			t.Error("precision column missing on curve_pool_coin")
+		}
+	})
+
+	t.Run("precision_seeded_for_all_coins", func(t *testing.T) {
+		var nullCount int
+		if err := curveTestPool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM curve_pool_coin WHERE precision IS NULL`).Scan(&nullCount); err != nil {
+			t.Fatalf("counting NULL precision rows: %v", err)
+		}
+		if nullCount != 0 {
+			t.Errorf("found %d curve_pool_coin rows with NULL precision after seeding; want 0", nullCount)
+		}
+	})
+
+	t.Run("stableswap_state_extended_columns_exist", func(t *testing.T) {
+		cols := []string{
+			"a_precise", "admin_balances", "stored_rates",
+			"ema_price", "get_p", "calc_token_amount", "calc_withdraw_one_coin",
+		}
+		for _, col := range cols {
+			var exists bool
+			if err := curveTestPool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_name = 'curve_stableswap_state' AND column_name = $1
+				)`, col).Scan(&exists); err != nil {
+				t.Fatalf("checking curve_stableswap_state.%s: %v", col, err)
+			}
+			if !exists {
+				t.Errorf("curve_stableswap_state.%s missing", col)
+			}
+		}
+	})
+
+	t.Run("cryptoswap_state_extended_columns_exist", func(t *testing.T) {
+		cols := []string{
+			"admin_balances", "lp_price", "xcp_profit_a",
+			"last_prices_timestamp", "get_dx", "calc_token_amount", "calc_withdraw_one_coin",
+		}
+		for _, col := range cols {
+			var exists bool
+			if err := curveTestPool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_name = 'curve_cryptoswap_state' AND column_name = $1
+				)`, col).Scan(&exists); err != nil {
+				t.Fatalf("checking curve_cryptoswap_state.%s: %v", col, err)
+			}
+			if !exists {
+				t.Errorf("curve_cryptoswap_state.%s missing", col)
+			}
+		}
+	})
+
+	t.Run("stableswap_config_trigger_fires", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving stETH classic pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_stableswap_config
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     initial_a, initial_a_time, future_a, future_a_time,
+			     admin_fee, future_fee, future_admin_fee, build_id)
+			VALUES ($1, 11592700, 0, '2021-01-02T00:00:00Z'::timestamptz,
+			        100, 0, 100, 0, 5000000000, 5000000000, 0, 0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test stableswap config: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+
+	t.Run("cryptoswap_config_trigger_fires", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving TricryptoUSDC pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_cryptoswap_config
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     initial_a_gamma, future_a_gamma, initial_a_gamma_time, future_a_gamma_time,
+			     mid_fee, out_fee, fee_gamma, allowed_extra_profit, adjustment_step,
+			     ma_time, admin_fee, build_id)
+			VALUES ($1, 17072950, 0, '2023-04-02T00:00:00Z'::timestamptz,
+			        2700000, 2700000, 0, 0,
+			        5000000, 30000000, 500000000000000, 100000000000, 146000000000000,
+			        600, 5000000000, 0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test cryptoswap config: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+
+	t.Run("parameter_event_trigger_fires", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving stETH classic pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_parameter_event
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     tx_hash, log_index, event_name, params, build_id)
+			VALUES ($1, 11592800, 0, '2021-01-03T00:00:00Z'::timestamptz,
+			        '\xccddee00ccddee00ccddee00ccddee00ccddee00ccddee00ccddee00ccddee00'::bytea,
+			        0, 'ramp_a', '{"initial_A": 100, "future_A": 200}'::jsonb, 0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test parameter event: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+
+	t.Run("lp_token_event_trigger_fires", func(t *testing.T) {
+		var poolID int64
+		if err := curveTestPool.QueryRow(ctx, `
+			SELECT id FROM curve_pool
+			WHERE chain_id = 1
+			  AND pool_address = '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea`,
+		).Scan(&poolID); err != nil {
+			t.Fatalf("resolving stETH classic pool id: %v", err)
+		}
+
+		var pv int
+		err := curveTestPool.QueryRow(ctx, `
+			INSERT INTO curve_lp_token_event
+			    (curve_pool_id, block_number, block_version, block_timestamp,
+			     tx_hash, log_index, event_name, from_address, to_address, value, build_id)
+			VALUES ($1, 11592900, 0, '2021-01-04T00:00:00Z'::timestamptz,
+			        '\xddeeff11ddeeff11ddeeff11ddeeff11ddeeff11ddeeff11ddeeff11ddeeff11'::bytea,
+			        0, 'transfer',
+			        '\x0000000000000000000000000000000000000000'::bytea,
+			        '\x3333333333333333333333333333333333333333'::bytea,
+			        1000000000000000000, 0)
+			RETURNING processing_version`,
+			poolID).Scan(&pv)
+		if err != nil {
+			t.Fatalf("inserting test lp token event: %v", err)
+		}
+		if pv != 0 {
+			t.Errorf("processing_version = %d after first insert, want 0", pv)
+		}
+	})
+}
+
 // TestCurveMigration verifies that the 20260521_110000_create_curve_dex_tables.sql
 // migration applies cleanly and produces the expected schema + seed data.
 func TestCurveMigration(t *testing.T) {
