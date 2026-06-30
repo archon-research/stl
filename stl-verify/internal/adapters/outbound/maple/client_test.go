@@ -793,9 +793,9 @@ func TestGetActiveFixedTermLoans_HappyPath(t *testing.T) {
 
 func TestGetActiveFixedTermLoans_NullAcmRatioAndStateDetail(t *testing.T) {
 	// acmRatio and stateDetail are nullable in the schema; both surface as
-	// nil/"" with a single warn, not a failure.
-	handler := &testutil.SlogRecorder{}
-	client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+	// nil/"" without a failure. The null-downgrade signal is the service's
+	// concern, so the client does not log here.
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"loans": [{
 			"id": %q, "borrower": {"id": %q}, "fundingPool": {"id": %q},
 			"collateralAsset": {"id": %q, "symbol": "WBTC", "decimals": 8},
@@ -808,7 +808,7 @@ func TestGetActiveFixedTermLoans_NullAcmRatioAndStateDetail(t *testing.T) {
 			"drawdownAmount": "0", "claimableAmount": "0",
 			"acmRatio": null, "isImpaired": false
 		}]}}`, loanAddr, borrowerAddr, poolAddr, wbtcAddr, usdcAddr))
-	}}, slog.New(handler))
+	}})
 
 	loans, err := client.GetActiveFixedTermLoans(context.Background())
 	if err != nil {
@@ -823,9 +823,6 @@ func TestGetActiveFixedTermLoans_NullAcmRatioAndStateDetail(t *testing.T) {
 	// Pre-funding state legitimately reports 0 epoch dates -> 0 ("none").
 	if loans[0].MaturityDate != 0 || loans[0].NextPaymentDue != 0 {
 		t.Errorf("dates = %d/%d, want 0/0", loans[0].MaturityDate, loans[0].NextPaymentDue)
-	}
-	if got := handler.CountWarn("storing as NULL"); got != 1 {
-		t.Errorf("null-downgrade warn fired %d times, want exactly 1", got)
 	}
 }
 
@@ -879,7 +876,8 @@ func TestGetActiveFixedTermLoans_MalformedValuesFailHard(t *testing.T) {
 		{name: "malformed termDays", overrides: map[string]string{"termDays": `"x"`}, wantField: "termDays"},
 		{name: "malformed maturityDate", overrides: map[string]string{"maturityDate": `"later"`}, wantField: "maturityDate"},
 		{name: "negative maturityDate", overrides: map[string]string{"maturityDate": `"-5"`}, wantField: "maturityDate"},
-		{name: "zero collateral decimals", overrides: map[string]string{"colDecimals": "0"}, wantField: "collateralAsset.decimals"},
+		// Zero decimals is validated by the service (distinctFTLAssetTokens), not
+		// the client; the client only rejects a missing/null decimals value.
 		{name: "null funds decimals", overrides: map[string]string{"fundsDecimals": "null"}, wantField: "liquidityAsset.decimals"},
 		{name: "bad collateral address", overrides: map[string]string{"colAddr": `"garbage"`}, wantField: "collateralAsset.id"},
 	} {

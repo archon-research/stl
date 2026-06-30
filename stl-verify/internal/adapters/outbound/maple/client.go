@@ -488,18 +488,14 @@ func (c *Client) GetActiveFixedTermLoans(ctx context.Context) ([]outbound.MapleF
 		return nil, err
 	}
 
+	// Null acmRatio / empty stateDetail are valid (schema-nullable). The service
+	// owns the null-downgrade signal (RecordNullDowngrade), so the adapter does
+	// not log about a persistence decision it does not make.
 	loans := make([]outbound.MapleFixedTermLoan, 0, len(wires))
 	for _, w := range wires {
 		loan, err := parseFixedTermLoan(w)
 		if err != nil {
 			return nil, err
-		}
-		if loan.AcmRatio == nil || loan.StateDetail == "" {
-			c.logger.Warn("fixed-term loan has null acmRatio or stateDetail; storing as NULL",
-				"loan", w.ID,
-				"acmRatioNull", loan.AcmRatio == nil,
-				"stateDetailNull", loan.StateDetail == "",
-			)
 		}
 		loans = append(loans, loan)
 	}
@@ -830,17 +826,19 @@ func parseFixedTermLoan(w ftlLoanWire) (outbound.MapleFixedTermLoan, error) {
 
 // parseAssetToken validates a fixed-term loan's collateral/funds Asset (always
 // non-null per the schema), failing on a bad address or zero/missing decimals.
+// parseAssetToken decodes a fixed-term loan's collateral/funds Asset (always
+// non-null per the schema): it parses the address and the wire decimals (which
+// must be present, not null). Symbol emptiness and the decimals value/range are
+// validated by the service's distinctFTLAssetTokens, the single owner of asset
+// metadata validation (mirroring the OTL parsePool/distinctAssetTokens split).
 func parseAssetToken(w assetWire, field, id string) (outbound.MapleAssetToken, error) {
 	address, err := parseAddress(w.ID, field+".id", id)
 	if err != nil {
 		return outbound.MapleAssetToken{}, err
 	}
-	decimals, err := requireDecimals(w.Decimals, field+".decimals", id)
+	decimals, err := requireInt(w.Decimals, field+".decimals", id)
 	if err != nil {
 		return outbound.MapleAssetToken{}, err
-	}
-	if w.Symbol == "" {
-		return outbound.MapleAssetToken{}, fmt.Errorf("%s.symbol is empty for %s", field, id)
 	}
 	return outbound.MapleAssetToken{Address: address, Symbol: w.Symbol, Decimals: decimals}, nil
 }

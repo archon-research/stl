@@ -1691,8 +1691,9 @@ func TestSync_CtxCancelledDuringFTLAbortsCycle(t *testing.T) {
 
 func TestSync_FixedTermLoanErrorsPropagate(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(r *mockRepo)
+		name    string
+		mutate  func(r *mockRepo)
+		wantErr string
 	}{
 		{
 			name: "ftl record fails",
@@ -1701,6 +1702,7 @@ func TestSync_FixedTermLoanErrorsPropagate(t *testing.T) {
 					return nil, errors.New("ftl record failed")
 				}
 			},
+			wantErr: "ftl record failed",
 		},
 		{
 			name: "ftl state save fails",
@@ -1709,6 +1711,7 @@ func TestSync_FixedTermLoanErrorsPropagate(t *testing.T) {
 					return errors.New("ftl save failed")
 				}
 			},
+			wantErr: "ftl save failed",
 		},
 	}
 	for _, tt := range tests {
@@ -1721,8 +1724,8 @@ func TestSync_FixedTermLoanErrorsPropagate(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			if !strings.Contains(err.Error(), "failed") {
-				t.Errorf("error = %q", err.Error())
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q should contain %q", err.Error(), tt.wantErr)
 			}
 		})
 	}
@@ -1803,6 +1806,11 @@ func TestSync_FixedTermLoanInputValidationFailures(t *testing.T) {
 			name:    "decimals overflow",
 			mutate:  func(loans []outbound.MapleFixedTermLoan) { loans[0].Collateral.Decimals = 65542 },
 			wantErr: "out of int16 range",
+		},
+		{
+			name:    "zero decimals",
+			mutate:  func(loans []outbound.MapleFixedTermLoan) { loans[0].Collateral.Decimals = 0 },
+			wantErr: "decimals must not be zero",
 		},
 		{
 			name: "conflicting asset metadata",

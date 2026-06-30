@@ -446,48 +446,19 @@ func (r *MapleGraphQLRepository) saveFixedTermLoanStateBatch(ctx context.Context
 	var sb strings.Builder
 	sb.WriteString(`INSERT INTO maple_ftl_loan_state (maple_ftl_loan_id, synced_at, state, state_detail, principal_owed, interest_rate, interest_paid, payments_remaining, payment_interval_days, term_days, maturity_date, next_payment_due, collateral_amount, collateral_required, collateral_ratio, drawdown_amount, claimable_amount, acm_ratio, is_impaired, build_id) VALUES `)
 
+	// The required amount columns are NUMERIC NOT NULL and FTLLoanState.Validate
+	// (run in the constructor) already rejects any nil *big.Int, so they render
+	// straight to their decimal string here — the same way the nullable AcmRatio
+	// goes through optionalNumeric.
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
-		principalOwed, err := bigIntToNumeric(s.PrincipalOwed)
-		if err != nil {
-			return 0, fmt.Errorf("converting principal_owed for ftl loan %d: %w", s.LoanID, err)
-		}
-		interestRate, err := bigIntToNumeric(s.InterestRate)
-		if err != nil {
-			return 0, fmt.Errorf("converting interest_rate for ftl loan %d: %w", s.LoanID, err)
-		}
-		interestPaid, err := bigIntToNumeric(s.InterestPaid)
-		if err != nil {
-			return 0, fmt.Errorf("converting interest_paid for ftl loan %d: %w", s.LoanID, err)
-		}
-		collateralAmount, err := bigIntToNumeric(s.CollateralAmount)
-		if err != nil {
-			return 0, fmt.Errorf("converting collateral_amount for ftl loan %d: %w", s.LoanID, err)
-		}
-		collateralRequired, err := bigIntToNumeric(s.CollateralRequired)
-		if err != nil {
-			return 0, fmt.Errorf("converting collateral_required for ftl loan %d: %w", s.LoanID, err)
-		}
-		collateralRatio, err := bigIntToNumeric(s.CollateralRatio)
-		if err != nil {
-			return 0, fmt.Errorf("converting collateral_ratio for ftl loan %d: %w", s.LoanID, err)
-		}
-		drawdownAmount, err := bigIntToNumeric(s.DrawdownAmount)
-		if err != nil {
-			return 0, fmt.Errorf("converting drawdown_amount for ftl loan %d: %w", s.LoanID, err)
-		}
-		claimableAmount, err := bigIntToNumeric(s.ClaimableAmount)
-		if err != nil {
-			return 0, fmt.Errorf("converting claimable_amount for ftl loan %d: %w", s.LoanID, err)
-		}
-
 		writeValuesPlaceholders(&sb, i, cols)
 		args = append(args, s.LoanID, s.SyncedAt, s.State, nullIfEmpty(s.StateDetail),
-			principalOwed, interestRate, interestPaid,
+			s.PrincipalOwed.String(), s.InterestRate.String(), s.InterestPaid.String(),
 			s.PaymentsRemaining, s.PaymentIntervalDays, s.TermDays,
 			s.MaturityDate, s.NextPaymentDue,
-			collateralAmount, collateralRequired, collateralRatio,
-			drawdownAmount, claimableAmount, optionalNumeric(s.AcmRatio), s.IsImpaired, int(r.buildID))
+			s.CollateralAmount.String(), s.CollateralRequired.String(), s.CollateralRatio.String(),
+			s.DrawdownAmount.String(), s.ClaimableAmount.String(), optionalNumeric(s.AcmRatio), s.IsImpaired, int(r.buildID))
 	}
 	sb.WriteString(` ON CONFLICT (maple_ftl_loan_id, synced_at, processing_version) DO NOTHING`)
 

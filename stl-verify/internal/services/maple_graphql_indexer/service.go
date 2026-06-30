@@ -598,10 +598,10 @@ func (s *Service) syncFixedTermLoans(ctx context.Context, syncedAt time.Time, po
 		return err
 	}
 
+	// Pool membership is enforced in buildFTLLoanEntities (the sole guard, so it
+	// can never silently write maple_pool_id = 0); this loop only emits the
+	// per-field null-downgrade metrics.
 	for _, l := range loans {
-		if _, ok := poolIDs[l.PoolAddress]; !ok {
-			return fmt.Errorf("fixed-term loan %s references unknown pool %s", lowerHex(l.LoanID), lowerHex(l.PoolAddress))
-		}
 		if l.AcmRatio == nil {
 			s.telemetry.RecordNullDowngrade(ctx, "ftl_acm_ratio")
 		}
@@ -676,9 +676,8 @@ func (s *Service) buildFTLLoanEntities(loans []outbound.MapleFixedTermLoan, pool
 		if !ok {
 			return nil, fmt.Errorf("fixed-term loan %s: funds token %s missing from upsert result", lowerHex(l.LoanID), lowerHex(l.Funds.Address))
 		}
-		// poolIDs membership is also checked up front in syncFixedTermLoans;
-		// resolve with the ok guard here too so a future refactor can never
-		// silently write maple_pool_id = 0.
+		// Sole pool-membership guard: resolve with the ok check so an unknown
+		// pool fails the snapshot rather than silently writing maple_pool_id = 0.
 		poolID, ok := poolIDs[l.PoolAddress]
 		if !ok {
 			return nil, fmt.Errorf("fixed-term loan %s references unknown pool %s", lowerHex(l.LoanID), lowerHex(l.PoolAddress))
@@ -735,12 +734,13 @@ func buildFTLLoanStates(loans []outbound.MapleFixedTermLoan, loanIDs map[common.
 
 // epochToTime converts an API epoch-second timestamp to a *time.Time, mapping
 // the sentinel 0 (pre-funding / none due) to nil so it persists as SQL NULL
-// rather than 1970-01-01.
+// rather than 1970-01-01. NewFTLLoanState normalizes the instant to UTC, so
+// this leaves the location to the entity rather than normalizing twice.
 func epochToTime(secs int64) *time.Time {
 	if secs == 0 {
 		return nil
 	}
-	t := time.Unix(secs, 0).UTC()
+	t := time.Unix(secs, 0)
 	return &t
 }
 
@@ -754,6 +754,12 @@ func distinctFTLAssetTokens(chainID int64, loans []outbound.MapleFixedTermLoan) 
 	add := func(loanID common.Address, a outbound.MapleAssetToken) error {
 		if a.Symbol == "" {
 			return fmt.Errorf("fixed-term loan %s: asset %s: symbol must not be empty", lowerHex(loanID), lowerHex(a.Address))
+		}
+		// 0 decimals passes toInt16 and the non-negative validators but
+		// mis-scales every downstream amount, so it is never a legitimate token
+		// decimals (matches the client's requireDecimals zero-rejection).
+		if a.Decimals == 0 {
+			return fmt.Errorf("fixed-term loan %s: asset %s: decimals must not be zero", lowerHex(loanID), lowerHex(a.Address))
 		}
 		decimals, err := toInt16(a.Decimals)
 		if err != nil {
