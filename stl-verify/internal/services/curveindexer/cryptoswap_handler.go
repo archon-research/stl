@@ -2,7 +2,6 @@ package curveindexer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"time"
@@ -151,17 +150,10 @@ func (h *CryptoswapHandler) DecodeEvents(
 		}
 
 		// Capture net: all known pool-address logs are also stored in Captured.
-		payload, err := json.Marshal(eventData)
+		result.Captured, err = appendDecodedCaptured(result.Captured, addr, logIndex, txHash, ev.Name, eventData)
 		if err != nil {
-			return DecodedEvents{}, fmt.Errorf("marshalling %s capture payload: %w", ev.Name, err)
+			return DecodedEvents{}, err
 		}
-		result.Captured = append(result.Captured, CapturedEvent{
-			Address:   addr,
-			LogIndex:  logIndex,
-			TxHash:    txHash,
-			EventName: ev.Name,
-			Payload:   payload,
-		})
 	}
 
 	return result, nil
@@ -600,8 +592,15 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	if err != nil {
 		return nil, nil, fmt.Errorf("last_prices_timestamp: %w", err)
 	}
+	// lastPricesTimestamp is nil when the call reverted (optUint returns nil for
+	// a revert, which is the no-call structural path — the call was issued and
+	// allowed to fail). An issued call that returned a value outside int64 is
+	// a real data-quality error, not a structural absence.
 	var lastPricesTimestamp *int64
-	if lastPricesTs != nil && lastPricesTs.IsInt64() {
+	if lastPricesTs != nil {
+		if !lastPricesTs.IsInt64() {
+			return nil, nil, fmt.Errorf("last_prices_timestamp for pool %s: value %s overflows int64", pool.Address, lastPricesTs.String())
+		}
 		v := lastPricesTs.Int64()
 		lastPricesTimestamp = &v
 	}
@@ -727,7 +726,7 @@ func (h *CryptoswapHandler) decodeCryptoswapConfigReads(optUint func(string) (*b
 // reads. Every required NOT-NULL value field is always issued, so a nil here
 // means an upstream decode bug rather than a real revert (a revert errors in
 // optUint); we fail hard rather than persist a partial config row. The *_time
-// fields are also always issued, so timeOrZero only guards the !IsInt64 case.
+// fields are always issued; a successful read outside int64 is an error.
 func buildCryptoswapConfig(
 	pool RegisteredPool,
 	blockNumber int64,
@@ -744,11 +743,26 @@ func buildCryptoswapConfig(
 			return nil, fmt.Errorf("cryptoswap config for pool %s missing a required getter", pool.Address)
 		}
 	}
-	timeOrZero := func(b *big.Int) int64 {
-		if b == nil || !b.IsInt64() {
-			return 0
+	// timeOrError converts a non-nil *big.Int to int64. Both time getters are
+	// always issued for cryptoswap, so nil here is a decode bug. An out-of-range
+	// value silently coercing to 0 would persist a wrong timestamp; we error
+	// instead.
+	timeOrError := func(name string, b *big.Int) (int64, error) {
+		if b == nil {
+			return 0, fmt.Errorf("cryptoswap config for pool %s: %s getter returned nil (decode bug)", pool.Address, name)
 		}
-		return b.Int64()
+		if !b.IsInt64() {
+			return 0, fmt.Errorf("cryptoswap config for pool %s: %s value %s overflows int64", pool.Address, name, b.String())
+		}
+		return b.Int64(), nil
+	}
+	initialAGammaTime, err := timeOrError("initial_A_gamma_time", r.initialAGammaTime)
+	if err != nil {
+		return nil, err
+	}
+	futureAGammaTime, err := timeOrError("future_A_gamma_time", r.futureAGammaTime)
+	if err != nil {
+		return nil, err
 	}
 	return entity.NewCurveCryptoswapConfig(entity.CurveCryptoswapConfigParams{
 		CurvePoolID:        pool.ID,
@@ -757,8 +771,8 @@ func buildCryptoswapConfig(
 		Timestamp:          ts,
 		InitialAGamma:      r.initialAGamma,
 		FutureAGamma:       r.futureAGamma,
-		InitialAGammaTime:  timeOrZero(r.initialAGammaTime),
-		FutureAGammaTime:   timeOrZero(r.futureAGammaTime),
+		InitialAGammaTime:  initialAGammaTime,
+		FutureAGammaTime:   futureAGammaTime,
 		MidFee:             r.midFee,
 		OutFee:             r.outFee,
 		FeeGamma:           r.feeGamma,

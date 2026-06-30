@@ -107,7 +107,7 @@ COMMENT ON COLUMN curve_liquidity_event.kind IS
 COMMENT ON COLUMN curve_liquidity_event.token_amounts IS
   'Per-coin token amounts, raw native decimals, index-aligned to coins(i), for add/remove/remove_imbalance. For remove_one it holds [LP tokens burned, single-coin amount received].';
 COMMENT ON COLUMN curve_liquidity_event.coin_index IS
-  'For remove_one: the coin index withdrawn (cryptoswap emits it; NULL for classic remove_one and for all other kinds).';
+  'For remove_one: the coin index withdrawn. Populated by cryptoswap and Stableswap-NG remove_one (NG RemoveLiquidityOne emits token_id). NULL for pre-NG classic remove_one and for all other kinds.';
 COMMENT ON COLUMN curve_liquidity_event.fees IS
   'Per-coin fees charged, raw native decimals, index-aligned to coins(i), when the event carries them; NULL when absent.';
 COMMENT ON COLUMN curve_liquidity_event.invariant IS

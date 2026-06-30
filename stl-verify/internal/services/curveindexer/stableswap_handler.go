@@ -2,7 +2,6 @@ package curveindexer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"time"
@@ -184,17 +183,10 @@ func (h *StableswapHandler) DecodeEvents(
 
 		// Capture net: all known pool-address logs are also stored in Captured
 		// so protocol_event is a full mirror of on-chain activity.
-		payload, err := json.Marshal(eventData)
+		result.Captured, err = appendDecodedCaptured(result.Captured, addr, logIndex, txHash, ev.Name, eventData)
 		if err != nil {
-			return DecodedEvents{}, fmt.Errorf("marshalling %s capture payload: %w", ev.Name, err)
+			return DecodedEvents{}, err
 		}
-		result.Captured = append(result.Captured, CapturedEvent{
-			Address:   addr,
-			LogIndex:  logIndex,
-			TxHash:    txHash,
-			EventName: ev.Name,
-			Payload:   payload,
-		})
 	}
 
 	return result, nil
@@ -684,8 +676,8 @@ type stableswapConfigReads struct {
 // reads. The four required NOT-NULL value fields (initial_a, future_a, admin_fee,
 // future_fee) are always issued for both classes, so a nil here means an
 // upstream decode bug rather than a real revert (a revert errors in optUint); we
-// fail hard rather than persist a partial config row. The *_time fields are also
-// always issued, so timeOrZero only guards the !IsInt64 case, not a revert.
+// fail hard rather than persist a partial config row. The *_time fields are always
+// issued; a successful read outside int64 is an error, not a coercion to 0.
 func buildStableswapConfig(
 	pool RegisteredPool,
 	blockNumber int64,
@@ -696,14 +688,36 @@ func buildStableswapConfig(
 	if r.initialA == nil || r.futureA == nil || r.adminFee == nil || r.futureFee == nil {
 		return nil, fmt.Errorf("stableswap config for pool %s missing a required getter (initial_a/future_a/admin_fee/future_fee)", pool.Address)
 	}
-	timeOrZero := func(b *big.Int) int64 {
-		if b == nil || !b.IsInt64() {
-			return 0
+	// timeOrError converts a non-nil *big.Int to int64. A nil value is only
+	// possible for a field that was structurally not issued (none of the time
+	// fields here are in that category), so we treat it as a decode bug and
+	// hard-error. An out-of-int64-range value is also an error: silently
+	// coercing to 0 would persist a wrong timestamp without any signal.
+	timeOrError := func(name string, b *big.Int) (int64, error) {
+		if b == nil {
+			return 0, fmt.Errorf("stableswap config for pool %s: %s getter returned nil (decode bug)", pool.Address, name)
 		}
-		return b.Int64()
+		if !b.IsInt64() {
+			return 0, fmt.Errorf("stableswap config for pool %s: %s value %s overflows int64", pool.Address, name, b.String())
+		}
+		return b.Int64(), nil
 	}
+	initialATime, err := timeOrError("initial_A_time", r.initialATime)
+	if err != nil {
+		return nil, err
+	}
+	futureATime, err := timeOrError("future_A_time", r.futureATime)
+	if err != nil {
+		return nil, err
+	}
+	// maExpTime is nil when not issued (pre-NG pools: the call is structurally
+	// gated out), so nil is the correct absent value. An issued call that
+	// returned a value outside int64 is still an error.
 	var maExpTime *int64
-	if r.maExpTime != nil && r.maExpTime.IsInt64() {
+	if r.maExpTime != nil {
+		if !r.maExpTime.IsInt64() {
+			return nil, fmt.Errorf("stableswap config for pool %s: ma_exp_time value %s overflows int64", pool.Address, r.maExpTime.String())
+		}
 		v := r.maExpTime.Int64()
 		maExpTime = &v
 	}
@@ -713,9 +727,9 @@ func buildStableswapConfig(
 		BlockVersion:   version,
 		Timestamp:      ts,
 		InitialA:       r.initialA,
-		InitialATime:   timeOrZero(r.initialATime),
+		InitialATime:   initialATime,
 		FutureA:        r.futureA,
-		FutureATime:    timeOrZero(r.futureATime),
+		FutureATime:    futureATime,
 		AdminFee:       r.adminFee,
 		FutureFee:      r.futureFee,
 		FutureAdminFee: r.futureAdminFee,

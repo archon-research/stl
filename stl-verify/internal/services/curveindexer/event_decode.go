@@ -9,6 +9,30 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
+// appendDecodedCaptured json.Marshals eventData and appends a CapturedEvent for a
+// successfully ABI-decoded log. Used by both the stableswap and cryptoswap handlers
+// for their capture-net tail so the duplication lives in one place.
+func appendDecodedCaptured(
+	captured []CapturedEvent,
+	addr common.Address,
+	logIndex uint,
+	txHash common.Hash,
+	eventName string,
+	eventData any,
+) ([]CapturedEvent, error) {
+	payload, err := json.Marshal(eventData)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling %s capture payload: %w", eventName, err)
+	}
+	return append(captured, CapturedEvent{
+		Address:   addr,
+		LogIndex:  logIndex,
+		TxHash:    txHash,
+		EventName: eventName,
+		Payload:   payload,
+	}), nil
+}
+
 // appendRawCaptured appends a capture-net entry holding the raw {topics, data} of
 // a log. Used for logs that are not ABI-decoded into a typed payload (unknown
 // topic0, zero-topic logs, and word-sliced fixed-array liquidity events), so
