@@ -48,6 +48,47 @@ type MapleActiveLoan struct {
 	PoolAddress   common.Address
 }
 
+// MapleAssetToken is a mainnet ERC-20 referenced by a fixed-term loan
+// (collateralAsset / liquidityAsset). Unlike OTL collateral (off-chain
+// custodied, symbol-only), FTL assets carry a real Ethereum address and FK the
+// token registry.
+type MapleAssetToken struct {
+	Address  common.Address
+	Symbol   string
+	Decimals int
+}
+
+// MapleFixedTermLoan is one live (non-terminal) fixed-term loan as reported by
+// the Maple GraphQL API. The funding pool is referenced by address only; pool
+// details come from GetPools in the same cycle. Collateral and funds are
+// on-chain ERC-20s (MapleAssetToken). MaturityDate and NextPaymentDue are epoch
+// seconds with 0 meaning "none" (pre-funding / no payment due). Amounts are raw
+// integers; AcmRatio is nil and StateDetail is empty when the API reports none.
+type MapleFixedTermLoan struct {
+	LoanID              common.Address
+	Borrower            common.Address
+	PoolAddress         common.Address
+	Collateral          MapleAssetToken
+	Funds               MapleAssetToken
+	State               string
+	StateDetail         string // "" when the API reports null
+	PrincipalOwed       *big.Int
+	InterestRate        *big.Int
+	InterestPaid        *big.Int
+	PaymentsRemaining   int64
+	PaymentIntervalDays int64
+	TermDays            int64
+	MaturityDate        int64 // epoch seconds; 0 = none
+	NextPaymentDue      int64 // epoch seconds; 0 = none
+	CollateralAmount    *big.Int
+	CollateralRequired  *big.Int
+	CollateralRatio     *big.Int
+	DrawdownAmount      *big.Int
+	ClaimableAmount     *big.Int
+	AcmRatio            *big.Int // nil when the API reports null
+	IsImpaired          bool
+}
+
 // MaplePool is one PoolV2 lending pool with its current lending metrics.
 type MaplePool struct {
 	Address       common.Address
@@ -103,6 +144,12 @@ type MapleGraphQLClient interface {
 
 	// GetActiveLoans fetches all Open Term Loans with state Active.
 	GetActiveLoans(ctx context.Context) ([]MapleActiveLoan, error)
+
+	// GetActiveFixedTermLoans fetches all fixed-term loans in a live
+	// (non-terminal) state. The FTL book is legitimately empty today (the
+	// product is dormant, not retired), so an empty result is a valid snapshot,
+	// not an error.
+	GetActiveFixedTermLoans(ctx context.Context) ([]MapleFixedTermLoan, error)
 
 	// GetSkyStrategies fetches all Sky strategies.
 	GetSkyStrategies(ctx context.Context) ([]MapleSkyStrategy, error)
