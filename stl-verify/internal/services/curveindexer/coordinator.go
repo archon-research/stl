@@ -50,17 +50,20 @@ type snapshotKey struct {
 // per-block work happens in local variables inside BlockHandler; the only
 // cross-block state is the pool registry and lastSnapshot (heartbeat tracking).
 type Coordinator struct {
-	poolsByAddr     map[common.Address]RegisteredPool
-	pools           []RegisteredPool // ordered for deterministic iteration
-	handlers        map[PoolKind]PoolClassHandler
-	multicaller     outbound.Multicaller
-	repo            outbound.CurveRepository
-	eventWriter     *dexconsumer.ProtocolEventWriter
-	txMgr           outbound.TxManager
-	heartbeatBlocks int64
-	chainID         int64
-	logger          *slog.Logger
-	telemetry       *dextelemetry.Telemetry
+	// poolsByWatchedAddr maps every address whose logs route to a pool -> that
+	// pool. A pool is reachable by its own address and, for pre-NG pools, by its
+	// separate LP-token contract (so LP Transfer/Approval reach the owning pool).
+	poolsByWatchedAddr map[common.Address]RegisteredPool
+	pools              []RegisteredPool // ordered for deterministic iteration
+	handlers           map[PoolKind]PoolClassHandler
+	multicaller        outbound.Multicaller
+	repo               outbound.CurveRepository
+	eventWriter        *dexconsumer.ProtocolEventWriter
+	txMgr              outbound.TxManager
+	heartbeatBlocks    int64
+	chainID            int64
+	logger             *slog.Logger
+	telemetry          *dextelemetry.Telemetry
 
 	lastSnapshot map[int64]snapshotKey // pool.ID -> last snapshotted (block, version)
 }
@@ -87,7 +90,6 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 
-	poolsByAddr := make(map[common.Address]RegisteredPool, len(deps.Pools))
 	for _, p := range deps.Pools {
 		h, ok := deps.Handlers[p.Kind]
 		if !ok {
@@ -96,22 +98,26 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 		// Warm the handler's per-coin-count caches now, while construction is still
 		// single-threaded, so the per-block decode path performs no lazy cache writes.
 		h.Warm(p.NCoins)
-		poolsByAddr[p.Address] = p
+	}
+
+	watched, err := indexPoolsByWatchedAddress(deps.Pools)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Coordinator{
-		poolsByAddr:     poolsByAddr,
-		pools:           deps.Pools,
-		handlers:        deps.Handlers,
-		multicaller:     deps.Multicaller,
-		repo:            deps.Repo,
-		eventWriter:     deps.EventWriter,
-		txMgr:           deps.TxManager,
-		heartbeatBlocks: deps.HeartbeatBlocks,
-		chainID:         deps.ChainID,
-		logger:          deps.Logger,
-		telemetry:       deps.Telemetry,
-		lastSnapshot:    make(map[int64]snapshotKey),
+		poolsByWatchedAddr: watched,
+		pools:              deps.Pools,
+		handlers:           deps.Handlers,
+		multicaller:        deps.Multicaller,
+		repo:               deps.Repo,
+		eventWriter:        deps.EventWriter,
+		txMgr:              deps.TxManager,
+		heartbeatBlocks:    deps.HeartbeatBlocks,
+		chainID:            deps.ChainID,
+		logger:             deps.Logger,
+		telemetry:          deps.Telemetry,
+		lastSnapshot:       make(map[int64]snapshotKey),
 	}, nil
 }
 
@@ -143,17 +149,11 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			presentAddrs := make(map[common.Address]struct{}, len(receipt.Logs))
-			for _, log := range receipt.Logs {
-				if !common.IsHexAddress(log.Address) {
-					return fmt.Errorf("invalid log address %q in block %d", log.Address, bn)
-				}
-				presentAddrs[common.HexToAddress(log.Address)] = struct{}{}
+			pools, err := c.poolsTouchedByReceipt(receipt, bn)
+			if err != nil {
+				return err
 			}
-			for addr, pool := range c.poolsByAddr {
-				if _, ok := presentAddrs[addr]; !ok {
-					continue
-				}
+			for _, pool := range pools {
 				decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, c.chainID, bn, ver, ts)
 				if err != nil {
 					c.telemetry.RecordError(ctx, "decodeEvents", err)
@@ -218,7 +218,7 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(captured))
 		for _, cap := range captured {
 			capturedIns = append(capturedIns, dexconsumer.ProtocolEventInput{
-				ContractAddress: cap.Pool.Address,
+				ContractAddress: cap.Address,
 				ChainID:         c.chainID,
 				BlockNumber:     bn,
 				BlockVersion:    ver,
@@ -263,6 +263,55 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		c.telemetry.RecordStateRows(ctx, int(stateRows))
 		return nil
 	}
+}
+
+// indexPoolsByWatchedAddress builds the address -> pool index. Each pool is
+// reachable by its own address and, when set, by its separate LP-token contract
+// address (pre-NG pools). A watched address must map to exactly one pool; a
+// collision (two pools sharing an address) is a registry bug we fail on at
+// construction rather than silently dropping events for one of them.
+func indexPoolsByWatchedAddress(pools []RegisteredPool) (map[common.Address]RegisteredPool, error) {
+	byAddr := make(map[common.Address]RegisteredPool, len(pools))
+	add := func(addr common.Address, pool RegisteredPool) error {
+		if existing, ok := byAddr[addr]; ok && existing.ID != pool.ID {
+			return fmt.Errorf("address %s maps to both pool %d and pool %d", addr, existing.ID, pool.ID)
+		}
+		byAddr[addr] = pool
+		return nil
+	}
+	for _, p := range pools {
+		if err := add(p.Address, p); err != nil {
+			return nil, err
+		}
+		if p.LpTokenAddress != nil {
+			if err := add(*p.LpTokenAddress, p); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return byAddr, nil
+}
+
+// poolsTouchedByReceipt returns the deduplicated pools whose watched address (own
+// or LP-token contract) appears in the receipt's logs, in deterministic pool-ID
+// order. A pool reachable by both its own address and its LP-token address in the
+// same receipt is returned once so DecodeEvents (which scans all logs) runs once.
+func (c *Coordinator) poolsTouchedByReceipt(receipt shared.TransactionReceipt, bn int64) ([]RegisteredPool, error) {
+	byID := make(map[int64]RegisteredPool)
+	for _, log := range receipt.Logs {
+		if !common.IsHexAddress(log.Address) {
+			return nil, fmt.Errorf("invalid log address %q in block %d", log.Address, bn)
+		}
+		if pool, ok := c.poolsByWatchedAddr[common.HexToAddress(log.Address)]; ok {
+			byID[pool.ID] = pool
+		}
+	}
+	pools := make([]RegisteredPool, 0, len(byID))
+	for _, pool := range byID {
+		pools = append(pools, pool)
+	}
+	sort.Slice(pools, func(i, j int) bool { return pools[i].ID < pools[j].ID })
+	return pools, nil
 }
 
 // buildSnapshotSet returns the sorted (by pool.ID ASC) union of touched pools

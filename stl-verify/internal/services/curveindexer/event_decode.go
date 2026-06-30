@@ -13,10 +13,11 @@ import (
 // a log. Used for logs that are not ABI-decoded into a typed payload (unknown
 // topic0, zero-topic logs, and word-sliced fixed-array liquidity events), so
 // protocol_event stays a complete mirror of the on-chain log surface. eventName
-// is the log's topic0 hex (or "" for a zero-topic log).
+// is the log's topic0 hex (or "" for a zero-topic log); addr is the log's
+// already-validated emitting contract (the pool, or the separate LP-token contract).
 func appendRawCaptured(
 	captured []CapturedEvent,
-	pool RegisteredPool,
+	addr common.Address,
 	logIndex uint,
 	txHash common.Hash,
 	eventName string,
@@ -27,7 +28,7 @@ func appendRawCaptured(
 		return nil, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, err)
 	}
 	return append(captured, CapturedEvent{
-		Pool:      pool,
+		Address:   addr,
 		LogIndex:  logIndex,
 		TxHash:    txHash,
 		EventName: eventName,

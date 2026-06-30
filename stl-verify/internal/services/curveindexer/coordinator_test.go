@@ -127,6 +127,22 @@ func (r *countingEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, evts []*entit
 	return nil
 }
 
+// capturingEventRepo records the persisted events so capture-net tests can
+// assert the emitting contract address per event.
+type capturingEventRepo struct {
+	events []*entity.ProtocolEvent
+}
+
+func (r *capturingEventRepo) SaveEvent(_ context.Context, _ pgx.Tx, e *entity.ProtocolEvent) error {
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *capturingEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, evts []*entity.ProtocolEvent) error {
+	r.events = append(r.events, evts...)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Test fixture factory
 // ---------------------------------------------------------------------------
@@ -143,6 +159,20 @@ func newTestPool() RegisteredPool {
 		CoinDecimals: []int{18, 18},
 		DeployBlock:  1,
 	}
+}
+
+// preNGLpTokenAddr is the separate LP-token contract for newTestPoolWithLpToken,
+// modelled on the stETH-classic steCRV LP token.
+var preNGLpTokenAddr = common.HexToAddress("0x06325440D014e39736583c165C2963BA99fAf14E")
+
+// newTestPoolWithLpToken returns the pre-NG pool from newTestPool but with a
+// separate LP-token contract address, so LP Transfer/Approval logs arrive on a
+// different address than the pool itself.
+func newTestPoolWithLpToken() RegisteredPool {
+	p := newTestPool()
+	lp := preNGLpTokenAddr
+	p.LpTokenAddress = &lp
+	return p
 }
 
 // newTestCoordinator constructs a Coordinator with one stableswap pool, a
@@ -676,6 +706,82 @@ func TestCoordinator_RoutesParameterAndLpEventsIntoBlockWrites(t *testing.T) {
 	}
 	if len(repo.lastWrites.ParameterEvents) == 1 && repo.lastWrites.ParameterEvents[0].EventName != "ramp_a" {
 		t.Errorf("parameter event_name = %q, want ramp_a", repo.lastWrites.ParameterEvents[0].EventName)
+	}
+}
+
+// TestCoordinator_RoutesLpTokenLogOnSeparateAddressToPool: a pre-NG pool whose
+// LP token is a SEPARATE contract emits an LP Transfer on the LP-token address
+// (not the pool address). The coordinator must route that log to the owning pool
+// so the LP event is attributed to the pool's curve_pool_id, while the capture
+// row keeps the actual emitting address (the LP-token contract).
+func TestCoordinator_RoutesLpTokenLogOnSeparateAddressToPool(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &capturingEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	pool := newTestPoolWithLpToken()
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{pool},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 0, // only a touched pool should snapshot
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	from := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	to := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	// Transfer emitted on the SEPARATE LP-token contract address.
+	transferLog := buildEventLog(t, a, "Transfer", *pool.LpTokenAddress,
+		[]common.Hash{addrTopic(from), addrTopic(to)}, big.NewInt(500))
+	transferLog.LogIndex = "0x4"
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{transferLog},
+		TransactionHash: transferLog.TransactionHash,
+	}
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), blockEvent(810), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if len(repo.lastWrites.LpTokenEvents) != 1 {
+		t.Fatalf("LpTokenEvents = %d, want 1 (LP transfer on separate LP-token address must route to pool)", len(repo.lastWrites.LpTokenEvents))
+	}
+	if got := repo.lastWrites.LpTokenEvents[0].CurvePoolID; got != pool.ID {
+		t.Errorf("LP token event curve_pool_id = %d, want %d", got, pool.ID)
+	}
+
+	// The pool was touched only by an LP-token log; it must still be snapshotted.
+	if repo.stableswapSaves != 1 {
+		t.Errorf("stableswap snapshots = %d, want 1 (pool touched by LP-token log must snapshot)", repo.stableswapSaves)
+	}
+
+	// The capture row must keep the actual emitting address (the LP-token
+	// contract), not the pool address.
+	if len(eventRepo.events) != 1 {
+		t.Fatalf("captured events = %d, want 1", len(eventRepo.events))
+	}
+	gotAddr := common.BytesToAddress(eventRepo.events[0].ContractAddress)
+	if gotAddr != *pool.LpTokenAddress {
+		t.Errorf("captured event contract address = %s, want %s (LP-token contract, not pool %s)",
+			gotAddr, pool.LpTokenAddress, pool.Address)
 	}
 }
 

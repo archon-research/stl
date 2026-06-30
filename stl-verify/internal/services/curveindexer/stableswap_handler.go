@@ -72,7 +72,7 @@ func (h *StableswapHandler) DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("invalid log address %q", log.Address)
 		}
 		addr := common.HexToAddress(log.Address)
-		if addr != pool.Address {
+		if !logBelongsToPool(addr, pool) {
 			continue
 		}
 
@@ -83,7 +83,7 @@ func (h *StableswapHandler) DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		if len(log.Topics) == 0 {
-			result.Captured, err = appendRawCaptured(result.Captured, pool, logIndex, txHash, "", log)
+			result.Captured, err = appendRawCaptured(result.Captured, addr, logIndex, txHash, "", log)
 			if err != nil {
 				return DecodedEvents{}, err
 			}
@@ -101,7 +101,7 @@ func (h *StableswapHandler) DecodeEvents(
 			}
 			if matched {
 				result.Liquidity = append(result.Liquidity, *rec)
-				result.Captured, err = appendRawCaptured(result.Captured, pool, logIndex, txHash, log.Topics[0], log)
+				result.Captured, err = appendRawCaptured(result.Captured, addr, logIndex, txHash, log.Topics[0], log)
 				if err != nil {
 					return DecodedEvents{}, err
 				}
@@ -112,7 +112,7 @@ func (h *StableswapHandler) DecodeEvents(
 		ev, known := h.eventsByID[topic0]
 
 		if !known {
-			result.Captured, err = appendRawCaptured(result.Captured, pool, logIndex, txHash, log.Topics[0], log)
+			result.Captured, err = appendRawCaptured(result.Captured, addr, logIndex, txHash, log.Topics[0], log)
 			if err != nil {
 				return DecodedEvents{}, err
 			}
@@ -189,7 +189,7 @@ func (h *StableswapHandler) DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("marshalling %s capture payload: %w", ev.Name, err)
 		}
 		result.Captured = append(result.Captured, CapturedEvent{
-			Pool:      pool,
+			Address:   addr,
 			LogIndex:  logIndex,
 			TxHash:    txHash,
 			EventName: ev.Name,

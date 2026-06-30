@@ -14,6 +14,17 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
+// logBelongsToPool reports whether a log emitted by addr should be decoded for
+// pool. It matches the pool's own address and, for pre-NG pools whose LP token is
+// a separate contract, the LP-token contract address (so its Transfer/Approval
+// logs route to the owning pool).
+func logBelongsToPool(addr common.Address, pool RegisteredPool) bool {
+	if addr == pool.Address {
+		return true
+	}
+	return pool.LpTokenAddress != nil && addr == *pool.LpTokenAddress
+}
+
 // decodeLog extracts both indexed (from topics) and non-indexed (from data) fields
 // into a flat map, following the morpho_indexer parseTopics/parseData pattern.
 func decodeLog(ev *abi.Event, log shared.Log) (map[string]any, error) {

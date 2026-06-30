@@ -95,7 +95,11 @@ type LiquidityRecord struct {
 }
 
 type CapturedEvent struct { // -> protocol_event capture net
-	Pool      RegisteredPool
+	// Address is the log's emitting contract: the pool itself for most logs, but
+	// the separate LP-token contract for pre-NG pools' Transfer/Approval. A captured
+	// event carries only its emitting address, not pool identity; protocol_event
+	// records this address verbatim.
+	Address   common.Address
 	LogIndex  uint
 	TxHash    common.Hash
 	EventName string
