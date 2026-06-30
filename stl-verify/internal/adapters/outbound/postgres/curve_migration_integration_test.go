@@ -274,6 +274,67 @@ func TestCurveExtendedDataMigration(t *testing.T) {
 	})
 }
 
+// TestCurveColumnComments asserts that every column on every curve_* table has a
+// COMMENT set. Failures indicate that 20260521_120000_curve_column_comments.sql
+// is missing entries for newly added columns or tables.
+func TestCurveColumnComments(t *testing.T) {
+	ctx := context.Background()
+
+	curveTables := []string{
+		"curve_pool",
+		"curve_pool_coin",
+		"curve_swap",
+		"curve_liquidity_event",
+		"curve_stableswap_state",
+		"curve_cryptoswap_state",
+		"curve_stableswap_config",
+		"curve_cryptoswap_config",
+		"curve_parameter_event",
+		"curve_lp_token_event",
+	}
+
+	type uncommentedCol struct {
+		table  string
+		column string
+	}
+	var missing []uncommentedCol
+
+	for _, table := range curveTables {
+		rows, err := curveTestPool.Query(ctx, `
+			SELECT a.attname
+			FROM pg_attribute a
+			JOIN pg_class c ON c.oid = a.attrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE c.relname = $1
+			  AND n.nspname = current_schema()
+			  AND a.attnum > 0
+			  AND NOT a.attisdropped
+			  AND col_description(a.attrelid, a.attnum) IS NULL
+			ORDER BY a.attnum`, table)
+		if err != nil {
+			t.Fatalf("querying uncommented columns for %s: %v", table, err)
+		}
+		for rows.Next() {
+			var col string
+			if err := rows.Scan(&col); err != nil {
+				rows.Close()
+				t.Fatalf("scanning row for %s: %v", table, err)
+			}
+			missing = append(missing, uncommentedCol{table: table, column: col})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterating rows for %s: %v", table, err)
+		}
+	}
+
+	if len(missing) != 0 {
+		for _, m := range missing {
+			t.Errorf("curve column missing COMMENT: %s.%s", m.table, m.column)
+		}
+	}
+}
+
 // TestCurveMigration verifies that the 20260521_110000_create_curve_dex_tables.sql
 // migration applies cleanly and produces the expected schema + seed data.
 func TestCurveMigration(t *testing.T) {
