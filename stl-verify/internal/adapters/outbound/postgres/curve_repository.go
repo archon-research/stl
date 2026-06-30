@@ -491,6 +491,12 @@ func (r *CurveRepository) writeConfigs(
 		return nil
 	}
 
+	// Lock every affected pool in ascending id order before any read/insert so
+	// concurrent block writers serialize deadlock-free (CLAUDE.md read-then-write
+	// rule). This "curve_config|<id>" key is a distinct lock domain from the
+	// triggers' "cssc|"/"ccsc|" keys on purpose: this guards the app-level
+	// read-latest-then-insert decision, the trigger guards processing_version
+	// assignment. They must not be harmonized.
 	poolIDs := distinctSortedConfigPoolIDs(stables, cryptos)
 	for _, poolID := range poolIDs {
 		lockKey := fmt.Sprintf("curve_config|%d", poolID)
