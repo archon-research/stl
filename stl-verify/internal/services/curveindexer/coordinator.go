@@ -121,6 +121,16 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 	}, nil
 }
 
+// blockAccumulators holds every event decoded from a single block's receipts.
+type blockAccumulators struct {
+	swaps     []SwapRecord
+	liquidity []LiquidityRecord
+	paramEvts []ParameterEventRecord
+	lpEvts    []LpTokenEventRecord
+	captured  []CapturedEvent
+	touched   map[int64]RegisteredPool
+}
+
 // BlockHandler returns the dexconsumer.BlockHandler for this coordinator. It
 // decodes every receipt in the block into local accumulators, snapshots the
 // touched and heartbeat-due pools (via multicall, before opening the
@@ -134,125 +144,34 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		ver := event.Version
 		ts := time.Unix(event.BlockTimestamp, 0).UTC()
 
-		var (
-			swaps     []SwapRecord
-			liquidity []LiquidityRecord
-			paramEvts []ParameterEventRecord
-			lpEvts    []LpTokenEventRecord
-			captured  []CapturedEvent
-		)
-		touched := make(map[int64]RegisteredPool)
-
-		for _, receipt := range receipts {
-			// Bail early (with an error, never a silent ack) if the handler-timeout
-			// budget or a shutdown cancelled ctx, rather than decoding the rest.
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			pools, err := c.poolsTouchedByReceipt(receipt, bn)
-			if err != nil {
-				return err
-			}
-			for _, pool := range pools {
-				decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, c.chainID, bn, ver, ts)
-				if err != nil {
-					c.telemetry.RecordError(ctx, "decodeEvents", err)
-					return fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
-				}
-				swaps = append(swaps, decoded.Swaps...)
-				liquidity = append(liquidity, decoded.Liquidity...)
-				paramEvts = append(paramEvts, decoded.ParameterEvents...)
-				lpEvts = append(lpEvts, decoded.LpTokenEvents...)
-				captured = append(captured, decoded.Captured...)
-				touched[pool.ID] = pool
-			}
+		acc, err := c.decodeBlockEvents(ctx, receipts, bn, ver, ts)
+		if err != nil {
+			return err
 		}
 
-		snapshotSet := c.buildSnapshotSet(bn, ver, touched)
+		snapshotSet := c.buildSnapshotSet(bn, ver, acc.touched)
 
 		// Read pool state via multicall BEFORE opening the transaction so archive-RPC
 		// latency never pins a pgx connection (connection-pool exhaustion is a stall cause).
-		snapshots := make([]StateSnapshot, 0, len(snapshotSet))
-		for _, pool := range snapshotSet {
-			snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
-			if err != nil {
-				c.telemetry.RecordError(ctx, "snapshotState", err)
-				return fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
-			}
-			if err := snap.Validate(); err != nil {
-				c.telemetry.RecordError(ctx, "snapshotState", err)
-				return fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
-			}
-			snapshots = append(snapshots, snap)
+		snapshots, err := c.snapshotPools(ctx, snapshotSet, bn, ver, ts)
+		if err != nil {
+			return err
 		}
 
 		// Quiet block: nothing decoded and no snapshot due. Skip the empty transaction.
-		if len(swaps) == 0 && len(liquidity) == 0 && len(paramEvts) == 0 &&
-			len(lpEvts) == 0 && len(captured) == 0 && len(snapshots) == 0 {
+		if len(acc.swaps) == 0 && len(acc.liquidity) == 0 && len(acc.paramEvts) == 0 &&
+			len(acc.lpEvts) == 0 && len(acc.captured) == 0 && len(snapshots) == 0 {
 			return nil
 		}
 
 		// Build DB inputs before opening the transaction so conversion errors fail
 		// fast without touching the connection pool.
-		swapIns := make([]outbound.SwapInput, 0, len(swaps))
-		for _, s := range swaps {
-			swapIns = append(swapIns, toSwapInput(s, bn, ver, ts))
-		}
-
-		liqIns := make([]outbound.LiquidityInput, 0, len(liquidity))
-		for _, l := range liquidity {
-			liqIns = append(liqIns, toLiquidityInput(l, bn, ver, ts))
-		}
-
-		split := splitSnapshots(snapshots)
-
-		paramIns, err := collectParameterEvents(paramEvts, bn, ver, ts)
-		if err != nil {
-			return err
-		}
-		lpIns, err := collectLpTokenEvents(lpEvts, bn, ver, ts)
+		writes, capturedIns, err := c.buildBlockWrites(acc, snapshots, bn, ver, ts)
 		if err != nil {
 			return err
 		}
 
-		capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(captured))
-		for _, cap := range captured {
-			capturedIns = append(capturedIns, dexconsumer.ProtocolEventInput{
-				ContractAddress: cap.Address,
-				ChainID:         c.chainID,
-				BlockNumber:     bn,
-				BlockVersion:    ver,
-				BlockTimestamp:  ts,
-				TxHash:          cap.TxHash,
-				LogIndex:        cap.LogIndex,
-				EventName:       cap.EventName,
-				Payload:         cap.Payload,
-			})
-		}
-
-		var stateRows int64
-		err = c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-			var txErr error
-			stateRows, txErr = c.repo.SaveBlock(ctx, tx, outbound.BlockWrites{
-				Swaps:             swapIns,
-				Liquidity:         liqIns,
-				StableStates:      split.stableStates,
-				CryptoStates:      split.cryptoStates,
-				StableswapConfigs: split.stableConfigs,
-				CryptoswapConfigs: split.cryptoConfigs,
-				ParameterEvents:   paramIns,
-				LpTokenEvents:     lpIns,
-			})
-			if txErr != nil {
-				c.telemetry.RecordError(ctx, "persistBlock", txErr)
-				return fmt.Errorf("persisting curve block %d: %w", bn, txErr)
-			}
-			if txErr := c.eventWriter.SaveBatch(ctx, tx, capturedIns); txErr != nil {
-				c.telemetry.RecordError(ctx, "persistBlock", txErr)
-				return fmt.Errorf("persisting captured events block %d: %w", bn, txErr)
-			}
-			return nil
-		})
+		stateRows, err := c.persistBlock(ctx, writes, capturedIns, bn)
 		if err != nil {
 			return err
 		}
@@ -263,6 +182,136 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		c.telemetry.RecordStateRows(ctx, int(stateRows))
 		return nil
 	}
+}
+
+// decodeBlockEvents iterates every receipt, identifies pools touched by each
+// receipt's logs, calls each pool's handler, and accumulates the decoded events.
+// ctx is checked at the start of each receipt to honour cancellation without
+// silently acking a partially-decoded block.
+func (c *Coordinator) decodeBlockEvents(ctx context.Context, receipts []shared.TransactionReceipt, bn int64, ver int, ts time.Time) (blockAccumulators, error) {
+	acc := blockAccumulators{
+		touched: make(map[int64]RegisteredPool),
+	}
+	for _, receipt := range receipts {
+		// Bail early (with an error, never a silent ack) if the handler-timeout
+		// budget or a shutdown cancelled ctx, rather than decoding the rest.
+		if err := ctx.Err(); err != nil {
+			return blockAccumulators{}, err
+		}
+		pools, err := c.poolsTouchedByReceipt(receipt, bn)
+		if err != nil {
+			return blockAccumulators{}, err
+		}
+		for _, pool := range pools {
+			decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, c.chainID, bn, ver, ts)
+			if err != nil {
+				c.telemetry.RecordError(ctx, "decodeEvents", err)
+				return blockAccumulators{}, fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
+			}
+			acc.swaps = append(acc.swaps, decoded.Swaps...)
+			acc.liquidity = append(acc.liquidity, decoded.Liquidity...)
+			acc.paramEvts = append(acc.paramEvts, decoded.ParameterEvents...)
+			acc.lpEvts = append(acc.lpEvts, decoded.LpTokenEvents...)
+			acc.captured = append(acc.captured, decoded.Captured...)
+			acc.touched[pool.ID] = pool
+		}
+	}
+	return acc, nil
+}
+
+// snapshotPools calls each pool's SnapshotState via multicall and validates the
+// result. It must run BEFORE the DB transaction opens (see BlockHandler doc).
+func (c *Coordinator) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, ts time.Time) ([]StateSnapshot, error) {
+	snapshots := make([]StateSnapshot, 0, len(snapshotSet))
+	for _, pool := range snapshotSet {
+		snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
+		if err != nil {
+			c.telemetry.RecordError(ctx, "snapshotState", err)
+			return nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
+		}
+		if err := snap.Validate(); err != nil {
+			c.telemetry.RecordError(ctx, "snapshotState", err)
+			return nil, fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
+		}
+		snapshots = append(snapshots, snap)
+	}
+	return snapshots, nil
+}
+
+// buildBlockWrites converts decoded accumulators and snapshots into the typed
+// input structs that the repo and event writer expect. Conversion errors are
+// returned before the transaction opens so they fail fast without touching the
+// connection pool.
+func (c *Coordinator) buildBlockWrites(acc blockAccumulators, snapshots []StateSnapshot, bn int64, ver int, ts time.Time) (outbound.BlockWrites, []dexconsumer.ProtocolEventInput, error) {
+	swapIns := make([]outbound.SwapInput, 0, len(acc.swaps))
+	for _, s := range acc.swaps {
+		swapIns = append(swapIns, toSwapInput(s, bn, ver, ts))
+	}
+
+	liqIns := make([]outbound.LiquidityInput, 0, len(acc.liquidity))
+	for _, l := range acc.liquidity {
+		liqIns = append(liqIns, toLiquidityInput(l, bn, ver, ts))
+	}
+
+	split := splitSnapshots(snapshots)
+
+	paramIns, err := collectParameterEvents(acc.paramEvts, bn, ver, ts)
+	if err != nil {
+		return outbound.BlockWrites{}, nil, err
+	}
+	lpIns, err := collectLpTokenEvents(acc.lpEvts, bn, ver, ts)
+	if err != nil {
+		return outbound.BlockWrites{}, nil, err
+	}
+
+	capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(acc.captured))
+	for _, cap := range acc.captured {
+		capturedIns = append(capturedIns, dexconsumer.ProtocolEventInput{
+			ContractAddress: cap.Address,
+			ChainID:         c.chainID,
+			BlockNumber:     bn,
+			BlockVersion:    ver,
+			BlockTimestamp:  ts,
+			TxHash:          cap.TxHash,
+			LogIndex:        cap.LogIndex,
+			EventName:       cap.EventName,
+			Payload:         cap.Payload,
+		})
+	}
+
+	writes := outbound.BlockWrites{
+		Swaps:             swapIns,
+		Liquidity:         liqIns,
+		StableStates:      split.stableStates,
+		CryptoStates:      split.cryptoStates,
+		StableswapConfigs: split.stableConfigs,
+		CryptoswapConfigs: split.cryptoConfigs,
+		ParameterEvents:   paramIns,
+		LpTokenEvents:     lpIns,
+	}
+	return writes, capturedIns, nil
+}
+
+// persistBlock saves the block writes and captured events in a single DB
+// transaction. SaveBlock and SaveBatch share one pgx.Tx so both commit or both
+// roll back together. Returns the number of state rows actually inserted (may be
+// zero on an idempotent ON CONFLICT DO NOTHING replay).
+func (c *Coordinator) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
+	var stateRows int64
+	err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
+		var txErr error
+		stateRows, txErr = c.repo.SaveBlock(ctx, tx, writes)
+		if txErr != nil {
+			c.telemetry.RecordError(ctx, "persistBlock", txErr)
+			return fmt.Errorf("persisting curve block %d: %w", bn, txErr)
+		}
+		if txErr := c.eventWriter.SaveBatch(ctx, tx, capturedIns); txErr != nil {
+			c.telemetry.RecordError(ctx, "persistBlock", txErr)
+			return fmt.Errorf("persisting captured events block %d: %w", bn, txErr)
+		}
+		return nil
+	})
+	return stateRows, err
 }
 
 // indexPoolsByWatchedAddress builds the address -> pool index. Each pool is
