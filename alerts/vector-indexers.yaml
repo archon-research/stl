@@ -445,6 +445,34 @@ groups:
             and the pools phase before pool state goes stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplepoolwriteszero
 
+      - alert: VectorMapleFTLBookActive
+        # The fixed-term-loan book is dormant today (0 live FTLs), so the FTL
+        # phase normally writes 0 rows. There is deliberately NO zero-rows alert
+        # for maple_ftl_loan_state — it would fire constantly (see the note on
+        # VectorMaplePoolWritesZero). The signal worth catching is the inverse:
+        # a NONZERO FTL write means Maple reactivated the product. Fire info so
+        # an operator confirms the FTL path end-to-end and adds the data-quality
+        # alerts (e.g. an FTL silent-empty alert analogous to pools) that only
+        # make sense once the book is live.
+        expr: |
+          sum by (chain, cluster) (
+            increase(maple_sync_rows_written_total{table="maple_ftl_loan_state", k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: info
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer wrote fixed-term-loan rows (book reactivated)"
+          description: |
+            `maple_ftl_loan_state` received > 0 rows in 1h. The FTL book was
+            dormant, so a nonzero write means Maple reactivated fixed-term
+            loans. Verify the FTL phase end-to-end and add the FTL
+            data-quality alerts that only apply once the book is live.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleftlbookactive
+
       - alert: VectorMapleSchemaDrift
         # null-downgrade canary. Rather than firing on ANY null (acmRatio, tvl
         # and collateral_value_usd are legitimately null on many loans/pools —
