@@ -524,7 +524,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	// 8. A_precise
 	aPrecise, err := optUint("A_precise")
 	if err != nil {
-		return nil, nil, fmt.Errorf("A_precise: %w", err)
+		return nil, nil, fmt.Errorf("reading A_precise: %w", err)
 	}
 
 	// 9. admin_balances(i)
