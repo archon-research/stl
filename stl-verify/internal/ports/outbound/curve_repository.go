@@ -43,6 +43,7 @@ type SwapInput struct {
 	TokensSold     *big.Int
 	TokensBought   *big.Int
 	Fee            *big.Int // nullable
+	IsUnderlying   bool     // true for TokenExchangeUnderlying swaps
 }
 
 // LiquidityInput carries primitive values for a curve_liquidity_event insert.

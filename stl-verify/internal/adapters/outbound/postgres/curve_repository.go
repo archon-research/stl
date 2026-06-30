@@ -304,12 +304,12 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			`INSERT INTO curve_swap
 			   (curve_pool_id, block_number, block_version, block_timestamp,
 			    tx_hash, log_index, buyer, sold_id, bought_id,
-			    tokens_sold, tokens_bought, fee, build_id)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			    tokens_sold, tokens_bought, fee, is_underlying, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			c.in.CurvePoolID, c.in.BlockNumber, c.in.BlockVersion, c.in.BlockTimestamp,
 			c.in.TxHash.Bytes(), c.in.LogIndex, c.in.Buyer.Bytes(), c.in.SoldID, c.in.BoughtID,
-			c.tokensSold, c.tokensBought, BigIntToNullableNumeric(c.in.Fee), int(r.buildID),
+			c.tokensSold, c.tokensBought, BigIntToNullableNumeric(c.in.Fee), c.in.IsUnderlying, int(r.buildID),
 		)
 	}
 

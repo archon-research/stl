@@ -616,6 +616,83 @@ func TestCoordinator_ReorgBlock_Resnapshots(t *testing.T) {
 	}
 }
 
+// TestCoordinator_RoutesParameterAndLpEventsIntoBlockWrites verifies that a
+// receipt carrying a parameter event (RampA) and an LP-token Transfer is routed
+// into BlockWrites.ParameterEvents and BlockWrites.LpTokenEvents.
+func TestCoordinator_RoutesParameterAndLpEventsIntoBlockWrites(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	pool := newTestPool()
+
+	c, err := NewCoordinator(CoordinatorDeps{
+		Pools:           []RegisteredPool{pool},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 0,
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCoordinator: %v", err)
+	}
+
+	rampLog := buildEventLog(t, a, "RampA", pool.Address, nil,
+		big.NewInt(20000), big.NewInt(90000), big.NewInt(100), big.NewInt(200))
+	from := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	to := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	transferLog := buildEventLog(t, a, "Transfer", pool.Address,
+		[]common.Hash{addrTopic(from), addrTopic(to)}, big.NewInt(500))
+	transferLog.LogIndex = "0x6"
+
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{rampLog, transferLog},
+		TransactionHash: rampLog.TransactionHash,
+	}
+
+	bh := c.BlockHandler()
+	event := blockEvent(800)
+	if err := bh(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if len(repo.lastWrites.ParameterEvents) != 1 {
+		t.Errorf("ParameterEvents = %d, want 1", len(repo.lastWrites.ParameterEvents))
+	}
+	if len(repo.lastWrites.LpTokenEvents) != 1 {
+		t.Errorf("LpTokenEvents = %d, want 1", len(repo.lastWrites.LpTokenEvents))
+	}
+	if len(repo.lastWrites.ParameterEvents) == 1 && repo.lastWrites.ParameterEvents[0].EventName != "ramp_a" {
+		t.Errorf("parameter event_name = %q, want ramp_a", repo.lastWrites.ParameterEvents[0].EventName)
+	}
+}
+
+// TestCoordinator_RoutesStableswapConfigIntoBlockWrites verifies that the
+// stableswap snapshot's config is routed into BlockWrites.StableswapConfigs.
+func TestCoordinator_RoutesStableswapConfigIntoBlockWrites(t *testing.T) {
+	c, repo := newTestCoordinator(t, 0)
+	bh := c.BlockHandler()
+
+	if err := bh(context.Background(), blockEvent(900), []shared.TransactionReceipt{swapReceipt(t)}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+	if len(repo.lastWrites.StableswapConfigs) != 1 {
+		t.Errorf("StableswapConfigs = %d, want 1 (touched-pool snapshot builds a config)", len(repo.lastWrites.StableswapConfigs))
+	}
+}
+
 // stateRowsWritten reads the curve.state.rows.written counter total, returning 0
 // if the metric was never recorded.
 func stateRowsWritten(t *testing.T, rm *metricdata.ResourceMetrics) int64 {

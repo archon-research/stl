@@ -93,6 +93,83 @@ const curveStableswapJSON = `[
 		"type": "event"
 	},
 	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true,  "name": "buyer",         "type": "address"},
+			{"indexed": false, "name": "sold_id",       "type": "int128"},
+			{"indexed": false, "name": "tokens_sold",   "type": "uint256"},
+			{"indexed": false, "name": "bought_id",     "type": "int128"},
+			{"indexed": false, "name": "tokens_bought", "type": "uint256"}
+		],
+		"name": "TokenExchangeUnderlying",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": false, "name": "fee",       "type": "uint256"},
+			{"indexed": false, "name": "admin_fee", "type": "uint256"}
+		],
+		"name": "NewFee",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": false, "name": "deadline",  "type": "uint256"},
+			{"indexed": false, "name": "fee",       "type": "uint256"},
+			{"indexed": false, "name": "admin_fee", "type": "uint256"}
+		],
+		"name": "CommitNewFee",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": false, "name": "fee",                   "type": "uint256"},
+			{"indexed": false, "name": "offpeg_fee_multiplier", "type": "uint256"}
+		],
+		"name": "ApplyNewFee",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true, "name": "admin", "type": "address"}
+		],
+		"name": "NewAdmin",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true,  "name": "deadline", "type": "uint256"},
+			{"indexed": true,  "name": "admin",    "type": "address"}
+		],
+		"name": "CommitNewAdmin",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true,  "name": "sender",   "type": "address"},
+			{"indexed": true,  "name": "receiver", "type": "address"},
+			{"indexed": false, "name": "value",    "type": "uint256"}
+		],
+		"name": "Transfer",
+		"type": "event"
+	},
+	{
+		"anonymous": false,
+		"inputs": [
+			{"indexed": true,  "name": "owner",   "type": "address"},
+			{"indexed": true,  "name": "spender", "type": "address"},
+			{"indexed": false, "name": "value",   "type": "uint256"}
+		],
+		"name": "Approval",
+		"type": "event"
+	},
+	{
 		"inputs": [{"name": "i", "type": "uint256"}],
 		"name": "coins",
 		"outputs": [{"name": "", "type": "address"}],
@@ -163,6 +240,104 @@ const curveStableswapJSON = `[
 		"inputs": [],
 		"name": "stored_rates",
 		"outputs": [{"name": "", "type": "uint256[2]"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "A_precise",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [{"name": "i", "type": "uint256"}],
+		"name": "admin_balances",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [{"name": "dx", "type": "uint256"}, {"name": "i", "type": "int128"}],
+		"name": "calc_withdraw_one_coin",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "ema_price",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "get_p",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "ma_exp_time",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "oracle_method",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "initial_A",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "initial_A_time",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "future_A",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "future_A_time",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "admin_fee",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "future_fee",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [],
+		"name": "future_admin_fee",
+		"outputs": [{"name": "", "type": "uint256"}],
 		"stateMutability": "view",
 		"type": "function"
 	}

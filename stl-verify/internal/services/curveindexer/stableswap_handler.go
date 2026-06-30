@@ -83,17 +83,10 @@ func (h *StableswapHandler) DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		if len(log.Topics) == 0 {
-			payload, marshalErr := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
-			if marshalErr != nil {
-				return DecodedEvents{}, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, marshalErr)
+			result.Captured, err = appendRawCaptured(result.Captured, pool, logIndex, txHash, "", log)
+			if err != nil {
+				return DecodedEvents{}, err
 			}
-			result.Captured = append(result.Captured, CapturedEvent{
-				Pool:      pool,
-				LogIndex:  logIndex,
-				TxHash:    txHash,
-				EventName: "",
-				Payload:   payload,
-			})
 			continue
 		}
 
@@ -108,17 +101,10 @@ func (h *StableswapHandler) DecodeEvents(
 			}
 			if matched {
 				result.Liquidity = append(result.Liquidity, *rec)
-				payload, marshalErr := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
-				if marshalErr != nil {
-					return DecodedEvents{}, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, marshalErr)
+				result.Captured, err = appendRawCaptured(result.Captured, pool, logIndex, txHash, log.Topics[0], log)
+				if err != nil {
+					return DecodedEvents{}, err
 				}
-				result.Captured = append(result.Captured, CapturedEvent{
-					Pool:      pool,
-					LogIndex:  logIndex,
-					TxHash:    txHash,
-					EventName: log.Topics[0],
-					Payload:   payload,
-				})
 				continue
 			}
 		}
@@ -126,20 +112,10 @@ func (h *StableswapHandler) DecodeEvents(
 		ev, known := h.eventsByID[topic0]
 
 		if !known {
-			payload, marshalErr := json.Marshal(map[string]any{
-				"topics": log.Topics,
-				"data":   log.Data,
-			})
-			if marshalErr != nil {
-				return DecodedEvents{}, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, marshalErr)
+			result.Captured, err = appendRawCaptured(result.Captured, pool, logIndex, txHash, log.Topics[0], log)
+			if err != nil {
+				return DecodedEvents{}, err
 			}
-			result.Captured = append(result.Captured, CapturedEvent{
-				Pool:      pool,
-				LogIndex:  logIndex,
-				TxHash:    txHash,
-				EventName: log.Topics[0],
-				Payload:   payload,
-			})
 			continue
 		}
 
@@ -148,11 +124,32 @@ func (h *StableswapHandler) DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("decoding %s log (index %s): %w", ev.Name, log.LogIndex, err)
 		}
 
+		if paramName, isParam := parameterEventName(ev.Name); isParam {
+			rec, err := extractParameterEvent(eventData, ev.Name, paramName, pool, logIndex, txHash)
+			if err != nil {
+				return DecodedEvents{}, fmt.Errorf("extracting %s: %w", ev.Name, err)
+			}
+			result.ParameterEvents = append(result.ParameterEvents, rec)
+		} else if isLpTokenEvent(ev.Name) {
+			rec, err := extractLpTokenEvent(eventData, ev.Name, pool, logIndex, txHash)
+			if err != nil {
+				return DecodedEvents{}, fmt.Errorf("extracting %s: %w", ev.Name, err)
+			}
+			result.LpTokenEvents = append(result.LpTokenEvents, rec)
+		}
+
 		switch ev.Name {
 		case "TokenExchange":
-			swap, err := extractStableswapTokenExchange(eventData, pool, logIndex, txHash)
+			swap, err := extractStableswapTokenExchange(eventData, pool, logIndex, txHash, false)
 			if err != nil {
 				return DecodedEvents{}, fmt.Errorf("extracting TokenExchange: %w", err)
+			}
+			result.Swaps = append(result.Swaps, swap)
+
+		case "TokenExchangeUnderlying":
+			swap, err := extractStableswapTokenExchange(eventData, pool, logIndex, txHash, true)
+			if err != nil {
+				return DecodedEvents{}, fmt.Errorf("extracting TokenExchangeUnderlying: %w", err)
 			}
 			result.Swaps = append(result.Swaps, swap)
 
@@ -225,22 +222,23 @@ func (h *StableswapHandler) SnapshotState(
 		return StateSnapshot{}, fmt.Errorf("executing snapshot multicall for pool %s: %w", pool.Address, err)
 	}
 
-	st, err := h.decodeSnapshotResults(pool, blockNumber, version, ts, calls, results)
+	st, cfg, err := h.decodeSnapshotResults(pool, blockNumber, version, ts, calls, results)
 	if err != nil {
 		return StateSnapshot{}, fmt.Errorf("decoding snapshot results for pool %s: %w", pool.Address, err)
 	}
 
 	return StateSnapshot{
-		Pool:         pool,
-		BlockNumber:  blockNumber,
-		BlockVersion: version,
-		Timestamp:    ts,
-		Stableswap:   st,
+		Pool:             pool,
+		BlockNumber:      blockNumber,
+		BlockVersion:     version,
+		Timestamp:        ts,
+		Stableswap:       st,
+		StableswapConfig: cfg,
 	}, nil
 }
 
 // buildSnapshotCalls constructs the ordered multicall call list for a stableswap pool.
-// Call order:
+// Call order (existing calls 1-7 keep their positions; decode is in lockstep):
 //  1. balances(i) for i in 0..n-1
 //  2. get_virtual_price()
 //  3. totalSupply()
@@ -248,6 +246,17 @@ func (h *StableswapHandler) SnapshotState(
 //  5. fee()
 //  6. get_dy(i,j,10^CoinDecimals[i]) for every ordered pair i!=j, i asc then j asc
 //  7. (NG only) price_oracle(), last_price() with AllowFailure=true
+//
+// Extended reads (all AllowFailure=true; a revert leaves the field nil and never
+// fails the whole snapshot):
+//  8. A_precise()
+//  9. admin_balances(i) for i in 0..n-1
+//  10. calc_token_amount([10^decimals[i] for each i], true)
+//  11. calc_withdraw_one_coin(1e18, i) for i in 0..n-1
+//  12. (NG only) stored_rates(), ema_price(), get_p()
+//  13. config getters: initial_A, initial_A_time, future_A, future_A_time, admin_fee, future_fee
+//  14. (pre-NG only) future_admin_fee()
+//  15. (NG only) ma_exp_time(), oracle_method()
 func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.Call, error) {
 	var calls []outbound.Call
 
@@ -328,10 +337,95 @@ func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
 	}
 
+	// 8. A_precise()
+	allow := func(data []byte) {
+		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
+	}
+	data, err = h.stableABI.Pack("A_precise")
+	if err != nil {
+		return nil, fmt.Errorf("packing A_precise: %w", err)
+	}
+	allow(data)
+
+	// 9. admin_balances(i) for each coin
+	for i := 0; i < pool.NCoins; i++ {
+		data, err = h.stableABI.Pack("admin_balances", big.NewInt(int64(i)))
+		if err != nil {
+			return nil, fmt.Errorf("packing admin_balances(%d): %w", i, err)
+		}
+		allow(data)
+	}
+
+	// 10. calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
+	deposits := make([]*big.Int, pool.NCoins)
+	for i := 0; i < pool.NCoins; i++ {
+		if i >= len(pool.CoinDecimals) {
+			return nil, fmt.Errorf("pool %s coin %d missing decimals (have %d, n_coins %d)", pool.Address, i, len(pool.CoinDecimals), pool.NCoins)
+		}
+		deposits[i] = new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(pool.CoinDecimals[i])), nil)
+	}
+	data, err = packCalcTokenAmount(deposits, true)
+	if err != nil {
+		return nil, fmt.Errorf("packing calc_token_amount: %w", err)
+	}
+	allow(data)
+
+	// 11. calc_withdraw_one_coin(1e18, i) for each coin
+	oneLP := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	for i := 0; i < pool.NCoins; i++ {
+		data, err = h.stableABI.Pack("calc_withdraw_one_coin", oneLP, big.NewInt(int64(i)))
+		if err != nil {
+			return nil, fmt.Errorf("packing calc_withdraw_one_coin(%d): %w", i, err)
+		}
+		allow(data)
+	}
+
+	// 12. NG-only: stored_rates(), ema_price(), get_p()
+	if pool.Kind == KindStableswapNG {
+		for _, fn := range []string{"stored_rates", "ema_price", "get_p"} {
+			data, err = h.stableABI.Pack(fn)
+			if err != nil {
+				return nil, fmt.Errorf("packing %s: %w", fn, err)
+			}
+			allow(data)
+		}
+	}
+
+	// 13. config getters (both classes)
+	for _, fn := range []string{"initial_A", "initial_A_time", "future_A", "future_A_time", "admin_fee", "future_fee"} {
+		data, err = h.stableABI.Pack(fn)
+		if err != nil {
+			return nil, fmt.Errorf("packing %s: %w", fn, err)
+		}
+		allow(data)
+	}
+
+	// 14. pre-NG only: future_admin_fee()
+	if pool.Kind == KindStableswapPreNG {
+		data, err = h.stableABI.Pack("future_admin_fee")
+		if err != nil {
+			return nil, fmt.Errorf("packing future_admin_fee: %w", err)
+		}
+		allow(data)
+	}
+
+	// 15. NG-only: ma_exp_time(), oracle_method()
+	if pool.Kind == KindStableswapNG {
+		for _, fn := range []string{"ma_exp_time", "oracle_method"} {
+			data, err = h.stableABI.Pack(fn)
+			if err != nil {
+				return nil, fmt.Errorf("packing %s: %w", fn, err)
+			}
+			allow(data)
+		}
+	}
+
 	return calls, nil
 }
 
-// decodeSnapshotResults decodes the multicall results in the same order as buildSnapshotCalls.
+// decodeSnapshotResults decodes the multicall results in the same order as
+// buildSnapshotCalls, returning the per-block state row and the close-to-static
+// config (nil when a required config getter reverted).
 func (h *StableswapHandler) decodeSnapshotResults(
 	pool RegisteredPool,
 	blockNumber int64,
@@ -339,9 +433,9 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	ts time.Time,
 	calls []outbound.Call,
 	results []outbound.Result,
-) (*entity.CurveStableswapState, error) {
+) (*entity.CurveStableswapState, *entity.CurveStableswapConfig, error) {
 	if len(results) != len(calls) {
-		return nil, fmt.Errorf("multicall returned %d results, expected %d", len(results), len(calls))
+		return nil, nil, fmt.Errorf("multicall returned %d results, expected %d", len(results), len(calls))
 	}
 
 	idx := 0
@@ -351,7 +445,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	for i := 0; i < pool.NCoins; i++ {
 		v, err := shared.UnpackUint(h.stableABI, "balances", results[idx])
 		if err != nil {
-			return nil, fmt.Errorf("balances(%d): %w", i, err)
+			return nil, nil, fmt.Errorf("balances(%d): %w", i, err)
 		}
 		balances[i] = v
 		idx++
@@ -360,28 +454,28 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	// 2. get_virtual_price
 	virtualPrice, err := shared.UnpackUint(h.stableABI, "get_virtual_price", results[idx])
 	if err != nil {
-		return nil, fmt.Errorf("get_virtual_price: %w", err)
+		return nil, nil, fmt.Errorf("get_virtual_price: %w", err)
 	}
 	idx++
 
 	// 3. totalSupply
 	totalSupply, err := shared.UnpackUint(h.stableABI, "totalSupply", results[idx])
 	if err != nil {
-		return nil, fmt.Errorf("totalSupply: %w", err)
+		return nil, nil, fmt.Errorf("totalSupply: %w", err)
 	}
 	idx++
 
 	// 4. A
 	a, err := shared.UnpackUint(h.stableABI, "A", results[idx])
 	if err != nil {
-		return nil, fmt.Errorf("decoding A: %w", err)
+		return nil, nil, fmt.Errorf("decoding A: %w", err)
 	}
 	idx++
 
 	// 5. fee
 	fee, err := shared.UnpackUint(h.stableABI, "fee", results[idx])
 	if err != nil {
-		return nil, fmt.Errorf("fee: %w", err)
+		return nil, nil, fmt.Errorf("fee: %w", err)
 	}
 	idx++
 
@@ -395,7 +489,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 			}
 			v, err := shared.UnpackUint(h.stableABI, "get_dy", results[idx])
 			if err != nil {
-				return nil, fmt.Errorf("get_dy(%d,%d): %w", i, j, err)
+				return nil, nil, fmt.Errorf("get_dy(%d,%d): %w", i, j, err)
 			}
 			spotDy = append(spotDy, v)
 			idx++
@@ -408,7 +502,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		if results[idx].Success {
 			po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx])
 			if err != nil {
-				return nil, fmt.Errorf("price_oracle: %w", err)
+				return nil, nil, fmt.Errorf("price_oracle: %w", err)
 			}
 			priceOracle = po
 		}
@@ -416,25 +510,241 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		if results[idx].Success {
 			lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx])
 			if err != nil {
-				return nil, fmt.Errorf("last_price: %w", err)
+				return nil, nil, fmt.Errorf("last_price: %w", err)
 			}
 			lastPrice = lp
 		}
+		idx++
 	}
 
-	return entity.NewCurveStableswapState(entity.CurveStableswapStateParams{
-		CurvePoolID:  pool.ID,
-		BlockNumber:  blockNumber,
-		BlockVersion: version,
-		Timestamp:    ts,
-		Balances:     balances,
-		VirtualPrice: virtualPrice,
-		TotalSupply:  totalSupply,
-		A:            a,
-		Fee:          fee,
-		SpotDy:       spotDy,
-		LastPrice:    lastPrice,
-		PriceOracle:  priceOracle,
+	// optUint reads an AllowFailure=true scalar at the cursor: nil on revert,
+	// error only on a decode failure of a successful result, advancing idx.
+	optUint := func(method string) (*big.Int, error) {
+		defer func() { idx++ }()
+		if !results[idx].Success {
+			return nil, nil
+		}
+		return shared.UnpackUint(h.stableABI, method, results[idx])
+	}
+
+	// 8. A_precise
+	aPrecise, err := optUint("A_precise")
+	if err != nil {
+		return nil, nil, fmt.Errorf("A_precise: %w", err)
+	}
+
+	// 9. admin_balances(i)
+	adminBalances := make([]*big.Int, pool.NCoins)
+	allAdminOK := true
+	for i := 0; i < pool.NCoins; i++ {
+		v, err := optUint("admin_balances")
+		if err != nil {
+			return nil, nil, fmt.Errorf("admin_balances(%d): %w", i, err)
+		}
+		if v == nil {
+			allAdminOK = false
+		}
+		adminBalances[i] = v
+	}
+	if !allAdminOK {
+		adminBalances = nil
+	}
+
+	// 10. calc_token_amount (packed manually per N, so not unpacked via the ABI)
+	var calcTokenAmount *big.Int
+	if results[idx].Success {
+		v, err := unpackSingleUint(results[idx])
+		if err != nil {
+			return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
+		}
+		calcTokenAmount = v
+	}
+	idx++
+
+	// 11. calc_withdraw_one_coin(1e18, i)
+	calcWithdraw := make([]*big.Int, pool.NCoins)
+	allWithdrawOK := true
+	for i := 0; i < pool.NCoins; i++ {
+		v, err := optUint("calc_withdraw_one_coin")
+		if err != nil {
+			return nil, nil, fmt.Errorf("calc_withdraw_one_coin(%d): %w", i, err)
+		}
+		if v == nil {
+			allWithdrawOK = false
+		}
+		calcWithdraw[i] = v
+	}
+	if !allWithdrawOK {
+		calcWithdraw = nil
+	}
+
+	// 12. NG-only: stored_rates, ema_price, get_p
+	var storedRates []*big.Int
+	var emaPrice, getP *big.Int
+	if pool.Kind == KindStableswapNG {
+		if results[idx].Success {
+			sr, err := unpackUintArray(results[idx], pool.NCoins)
+			if err != nil {
+				return nil, nil, fmt.Errorf("stored_rates: %w", err)
+			}
+			storedRates = sr
+		}
+		idx++
+		emaPrice, err = optUint("ema_price")
+		if err != nil {
+			return nil, nil, fmt.Errorf("ema_price: %w", err)
+		}
+		getP, err = optUint("get_p")
+		if err != nil {
+			return nil, nil, fmt.Errorf("get_p: %w", err)
+		}
+	}
+
+	// 13. config getters
+	initialA, err := optUint("initial_A")
+	if err != nil {
+		return nil, nil, fmt.Errorf("initial_A: %w", err)
+	}
+	initialATime, err := optUint("initial_A_time")
+	if err != nil {
+		return nil, nil, fmt.Errorf("initial_A_time: %w", err)
+	}
+	futureA, err := optUint("future_A")
+	if err != nil {
+		return nil, nil, fmt.Errorf("future_A: %w", err)
+	}
+	futureATime, err := optUint("future_A_time")
+	if err != nil {
+		return nil, nil, fmt.Errorf("future_A_time: %w", err)
+	}
+	adminFee, err := optUint("admin_fee")
+	if err != nil {
+		return nil, nil, fmt.Errorf("admin_fee: %w", err)
+	}
+	futureFee, err := optUint("future_fee")
+	if err != nil {
+		return nil, nil, fmt.Errorf("future_fee: %w", err)
+	}
+
+	// 14. pre-NG only: future_admin_fee
+	var futureAdminFee *big.Int
+	if pool.Kind == KindStableswapPreNG {
+		futureAdminFee, err = optUint("future_admin_fee")
+		if err != nil {
+			return nil, nil, fmt.Errorf("future_admin_fee: %w", err)
+		}
+	}
+
+	// 15. NG-only: ma_exp_time, oracle_method
+	var maExpTime, oracleMethod *big.Int
+	if pool.Kind == KindStableswapNG {
+		maExpTime, err = optUint("ma_exp_time")
+		if err != nil {
+			return nil, nil, fmt.Errorf("ma_exp_time: %w", err)
+		}
+		oracleMethod, err = optUint("oracle_method")
+		if err != nil {
+			return nil, nil, fmt.Errorf("oracle_method: %w", err)
+		}
+	}
+
+	state, err := entity.NewCurveStableswapState(entity.CurveStableswapStateParams{
+		CurvePoolID:         pool.ID,
+		BlockNumber:         blockNumber,
+		BlockVersion:        version,
+		Timestamp:           ts,
+		Balances:            balances,
+		VirtualPrice:        virtualPrice,
+		TotalSupply:         totalSupply,
+		A:                   a,
+		Fee:                 fee,
+		SpotDy:              spotDy,
+		LastPrice:           lastPrice,
+		PriceOracle:         priceOracle,
+		APrecise:            aPrecise,
+		AdminBalances:       adminBalances,
+		StoredRates:         storedRates,
+		EmaPrice:            emaPrice,
+		GetP:                getP,
+		CalcTokenAmount:     calcTokenAmount,
+		CalcWithdrawOneCoin: calcWithdraw,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cfg, err := buildStableswapConfig(pool, blockNumber, version, ts, stableswapConfigReads{
+		initialA:       initialA,
+		initialATime:   initialATime,
+		futureA:        futureA,
+		futureATime:    futureATime,
+		adminFee:       adminFee,
+		futureFee:      futureFee,
+		futureAdminFee: futureAdminFee,
+		maExpTime:      maExpTime,
+		oracleMethod:   oracleMethod,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return state, cfg, nil
+}
+
+// stableswapConfigReads holds the raw config getter results; nil means the read
+// reverted (AllowFailure=true).
+type stableswapConfigReads struct {
+	initialA       *big.Int
+	initialATime   *big.Int
+	futureA        *big.Int
+	futureATime    *big.Int
+	adminFee       *big.Int
+	futureFee      *big.Int
+	futureAdminFee *big.Int // pre-NG only
+	maExpTime      *big.Int // NG only
+	oracleMethod   *big.Int // NG only
+}
+
+// buildStableswapConfig assembles a CurveStableswapConfig from the config getter
+// reads, or returns (nil, nil) when any of the four required NOT-NULL value
+// fields (initial_a, future_a, admin_fee, future_fee) reverted (we never persist
+// a partial config row). The *_time fields default to 0 when their optional read
+// reverted; this matches the BIGINT NOT NULL DEFAULT 0 columns.
+func buildStableswapConfig(
+	pool RegisteredPool,
+	blockNumber int64,
+	version int,
+	ts time.Time,
+	r stableswapConfigReads,
+) (*entity.CurveStableswapConfig, error) {
+	if r.initialA == nil || r.futureA == nil || r.adminFee == nil || r.futureFee == nil {
+		return nil, nil
+	}
+	timeOrZero := func(b *big.Int) int64 {
+		if b == nil || !b.IsInt64() {
+			return 0
+		}
+		return b.Int64()
+	}
+	var maExpTime *int64
+	if r.maExpTime != nil && r.maExpTime.IsInt64() {
+		v := r.maExpTime.Int64()
+		maExpTime = &v
+	}
+	return entity.NewCurveStableswapConfig(entity.CurveStableswapConfigParams{
+		CurvePoolID:    pool.ID,
+		BlockNumber:    blockNumber,
+		BlockVersion:   version,
+		Timestamp:      ts,
+		InitialA:       r.initialA,
+		InitialATime:   timeOrZero(r.initialATime),
+		FutureA:        r.futureA,
+		FutureATime:    timeOrZero(r.futureATime),
+		AdminFee:       r.adminFee,
+		FutureFee:      r.futureFee,
+		FutureAdminFee: r.futureAdminFee,
+		MaExpTime:      maExpTime,
+		OracleMethod:   r.oracleMethod,
 	})
 }
 
@@ -447,6 +757,7 @@ func extractStableswapTokenExchange(
 	pool RegisteredPool,
 	logIndex uint,
 	txHash common.Hash,
+	isUnderlying bool,
 ) (SwapRecord, error) {
 	// buyer is indexed; it was decoded from Topics[1] into data["buyer"].
 	buyer, err := getAddrField(data, "buyer")
@@ -480,6 +791,7 @@ func extractStableswapTokenExchange(
 		TokensSold:   tokensSold,
 		TokensBought: tokensBought,
 		Fee:          nil, // stableswap TokenExchange carries no fee field
+		IsUnderlying: isUnderlying,
 	}, nil
 }
 

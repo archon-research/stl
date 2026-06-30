@@ -131,6 +131,8 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		var (
 			swaps     []SwapRecord
 			liquidity []LiquidityRecord
+			paramEvts []ParameterEventRecord
+			lpEvts    []LpTokenEventRecord
 			captured  []CapturedEvent
 		)
 		touched := make(map[int64]RegisteredPool)
@@ -159,6 +161,8 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 				}
 				swaps = append(swaps, decoded.Swaps...)
 				liquidity = append(liquidity, decoded.Liquidity...)
+				paramEvts = append(paramEvts, decoded.ParameterEvents...)
+				lpEvts = append(lpEvts, decoded.LpTokenEvents...)
 				captured = append(captured, decoded.Captured...)
 				touched[pool.ID] = pool
 			}
@@ -183,7 +187,8 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		}
 
 		// Quiet block: nothing decoded and no snapshot due. Skip the empty transaction.
-		if len(swaps) == 0 && len(liquidity) == 0 && len(captured) == 0 && len(snapshots) == 0 {
+		if len(swaps) == 0 && len(liquidity) == 0 && len(paramEvts) == 0 &&
+			len(lpEvts) == 0 && len(captured) == 0 && len(snapshots) == 0 {
 			return nil
 		}
 
@@ -199,15 +204,15 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 			liqIns = append(liqIns, toLiquidityInput(l, bn, ver, ts))
 		}
 
-		var stableStates []*entity.CurveStableswapState
-		var cryptoStates []*entity.CurveCryptoswapState
-		for _, snap := range snapshots {
-			switch {
-			case snap.Stableswap != nil:
-				stableStates = append(stableStates, snap.Stableswap)
-			case snap.Cryptoswap != nil:
-				cryptoStates = append(cryptoStates, snap.Cryptoswap)
-			}
+		split := splitSnapshots(snapshots)
+
+		paramIns, err := collectParameterEvents(paramEvts, bn, ver, ts)
+		if err != nil {
+			return err
+		}
+		lpIns, err := collectLpTokenEvents(lpEvts, bn, ver, ts)
+		if err != nil {
+			return err
 		}
 
 		capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(captured))
@@ -226,13 +231,17 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 		}
 
 		var stateRows int64
-		err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
+		err = c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 			var txErr error
 			stateRows, txErr = c.repo.SaveBlock(ctx, tx, outbound.BlockWrites{
-				Swaps:        swapIns,
-				Liquidity:    liqIns,
-				StableStates: stableStates,
-				CryptoStates: cryptoStates,
+				Swaps:             swapIns,
+				Liquidity:         liqIns,
+				StableStates:      split.stableStates,
+				CryptoStates:      split.cryptoStates,
+				StableswapConfigs: split.stableConfigs,
+				CryptoswapConfigs: split.cryptoConfigs,
+				ParameterEvents:   paramIns,
+				LpTokenEvents:     lpIns,
 			})
 			if txErr != nil {
 				c.telemetry.RecordError(ctx, "persistBlock", txErr)
@@ -284,6 +293,78 @@ func (c *Coordinator) buildSnapshotSet(bn int64, ver int, touched map[int64]Regi
 // Mapping helpers: domain records -> repo input structs
 // ---------------------------------------------------------------------------
 
+// splitSnapshots groups class-tagged snapshots into the per-class state and
+// config slices the repo's BlockWrites expects.
+type splitSnapshotResult struct {
+	stableStates  []*entity.CurveStableswapState
+	cryptoStates  []*entity.CurveCryptoswapState
+	stableConfigs []*entity.CurveStableswapConfig
+	cryptoConfigs []*entity.CurveCryptoswapConfig
+}
+
+func splitSnapshots(snapshots []StateSnapshot) splitSnapshotResult {
+	var r splitSnapshotResult
+	for _, snap := range snapshots {
+		switch {
+		case snap.Stableswap != nil:
+			r.stableStates = append(r.stableStates, snap.Stableswap)
+		case snap.Cryptoswap != nil:
+			r.cryptoStates = append(r.cryptoStates, snap.Cryptoswap)
+		}
+		if snap.StableswapConfig != nil {
+			r.stableConfigs = append(r.stableConfigs, snap.StableswapConfig)
+		}
+		if snap.CryptoswapConfig != nil {
+			r.cryptoConfigs = append(r.cryptoConfigs, snap.CryptoswapConfig)
+		}
+	}
+	return r
+}
+
+func collectParameterEvents(recs []ParameterEventRecord, bn int64, ver int, ts time.Time) ([]*entity.CurveParameterEvent, error) {
+	out := make([]*entity.CurveParameterEvent, 0, len(recs))
+	for _, p := range recs {
+		rec, err := entity.NewCurveParameterEvent(entity.CurveParameterEventParams{
+			CurvePoolID:  p.Pool.ID,
+			BlockNumber:  bn,
+			BlockVersion: ver,
+			Timestamp:    ts,
+			TxHash:       p.TxHash,
+			LogIndex:     int(p.LogIndex),
+			EventName:    p.EventName,
+			Params:       p.Params,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("building parameter event for pool %d block %d: %w", p.Pool.ID, bn, err)
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
+func collectLpTokenEvents(recs []LpTokenEventRecord, bn int64, ver int, ts time.Time) ([]*entity.CurveLpTokenEvent, error) {
+	out := make([]*entity.CurveLpTokenEvent, 0, len(recs))
+	for _, l := range recs {
+		rec, err := entity.NewCurveLpTokenEvent(entity.CurveLpTokenEventParams{
+			CurvePoolID:  l.Pool.ID,
+			BlockNumber:  bn,
+			BlockVersion: ver,
+			Timestamp:    ts,
+			TxHash:       l.TxHash,
+			LogIndex:     int(l.LogIndex),
+			EventName:    l.EventName,
+			From:         l.From,
+			To:           l.To,
+			Value:        l.Value,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("building lp token event for pool %d block %d: %w", l.Pool.ID, bn, err)
+		}
+		out = append(out, rec)
+	}
+	return out, nil
+}
+
 func toSwapInput(s SwapRecord, bn int64, ver int, ts time.Time) outbound.SwapInput {
 	return outbound.SwapInput{
 		CurvePoolID:    s.Pool.ID,
@@ -298,6 +379,7 @@ func toSwapInput(s SwapRecord, bn int64, ver int, ts time.Time) outbound.SwapInp
 		TokensSold:     s.TokensSold,
 		TokensBought:   s.TokensBought,
 		Fee:            s.Fee,
+		IsUnderlying:   s.IsUnderlying,
 	}
 }
 

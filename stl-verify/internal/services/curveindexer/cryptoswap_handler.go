@@ -147,6 +147,12 @@ func (h *CryptoswapHandler) DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("decoding %s log (index %s): %w", ev.Name, log.LogIndex, err)
 		}
 
+		// Parameter events (RampAgamma/NewParameters/CommitNewParameters/ClaimAdminFee)
+		// and LP-token Transfer/Approval are deliberately not decoded yet: the
+		// cryptoswap ABI (curve_cryptoswap.go) does not declare them. The cryptoswap
+		// task adds those ABI entries and a dispatch branch here that REUSES the shared
+		// extractParameterEvent/abiParamEventNames and extractLpTokenEvent (see
+		// stableswap_handler.go), extending the shared switch rather than duplicating it.
 		switch ev.Name {
 		case "TokenExchange":
 			swap, err := extractCryptoswapTokenExchange(eventData, pool, logIndex, txHash)

@@ -44,6 +44,32 @@ type SwapRecord struct {
 	TokensSold   *big.Int
 	TokensBought *big.Int
 	Fee          *big.Int // nil when the event carries none (stableswap)
+	// IsUnderlying is true when the row came from TokenExchangeUnderlying
+	// (meta/lending underlying swap) rather than TokenExchange.
+	IsUnderlying bool
+}
+
+// ParameterEventRecord is a decoded on-chain admin/governance parameter event
+// (RampA, NewFee, NewAdmin, ...). Params carries the decoded named fields as
+// JSONB; the exact keys per EventName are documented on curve_parameter_event.params.
+type ParameterEventRecord struct {
+	Pool      RegisteredPool
+	LogIndex  uint
+	TxHash    common.Hash
+	EventName string
+	Params    json.RawMessage
+}
+
+// LpTokenEventRecord is a decoded LP-token ERC-20 Transfer or Approval event.
+// For Approval, From holds the owner and To holds the spender.
+type LpTokenEventRecord struct {
+	Pool      RegisteredPool
+	LogIndex  uint
+	TxHash    common.Hash
+	EventName string // "transfer" or "approval"
+	From      common.Address
+	To        common.Address
+	Value     *big.Int
 }
 
 type LiquidityKind string
@@ -77,32 +103,46 @@ type CapturedEvent struct { // -> protocol_event capture net
 }
 
 type DecodedEvents struct {
-	Swaps     []SwapRecord
-	Liquidity []LiquidityRecord
-	Captured  []CapturedEvent
+	Swaps           []SwapRecord
+	Liquidity       []LiquidityRecord
+	ParameterEvents []ParameterEventRecord
+	LpTokenEvents   []LpTokenEventRecord
+	Captured        []CapturedEvent
 }
 
-// StateSnapshot is a pool-class-tagged state row. Exactly one of the two
-// pointers is non-nil, matching Pool.Kind.
+// StateSnapshot is a pool-class-tagged state row plus its close-to-static
+// governance config. Exactly one of the two state pointers is non-nil, matching
+// Pool.Kind; the matching config pointer carries the per-block config reads (the
+// repo decides via append-on-change whether to persist a new config row).
 type StateSnapshot struct {
-	Pool         RegisteredPool
-	BlockNumber  int64
-	BlockVersion int
-	Timestamp    time.Time
-	Stableswap   *entity.CurveStableswapState
-	Cryptoswap   *entity.CurveCryptoswapState
+	Pool             RegisteredPool
+	BlockNumber      int64
+	BlockVersion     int
+	Timestamp        time.Time
+	Stableswap       *entity.CurveStableswapState
+	Cryptoswap       *entity.CurveCryptoswapState
+	StableswapConfig *entity.CurveStableswapConfig
+	CryptoswapConfig *entity.CurveCryptoswapConfig
 }
 
-// Validate enforces that exactly one state pointer is set and it matches Pool.Kind.
+// Validate enforces that exactly one state pointer is set matching Pool.Kind,
+// and that any attached config pointer also matches Kind (a cross-class config
+// is a handler bug and must fail at the boundary, not become a mismatched row).
 func (s StateSnapshot) Validate() error {
 	switch s.Pool.Kind {
 	case KindStableswapPreNG, KindStableswapNG:
 		if s.Stableswap == nil || s.Cryptoswap != nil {
 			return fmt.Errorf("pool %s (kind %s): expected stableswap snapshot only", s.Pool.Address, s.Pool.Kind)
 		}
+		if s.CryptoswapConfig != nil {
+			return fmt.Errorf("pool %s (kind %s): stableswap snapshot carries a cryptoswap config", s.Pool.Address, s.Pool.Kind)
+		}
 	case KindCryptoswap:
 		if s.Cryptoswap == nil || s.Stableswap != nil {
 			return fmt.Errorf("pool %s (kind %s): expected cryptoswap snapshot only", s.Pool.Address, s.Pool.Kind)
+		}
+		if s.StableswapConfig != nil {
+			return fmt.Errorf("pool %s (kind %s): cryptoswap snapshot carries a stableswap config", s.Pool.Address, s.Pool.Kind)
 		}
 	default:
 		return fmt.Errorf("pool %s: unknown kind %s", s.Pool.Address, s.Pool.Kind)
