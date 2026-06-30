@@ -45,6 +45,23 @@ jobs:
       contents: read
       packages: write  # push BuildKit layer cache to GHCR
     steps:
+      # A short or malformed sha input gets stamped verbatim into every image
+      # tag, and the 40-char-only update regex (update-staging / create-prod-pr)
+      # can never rewrite it again, silently freezing the environment. Reject
+      # anything that is not a full 40-char commit SHA before any build, push, or
+      # tag commit. The automated path always supplies github.sha (40 chars), so
+      # this only ever trips a hand-entered dispatch sha. Gates the whole
+      # workflow: every tag-writing job depends on this one.
+      - name: Validate deploy SHA is a full 40-char commit SHA
+        env:
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deploy SHA '$DEPLOY_SHA' is not a full 40-char commit SHA. Pass the full SHA (git rev-parse <ref>); a short SHA poisons every image tag."
+            exit 1
+          fi
+          echo "Deploy SHA OK: $DEPLOY_SHA"
+
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
@@ -219,7 +236,7 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer migrate python-api
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer migrate python-api
       CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator
     permissions:
       id-token: write

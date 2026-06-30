@@ -235,6 +235,37 @@ just duplicate `Stalled`.)
 
 ---
 
+## VectorMapleFTLBookActive
+
+**Severity:** info · **For:** 0m (1h window)
+
+### What it means
+
+The `fixed_term_loans` phase wrote > 0 rows to `maple_ftl_loan_state` in 1h.
+The FTL book has been dormant (0 live fixed-term loans), so the steady state is
+0 rows and there is intentionally no zero-rows alert (it would fire constantly).
+A nonzero write is the inverse signal: Maple reactivated the fixed-term-loan
+product and the indexer is now capturing it.
+
+### First checks
+
+- `SELECT COUNT(*), MAX(synced_at) FROM maple_ftl_loan_state;` — confirm rows
+  are landing and current.
+- Check `maple-graphql-indexer` logs for `fixed-term loans synced count=<n>`.
+- Spot-check a row against the Maple API (`loans` query) for the same loan id:
+  state, `interestRate` scale (6-decimal on live PoolV2), collateral/funds token
+  resolution.
+
+### Action
+
+Confirm the FTL path end-to-end, then add the data-quality alerts that only
+make sense once the book is live — most importantly an FTL silent-empty alert
+analogous to `VectorMaplePoolWritesZero` (cycling AND zero), so a later silent
+drop back to `[]` is caught. Until then this info alert is the only FTL
+data-quality signal.
+
+---
+
 ## VectorMapleSchemaDrift
 
 **Severity:** warning · **For:** 0m (1h window debounces)
@@ -283,6 +314,190 @@ Maple API is degraded and a phase risks overrunning the 10m interval.
 - Maple API status / response times (curl a representative query).
 - If it's the `loans` phase, pagination volume may have grown; check
   `total_rows` in the client logs.
+
+---
+
+## VectorCexOrderbookPersistFailing
+
+**Severity:** critical · **For:** 15m
+
+### What it means
+
+Every snapshot write for the labelled `exchange` has failed continuously for
+>15 minutes. The WebSocket is probably still up (books are fresh in memory) but
+nothing is reaching TimescaleDB — a silent data hole. Because the indexer drops
+failed ticks by design, it will not recover on its own from a permanent cause.
+
+### First checks (≤5 min)
+
+1. **Pod status & logs** — `kubectl -n vector logs -l app=cex-orderbook-indexer-<exchange> --tail=200`.
+   Look for the `failed to persist order book snapshots` error and its cause.
+2. **Classify the cause from the error:**
+   - `password authentication failed` / permission denied → DB credential or
+     grant problem; fix the secret/role and restart.
+   - `relation "cex_orderbook_snapshots" does not exist` → the migration did not
+     run in this environment; run the migrate job.
+   - `timeout` / `too many connections` / pool exhausted → DB under load or pool
+     too small; check the Postgres dashboard.
+
+### Verify recovery
+
+`rate(orderbook_persist_failures_total{exchange="<exchange>"}[10m]) == 0` and
+fresh rows: `SELECT max(persisted_at) FROM cex_orderbook_snapshots WHERE exchange = '<exchange>'`.
+
+---
+
+## VectorCexOrderbookStreamStalled
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The oldest symbol on the labelled `exchange` has had no order book update for
+>120s sustained over 10m. The upstream feed has silently gone dead; snapshots
+are stale and stale symbols stop being written, so the series flat-lines.
+
+### First checks (≤5 min)
+
+1. **Pod logs** — `kubectl -n vector logs -l app=cex-orderbook-indexer-<exchange> --tail=200`.
+   Look for reconnect churn (`orderbook.reconnections.total`) or
+   `skipping stale order books`.
+2. **Exchange status** — check the venue's status page / API health; an outage
+   or a symbol delisting stops updates.
+3. **Symbol config** — a bad/renamed symbol can wedge the feed (e.g. Kraken
+   `XBT`/`XDG` aliasing); confirm `SYMBOLS` matches the venue's current pairs.
+4. **Network egress** — confirm the pod can reach the exchange WebSocket.
+
+### Verify recovery
+
+`max(orderbook_last_update_age{exchange="<exchange>"}) < 120` and
+`rate(orderbook_updates_emitted_total{exchange="<exchange>"}[5m]) > 0`.
+
+---
+
+## VectorCexOrderbookDown
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The labelled `deployment` has <1 available replica for >10m (kube-state-metrics,
+independent of the pod's own OTLP export). The order book indexer is not
+running, so no snapshots are taken. This is the availability companion to
+`VectorCexOrderbookStreamStalled`: that one reads the pod's own
+`orderbook_last_update_age` gauge, which vanishes on a pod/exporter outage — so
+`Down` catches the total-outage case `StreamStalled` cannot. If both fire,
+**this is the root cause.**
+
+### First checks (≤5 min)
+
+1. `kubectl -n vector get deploy,pods -l app=<deployment>` — pod state and
+   restart count.
+2. **Not Running?** describe for the reason:
+   `kubectl -n vector describe pod -l app=<deployment> | sed -n '/Events:/,$p'`
+   - `CreateContainerConfigError` → missing config/secret; check the
+     `<deployment>-config` ConfigMap and its ExternalSecret (DB URL).
+   - `CrashLoopBackOff` → read logs; common: bad `DATABASE_URL`, unreachable
+     TimescaleDB, or a startup panic (e.g. unknown `EXCHANGE`).
+   - `Pending` / `FailedScheduling` → no node capacity; check the node group.
+3. **ExternalSecret synced?**
+   `kubectl -n vector get externalsecret <deployment>` — a failed sync leaves
+   the pod unable to start.
+
+### Verify recovery
+
+`kube_deployment_status_replicas_available{deployment="<deployment>"} == 1` and
+updates resume (see StreamStalled recovery check).
+
+---
+
+## VectorCexOrderbookPersistLatencyHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+p99 latency of a snapshot batch write to TimescaleDB exceeded 1s over 10m. A
+top-N JSONB insert is normally single-digit ms, so this means the DB or the
+connection pool is degraded. The risk: a write slower than the snapshot interval
+(default 5s) makes ticks pile up and drop — this is the precursor to
+`VectorCexOrderbookPersistFailing`, not yet an outage.
+
+### First checks (≤5 min)
+
+1. **Which exchange/pod** — `histogram_quantile(0.99, sum by (exchange, le) (rate(orderbook_persist_duration_seconds_bucket[10m])))`.
+2. **TimescaleDB health** — connection pool saturation, CPU, lock contention, or
+   replication lag on the Postgres dashboard. Latency here is almost always
+   downstream DB pressure, not the indexer.
+3. **Correlate** — is another heavy writer (a backfill, another indexer) loading
+   the same DB right now?
+
+### Common causes
+
+- DB pool saturated / under load → restart is a stopgap; longer-term raise the
+  pool limit or the DB instance size.
+- A slow/locking migration or compaction job running concurrently.
+
+### Verify recovery
+
+`histogram_quantile(0.99, sum by (exchange, le) (rate(orderbook_persist_duration_seconds_bucket[10m]))) < 1`.
+
+---
+
+## VectorRPCRetryRatioHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+For the labelled `service_name` and `server_address` (RPC host), more than 20%
+of RPC attempts over the last 10m were retries, measured by the shared
+`internal/pkg/rpchttp` retry transport (used by every `DialEthereum` caller:
+oracle / morpho / sparklend / prime / psm3 indexers, dex bootstrap, and the
+backfillers). The transport retries 429 / 5xx / network with capped exponential
+backoff and masks the failures as added latency, so this is the leading
+indicator of a throttle-driven latency tail — it typically precedes or
+accompanies a `Vector*IndexerRPCLatencyHigh` warning on the same chain.
+
+### First checks (≤5 min)
+
+1. **Break down by reason** — the single most useful query:
+   ```promql
+   sum by (reason) (rate(rpc_http_retries_total{k8s_namespace_name="vector", service_name="<svc>"}[10m]))
+   ```
+   - `reason="429"` → upstream **rate-limiting** (Alchemy compute-unit
+     throttling). The Alchemy key is shared across all workers and chains, so a
+     burst from any worker can throttle the whole account.
+   - `reason="5xx"` → transient provider **server errors**.
+   - `reason="network"` → connection resets / DNS / TLS / dial failures.
+2. **Confirm latency impact** — check the matching per-service RPC latency
+   metric (e.g. `oracle_rpc_duration_seconds` p99) and whether a
+   `Vector*IndexerRPCLatencyHigh` alert is firing on the same chain. A slow
+   trace also carries inline `rpc.retry` span events with the same labels.
+3. **Alchemy status / quota** — https://status.alchemy.com/ and the account's
+   compute-unit usage.
+
+### Common causes
+
+- **Account-wide CU throttling on the shared Alchemy key** (`reason="429"`):
+  cross-worker bursts exceed the per-second CU budget. The call itself is cheap;
+  the seconds come from our backoff. This is the shape behind the avalanche-c
+  oracle latency tail.
+- **Transient provider degradation** (`reason="5xx"`): wait for recovery.
+- **Network churn** (`reason="network"`): check pod egress / node connectivity
+  if localized to one pod.
+
+### What to do
+
+- Transient (ratio falls back under 20% within an interval or two): no action —
+  the transport is doing its job.
+- Sustained 429s: raise the Alchemy CU/throughput limit, or reduce cross-worker
+  burst pressure (stagger schedules / lower per-worker concurrency). As a
+  freshness-over-completeness lever, a service can lower its dial timeout
+  (`WithClientTimeout`) or retry budget so a throttled call fails fast and the
+  block is reprocessed rather than blocking the worker.
+- Sustained 5xx/network against one host only: consider failing that chain over
+  to an alternate RPC provider if available.
 
 ---
 

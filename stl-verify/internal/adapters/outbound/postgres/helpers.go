@@ -94,32 +94,6 @@ func nullIfEmpty(s string) *string {
 	return &s
 }
 
-// equalStringPtr reports NULL-safe equality of two nullable strings: both
-// nil is equal, nil vs non-nil is a mismatch, two non-nils compare by value.
-func equalStringPtr(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-// strOrNull renders a nullable string for mismatch messages, distinguishing
-// SQL NULL from an empty string.
-func strOrNull(s *string) string {
-	if s == nil {
-		return "NULL"
-	}
-	return fmt.Sprintf("%q", *s)
-}
-
-// intOrNull renders a nullable int for mismatch messages.
-func intOrNull(i *int) string {
-	if i == nil {
-		return "NULL"
-	}
-	return fmt.Sprintf("%d", *i)
-}
-
 // registryMismatchError builds the fail-hard error for an immutable-registry
 // guard: nil when nothing changed, else one error naming every changed field
 // with its stored and incoming values. Callers pass mismatches as
