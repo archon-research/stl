@@ -305,35 +305,82 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 //	19: last_prices(1)
 //	20: D()
 //	21: xcp_profit()
+//
+// Extended reads (all AllowFailure=true):
+//
+//	22-24: admin_balances(0..2)
+//	25: lp_price()
+//	26: xcp_profit_a()
+//	27: last_prices_timestamp()
+//	28-33: get_dx for the 6 ordered pairs
+//	34: calc_token_amount()
+//	35-37: calc_withdraw_one_coin(0..2)
+//	38-48: config getters (initial_A_gamma, future_A_gamma, initial_A_gamma_time,
+//	       future_A_gamma_time, mid_fee, out_fee, fee_gamma, allowed_extra_profit,
+//	       adjustment_step, ma_time, ADMIN_FEE)
 func cryptoswapResults(_ *testing.T, _ *abi.ABI) []outbound.Result {
 	pack := func(v int64) outbound.Result {
 		return outbound.Result{Success: true, ReturnData: packUint256(big.NewInt(v))}
 	}
 	return []outbound.Result{
-		pack(1000000000000000000), // balances(0)
-		pack(1000000000000000000), // balances(1)
-		pack(1000000000000000000), // balances(2)
-		pack(1001000000000000000), // get_virtual_price
-		pack(3000000000000000000), // totalSupply
-		pack(270000),              // A
-		pack(11809167828997),      // gamma
-		pack(5000000),             // fee
-		pack(999000000000000000),  // get_dy(0,1)
-		pack(998000000000000000),  // get_dy(0,2)
-		pack(999500000000000000),  // get_dy(1,0)
-		pack(998500000000000000),  // get_dy(1,2)
-		pack(999800000000000000),  // get_dy(2,0)
-		pack(999300000000000000),  // get_dy(2,1)
-		pack(1500000000000000000), // price_scale(0)
-		pack(1600000000000000000), // price_scale(1)
-		pack(1510000000000000000), // price_oracle(0)
-		pack(1610000000000000000), // price_oracle(1)
-		pack(1505000000000000000), // last_prices(0)
-		pack(1605000000000000000), // last_prices(1)
-		pack(3003000000000000000), // D
-		pack(1000100000000000000), // xcp_profit
+		pack(1000000000000000000), // 0 balances(0)
+		pack(1000000000000000000), // 1 balances(1)
+		pack(1000000000000000000), // 2 balances(2)
+		pack(1001000000000000000), // 3 get_virtual_price
+		pack(3000000000000000000), // 4 totalSupply
+		pack(270000),              // 5 A
+		pack(11809167828997),      // 6 gamma
+		pack(5000000),             // 7 fee
+		pack(999000000000000000),  // 8 get_dy(0,1)
+		pack(998000000000000000),  // 9 get_dy(0,2)
+		pack(999500000000000000),  // 10 get_dy(1,0)
+		pack(998500000000000000),  // 11 get_dy(1,2)
+		pack(999800000000000000),  // 12 get_dy(2,0)
+		pack(999300000000000000),  // 13 get_dy(2,1)
+		pack(1500000000000000000), // 14 price_scale(0)
+		pack(1600000000000000000), // 15 price_scale(1)
+		pack(1510000000000000000), // 16 price_oracle(0)
+		pack(1610000000000000000), // 17 price_oracle(1)
+		pack(1505000000000000000), // 18 last_prices(0)
+		pack(1605000000000000000), // 19 last_prices(1)
+		pack(3003000000000000000), // 20 D
+		pack(1000100000000000000), // 21 xcp_profit
+		pack(167049139334410),     // 22 admin_balances(0)
+		pack(200000),              // 23 admin_balances(1)
+		pack(300000),              // 24 admin_balances(2)
+		pack(1407313225375571094), // 25 lp_price
+		pack(1068150721095887980), // 26 xcp_profit_a
+		pack(1782820487),          // 27 last_prices_timestamp
+		pack(591050417),           // 28 get_dx(0,1)
+		pack(592000000),           // 29 get_dx(0,2)
+		pack(593000000),           // 30 get_dx(1,0)
+		pack(594000000),           // 31 get_dx(1,2)
+		pack(595000000),           // 32 get_dx(2,0)
+		pack(596000000),           // 33 get_dx(2,1)
+		pack(42853623908762784),   // 34 calc_token_amount
+		pack(1405602713),          // 35 calc_withdraw_one_coin(0)
+		pack(1406000000),          // 36 calc_withdraw_one_coin(1)
+		pack(1407000000),          // 37 calc_withdraw_one_coin(2)
+		pack(581076037942835227),  // 38 initial_A_gamma
+		pack(581076037942835227),  // 39 future_A_gamma
+		pack(0),                   // 40 initial_A_gamma_time
+		pack(0),                   // 41 future_A_gamma_time
+		pack(3000000),             // 42 mid_fee
+		pack(30000000),            // 43 out_fee
+		pack(500000000000000),     // 44 fee_gamma
+		pack(2000000000000),       // 45 allowed_extra_profit
+		pack(490000000000000),     // 46 adjustment_step
+		pack(600),                 // 47 ma_time
+		pack(5000000000),          // 48 ADMIN_FEE
 	}
 }
+
+// cryptoswap state-read result indices used by tests.
+const (
+	cryptoswapDIdx           = 20
+	cryptoswapXcpProfitIdx   = 21
+	cryptoswapConfigFirstIdx = 38 // initial_A_gamma
+)
 
 // cryptoswapResultsDNil builds canned results where D() and xcp_profit() revert.
 func cryptoswapResultsDNil(t *testing.T, a *abi.ABI) []outbound.Result {
@@ -342,8 +389,8 @@ func cryptoswapResultsDNil(t *testing.T, a *abi.ABI) []outbound.Result {
 	result := make([]outbound.Result, len(base))
 	copy(result, base)
 	// D() and xcp_profit() revert -> AllowFailure=true means nil, not error.
-	result[20] = outbound.Result{Success: false, ReturnData: nil}
-	result[21] = outbound.Result{Success: false, ReturnData: nil}
+	result[cryptoswapDIdx] = outbound.Result{Success: false, ReturnData: nil}
+	result[cryptoswapXcpProfitIdx] = outbound.Result{Success: false, ReturnData: nil}
 	return result
 }
 
@@ -400,6 +447,61 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 	}
 	if ss.BlockNumber != 200 {
 		t.Errorf("BlockNumber = %d, want 200", ss.BlockNumber)
+	}
+
+	// Extended state fields populated when their reads succeed.
+	if len(ss.Cryptoswap.AdminBalances) != 3 {
+		t.Errorf("AdminBalances len = %d, want 3", len(ss.Cryptoswap.AdminBalances))
+	}
+	if ss.Cryptoswap.LpPrice == nil {
+		t.Error("LpPrice must be non-nil")
+	}
+	if ss.Cryptoswap.XcpProfitA == nil {
+		t.Error("XcpProfitA must be non-nil")
+	}
+	if ss.Cryptoswap.LastPricesTimestamp == nil {
+		t.Error("LastPricesTimestamp must be non-nil")
+	} else if *ss.Cryptoswap.LastPricesTimestamp != 1782820487 {
+		t.Errorf("LastPricesTimestamp = %d, want 1782820487", *ss.Cryptoswap.LastPricesTimestamp)
+	}
+	if len(ss.Cryptoswap.GetDx) != 6 {
+		t.Errorf("GetDx len = %d, want 6", len(ss.Cryptoswap.GetDx))
+	}
+	if ss.Cryptoswap.CalcTokenAmount == nil {
+		t.Error("CalcTokenAmount must be non-nil")
+	}
+	if len(ss.Cryptoswap.CalcWithdrawOneCoin) != 3 {
+		t.Errorf("CalcWithdrawOneCoin len = %d, want 3", len(ss.Cryptoswap.CalcWithdrawOneCoin))
+	}
+
+	// Config is built from the (all-successful) config getters. Assert every
+	// field so an off-by-one in the dst<->cryptoswapConfigGetters index mapping
+	// (decodeCryptoswapConfigReads) is caught, not just a representative subset.
+	if ss.CryptoswapConfig == nil {
+		t.Fatal("CryptoswapConfig must be non-nil when config getters succeed")
+	}
+	cfg := ss.CryptoswapConfig
+	bigEq := func(name string, got *big.Int, want int64) {
+		t.Helper()
+		if got == nil || got.Cmp(big.NewInt(want)) != 0 {
+			t.Errorf("%s = %v, want %d", name, got, want)
+		}
+	}
+	bigEq("InitialAGamma", cfg.InitialAGamma, 581076037942835227)
+	bigEq("FutureAGamma", cfg.FutureAGamma, 581076037942835227)
+	bigEq("MidFee", cfg.MidFee, 3000000)
+	bigEq("OutFee", cfg.OutFee, 30000000)
+	bigEq("FeeGamma", cfg.FeeGamma, 500000000000000)
+	bigEq("AllowedExtraProfit", cfg.AllowedExtraProfit, 2000000000000)
+	bigEq("AdjustmentStep", cfg.AdjustmentStep, 490000000000000)
+	bigEq("MaTime", cfg.MaTime, 600)
+	// admin_fee comes from the ADMIN_FEE constant.
+	bigEq("AdminFee", cfg.AdminFee, 5000000000)
+	if cfg.InitialAGammaTime != 0 {
+		t.Errorf("InitialAGammaTime = %d, want 0", cfg.InitialAGammaTime)
+	}
+	if cfg.FutureAGammaTime != 0 {
+		t.Errorf("FutureAGammaTime = %d, want 0", cfg.FutureAGammaTime)
 	}
 }
 
@@ -542,5 +644,284 @@ func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Errorf("snapshot with required call revert should error, got nil")
+	}
+}
+
+// cryptoswapPool is the standard 3-coin fixture pool used across these tests.
+func cryptoswapPool() RegisteredPool {
+	return RegisteredPool{
+		ID:           10,
+		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
+		Kind:         KindCryptoswap,
+		NCoins:       3,
+		CoinDecimals: []int{18, 18, 6},
+	}
+}
+
+// TestCryptoswapHandler_SnapshotAdminBalancesNilOnRevert verifies an extended
+// state read reverting (admin_balances, absent on Tricrypto-NG) leaves its field
+// nil without failing the whole snapshot.
+func TestCryptoswapHandler_SnapshotAdminBalancesNilOnRevert(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool()
+
+	results := cryptoswapResults(t, a)
+	// admin_balances(0..2) live at 22..24.
+	for i := 22; i <= 24; i++ {
+		results[i] = outbound.Result{Success: false, ReturnData: nil}
+	}
+
+	ss, err := h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("admin_balances revert must not error, got: %v", err)
+	}
+	if ss.Cryptoswap.AdminBalances != nil {
+		t.Errorf("AdminBalances must be nil when all reads revert, got %v", ss.Cryptoswap.AdminBalances)
+	}
+	// Config getters still succeeded, so config must still be built.
+	if ss.CryptoswapConfig == nil {
+		t.Error("CryptoswapConfig must remain non-nil when only admin_balances reverts")
+	}
+}
+
+// TestCryptoswapHandler_SnapshotAdminBalancesNilOnPartialRevert locks the
+// "one revert nils the whole slice" contract: a per-coin read array is all-or-
+// nothing, so a single reverted entry collapses the field to nil rather than
+// persisting a misaligned slice with embedded nils.
+func TestCryptoswapHandler_SnapshotAdminBalancesNilOnPartialRevert(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool()
+
+	results := cryptoswapResults(t, a)
+	// Only admin_balances(1) (idx 23) reverts; 22 and 24 succeed.
+	results[23] = outbound.Result{Success: false, ReturnData: nil}
+
+	ss, err := h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("partial admin_balances revert must not error, got: %v", err)
+	}
+	if ss.Cryptoswap.AdminBalances != nil {
+		t.Errorf("AdminBalances must be nil when any read reverts, got %v", ss.Cryptoswap.AdminBalances)
+	}
+}
+
+// TestCryptoswapHandler_SnapshotConfigNilOnRevert verifies that when a required
+// config getter reverts, no partial config row is built (nil config), while the
+// state row is still returned.
+func TestCryptoswapHandler_SnapshotConfigNilOnRevert(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool()
+
+	results := cryptoswapResults(t, a)
+	// initial_A_gamma is a required config field; reverting it -> nil config.
+	results[cryptoswapConfigFirstIdx] = outbound.Result{Success: false, ReturnData: nil}
+
+	ss, err := h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err != nil {
+		t.Fatalf("config getter revert must not error, got: %v", err)
+	}
+	if ss.Cryptoswap == nil {
+		t.Fatal("state row must still be returned when config reverts")
+	}
+	if ss.CryptoswapConfig != nil {
+		t.Errorf("CryptoswapConfig must be nil when a required getter reverts, got %+v", ss.CryptoswapConfig)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cryptoswap parameter-event and LP-event decode
+// ---------------------------------------------------------------------------
+
+func TestCryptoswapHandler_DecodeParameterEvents(t *testing.T) {
+	pool := cryptoswapPool()
+
+	cases := []struct {
+		name       string
+		eventName  string
+		indexed    []common.Hash
+		nonIndexed []any
+		wantEvent  string
+		wantParams map[string]string
+	}{
+		{
+			name:       "RampAgamma",
+			eventName:  "RampAgamma",
+			nonIndexed: []any{big.NewInt(270000), big.NewInt(540000), big.NewInt(11809167828997), big.NewInt(23618335657994), big.NewInt(1731805535), big.NewInt(1732495784)},
+			wantEvent:  "ramp_a_gamma",
+			wantParams: map[string]string{
+				"initial_a": "270000", "future_a": "540000",
+				"initial_gamma": "11809167828997", "future_gamma": "23618335657994",
+				"initial_time": "1731805535", "future_time": "1732495784",
+			},
+		},
+		{
+			name:       "NewParameters",
+			eventName:  "NewParameters",
+			nonIndexed: []any{big.NewInt(3000000), big.NewInt(30000000), big.NewInt(500000000000000), big.NewInt(2000000000000), big.NewInt(490000000000000), big.NewInt(600)},
+			wantEvent:  "new_parameters",
+			wantParams: map[string]string{
+				"mid_fee": "3000000", "out_fee": "30000000", "fee_gamma": "500000000000000",
+				"allowed_extra_profit": "2000000000000", "adjustment_step": "490000000000000", "ma_time": "600",
+			},
+		},
+		{
+			name:       "CommitNewParameters",
+			eventName:  "CommitNewParameters",
+			indexed:    []common.Hash{uintTopic(1732500000)},
+			nonIndexed: []any{big.NewInt(3000000), big.NewInt(30000000), big.NewInt(500000000000000), big.NewInt(2000000000000), big.NewInt(490000000000000), big.NewInt(600)},
+			wantEvent:  "commit_new_parameters",
+			wantParams: map[string]string{
+				"deadline": "1732500000",
+				"mid_fee":  "3000000", "out_fee": "30000000", "fee_gamma": "500000000000000",
+				"allowed_extra_profit": "2000000000000", "adjustment_step": "490000000000000", "ma_time": "600",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := abis.CurveCryptoswapABI()
+			if err != nil {
+				t.Fatalf("loading ABI: %v", err)
+			}
+			h := NewCryptoswapHandler(a)
+			log := buildEventLog(t, a, tc.eventName, pool.Address, tc.indexed, tc.nonIndexed...)
+			got, err := h.DecodeEvents(buildReceiptFromLog(log), pool, 1, 100, 0, time.Unix(1, 0).UTC())
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(got.ParameterEvents) != 1 {
+				t.Fatalf("parameter events = %d, want 1", len(got.ParameterEvents))
+			}
+			pe := got.ParameterEvents[0]
+			if pe.EventName != tc.wantEvent {
+				t.Errorf("event_name = %q, want %q", pe.EventName, tc.wantEvent)
+			}
+			gotParams := decodeParamsMap(t, pe.Params)
+			if len(gotParams) != len(tc.wantParams) {
+				t.Errorf("params keys = %v, want %v", gotParams, tc.wantParams)
+			}
+			for k, want := range tc.wantParams {
+				if gotParams[k] != want {
+					t.Errorf("params[%q] = %q, want %q", k, gotParams[k], want)
+				}
+			}
+			// Parameter events must also reach the capture net.
+			if len(got.Captured) != 1 {
+				t.Errorf("captured = %d, want 1", len(got.Captured))
+			}
+		})
+	}
+}
+
+func TestCryptoswapHandler_DecodeClaimAdminFee(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool()
+	admin := common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+
+	log := buildEventLog(t, a, "ClaimAdminFee", pool.Address,
+		[]common.Hash{addrTopic(admin)}, big.NewInt(123456789))
+	got, err := h.DecodeEvents(buildReceiptFromLog(log), pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.ParameterEvents) != 1 {
+		t.Fatalf("parameter events = %d, want 1", len(got.ParameterEvents))
+	}
+	pe := got.ParameterEvents[0]
+	if pe.EventName != "claim_admin_fee" {
+		t.Errorf("event_name = %q, want claim_admin_fee", pe.EventName)
+	}
+	params := decodeParamsMap(t, pe.Params)
+	if common.HexToAddress(params["admin"]) != admin {
+		t.Errorf("params[admin] = %q, want %s", params["admin"], admin.Hex())
+	}
+	if params["tokens"] != "123456789" {
+		t.Errorf("params[tokens] = %q, want 123456789", params["tokens"])
+	}
+}
+
+func TestCryptoswapHandler_DecodeLpTransfer(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool() // pool == LP token for cryptoswap
+	from := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	to := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	log := buildEventLog(t, a, "Transfer", pool.Address,
+		[]common.Hash{addrTopic(from), addrTopic(to)}, big.NewInt(123456))
+	got, err := h.DecodeEvents(buildReceiptFromLog(log), pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.LpTokenEvents) != 1 {
+		t.Fatalf("lp token events = %d, want 1", len(got.LpTokenEvents))
+	}
+	le := got.LpTokenEvents[0]
+	if le.EventName != "transfer" {
+		t.Errorf("event_name = %q, want transfer", le.EventName)
+	}
+	if le.From != from {
+		t.Errorf("From = %s, want %s", le.From, from)
+	}
+	if le.To != to {
+		t.Errorf("To = %s, want %s", le.To, to)
+	}
+	if le.Value.Cmp(big.NewInt(123456)) != 0 {
+		t.Errorf("Value = %s, want 123456", le.Value)
+	}
+}
+
+func TestCryptoswapHandler_DecodeLpApproval(t *testing.T) {
+	a, err := abis.CurveCryptoswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewCryptoswapHandler(a)
+	pool := cryptoswapPool()
+	owner := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	spender := common.HexToAddress("0x4444444444444444444444444444444444444444")
+
+	log := buildEventLog(t, a, "Approval", pool.Address,
+		[]common.Hash{addrTopic(owner), addrTopic(spender)}, big.NewInt(777))
+	got, err := h.DecodeEvents(buildReceiptFromLog(log), pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.LpTokenEvents) != 1 {
+		t.Fatalf("lp token events = %d, want 1", len(got.LpTokenEvents))
+	}
+	le := got.LpTokenEvents[0]
+	if le.EventName != "approval" {
+		t.Errorf("event_name = %q, want approval", le.EventName)
+	}
+	// Approval: owner -> From, spender -> To.
+	if le.From != owner {
+		t.Errorf("From = %s, want owner %s", le.From, owner)
+	}
+	if le.To != spender {
+		t.Errorf("To = %s, want spender %s", le.To, spender)
+	}
+	if le.Value.Cmp(big.NewInt(777)) != 0 {
+		t.Errorf("Value = %s, want 777", le.Value)
 	}
 }

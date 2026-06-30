@@ -114,6 +114,11 @@ var abiParamEventNames = map[string]string{
 	"ApplyNewFee":    "apply_new_fee",
 	"NewAdmin":       "new_admin",
 	"CommitNewAdmin": "commit_new_admin",
+	// Cryptoswap-only admin/governance events.
+	"RampAgamma":          "ramp_a_gamma",
+	"NewParameters":       "new_parameters",
+	"CommitNewParameters": "commit_new_parameters",
+	"ClaimAdminFee":       "claim_admin_fee",
 }
 
 // marshalParameterParams builds the params JSONB for a parameter event using the
@@ -208,6 +213,33 @@ func extractParameterEvent(
 		params, err = marshalAddressParams(data,
 			[][2]string{{"admin", "admin"}},
 			[][2]string{{"deadline", "deadline"}},
+		)
+	case "RampAgamma":
+		params, err = marshalParameterParams(data, [][2]string{
+			{"initial_a", "initial_A"}, {"future_a", "future_A"},
+			{"initial_gamma", "initial_gamma"}, {"future_gamma", "future_gamma"},
+			{"initial_time", "initial_time"}, {"future_time", "future_time"},
+		})
+	case "NewParameters":
+		// Cryptoswap NewParameters carries no admin_fee (the catalogue comment is
+		// stale on this point); admin_fee lives only on the ADMIN_FEE constant.
+		params, err = marshalParameterParams(data, [][2]string{
+			{"mid_fee", "mid_fee"}, {"out_fee", "out_fee"}, {"fee_gamma", "fee_gamma"},
+			{"allowed_extra_profit", "allowed_extra_profit"},
+			{"adjustment_step", "adjustment_step"}, {"ma_time", "ma_time"},
+		})
+	case "CommitNewParameters":
+		// deadline is the indexed pending-change deadline, decoded from Topics[1].
+		params, err = marshalParameterParams(data, [][2]string{
+			{"deadline", "deadline"},
+			{"mid_fee", "mid_fee"}, {"out_fee", "out_fee"}, {"fee_gamma", "fee_gamma"},
+			{"allowed_extra_profit", "allowed_extra_profit"},
+			{"adjustment_step", "adjustment_step"}, {"ma_time", "ma_time"},
+		})
+	case "ClaimAdminFee":
+		params, err = marshalAddressParams(data,
+			[][2]string{{"admin", "admin"}},
+			[][2]string{{"tokens", "tokens"}},
 		)
 	default:
 		return ParameterEventRecord{}, fmt.Errorf("unhandled parameter event %s", abiEventName)
