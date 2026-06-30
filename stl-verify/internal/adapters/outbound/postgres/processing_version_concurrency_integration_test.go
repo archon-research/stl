@@ -699,8 +699,8 @@ func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey 
 
 	var poolID int64
 	if err := concurrencyPool.QueryRow(ctx,
-		`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
-		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, 'Race Pool', $2, false)
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, $2)
 		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
 		t.Fatalf("seed maple pool: %v", err)
 	}
