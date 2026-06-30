@@ -23,9 +23,9 @@ func init() {
 	})
 }
 
-// TestCurveExtendedDataMigration verifies that the
-// 20260630_100000_curve_extended_data.sql migration applies cleanly on top of
-// the base Curve schema and produces the expected columns, tables, and triggers.
+// TestCurveExtendedDataMigration verifies that the extended-data schema folded
+// into 20260521_110000_create_curve_dex_tables.sql applies cleanly and produces
+// the expected columns, tables, and triggers.
 // It also asserts that curve_pool_coin.precision is seeded for all 10 existing
 // coins.
 func TestCurveExtendedDataMigration(t *testing.T) {

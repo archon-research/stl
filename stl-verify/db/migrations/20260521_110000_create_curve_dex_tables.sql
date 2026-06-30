@@ -651,7 +651,7 @@ CREATE TABLE IF NOT EXISTS curve_stableswap_config
     future_a_time      BIGINT      NOT NULL,
     admin_fee          NUMERIC     NOT NULL,
     future_fee         NUMERIC     NOT NULL,
-    future_admin_fee   NUMERIC     NOT NULL,
+    future_admin_fee   NUMERIC, -- nullable: pre-NG only; NG pools have no future_admin_fee()
     ma_exp_time        BIGINT,
     oracle_method      NUMERIC,
     processing_version INT         NOT NULL DEFAULT 0,
@@ -695,6 +695,9 @@ CREATE TRIGGER trigger_assign_processing_version
     BEFORE INSERT ON curve_stableswap_config
     FOR EACH ROW
 EXECUTE FUNCTION assign_processing_version_curve_stableswap_config();
+
+CREATE INDEX IF NOT EXISTS idx_curve_stableswap_config_pv_lookup
+    ON curve_stableswap_config (curve_pool_id, block_number, block_version, build_id);
 
 -- ============================================================================
 -- curve_cryptoswap_config: append-on-change governance config for cryptoswap.
@@ -758,6 +761,9 @@ CREATE TRIGGER trigger_assign_processing_version
     BEFORE INSERT ON curve_cryptoswap_config
     FOR EACH ROW
 EXECUTE FUNCTION assign_processing_version_curve_cryptoswap_config();
+
+CREATE INDEX IF NOT EXISTS idx_curve_cryptoswap_config_pv_lookup
+    ON curve_cryptoswap_config (curve_pool_id, block_number, block_version, build_id);
 
 -- ============================================================================
 -- curve_parameter_event: on-chain admin/governance parameter events.
