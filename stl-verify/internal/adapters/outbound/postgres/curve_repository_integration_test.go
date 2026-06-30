@@ -365,7 +365,7 @@ func TestCurveRepository_SaveLiquidityEvent_Idempotent(t *testing.T) {
 }
 
 // TestCurveRepository_LoadPools verifies that LoadPools returns the seeded
-// pool with correct coin token IDs in coin_index order.
+// pool with correct fields including a non-zero ProtocolID.
 func TestCurveRepository_LoadPools(t *testing.T) {
 	ctx := context.Background()
 	repo := newCurveRepo(t)
@@ -385,6 +385,9 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatalf("seeded pool id=%d not found in LoadPools result", poolID)
+	}
+	if found.ProtocolID == 0 {
+		t.Errorf("ProtocolID = 0, want non-zero (must be sourced from curve_pool.protocol_id)")
 	}
 	if found.Kind != "plain_pre_ng" {
 		t.Errorf("Kind = %q, want plain_pre_ng", found.Kind)

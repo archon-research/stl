@@ -9,8 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
-
 	"github.com/archon-research/stl/stl-verify/cmd/workers/internal/dexbootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -25,12 +23,6 @@ var (
 	GitBranch string
 	BuildTime string
 )
-
-// curveStableswapNGFactory is the Curve Stableswap-NG factory on Ethereum
-// mainnet (cast-verified: pool_count() > 900, admin() is the Curve DAO). It is
-// the canonical (chain_id, address) identifier for the Curve protocol row; the
-// migration seeds the protocol at this address, and curve_pool FKs it.
-const curveStableswapNGFactory = "0x6A8cbed756804B16E05E741eDaBd5cB544AE21bf"
 
 func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
@@ -83,15 +75,10 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading cryptoswap abi: %w", err)
 	}
 
-	protocolID, err := dexconsumer.ResolveProtocolID(ctx, deps.TxManager, deps.ProtocolRepo, dexconsumer.ProtocolDescriptor{
-		Address:      common.HexToAddress(curveStableswapNGFactory),
-		Name:         "Curve",
-		ProtocolType: "dex",
-		DeployBlock:  19421686,
-	}, cfg.ChainID)
-	if err != nil {
-		return fmt.Errorf("resolving curve protocol_id: %w", err)
+	if len(poolRows) == 0 {
+		return fmt.Errorf("no curve pools registered for chain %d", cfg.ChainID)
 	}
+	protocolID := poolRows[0].ProtocolID
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{

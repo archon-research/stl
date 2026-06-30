@@ -14,6 +14,7 @@ import (
 // CurvePoolRow is the data returned by LoadPools for each pool in the registry.
 type CurvePoolRow struct {
 	ID           int64
+	ProtocolID   int64
 	Address      common.Address
 	Kind         string // matches curve_pool.pool_kind
 	NCoins       int
