@@ -319,7 +319,7 @@ COMMENT ON COLUMN curve_parameter_event.log_index IS
 COMMENT ON COLUMN curve_parameter_event.event_name IS
   'Decoded event type: one of ramp_a, stop_ramp_a, ramp_a_gamma, new_fee, commit_new_fee, apply_new_fee, new_parameters, commit_new_parameters, claim_admin_fee, new_admin, commit_new_admin.';
 COMMENT ON COLUMN curve_parameter_event.params IS
-  'JSONB of decoded event fields keyed by name; exact keys are defined by the decoding handler for each event_name (e.g. ramp_a: {old_a,new_a,initial_time,future_time}; ramp_a_gamma: {initial_a,future_a,initial_gamma,future_gamma,initial_time,future_time}; new_fee/commit_new_fee/apply_new_fee: {fee,admin_fee}).';
+  'JSONB of decoded event fields keyed by name. Keys per event_name: ramp_a {old_a,new_a,initial_time,future_time}; stop_ramp_a {a,t}; new_fee {fee,admin_fee}; commit_new_fee {deadline,fee,admin_fee}; apply_new_fee {fee,offpeg_fee_multiplier}; new_admin {admin}; commit_new_admin {admin,deadline}; ramp_a_gamma {initial_a,future_a,initial_gamma,future_gamma,initial_time,future_time}; new_parameters/commit_new_parameters {admin_fee,mid_fee,out_fee,fee_gamma,allowed_extra_profit,adjustment_step,ma_time}; claim_admin_fee {admin,tokens}.';
 COMMENT ON COLUMN curve_parameter_event.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites it; prior versions retained.';
 COMMENT ON COLUMN curve_parameter_event.build_id IS
