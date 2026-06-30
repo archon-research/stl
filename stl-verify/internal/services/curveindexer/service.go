@@ -18,10 +18,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// CoordinatorDeps groups the Coordinator's constructor arguments.
+// CurveServiceDeps groups the CurveService's constructor arguments.
 // No doc comments on self-evident fields: the field names explain themselves.
 // Telemetry is optional (nil = no-op).
-type CoordinatorDeps struct {
+type CurveServiceDeps struct {
 	Pools           []RegisteredPool
 	Handlers        map[PoolKind]PoolClassHandler
 	Multicaller     outbound.Multicaller
@@ -42,14 +42,14 @@ type snapshotKey struct {
 	ver int
 }
 
-// Coordinator drives per-block event decoding and transactional persistence for
+// CurveService drives per-block event decoding and transactional persistence for
 // the Curve indexer.
 //
 // Single-goroutine contract: sqsutil.RunLoop processes one SQS message at a
-// time, so no synchronisation is required on any Coordinator field. All
+// time, so no synchronisation is required on any CurveService field. All
 // per-block work happens in local variables inside BlockHandler; the only
 // cross-block state is the pool registry and lastSnapshot (heartbeat tracking).
-type Coordinator struct {
+type CurveService struct {
 	// poolsByWatchedAddr maps every address whose logs route to a pool -> that
 	// pool. A pool is reachable by its own address and, for pre-NG pools, by its
 	// separate LP-token contract (so LP Transfer/Approval reach the owning pool).
@@ -68,9 +68,9 @@ type Coordinator struct {
 	lastSnapshot map[int64]snapshotKey // pool.ID -> last snapshotted (block, version)
 }
 
-// NewCoordinator validates deps and builds a Coordinator. Every registered
+// NewCurveService validates deps and builds a CurveService. Every registered
 // pool's Kind must have a corresponding handler entry.
-func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
+func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
 	if deps.Multicaller == nil {
 		return nil, fmt.Errorf("multicaller is required")
 	}
@@ -105,7 +105,7 @@ func NewCoordinator(deps CoordinatorDeps) (*Coordinator, error) {
 		return nil, err
 	}
 
-	return &Coordinator{
+	return &CurveService{
 		poolsByWatchedAddr: watched,
 		pools:              deps.Pools,
 		handlers:           deps.Handlers,
@@ -138,7 +138,7 @@ type blockAccumulators struct {
 // state in one transaction. Returning a non-nil error leaves the block for SQS
 // redelivery; nil is returned only after a successful commit. All per-block
 // state is local, so a redelivery reprocesses from scratch with no carryover.
-func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
+func (c *CurveService) BlockHandler() dexconsumer.BlockHandler {
 	return func(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 		bn := event.BlockNumber
 		ver := event.Version
@@ -188,7 +188,7 @@ func (c *Coordinator) BlockHandler() dexconsumer.BlockHandler {
 // receipt's logs, calls each pool's handler, and accumulates the decoded events.
 // ctx is checked at the start of each receipt to honour cancellation without
 // silently acking a partially-decoded block.
-func (c *Coordinator) decodeBlockEvents(ctx context.Context, receipts []shared.TransactionReceipt, bn int64, ver int, ts time.Time) (blockAccumulators, error) {
+func (c *CurveService) decodeBlockEvents(ctx context.Context, receipts []shared.TransactionReceipt, bn int64, ver int, ts time.Time) (blockAccumulators, error) {
 	acc := blockAccumulators{
 		touched: make(map[int64]RegisteredPool),
 	}
@@ -221,7 +221,7 @@ func (c *Coordinator) decodeBlockEvents(ctx context.Context, receipts []shared.T
 
 // snapshotPools calls each pool's SnapshotState via multicall and validates the
 // result. It must run BEFORE the DB transaction opens (see BlockHandler doc).
-func (c *Coordinator) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, ts time.Time) ([]StateSnapshot, error) {
+func (c *CurveService) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, ts time.Time) ([]StateSnapshot, error) {
 	snapshots := make([]StateSnapshot, 0, len(snapshotSet))
 	for _, pool := range snapshotSet {
 		snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
@@ -242,7 +242,7 @@ func (c *Coordinator) snapshotPools(ctx context.Context, snapshotSet []Registere
 // input structs that the repo and event writer expect. Conversion errors are
 // returned before the transaction opens so they fail fast without touching the
 // connection pool.
-func (c *Coordinator) buildBlockWrites(acc blockAccumulators, snapshots []StateSnapshot, bn int64, ver int, ts time.Time) (outbound.BlockWrites, []dexconsumer.ProtocolEventInput, error) {
+func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots []StateSnapshot, bn int64, ver int, ts time.Time) (outbound.BlockWrites, []dexconsumer.ProtocolEventInput, error) {
 	swapIns := make([]outbound.SwapInput, 0, len(acc.swaps))
 	for _, s := range acc.swaps {
 		swapIns = append(swapIns, toSwapInput(s, bn, ver, ts))
@@ -296,7 +296,7 @@ func (c *Coordinator) buildBlockWrites(acc blockAccumulators, snapshots []StateS
 // transaction. SaveBlock and SaveBatch share one pgx.Tx so both commit or both
 // roll back together. Returns the number of state rows actually inserted (may be
 // zero on an idempotent ON CONFLICT DO NOTHING replay).
-func (c *Coordinator) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
+func (c *CurveService) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
 	var stateRows int64
 	err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
 		var txErr error
@@ -345,7 +345,7 @@ func indexPoolsByWatchedAddress(pools []RegisteredPool) (map[common.Address]Regi
 // or LP-token contract) appears in the receipt's logs, in deterministic pool-ID
 // order. A pool reachable by both its own address and its LP-token address in the
 // same receipt is returned once so DecodeEvents (which scans all logs) runs once.
-func (c *Coordinator) poolsTouchedByReceipt(receipt shared.TransactionReceipt, bn int64) ([]RegisteredPool, error) {
+func (c *CurveService) poolsTouchedByReceipt(receipt shared.TransactionReceipt, bn int64) ([]RegisteredPool, error) {
 	byID := make(map[int64]RegisteredPool)
 	for _, log := range receipt.Logs {
 		if !common.IsHexAddress(log.Address) {
@@ -366,7 +366,7 @@ func (c *Coordinator) poolsTouchedByReceipt(receipt shared.TransactionReceipt, b
 // buildSnapshotSet returns the sorted (by pool.ID ASC) union of touched pools
 // and heartbeat-due pools. Consistent ordering is required by the advisory-lock
 // convention in the DB trigger.
-func (c *Coordinator) buildSnapshotSet(bn int64, ver int, touched map[int64]RegisteredPool) []RegisteredPool {
+func (c *CurveService) buildSnapshotSet(bn int64, ver int, touched map[int64]RegisteredPool) []RegisteredPool {
 	byID := make(map[int64]RegisteredPool)
 	maps.Copy(byID, touched)
 	if c.heartbeatBlocks > 0 {

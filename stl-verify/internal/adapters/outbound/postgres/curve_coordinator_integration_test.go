@@ -271,10 +271,10 @@ func seedCurveCoordCoins(t *testing.T, ctx context.Context, poolID, tokenID0, to
 	}
 }
 
-// newCurveCoordinator wires a real CurveRepository, EventRepository, TxManager,
-// and the canned-result multicaller into a curveindexer.Coordinator over the
+// newCurveCurveService wires a real CurveRepository, EventRepository, TxManager,
+// and the canned-result multicaller into a curveindexer.CurveService over the
 // pools seeded on chain 998.
-func newCurveCoordinator(t *testing.T, ctx context.Context) (*curveindexer.Coordinator, *stableswapCallCountResults) {
+func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.CurveService, *stableswapCallCountResults) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -317,7 +317,7 @@ func newCurveCoordinator(t *testing.T, ctx context.Context) (*curveindexer.Coord
 
 	mc := &stableswapCallCountResults{t: t, pre: coordPreNGResults(), ng: coordNGResults(t)}
 
-	coord, err := curveindexer.NewCoordinator(curveindexer.CoordinatorDeps{
+	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
 		Pools:           registered,
 		Handlers:        handlers,
 		Multicaller:     mc,
@@ -329,7 +329,7 @@ func newCurveCoordinator(t *testing.T, ctx context.Context) (*curveindexer.Coord
 		Logger:          logger,
 	})
 	if err != nil {
-		t.Fatalf("NewCoordinator: %v", err)
+		t.Fatalf("NewCurveService: %v", err)
 	}
 	return coord, mc
 }
@@ -373,7 +373,7 @@ func deleteCurveCoordPools(t *testing.T, ctx context.Context) {
 	}
 }
 
-// TestCurveCoordinator_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable feeds a
+// TestCurveCurveService_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable feeds a
 // single block through the coordinator that carries, for the pre-NG pool, a swap,
 // a liquidity add, a parameter event (RampA), and LP Transfer + Approval emitted
 // on its SEPARATE LP-token contract, plus an LP Transfer on the NG pool's own
@@ -381,7 +381,7 @@ func deleteCurveCoordPools(t *testing.T, ctx context.Context) {
 // is attributed to the pre-NG pool id, both pools are state-snapshotted, and the
 // protocol_event capture row for an LP-token log keeps the LP-token contract
 // address (not the pool address).
-func TestCurveCoordinator_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable(t *testing.T) {
+func TestCurveCurveService_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable(t *testing.T) {
 	ctx := context.Background()
 	truncateCurveCoordTables(t, ctx)
 
@@ -393,7 +393,7 @@ func TestCurveCoordinator_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable(t *t
 		t.Fatalf("loading stableswap ABI: %v", err)
 	}
 
-	coord, _ := newCurveCoordinator(t, ctx)
+	coord, _ := newCurveCurveService(t, ctx)
 
 	const bn = int64(12_000_000)
 	txHash := common.HexToHash("0xfeedface00000000000000000000000000000000000000000000000000000001")
@@ -462,11 +462,11 @@ func TestCurveCoordinator_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable(t *t
 	assertProtocolEventAddress(t, ctx, bn, 5, ngAddr)
 }
 
-// TestCurveCoordinator_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot feeds a
+// TestCurveCurveService_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot feeds a
 // block whose only relevant log is an LP Transfer on the pre-NG pool's SEPARATE
 // LP-token contract. The pool has no pool-address activity, yet it must still be
 // considered touched and receive a state snapshot.
-func TestCurveCoordinator_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot(t *testing.T) {
+func TestCurveCurveService_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot(t *testing.T) {
 	ctx := context.Background()
 	truncateCurveCoordTables(t, ctx)
 
@@ -477,7 +477,7 @@ func TestCurveCoordinator_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot(t *
 	if err != nil {
 		t.Fatalf("loading stableswap ABI: %v", err)
 	}
-	coord, _ := newCurveCoordinator(t, ctx)
+	coord, _ := newCurveCurveService(t, ctx)
 
 	const bn = int64(12_000_100)
 	txHash := common.HexToHash("0xfeedface00000000000000000000000000000000000000000000000000000002")

@@ -94,7 +94,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
-	coord, err := curveindexer.NewCoordinator(curveindexer.CoordinatorDeps{
+	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
 		Pools:           pools,
 		Handlers:        curveindexer.NewHandlerRegistry(curveindexer.NewStableswapHandler(stableABI), curveindexer.NewCryptoswapHandler(cryptoABI)),
 		Multicaller:     deps.Multicaller,
