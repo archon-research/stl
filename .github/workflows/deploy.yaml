@@ -741,7 +741,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: archon-research/github-actions
-          ref: aa058240b17bec94388285d36bb43989c0f9382b # argocd-sync (github-actions #29)
+          ref: 3690aaac8f402b6ad40fbfd073cb76313932727e # argocd-sync (github-actions #30, install fix)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
