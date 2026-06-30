@@ -169,8 +169,10 @@ func (h *CryptoswapHandler) DecodeEvents(
 
 // SnapshotState reads cryptoswap pool state at the given block via multicall.
 // Call order is deterministic; results are decoded in the same order.
-// Required calls (AllowFailure=false) that revert propagate as errors.
-// D() and xcp_profit() are AllowFailure=true: a revert maps to nil, not an error.
+// Every issued call that reverts propagates as an error (no-swallowed-errors):
+// a reverted read is never collapsed into a nil/NULL field. admin_balances() is
+// not issued for cryptoswap pools (see buildExtendedSnapshotCalls), so its column
+// is NULL by structural design rather than because a call silently failed.
 func (h *CryptoswapHandler) SnapshotState(
 	ctx context.Context,
 	mc outbound.Multicaller,
@@ -220,16 +222,16 @@ func (h *CryptoswapHandler) SnapshotState(
 //  11. D() AllowFailure=true
 //  12. xcp_profit() AllowFailure=true
 //
-// Extended reads (all AllowFailure=true; a revert leaves the field nil and never
-// fails the whole snapshot):
-//  13. admin_balances(i) for i in 0..n-1
-//  14. lp_price()
-//  15. xcp_profit_a()
-//  16. last_prices_timestamp()
-//  17. get_dx(i,j,10^decimals[j]) for every ordered pair i!=j, i asc then j asc
-//  18. calc_token_amount([10^decimals[i] for each i], true)
-//  19. calc_withdraw_one_coin(1e18, i) for i in 0..n-1
-//  20. config getters: initial_A_gamma, future_A_gamma, initial_A_gamma_time,
+// Extended reads (issued with AllowFailure=true so one revert does not abort the
+// whole multicall, but a revert is still decoded as an error and stops the block).
+// admin_balances() is NOT issued (see buildExtendedSnapshotCalls):
+//  13. lp_price()
+//  14. xcp_profit_a()
+//  15. last_prices_timestamp()
+//  16. get_dx(i,j,10^decimals[j]) for every ordered pair i!=j, i asc then j asc
+//  17. calc_token_amount([10^decimals[i] for each i], true)
+//  18. calc_withdraw_one_coin(1e18, i) for i in 0..n-1
+//  19. config getters: initial_A_gamma, future_A_gamma, initial_A_gamma_time,
 //     future_A_gamma_time, mid_fee, out_fee, fee_gamma, allowed_extra_profit,
 //     adjustment_step, ma_time, ADMIN_FEE
 func (h *CryptoswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.Call, error) {
@@ -332,14 +334,15 @@ func (h *CryptoswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
 	}
 
-	// 11. D() - AllowFailure=true; revert maps to nil D in the snapshot.
+	// 11. D() - AllowFailure=true so it does not abort the multicall, but a revert
+	// is still decoded as an error (no-swallowed-errors).
 	data, err = h.cryptoABI.Pack("D")
 	if err != nil {
 		return nil, fmt.Errorf("packing D: %w", err)
 	}
 	calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
 
-	// 12. xcp_profit() - AllowFailure=true; revert maps to nil XcpProfit in the snapshot.
+	// 12. xcp_profit() - AllowFailure=true; a revert is decoded as an error.
 	data, err = h.cryptoABI.Pack("xcp_profit")
 	if err != nil {
 		return nil, fmt.Errorf("packing xcp_profit: %w", err)
@@ -355,25 +358,24 @@ func (h *CryptoswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 	return calls, nil
 }
 
-// buildExtendedSnapshotCalls builds the extended state + config reads (calls
-// 13-20). Every call is AllowFailure=true: a revert leaves its field nil rather
-// than failing the whole snapshot (e.g. admin_balances is absent on Tricrypto-NG).
+// buildExtendedSnapshotCalls builds the extended state + config reads. Every
+// call is AllowFailure=true so one revert does not abort the whole multicall,
+// but a revert is still decoded as an error.
+//
+// admin_balances() is deliberately NOT issued for cryptoswap pools: Tricrypto-NG
+// has no admin_balances getter (it always reverts), and the only indexed
+// cryptoswap pool (TriCryptoUSDC) is Tricrypto-NG. Issuing it would force a
+// choice between a swallowed revert and a poison-stall on every block. We gate it
+// out instead, leaving curve_cryptoswap_state.admin_balances NULL by design. A
+// future twocrypto variant that exposes admin_balances would re-enable this read
+// behind a variant check.
 func (h *CryptoswapHandler) buildExtendedSnapshotCalls(pool RegisteredPool) ([]outbound.Call, error) {
 	var calls []outbound.Call
 	allow := func(data []byte) {
 		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
 	}
 
-	// 13. admin_balances(i) for each coin
-	for i := 0; i < pool.NCoins; i++ {
-		data, err := h.cryptoABI.Pack("admin_balances", big.NewInt(int64(i)))
-		if err != nil {
-			return nil, fmt.Errorf("packing admin_balances(%d): %w", i, err)
-		}
-		allow(data)
-	}
-
-	// 14-16. lp_price(), xcp_profit_a(), last_prices_timestamp()
+	// 13-15. lp_price(), xcp_profit_a(), last_prices_timestamp()
 	for _, fn := range []string{"lp_price", "xcp_profit_a", "last_prices_timestamp"} {
 		data, err := h.cryptoABI.Pack(fn)
 		if err != nil {
@@ -382,7 +384,7 @@ func (h *CryptoswapHandler) buildExtendedSnapshotCalls(pool RegisteredPool) ([]o
 		allow(data)
 	}
 
-	// 17. get_dx(i, j, 10^decimals[j]) for every ordered pair i!=j: one unit of
+	// 16. get_dx(i, j, 10^decimals[j]) for every ordered pair i!=j: one unit of
 	// the bought coin j, asking how much coin i it costs.
 	for i := 0; i < pool.NCoins; i++ {
 		for j := 0; j < pool.NCoins; j++ {
@@ -401,7 +403,7 @@ func (h *CryptoswapHandler) buildExtendedSnapshotCalls(pool RegisteredPool) ([]o
 		}
 	}
 
-	// 18. calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
+	// 17. calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
 	deposits := make([]*big.Int, pool.NCoins)
 	for i := 0; i < pool.NCoins; i++ {
 		if i >= len(pool.CoinDecimals) {
@@ -415,7 +417,7 @@ func (h *CryptoswapHandler) buildExtendedSnapshotCalls(pool RegisteredPool) ([]o
 	}
 	allow(data)
 
-	// 19. calc_withdraw_one_coin(1e18, i) for each coin
+	// 18. calc_withdraw_one_coin(1e18, i) for each coin
 	oneLP := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	for i := 0; i < pool.NCoins; i++ {
 		data, err := h.cryptoABI.Pack("calc_withdraw_one_coin", oneLP, big.NewInt(int64(i)))
@@ -425,7 +427,7 @@ func (h *CryptoswapHandler) buildExtendedSnapshotCalls(pool RegisteredPool) ([]o
 		allow(data)
 	}
 
-	// 20. config getters. Cryptoswap admin_fee is the ADMIN_FEE constant; the pool
+	// 19. config getters. Cryptoswap admin_fee is the ADMIN_FEE constant; the pool
 	// has no admin_fee() getter.
 	for _, fn := range cryptoswapConfigGetters {
 		data, err := h.cryptoABI.Pack(fn)
@@ -561,56 +563,31 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 		idx++
 	}
 
-	// 11. D() - AllowFailure=true; nil on revert.
-	var d *big.Int
-	if results[idx].Success {
-		v, err := shared.UnpackUint(h.cryptoABI, "D", results[idx])
-		if err != nil {
-			return nil, nil, fmt.Errorf("decoding D: %w", err)
-		}
-		d = v
-	}
-	idx++
-
-	// 12. xcp_profit() - AllowFailure=true; nil on revert.
-	var xcpProfit *big.Int
-	if results[idx].Success {
-		v, err := shared.UnpackUint(h.cryptoABI, "xcp_profit", results[idx])
-		if err != nil {
-			return nil, nil, fmt.Errorf("xcp_profit: %w", err)
-		}
-		xcpProfit = v
-	}
-	idx++
-
-	// optUint reads an AllowFailure=true scalar at the cursor: nil on revert,
-	// error only on a decode failure of a successful result, advancing idx.
+	// optUint reads an AllowFailure=true scalar at the cursor, advancing idx. A
+	// revert is an error (no-swallowed-errors): the call was issued, so a failure
+	// stops the block rather than collapsing to a nil field.
 	optUint := func(method string) (*big.Int, error) {
 		defer func() { idx++ }()
-		if !results[idx].Success {
-			return nil, nil
-		}
-		return shared.UnpackUint(h.cryptoABI, method, results[idx])
+		return optionalUintResult(h.cryptoABI, method, results[idx], pool.Address, blockNumber)
 	}
 
-	// 13. admin_balances(i) (absent on Tricrypto-NG: all-nil -> nil slice).
-	adminBalances := make([]*big.Int, pool.NCoins)
-	allAdminOK := true
-	for i := 0; i < pool.NCoins; i++ {
-		v, err := optUint("admin_balances")
-		if err != nil {
-			return nil, nil, fmt.Errorf("admin_balances(%d): %w", i, err)
-		}
-		if v == nil {
-			allAdminOK = false
-		}
-		adminBalances[i] = v
-	}
-	if !allAdminOK {
-		adminBalances = nil
+	// 11. D()
+	d, err := optUint("D")
+	if err != nil {
+		return nil, nil, fmt.Errorf("decoding D: %w", err)
 	}
 
-	// 14-16. lp_price, xcp_profit_a, last_prices_timestamp
+	// 12. xcp_profit()
+	xcpProfit, err := optUint("xcp_profit")
+	if err != nil {
+		return nil, nil, fmt.Errorf("xcp_profit: %w", err)
+	}
+
+	// admin_balances() is not issued for cryptoswap pools (see
+	// buildExtendedSnapshotCalls); the column stays NULL by structural design.
+	var adminBalances []*big.Int
+
+	// 13-15. lp_price, xcp_profit_a, last_prices_timestamp
 	lpPrice, err := optUint("lp_price")
 	if err != nil {
 		return nil, nil, fmt.Errorf("lp_price: %w", err)
@@ -629,9 +606,8 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 		lastPricesTimestamp = &v
 	}
 
-	// 17. get_dx(i,j) for each ordered pair (all-nil -> nil slice).
+	// 16. get_dx(i,j) for each ordered pair
 	getDx := make([]*big.Int, 0, nPairs)
-	allDxOK := true
 	for i := 0; i < pool.NCoins; i++ {
 		for j := 0; j < pool.NCoins; j++ {
 			if i == j {
@@ -641,45 +617,28 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 			if err != nil {
 				return nil, nil, fmt.Errorf("get_dx(%d,%d): %w", i, j, err)
 			}
-			if v == nil {
-				allDxOK = false
-			}
 			getDx = append(getDx, v)
 		}
 	}
-	if !allDxOK {
-		getDx = nil
-	}
 
-	// 18. calc_token_amount (packed manually per N, so not unpacked via the ABI).
-	var calcTokenAmount *big.Int
-	if results[idx].Success {
-		v, err := unpackSingleUint(results[idx])
-		if err != nil {
-			return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
-		}
-		calcTokenAmount = v
+	// 17. calc_token_amount (packed manually per N, so not unpacked via the ABI).
+	calcTokenAmount, err := unpackSingleUint(results[idx])
+	if err != nil {
+		return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
 	}
 	idx++
 
-	// 19. calc_withdraw_one_coin(1e18, i) (all-nil -> nil slice).
+	// 18. calc_withdraw_one_coin(1e18, i)
 	calcWithdraw := make([]*big.Int, pool.NCoins)
-	allWithdrawOK := true
 	for i := 0; i < pool.NCoins; i++ {
 		v, err := optUint("calc_withdraw_one_coin")
 		if err != nil {
 			return nil, nil, fmt.Errorf("calc_withdraw_one_coin(%d): %w", i, err)
 		}
-		if v == nil {
-			allWithdrawOK = false
-		}
 		calcWithdraw[i] = v
 	}
-	if !allWithdrawOK {
-		calcWithdraw = nil
-	}
 
-	// 20. config getters
+	// 19. config getters
 	cfgReads, err := h.decodeCryptoswapConfigReads(optUint)
 	if err != nil {
 		return nil, nil, err
@@ -724,7 +683,9 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 }
 
 // cryptoswapConfigReads holds the raw config getter results in
-// cryptoswapConfigGetters order; nil means the read reverted (AllowFailure=true).
+// cryptoswapConfigGetters order. Every getter is issued for every cryptoswap
+// pool, so a reverted getter is an error upstream (optUint); a nil here would be
+// an upstream decode bug, not a real revert.
 type cryptoswapConfigReads struct {
 	initialAGamma      *big.Int
 	futureAGamma       *big.Int
@@ -763,9 +724,10 @@ func (h *CryptoswapHandler) decodeCryptoswapConfigReads(optUint func(string) (*b
 }
 
 // buildCryptoswapConfig assembles a CurveCryptoswapConfig from the config getter
-// reads, or returns (nil, nil) when any NOT-NULL value field reverted (we never
-// persist a partial config row). The *_time fields default to 0 when their read
-// reverted; this matches the BIGINT NOT NULL DEFAULT 0 columns.
+// reads. Every required NOT-NULL value field is always issued, so a nil here
+// means an upstream decode bug rather than a real revert (a revert errors in
+// optUint); we fail hard rather than persist a partial config row. The *_time
+// fields are also always issued, so timeOrZero only guards the !IsInt64 case.
 func buildCryptoswapConfig(
 	pool RegisteredPool,
 	blockNumber int64,
@@ -779,7 +741,7 @@ func buildCryptoswapConfig(
 	}
 	for _, v := range required {
 		if v == nil {
-			return nil, nil
+			return nil, fmt.Errorf("cryptoswap config for pool %s missing a required getter", pool.Address)
 		}
 	}
 	timeOrZero := func(b *big.Int) int64 {

@@ -202,8 +202,12 @@ func (h *StableswapHandler) DecodeEvents(
 
 // SnapshotState reads stableswap pool state at the given block via multicall.
 // Call order is deterministic; results are decoded in the same order.
-// Required calls (AllowFailure=false) that revert propagate as errors (transient-retry contract).
-// NG-only calls (price_oracle, last_price) are AllowFailure=true and only issued for KindStableswapNG.
+// Every issued call that reverts propagates as an error (transient-retry
+// contract): a reverted read is never collapsed into a nil/NULL field. Reads
+// that legitimately do not exist for a pool class are not issued at all
+// (NG-only price_oracle/last_price/stored_rates/ema_price/get_p, pre-NG-only
+// future_admin_fee), so a NULL column is always a structural fact, never a
+// swallowed failure.
 func (h *StableswapHandler) SnapshotState(
 	ctx context.Context,
 	mc outbound.Multicaller,
@@ -247,8 +251,8 @@ func (h *StableswapHandler) SnapshotState(
 //  6. get_dy(i,j,10^CoinDecimals[i]) for every ordered pair i!=j, i asc then j asc
 //  7. (NG only) price_oracle(), last_price() with AllowFailure=true
 //
-// Extended reads (all AllowFailure=true; a revert leaves the field nil and never
-// fails the whole snapshot):
+// Extended reads (issued with AllowFailure=true so one revert does not abort the
+// whole multicall, but a revert is still decoded as an error and stops the block):
 //  8. A_precise()
 //  9. admin_balances(i) for i in 0..n-1
 //  10. calc_token_amount([10^decimals[i] for each i], true)
@@ -496,35 +500,25 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		}
 	}
 
+	// optUint reads an AllowFailure=true scalar at the cursor, advancing idx. A
+	// revert is an error (no-swallowed-errors): the call was issued, so a failure
+	// stops the block rather than collapsing to a nil field.
+	optUint := func(method string) (*big.Int, error) {
+		defer func() { idx++ }()
+		return optionalUintResult(h.stableABI, method, results[idx], pool.Address, blockNumber)
+	}
+
 	// 7. NG-only: price_oracle and last_price
 	var priceOracle, lastPrice *big.Int
 	if pool.Kind == KindStableswapNG {
-		if results[idx].Success {
-			po, err := shared.UnpackUint(h.stableABI, "price_oracle", results[idx])
-			if err != nil {
-				return nil, nil, fmt.Errorf("price_oracle: %w", err)
-			}
-			priceOracle = po
+		priceOracle, err = optUint("price_oracle")
+		if err != nil {
+			return nil, nil, fmt.Errorf("price_oracle: %w", err)
 		}
-		idx++
-		if results[idx].Success {
-			lp, err := shared.UnpackUint(h.stableABI, "last_price", results[idx])
-			if err != nil {
-				return nil, nil, fmt.Errorf("last_price: %w", err)
-			}
-			lastPrice = lp
+		lastPrice, err = optUint("last_price")
+		if err != nil {
+			return nil, nil, fmt.Errorf("last_price: %w", err)
 		}
-		idx++
-	}
-
-	// optUint reads an AllowFailure=true scalar at the cursor: nil on revert,
-	// error only on a decode failure of a successful result, advancing idx.
-	optUint := func(method string) (*big.Int, error) {
-		defer func() { idx++ }()
-		if !results[idx].Success {
-			return nil, nil
-		}
-		return shared.UnpackUint(h.stableABI, method, results[idx])
 	}
 
 	// 8. A_precise
@@ -535,59 +529,38 @@ func (h *StableswapHandler) decodeSnapshotResults(
 
 	// 9. admin_balances(i)
 	adminBalances := make([]*big.Int, pool.NCoins)
-	allAdminOK := true
 	for i := 0; i < pool.NCoins; i++ {
 		v, err := optUint("admin_balances")
 		if err != nil {
 			return nil, nil, fmt.Errorf("admin_balances(%d): %w", i, err)
 		}
-		if v == nil {
-			allAdminOK = false
-		}
 		adminBalances[i] = v
-	}
-	if !allAdminOK {
-		adminBalances = nil
 	}
 
 	// 10. calc_token_amount (packed manually per N, so not unpacked via the ABI)
-	var calcTokenAmount *big.Int
-	if results[idx].Success {
-		v, err := unpackSingleUint(results[idx])
-		if err != nil {
-			return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
-		}
-		calcTokenAmount = v
+	calcTokenAmount, err := unpackSingleUint(results[idx])
+	if err != nil {
+		return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
 	}
 	idx++
 
 	// 11. calc_withdraw_one_coin(1e18, i)
 	calcWithdraw := make([]*big.Int, pool.NCoins)
-	allWithdrawOK := true
 	for i := 0; i < pool.NCoins; i++ {
 		v, err := optUint("calc_withdraw_one_coin")
 		if err != nil {
 			return nil, nil, fmt.Errorf("calc_withdraw_one_coin(%d): %w", i, err)
 		}
-		if v == nil {
-			allWithdrawOK = false
-		}
 		calcWithdraw[i] = v
-	}
-	if !allWithdrawOK {
-		calcWithdraw = nil
 	}
 
 	// 12. NG-only: stored_rates, ema_price, get_p
 	var storedRates []*big.Int
 	var emaPrice, getP *big.Int
 	if pool.Kind == KindStableswapNG {
-		if results[idx].Success {
-			sr, err := unpackUintArray(results[idx], pool.NCoins)
-			if err != nil {
-				return nil, nil, fmt.Errorf("stored_rates: %w", err)
-			}
-			storedRates = sr
+		storedRates, err = unpackUintArray(results[idx], pool.NCoins)
+		if err != nil {
+			return nil, nil, fmt.Errorf("stored_rates: %w", err)
 		}
 		idx++
 		emaPrice, err = optUint("ema_price")
@@ -691,8 +664,10 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	return state, cfg, nil
 }
 
-// stableswapConfigReads holds the raw config getter results; nil means the read
-// reverted (AllowFailure=true).
+// stableswapConfigReads holds the raw config getter results. A field is nil only
+// when its getter was structurally not issued (futureAdminFee for NG, the NG-only
+// fields for pre-NG); an issued getter that reverted is an error upstream, never a
+// nil here.
 type stableswapConfigReads struct {
 	initialA       *big.Int
 	initialATime   *big.Int
@@ -706,10 +681,11 @@ type stableswapConfigReads struct {
 }
 
 // buildStableswapConfig assembles a CurveStableswapConfig from the config getter
-// reads, or returns (nil, nil) when any of the four required NOT-NULL value
-// fields (initial_a, future_a, admin_fee, future_fee) reverted (we never persist
-// a partial config row). The *_time fields default to 0 when their optional read
-// reverted; this matches the BIGINT NOT NULL DEFAULT 0 columns.
+// reads. The four required NOT-NULL value fields (initial_a, future_a, admin_fee,
+// future_fee) are always issued for both classes, so a nil here means an
+// upstream decode bug rather than a real revert (a revert errors in optUint); we
+// fail hard rather than persist a partial config row. The *_time fields are also
+// always issued, so timeOrZero only guards the !IsInt64 case, not a revert.
 func buildStableswapConfig(
 	pool RegisteredPool,
 	blockNumber int64,
@@ -718,7 +694,7 @@ func buildStableswapConfig(
 	r stableswapConfigReads,
 ) (*entity.CurveStableswapConfig, error) {
 	if r.initialA == nil || r.futureA == nil || r.adminFee == nil || r.futureFee == nil {
-		return nil, nil
+		return nil, fmt.Errorf("stableswap config for pool %s missing a required getter (initial_a/future_a/admin_fee/future_fee)", pool.Address)
 	}
 	timeOrZero := func(b *big.Int) int64 {
 		if b == nil || !b.IsInt64() {

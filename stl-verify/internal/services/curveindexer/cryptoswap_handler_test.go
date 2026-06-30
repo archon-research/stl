@@ -306,16 +306,17 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 //	20: D()
 //	21: xcp_profit()
 //
-// Extended reads (all AllowFailure=true):
+// Extended reads (all AllowFailure=true). admin_balances() is NOT issued for
+// cryptoswap pools (gated: Tricrypto-NG has no admin_balances getter), so the
+// extended reads start at lp_price:
 //
-//	22-24: admin_balances(0..2)
-//	25: lp_price()
-//	26: xcp_profit_a()
-//	27: last_prices_timestamp()
-//	28-33: get_dx for the 6 ordered pairs
-//	34: calc_token_amount()
-//	35-37: calc_withdraw_one_coin(0..2)
-//	38-48: config getters (initial_A_gamma, future_A_gamma, initial_A_gamma_time,
+//	22: lp_price()
+//	23: xcp_profit_a()
+//	24: last_prices_timestamp()
+//	25-30: get_dx for the 6 ordered pairs
+//	31: calc_token_amount()
+//	32-34: calc_withdraw_one_coin(0..2)
+//	35-45: config getters (initial_A_gamma, future_A_gamma, initial_A_gamma_time,
 //	       future_A_gamma_time, mid_fee, out_fee, fee_gamma, allowed_extra_profit,
 //	       adjustment_step, ma_time, ADMIN_FEE)
 func cryptoswapResults(_ *testing.T, _ *abi.ABI) []outbound.Result {
@@ -345,52 +346,46 @@ func cryptoswapResults(_ *testing.T, _ *abi.ABI) []outbound.Result {
 		pack(1605000000000000000), // 19 last_prices(1)
 		pack(3003000000000000000), // 20 D
 		pack(1000100000000000000), // 21 xcp_profit
-		pack(167049139334410),     // 22 admin_balances(0)
-		pack(200000),              // 23 admin_balances(1)
-		pack(300000),              // 24 admin_balances(2)
-		pack(1407313225375571094), // 25 lp_price
-		pack(1068150721095887980), // 26 xcp_profit_a
-		pack(1782820487),          // 27 last_prices_timestamp
-		pack(591050417),           // 28 get_dx(0,1)
-		pack(592000000),           // 29 get_dx(0,2)
-		pack(593000000),           // 30 get_dx(1,0)
-		pack(594000000),           // 31 get_dx(1,2)
-		pack(595000000),           // 32 get_dx(2,0)
-		pack(596000000),           // 33 get_dx(2,1)
-		pack(42853623908762784),   // 34 calc_token_amount
-		pack(1405602713),          // 35 calc_withdraw_one_coin(0)
-		pack(1406000000),          // 36 calc_withdraw_one_coin(1)
-		pack(1407000000),          // 37 calc_withdraw_one_coin(2)
-		pack(581076037942835227),  // 38 initial_A_gamma
-		pack(581076037942835227),  // 39 future_A_gamma
-		pack(0),                   // 40 initial_A_gamma_time
-		pack(0),                   // 41 future_A_gamma_time
-		pack(3000000),             // 42 mid_fee
-		pack(30000000),            // 43 out_fee
-		pack(500000000000000),     // 44 fee_gamma
-		pack(2000000000000),       // 45 allowed_extra_profit
-		pack(490000000000000),     // 46 adjustment_step
-		pack(600),                 // 47 ma_time
-		pack(5000000000),          // 48 ADMIN_FEE
+		pack(1407313225375571094), // 22 lp_price
+		pack(1068150721095887980), // 23 xcp_profit_a
+		pack(1782820487),          // 24 last_prices_timestamp
+		pack(591050417),           // 25 get_dx(0,1)
+		pack(592000000),           // 26 get_dx(0,2)
+		pack(593000000),           // 27 get_dx(1,0)
+		pack(594000000),           // 28 get_dx(1,2)
+		pack(595000000),           // 29 get_dx(2,0)
+		pack(596000000),           // 30 get_dx(2,1)
+		pack(42853623908762784),   // 31 calc_token_amount
+		pack(1405602713),          // 32 calc_withdraw_one_coin(0)
+		pack(1406000000),          // 33 calc_withdraw_one_coin(1)
+		pack(1407000000),          // 34 calc_withdraw_one_coin(2)
+		pack(581076037942835227),  // 35 initial_A_gamma
+		pack(581076037942835227),  // 36 future_A_gamma
+		pack(0),                   // 37 initial_A_gamma_time
+		pack(0),                   // 38 future_A_gamma_time
+		pack(3000000),             // 39 mid_fee
+		pack(30000000),            // 40 out_fee
+		pack(500000000000000),     // 41 fee_gamma
+		pack(2000000000000),       // 42 allowed_extra_profit
+		pack(490000000000000),     // 43 adjustment_step
+		pack(600),                 // 44 ma_time
+		pack(5000000000),          // 45 ADMIN_FEE
 	}
 }
 
 // cryptoswap state-read result indices used by tests.
 const (
 	cryptoswapDIdx           = 20
-	cryptoswapXcpProfitIdx   = 21
-	cryptoswapConfigFirstIdx = 38 // initial_A_gamma
+	cryptoswapConfigFirstIdx = 35 // initial_A_gamma
 )
 
-// cryptoswapResultsDNil builds canned results where D() and xcp_profit() revert.
-func cryptoswapResultsDNil(t *testing.T, a *abi.ABI) []outbound.Result {
+// cryptoswapResultsDRevert builds canned results where D() reverts.
+func cryptoswapResultsDRevert(t *testing.T, a *abi.ABI) []outbound.Result {
 	t.Helper()
 	base := cryptoswapResults(t, a)
 	result := make([]outbound.Result, len(base))
 	copy(result, base)
-	// D() and xcp_profit() revert -> AllowFailure=true means nil, not error.
 	result[cryptoswapDIdx] = outbound.Result{Success: false, ReturnData: nil}
-	result[cryptoswapXcpProfitIdx] = outbound.Result{Success: false, ReturnData: nil}
 	return result
 }
 
@@ -449,9 +444,10 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 		t.Errorf("BlockNumber = %d, want 200", ss.BlockNumber)
 	}
 
-	// Extended state fields populated when their reads succeed.
-	if len(ss.Cryptoswap.AdminBalances) != 3 {
-		t.Errorf("AdminBalances len = %d, want 3", len(ss.Cryptoswap.AdminBalances))
+	// admin_balances is not issued for cryptoswap pools (gated: Tricrypto-NG has
+	// no admin_balances getter), so the column is NULL by structural design.
+	if ss.Cryptoswap.AdminBalances != nil {
+		t.Errorf("AdminBalances must be nil (call gated out), got %v", ss.Cryptoswap.AdminBalances)
 	}
 	if ss.Cryptoswap.LpPrice == nil {
 		t.Error("LpPrice must be non-nil")
@@ -505,32 +501,20 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 	}
 }
 
-func TestCryptoswapHandler_SnapshotDNilOnRevert(t *testing.T) {
+// TestCryptoswapHandler_SnapshotDRevertErrors verifies that a reverted D() read
+// (issued with AllowFailure=true) bubbles up as an error and stops the block
+// rather than being swallowed into a nil D field.
+func TestCryptoswapHandler_SnapshotDRevertErrors(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading ABI: %v", err)
 	}
 	h := NewCryptoswapHandler(a)
-	pool := RegisteredPool{
-		ID:           10,
-		Address:      common.HexToAddress("0xD51a44d3FaE010294C616388b506AcdA1bfAAE46"),
-		Kind:         KindCryptoswap,
-		NCoins:       3,
-		CoinDecimals: []int{18, 18, 6},
-	}
-	mc := &fakeMulticaller{results: cryptoswapResultsDNil(t, a)}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
-	if err != nil {
-		t.Fatalf("D/xcp_profit revert must not error, got: %v", err)
-	}
-	if ss.Cryptoswap == nil {
-		t.Fatal("Cryptoswap must be non-nil")
-	}
-	if ss.Cryptoswap.D != nil {
-		t.Errorf("D must be nil when result reverted, got %s", ss.Cryptoswap.D)
-	}
-	if ss.Cryptoswap.XcpProfit != nil {
-		t.Errorf("XcpProfit must be nil when result reverted, got %s", ss.Cryptoswap.XcpProfit)
+	pool := cryptoswapPool()
+	mc := &fakeMulticaller{results: cryptoswapResultsDRevert(t, a)}
+	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err == nil {
+		t.Error("reverted D() read must error, got nil")
 	}
 }
 
@@ -658,10 +642,10 @@ func cryptoswapPool() RegisteredPool {
 	}
 }
 
-// TestCryptoswapHandler_SnapshotAdminBalancesNilOnRevert verifies an extended
-// state read reverting (admin_balances, absent on Tricrypto-NG) leaves its field
-// nil without failing the whole snapshot.
-func TestCryptoswapHandler_SnapshotAdminBalancesNilOnRevert(t *testing.T) {
+// TestCryptoswapHandler_SnapshotAdminBalancesNotIssued verifies admin_balances is
+// not issued for cryptoswap pools (gated: Tricrypto-NG has no admin_balances
+// getter) and that the column is consequently NULL by structural design.
+func TestCryptoswapHandler_SnapshotAdminBalancesNotIssued(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading ABI: %v", err)
@@ -669,30 +653,34 @@ func TestCryptoswapHandler_SnapshotAdminBalancesNilOnRevert(t *testing.T) {
 	h := NewCryptoswapHandler(a)
 	pool := cryptoswapPool()
 
-	results := cryptoswapResults(t, a)
-	// admin_balances(0..2) live at 22..24.
-	for i := 22; i <= 24; i++ {
-		results[i] = outbound.Result{Success: false, ReturnData: nil}
+	calls, err := h.buildSnapshotCalls(pool)
+	if err != nil {
+		t.Fatalf("building snapshot calls: %v", err)
+	}
+	adminBalancesData, err := a.Pack("admin_balances", big.NewInt(0))
+	if err != nil {
+		t.Fatalf("packing admin_balances: %v", err)
+	}
+	for i, c := range calls {
+		if string(c.CallData) == string(adminBalancesData) {
+			t.Errorf("call[%d] is admin_balances; it must not be issued for cryptoswap pools", i)
+		}
 	}
 
-	ss, err := h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err != nil {
-		t.Fatalf("admin_balances revert must not error, got: %v", err)
+		t.Fatalf("snapshot: %v", err)
 	}
 	if ss.Cryptoswap.AdminBalances != nil {
-		t.Errorf("AdminBalances must be nil when all reads revert, got %v", ss.Cryptoswap.AdminBalances)
-	}
-	// Config getters still succeeded, so config must still be built.
-	if ss.CryptoswapConfig == nil {
-		t.Error("CryptoswapConfig must remain non-nil when only admin_balances reverts")
+		t.Errorf("AdminBalances must be nil (call gated out), got %v", ss.Cryptoswap.AdminBalances)
 	}
 }
 
-// TestCryptoswapHandler_SnapshotAdminBalancesNilOnPartialRevert locks the
-// "one revert nils the whole slice" contract: a per-coin read array is all-or-
-// nothing, so a single reverted entry collapses the field to nil rather than
-// persisting a misaligned slice with embedded nils.
-func TestCryptoswapHandler_SnapshotAdminBalancesNilOnPartialRevert(t *testing.T) {
+// TestCryptoswapHandler_SnapshotGetDxRevertErrors verifies that a single reverted
+// per-coin get_dx element bubbles up as an error rather than collapsing the whole
+// array to nil (the all-or-nothing nil collapse was itself a swallow).
+func TestCryptoswapHandler_SnapshotGetDxRevertErrors(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading ABI: %v", err)
@@ -701,22 +689,20 @@ func TestCryptoswapHandler_SnapshotAdminBalancesNilOnPartialRevert(t *testing.T)
 	pool := cryptoswapPool()
 
 	results := cryptoswapResults(t, a)
-	// Only admin_balances(1) (idx 23) reverts; 22 and 24 succeed.
-	results[23] = outbound.Result{Success: false, ReturnData: nil}
+	// get_dx(0,1) lives at idx 25 (first get_dx entry).
+	const firstGetDxIdx = 25
+	results[firstGetDxIdx] = outbound.Result{Success: false, ReturnData: nil}
 
-	ss, err := h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
-	if err != nil {
-		t.Fatalf("partial admin_balances revert must not error, got: %v", err)
-	}
-	if ss.Cryptoswap.AdminBalances != nil {
-		t.Errorf("AdminBalances must be nil when any read reverts, got %v", ss.Cryptoswap.AdminBalances)
+	_, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err == nil {
+		t.Error("reverted get_dx element must error, got nil")
 	}
 }
 
-// TestCryptoswapHandler_SnapshotConfigNilOnRevert verifies that when a required
-// config getter reverts, no partial config row is built (nil config), while the
-// state row is still returned.
-func TestCryptoswapHandler_SnapshotConfigNilOnRevert(t *testing.T) {
+// TestCryptoswapHandler_SnapshotConfigGetterRevertErrors verifies that a reverted
+// required config getter bubbles up as an error and stops the block rather than
+// silently dropping the config row.
+func TestCryptoswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	a, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading ABI: %v", err)
@@ -725,18 +711,11 @@ func TestCryptoswapHandler_SnapshotConfigNilOnRevert(t *testing.T) {
 	pool := cryptoswapPool()
 
 	results := cryptoswapResults(t, a)
-	// initial_A_gamma is a required config field; reverting it -> nil config.
 	results[cryptoswapConfigFirstIdx] = outbound.Result{Success: false, ReturnData: nil}
 
-	ss, err := h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
-	if err != nil {
-		t.Fatalf("config getter revert must not error, got: %v", err)
-	}
-	if ss.Cryptoswap == nil {
-		t.Fatal("state row must still be returned when config reverts")
-	}
-	if ss.CryptoswapConfig != nil {
-		t.Errorf("CryptoswapConfig must be nil when a required getter reverts, got %+v", ss.CryptoswapConfig)
+	_, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	if err == nil {
+		t.Error("reverted required config getter must error, got nil")
 	}
 }
 

@@ -668,10 +668,10 @@ const preNG2CoinAPreciseIdx = 8
 // calc_withdraw x2 (12-13) -> initial_A at index 14.
 const preNG2CoinInitialAIdx = 14
 
-// TestStableswapHandler_SnapshotExtendedRevertLeavesFieldNil verifies that an
-// extended read (AllowFailure=true) reverting leaves only its field nil and does
-// NOT fail the whole snapshot.
-func TestStableswapHandler_SnapshotExtendedRevertLeavesFieldNil(t *testing.T) {
+// TestStableswapHandler_SnapshotExtendedRevertErrors verifies that an issued
+// extended read (AllowFailure=true) reverting bubbles up as an error and stops the
+// block rather than being swallowed into a nil field.
+func TestStableswapHandler_SnapshotExtendedRevertErrors(t *testing.T) {
 	_, a := newStableswapHandlerForTest(t)
 	h := NewStableswapHandler(a)
 	pool := stableswapPoolPreNG()
@@ -680,26 +680,16 @@ func TestStableswapHandler_SnapshotExtendedRevertLeavesFieldNil(t *testing.T) {
 	results[preNG2CoinAPreciseIdx] = outbound.Result{Success: false} // A_precise reverts
 
 	mc := &fakeMulticaller{results: results}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
-	if err != nil {
-		t.Fatalf("snapshot must not fail on an optional revert: %v", err)
-	}
-	if ss.Stableswap == nil {
-		t.Fatal("state must still be produced")
-	}
-	if ss.Stableswap.APrecise != nil {
-		t.Errorf("a_precise = %v, want nil (read reverted)", ss.Stableswap.APrecise)
-	}
-	// Core fields and other extended fields must still populate.
-	if ss.Stableswap.CalcTokenAmount == nil {
-		t.Error("calc_token_amount must still populate when only A_precise reverted")
+	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Error("reverted extended read (A_precise) must error, got nil")
 	}
 }
 
-// TestStableswapHandler_SnapshotConfigGetterRevertSkipsConfig verifies that when a
-// required config getter reverts, no config row is built (nil) but the snapshot
-// state still succeeds.
-func TestStableswapHandler_SnapshotConfigGetterRevertSkipsConfig(t *testing.T) {
+// TestStableswapHandler_SnapshotConfigGetterRevertErrors verifies that a reverted
+// required config getter bubbles up as an error and stops the block rather than
+// silently dropping the config row.
+func TestStableswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	_, a := newStableswapHandlerForTest(t)
 	h := NewStableswapHandler(a)
 	pool := stableswapPoolPreNG()
@@ -708,14 +698,8 @@ func TestStableswapHandler_SnapshotConfigGetterRevertSkipsConfig(t *testing.T) {
 	results[preNG2CoinInitialAIdx] = outbound.Result{Success: false} // initial_A reverts
 
 	mc := &fakeMulticaller{results: results}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
-	if err != nil {
-		t.Fatalf("snapshot must not fail on a config getter revert: %v", err)
-	}
-	if ss.Stableswap == nil {
-		t.Fatal("state must still be produced")
-	}
-	if ss.StableswapConfig != nil {
-		t.Error("config must be nil when a required config getter reverted (no partial config row)")
+	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Error("reverted required config getter must error, got nil")
 	}
 }

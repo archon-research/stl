@@ -128,6 +128,18 @@ func calcTokenAmountSelector(n int) []byte {
 	return gocrypto.Keccak256([]byte(sig))[:4]
 }
 
+// optionalUintResult decodes an AllowFailure=true scalar snapshot result. A
+// revert is an error, not a nil field: per the no-swallowed-errors rule a
+// best-effort read that reverted must stop the block rather than be silently
+// turned into a NULL column. The only legitimately-absent reads are gated
+// structurally (not issued) rather than swallowed here.
+func optionalUintResult(abiDef *abi.ABI, method string, r outbound.Result, poolAddr common.Address, blockNumber int64) (*big.Int, error) {
+	if !r.Success {
+		return nil, fmt.Errorf("snapshot call %s reverted for pool %s at block %d", method, poolAddr, blockNumber)
+	}
+	return shared.UnpackUint(abiDef, method, r)
+}
+
 // unpackSingleUint decodes a single uint256-returning result whose method is not
 // in the ABI (e.g. calc_token_amount, which we pack manually per N). A reverted
 // call or a payload shorter than 32 bytes is an error.
