@@ -9,7 +9,6 @@ SET search_path TO public;
 CREATE OR REPLACE FUNCTION public.set_updated_at() RETURNS trigger
   LANGUAGE plpgsql AS $$ BEGIN NEW.updated_at = now(); RETURN NEW; END $$;
 
-\restrict g09Ngl5htKVByHk9MVvb1agSJl6y5b40aeMsQQp0ITbNMT3hVa7aZtMqgLqboEo
 CREATE TABLE IF NOT EXISTS public.deal_type_ref (
     deal_type text NOT NULL,
     direction text,
@@ -612,7 +611,6 @@ ALTER TABLE ONLY public.security_subtype_ref
     ADD CONSTRAINT security_subtype_ref_asset_class_security_type_fkey FOREIGN KEY (asset_class, security_type) REFERENCES public.security_type_ref(asset_class, security_type);
 ALTER TABLE ONLY public.security_type_ref
     ADD CONSTRAINT security_type_ref_asset_class_fkey FOREIGN KEY (asset_class) REFERENCES public.asset_class_ref(asset_class);
-\unrestrict g09Ngl5htKVByHk9MVvb1agSJl6y5b40aeMsQQp0ITbNMT3hVa7aZtMqgLqboEo
 
 SET search_path TO public;
 INSERT INTO migrations (filename) VALUES ('20260630_130000_create_reference_tables.sql') ON CONFLICT (filename) DO NOTHING;
