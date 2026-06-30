@@ -120,47 +120,47 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 // swapConverted holds pre-converted numeric values for a curve_swap insert.
 type swapConverted struct {
 	in           outbound.SwapInput
-	tokensSold   any
-	tokensBought any
+	tokensSold   pgtype.Numeric
+	tokensBought pgtype.Numeric
 }
 
 // liquidityConverted holds pre-converted numeric values for a curve_liquidity_event insert.
 type liquidityConverted struct {
 	in           outbound.LiquidityInput
-	tokenAmounts any
-	fees         any
+	tokenAmounts []pgtype.Numeric
+	fees         pgtype.FlatArray[pgtype.Numeric]
 }
 
 // stableConverted holds pre-converted numeric values for a curve_stableswap_state insert.
 type stableConverted struct {
 	s             *entity.CurveStableswapState
-	balances      any
-	vp            any
-	ts            any
-	a             any
-	fee           any
-	spotDy        any
-	adminBalances any
-	storedRates   any
-	calcWithdraw  any
+	balances      []pgtype.Numeric
+	vp            pgtype.Numeric
+	ts            pgtype.Numeric
+	a             pgtype.Numeric
+	fee           pgtype.Numeric
+	spotDy        []pgtype.Numeric
+	adminBalances pgtype.FlatArray[pgtype.Numeric]
+	storedRates   pgtype.FlatArray[pgtype.Numeric]
+	calcWithdraw  pgtype.FlatArray[pgtype.Numeric]
 }
 
 // cryptoConverted holds pre-converted numeric values for a curve_cryptoswap_state insert.
 type cryptoConverted struct {
 	s             *entity.CurveCryptoswapState
-	balances      any
-	vp            any
-	ts            any
-	a             any
-	gamma         any
-	fee           any
-	priceScale    any
-	priceOracle   any
-	lastPrices    any
-	spotDy        any
-	adminBalances any
-	getDx         any
-	calcWithdraw  any
+	balances      []pgtype.Numeric
+	vp            pgtype.Numeric
+	ts            pgtype.Numeric
+	a             pgtype.Numeric
+	gamma         pgtype.Numeric
+	fee           pgtype.Numeric
+	priceScale    []pgtype.Numeric
+	priceOracle   []pgtype.Numeric
+	lastPrices    []pgtype.Numeric
+	spotDy        []pgtype.Numeric
+	adminBalances pgtype.FlatArray[pgtype.Numeric]
+	getDx         pgtype.FlatArray[pgtype.Numeric]
+	calcWithdraw  pgtype.FlatArray[pgtype.Numeric]
 }
 
 // SaveBlock persists all of a block's curve rows in one pgx.Batch within tx.

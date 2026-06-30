@@ -73,26 +73,31 @@ func BigIntsToNumericArray(bs []*big.Int) ([]pgtype.Numeric, error) {
 	return out, nil
 }
 
-// BigIntsToNullableNumericArray converts a slice to a NUMERIC[] payload,
-// returning nil so pgx serialises a SQL NULL when the input slice is nil.
-// An empty (non-nil) slice yields an empty array, not NULL.
-func BigIntsToNullableNumericArray(bs []*big.Int) (any, error) {
+// BigIntsToNullableNumericArray converts a slice to a NUMERIC[] payload.
+// A nil input slice yields a nil FlatArray (SQL NULL); a non-nil slice
+// (including empty) yields a valid array. pgx encodes a nil FlatArray as
+// SQL NULL because its Dimensions() returns nil.
+func BigIntsToNullableNumericArray(bs []*big.Int) (pgtype.FlatArray[pgtype.Numeric], error) {
 	if bs == nil {
 		return nil, nil
 	}
-	return BigIntsToNumericArray(bs)
+	elems, err := BigIntsToNumericArray(bs)
+	if err != nil {
+		return nil, err
+	}
+	return pgtype.FlatArray[pgtype.Numeric](elems), nil
 }
 
 // BigIntsToNullableElementArrayOrNull converts a slice to a NUMERIC[] payload
-// where a nil slice → SQL NULL column and nil elements → SQL NULL elements.
+// where a nil slice produces SQL NULL and nil elements become SQL NULL elements.
 // Used by the NG oracle columns (price_oracle / last_price) where individual
 // slots are legitimately absent: the EMA is uninitialised before the pool's
 // first swap, or the indexed selector reverts on factory-v2-era pools.
-func BigIntsToNullableElementArrayOrNull(bs []*big.Int) any {
+func BigIntsToNullableElementArrayOrNull(bs []*big.Int) pgtype.FlatArray[pgtype.Numeric] {
 	if bs == nil {
 		return nil
 	}
-	return BigIntsToNullableElementNumericArray(bs)
+	return pgtype.FlatArray[pgtype.Numeric](BigIntsToNullableElementNumericArray(bs))
 }
 
 // BigIntsToNullableElementNumericArray converts a slice of *big.Int to a

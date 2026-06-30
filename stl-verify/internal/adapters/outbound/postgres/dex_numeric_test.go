@@ -126,22 +126,22 @@ func TestBigIntsToNumericArray(t *testing.T) {
 	}
 }
 
-// BigIntsToNullableNumericArray: nil slice → SQL NULL; nil element → error.
+// BigIntsToNullableNumericArray: nil slice -> SQL NULL (nil FlatArray); nil element -> error.
 func TestBigIntsToNullableNumericArray(t *testing.T) {
 	v, err := BigIntsToNullableNumericArray(nil)
 	if err != nil {
 		t.Fatalf("nil slice: unexpected error %v", err)
 	}
 	if v != nil {
-		t.Errorf("nil slice must map to nil (SQL NULL), got %#v", v)
+		t.Errorf("nil slice must map to nil FlatArray (SQL NULL), got %#v", v)
 	}
 
 	v, err = BigIntsToNullableNumericArray([]*big.Int{})
 	if err != nil {
 		t.Fatalf("empty slice: %v", err)
 	}
-	if arr, ok := v.([]pgtype.Numeric); !ok || arr == nil || len(arr) != 0 {
-		t.Errorf("empty (non-nil) slice must map to an empty array, not NULL; got %#v", v)
+	if v == nil || len(v) != 0 {
+		t.Errorf("empty (non-nil) slice must map to an empty non-nil FlatArray, not NULL; got %#v", v)
 	}
 
 	if _, err := BigIntsToNullableNumericArray([]*big.Int{nil}); err == nil {
@@ -149,19 +149,18 @@ func TestBigIntsToNullableNumericArray(t *testing.T) {
 	}
 }
 
-// BigIntsToNullableElementArrayOrNull: nil slice → SQL NULL; nil element → NULL element.
+// BigIntsToNullableElementArrayOrNull: nil slice -> SQL NULL (nil FlatArray); nil element -> NULL element.
 func TestBigIntsToNullableElementArrayOrNull(t *testing.T) {
 	if v := BigIntsToNullableElementArrayOrNull(nil); v != nil {
-		t.Errorf("nil slice must map to nil (SQL NULL), got %#v", v)
+		t.Errorf("nil slice must map to nil FlatArray (SQL NULL), got %#v", v)
 	}
 
 	v := BigIntsToNullableElementArrayOrNull([]*big.Int{big.NewInt(1), nil})
-	arr, ok := v.([]pgtype.Numeric)
-	if !ok || len(arr) != 2 {
-		t.Fatalf("want []pgtype.Numeric of len 2, got %#v", v)
+	if v == nil || len(v) != 2 {
+		t.Fatalf("want FlatArray of len 2, got %#v", v)
 	}
-	if !arr[0].Valid || arr[1].Valid {
-		t.Errorf("want element 0 Valid and element 1 a NULL element, got %+v", arr)
+	if !v[0].Valid || v[1].Valid {
+		t.Errorf("want element 0 Valid and element 1 a NULL element, got %+v", []pgtype.Numeric(v))
 	}
 }
 
