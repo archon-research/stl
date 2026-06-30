@@ -181,6 +181,32 @@ data:
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
 ---
+# OKX uses dash-separated instrument ids with a USDT quote (no USD spot pairs);
+# BTC-USDT/ETH-USDT verified live against the OKX SPOT instruments API.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cex-orderbook-indexer-okx-config
+data:
+  EXCHANGE: "okx"
+  SYMBOLS: "BTC-USDT,ETH-USDT"
+  ORDERBOOK_DEPTH: "100"
+  ORDERBOOK_INTERVAL: "5s"
+  ENVIRONMENT: "sentinelstaging"
+---
+# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC);
+# XBT/USD and ETH/USD verified live against the Kraken AssetPairs "wsname" field.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cex-orderbook-indexer-kraken-config
+data:
+  EXCHANGE: "kraken"
+  SYMBOLS: "XBT/USD,ETH/USD"
+  ORDERBOOK_DEPTH: "100"
+  ORDERBOOK_INTERVAL: "5s"
+  ENVIRONMENT: "sentinelstaging"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
