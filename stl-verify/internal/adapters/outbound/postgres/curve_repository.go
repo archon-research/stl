@@ -163,142 +163,208 @@ type cryptoConverted struct {
 
 // SaveBlock persists all of a block's curve rows in one pgx.Batch within tx.
 func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.BlockWrites) (stateRows int64, err error) {
-	// Pre-convert all numeric values before touching the batch. Any conversion
-	// error is returned immediately so the caller gets a clear message without
-	// partially-queued state.
-	swaps := make([]swapConverted, 0, len(w.Swaps))
-	for i, in := range w.Swaps {
+	swaps, err := convertSwaps(w.Swaps)
+	if err != nil {
+		return 0, err
+	}
+	liqs, err := convertLiquidity(w.Liquidity)
+	if err != nil {
+		return 0, err
+	}
+	stables, err := convertStableStates(w.StableStates)
+	if err != nil {
+		return 0, err
+	}
+	cryptos, err := convertCryptoStates(w.CryptoStates)
+	if err != nil {
+		return 0, err
+	}
+
+	batch := &pgx.Batch{}
+	if err := queueCurveBatch(batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents, r.buildID); err != nil {
+		return 0, err
+	}
+
+	stateRows, err = sendCurveBatch(ctx, tx, batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents)
+	if err != nil {
+		return stateRows, err
+	}
+
+	// Config rows are written after the batch reader is fully closed: pgx forbids
+	// issuing new queries on a connection while a batch result reader is open, and
+	// each config insert depends on a prior read of the latest row for that pool
+	// (a read-then-write race ON CONFLICT cannot guard, ADR-0002 §3). The pool
+	// locks are acquired in sorted curve_pool_id order so concurrent SaveBlock
+	// transactions never deadlock.
+	if err := r.writeConfigs(ctx, tx, w.StableswapConfigs, w.CryptoswapConfigs); err != nil {
+		return stateRows, err
+	}
+
+	return stateRows, nil
+}
+
+// convertSwaps pre-converts all numeric fields for swap inserts. Any conversion
+// error is returned immediately so the caller gets a clear message without
+// partially-queued state.
+func convertSwaps(inputs []outbound.SwapInput) ([]swapConverted, error) {
+	out := make([]swapConverted, 0, len(inputs))
+	for i, in := range inputs {
 		tokensSold, convErr := BigIntToNumericRequired(in.TokensSold, "tokens_sold")
 		if convErr != nil {
-			return 0, fmt.Errorf("swap %d converting tokens_sold: %w", i, convErr)
+			return nil, fmt.Errorf("swap %d converting tokens_sold: %w", i, convErr)
 		}
 		tokensBought, convErr := BigIntToNumericRequired(in.TokensBought, "tokens_bought")
 		if convErr != nil {
-			return 0, fmt.Errorf("swap %d converting tokens_bought: %w", i, convErr)
+			return nil, fmt.Errorf("swap %d converting tokens_bought: %w", i, convErr)
 		}
-		swaps = append(swaps, swapConverted{in: in, tokensSold: tokensSold, tokensBought: tokensBought})
+		out = append(out, swapConverted{in: in, tokensSold: tokensSold, tokensBought: tokensBought})
 	}
+	return out, nil
+}
 
-	liqs := make([]liquidityConverted, 0, len(w.Liquidity))
-	for i, in := range w.Liquidity {
+// convertLiquidity pre-converts all numeric fields for liquidity event inserts.
+func convertLiquidity(inputs []outbound.LiquidityInput) ([]liquidityConverted, error) {
+	out := make([]liquidityConverted, 0, len(inputs))
+	for i, in := range inputs {
 		tokenAmounts, convErr := BigIntsToNumericArray(in.TokenAmounts)
 		if convErr != nil {
-			return 0, fmt.Errorf("liquidity %d converting token_amounts: %w", i, convErr)
+			return nil, fmt.Errorf("liquidity %d converting token_amounts: %w", i, convErr)
 		}
 		fees, convErr := BigIntsToNullableNumericArray(in.Fees)
 		if convErr != nil {
-			return 0, fmt.Errorf("liquidity %d converting fees: %w", i, convErr)
+			return nil, fmt.Errorf("liquidity %d converting fees: %w", i, convErr)
 		}
-		liqs = append(liqs, liquidityConverted{in: in, tokenAmounts: tokenAmounts, fees: fees})
+		out = append(out, liquidityConverted{in: in, tokenAmounts: tokenAmounts, fees: fees})
 	}
+	return out, nil
+}
 
-	stables := make([]stableConverted, 0, len(w.StableStates))
-	for i, s := range w.StableStates {
+// convertStableStates pre-converts all numeric fields for stableswap state inserts.
+func convertStableStates(states []*entity.CurveStableswapState) ([]stableConverted, error) {
+	out := make([]stableConverted, 0, len(states))
+	for i, s := range states {
 		balances, convErr := BigIntsToNumericArray(s.Balances)
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting balances: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting balances: %w", i, convErr)
 		}
 		spotDy, convErr := BigIntsToNumericArray(s.SpotDy)
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting spot_dy: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting spot_dy: %w", i, convErr)
 		}
 		vp, convErr := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting virtual_price: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting virtual_price: %w", i, convErr)
 		}
 		ts, convErr := BigIntToNumericRequired(s.TotalSupply, "total_supply")
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting total_supply: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting total_supply: %w", i, convErr)
 		}
 		a, convErr := BigIntToNumericRequired(s.A, "a")
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting a: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting a: %w", i, convErr)
 		}
 		fee, convErr := BigIntToNumericRequired(s.Fee, "fee")
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting fee: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting fee: %w", i, convErr)
 		}
 		adminBalances, convErr := BigIntsToNullableNumericArray(s.AdminBalances)
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting admin_balances: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting admin_balances: %w", i, convErr)
 		}
 		storedRates, convErr := BigIntsToNullableNumericArray(s.StoredRates)
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting stored_rates: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting stored_rates: %w", i, convErr)
 		}
 		calcWithdraw, convErr := BigIntsToNullableNumericArray(s.CalcWithdrawOneCoin)
 		if convErr != nil {
-			return 0, fmt.Errorf("stableswap %d converting calc_withdraw_one_coin: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting calc_withdraw_one_coin: %w", i, convErr)
 		}
-		stables = append(stables, stableConverted{
+		out = append(out, stableConverted{
 			s: s, balances: balances, vp: vp, ts: ts, a: a, fee: fee, spotDy: spotDy,
 			adminBalances: adminBalances, storedRates: storedRates, calcWithdraw: calcWithdraw,
 		})
 	}
+	return out, nil
+}
 
-	cryptos := make([]cryptoConverted, 0, len(w.CryptoStates))
-	for i, s := range w.CryptoStates {
+// convertCryptoStates pre-converts all numeric fields for cryptoswap state inserts.
+func convertCryptoStates(states []*entity.CurveCryptoswapState) ([]cryptoConverted, error) {
+	out := make([]cryptoConverted, 0, len(states))
+	for i, s := range states {
 		balances, convErr := BigIntsToNumericArray(s.Balances)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting balances: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting balances: %w", i, convErr)
 		}
 		vp, convErr := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting virtual_price: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting virtual_price: %w", i, convErr)
 		}
 		ts, convErr := BigIntToNumericRequired(s.TotalSupply, "total_supply")
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting total_supply: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting total_supply: %w", i, convErr)
 		}
 		a, convErr := BigIntToNumericRequired(s.A, "a")
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting a: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting a: %w", i, convErr)
 		}
 		gamma, convErr := BigIntToNumericRequired(s.Gamma, "gamma")
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting gamma: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting gamma: %w", i, convErr)
 		}
 		fee, convErr := BigIntToNumericRequired(s.Fee, "fee")
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting fee: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting fee: %w", i, convErr)
 		}
 		priceScale, convErr := BigIntsToNumericArray(s.PriceScale)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting price_scale: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting price_scale: %w", i, convErr)
 		}
 		priceOracle, convErr := BigIntsToNumericArray(s.PriceOracle)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting price_oracle: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting price_oracle: %w", i, convErr)
 		}
 		lastPrices, convErr := BigIntsToNumericArray(s.LastPrices)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting last_prices: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting last_prices: %w", i, convErr)
 		}
 		spotDy, convErr := BigIntsToNumericArray(s.SpotDy)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting spot_dy: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting spot_dy: %w", i, convErr)
 		}
 		adminBalances, convErr := BigIntsToNullableNumericArray(s.AdminBalances)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting admin_balances: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting admin_balances: %w", i, convErr)
 		}
 		getDx, convErr := BigIntsToNullableNumericArray(s.GetDx)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting get_dx: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting get_dx: %w", i, convErr)
 		}
 		calcWithdraw, convErr := BigIntsToNullableNumericArray(s.CalcWithdrawOneCoin)
 		if convErr != nil {
-			return 0, fmt.Errorf("cryptoswap %d converting calc_withdraw_one_coin: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting calc_withdraw_one_coin: %w", i, convErr)
 		}
-		cryptos = append(cryptos, cryptoConverted{
+		out = append(out, cryptoConverted{
 			s: s, balances: balances, vp: vp, ts: ts, a: a, gamma: gamma, fee: fee,
 			priceScale: priceScale, priceOracle: priceOracle, lastPrices: lastPrices, spotDy: spotDy,
 			adminBalances: adminBalances, getDx: getDx, calcWithdraw: calcWithdraw,
 		})
 	}
+	return out, nil
+}
 
-	batch := &pgx.Batch{}
-
+// queueCurveBatch adds all converted rows to batch in the canonical order that
+// sendCurveBatch expects to drain them: swaps, liquidity, stableswap states,
+// cryptoswap states, parameter events, lp token events.
+func queueCurveBatch(
+	batch *pgx.Batch,
+	swaps []swapConverted,
+	liqs []liquidityConverted,
+	stables []stableConverted,
+	cryptos []cryptoConverted,
+	parameterEvents []*entity.CurveParameterEvent,
+	lpTokenEvents []*entity.CurveLpTokenEvent,
+	buildID buildregistry.BuildID,
+) error {
 	for _, c := range swaps {
 		batch.Queue(
 			`INSERT INTO curve_swap
@@ -309,7 +375,7 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			 ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			c.in.CurvePoolID, c.in.BlockNumber, c.in.BlockVersion, c.in.BlockTimestamp,
 			c.in.TxHash.Bytes(), c.in.LogIndex, c.in.Buyer.Bytes(), c.in.SoldID, c.in.BoughtID,
-			c.tokensSold, c.tokensBought, BigIntToNullableNumeric(c.in.Fee), c.in.IsUnderlying, int(r.buildID),
+			c.tokensSold, c.tokensBought, BigIntToNullableNumeric(c.in.Fee), c.in.IsUnderlying, int(buildID),
 		)
 	}
 
@@ -324,7 +390,7 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			c.in.CurvePoolID, c.in.BlockNumber, c.in.BlockVersion, c.in.BlockTimestamp,
 			c.in.TxHash.Bytes(), c.in.LogIndex, c.in.Provider.Bytes(), c.in.Kind, c.tokenAmounts,
 			c.in.CoinIndex, c.fees, BigIntToNullableNumeric(c.in.Invariant), BigIntToNullableNumeric(c.in.TokenSupply),
-			int(r.buildID),
+			int(buildID),
 		)
 	}
 
@@ -342,7 +408,7 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			BigIntToNullableNumeric(c.s.LastPrice), BigIntToNullableNumeric(c.s.PriceOracle),
 			BigIntToNullableNumeric(c.s.APrecise), c.adminBalances, c.storedRates,
 			BigIntToNullableNumeric(c.s.EmaPrice), BigIntToNullableNumeric(c.s.GetP),
-			BigIntToNullableNumeric(c.s.CalcTokenAmount), c.calcWithdraw, int(r.buildID),
+			BigIntToNullableNumeric(c.s.CalcTokenAmount), c.calcWithdraw, int(buildID),
 		)
 	}
 
@@ -362,11 +428,11 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			c.priceScale, c.priceOracle, c.lastPrices, c.spotDy,
 			c.adminBalances, BigIntToNullableNumeric(c.s.LpPrice), BigIntToNullableNumeric(c.s.XcpProfitA),
 			c.s.LastPricesTimestamp, c.getDx, BigIntToNullableNumeric(c.s.CalcTokenAmount),
-			c.calcWithdraw, int(r.buildID),
+			c.calcWithdraw, int(buildID),
 		)
 	}
 
-	for _, e := range w.ParameterEvents {
+	for _, e := range parameterEvents {
 		batch.Queue(
 			`INSERT INTO curve_parameter_event
 			   (curve_pool_id, block_number, block_version, block_timestamp,
@@ -374,14 +440,14 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			 ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			e.CurvePoolID, e.BlockNumber, e.BlockVersion, e.Timestamp,
-			e.TxHash.Bytes(), e.LogIndex, e.EventName, []byte(e.Params), int(r.buildID),
+			e.TxHash.Bytes(), e.LogIndex, e.EventName, []byte(e.Params), int(buildID),
 		)
 	}
 
-	for _, e := range w.LpTokenEvents {
+	for _, e := range lpTokenEvents {
 		value, convErr := BigIntToNumericRequired(e.Value, "value")
 		if convErr != nil {
-			return 0, fmt.Errorf("lp token event converting value: %w", convErr)
+			return fmt.Errorf("lp token event converting value: %w", convErr)
 		}
 		batch.Queue(
 			`INSERT INTO curve_lp_token_event
@@ -390,26 +456,11 @@ func (r *CurveRepository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.B
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			 ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			e.CurvePoolID, e.BlockNumber, e.BlockVersion, e.Timestamp,
-			e.TxHash.Bytes(), e.LogIndex, e.EventName, e.From.Bytes(), e.To.Bytes(), value, int(r.buildID),
+			e.TxHash.Bytes(), e.LogIndex, e.EventName, e.From.Bytes(), e.To.Bytes(), value, int(buildID),
 		)
 	}
 
-	stateRows, err = sendCurveBatch(ctx, tx, batch, swaps, liqs, stables, cryptos, w.ParameterEvents, w.LpTokenEvents)
-	if err != nil {
-		return stateRows, err
-	}
-
-	// Config rows are written after the batch reader is fully closed: pgx forbids
-	// issuing new queries on a connection while a batch result reader is open, and
-	// each config insert depends on a prior read of the latest row for that pool
-	// (a read-then-write race ON CONFLICT cannot guard, ADR-0002 §3). The pool
-	// locks are acquired in sorted curve_pool_id order so concurrent SaveBlock
-	// transactions never deadlock.
-	if err := r.writeConfigs(ctx, tx, w.StableswapConfigs, w.CryptoswapConfigs); err != nil {
-		return stateRows, err
-	}
-
-	return stateRows, nil
+	return nil
 }
 
 // sendCurveBatch executes the queued batch and drains every result in queue
