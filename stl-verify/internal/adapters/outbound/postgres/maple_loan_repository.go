@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -68,12 +69,15 @@ func (r *MapleGraphQLRepository) GetMapleProtocolID(ctx context.Context, chainID
 	return id, nil
 }
 
-// UpsertPools upserts pool registry rows and returns
-// address -> maple_pool.id. name, asset_token_id, and is_syrup are immutable
-// per pool, so the upsert refreshes nothing on conflict (the no-op DO UPDATE
-// keeps RETURNING yielding the stored row) and the scan fails the run if any
-// stored value differs from the incoming one.
-func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, pools []*maple.Pool) (map[common.Address]int64, error) {
+// RecordPools registers pool identity rows and records their editorial
+// attributes (name, is_syrup) in the maple_pool_meta satellite, returning
+// address -> maple_pool.id. The hub holds identity only: protocol_id and
+// asset_token_id are immutable, so the hub insert refreshes nothing on conflict
+// (the no-op DO UPDATE keeps RETURNING yielding the stored row) and the scan
+// fails the run if either differs from the incoming one. An editorial change
+// appends a satellite row via appendMeta when the editorial hashdiff differs
+// from the pool's latest one.
+func (r *MapleGraphQLRepository) RecordPools(ctx context.Context, tx pgx.Tx, syncedAt time.Time, pools []*maple.Pool) (map[common.Address]int64, error) {
 	if len(pools) == 0 {
 		return make(map[common.Address]int64), nil
 	}
@@ -83,38 +87,49 @@ func (r *MapleGraphQLRepository) UpsertPools(ctx context.Context, tx pgx.Tx, poo
 	batch := &pgx.Batch{}
 	for _, p := range sorted {
 		batch.Queue(
-			`INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup)
-			 VALUES ($1, $2, $3, $4, $5, $6)
+			`INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (chain_id, address) DO UPDATE SET id = maple_pool.id
-			 RETURNING id, name, asset_token_id, is_syrup`,
-			p.ChainID, p.ProtocolID, p.Address, p.Name, p.AssetTokenID, p.IsSyrup,
+			 RETURNING id, protocol_id, asset_token_id`,
+			p.ChainID, p.ProtocolID, p.Address, p.AssetTokenID,
 		)
 	}
 
-	return collectBatchRows(ctx, tx, batch, sorted, "maple pool",
+	ids, err := collectBatchRows(ctx, tx, batch, sorted, "maple pool",
 		func(row pgx.Row, p *maple.Pool) (common.Address, int64, error) {
 			addr := common.BytesToAddress(p.Address)
-			var id, storedAssetTokenID int64
-			var storedName *string // name is a nullable column; a stored NULL is itself a mismatch
-			var storedIsSyrup bool
-			if err := row.Scan(&id, &storedName, &storedAssetTokenID, &storedIsSyrup); err != nil {
-				return common.Address{}, 0, fmt.Errorf("upserting maple pool %s: %w", addr, err)
+			var id, storedProtocolID, storedAssetTokenID int64
+			if err := row.Scan(&id, &storedProtocolID, &storedAssetTokenID); err != nil {
+				return common.Address{}, 0, fmt.Errorf("recording maple pool %s: %w", addr, err)
 			}
 			var mismatches []string
-			if storedName == nil || *storedName != p.Name {
-				mismatches = append(mismatches, fmt.Sprintf("name (stored %s, incoming %q)", strOrNull(storedName), p.Name))
+			if storedProtocolID != p.ProtocolID {
+				mismatches = append(mismatches, fmt.Sprintf("protocol_id (stored %d, incoming %d)", storedProtocolID, p.ProtocolID))
 			}
 			if storedAssetTokenID != p.AssetTokenID {
 				mismatches = append(mismatches, fmt.Sprintf("asset_token_id (stored %d, incoming %d)", storedAssetTokenID, p.AssetTokenID))
-			}
-			if storedIsSyrup != p.IsSyrup {
-				mismatches = append(mismatches, fmt.Sprintf("is_syrup (stored %t, incoming %t)", storedIsSyrup, p.IsSyrup))
 			}
 			if err := registryMismatchError("maple pool", addr, mismatches); err != nil {
 				return common.Address{}, 0, err
 			}
 			return addr, id, nil
 		})
+	if err != nil {
+		return nil, err
+	}
+
+	rows := make([]metaRow, 0, len(sorted))
+	for _, p := range sorted {
+		rows = append(rows, metaRow{
+			id:        ids[common.BytesToAddress(p.Address)],
+			editorial: []any{p.Name, p.IsSyrup},
+		})
+	}
+	if err := r.appendMeta(ctx, tx, "maple_pool_meta", "maple_pool_id",
+		[]string{"name", "is_syrup"}, syncedAt, rows); err != nil {
+		return nil, fmt.Errorf("recording maple pool meta: %w", err)
+	}
+	return ids, nil
 }
 
 // SavePoolStates inserts pool state snapshots. The BEFORE INSERT trigger
@@ -171,7 +186,7 @@ func (r *MapleGraphQLRepository) savePoolStateBatch(ctx context.Context, tx pgx.
 	return r.execInsert(ctx, tx, "maple_pool_state", sb.String(), args)
 }
 
-// loanMetaCols holds a loan's six nullable loanMeta columns as upsert args.
+// loanMetaCols holds a loan's six nullable loanMeta columns as satellite column args.
 type loanMetaCols struct {
 	typ, assetSymbol, dex, walletAddress, walletType, location *string
 }
@@ -192,15 +207,15 @@ func loanMetaColsOf(l *maple.Loan) loanMetaCols {
 	}
 }
 
-// UpsertLoans upserts loan registry rows and returns loan
-// address -> maple_loan.id. maple_pool_id, borrower_user_id, and every
-// loanMeta column are immutable per loan — empirically unchanged across ~1
-// year of subgraph history — so the upsert refreshes nothing on conflict (the
-// no-op DO UPDATE keeps RETURNING yielding the stored row) and the scan fails
-// the run if any stored value differs from the incoming one. Nullable
-// loanMeta columns compare NULL-safely, so editorial enrichment (null→value)
-// trips the guard like any other change.
-func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loans []*maple.Loan) (map[common.Address]int64, error) {
+// RecordLoans registers loan identity rows and records their editorial
+// attributes (loan_type and the six loanMeta columns) in the maple_loan_meta
+// satellite, returning loan address -> maple_loan.id. The hub holds identity
+// only: maple_pool_id and borrower_user_id are immutable, so the hub insert
+// refreshes nothing on conflict and the scan fails the run if either differs
+// from the incoming one. A loanMeta change appends a satellite row via
+// appendMeta (nullable columns compared NULL-safely via the hashdiff null
+// sentinel).
+func (r *MapleGraphQLRepository) RecordLoans(ctx context.Context, tx pgx.Tx, syncedAt time.Time, loans []*maple.Loan) (map[common.Address]int64, error) {
 	if len(loans) == 0 {
 		return make(map[common.Address]int64), nil
 	}
@@ -209,33 +224,22 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 
 	batch := &pgx.Batch{}
 	for _, l := range sorted {
-		m := loanMetaColsOf(l)
 		batch.Queue(
-			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, loan_type, maple_pool_id, borrower_user_id,
-			                         loan_meta_type, loan_meta_asset_symbol, loan_meta_dex, loan_meta_wallet_address,
-			                         loan_meta_wallet_type, loan_meta_location)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+			 VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT (chain_id, loan_address) DO UPDATE SET id = maple_loan.id
-			 RETURNING id, maple_pool_id, borrower_user_id,
-			           loan_meta_type, loan_meta_asset_symbol, loan_meta_dex,
-			           loan_meta_wallet_address, loan_meta_wallet_type, loan_meta_location`,
-			l.ChainID, l.ProtocolID, l.LoanAddress, l.LoanType, l.PoolID, l.BorrowerUserID,
-			m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location,
+			 RETURNING id, maple_pool_id, borrower_user_id`,
+			l.ChainID, l.ProtocolID, l.LoanAddress, l.PoolID, l.BorrowerUserID,
 		)
 	}
 
-	return collectBatchRows(ctx, tx, batch, sorted, "maple loan",
+	ids, err := collectBatchRows(ctx, tx, batch, sorted, "maple loan",
 		func(row pgx.Row, l *maple.Loan) (common.Address, int64, error) {
 			addr := common.BytesToAddress(l.LoanAddress)
 			var id, storedPoolID, storedBorrower int64
-			var stored loanMetaCols
-			if err := row.Scan(&id, &storedPoolID, &storedBorrower,
-				&stored.typ, &stored.assetSymbol, &stored.dex,
-				&stored.walletAddress, &stored.walletType, &stored.location); err != nil {
-				return common.Address{}, 0, fmt.Errorf("upserting maple loan %s: %w", addr, err)
+			if err := row.Scan(&id, &storedPoolID, &storedBorrower); err != nil {
+				return common.Address{}, 0, fmt.Errorf("recording maple loan %s: %w", addr, err)
 			}
-
-			incoming := loanMetaColsOf(l)
 			var mismatches []string
 			if storedPoolID != l.PoolID {
 				mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, l.PoolID))
@@ -243,26 +247,30 @@ func (r *MapleGraphQLRepository) UpsertLoans(ctx context.Context, tx pgx.Tx, loa
 			if storedBorrower != l.BorrowerUserID {
 				mismatches = append(mismatches, fmt.Sprintf("borrower_user_id (stored %d, incoming %d)", storedBorrower, l.BorrowerUserID))
 			}
-			for _, c := range []struct {
-				field            string
-				stored, incoming *string
-			}{
-				{"loan_meta_type", stored.typ, incoming.typ},
-				{"loan_meta_asset_symbol", stored.assetSymbol, incoming.assetSymbol},
-				{"loan_meta_dex", stored.dex, incoming.dex},
-				{"loan_meta_wallet_address", stored.walletAddress, incoming.walletAddress},
-				{"loan_meta_wallet_type", stored.walletType, incoming.walletType},
-				{"loan_meta_location", stored.location, incoming.location},
-			} {
-				if !equalStringPtr(c.stored, c.incoming) {
-					mismatches = append(mismatches, fmt.Sprintf("%s (stored %s, incoming %s)", c.field, strOrNull(c.stored), strOrNull(c.incoming)))
-				}
-			}
 			if err := registryMismatchError("maple loan", addr, mismatches); err != nil {
 				return common.Address{}, 0, err
 			}
 			return addr, id, nil
 		})
+	if err != nil {
+		return nil, err
+	}
+
+	rows := make([]metaRow, 0, len(sorted))
+	for _, l := range sorted {
+		m := loanMetaColsOf(l)
+		rows = append(rows, metaRow{
+			id:        ids[common.BytesToAddress(l.LoanAddress)],
+			editorial: []any{l.LoanType, m.typ, m.assetSymbol, m.dex, m.walletAddress, m.walletType, m.location},
+		})
+	}
+	if err := r.appendMeta(ctx, tx, "maple_loan_meta", "maple_loan_id",
+		[]string{"loan_type", "loan_meta_type", "loan_meta_asset_symbol", "loan_meta_dex",
+			"loan_meta_wallet_address", "loan_meta_wallet_type", "loan_meta_location"},
+		syncedAt, rows); err != nil {
+		return nil, fmt.Errorf("recording maple loan meta: %w", err)
+	}
+	return ids, nil
 }
 
 // SaveLoanStates inserts loan state snapshots (same trigger/conflict
@@ -351,15 +359,14 @@ func (r *MapleGraphQLRepository) saveLoanCollateralBatch(ctx context.Context, tx
 	return r.execInsert(ctx, tx, "maple_loan_collateral", sb.String(), args)
 }
 
-// UpsertSkyStrategies upserts strategy registry rows and returns strategy
-// address -> maple_sky_strategy.id. maple_pool_id and version are immutable
-// per strategy, so the upsert refreshes nothing on conflict (the no-op DO
-// UPDATE keeps RETURNING yielding the stored row) and the scan fails the run
-// if any stored value differs from the incoming one. version has a documented
-// live mutation path (Governor-enabled proxy upgrade) but is empirically
-// unchanged to date; a real upgrade would trip this guard, which is the
-// intended first-observed-mismatch signal.
-func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx.Tx, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
+// RecordSkyStrategies registers strategy identity rows and records their
+// editorial attribute (version) in the maple_sky_strategy_meta satellite,
+// returning strategy address -> maple_sky_strategy.id. The hub holds identity
+// only: maple_pool_id is immutable, so the hub insert refreshes nothing on
+// conflict and the scan fails the run if it differs from the incoming one. A
+// version change (e.g. a Governor-enabled proxy upgrade) appends a satellite
+// row via appendMeta.
+func (r *MapleGraphQLRepository) RecordSkyStrategies(ctx context.Context, tx pgx.Tx, syncedAt time.Time, strategies []*maple.SkyStrategy) (map[common.Address]int64, error) {
 	if len(strategies) == 0 {
 		return make(map[common.Address]int64), nil
 	}
@@ -369,34 +376,46 @@ func (r *MapleGraphQLRepository) UpsertSkyStrategies(ctx context.Context, tx pgx
 	batch := &pgx.Batch{}
 	for _, s := range sorted {
 		batch.Queue(
-			`INSERT INTO maple_sky_strategy (chain_id, strategy_address, maple_pool_id, version)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO maple_sky_strategy (chain_id, strategy_address, maple_pool_id)
+			 VALUES ($1, $2, $3)
 			 ON CONFLICT (chain_id, strategy_address) DO UPDATE SET id = maple_sky_strategy.id
-			 RETURNING id, maple_pool_id, version`,
-			s.ChainID, s.StrategyAddress, s.PoolID, s.Version,
+			 RETURNING id, maple_pool_id`,
+			s.ChainID, s.StrategyAddress, s.PoolID,
 		)
 	}
 
-	return collectBatchRows(ctx, tx, batch, sorted, "maple sky strategy",
+	ids, err := collectBatchRows(ctx, tx, batch, sorted, "maple sky strategy",
 		func(row pgx.Row, s *maple.SkyStrategy) (common.Address, int64, error) {
 			addr := common.BytesToAddress(s.StrategyAddress)
 			var id, storedPoolID int64
-			var storedVersion *int // version is a nullable column; a stored NULL is itself a mismatch
-			if err := row.Scan(&id, &storedPoolID, &storedVersion); err != nil {
-				return common.Address{}, 0, fmt.Errorf("upserting maple sky strategy %s: %w", addr, err)
+			if err := row.Scan(&id, &storedPoolID); err != nil {
+				return common.Address{}, 0, fmt.Errorf("recording maple sky strategy %s: %w", addr, err)
 			}
 			var mismatches []string
 			if storedPoolID != s.PoolID {
 				mismatches = append(mismatches, fmt.Sprintf("maple_pool_id (stored %d, incoming %d)", storedPoolID, s.PoolID))
-			}
-			if storedVersion == nil || *storedVersion != s.Version {
-				mismatches = append(mismatches, fmt.Sprintf("version (stored %s, incoming %d)", intOrNull(storedVersion), s.Version))
 			}
 			if err := registryMismatchError("maple sky strategy", addr, mismatches); err != nil {
 				return common.Address{}, 0, err
 			}
 			return addr, id, nil
 		})
+	if err != nil {
+		return nil, err
+	}
+
+	rows := make([]metaRow, 0, len(sorted))
+	for _, s := range sorted {
+		rows = append(rows, metaRow{
+			id:        ids[common.BytesToAddress(s.StrategyAddress)],
+			editorial: []any{s.Version},
+		})
+	}
+	if err := r.appendMeta(ctx, tx, "maple_sky_strategy_meta", "maple_sky_strategy_id",
+		[]string{"version"}, syncedAt, rows); err != nil {
+		return nil, fmt.Errorf("recording maple sky strategy meta: %w", err)
+	}
+	return ids, nil
 }
 
 // SaveSkyStrategyStates inserts strategy state snapshots (same
