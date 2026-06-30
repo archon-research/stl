@@ -149,6 +149,50 @@ CREATE TRIGGER trigger_assign_processing_version
     FOR EACH ROW
 EXECUTE FUNCTION assign_processing_version_maple_ftl_loan_state();
 
+-- ============================================================================
+-- Catalogue metadata (COMMENT ON), consistent with 20260609 add_schema_comments.
+--   [Type]: Dimension | Hypertable
+--   Roles:  PK | FK→table.col | Partition | Audit
+--   Scale:  raw amounts are on-chain integers in the named asset's native
+--           decimals (scale by token.decimals); ratio columns are fixed-point
+--           ×1e6 (6 decimals), stated per column.
+-- ============================================================================
+COMMENT ON TABLE maple_ftl_loan IS
+  '[Dimension] Registry of Maple fixed-term loans (FTLs): one row per loan contract. Identity + immutable FKs only; refinance-mutable terms live in maple_ftl_loan_state. Unlike open-term loans (maple_loan), FTL collateral and funds are mainnet ERC-20s, so both FK the token registry.';
+COMMENT ON COLUMN maple_ftl_loan.id IS 'PK. Surrogate id referenced by maple_ftl_loan_state.';
+COMMENT ON COLUMN maple_ftl_loan.chain_id IS 'FK→chain.chain_id.';
+COMMENT ON COLUMN maple_ftl_loan.protocol_id IS 'FK→protocol.id. The Maple protocol row.';
+COMMENT ON COLUMN maple_ftl_loan.loan_address IS 'FTL loan contract address (20 bytes); loan.id in the Maple API. Unique per (chain_id, loan_address).';
+COMMENT ON COLUMN maple_ftl_loan.maple_pool_id IS 'FK→maple_pool.id. The PoolV2 funding pool (fundingPool); immutable per loan. The service fails hard on a null/unknown pool rather than inserting one here.';
+COMMENT ON COLUMN maple_ftl_loan.borrower_user_id IS 'FK→user.id. The borrower (borrower.id); immutable per loan.';
+COMMENT ON COLUMN maple_ftl_loan.collateral_token_id IS 'FK→token.id. The collateral ERC-20 (collateralAsset); immutable per loan.';
+COMMENT ON COLUMN maple_ftl_loan.funds_token_id IS 'FK→token.id. The funds/liquidity ERC-20 (liquidityAsset / fundsAsset); immutable per loan. May equal collateral_token_id.';
+COMMENT ON COLUMN maple_ftl_loan.first_seen_at IS 'Audit. Wall-clock time the registry row was first inserted.';
+
+COMMENT ON TABLE maple_ftl_loan_state IS
+  '[Hypertable] Per-cycle snapshot of a live (non-terminal) fixed-term loan, partitioned on synced_at. A loan that stops appearing at a given synced_at has gone terminal (matured/liquidated), mirroring the OTL absence=inactive convention. No block_version: GraphQL data has no reorg concept.';
+COMMENT ON COLUMN maple_ftl_loan_state.maple_ftl_loan_id IS 'FK→maple_ftl_loan.id. Part of PK.';
+COMMENT ON COLUMN maple_ftl_loan_state.synced_at IS 'Partition. Cron-cycle timestamp (UTC), shared by every row of one sync cycle. Part of PK.';
+COMMENT ON COLUMN maple_ftl_loan_state.state IS 'LoanState enum; one of the live states Active | DrawdownFunds | WaitingForAcceptance | RemoveCollateral.';
+COMMENT ON COLUMN maple_ftl_loan_state.state_detail IS 'LoanStateDetail enum; NULL when the API reports none.';
+COMMENT ON COLUMN maple_ftl_loan_state.principal_owed IS 'Raw integer in funds-asset native decimals (scale by funds token.decimals). 0 is valid (pre-funding), not absence.';
+COMMENT ON COLUMN maple_ftl_loan_state.interest_rate IS 'Annualized rate, fixed-point ×1e6 (6 decimals) on live PoolV2 loans (182000 = 18.2%). Stored raw; V1-era 18-decimal loans are terminal and never indexed.';
+COMMENT ON COLUMN maple_ftl_loan_state.interest_paid IS 'Raw integer in funds-asset native decimals (scale by funds token.decimals).';
+COMMENT ON COLUMN maple_ftl_loan_state.payments_remaining IS 'Count of scheduled payments left.';
+COMMENT ON COLUMN maple_ftl_loan_state.payment_interval_days IS 'Days between scheduled payments.';
+COMMENT ON COLUMN maple_ftl_loan_state.term_days IS 'Total loan term in days.';
+COMMENT ON COLUMN maple_ftl_loan_state.maturity_date IS 'Loan maturity, converted from API epoch seconds. NULL when the API reports 0 (pre-funding).';
+COMMENT ON COLUMN maple_ftl_loan_state.next_payment_due IS 'Next payment due, converted from API epoch seconds. NULL when the API reports 0 (none due).';
+COMMENT ON COLUMN maple_ftl_loan_state.collateral_amount IS 'Raw integer in collateral-asset native decimals (scale by collateral token.decimals).';
+COMMENT ON COLUMN maple_ftl_loan_state.collateral_required IS 'Raw integer in collateral-asset native decimals (scale by collateral token.decimals).';
+COMMENT ON COLUMN maple_ftl_loan_state.collateral_ratio IS 'Fixed-point ×1e6 (6 decimals).';
+COMMENT ON COLUMN maple_ftl_loan_state.drawdown_amount IS 'Raw integer in funds-asset native decimals (scale by funds token.decimals).';
+COMMENT ON COLUMN maple_ftl_loan_state.claimable_amount IS 'Raw integer in funds-asset native decimals (scale by funds token.decimals).';
+COMMENT ON COLUMN maple_ftl_loan_state.acm_ratio IS 'Fixed-point ×1e6 (6 decimals); NULL when the API reports none.';
+COMMENT ON COLUMN maple_ftl_loan_state.is_impaired IS 'Whether the loan is flagged impaired by Maple.';
+COMMENT ON COLUMN maple_ftl_loan_state.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Part of PK; order by synced_at DESC, processing_version DESC for the latest snapshot.';
+COMMENT ON COLUMN maple_ftl_loan_state.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
+
 INSERT INTO migrations (filename)
 VALUES ('20260619_120000_create_maple_ftl_loan_tables.sql')
 ON CONFLICT (filename) DO NOTHING;
