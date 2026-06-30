@@ -109,6 +109,10 @@ func truncateCurveFactTables(t *testing.T, ctx context.Context) {
 		"curve_cryptoswap_state",
 		"curve_swap",
 		"curve_liquidity_event",
+		"curve_stableswap_config",
+		"curve_cryptoswap_config",
+		"curve_parameter_event",
+		"curve_lp_token_event",
 	} {
 		if _, err := curveTestPool.Exec(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)

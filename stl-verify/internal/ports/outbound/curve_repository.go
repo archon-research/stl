@@ -18,7 +18,11 @@ type CurvePoolRow struct {
 	Kind         string // matches curve_pool.pool_kind
 	NCoins       int
 	CoinDecimals []int // index-aligned (ordered by coin_index)
-	DeployBlock  int64
+	// Precisions is index-aligned to CoinDecimals (same coin_index ordering):
+	// curve_pool_coin.precision = 10^(18 - token.decimals). A nil entry means
+	// the column was NULL for that coin.
+	Precisions  []*big.Int
+	DeployBlock int64
 	// LpTokenAddress is the pool's LP/share token. For pre-NG pools this is a
 	// separate contract (totalSupply lives there, not on the pool); nil when the
 	// pool is its own LP token (NG pools).
@@ -60,10 +64,14 @@ type LiquidityInput struct {
 
 // BlockWrites groups all of a block's curve-table rows for a single batched persist.
 type BlockWrites struct {
-	Swaps        []SwapInput
-	Liquidity    []LiquidityInput
-	StableStates []*entity.CurveStableswapState
-	CryptoStates []*entity.CurveCryptoswapState
+	Swaps             []SwapInput
+	Liquidity         []LiquidityInput
+	StableStates      []*entity.CurveStableswapState
+	CryptoStates      []*entity.CurveCryptoswapState
+	StableswapConfigs []*entity.CurveStableswapConfig
+	CryptoswapConfigs []*entity.CurveCryptoswapConfig
+	ParameterEvents   []*entity.CurveParameterEvent
+	LpTokenEvents     []*entity.CurveLpTokenEvent
 }
 
 // CurveRepository defines the interface for Curve DEX data persistence.

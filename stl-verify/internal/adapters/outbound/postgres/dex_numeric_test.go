@@ -8,6 +8,71 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+func TestNumericToNullableBigInt(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      pgtype.Numeric
+		want    *big.Int // nil means expect a nil result
+		wantErr bool
+	}{
+		{
+			name: "sql null maps to nil",
+			in:   pgtype.Numeric{Valid: false},
+			want: nil,
+		},
+		{
+			name: "exp zero returns the mantissa",
+			in:   pgtype.Numeric{Int: big.NewInt(42), Exp: 0, Valid: true},
+			want: big.NewInt(42),
+		},
+		{
+			name: "positive exp scales up",
+			in:   pgtype.Numeric{Int: big.NewInt(5), Exp: 3, Valid: true},
+			want: big.NewInt(5000),
+		},
+		{
+			name: "negative exp on a whole number scales down exactly",
+			in:   pgtype.Numeric{Int: big.NewInt(7000), Exp: -3, Valid: true},
+			want: big.NewInt(7),
+		},
+		{
+			name:    "negative exp on a non-whole value errors",
+			in:      pgtype.Numeric{Int: big.NewInt(7001), Exp: -3, Valid: true},
+			wantErr: true,
+		},
+		{
+			name:    "valid with nil mantissa errors",
+			in:      pgtype.Numeric{Int: nil, Valid: true},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NumericToNullableBigInt(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got nil (result %v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			switch {
+			case tt.want == nil:
+				if got != nil {
+					t.Errorf("got %v, want nil", got)
+				}
+			case got == nil:
+				t.Errorf("got nil, want %v", tt.want)
+			case got.Cmp(tt.want) != 0:
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBigIntToNullableNumeric(t *testing.T) {
 	if got := BigIntToNullableNumeric(nil); got.Valid {
 		t.Error("nil must serialise as SQL NULL (Valid=false)")

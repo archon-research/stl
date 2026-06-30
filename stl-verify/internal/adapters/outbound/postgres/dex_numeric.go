@@ -12,6 +12,34 @@ import (
 // shared PR, rather than in any single per-DEX repository file so that the
 // per-DEX PRs do not depend on one another.
 
+// NumericToNullableBigInt converts a scanned NUMERIC into a *big.Int, returning
+// nil when the value is SQL NULL. A positive Exp scales the mantissa up; a
+// negative Exp is only valid here when the value is a whole number (the curve
+// columns that use this store integers), in which case it scales down exactly.
+func NumericToNullableBigInt(n pgtype.Numeric) (*big.Int, error) {
+	if !n.Valid {
+		return nil, nil
+	}
+	if n.Int == nil {
+		return nil, fmt.Errorf("numeric is valid but has nil mantissa")
+	}
+	v := new(big.Int).Set(n.Int)
+	switch {
+	case n.Exp == 0:
+		return v, nil
+	case n.Exp > 0:
+		scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n.Exp)), nil)
+		return v.Mul(v, scale), nil
+	default:
+		scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-n.Exp)), nil)
+		quo, rem := new(big.Int).QuoRem(v, scale, new(big.Int))
+		if rem.Sign() != 0 {
+			return nil, fmt.Errorf("numeric with exp %d is not a whole number", n.Exp)
+		}
+		return quo, nil
+	}
+}
+
 // BigIntToNullableNumeric returns a pgtype.Numeric for a possibly-nil raw
 // integer big.Int (Exp = 0; storing the integer value as-is). A nil input
 // serialises as SQL NULL.
