@@ -116,7 +116,7 @@ func (f *fluidTestFixture) newTestVault(firstByte byte) *entity.FluidVault {
 	}
 }
 
-// createVault upserts one vault in its own committed tx and returns its id.
+// createVault records one vault in its own committed tx and returns its id.
 func (f *fluidTestFixture) createVault(t *testing.T, ctx context.Context, v *entity.FluidVault) int64 {
 	t.Helper()
 	tx, err := f.pool.Begin(ctx)
@@ -125,9 +125,9 @@ func (f *fluidTestFixture) createVault(t *testing.T, ctx context.Context, v *ent
 	}
 	defer tx.Rollback(ctx)
 
-	ids, err := f.repo.UpsertVaults(ctx, tx, []*entity.FluidVault{v})
+	ids, err := f.repo.RecordVaults(ctx, tx, []*entity.FluidVault{v})
 	if err != nil {
-		t.Fatalf("UpsertVaults: %v", err)
+		t.Fatalf("RecordVaults: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
@@ -143,7 +143,7 @@ func bytes20(first byte) []byte {
 
 // --- Registry tests ---
 
-func TestFluidUpsertVaults_CreateAndGetAll(t *testing.T) {
+func TestFluidRecordVaults_CreateAndGetAll(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
 
@@ -174,7 +174,7 @@ func TestFluidUpsertVaults_CreateAndGetAll(t *testing.T) {
 	}
 }
 
-func TestFluidUpsertVaults_MixedChainsFails(t *testing.T) {
+func TestFluidRecordVaults_MixedChainsFails(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
 
@@ -190,7 +190,7 @@ func TestFluidUpsertVaults_MixedChainsFails(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = f.repo.UpsertVaults(ctx, tx, []*entity.FluidVault{v1, v2})
+	_, err = f.repo.RecordVaults(ctx, tx, []*entity.FluidVault{v1, v2})
 	if err == nil {
 		t.Fatal("expected error on mixed-chain batch, got nil")
 	}
@@ -212,7 +212,7 @@ func TestFluidGetAllVaults_Empty(t *testing.T) {
 	}
 }
 
-func TestFluidUpsertVaults_Idempotent(t *testing.T) {
+func TestFluidRecordVaults_Idempotent(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
 
@@ -220,11 +220,11 @@ func TestFluidUpsertVaults_Idempotent(t *testing.T) {
 	id1 := f.createVault(t, ctx, v)
 	id2 := f.createVault(t, ctx, v)
 	if id1 != id2 {
-		t.Errorf("UpsertVaults not idempotent: first=%d second=%d", id1, id2)
+		t.Errorf("RecordVaults not idempotent: first=%d second=%d", id1, id2)
 	}
 }
 
-func TestFluidUpsertVaults_ImmutableFieldChangeFails(t *testing.T) {
+func TestFluidRecordVaults_ImmutableFieldChangeFails(t *testing.T) {
 	f := setupFluidTest(t)
 	ctx := context.Background()
 
@@ -240,7 +240,7 @@ func TestFluidUpsertVaults_ImmutableFieldChangeFails(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = f.repo.UpsertVaults(ctx, tx, []*entity.FluidVault{changed})
+	_, err = f.repo.RecordVaults(ctx, tx, []*entity.FluidVault{changed})
 	if err == nil {
 		t.Fatal("expected error on immutable field change, got nil")
 	}

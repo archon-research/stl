@@ -48,12 +48,12 @@ func NewFluidVaultRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bu
 	}, nil
 }
 
-// UpsertVaults upserts vault registry rows and returns address -> fluid_vault.id.
+// RecordVaults registers vault registry rows and returns address -> fluid_vault.id.
 // vault_type, collateral_token_id, and debt_token_id are immutable per vault, so
-// the upsert refreshes nothing on conflict (the no-op DO UPDATE keeps RETURNING
-// yielding the stored row) and the scan fails the run if any stored value
-// differs from the incoming one.
-func (r *FluidVaultRepository) UpsertVaults(ctx context.Context, tx pgx.Tx, vaults []*entity.FluidVault) (map[common.Address]int64, error) {
+// the INSERT ... ON CONFLICT refreshes nothing (the no-op DO UPDATE keeps
+// RETURNING yielding the stored row) and the scan fails the run if any stored
+// value differs from the incoming one.
+func (r *FluidVaultRepository) RecordVaults(ctx context.Context, tx pgx.Tx, vaults []*entity.FluidVault) (map[common.Address]int64, error) {
 	if len(vaults) == 0 {
 		return make(map[common.Address]int64), nil
 	}
@@ -83,7 +83,7 @@ func (r *FluidVaultRepository) UpsertVaults(ctx context.Context, tx pgx.Tx, vaul
 			var id, storedCollTokenID, storedDebtTokenID int64
 			var storedVaultType string
 			if err := row.Scan(&id, &storedVaultType, &storedCollTokenID, &storedDebtTokenID); err != nil {
-				return common.Address{}, 0, fmt.Errorf("upserting fluid vault %s: %w", addr, err)
+				return common.Address{}, 0, fmt.Errorf("recording fluid vault %s: %w", addr, err)
 			}
 			var mismatches []string
 			if storedVaultType != v.VaultType {
@@ -159,7 +159,7 @@ func (r *FluidVaultRepository) SaveVaultStates(ctx context.Context, tx pgx.Tx, s
 func (r *FluidVaultRepository) saveVaultStateBatch(ctx context.Context, tx pgx.Tx, states []*entity.FluidVaultState) (int64, error) {
 	const cols = 11
 	var sb strings.Builder
-	sb.WriteString(`INSERT INTO fluid_vault_state (fluid_vault_id, block_number, block_version, timestamp, total_collateral, total_debt, supply_exchange_price, borrow_exchange_price, supply_rate, borrow_rate, build_id) VALUES `)
+	sb.WriteString(`INSERT INTO fluid_vault_state (fluid_vault_id, block_number, block_version, block_timestamp, total_collateral, total_debt, supply_exchange_price, borrow_exchange_price, supply_rate, borrow_rate, build_id) VALUES `)
 
 	args := make([]any, 0, len(states)*cols)
 	for i, s := range states {
@@ -177,7 +177,7 @@ func (r *FluidVaultRepository) saveVaultStateBatch(ctx context.Context, tx pgx.T
 			totalCollateral, totalDebt, optionalNumeric(s.SupplyExchangePrice), optionalNumeric(s.BorrowExchangePrice),
 			optionalNumeric(s.SupplyRate), optionalNumeric(s.BorrowRate), int(r.buildID))
 	}
-	sb.WriteString(` ON CONFLICT (fluid_vault_id, block_number, block_version, timestamp, processing_version) DO NOTHING`)
+	sb.WriteString(` ON CONFLICT (fluid_vault_id, block_number, block_version, block_timestamp, processing_version) DO NOTHING`)
 
 	tag, err := tx.Exec(ctx, sb.String(), args...)
 	if err != nil {
