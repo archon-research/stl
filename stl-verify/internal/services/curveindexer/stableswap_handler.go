@@ -192,7 +192,9 @@ func (h *StableswapHandler) DecodeEvents(
 	return result, nil
 }
 
-// SnapshotState reads stableswap pool state at the given block via multicall.
+// SnapshotState reads stableswap pool state at the given block via multicall,
+// pinned to blockHash (see outbound.Multicaller.ExecuteAtHash) so a reorg
+// between publish and processing cannot silently answer from the wrong fork.
 // Call order is deterministic; results are decoded in the same order.
 // Every issued call that reverts propagates as an error (transient-retry
 // contract): a reverted read is never collapsed into a nil/NULL field. Reads
@@ -206,6 +208,7 @@ func (h *StableswapHandler) SnapshotState(
 	pool RegisteredPool,
 	blockNumber int64,
 	version int,
+	blockHash common.Hash,
 	ts time.Time,
 ) (StateSnapshot, error) {
 	calls, err := h.buildSnapshotCalls(pool)
@@ -213,7 +216,7 @@ func (h *StableswapHandler) SnapshotState(
 		return StateSnapshot{}, fmt.Errorf("building snapshot calls for pool %s: %w", pool.Address, err)
 	}
 
-	results, err := mc.Execute(ctx, calls, big.NewInt(blockNumber))
+	results, err := mc.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return StateSnapshot{}, fmt.Errorf("executing snapshot multicall for pool %s: %w", pool.Address, err)
 	}

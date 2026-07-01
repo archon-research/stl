@@ -161,6 +161,7 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 	bn := event.BlockNumber
 	ver := event.Version
 	ts := time.Unix(event.BlockTimestamp, 0).UTC()
+	blockHash := common.HexToHash(event.BlockHash)
 
 	acc, err := c.decodeBlockEvents(ctx, receipts, bn, ver, ts)
 	if err != nil {
@@ -171,7 +172,7 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 
 	// Read pool state via multicall BEFORE opening the transaction so archive-RPC
 	// latency never pins a pgx connection (connection-pool exhaustion is a stall cause).
-	snapshots, err := c.snapshotPools(ctx, snapshotSet, bn, ver, ts)
+	snapshots, err := c.snapshotPools(ctx, snapshotSet, bn, ver, blockHash, ts)
 	if err != nil {
 		return err
 	}
@@ -235,12 +236,14 @@ func (c *CurveService) decodeBlockEvents(ctx context.Context, receipts []shared.
 	return acc, nil
 }
 
-// snapshotPools calls each pool's SnapshotState via multicall and validates the
-// result. It must run BEFORE the DB transaction opens (see BlockHandler doc).
-func (c *CurveService) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, ts time.Time) ([]StateSnapshot, error) {
+// snapshotPools calls each pool's SnapshotState via multicall, pinned to
+// blockHash so the read cannot silently answer from a post-reorg fork (see
+// outbound.Multicaller.ExecuteAtHash), and validates the result. It must run
+// BEFORE the DB transaction opens (see BlockHandler doc).
+func (c *CurveService) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, blockHash common.Hash, ts time.Time) ([]StateSnapshot, error) {
 	snapshots := make([]StateSnapshot, 0, len(snapshotSet))
 	for _, pool := range snapshotSet {
-		snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
+		snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, blockHash, ts)
 		if err != nil {
 			return nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
 		}

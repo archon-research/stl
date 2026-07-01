@@ -499,6 +499,12 @@ func (m *callCountMock) Execute(ctx context.Context, calls []outbound.Call, bloc
 	return fn(ctx, calls, blockNumber)
 }
 
+// ExecuteAtHash is not exercised by feed-price tests (reads are number-pinned);
+// it is here only to satisfy outbound.Multicaller.
+func (m *callCountMock) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return nil, fmt.Errorf("ExecuteAtHash not mocked")
+}
+
 func (m *callCountMock) Address() common.Address {
 	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 }

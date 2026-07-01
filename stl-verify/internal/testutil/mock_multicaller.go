@@ -13,10 +13,11 @@ import (
 
 // MockMulticaller implements outbound.Multicaller for testing.
 type MockMulticaller struct {
-	mu        sync.Mutex
-	ExecuteFn func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
-	CallCount int
-	Addr      common.Address
+	mu              sync.Mutex
+	ExecuteFn       func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
+	ExecuteAtHashFn func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error)
+	CallCount       int
+	Addr            common.Address
 }
 
 func NewMockMulticaller() *MockMulticaller {
@@ -33,6 +34,16 @@ func (m *MockMulticaller) Execute(ctx context.Context, calls []outbound.Call, bl
 		return m.ExecuteFn(ctx, calls, blockNumber)
 	}
 	return nil, errors.New("Execute not mocked")
+}
+
+func (m *MockMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	m.mu.Lock()
+	m.CallCount++
+	m.mu.Unlock()
+	if m.ExecuteAtHashFn != nil {
+		return m.ExecuteAtHashFn(ctx, calls, blockHash)
+	}
+	return nil, errors.New("ExecuteAtHash not mocked")
 }
 
 func (m *MockMulticaller) Address() common.Address {

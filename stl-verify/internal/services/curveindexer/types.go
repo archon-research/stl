@@ -160,7 +160,10 @@ func (s StateSnapshot) Validate() error {
 
 type PoolClassHandler interface {
 	DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error)
-	SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, ts time.Time) (StateSnapshot, error)
+	// SnapshotState reads pool state via mc pinned to blockHash, the hash of the
+	// (blockNumber, version) block being processed (reorg-correctness: see
+	// outbound.Multicaller.ExecuteAtHash).
+	SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, blockHash common.Hash, ts time.Time) (StateSnapshot, error)
 	// Warm precomputes any per-coin-count state (e.g. event-signature hashes) for
 	// pools with nCoins coins. The coordinator calls it once per registered pool at
 	// construction so the per-block decode path is a pure cache read, keeping the
