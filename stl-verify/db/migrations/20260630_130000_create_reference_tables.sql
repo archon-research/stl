@@ -293,7 +293,7 @@ INSERT INTO country_ref VALUES ('VE', 'VEN', '862', 'Venezuela', 'SOUTH_AMERICA'
 INSERT INTO country_ref VALUES ('VG', 'VGB', '092', 'British Virgin Islands', 'NORTH_AMERICA', 'CARIBBEAN', 'USD', '2026-06-22 14:47:52.769993+00', '2026-06-30 07:44:59.022269+00') ON CONFLICT DO NOTHING;
 INSERT INTO country_ref VALUES ('XX', 'XXX', '000', 'Unknown', 'UNKNOWN', 'UNKNOWN', 'XXX', '2026-06-26 11:53:54.897517+00', '2026-06-30 07:44:59.022269+00') ON CONFLICT DO NOTHING;
 INSERT INTO country_ref VALUES ('ZA', 'ZAF', '710', 'South Africa', 'AFRICA', 'SOUTHERN_AFRICA', 'ZAR', '2026-06-22 14:47:52.769993+00', '2026-06-30 07:44:59.022269+00') ON CONFLICT DO NOTHING;
-INSERT INTO country_ref VALUES ('ZW', 'ZWE', '716', 'Zimbabwe', 'AFRICA', 'EASTERN_AFRICA', 'ZWL', '2026-06-22 14:47:52.769993+00', '2026-06-30 07:44:59.022269+00') ON CONFLICT DO NOTHING;
+INSERT INTO country_ref VALUES ('ZW', 'ZWE', '716', 'Zimbabwe', 'AFRICA', 'EASTERN_AFRICA', 'ZWG', '2026-06-22 14:47:52.769993+00', '2026-06-30 07:44:59.022269+00') ON CONFLICT DO NOTHING;
 INSERT INTO credit_rating_ref VALUES (1, 'AAA', 'Aaa', 'PRIME', 'INVESTMENT_GRADE', 'Highest quality, minimal credit risk', '2026-06-30 10:09:13.075084+00', '2026-06-30 10:09:13.075084+00') ON CONFLICT DO NOTHING;
 INSERT INTO credit_rating_ref VALUES (2, 'AA+', 'Aa1', 'HIGH_GRADE', 'INVESTMENT_GRADE', 'Very high quality, very low credit risk', '2026-06-30 10:09:13.075084+00', '2026-06-30 10:09:13.075084+00') ON CONFLICT DO NOTHING;
 INSERT INTO credit_rating_ref VALUES (3, 'AA', 'Aa2', 'HIGH_GRADE', 'INVESTMENT_GRADE', 'Very high quality, very low credit risk', '2026-06-30 10:09:13.075084+00', '2026-06-30 10:09:13.075084+00') ON CONFLICT DO NOTHING;
@@ -371,7 +371,7 @@ INSERT INTO currency_ref VALUES ('UAH', '980', 'Hryvnia', 2, '2026-06-30 08:05:4
 INSERT INTO currency_ref VALUES ('USD', '840', 'US Dollar', 2, '2026-06-30 08:05:49.040608+00', '2026-06-30 08:05:49.040608+00') ON CONFLICT DO NOTHING;
 INSERT INTO currency_ref VALUES ('VES', '928', 'Bolivar Soberano', 2, '2026-06-30 08:05:49.040608+00', '2026-06-30 08:05:49.040608+00') ON CONFLICT DO NOTHING;
 INSERT INTO currency_ref VALUES ('ZAR', '710', 'Rand', 2, '2026-06-30 08:05:49.040608+00', '2026-06-30 08:05:49.040608+00') ON CONFLICT DO NOTHING;
-INSERT INTO currency_ref VALUES ('ZWL', '932', 'Zimbabwe Dollar', 2, '2026-06-30 08:05:49.040608+00', '2026-06-30 08:05:49.040608+00') ON CONFLICT DO NOTHING;
+INSERT INTO currency_ref VALUES ('ZWG', '924', 'Zimbabwe Gold', 2, '2026-06-30 08:05:49.040608+00', '2026-06-30 08:05:49.040608+00') ON CONFLICT DO NOTHING;
 INSERT INTO currency_ref VALUES ('XXX', '999', 'Unknown / No currency', 0, '2026-06-30 08:05:49.040608+00', '2026-06-30 08:05:49.040608+00') ON CONFLICT DO NOTHING;
 INSERT INTO deal_type_ref VALUES ('LOAN', 'LONG', 'Asset lent to a protocol/counterparty; earns yield', '2026-06-22 15:12:10.464516+00', '2026-06-22 15:12:10.464516+00') ON CONFLICT DO NOTHING;
 INSERT INTO deal_type_ref VALUES ('BORROW', 'SHORT', 'Asset borrowed against collateral; incurs interest cost', '2026-06-22 15:12:10.464516+00', '2026-06-22 15:12:10.464516+00') ON CONFLICT DO NOTHING;
@@ -578,7 +578,7 @@ ALTER TABLE ONLY deal_type_ref
 ALTER TABLE ONLY entity_type_ref
     ADD CONSTRAINT entity_type_ref_pkey PRIMARY KEY (entity_type);
 ALTER TABLE ONLY industry_group_ref
-    ADD CONSTRAINT industry_group_ref_pkey PRIMARY KEY (industry_group);
+    ADD CONSTRAINT industry_group_ref_pkey PRIMARY KEY (sector, industry_group);
 ALTER TABLE ONLY origination_type_ref
     ADD CONSTRAINT origination_type_ref_pkey PRIMARY KEY (origination_type);
 ALTER TABLE ONLY sector_ref
@@ -604,8 +604,9 @@ ALTER TABLE ONLY country_ref
     ADD CONSTRAINT country_ref_currency_code_fkey FOREIGN KEY (currency_code) REFERENCES currency_ref(currency_code);
 ALTER TABLE ONLY industry_group_ref
     ADD CONSTRAINT industry_group_ref_sector_fkey FOREIGN KEY (sector) REFERENCES sector_ref(sector);
-ALTER TABLE ONLY security_subtype_ref
-    ADD CONSTRAINT security_subtype_ref_asset_class_fkey FOREIGN KEY (asset_class) REFERENCES asset_class_ref(asset_class);
+-- asset_class integrity is enforced transitively through the composite FK below
+-- ((asset_class, security_type) -> security_type_ref, whose asset_class -> asset_class_ref),
+-- so a standalone security_subtype_ref.asset_class -> asset_class_ref FK is redundant.
 ALTER TABLE ONLY security_subtype_ref
     ADD CONSTRAINT security_subtype_ref_asset_class_security_type_fkey FOREIGN KEY (asset_class, security_type) REFERENCES security_type_ref(asset_class, security_type);
 ALTER TABLE ONLY security_type_ref
