@@ -9,6 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+// CurveStableswapStateParams is the constructor input for CurveStableswapState;
+// see that type for what each field means.
 type CurveStableswapStateParams struct {
 	CurvePoolID  int64
 	BlockNumber  int64
@@ -32,6 +34,23 @@ type CurveStableswapStateParams struct {
 	CalcWithdrawOneCoin []*big.Int
 }
 
+// CurveStableswapState is a per-block snapshot of a Curve stableswap pool, one
+// field per on-chain view function. "NG" is Curve's Stableswap-NG ("new
+// generation") pool implementation; the NG-only fields are nil on the legacy
+// pre-NG plain pools that do not expose those getters. Non-obvious fields:
+//
+//	A                    amplification coefficient, A()
+//	Fee                  swap fee in Curve units (1e10 = 100%)
+//	SpotDy               marginal get_dy(i,j) per ordered coin pair i!=j
+//	LastPrice            last_price() (NG-only)
+//	PriceOracle          price_oracle() EMA price (NG-only)
+//	APrecise             A at full A_PRECISION, A_precise() (absent on the oldest pre-NG pools)
+//	AdminBalances        accrued admin (protocol) fees per coin
+//	StoredRates          per-coin rate multipliers, stored_rates() (NG-only)
+//	EmaPrice             ema_price(0) (NG-only)
+//	GetP                 get_p(0) instantaneous price (NG-only)
+//	CalcTokenAmount      LP minted for a unit deposit (calc_token_amount quote)
+//	CalcWithdrawOneCoin  coins out for a unit LP withdrawal, per coin (calc_withdraw_one_coin quote)
 type CurveStableswapState struct {
 	CurvePoolID  int64
 	BlockNumber  int64
@@ -77,6 +96,8 @@ func NewCurveStableswapState(p CurveStableswapStateParams) (*CurveStableswapStat
 	}, nil
 }
 
+// CurveCryptoswapStateParams is the constructor input for CurveCryptoswapState;
+// see that type for what each field means.
 type CurveCryptoswapStateParams struct {
 	CurvePoolID  int64
 	BlockNumber  int64
@@ -104,6 +125,23 @@ type CurveCryptoswapStateParams struct {
 	CalcWithdrawOneCoin []*big.Int
 }
 
+// CurveCryptoswapState is a per-block snapshot of a Curve Cryptoswap pool
+// (Tricrypto-NG), one field per on-chain view function. Non-obvious fields:
+//
+//	A / Gamma            amplification and gamma parameters, A() / gamma()
+//	Fee                  current dynamic fee, fee() (1e10 = 100%)
+//	D                    pool invariant, D()
+//	XcpProfit            cumulative profit metric, xcp_profit()
+//	XcpProfitA           xcp_profit at the last admin-fee claim, xcp_profit_a()
+//	PriceScale           per-coin (i in [0,n-2]) repeg price, price_scale(i)
+//	PriceOracle          per-coin EMA oracle price, price_oracle(i)
+//	LastPrices           per-coin last spot price, last_prices(i)
+//	LastPricesTimestamp  unix seconds of the last last_prices update
+//	SpotDy               marginal get_dy(i,j) per ordered coin pair i!=j
+//	LpPrice              the pool's own LP-token price, lp_price()
+//	GetDx                get_dx(i,j) input quote per ordered coin pair i!=j
+//	CalcTokenAmount      LP minted for a unit deposit (calc_token_amount quote)
+//	CalcWithdrawOneCoin  coins out for a unit LP withdrawal, per coin (calc_withdraw_one_coin quote)
 type CurveCryptoswapState struct {
 	CurvePoolID  int64
 	BlockNumber  int64
