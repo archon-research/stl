@@ -574,7 +574,7 @@ groups:
       - alert: VectorCexOrderbookStreamStalled
         expr: |
           max by (exchange, cluster) (
-            orderbook_last_update_age{k8s_namespace_name="vector"}
+            orderbook_last_update_age_seconds{k8s_namespace_name="vector"}
           ) > 120
         for: 10m
         labels:
@@ -593,7 +593,7 @@ groups:
 
       - alert: VectorCexOrderbookDown
         # Availability companion to StreamStalled, mirroring the Maple
-        # Stalled/Down pair (VEC-360). orderbook_last_update_age is a gauge from
+        # Stalled/Down pair (VEC-360). orderbook_last_update_age_seconds is a gauge from
         # the pod's own OTLP export, so it disappears on a pod/exporter outage
         # and StreamStalled goes silent (no series to compare). kube-state-metrics
         # is independent of that export, so this still fires when the process or
