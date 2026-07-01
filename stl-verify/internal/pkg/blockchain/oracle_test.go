@@ -18,11 +18,19 @@ import (
 
 // mockMulticaller implements outbound.Multicaller for testing.
 type mockMulticaller struct {
-	executeFn func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
+	executeFn       func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
+	executeAtHashFn func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error)
 }
 
 func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 	return m.executeFn(ctx, calls, blockNumber)
+}
+
+func (m *mockMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	if m.executeAtHashFn != nil {
+		return m.executeAtHashFn(ctx, calls, blockHash)
+	}
+	return nil, errors.New("ExecuteAtHash not mocked")
 }
 
 func (m *mockMulticaller) Address() common.Address {

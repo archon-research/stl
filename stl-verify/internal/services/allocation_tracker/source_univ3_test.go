@@ -24,6 +24,13 @@ func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.I
 	return f.results, nil
 }
 
+func (f *fakeMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.results, nil
+}
+
 func (f *fakeMulticaller) Address() common.Address {
 	return common.Address{}
 }

@@ -499,6 +499,10 @@ func (m *callCountMock) Execute(ctx context.Context, calls []outbound.Call, bloc
 	return fn(ctx, calls, blockNumber)
 }
 
+func (m *callCountMock) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return nil, errors.New("ExecuteAtHash not mocked")
+}
+
 func (m *callCountMock) Address() common.Address {
 	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 }

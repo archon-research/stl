@@ -9,6 +9,13 @@ import (
 
 type Multicaller interface {
 	Execute(ctx context.Context, calls []Call, blockNumber *big.Int) ([]Result, error)
+	// ExecuteAtHash pins the read to a specific block hash rather than a number.
+	// Required for state reads keyed by (blockNumber, version): after a reorg an
+	// archive node answers eth_call-by-number with the new canonical state, which
+	// can silently disagree with the reorged (older-version) data being processed.
+	// Pinning by hash makes the read unambiguous; the node errors if the hash is
+	// no longer canonical instead of silently answering from the wrong fork.
+	ExecuteAtHash(ctx context.Context, calls []Call, blockHash common.Hash) ([]Result, error)
 	Address() common.Address
 }
 

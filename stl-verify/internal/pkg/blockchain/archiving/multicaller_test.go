@@ -24,6 +24,10 @@ type stubInner struct {
 func (s *stubInner) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 	return s.results, s.err
 }
+
+func (s *stubInner) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return s.results, s.err
+}
 func (s *stubInner) Address() common.Address { return s.addr }
 
 type recordingArchiver struct {
@@ -233,6 +237,64 @@ func TestExecute(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExecuteAtHash covers the same forwarding/archiving/error-suppression
+// contract as TestExecute, exercised through the hash-pinned entry point.
+func TestExecuteAtHash(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	t.Run("forwards results and inner error without archiving", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		var wg sync.WaitGroup
+		d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true}}, err: errBoom}, rec, &wg)
+
+		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("err = %v, want %v", err, errBoom)
+		}
+		if len(res) != 1 || !res[0].Success {
+			t.Fatalf("results not forwarded: %+v", res)
+		}
+		d.Close()
+		if len(rec.batches) != 0 {
+			t.Fatalf("archived %d batches on inner error, want 0", len(rec.batches))
+		}
+	})
+
+	t.Run("archives the whole batch, stamping BlockNumber 0 (hash-pinned callers carry no number)", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		var wg sync.WaitGroup
+		d := newTestDecorator(&stubInner{results: []outbound.Result{
+			{Success: true, ReturnData: []byte{0xaa}},
+			{Success: false, ReturnData: []byte{0xbb}},
+		}}, rec, &wg)
+
+		calls := []outbound.Call{
+			{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
+			{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
+		}
+		ctx := WithBlockVersion(context.Background(), 3)
+		res, err := d.ExecuteAtHash(ctx, calls, common.HexToHash("0xabc"))
+		if err != nil {
+			t.Fatalf("ExecuteAtHash: %v", err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("results = %d, want 2", len(res))
+		}
+		d.Close()
+
+		if len(rec.batches) != 1 {
+			t.Fatalf("archived %d batches, want 1", len(rec.batches))
+		}
+		b := rec.batches[0]
+		if b.BlockNumber != 0 || b.BlockVersion != 3 || b.ChainID != 1 || b.BuildID != 47 {
+			t.Fatalf("batch metadata wrong: %+v", b)
+		}
+		if len(b.Calls) != 2 {
+			t.Fatalf("archived %d calls, want 2", len(b.Calls))
+		}
+	})
 }
 
 // TestExecuteSucceedsWhenArchiveErrors asserts the fire-and-forget guarantee:
