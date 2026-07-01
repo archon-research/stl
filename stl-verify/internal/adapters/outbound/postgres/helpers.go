@@ -154,6 +154,27 @@ func writeValuesPlaceholders(sb *strings.Builder, row, cols int) {
 	sb.WriteString(")")
 }
 
+// checkDedupedStateRows makes append-only ON CONFLICT DO NOTHING dedup visible
+// for a logical state save. A full dedup (zero rows inserted) is the expected
+// signature of a same-key retry — the trigger reuses processing_version and the
+// insert dedupes — so it logs at warn and succeeds. A partial dedup (some rows
+// collided while siblings did not) means data the caller believed fresh
+// silently collided; committing would drop the collided rows, so it fails the
+// save and the caller's transaction rolls back. expected is the number of rows
+// the caller logically attempted; table names the table for messages.
+func checkDedupedStateRows(logger *slog.Logger, table string, inserted int64, expected int) error {
+	switch {
+	case inserted == int64(expected):
+		return nil
+	case inserted == 0:
+		logger.Warn("state insert fully deduplicated by ON CONFLICT DO NOTHING (expected on retries)",
+			"table", table, "expected", expected, "inserted", inserted)
+		return nil
+	default:
+		return fmt.Errorf("state insert into %s partially deduplicated by ON CONFLICT DO NOTHING (%d of %d rows inserted); failing the save so the caller rolls back instead of silently dropping the collided rows", table, inserted, expected)
+	}
+}
+
 // marshalMetadata safely marshals metadata to JSON, returning "{}" for nil/empty maps.
 func marshalMetadata(m map[string]any) ([]byte, error) {
 	if len(m) == 0 {
