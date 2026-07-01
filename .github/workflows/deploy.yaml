@@ -487,10 +487,13 @@ jobs:
         run: |
           set -euo pipefail
           base="https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}"
-          curl -sSfL -o /tmp/argocd "${base}/argocd-linux-amd64"
+          # Download under the release's own filename so the published checksum
+          # line (`<hash>  argocd-linux-amd64`) matches what `sha256sum -c` looks
+          # for in /tmp — otherwise it errors "No such file or directory".
+          curl -sSfL -o /tmp/argocd-linux-amd64 "${base}/argocd-linux-amd64"
           curl -sSfL -o /tmp/cli_checksums.txt "${base}/cli_checksums.txt"
           ( cd /tmp && grep 'argocd-linux-amd64$' cli_checksums.txt | sha256sum -c - )
-          sudo install -m 0755 /tmp/argocd /usr/local/bin/argocd
+          sudo install -m 0755 /tmp/argocd-linux-amd64 /usr/local/bin/argocd
 
       - name: Resolve ArgoCD server and read baseline + diff
         id: argocd
@@ -738,7 +741,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: archon-research/github-actions
-          ref: aa058240b17bec94388285d36bb43989c0f9382b # argocd-sync (github-actions #29)
+          ref: 3690aaac8f402b6ad40fbfd073cb76313932727e # argocd-sync (github-actions #30, install fix)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
