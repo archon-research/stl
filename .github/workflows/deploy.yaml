@@ -528,10 +528,21 @@ jobs:
           # `argocd app diff` exits non-zero when there IS a diff — expected.
           # Best-effort: a diff hiccup must not block the approval request.
           DIFF=$(argocd app diff "$APP_NAME" --revision "$DEPLOY_SHA" 2>&1 || true)
+          # A prod deploy only bumps image tags, so the raw diff is one near
+          # identical 6-line block per workload — a huge wall in Slack. Collapse
+          # it to the count + changed resource names (the tag is the deploy SHA,
+          # shown once in the changelog). Resource headers look like
+          # `===== apps/Deployment vector/allocation-tracker =====`.
+          RESOURCES=$(printf '%s\n' "$DIFF" \
+            | sed -nE 's/^=====[[:space:]]+(.*)[[:space:]]+=====$/\1/p' \
+            | awk '{print $NF}' || true)
+          COUNT=$(printf '%s' "$RESOURCES" | grep -c . || true); COUNT=${COUNT:-0}
+          LIST=$(printf '%s\n' "$RESOURCES" | sed '/^$/d' | head -20 | paste -sd ', ' - || true)
+          if [ "$COUNT" -gt 20 ]; then LIST="${LIST}, …and $((COUNT - 20)) more"; fi
           {
-            echo "diff<<ARGOCD_DIFF_EOF"
-            printf '%s\n' "$DIFF" | head -c 2500
-            echo ""
+            echo "diff_count=${COUNT}"
+            echo "diff_list<<ARGOCD_DIFF_EOF"
+            printf '%s\n' "$LIST"
             echo "ARGOCD_DIFF_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -554,7 +565,8 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BASELINE: ${{ steps.argocd.outputs.baseline }}
           DEPLOY_SHA: ${{ needs.update-prod.outputs.deploy_sha }}
-          ARGOCD_DIFF: ${{ steps.argocd.outputs.diff }}
+          ARGOCD_DIFF_COUNT: ${{ steps.argocd.outputs.diff_count }}
+          ARGOCD_DIFF_LIST: ${{ steps.argocd.outputs.diff_list }}
         run: |
           set -euo pipefail
           DEPLOY_SHORT=${DEPLOY_SHA:0:7}
@@ -591,8 +603,8 @@ jobs:
             fi
           fi
 
-          if [ -n "$ARGOCD_DIFF" ]; then
-            CHANGELOG="${CHANGELOG}"$'\n\n'"*ArgoCD diff (\`stl-prod\`):*"$'\n''```'$'\n'"${ARGOCD_DIFF}"$'\n''```'
+          if [ "${ARGOCD_DIFF_COUNT:-0}" -gt 0 ]; then
+            CHANGELOG="${CHANGELOG}"$'\n\n'"*ArgoCD (\`stl-prod\`):* ${ARGOCD_DIFF_COUNT} workloads → \`${DEPLOY_SHORT}\`"$'\n'"${ARGOCD_DIFF_LIST}"
           fi
 
           {
@@ -741,7 +753,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: archon-research/github-actions
-          ref: 3690aaac8f402b6ad40fbfd073cb76313932727e # argocd-sync (github-actions #30, install fix)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
