@@ -186,6 +186,37 @@ func TestParseConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "explicit wait and visibility-timeout flags win over env vars",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
+				"-db", "postgres://localhost/db",
+				"-redis", "localhost:6379",
+				"-wait", "11",
+				"-visibility-timeout", "222",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY":        "test-key",
+				"SQS_WAIT_TIME":          "5",
+				"SQS_VISIBILITY_TIMEOUT": "60",
+				"S3_BUCKET":              "my-bucket",
+				"DEPLOY_ENV":             "sentinelstaging",
+			},
+			wantCfg: cliConfig{
+				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
+				dbURL:             "postgres://localhost/db",
+				redisAddr:         "localhost:6379",
+				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "my-bucket",
+				deployEnv:         "sentinelstaging",
+				maxMessages:       10,
+				waitTime:          11,
+				visibilityTimeout: 222,
+				chainID:           1,
+				chainName:         "mainnet",
+				targetDebtToken:   fluid_vault_indexer.SUSDSAddress,
+			},
+		},
+		{
 			name: "invalid SQS_WAIT_TIME",
 			args: []string{"-queue", "https://sqs.us-east-1.amazonaws.com/123/q", "-db", "postgres://localhost/db", "-redis", "localhost:6379"},
 			envVars: map[string]string{

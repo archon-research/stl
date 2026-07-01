@@ -85,6 +85,10 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, err
 	}
 
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
 	cfg := cliConfig{
 		queueURL:          *queueURL,
 		redisAddr:         *redisAddr,
@@ -122,14 +126,14 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
 		v, err := strconv.Atoi(waitTimeStr)
 		if err != nil {
 			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
 		}
 		cfg.waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
 		v, err := strconv.Atoi(visTimeStr)
 		if err != nil {
 			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
