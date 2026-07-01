@@ -25,6 +25,13 @@ func AppendOnChange[T any](
 	changed func(latest *T) bool,
 	insert func(ctx context.Context, tx pgx.Tx) error,
 ) error {
+	// Lock the key here so the helper is self-contained: any caller (e.g. a
+	// single-key writer with no batch pre-lock) gets correct read-then-write
+	// serialization. A caller that already holds this exact key in the same
+	// transaction (the multi-pool config batch pre-locks all keys in sorted
+	// order for cross-pool deadlock avoidance) re-acquires it here as a safe,
+	// reference-counted no-op — xact advisory locks are reentrant and released
+	// together at COMMIT/ROLLBACK.
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
 		lockKey,
