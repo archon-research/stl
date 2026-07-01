@@ -245,7 +245,7 @@ func (h *StableswapHandler) SnapshotState(
 //
 // Extended reads (issued with AllowFailure=true so one revert does not abort the
 // whole multicall, but a revert is still decoded as an error and stops the block):
-//  8. A_precise()
+//  8. A_precise() (only when pool.HasAPrecise; absent on some pre-NG pools)
 //  9. admin_balances(i) for i in 0..n-1
 //  10. calc_token_amount([10^decimals[i] for each i], true)
 //  11. calc_withdraw_one_coin(1e18, i) for i in 0..n-1
@@ -333,15 +333,18 @@ func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
 	}
 
-	// 8. A_precise()
 	allow := func(data []byte) {
 		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: true, CallData: data})
 	}
-	data, err = h.stableABI.Pack("A_precise")
-	if err != nil {
-		return nil, fmt.Errorf("packing A_precise: %w", err)
+
+	// 8. A_precise() -- gated by pool.HasAPrecise (see the field doc on RegisteredPool).
+	if pool.HasAPrecise {
+		data, err = h.stableABI.Pack("A_precise")
+		if err != nil {
+			return nil, fmt.Errorf("packing A_precise: %w", err)
+		}
+		allow(data)
 	}
-	allow(data)
 
 	// 9. admin_balances(i) for each coin
 	for i := 0; i < pool.NCoins; i++ {
@@ -513,10 +516,13 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		}
 	}
 
-	// 8. A_precise
-	aPrecise, err := optUint("A_precise")
-	if err != nil {
-		return nil, nil, fmt.Errorf("reading A_precise: %w", err)
+	// 8. A_precise -- gated by pool.HasAPrecise (see the field doc on RegisteredPool).
+	var aPrecise *big.Int
+	if pool.HasAPrecise {
+		aPrecise, err = optUint("A_precise")
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading A_precise: %w", err)
+		}
 	}
 
 	// 9. admin_balances(i)

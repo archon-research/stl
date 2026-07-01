@@ -25,6 +25,8 @@ func newStableswapHandlerForTest(t *testing.T) (*StableswapHandler, *abi.ABI) {
 }
 
 // stableswapPoolPreNG and stableswapPoolNG are fixture pools for decode tests.
+// Both model real pools (stETH classic pre-NG, stETH-ng) that expose A_precise, so
+// HasAPrecise=true and the snapshot issues the gated A_precise call.
 func stableswapPoolPreNG() RegisteredPool {
 	return RegisteredPool{
 		ID:           1,
@@ -32,6 +34,7 @@ func stableswapPoolPreNG() RegisteredPool {
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
+		HasAPrecise:  true,
 	}
 }
 
@@ -42,6 +45,7 @@ func stableswapPoolNG() RegisteredPool {
 		Kind:         KindStableswapNG,
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
+		HasAPrecise:  true,
 	}
 }
 

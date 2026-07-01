@@ -32,6 +32,11 @@ type RegisteredPool struct {
 	// LpTokenAddress is the separate LP token for pre-NG pools (where totalSupply
 	// lives), nil when the pool is its own LP token.
 	LpTokenAddress *common.Address
+	// HasAPrecise records whether this stableswap pool exposes A_precise(). Some of
+	// the oldest pre-NG pools (e.g. 3pool) do not, so the snapshot must gate the call
+	// on this flag. Set by the startup capability probe (ProbePoolCapabilities);
+	// irrelevant (and left false) for cryptoswap pools, which never call A_precise.
+	HasAPrecise bool
 }
 
 type SwapRecord struct {

@@ -150,6 +150,8 @@ func (r *capturingEventRepo) SaveBatch(_ context.Context, _ pgx.Tx, evts []*enti
 const testChainID = int64(1)
 
 // newTestPool returns a 2-coin pre-NG stableswap pool used by coordinator tests.
+// It models stETH classic, which does expose A_precise (HasAPrecise=true), so the
+// snapshot issues the gated A_precise call and the canned results stay aligned.
 func newTestPool() RegisteredPool {
 	return RegisteredPool{
 		ID:           42,
@@ -158,6 +160,7 @@ func newTestPool() RegisteredPool {
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
 		DeployBlock:  1,
+		HasAPrecise:  true,
 	}
 }
 

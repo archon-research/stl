@@ -1,6 +1,7 @@
 package curveindexer
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"math/big"
@@ -402,6 +403,7 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
+		HasAPrecise:  true,
 	}
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
@@ -476,6 +478,7 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 		Kind:         KindStableswapNG,
 		NCoins:       2,
 		CoinDecimals: []int{18, 6},
+		HasAPrecise:  true,
 	}
 	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
@@ -565,6 +568,7 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 		NCoins:         2,
 		CoinDecimals:   []int{18, 18},
 		LpTokenAddress: &lpAddr,
+		HasAPrecise:    true,
 	}
 
 	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
@@ -612,6 +616,7 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 		NCoins:         2,
 		CoinDecimals:   []int{18, 18},
 		LpTokenAddress: nil, // pool is its own LP token
+		HasAPrecise:    true,
 	}
 
 	mc := &capturingMulticaller{results: stableswapNGResults(t, a)}
@@ -642,6 +647,7 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
+		HasAPrecise:  true,
 	}
 
 	// Build results where the first balances call (required, AllowFailure=false) reverts.
@@ -701,5 +707,67 @@ func TestStableswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
+	}
+}
+
+// TestStableswapHandler_SnapshotNoAPreciseGatesCall verifies that a pre-NG pool
+// lacking A_precise (HasAPrecise=false, e.g. 3pool) issues no A_precise call,
+// leaves a_precise a structural NULL, and keeps the decode cursor aligned so every
+// other field still decodes correctly and no error is returned.
+func TestStableswapHandler_SnapshotNoAPreciseGatesCall(t *testing.T) {
+	_, a := newStableswapHandlerForTest(t)
+	h := NewStableswapHandler(a)
+	pool := stableswapPoolPreNG()
+	pool.HasAPrecise = false
+
+	// The canned pre-NG results include the A_precise entry at index preNG2CoinAPreciseIdx;
+	// drop it so the result list matches the gated (one-shorter) call list.
+	base := stableswapPreNGResults(t, a)
+	results := make([]outbound.Result, 0, len(base)-1)
+	results = append(results, base[:preNG2CoinAPreciseIdx]...)
+	results = append(results, base[preNG2CoinAPreciseIdx+1:]...)
+
+	aPreciseData, err := a.Pack("A_precise")
+	if err != nil {
+		t.Fatalf("packing A_precise: %v", err)
+	}
+
+	mc := &capturingMulticaller{results: results}
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	for i, c := range mc.captured {
+		if bytes.Equal(c.CallData, aPreciseData) {
+			t.Errorf("call[%d] is A_precise, but HasAPrecise=false must issue no A_precise call", i)
+		}
+	}
+
+	st := ss.Stableswap
+	if st == nil {
+		t.Fatal("want stableswap snapshot")
+	}
+	if st.APrecise != nil {
+		t.Errorf("a_precise = %v, want nil (structural NULL when gated off)", st.APrecise)
+	}
+	// Cursor stays aligned: fields after the gated-off A_precise still decode.
+	if len(st.AdminBalances) != 2 {
+		t.Errorf("admin_balances len = %d, want 2", len(st.AdminBalances))
+	}
+	if st.CalcTokenAmount == nil {
+		t.Error("calc_token_amount must still populate")
+	}
+	if len(st.CalcWithdrawOneCoin) != 2 {
+		t.Errorf("calc_withdraw_one_coin len = %d, want 2", len(st.CalcWithdrawOneCoin))
+	}
+	if ss.StableswapConfig == nil {
+		t.Fatal("config must still build")
+	}
+	if ss.StableswapConfig.InitialA.Cmp(big.NewInt(20000)) != 0 {
+		t.Errorf("config initial_a = %v, want 20000", ss.StableswapConfig.InitialA)
+	}
+	if ss.StableswapConfig.FutureAdminFee == nil || ss.StableswapConfig.FutureAdminFee.Cmp(big.NewInt(5000000000)) != 0 {
+		t.Errorf("config future_admin_fee = %v, want 5000000000", ss.StableswapConfig.FutureAdminFee)
 	}
 }

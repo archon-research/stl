@@ -75,6 +75,18 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading cryptoswap abi: %w", err)
 	}
 
+	// Resolve per-pool A_precise availability before constructing the service, so
+	// the snapshot issues that call only where it exists (a transport error fails
+	// startup and retries rather than mislabelling capabilities).
+	probeBlock, err := deps.LatestBlock(ctx)
+	if err != nil {
+		return fmt.Errorf("resolving probe block: %w", err)
+	}
+	pools, err = curveindexer.ProbePoolCapabilities(ctx, deps.Multicaller, stableABI, pools, probeBlock)
+	if err != nil {
+		return fmt.Errorf("probing pool capabilities: %w", err)
+	}
+
 	if len(poolRows) == 0 {
 		return fmt.Errorf("no curve pools registered for chain %d", cfg.ChainID)
 	}

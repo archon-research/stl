@@ -50,6 +50,20 @@ func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound
 
 func (m *stableswapCallCountResults) Address() common.Address { return common.Address{} }
 
+// allSuccessMulticaller returns a Success result for every call. It is used to
+// drive ProbePoolCapabilities so the seeded stableswap pools report HasAPrecise=true.
+type allSuccessMulticaller struct{}
+
+func (allSuccessMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	out := make([]outbound.Result, len(calls))
+	for i := range out {
+		out[i] = outbound.Result{Success: true}
+	}
+	return out, nil
+}
+
+func (allSuccessMulticaller) Address() common.Address { return common.Address{} }
+
 // coordPreNGResults mirrors the curveindexer unit-test canned results for a
 // 2-coin pre-NG pool (21 reads). Kept local to the postgres package because the
 // curveindexer fixtures are test-only and not importable.
@@ -292,6 +306,15 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	if err != nil {
 		t.Fatalf("loading stableswap ABI: %v", err)
 	}
+
+	// Mirror production: run the startup capability probe so the seeded stableswap
+	// pools (which model real pools that expose A_precise) get HasAPrecise=true and
+	// the snapshot issues the gated A_precise call, keeping the 21/27 canned counts.
+	registered, err = curveindexer.ProbePoolCapabilities(ctx, allSuccessMulticaller{}, stableABI, registered, big.NewInt(100))
+	if err != nil {
+		t.Fatalf("ProbePoolCapabilities: %v", err)
+	}
+
 	cryptoABI, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading cryptoswap ABI: %v", err)
