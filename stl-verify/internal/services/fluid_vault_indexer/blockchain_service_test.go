@@ -34,8 +34,12 @@ func mustERC20ABI(t *testing.T) *abi.ABI {
 	return parsed
 }
 
-// readFixture loads a captured getVaultEntireData return blob (real mainnet
-// resolver output) as raw bytes.
+// readFixture loads a testdata/*.hex fixture as raw bytes. Each fixture is the
+// hex-encoded ABI return blob of a real mainnet VaultResolver.getVaultEntireData
+// call, captured with `cast call <resolver> "getVaultEntireData(address)" <vault>`
+// (single_susds = the ETH/sUSDS VaultT1 0x75305a6a…; smart = a DEX vault). We
+// decode against captured on-chain output rather than a hand-encoded tuple so a
+// silent drift in Fluid's return shape or in our field offsets fails the test.
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", name))

@@ -90,7 +90,7 @@ func TestIntegration_ReconcileThenSnapshot(t *testing.T) {
 		t.Fatalf("fluid_vault rows = %d, want 1", vaultCount)
 	}
 
-	f.cache.receipts[19_500_010] = receiptsWithLog(t, vault, common.HexToHash("0xabc"))
+	f.cache.receipts[19_500_010] = receiptsWithLog(t, vault, logOperateTopic(t))
 	event := blockEvent(19_500_010)
 	if err := f.svc.processBlockEvent(ctx, event); err != nil {
 		t.Fatalf("processBlockEvent: %v", err)

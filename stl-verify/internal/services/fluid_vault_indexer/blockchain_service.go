@@ -14,9 +14,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// ethSentinel is the pseudo-address Fluid uses for native ETH collateral. It is
-// not an ERC-20 contract, so symbol()/decimals() cannot be read from it; the
-// indexer substitutes canonical ETH metadata.
+// ethSentinel is Fluid's native-ETH designator: contract code stores the
+// address 0xEeee…EEeE (Fluid's NATIVE_TOKEN constant, e.g.
+// fluid-contracts-public contracts/protocols/dexLite/other/constantVariables.sol)
+// wherever a vault's collateral is raw ETH rather than an ERC-20. There is no
+// contract at that address, so symbol()/decimals() revert; the indexer maps it
+// to the canonical ETH metadata instead of failing the read. This is not a
+// per-repo hack: 0xEeee…EEeE is the de-facto native-asset sentinel across DeFi
+// (Aave, 1inch, Fluid, …) and the only correct value to store for an
+// ETH-collateral vault.
 var ethSentinel = common.HexToAddress("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
 
 // TokenMetadata is the ERC-20 metadata the indexer needs to register a token.
