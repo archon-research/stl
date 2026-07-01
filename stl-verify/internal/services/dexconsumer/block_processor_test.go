@@ -107,7 +107,7 @@ func TestBlockProcessor_HandlerReceivesAllReceiptsAndBlockCoordinates(t *testing
 
 // TestBlockProcessor_EmptyBlock_StillCallsHandler: a block with zero receipts
 // must still invoke the handler once with an empty slice so the coordinator can
-// take heartbeat snapshots.
+// take sweep snapshots.
 func TestBlockProcessor_EmptyBlock_StillCallsHandler(t *testing.T) {
 	cache := &fakeCache{receipts: receiptsJSON(t, 0)}
 	var calls int

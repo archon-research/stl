@@ -94,23 +94,23 @@ func run(ctx context.Context, args []string) error {
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
-		Pools:           pools,
-		Handlers:        curveindexer.NewHandlerRegistry(curveindexer.NewStableswapHandler(stableABI), curveindexer.NewCryptoswapHandler(cryptoABI)),
-		Multicaller:     deps.Multicaller,
-		Repo:            repo,
-		EventWriter:     eventWriter,
-		TxManager:       deps.TxManager,
-		HeartbeatBlocks: cfg.HeartbeatBlocks,
-		ChainID:         cfg.ChainID,
-		Logger:          deps.Logger,
-		Telemetry:       deps.DexTelemetry,
+		Pools:       pools,
+		Handlers:    curveindexer.NewHandlerRegistry(curveindexer.NewStableswapHandler(stableABI), curveindexer.NewCryptoswapHandler(cryptoABI)),
+		Multicaller: deps.Multicaller,
+		Repo:        repo,
+		EventWriter: eventWriter,
+		TxManager:   deps.TxManager,
+		SweepBlocks: cfg.SweepBlocks,
+		ChainID:     cfg.ChainID,
+		Logger:      deps.Logger,
+		Telemetry:   deps.DexTelemetry,
 	})
 	if err != nil {
 		return fmt.Errorf("creating coordinator: %w", err)
 	}
 
 	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, coord.BlockHandler())
-	deps.Logger.Info("curve-indexer started", "pools", len(poolRows), "heartbeatBlocks", cfg.HeartbeatBlocks)
+	deps.Logger.Info("curve-indexer started", "pools", len(poolRows), "sweepBlocks", cfg.SweepBlocks)
 	sqsutil.RunLoop(ctx, sqsutil.Config{
 		Consumer:     deps.SQSConsumer,
 		MaxMessages:  cfg.MaxMessages,

@@ -341,15 +341,15 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	mc := &stableswapCallCountResults{t: t, pre: coordPreNGResults(), ng: coordNGResults(t)}
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
-		Pools:           registered,
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     eventWriter,
-		TxManager:       txMgr,
-		HeartbeatBlocks: 0,
-		ChainID:         curveCoordChainID,
-		Logger:          logger,
+		Pools:       registered,
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: eventWriter,
+		TxManager:   txMgr,
+		SweepBlocks: 0,
+		ChainID:     curveCoordChainID,
+		Logger:      logger,
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)

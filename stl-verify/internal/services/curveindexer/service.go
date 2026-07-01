@@ -22,20 +22,20 @@ import (
 // No doc comments on self-evident fields: the field names explain themselves.
 // Telemetry is optional (nil = no-op).
 type CurveServiceDeps struct {
-	Pools           []RegisteredPool
-	Handlers        map[PoolKind]PoolClassHandler
-	Multicaller     outbound.Multicaller
-	Repo            outbound.CurveRepository
-	EventWriter     *dexconsumer.ProtocolEventWriter
-	TxManager       outbound.TxManager
-	HeartbeatBlocks int64
-	ChainID         int64
-	Logger          *slog.Logger
-	Telemetry       *dextelemetry.Telemetry
+	Pools       []RegisteredPool
+	Handlers    map[PoolKind]PoolClassHandler
+	Multicaller outbound.Multicaller
+	Repo        outbound.CurveRepository
+	EventWriter *dexconsumer.ProtocolEventWriter
+	TxManager   outbound.TxManager
+	SweepBlocks int64
+	ChainID     int64
+	Logger      *slog.Logger
+	Telemetry   *dextelemetry.Telemetry
 }
 
 // snapshotKey records the (blockNumber, version) of the last persisted snapshot
-// for a pool, so heartbeat logic correctly detects reorgs where bn == lastBn but
+// for a pool, so sweep logic correctly detects reorgs where bn == lastBn but
 // version changed.
 type snapshotKey struct {
 	bn  int64
@@ -48,7 +48,7 @@ type snapshotKey struct {
 // Single-goroutine contract: sqsutil.RunLoop processes one SQS message at a
 // time, so no synchronisation is required on any CurveService field. All
 // per-block work happens in local variables inside BlockHandler; the only
-// cross-block state is the pool registry and lastSnapshot (heartbeat tracking).
+// cross-block state is the pool registry and lastSnapshot (sweep tracking).
 type CurveService struct {
 	// poolsByWatchedAddr maps every address whose logs route to a pool -> that
 	// pool. A pool is reachable by its own address and, for pre-NG pools, by its
@@ -60,7 +60,7 @@ type CurveService struct {
 	repo               outbound.CurveRepository
 	eventWriter        *dexconsumer.ProtocolEventWriter
 	txMgr              outbound.TxManager
-	heartbeatBlocks    int64
+	sweepBlocks        int64
 	chainID            int64
 	logger             *slog.Logger
 	telemetry          *dextelemetry.Telemetry
@@ -118,7 +118,7 @@ func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
 		repo:               deps.Repo,
 		eventWriter:        deps.EventWriter,
 		txMgr:              deps.TxManager,
-		heartbeatBlocks:    deps.HeartbeatBlocks,
+		sweepBlocks:        deps.SweepBlocks,
 		chainID:            deps.ChainID,
 		logger:             deps.Logger,
 		telemetry:          deps.Telemetry,
@@ -152,7 +152,7 @@ func (c *CurveService) BlockHandler() dexconsumer.BlockHandler {
 }
 
 // handleBlock decodes every receipt in the block into local accumulators,
-// snapshots the touched and heartbeat-due pools (via multicall, before opening
+// snapshots the touched and sweep-due pools (via multicall, before opening
 // the transaction), and persists swaps, liquidity events, captured logs, and
 // pool state in one transaction. Returning a non-nil error leaves the block for
 // SQS redelivery; nil is returned only after a successful commit. All per-block
@@ -376,15 +376,15 @@ func (c *CurveService) poolsTouchedByReceipt(receipt shared.TransactionReceipt, 
 }
 
 // buildSnapshotSet returns the sorted (by pool.ID ASC) union of touched pools
-// and heartbeat-due pools. Consistent ordering is required by the advisory-lock
+// and sweep-due pools. Consistent ordering is required by the advisory-lock
 // convention in the DB trigger.
 func (c *CurveService) buildSnapshotSet(bn int64, ver int, touched map[int64]RegisteredPool) []RegisteredPool {
 	byID := make(map[int64]RegisteredPool)
 	maps.Copy(byID, touched)
-	if c.heartbeatBlocks > 0 {
+	if c.sweepBlocks > 0 {
 		for _, pool := range c.pools {
 			last, seen := c.lastSnapshot[pool.ID]
-			if !seen || bn-last.bn >= c.heartbeatBlocks || (bn == last.bn && ver != last.ver) {
+			if !seen || bn-last.bn >= c.sweepBlocks || (bn == last.bn && ver != last.ver) {
 				byID[pool.ID] = pool
 			}
 		}

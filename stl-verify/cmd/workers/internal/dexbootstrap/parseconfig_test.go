@@ -282,7 +282,7 @@ func TestParseConfig_FlagOverridesEnvVar(t *testing.T) {
 	}
 }
 
-func TestParseConfig_HeartbeatBlocks(t *testing.T) {
+func TestParseConfig_SweepBlocks(t *testing.T) {
 	tests := []struct {
 		name    string
 		flag    []string
@@ -291,17 +291,17 @@ func TestParseConfig_HeartbeatBlocks(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "default when unset", flag: nil, want: 50},
-		{name: "flag overrides default", flag: []string{"-heartbeat-blocks", "10"}, want: 10},
-		{name: "env used when flag absent", env: map[string]string{"HEARTBEAT_BLOCKS": "25"}, want: 25},
-		{name: "flag overrides env", flag: []string{"-heartbeat-blocks", "10"}, env: map[string]string{"HEARTBEAT_BLOCKS": "25"}, want: 10},
-		{name: "zero disables heartbeat", flag: []string{"-heartbeat-blocks", "0"}, want: 0},
-		{name: "negative rejected", flag: []string{"-heartbeat-blocks", "-1"}, wantErr: true},
-		{name: "non-numeric env rejected", env: map[string]string{"HEARTBEAT_BLOCKS": "abc"}, wantErr: true},
+		{name: "flag overrides default", flag: []string{"-sweep-blocks", "10"}, want: 10},
+		{name: "env used when flag absent", env: map[string]string{"SWEEP_BLOCKS": "25"}, want: 25},
+		{name: "flag overrides env", flag: []string{"-sweep-blocks", "10"}, env: map[string]string{"SWEEP_BLOCKS": "25"}, want: 10},
+		{name: "zero disables sweep", flag: []string{"-sweep-blocks", "0"}, want: 0},
+		{name: "negative rejected", flag: []string{"-sweep-blocks", "-1"}, wantErr: true},
+		{name: "non-numeric env rejected", env: map[string]string{"SWEEP_BLOCKS": "abc"}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			envSet(t, happyEnv())
-			t.Setenv("HEARTBEAT_BLOCKS", "")
+			t.Setenv("SWEEP_BLOCKS", "")
 			for k, v := range tt.env {
 				t.Setenv(k, v)
 			}
@@ -315,8 +315,8 @@ func TestParseConfig_HeartbeatBlocks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if cfg.HeartbeatBlocks != tt.want {
-				t.Fatalf("HeartbeatBlocks = %d, want %d", cfg.HeartbeatBlocks, tt.want)
+			if cfg.SweepBlocks != tt.want {
+				t.Fatalf("SweepBlocks = %d, want %d", cfg.SweepBlocks, tt.want)
 			}
 		})
 	}

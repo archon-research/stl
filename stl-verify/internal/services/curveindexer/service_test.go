@@ -179,10 +179,10 @@ func newTestPoolWithLpToken() RegisteredPool {
 }
 
 // newTestCurveService constructs a CurveService with one stableswap pool, a
-// fakeMulticaller returning pre-NG canned results, and the given heartbeat
+// fakeMulticaller returning pre-NG canned results, and the given sweep
 // interval. Returns the coordinator and the repo fake so callers can inspect
 // call counts.
-func newTestCurveService(t *testing.T, heartbeatBlocks int64) (*CurveService, *fakeCurveRepo) {
+func newTestCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *fakeCurveRepo) {
 	t.Helper()
 
 	a, err := abis.CurveStableswapABI()
@@ -204,15 +204,15 @@ func newTestCurveService(t *testing.T, heartbeatBlocks int64) (*CurveService, *f
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: heartbeatBlocks,
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: sweepBlocks,
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -253,7 +253,7 @@ func swapReceipt(t *testing.T) shared.TransactionReceipt {
 // TestCurveService_EventBlockSnapshotsTouchedPool: a receipt touching pool A
 // triggers exactly one stableswap snapshot for pool A and the swap is saved.
 func TestCurveService_EventBlockSnapshotsTouchedPool(t *testing.T) {
-	// HeartbeatBlocks=0 disables heartbeat; only touched-pool snapshot fires.
+	// SweepBlocks=0 disables sweep; only touched-pool snapshot fires.
 	c, repo := newTestCurveService(t, 0)
 	bh := c.BlockHandler()
 
@@ -277,12 +277,12 @@ func TestCurveService_EventBlockSnapshotsTouchedPool(t *testing.T) {
 	}
 }
 
-// TestCurveService_HeartbeatSnapshotsQuietPool: with HeartbeatBlocks=5 and no
+// TestCurveService_SweepSnapshotsQuietPool: with SweepBlocks=5 and no
 // events, the pool is snapshotted on block 100 (initial, never snapshotted) and
 // again once bn advances >= 5 past the last snapshot; it is NOT snapshotted on
 // blocks 101-104.
-func TestCurveService_HeartbeatSnapshotsQuietPool(t *testing.T) {
-	// HeartbeatBlocks=5. The pool has never been snapshotted, so the first
+func TestCurveService_SweepSnapshotsQuietPool(t *testing.T) {
+	// SweepBlocks=5. The pool has never been snapshotted, so the first
 	// call (block 100) triggers an initial snapshot. After that, blocks
 	// 101-104 are below the threshold; block 105 (>= 100+5) triggers the second.
 	c, repo := newTestCurveService(t, 5)
@@ -296,15 +296,15 @@ func TestCurveService_HeartbeatSnapshotsQuietPool(t *testing.T) {
 
 	// Block 100: initial snapshot (pool never snapshotted).
 	// Block 101-104: no snapshot (100+5=105 not yet reached).
-	// Block 105: heartbeat snapshot (105-100 >= 5).
+	// Block 105: sweep snapshot (105-100 >= 5).
 	if repo.stableswapSaves != 2 {
-		t.Fatalf("stableswap snapshots = %d, want 2 (initial at 100, heartbeat at 105)", repo.stableswapSaves)
+		t.Fatalf("stableswap snapshots = %d, want 2 (initial at 100, sweep at 105)", repo.stableswapSaves)
 	}
 }
 
-// TestCurveService_HeartbeatDoesNotFireBeforeInterval: granular assertion that
+// TestCurveService_SweepDoesNotFireBeforeInterval: granular assertion that
 // blocks 101-104 produce no snapshots when last snapshot was at block 100.
-func TestCurveService_HeartbeatDoesNotFireBeforeInterval(t *testing.T) {
+func TestCurveService_SweepDoesNotFireBeforeInterval(t *testing.T) {
 	c, repo := newTestCurveService(t, 5)
 	bh := c.BlockHandler()
 
@@ -365,15 +365,15 @@ func TestCurveService_NilNilSnapshotErrors(t *testing.T) {
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     &fakeMulticaller{},
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 1, // triggers heartbeat snapshot
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: &fakeMulticaller{},
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 1, // triggers sweep snapshot
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -421,15 +421,15 @@ func TestCurveService_CaptureNetReachesEventWriter(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{pool},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 0,
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{pool},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 0,
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -479,15 +479,15 @@ func TestCurveService_SnapshotMulticallRunsOutsideTransaction(t *testing.T) {
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       tracker,
-		HeartbeatBlocks: 1, // force a snapshot even with no events
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   tracker,
+		SweepBlocks: 1, // force a snapshot even with no events
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -537,16 +537,16 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 1, // force a snapshot
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		Telemetry:       tel,
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 1, // force a snapshot
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:   tel,
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -661,15 +661,15 @@ func TestCurveService_DecodeError_ReturnsNonNil(t *testing.T) {
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 0,
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 0,
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -744,15 +744,15 @@ func TestCurveService_RoutesParameterAndLpEventsIntoBlockWrites(t *testing.T) {
 	pool := newTestPool()
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{pool},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 0,
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{pool},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 0,
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -810,15 +810,15 @@ func TestCurveService_RoutesLpTokenLogOnSeparateAddressToPool(t *testing.T) {
 	pool := newTestPoolWithLpToken()
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{pool},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 0, // only a touched pool should snapshot
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{pool},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 0, // only a touched pool should snapshot
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -1023,15 +1023,15 @@ func TestCurveService_QuietBlock_NoTransaction(t *testing.T) {
 	txMgr := &countingTxManager{}
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       txMgr,
-		HeartbeatBlocks: 0, // no heartbeat -> no snapshot on quiet block
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   txMgr,
+		SweepBlocks: 0, // no sweep -> no snapshot on quiet block
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)

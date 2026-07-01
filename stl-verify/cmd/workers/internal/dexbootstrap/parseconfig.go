@@ -34,10 +34,10 @@ type Config struct {
 	WaitTime          int
 	VisibilityTimeout int
 	ChainID           int64
-	// HeartbeatBlocks is the number of blocks between guaranteed state
-	// snapshots even on blocks with no pool event. 0 disables the heartbeat
+	// SweepBlocks is the number of blocks between guaranteed state
+	// snapshots even on blocks with no pool event. 0 disables the sweep
 	// (event-driven snapshots only).
-	HeartbeatBlocks int64
+	SweepBlocks int64
 }
 
 // ParseConfig reads the canonical DEX-worker flag + env set and validates
@@ -57,7 +57,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	maxMessages := fs.Int("max", 10, "Max messages per poll")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
-	heartbeatBlocks := fs.Int64("heartbeat-blocks", 50, "Blocks between guaranteed state snapshots (0 disables)")
+	sweepBlocks := fs.Int64("sweep-blocks", 50, "Blocks between guaranteed state snapshots (0 disables)")
 	if err := fs.Parse(args); err != nil {
 		// %w preserves flag.ErrHelp so callers can still distinguish -help.
 		return Config{}, fmt.Errorf("parsing %s flags: %w", flagSetName, err)
@@ -76,7 +76,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		MaxMessages:       *maxMessages,
 		WaitTime:          *waitTime,
 		VisibilityTimeout: *visibilityTimeout,
-		HeartbeatBlocks:   *heartbeatBlocks,
+		SweepBlocks:       *sweepBlocks,
 	}
 
 	if cfg.QueueURL == "" {
@@ -128,17 +128,17 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		}
 	}
 
-	if !explicit["heartbeat-blocks"] {
-		if hbStr := env.Get("HEARTBEAT_BLOCKS", ""); hbStr != "" {
-			v, err := strconv.ParseInt(hbStr, 10, 64)
+	if !explicit["sweep-blocks"] {
+		if sweepStr := env.Get("SWEEP_BLOCKS", ""); sweepStr != "" {
+			v, err := strconv.ParseInt(sweepStr, 10, 64)
 			if err != nil {
-				return Config{}, fmt.Errorf("parsing HEARTBEAT_BLOCKS %q: %w", hbStr, err)
+				return Config{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepStr, err)
 			}
-			cfg.HeartbeatBlocks = v
+			cfg.SweepBlocks = v
 		}
 	}
-	if cfg.HeartbeatBlocks < 0 {
-		return Config{}, fmt.Errorf("heartbeat blocks %d must be >= 0", cfg.HeartbeatBlocks)
+	if cfg.SweepBlocks < 0 {
+		return Config{}, fmt.Errorf("sweep blocks %d must be >= 0", cfg.SweepBlocks)
 	}
 
 	// Range-validate the SQS timings (from flag OR env). AWS rejects these at

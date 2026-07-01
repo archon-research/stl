@@ -596,9 +596,9 @@ lag in Curve pool state.
 1. **Multicall/RPC latency** — the Coordinator's `SnapshotState` calls issue
    batched multicalls to the archive RPC. High latency there dominates block
    duration. Check the archive RPC pod health and CPU.
-2. **Pool count** — a large `snapshotSet` (many touched pools or heartbeat
+2. **Pool count** — a large `snapshotSet` (many touched pools or sweep
    firing on all pools) multiplies multicall round-trips. Check
-   `HeartbeatBlocks` config and pool count.
+   `SweepBlocks` config and pool count.
 3. **DB write latency** — confirm TimescaleDB is not under I/O pressure.
 4. **Pod CPU/memory** — `kubectl top pod -n vector -l app=curve-indexer`.
 
@@ -606,7 +606,7 @@ lag in Curve pool state.
 
 - Archive RPC node degraded -> coordinate with infra; consider circuit-
   breaker or fallback RPC.
-- Heartbeat interval too short for pool count -> raise `HEARTBEAT_BLOCKS`.
+- Sweep interval too short for pool count -> raise `SWEEP_BLOCKS`.
 - TimescaleDB I/O contention -> investigate concurrent write patterns.
 
 ### Verify recovery
@@ -619,7 +619,7 @@ for the affected chain.
 ## VectorCurveIndexerNoStateWritten
 
 **Severity:** warning · **For:** 10m
-The 30m rate window must remain above the configured heartbeat interval (default 50 blocks, ~10min on mainnet).
+The 30m rate window must remain above the configured sweep interval (default 50 blocks, ~10min on mainnet).
 
 ### What it means
 
@@ -627,7 +627,7 @@ Blocks are advancing (`curve_blocks_processed_total{status="success"}` is
 non-zero) but no pool-state snapshot rows have been written
 (`curve_state_rows_written_total` is zero) for 30 minutes. The error path will
 NOT catch this: a quietly-empty snapshot loop (e.g. `buildSnapshotSet` always
-returns empty, heartbeat disabled and no touched pools, or all pools skipped)
+returns empty, sweep disabled and no touched pools, or all pools skipped)
 produces no errors, just no state rows.
 
 This is the data-quality / silent-empty check that `VectorCurveIndexerStalled`
@@ -635,9 +635,9 @@ cannot see.
 
 ### First checks
 
-1. **HeartbeatBlocks config** — if `HEARTBEAT_BLOCKS=0` (disabled) and no
+1. **SweepBlocks config** — if `SWEEP_BLOCKS=0` (disabled) and no
    blocks contain Curve events, `buildSnapshotSet` legitimately returns empty.
-   Confirm there is genuine pool activity on-chain or re-enable heartbeat.
+   Confirm there is genuine pool activity on-chain or re-enable sweep.
 2. **Touched pools** — check whether any registered pool addresses match logs
    in the processed blocks. `kubectl logs -l app=curve-indexer` should show
    pool-touch debug entries (or absence thereof).
@@ -650,7 +650,7 @@ cannot see.
 
 ### Common causes
 
-- `HEARTBEAT_BLOCKS=0` and no Curve events on this chain in 30m (legitimate
+- `SWEEP_BLOCKS=0` and no Curve events on this chain in 30m (legitimate
   low-activity window) -> confirm on-chain before escalating.
 - Pool registry empty (migration not applied, wrong chain ID) -> verify
   `SELECT count(*) FROM curve_pool WHERE chain_id = <id>`.
@@ -671,4 +671,3 @@ cannot see.
 confirm on-chain that no Curve activity occurred (legitimate quiet window).
 
 ---
-

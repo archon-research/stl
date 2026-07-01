@@ -641,7 +641,7 @@ groups:
             `curve-indexer` on chain `{{ $labels.chain }}` has processed
             blocks successfully for 30m but written zero pool-state snapshot
             rows. The snapshot loop may be silently empty (all pools skipped,
-            heartbeat disabled, or snapshotSet always returning empty).
+            sweep disabled, or snapshotSet always returning empty).
 
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange
