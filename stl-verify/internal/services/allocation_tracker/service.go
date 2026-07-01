@@ -203,7 +203,11 @@ func (s *Service) processBlock(
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+			blockHash, err := blockHashFromEvent(event)
+			if err != nil {
+				return err
+			}
+			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber, blockHash)
 			if err != nil {
 				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 			}
@@ -233,13 +237,29 @@ func (s *Service) processBlock(
 	// TestProcessBlock_SweepFetchFailure_ReturnsError.
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
-		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {
+		blockHash, err := blockHashFromEvent(event)
+		if err != nil {
+			return err
+		}
+		if err := s.sweep(ctx, event.BlockNumber, blockHash, event.Version, blockTimestamp); err != nil {
 			return fmt.Errorf("sweep block %d: %w", event.BlockNumber, err)
 		}
 		s.blocksSinceSweep = 0
 	}
 
 	return nil
+}
+
+// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
+// on an empty string rather than letting common.HexToHash silently produce the
+// zero hash: that would pin every state read to block 0's hash and get a hard
+// eth_call error, but only after burning an RPC round trip and looking like an
+// RPC failure instead of a malformed event.
+func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
+	if event.BlockHash == "" {
+		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
+	}
+	return common.HexToHash(event.BlockHash), nil
 }
 
 func (s *Service) matchTransfers(
@@ -344,10 +364,10 @@ func buildSupplySnapshots(
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
 // snapshots.
-func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	start := time.Now()
 
-	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
+	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}

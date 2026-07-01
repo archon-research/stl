@@ -67,18 +67,13 @@ func (s *ERC7540Source) Supports(tokenType string, protocol string) bool {
 	return tokenType == "centrifuge"
 }
 
-func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
 	}
 
-	var block *big.Int
-	if blockNumber > 0 {
-		block = big.NewInt(blockNumber)
-	}
-
-	shareTokens, err := s.resolveShares(ctx, entries, block)
+	shareTokens, err := s.resolveShares(ctx, entries, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("resolve vault shares: %w", err)
 	}
@@ -87,7 +82,7 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		return nil, err
 	}
 
-	balances, err := s.fetchShareBalances(ctx, entries, shareTokens, block)
+	balances, err := s.fetchShareBalances(ctx, entries, shareTokens, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch share balances: %w", err)
 	}
@@ -110,7 +105,7 @@ func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 // resolveShares calls share() once per unique vault address and returns the
 // vault → share token mapping. Any failed or undecodable call is a hard error:
 // an entry routed here whose contract has no share() is misconfigured.
-func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry, block *big.Int) (map[common.Address]common.Address, error) {
+func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (map[common.Address]common.Address, error) {
 	data, err := s.vaultABI.Pack("share")
 	if err != nil {
 		return nil, fmt.Errorf("pack share: %w", err)
@@ -131,7 +126,7 @@ func (s *ERC7540Source) resolveShares(ctx context.Context, entries []*TokenEntry
 		calls[i] = outbound.Call{Target: vault, AllowFailure: true, CallData: data}
 	}
 
-	mc, err := s.multicaller.Execute(ctx, calls, block)
+	mc, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("share multicall: %w", err)
 	}
@@ -182,7 +177,7 @@ func (s *ERC7540Source) checkDuplicateShares(entries []*TokenEntry, shareTokens 
 
 // fetchShareBalances reads share.balanceOf(wallet) for every entry, keyed by
 // the entry's own key (vault + wallet).
-func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*TokenEntry, shareTokens map[common.Address]common.Address, block *big.Int) (map[EntryKey]*big.Int, error) {
+func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*TokenEntry, shareTokens map[common.Address]common.Address, blockHash common.Hash) (map[EntryKey]*big.Int, error) {
 	calls := make([]outbound.Call, len(entries))
 	for i, e := range entries {
 		data, err := s.vaultABI.Pack("balanceOf", e.WalletAddress)
@@ -192,7 +187,7 @@ func (s *ERC7540Source) fetchShareBalances(ctx context.Context, entries []*Token
 		calls[i] = outbound.Call{Target: shareTokens[e.ContractAddress], AllowFailure: true, CallData: data}
 	}
 
-	mc, err := s.multicaller.Execute(ctx, calls, block)
+	mc, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("balanceOf multicall: %w", err)
 	}

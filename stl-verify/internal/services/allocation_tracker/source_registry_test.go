@@ -12,6 +12,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+var testBlockHash = common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+
 // mockSource is a mock PositionSource for testing the registry.
 type mockSource struct {
 	name       string
@@ -28,7 +30,7 @@ func (m *mockSource) Supports(tokenType, protocol string) bool {
 	return m.tokenTypes[tokenType]
 }
 
-func (m *mockSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+func (m *mockSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error) {
 	m.called++
 	if m.err != nil {
 		return nil, m.err
@@ -116,7 +118,7 @@ func TestSourceRegistry_FetchAll_GroupsBySource(t *testing.T) {
 		{ContractAddress: contract2, WalletAddress: wallet2, TokenType: "erc4626"},
 	}
 
-	results, err := registry.FetchAll(context.Background(), entries, 0)
+	results, err := registry.FetchAll(context.Background(), entries, 0, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,7 +164,7 @@ func TestSourceRegistry_FetchAll_SkipsUnsupported(t *testing.T) {
 		{ContractAddress: common.HexToAddress("0x1111"), WalletAddress: common.HexToAddress("0xaaaa"), TokenType: "unknown_type"},
 	}
 
-	results, err := registry.FetchAll(context.Background(), entries, 0)
+	results, err := registry.FetchAll(context.Background(), entries, 0, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -204,7 +206,7 @@ func TestSourceRegistry_FetchAll_PartialFailure(t *testing.T) {
 		{ContractAddress: common.HexToAddress("0x2222"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"},
 	}
 
-	results, err := registry.FetchAll(context.Background(), entries, 0)
+	results, err := registry.FetchAll(context.Background(), entries, 0, testBlockHash)
 
 	// Should return partial results + error
 	if err == nil {
@@ -245,7 +247,7 @@ func TestSourceRegistry_FetchAll_NilResultIsError(t *testing.T) {
 			entries := []*TokenEntry{
 				{ContractAddress: common.HexToAddress("0x1111"), WalletAddress: common.HexToAddress("0xaaaa"), TokenType: "erc20"},
 			}
-			_, err := registry.FetchAll(context.Background(), entries, 0)
+			_, err := registry.FetchAll(context.Background(), entries, 0, testBlockHash)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
 			}
@@ -267,7 +269,7 @@ func TestSourceRegistry_FetchAll_WarnsOnceForStubRouted(t *testing.T) {
 		{ContractAddress: common.HexToAddress("0x2"), WalletAddress: common.HexToAddress("0xb"), TokenType: "psm3", Protocol: "psm3"},
 	}
 	for i := range 2 {
-		if _, err := registry.FetchAll(context.Background(), entries, int64(i)); err != nil {
+		if _, err := registry.FetchAll(context.Background(), entries, int64(i), testBlockHash); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -292,7 +294,7 @@ func TestSourceRegistry_FetchAll_StubStillFetchedAfterWarn(t *testing.T) {
 	entries := []*TokenEntry{
 		{ContractAddress: common.HexToAddress("0x1"), WalletAddress: common.HexToAddress("0xa"), TokenType: "psm3", Protocol: "psm3"},
 	}
-	if _, err := registry.FetchAll(context.Background(), entries, 0); err != nil {
+	if _, err := registry.FetchAll(context.Background(), entries, 0, testBlockHash); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -313,7 +315,7 @@ func TestSourceRegistry_FetchAll_SkipSourceDoesNotWarn(t *testing.T) {
 	entries := []*TokenEntry{
 		{ContractAddress: common.HexToAddress("0x1"), WalletAddress: common.HexToAddress("0xa"), TokenType: "anchorage", Protocol: "anchorage"},
 	}
-	if _, err := registry.FetchAll(context.Background(), entries, 0); err != nil {
+	if _, err := registry.FetchAll(context.Background(), entries, 0, testBlockHash); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -335,7 +337,7 @@ func TestSourceRegistry_FetchAll_WarnsOnceForUnsupported(t *testing.T) {
 		{ContractAddress: common.HexToAddress("0x2"), WalletAddress: common.HexToAddress("0xb"), TokenType: "mystery", Protocol: "x"},
 	}
 	for i := range 2 {
-		if _, err := registry.FetchAll(context.Background(), entries, int64(i)); err != nil {
+		if _, err := registry.FetchAll(context.Background(), entries, int64(i), testBlockHash); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	}

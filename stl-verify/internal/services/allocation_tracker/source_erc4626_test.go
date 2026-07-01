@@ -47,12 +47,12 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 1 {
 			t.Fatalf("expected 1 call, got %d", len(calls))
 		}
-		if blockNumber == nil || blockNumber.Cmp(big.NewInt(24584100)) != 0 {
-			t.Fatalf("blockNumber = %v, want 24584100", blockNumber)
+		if blockHash != testBlockHash {
+			t.Fatalf("blockHash = %v, want %v (state read must be pinned to the block hash, not the number, so a reorg can't return the wrong fork's state)", blockHash, testBlockHash)
 		}
 
 		returnData, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(expectedShares)
@@ -71,7 +71,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 		TokenType:       "erc4626",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100)
+	results, err := src.FetchBalances(context.Background(), entries, 24584100, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 
 func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
 	}
 
@@ -111,7 +111,7 @@ func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		TokenType:       "erc4626",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}

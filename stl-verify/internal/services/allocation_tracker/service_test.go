@@ -215,7 +215,7 @@ func TestProcessBlock_PartialFetchFailure_ReturnsErrorAndDoesNotPersist(t *testi
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockTimestamp: 1700000000})
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()})
 	if err == nil {
 		t.Fatal("expected partial fetch failure to be returned")
 	}
@@ -251,7 +251,7 @@ func TestProcessBlock_SweepFetchFailure_ReturnsError(t *testing.T) {
 		blocksSinceSweep: 0,
 	}
 
-	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockTimestamp: 1700000000})
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()})
 	if err == nil {
 		t.Fatal("expected sweep fetch failure to be returned")
 	}
@@ -285,7 +285,7 @@ func TestProcessBlock_FailedSweepDoesNotResetCounter(t *testing.T) {
 		blocksSinceSweep: 0,
 	}
 
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 300, Version: 0, BlockTimestamp: 1700000000}
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 300, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
 	if err := svc.processBlock(context.Background(), event); err == nil {
 		t.Fatal("expected first sweep attempt to fail")
 	}
@@ -335,7 +335,7 @@ func TestProcessBlock_SweepHandlerFailure_ReturnsError(t *testing.T) {
 		blocksSinceSweep: 0,
 	}
 
-	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 400, Version: 0, BlockTimestamp: 1700000000})
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 400, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()})
 	if err == nil {
 		t.Fatal("expected sweep handler failure to be returned")
 	}
