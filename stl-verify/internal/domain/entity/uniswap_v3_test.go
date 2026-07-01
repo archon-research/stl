@@ -149,7 +149,7 @@ func TestUniswapV3LiquidityEvent_Validate(t *testing.T) {
 			BlockTimestamp: time.Unix(1, 0).UTC(),
 			TxHash:         hash,
 			LogIndex:       0,
-			Kind:           LiquidityEventMint,
+			EventName:      LiquidityEventMint,
 			Owner:          addr,
 			Sender:         &addr,
 			Recipient:      nil,
@@ -162,13 +162,13 @@ func TestUniswapV3LiquidityEvent_Validate(t *testing.T) {
 	}
 	validBurn := func() *UniswapV3LiquidityEvent {
 		e := validMint()
-		e.Kind = LiquidityEventBurn
+		e.EventName = LiquidityEventBurn
 		e.Sender = nil
 		return e
 	}
 	validCollect := func() *UniswapV3LiquidityEvent {
 		e := validMint()
-		e.Kind = LiquidityEventCollect
+		e.EventName = LiquidityEventCollect
 		e.Sender = nil
 		e.Recipient = &addr
 		e.Amount = nil
@@ -190,7 +190,7 @@ func TestUniswapV3LiquidityEvent_Validate(t *testing.T) {
 		{"missing block timestamp", validMint, func(e *UniswapV3LiquidityEvent) { e.BlockTimestamp = time.Time{} }, true},
 		{"missing tx hash", validMint, func(e *UniswapV3LiquidityEvent) { e.TxHash = common.Hash{} }, true},
 		{"negative log index", validMint, func(e *UniswapV3LiquidityEvent) { e.LogIndex = -1 }, true},
-		{"bad kind", validMint, func(e *UniswapV3LiquidityEvent) { e.Kind = "sideways" }, true},
+		{"bad kind", validMint, func(e *UniswapV3LiquidityEvent) { e.EventName = "sideways" }, true},
 		{"missing owner", validMint, func(e *UniswapV3LiquidityEvent) { e.Owner = common.Address{} }, true},
 		{"tick_lower below int24 min", validMint, func(e *UniswapV3LiquidityEvent) { e.TickLower = -8388609 }, true},
 		{"tick_upper above int24 max", validMint, func(e *UniswapV3LiquidityEvent) { e.TickUpper = 8388608 }, true},

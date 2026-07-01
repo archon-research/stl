@@ -173,7 +173,7 @@ type UniswapV3LiquidityEvent struct {
 	BlockTimestamp time.Time
 	TxHash         common.Hash
 	LogIndex       int
-	Kind           LiquidityEventKind
+	EventName      LiquidityEventKind
 	Owner          common.Address
 	Sender         *common.Address // set for mint only
 	Recipient      *common.Address // set for collect only
@@ -203,8 +203,8 @@ func (e *UniswapV3LiquidityEvent) Validate() error {
 	if e.LogIndex < 0 {
 		return fmt.Errorf("logIndex must be non-negative, got %d", e.LogIndex)
 	}
-	if _, ok := validLiquidityEventKinds[e.Kind]; !ok {
-		return fmt.Errorf("kind %q is not allowed", e.Kind)
+	if _, ok := validLiquidityEventKinds[e.EventName]; !ok {
+		return fmt.Errorf("event name %q is not allowed", e.EventName)
 	}
 	if e.Owner == (common.Address{}) {
 		return fmt.Errorf("owner is required")
@@ -229,7 +229,7 @@ func (e *UniswapV3LiquidityEvent) Validate() error {
 	// sender (the position manager) and a liquidity delta; Burn carries only the delta
 	// (msg.sender is implicitly the owner); Collect carries a payout recipient and no
 	// delta (amount0/amount1 are the withdrawn fees, not a liquidity change).
-	switch e.Kind {
+	switch e.EventName {
 	case LiquidityEventMint:
 		if e.Amount == nil {
 			return fmt.Errorf("amount must not be nil for mint")
