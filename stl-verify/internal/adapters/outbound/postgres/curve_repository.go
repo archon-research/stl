@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
-	"sort"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -589,7 +589,7 @@ func distinctSortedConfigPoolIDs(
 	for id := range seen {
 		ids = append(ids, id)
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	slices.Sort(ids)
 	return ids
 }
 
