@@ -16,6 +16,47 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
+// TestStableswapHandler_RemoveLiquidityOne_ValidatesCoinIndex: the NG
+// RemoveLiquidityOne token_id (int128) is stored as coin_index, so a value
+// outside [0, NCoins) must be rejected rather than persisted as a silent
+// data-quality anomaly. Mirrors the cryptoswap RemoveLiquidityOne guard.
+func TestStableswapHandler_RemoveLiquidityOne_ValidatesCoinIndex(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := stableswapPoolNG() // NCoins = 2
+	provider := common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+	cases := []struct {
+		name    string
+		tokenID *big.Int
+		wantErr bool
+	}{
+		{"index 0", big.NewInt(0), false},
+		{"index 1", big.NewInt(1), false},
+		{"index equal to n_coins", big.NewInt(2), true},
+		{"negative index", big.NewInt(-1), true},
+		{"far out of range", big.NewInt(1 << 20), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			log := buildEventLog(t, a, "RemoveLiquidityOne", pool.Address,
+				[]common.Hash{addrTopic(provider)},
+				tc.tokenID, big.NewInt(100), big.NewInt(200), big.NewInt(1000))
+			receipt := shared.TransactionReceipt{Logs: []shared.Log{log}, TransactionHash: log.TransactionHash}
+			_, err := h.DecodeEvents(receipt, pool, testChainID, 100, 0, time.Unix(100, 0).UTC())
+			if tc.wantErr && err == nil {
+				t.Fatalf("token_id %s: expected out-of-range error, got nil", tc.tokenID)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("token_id %s: unexpected error: %v", tc.tokenID, err)
+			}
+		})
+	}
+}
+
 // buildReceiptWithTokenExchange constructs a shared.TransactionReceipt containing
 // a single TokenExchange log. The indexed buyer goes in Topics[1]; the four
 // non-indexed fields (sold_id, tokens_sold, bought_id, tokens_bought) are

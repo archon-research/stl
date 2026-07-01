@@ -891,6 +891,11 @@ func extractStableswapRemoveLiquidityOne(
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
+	// token_id is int128; reject anything outside [0, NCoins) rather than store a
+	// garbage coin_index (same guard as the cryptoswap RemoveLiquidityOne path).
+	if !tokenID.IsInt64() || tokenID.Sign() < 0 || tokenID.Int64() >= int64(pool.NCoins) {
+		return LiquidityRecord{}, fmt.Errorf("stableswap RemoveLiquidityOne coin_index %s out of range [0,%d)", tokenID, pool.NCoins)
+	}
 	coinIdx := int(tokenID.Int64())
 	return LiquidityRecord{
 		Pool:         pool,
