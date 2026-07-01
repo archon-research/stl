@@ -449,6 +449,7 @@ func TestCurveCurveService_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable(t *
 		BlockNumber:    bn,
 		Version:        0,
 		BlockTimestamp: 1_700_000_000,
+		BlockHash:      common.HexToHash("0x01").Hex(),
 	}
 
 	if err := coord.BlockHandler()(ctx, event, []shared.TransactionReceipt{receipt}); err != nil {
@@ -510,6 +511,7 @@ func TestCurveCurveService_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot(t 
 		BlockNumber:    bn,
 		Version:        0,
 		BlockTimestamp: 1_700_000_100,
+		BlockHash:      common.HexToHash("0x02").Hex(),
 	}
 
 	if err := coord.BlockHandler()(ctx, event, []shared.TransactionReceipt{receipt}); err != nil {
