@@ -16,6 +16,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+// oracleTestBlockHash is the block hash used by the price-fetch tests: with
+// VEC-471 the live fetchers pin reads via ExecuteAtHash, which needs a
+// non-zero hash. Backfill fallback (zero hash → Execute) is covered by its
+// own focused tests.
+var oracleTestBlockHash = common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+
 // mockMulticaller implements outbound.Multicaller for testing.
 type mockMulticaller struct {
 	executeFn       func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
@@ -29,6 +35,13 @@ func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, bl
 func (m *mockMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 	if m.executeAtHashFn != nil {
 		return m.executeAtHashFn(ctx, calls, blockHash)
+	}
+	// VEC-471 moved the live price fetchers to ExecuteAtHash; the shape-based
+	// executeFn dispatchers in these tests key on calls alone (never the block
+	// arg), so forwarding keeps them valid for both entry points. Tests that
+	// assert the hash-pinned path was used set executeAtHashFn explicitly.
+	if m.executeFn != nil {
+		return m.executeFn(ctx, calls, nil)
 	}
 	return nil, errors.New("ExecuteAtHash not mocked")
 }
@@ -179,6 +192,7 @@ func TestFetchOraclePrices(t *testing.T) {
 				oracleAddr,
 				assets,
 				blockNum,
+				oracleTestBlockHash,
 			)
 
 			if tt.wantErr {
@@ -219,8 +233,15 @@ func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
 	assets := []common.Address{common.HexToAddress("0xCC")}
 	prices := []*big.Int{big.NewInt(42)}
 
+	// The read must be pinned to the block hash, not the number: after a reorg
+	// an archive node answers eth_call-by-number with the new canonical price,
+	// which can silently disagree with the reorged block being processed (VEC-471).
 	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			t.Fatal("FetchOraclePrices must call ExecuteAtHash for a non-zero block hash, not Execute")
+			return nil, nil
+		},
+		executeAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 			if len(calls) != 1 {
 				t.Fatalf("expected 1 call, got %d", len(calls))
 			}
@@ -230,8 +251,8 @@ func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
 			if calls[0].AllowFailure {
 				t.Error("call[0].AllowFailure = true, want false")
 			}
-			if blockNumber.Int64() != 99 {
-				t.Errorf("blockNumber = %d, want 99", blockNumber.Int64())
+			if blockHash != oracleTestBlockHash {
+				t.Errorf("blockHash = %s, want %s", blockHash, oracleTestBlockHash)
 			}
 			return []outbound.Result{
 				{Success: true, ReturnData: abiPackPrices(t, prices)},
@@ -244,6 +265,7 @@ func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
 		oracleABI,
 		oracleAddr,
 		assets, 99,
+		oracleTestBlockHash,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -275,6 +297,7 @@ func TestFetchOraclePrices_EmptyAssets(t *testing.T) {
 		oracleABI,
 		oracleAddr,
 		[]common.Address{}, 100,
+		oracleTestBlockHash,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

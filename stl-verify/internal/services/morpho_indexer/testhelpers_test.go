@@ -82,20 +82,11 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	// VEC-471 moved the ~6 dynamic-state getters (market/position/vault state)
 	// from Execute to ExecuteAtHash, while static-identity getters (market
 	// params, token/vault metadata, symbol sweep) stay on Execute. Existing
-	// tests configure ExecuteFn with a shape-based dispatcher keyed on `calls`
-	// alone (call count + selectors), never on the block arg — so forwarding
-	// ExecuteAtHash to whatever ExecuteFn is currently set (read at call time,
-	// since tests reassign it after newTestHarness returns) keeps every
-	// existing dispatcher correct for both entry points without duplicating
-	// each test's mock logic. Tests that specifically assert the hash-pinned
-	// path was used (e.g. TestGetMarketState_PinsToBlockHash) override
-	// ExecuteAtHashFn directly, which takes precedence over this default.
-	multicaller.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-		if multicaller.ExecuteFn == nil {
-			return nil, fmt.Errorf("neither ExecuteAtHashFn nor ExecuteFn is mocked")
-		}
-		return multicaller.ExecuteFn(ctx, calls, nil)
-	}
+	// tests configure only ExecuteFn with a shape-based dispatcher keyed on
+	// `calls` alone; testutil.MockMulticaller forwards an unset ExecuteAtHashFn
+	// to ExecuteFn, so those dispatchers stay correct for both entry points.
+	// Tests that assert the hash-pinned path was actually used (e.g.
+	// TestGetMarketState_PinsToBlockHash) set ExecuteAtHashFn explicitly.
 
 	// Pre-seed the not-vault cache with the canonical "user" addresses so the
 	// V1/V1.1 Morpho Blue caller/onBehalf discovery probe (added to close the
