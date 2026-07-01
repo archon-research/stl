@@ -246,11 +246,13 @@
 - [ ] **Step 2:** `kustomize build k8s/overlays/staging` and `.../prod` resolve without error and reference a single `dex-indexer` image for both DEX deployments.
 - [ ] **Step 3:** Commit: `git commit -m "feat(k8s): single dex-indexer image, one deployment per DEX (curve + uniswap-v3)"`. (Docker/release consolidation is VEC-329; the single binary simplifies it — note, don't duplicate here.)
 
-### Task B13: Local real-mainnet validation
+### Task B13: Local real-mainnet validation (15-min live run)
 
-- [ ] **Step 1:** `cd stl-verify && make dev-up` with real Alchemy key; deploy the `dex-indexer` with `DEX=uniswap-v3` (or run the binary locally with `DEX=uniswap-v3` against the local cluster).
-- [ ] **Step 2:** Let it process live blocks touching the deep wstETH/WETH 0.01% pool; query the DB (db-query skill / psql) and confirm each `uniswap_v3_*` table populates with non-NULL data; verify a swap row, a state row (all core cols non-null), tick rows, and the protocol_event mirror. Confirm baseline tick count is bounded/logged.
-- [ ] **Step 3:** Record row/size deltas + any silent-NULL findings in the design doc's validation note. No code commit unless a defect is found (then fix + test first).
+**Bar (user-mandated):** validate against the **real watcher with real Alchemy and real live mainnet block data**, running locally for a **full 15 minutes**, then confirm ALL captured data looks correct — not a brief smoke test.
+
+- [ ] **Step 1:** `cd stl-verify && make dev-up` with the real Alchemy key so the real watcher ingests live mainnet blocks; run the `dex-indexer` with `DEX=uniswap-v3` against the local cluster (real SNS→SQS→worker path, real Multicall3 RPC). Let it run **≥15 minutes** of live blocks.
+- [ ] **Step 2:** Query the DB (db-query skill / psql) and validate EVERY `uniswap_v3_*` table over the run window: (a) `uniswap_v3_swap` — rows present for pools that traded, signed amounts sane, price from sqrtPriceX96 within a sane band vs the WETH peg; (b) `uniswap_v3_pool_state` — all core columns NON-NULL (slot0 fields, liquidity, feeGrowthGlobal0/1, protocolFees0/1, balance0/1), twap_tick populated where cardinality allows; (c) `uniswap_v3_liquidity_event` — mint/burn/collect decoded with correct tick ranges; (d) `uniswap_v3_tick` — touched-tick rows written, liquidityNet signs consistent, baseline count bounded/logged; (e) `uniswap_v3_pool_event` — any low-freq events captured; (f) the shared `protocol_event` mirror is a superset of all pool logs (nothing dropped). Spot-check ≥1 row per table against `cast`/Etherscan for a specific block to confirm values match chain truth. Confirm NO silent AllowFailure NULLs on core columns and NO stalls in the worker logs.
+- [ ] **Step 3:** Record row/size deltas, the baseline-tick count, and any silent-NULL / signature-mismatch findings in the design doc's validation note. No code commit unless a defect is found (then fix + test first, per TDD).
 
 ---
 
