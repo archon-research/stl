@@ -75,7 +75,7 @@ func (h *CryptoswapHandler) DecodeEvents(
 			continue
 		}
 
-		logIndex, err := parseHexUint(log.LogIndex)
+		logIndex, err := shared.ParseHexUint(log.LogIndex)
 		if err != nil {
 			return DecodedEvents{}, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 		}
@@ -117,7 +117,7 @@ func (h *CryptoswapHandler) DecodeEvents(
 			continue
 		}
 
-		eventData, err := decodeLog(ev, log)
+		eventData, err := shared.DecodeLog(*ev, log)
 		if err != nil {
 			return DecodedEvents{}, fmt.Errorf("decoding %s log (index %s): %w", ev.Name, log.LogIndex, err)
 		}
@@ -563,7 +563,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	// stops the block rather than collapsing to a nil field.
 	optUint := func(method string) (*big.Int, error) {
 		defer func() { idx++ }()
-		return optionalUintResult(h.cryptoABI, method, results[idx], pool.Address, blockNumber)
+		return shared.OptionalUintResult(h.cryptoABI, method, results[idx], pool.Address, blockNumber)
 	}
 
 	// 11. D()
@@ -623,7 +623,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	}
 
 	// 17. calc_token_amount (packed manually per N, so not unpacked via the ABI).
-	calcTokenAmount, err := unpackSingleUint(results[idx])
+	calcTokenAmount, err := shared.UnpackSingleUint(results[idx])
 	if err != nil {
 		return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
 	}
@@ -795,27 +795,27 @@ func extractCryptoswapTokenExchange(
 	logIndex uint,
 	txHash common.Hash,
 ) (SwapRecord, error) {
-	buyer, err := getAddrField(data, "buyer")
+	buyer, err := shared.GetAddrField(data, "buyer")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	soldID, err := getBigIntField(data, "sold_id")
+	soldID, err := shared.GetBigIntField(data, "sold_id")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	tokensSold, err := getBigIntField(data, "tokens_sold")
+	tokensSold, err := shared.GetBigIntField(data, "tokens_sold")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	boughtID, err := getBigIntField(data, "bought_id")
+	boughtID, err := shared.GetBigIntField(data, "bought_id")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	tokensBought, err := getBigIntField(data, "tokens_bought")
+	tokensBought, err := shared.GetBigIntField(data, "tokens_bought")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	fee, err := getBigIntField(data, "fee")
+	fee, err := shared.GetBigIntField(data, "fee")
 	if err != nil {
 		return SwapRecord{}, err
 	}

@@ -95,15 +95,15 @@ func extractLpTokenEvent(
 		return LpTokenEventRecord{}, fmt.Errorf("not an LP-token event: %s", eventName)
 	}
 
-	from, err := getAddrField(data, fromKey)
+	from, err := shared.GetAddrField(data, fromKey)
 	if err != nil {
 		return LpTokenEventRecord{}, err
 	}
-	to, err := getAddrField(data, toKey)
+	to, err := shared.GetAddrField(data, toKey)
 	if err != nil {
 		return LpTokenEventRecord{}, err
 	}
-	value, err := getBigIntField(data, "value")
+	value, err := shared.GetBigIntField(data, "value")
 	if err != nil {
 		return LpTokenEventRecord{}, err
 	}
@@ -154,7 +154,7 @@ func marshalParameterParams(data map[string]any, pairs [][2]string) (json.RawMes
 	out := make(map[string]string, len(pairs))
 	for _, p := range pairs {
 		jsonKey, abiField := p[0], p[1]
-		v, err := getBigIntField(data, abiField)
+		v, err := shared.GetBigIntField(data, abiField)
 		if err != nil {
 			return nil, fmt.Errorf("parameter event field %q: %w", abiField, err)
 		}
@@ -174,7 +174,7 @@ func marshalAddressParams(data map[string]any, addrPairs, bigIntPairs [][2]strin
 	out := make(map[string]string, len(addrPairs)+len(bigIntPairs))
 	for _, p := range addrPairs {
 		jsonKey, abiField := p[0], p[1]
-		a, err := getAddrField(data, abiField)
+		a, err := shared.GetAddrField(data, abiField)
 		if err != nil {
 			return nil, fmt.Errorf("parameter event field %q: %w", abiField, err)
 		}
@@ -182,7 +182,7 @@ func marshalAddressParams(data map[string]any, addrPairs, bigIntPairs [][2]strin
 	}
 	for _, p := range bigIntPairs {
 		jsonKey, abiField := p[0], p[1]
-		v, err := getBigIntField(data, abiField)
+		v, err := shared.GetBigIntField(data, abiField)
 		if err != nil {
 			return nil, fmt.Errorf("parameter event field %q: %w", abiField, err)
 		}

@@ -75,7 +75,7 @@ func (h *StableswapHandler) DecodeEvents(
 			continue
 		}
 
-		logIndex, err := parseHexUint(log.LogIndex)
+		logIndex, err := shared.ParseHexUint(log.LogIndex)
 		if err != nil {
 			return DecodedEvents{}, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 		}
@@ -118,7 +118,7 @@ func (h *StableswapHandler) DecodeEvents(
 			continue
 		}
 
-		eventData, err := decodeLog(ev, log)
+		eventData, err := shared.DecodeLog(*ev, log)
 		if err != nil {
 			return DecodedEvents{}, fmt.Errorf("decoding %s log (index %s): %w", ev.Name, log.LogIndex, err)
 		}
@@ -512,7 +512,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	// stops the block rather than collapsing to a nil field.
 	optUint := func(method string) (*big.Int, error) {
 		defer func() { idx++ }()
-		return optionalUintResult(h.stableABI, method, results[idx], pool.Address, blockNumber)
+		return shared.OptionalUintResult(h.stableABI, method, results[idx], pool.Address, blockNumber)
 	}
 
 	// 7. NG-only: price_oracle and last_price
@@ -548,7 +548,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	}
 
 	// 10. calc_token_amount (packed manually per N, so not unpacked via the ABI)
-	calcTokenAmount, err := unpackSingleUint(results[idx])
+	calcTokenAmount, err := shared.UnpackSingleUint(results[idx])
 	if err != nil {
 		return nil, nil, fmt.Errorf("calc_token_amount: %w", err)
 	}
@@ -568,7 +568,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	var storedRates []*big.Int
 	var emaPrice, getP *big.Int
 	if pool.Kind == KindStableswapNG {
-		storedRates, err = unpackUintArray(results[idx], pool.NCoins)
+		storedRates, err = shared.UnpackUintArray(results[idx], pool.NCoins)
 		if err != nil {
 			return nil, nil, fmt.Errorf("stored_rates: %w", err)
 		}
@@ -768,23 +768,23 @@ func extractStableswapTokenExchange(
 	isUnderlying bool,
 ) (SwapRecord, error) {
 	// buyer is indexed; it was decoded from Topics[1] into data["buyer"].
-	buyer, err := getAddrField(data, "buyer")
+	buyer, err := shared.GetAddrField(data, "buyer")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	soldID, err := getBigIntField(data, "sold_id")
+	soldID, err := shared.GetBigIntField(data, "sold_id")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	tokensSold, err := getBigIntField(data, "tokens_sold")
+	tokensSold, err := shared.GetBigIntField(data, "tokens_sold")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	boughtID, err := getBigIntField(data, "bought_id")
+	boughtID, err := shared.GetBigIntField(data, "bought_id")
 	if err != nil {
 		return SwapRecord{}, err
 	}
-	tokensBought, err := getBigIntField(data, "tokens_bought")
+	tokensBought, err := shared.GetBigIntField(data, "tokens_bought")
 	if err != nil {
 		return SwapRecord{}, err
 	}
@@ -817,23 +817,23 @@ func extractStableswapAddLiquidity(
 	logIndex uint,
 	txHash common.Hash,
 ) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
+	provider, err := shared.GetAddrField(data, "provider")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	amounts, err := getBigIntSliceField(data, "token_amounts")
+	amounts, err := shared.GetBigIntSliceField(data, "token_amounts")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	fees, err := getBigIntSliceField(data, "fees")
+	fees, err := shared.GetBigIntSliceField(data, "fees")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	invariant, err := getBigIntField(data, "invariant")
+	invariant, err := shared.GetBigIntField(data, "invariant")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	supply, err := getBigIntField(data, "token_supply")
+	supply, err := shared.GetBigIntField(data, "token_supply")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
@@ -856,19 +856,19 @@ func extractStableswapRemoveLiquidity(
 	logIndex uint,
 	txHash common.Hash,
 ) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
+	provider, err := shared.GetAddrField(data, "provider")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	amounts, err := getBigIntSliceField(data, "token_amounts")
+	amounts, err := shared.GetBigIntSliceField(data, "token_amounts")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	fees, err := getBigIntSliceField(data, "fees")
+	fees, err := shared.GetBigIntSliceField(data, "fees")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	supply, err := getBigIntField(data, "token_supply")
+	supply, err := shared.GetBigIntField(data, "token_supply")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
@@ -890,24 +890,24 @@ func extractStableswapRemoveLiquidityOne(
 	logIndex uint,
 	txHash common.Hash,
 ) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
+	provider, err := shared.GetAddrField(data, "provider")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
 	// token_id is int128 in the NG ABI; go-ethereum decodes it as *big.Int.
-	tokenID, err := getBigIntField(data, "token_id")
+	tokenID, err := shared.GetBigIntField(data, "token_id")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	tokenAmount, err := getBigIntField(data, "token_amount")
+	tokenAmount, err := shared.GetBigIntField(data, "token_amount")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	coinAmount, err := getBigIntField(data, "coin_amount")
+	coinAmount, err := shared.GetBigIntField(data, "coin_amount")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	supply, err := getBigIntField(data, "token_supply")
+	supply, err := shared.GetBigIntField(data, "token_supply")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
@@ -935,23 +935,23 @@ func extractStableswapRemoveLiquidityImbalance(
 	logIndex uint,
 	txHash common.Hash,
 ) (LiquidityRecord, error) {
-	provider, err := getAddrField(data, "provider")
+	provider, err := shared.GetAddrField(data, "provider")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	amounts, err := getBigIntSliceField(data, "token_amounts")
+	amounts, err := shared.GetBigIntSliceField(data, "token_amounts")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	fees, err := getBigIntSliceField(data, "fees")
+	fees, err := shared.GetBigIntSliceField(data, "fees")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	invariant, err := getBigIntField(data, "invariant")
+	invariant, err := shared.GetBigIntField(data, "invariant")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
-	supply, err := getBigIntField(data, "token_supply")
+	supply, err := shared.GetBigIntField(data, "token_supply")
 	if err != nil {
 		return LiquidityRecord{}, err
 	}
