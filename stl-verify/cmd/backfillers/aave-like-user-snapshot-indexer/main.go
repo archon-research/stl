@@ -381,7 +381,7 @@ func run(args []string) error {
 			logger.Info("batch starting", "batch", batchIdx+1, "of", len(batches), "users", len(batch))
 
 			rpcStart := time.Now()
-			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber))
+			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber), common.Hash{})
 			if err != nil {
 				return fmt.Errorf("batch %d RPC failed after %s: %w", batchIdx+1, time.Since(rpcStart), err)
 			}
