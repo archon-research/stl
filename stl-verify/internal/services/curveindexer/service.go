@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"sort"
 	"time"
 
@@ -34,21 +33,14 @@ type CurveServiceDeps struct {
 	Telemetry   *dextelemetry.Telemetry
 }
 
-// snapshotKey records the (blockNumber, version) of the last persisted snapshot
-// for a pool, so sweep logic correctly detects reorgs where bn == lastBn but
-// version changed.
-type snapshotKey struct {
-	bn  int64
-	ver int
-}
-
 // CurveService drives per-block event decoding and transactional persistence for
 // the Curve indexer.
 //
 // Single-goroutine contract: sqsutil.RunLoop processes one SQS message at a
 // time, so no synchronisation is required on any CurveService field. All
 // per-block work happens in local variables inside BlockHandler; the only
-// cross-block state is the pool registry and lastSnapshot (sweep tracking).
+// cross-block state is the pool registry and the tracker (sweep and
+// deploy-gate tracking).
 type CurveService struct {
 	// poolsByWatchedAddr maps every address whose logs route to a pool -> that
 	// pool. A pool is reachable by its own address and, for pre-NG pools, by its
@@ -60,12 +52,11 @@ type CurveService struct {
 	repo               outbound.CurveRepository
 	eventWriter        *dexconsumer.ProtocolEventWriter
 	txMgr              outbound.TxManager
-	sweepBlocks        int64
 	chainID            int64
 	logger             *slog.Logger
 	telemetry          *dextelemetry.Telemetry
 
-	lastSnapshot map[int64]snapshotKey // pool.ID -> last snapshotted (block, version)
+	tracker *dexconsumer.SnapshotTracker
 }
 
 // validate checks that every required dependency is present, so NewCurveService
@@ -118,11 +109,10 @@ func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
 		repo:               deps.Repo,
 		eventWriter:        deps.EventWriter,
 		txMgr:              deps.TxManager,
-		sweepBlocks:        deps.SweepBlocks,
 		chainID:            deps.ChainID,
 		logger:             deps.Logger,
 		telemetry:          deps.Telemetry,
-		lastSnapshot:       make(map[int64]snapshotKey),
+		tracker:            dexconsumer.NewSnapshotTracker(deps.SweepBlocks),
 	}, nil
 }
 
@@ -176,7 +166,14 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 		return err
 	}
 
-	snapshotSet := c.buildSnapshotSet(bn, ver, acc.touched)
+	touchedIDs := make(map[int64]bool, len(acc.touched))
+	for id := range acc.touched {
+		touchedIDs[id] = true
+	}
+	snapshotSet, err := dexconsumer.DueSet(c.tracker, c.pools, touchedIDs, bn, ver)
+	if err != nil {
+		return err
+	}
 
 	// Read pool state via multicall BEFORE opening the transaction so archive-RPC
 	// latency never pins a pgx connection (connection-pool exhaustion is a stall cause).
@@ -203,9 +200,11 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 		return err
 	}
 
-	for _, pool := range snapshotSet {
-		c.lastSnapshot[pool.ID] = snapshotKey{bn: bn, ver: ver}
+	snapshottedIDs := make([]int64, len(snapshotSet))
+	for i, pool := range snapshotSet {
+		snapshottedIDs[i] = pool.ID
 	}
+	c.tracker.MarkSnapshotted(snapshottedIDs, bn, ver)
 	c.telemetry.RecordStateRows(ctx, int(stateRows))
 	return nil
 }
@@ -384,30 +383,6 @@ func (c *CurveService) poolsTouchedByReceipt(receipt shared.TransactionReceipt, 
 	}
 	sort.Slice(pools, func(i, j int) bool { return pools[i].ID < pools[j].ID })
 	return pools, nil
-}
-
-// buildSnapshotSet returns the sorted (by pool.ID ASC) union of touched pools
-// and sweep-due pools. Consistent ordering is required by the advisory-lock
-// convention in the DB trigger.
-func (c *CurveService) buildSnapshotSet(bn int64, ver int, touched map[int64]RegisteredPool) []RegisteredPool {
-	byID := make(map[int64]RegisteredPool)
-	maps.Copy(byID, touched)
-	if c.sweepBlocks > 0 {
-		for _, pool := range c.pools {
-			last, seen := c.lastSnapshot[pool.ID]
-			if !seen || bn-last.bn >= c.sweepBlocks || (bn == last.bn && ver != last.ver) {
-				byID[pool.ID] = pool
-			}
-		}
-	}
-	result := make([]RegisteredPool, 0, len(byID))
-	for _, pool := range byID {
-		result = append(result, pool)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].ID < result[j].ID
-	})
-	return result
 }
 
 // ---------------------------------------------------------------------------
