@@ -161,6 +161,14 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 	bn := event.BlockNumber
 	ver := event.Version
 	ts := time.Unix(event.BlockTimestamp, 0).UTC()
+
+	// common.HexToHash never errors: an empty string would silently become the
+	// zero hash and reach the RPC as a real eth_call. Both producers always
+	// populate BlockHash (it's part of the dedup key), so this guards a
+	// malformed message rather than an expected path.
+	if event.BlockHash == "" {
+		return fmt.Errorf("block %d v%d: missing block hash on event", bn, ver)
+	}
 	blockHash := common.HexToHash(event.BlockHash)
 
 	acc, err := c.decodeBlockEvents(ctx, receipts, bn, ver, ts)
