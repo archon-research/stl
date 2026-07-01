@@ -566,6 +566,82 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 	}
 }
 
+// TestCurveService_HandlerError_RecordsErrorMetric: an error on a handler path
+// that is not one of the individually-instrumented stages (here an invalid log
+// address surfaced by poolsTouchedByReceipt) must still increment
+// curve_errors_total, so VectorCurveIndexerErrorsHigh observes every
+// poison-stall path, not only the decode/snapshot/persist ones.
+func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := dextelemetry.NewTelemetry("curve", testChainID)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:   tel,
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+
+	// A log whose address is not a valid hex address: poolsTouchedByReceipt errors
+	// before any per-stage RecordError runs.
+	badReceipt := shared.TransactionReceipt{
+		Logs: []shared.Log{{
+			Address:         "0x123", // too short to be a valid address
+			Topics:          []string{"0xdeadbeef"},
+			Data:            "0x",
+			TransactionHash: "0xabc",
+			LogIndex:        "0x0",
+		}},
+		TransactionHash: "0xabc",
+	}
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), blockEvent(100), []shared.TransactionReceipt{badReceipt}); err == nil {
+		t.Fatal("expected non-nil error from BlockHandler on invalid log address")
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got := curveErrorsTotal(t, &rm); got != 1 {
+		t.Errorf("curve.errors.total = %d, want 1 (every handler error path must record the metric)", got)
+	}
+}
+
 // TestCurveService_DecodeError_ReturnsNonNil: a receipt with corrupt event data
 // causes BlockHandler to return a non-nil error so the SQS message redelivers.
 func TestCurveService_DecodeError_ReturnsNonNil(t *testing.T) {
@@ -800,6 +876,29 @@ func TestCurveService_RoutesStableswapConfigIntoBlockWrites(t *testing.T) {
 	if len(repo.lastWrites.StableswapConfigs) != 1 {
 		t.Errorf("StableswapConfigs = %d, want 1 (touched-pool snapshot builds a config)", len(repo.lastWrites.StableswapConfigs))
 	}
+}
+
+// curveErrorsTotal reads the curve.errors.total counter total across all
+// operation labels, returning 0 if the metric was never recorded.
+func curveErrorsTotal(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "curve.errors.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("curve.errors.total: unexpected metric type %T", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	return 0
 }
 
 // stateRowsWritten reads the curve.state.rows.written counter total, returning 0

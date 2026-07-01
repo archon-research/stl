@@ -136,57 +136,69 @@ type blockAccumulators struct {
 	touched   map[int64]RegisteredPool
 }
 
-// BlockHandler returns the dexconsumer.BlockHandler for this coordinator. It
-// decodes every receipt in the block into local accumulators, snapshots the
-// touched and heartbeat-due pools (via multicall, before opening the
-// transaction), and persists swaps, liquidity events, captured logs, and pool
-// state in one transaction. Returning a non-nil error leaves the block for SQS
-// redelivery; nil is returned only after a successful commit. All per-block
-// state is local, so a redelivery reprocesses from scratch with no carryover.
+// BlockHandler returns the dexconsumer.BlockHandler for this service. It records
+// curve_errors_total once, at this boundary, on any non-nil handler return: the
+// inner steps wrap their errors with stage context (for the logs) but do not
+// touch the counter, so no future error path can silently skip the metric the
+// way scattered per-stage recording did. RecordError is a no-op on a nil error.
 func (c *CurveService) BlockHandler() dexconsumer.BlockHandler {
 	return func(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
-		bn := event.BlockNumber
-		ver := event.Version
-		ts := time.Unix(event.BlockTimestamp, 0).UTC()
-
-		acc, err := c.decodeBlockEvents(ctx, receipts, bn, ver, ts)
-		if err != nil {
+		if err := c.handleBlock(ctx, event, receipts); err != nil {
+			c.telemetry.RecordError(ctx, "blockHandler", err)
 			return err
 		}
-
-		snapshotSet := c.buildSnapshotSet(bn, ver, acc.touched)
-
-		// Read pool state via multicall BEFORE opening the transaction so archive-RPC
-		// latency never pins a pgx connection (connection-pool exhaustion is a stall cause).
-		snapshots, err := c.snapshotPools(ctx, snapshotSet, bn, ver, ts)
-		if err != nil {
-			return err
-		}
-
-		// Quiet block: nothing decoded and no snapshot due. Skip the empty transaction.
-		if len(acc.swaps) == 0 && len(acc.liquidity) == 0 && len(acc.paramEvts) == 0 &&
-			len(acc.lpEvts) == 0 && len(acc.captured) == 0 && len(snapshots) == 0 {
-			return nil
-		}
-
-		// Build DB inputs before opening the transaction so conversion errors fail
-		// fast without touching the connection pool.
-		writes, capturedIns, err := c.buildBlockWrites(acc, snapshots, bn, ver, ts)
-		if err != nil {
-			return err
-		}
-
-		stateRows, err := c.persistBlock(ctx, writes, capturedIns, bn)
-		if err != nil {
-			return err
-		}
-
-		for _, pool := range snapshotSet {
-			c.lastSnapshot[pool.ID] = snapshotKey{bn: bn, ver: ver}
-		}
-		c.telemetry.RecordStateRows(ctx, int(stateRows))
 		return nil
 	}
+}
+
+// handleBlock decodes every receipt in the block into local accumulators,
+// snapshots the touched and heartbeat-due pools (via multicall, before opening
+// the transaction), and persists swaps, liquidity events, captured logs, and
+// pool state in one transaction. Returning a non-nil error leaves the block for
+// SQS redelivery; nil is returned only after a successful commit. All per-block
+// state is local, so a redelivery reprocesses from scratch with no carryover.
+func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
+	bn := event.BlockNumber
+	ver := event.Version
+	ts := time.Unix(event.BlockTimestamp, 0).UTC()
+
+	acc, err := c.decodeBlockEvents(ctx, receipts, bn, ver, ts)
+	if err != nil {
+		return err
+	}
+
+	snapshotSet := c.buildSnapshotSet(bn, ver, acc.touched)
+
+	// Read pool state via multicall BEFORE opening the transaction so archive-RPC
+	// latency never pins a pgx connection (connection-pool exhaustion is a stall cause).
+	snapshots, err := c.snapshotPools(ctx, snapshotSet, bn, ver, ts)
+	if err != nil {
+		return err
+	}
+
+	// Quiet block: nothing decoded and no snapshot due. Skip the empty transaction.
+	if len(acc.swaps) == 0 && len(acc.liquidity) == 0 && len(acc.paramEvts) == 0 &&
+		len(acc.lpEvts) == 0 && len(acc.captured) == 0 && len(snapshots) == 0 {
+		return nil
+	}
+
+	// Build DB inputs before opening the transaction so conversion errors fail
+	// fast without touching the connection pool.
+	writes, capturedIns, err := c.buildBlockWrites(acc, snapshots, bn, ver, ts)
+	if err != nil {
+		return err
+	}
+
+	stateRows, err := c.persistBlock(ctx, writes, capturedIns, bn)
+	if err != nil {
+		return err
+	}
+
+	for _, pool := range snapshotSet {
+		c.lastSnapshot[pool.ID] = snapshotKey{bn: bn, ver: ver}
+	}
+	c.telemetry.RecordStateRows(ctx, int(stateRows))
+	return nil
 }
 
 // decodeBlockEvents iterates every receipt, identifies pools touched by each
@@ -210,7 +222,6 @@ func (c *CurveService) decodeBlockEvents(ctx context.Context, receipts []shared.
 		for _, pool := range pools {
 			decoded, err := c.handlers[pool.Kind].DecodeEvents(receipt, pool, c.chainID, bn, ver, ts)
 			if err != nil {
-				c.telemetry.RecordError(ctx, "decodeEvents", err)
 				return blockAccumulators{}, fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
 			}
 			acc.swaps = append(acc.swaps, decoded.Swaps...)
@@ -231,11 +242,9 @@ func (c *CurveService) snapshotPools(ctx context.Context, snapshotSet []Register
 	for _, pool := range snapshotSet {
 		snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, ts)
 		if err != nil {
-			c.telemetry.RecordError(ctx, "snapshotState", err)
 			return nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
 		}
 		if err := snap.Validate(); err != nil {
-			c.telemetry.RecordError(ctx, "snapshotState", err)
 			return nil, fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
 		}
 		snapshots = append(snapshots, snap)
@@ -307,11 +316,9 @@ func (c *CurveService) persistBlock(ctx context.Context, writes outbound.BlockWr
 		var txErr error
 		stateRows, txErr = c.repo.SaveBlock(ctx, tx, writes)
 		if txErr != nil {
-			c.telemetry.RecordError(ctx, "persistBlock", txErr)
 			return fmt.Errorf("persisting curve block %d: %w", bn, txErr)
 		}
 		if txErr := c.eventWriter.SaveBatch(ctx, tx, capturedIns); txErr != nil {
-			c.telemetry.RecordError(ctx, "persistBlock", txErr)
 			return fmt.Errorf("persisting captured events block %d: %w", bn, txErr)
 		}
 		return nil
