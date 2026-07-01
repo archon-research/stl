@@ -68,26 +68,31 @@ type CurveService struct {
 	lastSnapshot map[int64]snapshotKey // pool.ID -> last snapshotted (block, version)
 }
 
+// validate checks that every required dependency is present, so NewCurveService
+// reads as its build steps rather than a wall of nil guards.
+func (d CurveServiceDeps) validate() error {
+	switch {
+	case d.Multicaller == nil:
+		return fmt.Errorf("multicaller is required")
+	case d.Repo == nil:
+		return fmt.Errorf("repo is required")
+	case d.EventWriter == nil:
+		return fmt.Errorf("eventWriter is required")
+	case d.TxManager == nil:
+		return fmt.Errorf("txManager is required")
+	case d.Handlers == nil:
+		return fmt.Errorf("handlers is required")
+	case d.Logger == nil:
+		return fmt.Errorf("logger is required")
+	}
+	return nil
+}
+
 // NewCurveService validates deps and builds a CurveService. Every registered
 // pool's Kind must have a corresponding handler entry.
 func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
-	if deps.Multicaller == nil {
-		return nil, fmt.Errorf("multicaller is required")
-	}
-	if deps.Repo == nil {
-		return nil, fmt.Errorf("repo is required")
-	}
-	if deps.EventWriter == nil {
-		return nil, fmt.Errorf("eventWriter is required")
-	}
-	if deps.TxManager == nil {
-		return nil, fmt.Errorf("txManager is required")
-	}
-	if deps.Handlers == nil {
-		return nil, fmt.Errorf("handlers is required")
-	}
-	if deps.Logger == nil {
-		return nil, fmt.Errorf("logger is required")
+	if err := deps.validate(); err != nil {
+		return nil, err
 	}
 
 	for _, p := range deps.Pools {
