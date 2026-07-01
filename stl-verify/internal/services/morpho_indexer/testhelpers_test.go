@@ -79,6 +79,24 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	}
 	svc.ctx, svc.cancel = context.WithCancel(context.Background())
 
+	// VEC-471 moved the ~6 dynamic-state getters (market/position/vault state)
+	// from Execute to ExecuteAtHash, while static-identity getters (market
+	// params, token/vault metadata, symbol sweep) stay on Execute. Existing
+	// tests configure ExecuteFn with a shape-based dispatcher keyed on `calls`
+	// alone (call count + selectors), never on the block arg — so forwarding
+	// ExecuteAtHash to whatever ExecuteFn is currently set (read at call time,
+	// since tests reassign it after newTestHarness returns) keeps every
+	// existing dispatcher correct for both entry points without duplicating
+	// each test's mock logic. Tests that specifically assert the hash-pinned
+	// path was used (e.g. TestGetMarketState_PinsToBlockHash) override
+	// ExecuteAtHashFn directly, which takes precedence over this default.
+	multicaller.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if multicaller.ExecuteFn == nil {
+			return nil, fmt.Errorf("neither ExecuteAtHashFn nor ExecuteFn is mocked")
+		}
+		return multicaller.ExecuteFn(ctx, calls, nil)
+	}
+
 	// Pre-seed the not-vault cache with the canonical "user" addresses so the
 	// V1/V1.1 Morpho Blue caller/onBehalf discovery probe (added to close the
 	// post-IsVaultActivityEvent-narrowing gap) doesn't unexpectedly fire on
@@ -388,6 +406,11 @@ func hasSameSelector(a, b []byte) bool {
 // --- Event log construction helpers ---
 
 var (
+	// testBlockHash is the block hash used by processBlock (via the BlockEvent
+	// fixture) for every test that exercises state reads: with VEC-471 those
+	// reads are pinned via ExecuteAtHash, which needs a non-empty hash.
+	testBlockHash = common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+
 	testMarketID  = common.HexToHash("0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc")
 	testCaller    = common.HexToAddress("0x1111111111111111111111111111111111111111")
 	testOnBehalf  = common.HexToAddress("0x2222222222222222222222222222222222222222")
@@ -743,6 +766,7 @@ func (h *serviceTestHarness) processBlock(t *testing.T, chainID, blockNumber int
 		ChainID:     chainID,
 		BlockNumber: blockNumber,
 		Version:     version,
+		BlockHash:   testBlockHash.Hex(),
 	})
 }
 
@@ -764,12 +788,21 @@ func (h *serviceTestHarness) registerTestVault(vaultAddr common.Address, vaultID
 
 // setupPositionEventMulticall sets up the multicaller to return market+position state
 // for position events (Supply, Withdraw, Borrow, Repay, SupplyCollateral, WithdrawCollateral).
+// Position/market state is read via ExecuteAtHash (VEC-471); wiring both entry
+// points to the same dispatcher keeps the mock correct regardless of which
+// path a given getter uses.
 func (h *serviceTestHarness) setupPositionEventMulticall() {
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	dispatch := func(calls []outbound.Call) ([]outbound.Result, error) {
 		if len(calls) == 2 {
 			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 		}
 		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return dispatch(calls)
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return dispatch(calls)
 	}
 }
 
@@ -785,36 +818,42 @@ func (h *serviceTestHarness) setupMarketExistsInDB(marketID [32]byte, dbID int64
 
 // setupMarketNotInDB configures the multicaller with getMarketParams + getTokenPairMetadata responses
 // for the ensureMarket flow when the market doesn't exist in DB yet.
+//
+// Dispatch is shape-based (call count + selector), not entry-point-based,
+// because market/vault state now reads via ExecuteAtHash while market
+// params/token/vault metadata stay on Execute (VEC-471) — both entry points
+// share this dispatcher so the mock is correct regardless of which path a
+// given getter uses.
 func (h *serviceTestHarness) setupMarketNotInDB() {
-	// Override multicaller to handle both position calls and market params/token metadata calls.
-	origFn := h.multicaller.ExecuteFn
-	h.multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	origExecuteFn := h.multicaller.ExecuteFn
+	origExecuteAtHashFn := h.multicaller.ExecuteAtHashFn
+	dispatch := func(calls []outbound.Call) ([]outbound.Result, error, bool) {
 		switch len(calls) {
 		case 1:
 			// getMarketParams or getMarketState
 			return []outbound.Result{
 				{Success: true, ReturnData: h.packMarketParams(testLoanToken, testCollToken, testOracle, testIrm, testutils.BigFromStr(h.t, "800000000000000000"))},
-			}, nil
+			}, nil, true
 		case 2:
 			// Could be market+position or token metadata.
 			if calls[0].Target == MorphoBlueAddress {
-				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil, true
 			}
 			if calls[0].Target == testLoanToken || calls[0].Target == testCollToken {
 				// Token metadata (symbol + decimals)
 				return []outbound.Result{
 					{Success: true, ReturnData: h.packString("TKN")},
 					{Success: true, ReturnData: h.packUint8(18)},
-				}, nil
+				}, nil, true
 			}
-			return nil, fmt.Errorf("unexpected 2-call multicall to %s", calls[0].Target.Hex())
+			return nil, fmt.Errorf("unexpected 2-call multicall to %s", calls[0].Target.Hex()), true
 		case 3:
 			// market + 2 positions (Liquidate) OR vault state + balance
 			if calls[0].Target == MorphoBlueAddress {
-				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult(), h.defaultPositionStateResult()}, nil
+				return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult(), h.defaultPositionStateResult()}, nil, true
 			}
 			// vault state + balance
-			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil, true
 		case 4:
 			// Four-call multicalls fall into one of four shapes:
 			//  - vault probe              (MORPHO/asset/curator/liquidityAdapter)
@@ -826,10 +865,10 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 			// target equality cannot distinguish them. Discriminate by the
 			// first call's 4-byte selector instead.
 			if h.isProbeMulticall(calls) {
-				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil, true
 			}
 			if h.isVaultDetailsMulticall(calls) {
-				return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil
+				return h.vaultDetailResults("Test Vault", "tVLT", 18, false), nil, true
 			}
 			if h.isVaultStateAndTwoBalancesMulticall(calls) {
 				return []outbound.Result{
@@ -837,7 +876,7 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 					h.defaultVaultTotalSupplyResult(),
 					h.defaultBalanceOfResult(big.NewInt(100000)),
 					h.defaultBalanceOfResult(big.NewInt(200000)),
-				}, nil
+				}, nil, true
 			}
 			// Default: token pair metadata (symbolA, decimalsA, symbolB, decimalsB).
 			return []outbound.Result{
@@ -845,12 +884,27 @@ func (h *serviceTestHarness) setupMarketNotInDB() {
 				{Success: true, ReturnData: h.packUint8(18)},
 				{Success: true, ReturnData: h.packString("COLL")},
 				{Success: true, ReturnData: h.packUint8(18)},
-			}, nil
+			}, nil, true
 		default:
-			if origFn != nil {
-				return origFn(ctx, calls, blockNumber)
-			}
-			return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+			return nil, nil, false
 		}
+	}
+	h.multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		if results, err, handled := dispatch(calls); handled {
+			return results, err
+		}
+		if origExecuteFn != nil {
+			return origExecuteFn(ctx, calls, blockNumber)
+		}
+		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
+	}
+	h.multicaller.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if results, err, handled := dispatch(calls); handled {
+			return results, err
+		}
+		if origExecuteAtHashFn != nil {
+			return origExecuteAtHashFn(ctx, calls, blockHash)
+		}
+		return nil, fmt.Errorf("unexpected call count: %d", len(calls))
 	}
 }

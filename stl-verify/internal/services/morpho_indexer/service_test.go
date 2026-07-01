@@ -1890,7 +1890,7 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 	}
 	receipt := makeReceipt(testTxHash, irrelevantLog)
 
-	if err := h.svc.processReceipt(context.Background(), receipt, 1, 20000000, 0, time.Now()); err != nil {
+	if err := h.svc.processReceipt(context.Background(), receipt, 1, 20000000, testBlockHash, 0, time.Now()); err != nil {
 		t.Fatalf("processReceipt: %v", err)
 	}
 
@@ -1947,7 +1947,7 @@ func TestProcessReceipt_KnownNotVault_SkipsSpan(t *testing.T) {
 		Data: "0x0000000000000000000000000000000000000000000000000000000000000064",
 	})
 
-	if err := h.svc.processReceipt(context.Background(), receipt, 1, 20000000, 0, time.Now()); err != nil {
+	if err := h.svc.processReceipt(context.Background(), receipt, 1, 20000000, testBlockHash, 0, time.Now()); err != nil {
 		t.Fatalf("processReceipt: %v", err)
 	}
 

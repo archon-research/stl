@@ -278,6 +278,11 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
 	}
 
+	blockHash, err := blockHashFromEvent(event)
+	if err != nil {
+		return err
+	}
+
 	var receipts []shared.TransactionReceipt
 	if err := json.Unmarshal(receiptsJSON, &receipts); err != nil {
 		return fmt.Errorf("unmarshalling receipts: %w", err)
@@ -300,7 +305,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 
 	var errs []error
 	for _, receipt := range receipts {
-		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, event.Version, blockTimestamp); err != nil {
+		if err := s.processReceipt(ctx, receipt, event.ChainID, event.BlockNumber, blockHash, event.Version, blockTimestamp); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -309,6 +314,18 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
+// on an empty string rather than letting common.HexToHash silently produce the
+// zero hash: state reads must be pinned to the exact block being processed
+// (see outbound.Multicaller.ExecuteAtHash) — a malformed event must not sail
+// through as an eth_call pinned to block 0's hash.
+func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
+	if event.BlockHash == "" {
+		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
+	}
+	return common.HexToHash(event.BlockHash), nil
 }
 
 // hasRelevantEvents returns true if the receipt contains at least one
@@ -357,7 +374,7 @@ func (s *Service) hasRelevantEvents(receipt shared.TransactionReceipt) bool {
 // entity within one block produce identical on-chain snapshots. The ON CONFLICT
 // clause means only the last-written event_type/tx_hash is retained, but the
 // on-chain state (shares, assets, collateral) is always correct.
-func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) (retErr error) {
+func (s *Service) processReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) (retErr error) {
 	if !s.hasRelevantEvents(receipt) {
 		return nil
 	}
@@ -417,7 +434,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		switch {
 		case logAddress == morphoBlueAddr && isMorphoBlue:
 			s.logger.Debug("processing Morpho Blue event", "tx", receipt.TransactionHash, "topic", log.Topics[0])
-			if err := s.processMorphoBlueLog(ctx, log, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			if err := s.processMorphoBlueLog(ctx, log, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 				s.logger.Error("failed to process Morpho Blue event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
 			}
@@ -427,7 +444,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 
 		case s.vaultRegistry.IsKnownVault(logAddress) && isMetaMorpho:
 			s.logger.Debug("processing MetaMorpho event", "tx", receipt.TransactionHash, "vault", logAddress.Hex(), "topic", log.Topics[0])
-			if err := s.processMetaMorphoLog(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			if err := s.processMetaMorphoLog(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 				s.logger.Error("failed to process MetaMorpho event", "error", err, "tx", receipt.TransactionHash)
 				errs = append(errs, err)
 			}
@@ -456,7 +473,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 				continue
 			}
 			s.logger.Debug("attempting vault discovery", "address", logAddress.Hex(), "tx", receipt.TransactionHash)
-			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+			if err := s.tryDiscoverVault(ctx, log, logAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 				var nv *ErrNotVault
 				if errors.As(err, &nv) {
 					s.vaultRegistry.MarkNotVault(logAddress)
@@ -496,7 +513,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 }
 
 // processMorphoBlueLog handles a Morpho Blue event log.
-func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	event, err := s.eventExtractor.ExtractMorphoBlueEvent(log)
 	if err != nil {
 		return fmt.Errorf("extracting Morpho Blue event: %w", err)
@@ -526,23 +543,23 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 
 	switch e := event.(type) {
 	case *CreateMarketEvent:
-		return s.handleCreateMarket(ctx, e, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleCreateMarket(ctx, e, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SupplyEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *WithdrawEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *BorrowEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *RepayEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SupplyCollateralEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *WithdrawCollateralEvent:
-		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handlePositionEvent(ctx, e.MarketID(), e.OnBehalf, e.Type(), e.TxHash(), chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *LiquidateEvent:
-		return s.handleLiquidateEvent(ctx, e, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleLiquidateEvent(ctx, e, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *AccrueInterestEvent:
-		return s.handleAccrueInterest(ctx, e, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleAccrueInterest(ctx, e, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SetFeeEvent:
 		// Already saved as protocol_event above
 		return nil
@@ -562,7 +579,7 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 // SetPerformanceFee, SetCurator, Submit, …) is registered in the event
 // extractor so it lands in the audit log; structured tables for those events
 // are deferred per docs/vec-198-morpho-v2-followup-plan.md.
-func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	eventName, ok := s.eventExtractor.MetaMorphoEventName(log)
 	if !ok {
 		// Caller already filtered via IsMetaMorphoEvent; this shouldn't
@@ -598,13 +615,13 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 
 	switch e := event.(type) {
 	case *VaultDepositEvent:
-		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp, e.Type(), e.TxHash())
+		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp, e.Type(), e.TxHash())
 	case *VaultWithdrawEvent:
-		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp, e.Type(), e.TxHash())
+		return s.saveVaultEventSnapshot(ctx, e.Owner, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp, e.Type(), e.TxHash())
 	case *VaultTransferEvent:
-		return s.handleVaultTransfer(ctx, e, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleVaultTransfer(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *VaultAccrueInterestEvent:
-		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
+		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	default:
 		return nil
 	}
@@ -770,7 +787,7 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 // per IsVaultActivityEvent). Validates the log decodes, then probes and
 // registers via discoverAndRegisterVault, then processes the triggering log
 // against the now-known vault.
-func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
 		attribute.String("vault.address", vaultAddress.Hex()),
 		attribute.String("discovery.path", "vaultActivity"))
@@ -785,7 +802,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		return err
 	}
 
-	return s.processMetaMorphoLog(ctx, log, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp)
+	return s.processMetaMorphoLog(ctx, log, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 }
 
 // discoverV1V11VaultsInReceipt is the pre-walk for V1/V1.1 vault discovery
@@ -888,7 +905,7 @@ func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shar
 }
 
 // handleCreateMarket handles a CreateMarket event.
-func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	mp := e.Params
 	if mp == nil {
 		return fmt.Errorf("CreateMarket event missing marketParams")
@@ -900,7 +917,7 @@ func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, 
 		return fmt.Errorf("getting token pair metadata: %w", err)
 	}
 
-	ms, err := s.blockchainSvc.getMarketState(ctx, e.MarketID(), blockNumber)
+	ms, err := s.blockchainSvc.getMarketState(ctx, e.MarketID(), blockHash)
 	if err != nil {
 		return fmt.Errorf("fetching initial market state: %w", err)
 	}
@@ -936,8 +953,8 @@ func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, 
 }
 
 // handlePositionEvent handles Supply, Withdraw, Borrow, Repay, SupplyCollateral, WithdrawCollateral events.
-func (s *Service) handlePositionEvent(ctx context.Context, mktID [32]byte, user common.Address, eventType entity.MorphoEventType, txHash string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	ms, ps, err := s.blockchainSvc.getMarketAndPositionState(ctx, mktID, user, blockNumber)
+func (s *Service) handlePositionEvent(ctx context.Context, mktID [32]byte, user common.Address, eventType entity.MorphoEventType, txHash string, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	ms, ps, err := s.blockchainSvc.getMarketAndPositionState(ctx, mktID, user, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetching on-chain state: %w", err)
 	}
@@ -959,12 +976,12 @@ func (s *Service) handlePositionEvent(ctx context.Context, mktID [32]byte, user 
 }
 
 // handleLiquidateEvent handles Liquidate events by snapshotting both borrower and liquidator.
-func (s *Service) handleLiquidateEvent(ctx context.Context, e *LiquidateEvent, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) handleLiquidateEvent(ctx context.Context, e *LiquidateEvent, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	borrower := e.Borrower
 	liquidator := e.Caller
 
 	// Fetch market state + both positions in a single RPC call.
-	ms, borrowerPos, liquidatorPos, err := s.blockchainSvc.getMarketAndTwoPositionStates(ctx, e.MarketID(), borrower, liquidator, blockNumber)
+	ms, borrowerPos, liquidatorPos, err := s.blockchainSvc.getMarketAndTwoPositionStates(ctx, e.MarketID(), borrower, liquidator, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetching on-chain state: %w", err)
 	}
@@ -1022,8 +1039,8 @@ type userVaultBalance struct {
 }
 
 // handleAccrueInterest handles AccrueInterest events.
-func (s *Service) handleAccrueInterest(ctx context.Context, e *AccrueInterestEvent, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	ms, err := s.blockchainSvc.getMarketState(ctx, e.MarketID(), blockNumber)
+func (s *Service) handleAccrueInterest(ctx context.Context, e *AccrueInterestEvent, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	ms, err := s.blockchainSvc.getMarketState(ctx, e.MarketID(), blockHash)
 	if err != nil {
 		return fmt.Errorf("fetching market state: %w", err)
 	}
@@ -1044,7 +1061,7 @@ func (s *Service) handleAccrueInterest(ctx context.Context, e *AccrueInterestEve
 }
 
 // handleVaultTransfer handles vault Transfer events.
-func (s *Service) handleVaultTransfer(ctx context.Context, e *VaultTransferEvent, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) handleVaultTransfer(ctx context.Context, e *VaultTransferEvent, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault := s.vaultRegistry.GetVault(vaultAddress)
 	if vault == nil {
 		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
@@ -1062,13 +1079,13 @@ func (s *Service) handleVaultTransfer(ctx context.Context, e *VaultTransferEvent
 
 	switch {
 	case hasFrom && hasTo:
-		vs, senderBalance, receiverBalance, err = s.blockchainSvc.getVaultStateAndTwoBalances(ctx, vaultAddress, e.From, e.To, blockNumber)
+		vs, senderBalance, receiverBalance, err = s.blockchainSvc.getVaultStateAndTwoBalances(ctx, vaultAddress, e.From, e.To, blockHash)
 	case hasFrom:
-		vs, senderBalance, err = s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, e.From, blockNumber)
+		vs, senderBalance, err = s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, e.From, blockHash)
 	case hasTo:
-		vs, receiverBalance, err = s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, e.To, blockNumber)
+		vs, receiverBalance, err = s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, e.To, blockHash)
 	default:
-		vs, err = s.blockchainSvc.getVaultState(ctx, vaultAddress, blockNumber)
+		vs, err = s.blockchainSvc.getVaultState(ctx, vaultAddress, blockHash)
 	}
 	if err != nil {
 		return fmt.Errorf("fetching vault state and balances for vault=%s from=%s to=%s block=%d: %w",
@@ -1105,13 +1122,13 @@ func (s *Service) handleVaultTransfer(ctx context.Context, e *VaultTransferEvent
 }
 
 // handleVaultAccrueInterest handles vault AccrueInterest events.
-func (s *Service) handleVaultAccrueInterest(ctx context.Context, e *VaultAccrueInterestEvent, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) handleVaultAccrueInterest(ctx context.Context, e *VaultAccrueInterestEvent, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault := s.vaultRegistry.GetVault(vaultAddress)
 	if vault == nil {
 		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
 	}
 
-	vs, err := s.blockchainSvc.getVaultState(ctx, vaultAddress, blockNumber)
+	vs, err := s.blockchainSvc.getVaultState(ctx, vaultAddress, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetching vault state: %w", err)
 	}
@@ -1129,14 +1146,14 @@ func (s *Service) handleVaultAccrueInterest(ctx context.Context, e *VaultAccrueI
 }
 
 // saveVaultEventSnapshot handles deposit/withdraw by saving vault state + user position.
-func (s *Service) saveVaultEventSnapshot(ctx context.Context, user common.Address, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, eventType entity.MorphoEventType, txHash string) error {
+func (s *Service) saveVaultEventSnapshot(ctx context.Context, user common.Address, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time, eventType entity.MorphoEventType, txHash string) error {
 	vault := s.vaultRegistry.GetVault(vaultAddress)
 	if vault == nil {
 		return fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
 	}
 
 	// Fetch vault state + user balance in a single RPC call.
-	vs, balance, err := s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, user, blockNumber)
+	vs, balance, err := s.blockchainSvc.getVaultStateAndBalance(ctx, vaultAddress, user, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetching vault state and balance: %w", err)
 	}
