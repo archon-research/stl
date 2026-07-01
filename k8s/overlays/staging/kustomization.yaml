@@ -34,6 +34,8 @@ resources:
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
   # base dir + its configmap/external-secret with the exchange-specific values).
   - ../../base/cex-orderbook-indexer-coinbase
+  - ../../base/cex-orderbook-indexer-okx
+  - ../../base/cex-orderbook-indexer-kraken
   - ../../base/watcher-data-validator
   - ../../base/optimism-watcher-data-validator
   - ../../base/unichain-watcher-data-validator
