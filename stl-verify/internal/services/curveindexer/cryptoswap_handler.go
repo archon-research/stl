@@ -817,14 +817,22 @@ func extractCryptoswapTokenExchange(
 		return SwapRecord{}, err
 	}
 	// packed_price_scale is not stored; it is present in the event but discarded.
+	soldIdx, err := coinIndexOrError("sold_id", soldID, pool.NCoins)
+	if err != nil {
+		return SwapRecord{}, err
+	}
+	boughtIdx, err := coinIndexOrError("bought_id", boughtID, pool.NCoins)
+	if err != nil {
+		return SwapRecord{}, err
+	}
 
 	return SwapRecord{
 		Pool:         pool,
 		LogIndex:     logIndex,
 		TxHash:       txHash,
 		Buyer:        buyer,
-		SoldID:       int(soldID.Int64()),
-		BoughtID:     int(boughtID.Int64()),
+		SoldID:       soldIdx,
+		BoughtID:     boughtIdx,
 		TokensSold:   tokensSold,
 		TokensBought: tokensBought,
 		Fee:          fee,

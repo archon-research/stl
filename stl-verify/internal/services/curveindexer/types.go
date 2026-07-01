@@ -28,7 +28,6 @@ type RegisteredPool struct {
 	Kind         PoolKind
 	NCoins       int
 	CoinDecimals []int
-	DeployBlock  int64
 	// LpTokenAddress is the separate LP token for pre-NG pools (where totalSupply
 	// lives), nil when the pool is its own LP token.
 	LpTokenAddress *common.Address

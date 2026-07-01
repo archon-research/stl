@@ -785,14 +785,22 @@ func extractStableswapTokenExchange(
 	if err != nil {
 		return SwapRecord{}, err
 	}
+	soldIdx, err := coinIndexOrError("sold_id", soldID, pool.NCoins)
+	if err != nil {
+		return SwapRecord{}, err
+	}
+	boughtIdx, err := coinIndexOrError("bought_id", boughtID, pool.NCoins)
+	if err != nil {
+		return SwapRecord{}, err
+	}
 
 	return SwapRecord{
 		Pool:         pool,
 		LogIndex:     logIndex,
 		TxHash:       txHash,
 		Buyer:        buyer,
-		SoldID:       int(soldID.Int64()),
-		BoughtID:     int(boughtID.Int64()),
+		SoldID:       soldIdx,
+		BoughtID:     boughtIdx,
 		TokensSold:   tokensSold,
 		TokensBought: tokensBought,
 		Fee:          nil, // stableswap TokenExchange carries no fee field
@@ -901,11 +909,11 @@ func extractStableswapRemoveLiquidityOne(
 		return LiquidityRecord{}, err
 	}
 	// token_id is int128; reject anything outside [0, NCoins) rather than store a
-	// garbage coin_index (same guard as the cryptoswap RemoveLiquidityOne path).
-	if !tokenID.IsInt64() || tokenID.Sign() < 0 || tokenID.Int64() >= int64(pool.NCoins) {
-		return LiquidityRecord{}, fmt.Errorf("stableswap RemoveLiquidityOne coin_index %s out of range [0,%d)", tokenID, pool.NCoins)
+	// garbage coin_index.
+	coinIdx, err := coinIndexOrError("stableswap RemoveLiquidityOne coin_index", tokenID, pool.NCoins)
+	if err != nil {
+		return LiquidityRecord{}, err
 	}
-	coinIdx := int(tokenID.Int64())
 	return LiquidityRecord{
 		Pool:         pool,
 		LogIndex:     logIndex,

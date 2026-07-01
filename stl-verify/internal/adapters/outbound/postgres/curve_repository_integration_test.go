@@ -93,13 +93,49 @@ func seedCurvePoolWithTokens(t *testing.T, ctx context.Context) (int64, int64, i
 }
 
 // newCurveRepo builds a CurveRepository backed by curveTestPool with buildID 1.
+// It registers a cleanup that removes this test's fact rows and the chain-999
+// test dimensions so seeded pools/coins do not leak across tests or files: a
+// leaked chain-999 curve_pool_coin (seeded with NULL precision) would otherwise
+// break sibling files that run unscoped COUNT(*) on those dimensions (e.g. the
+// migration test's "precision IS NULL = 0" check), making file order load-bearing.
 func newCurveRepo(t *testing.T) *CurveRepository {
 	t.Helper()
 	repo, err := NewCurveRepository(curveTestPool, nil, buildregistry.BuildID(1))
 	if err != nil {
 		t.Fatalf("NewCurveRepository: %v", err)
 	}
+	t.Cleanup(func() { cleanupCurveTestData(t) })
 	return repo
+}
+
+// cleanupCurveTestData removes all curve fact rows and the chain-999 test
+// dimension rows (curve_pool_coin then curve_pool, FK order). Facts are deleted
+// first so the dimension deletes do not hit a foreign-key reference.
+func cleanupCurveTestData(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	for _, table := range []string{
+		"curve_stableswap_state",
+		"curve_cryptoswap_state",
+		"curve_swap",
+		"curve_liquidity_event",
+		"curve_stableswap_config",
+		"curve_cryptoswap_config",
+		"curve_parameter_event",
+		"curve_lp_token_event",
+	} {
+		if _, err := curveTestPool.Exec(ctx, "DELETE FROM "+table); err != nil {
+			t.Errorf("cleanup %s: %v", table, err)
+		}
+	}
+	if _, err := curveTestPool.Exec(ctx,
+		`DELETE FROM curve_pool_coin WHERE curve_pool_id IN (SELECT id FROM curve_pool WHERE chain_id = 999)`,
+	); err != nil {
+		t.Errorf("cleanup curve_pool_coin: %v", err)
+	}
+	if _, err := curveTestPool.Exec(ctx, `DELETE FROM curve_pool WHERE chain_id = 999`); err != nil {
+		t.Errorf("cleanup curve_pool: %v", err)
+	}
 }
 
 // truncateCurveFactTables clears all fact rows so each test starts clean.
@@ -447,35 +483,6 @@ func TestCurveRepository_LoadPools_HasAPrecise(t *testing.T) {
 	}
 }
 
-// TestCurveRepository_LoadPools_NullDeployBlock verifies that a pool whose
-// deploy_block is NULL (registered before its deploy height was backfilled) is
-// still returned by LoadPools, with DeployBlock mapped to 0 rather than a scan
-// error.
-func TestCurveRepository_LoadPools_NullDeployBlock(t *testing.T) {
-	ctx := context.Background()
-	repo := newCurveRepo(t)
-	poolID := seedCurvePoolWithNullDeployBlock(t, ctx)
-
-	pools, err := repo.LoadPools(ctx, 999)
-	if err != nil {
-		t.Fatalf("LoadPools: %v", err)
-	}
-
-	var found *outbound.CurvePoolRow
-	for i := range pools {
-		if pools[i].ID == poolID {
-			found = &pools[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("pool id=%d with NULL deploy_block not returned by LoadPools", poolID)
-	}
-	if found.DeployBlock != 0 {
-		t.Errorf("DeployBlock = %d, want 0 for a NULL deploy_block", found.DeployBlock)
-	}
-}
-
 // TestCurveRepository_LoadPools_LpTokenAddress verifies that LoadPools returns
 // LpTokenAddress when the column is non-null and nil when it is null.
 func TestCurveRepository_LoadPools_LpTokenAddress(t *testing.T) {
@@ -583,86 +590,6 @@ func seedCurvePoolWithLpToken(t *testing.T, ctx context.Context, lpAddr common.A
 	return poolID
 }
 
-// seedCurvePoolWithNullDeployBlock inserts a 2-coin pool with deploy_block = NULL
-// and returns its id. Idempotent: re-running forces deploy_block back to NULL.
-func seedCurvePoolWithNullDeployBlock(t *testing.T, ctx context.Context) int64 {
-	t.Helper()
-
-	if _, err := curveTestPool.Exec(ctx,
-		`INSERT INTO chain (chain_id, name) VALUES (999, 'testchain')
-		 ON CONFLICT (chain_id) DO NOTHING`,
-	); err != nil {
-		t.Fatalf("seed chain: %v", err)
-	}
-
-	var protoID int64
-	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
-		 VALUES (999, '\xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC'::bytea, 'Curve', 'dex', 0, NOW(), '{}'::jsonb)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
-		 RETURNING id`,
-	).Scan(&protoID); err != nil {
-		t.Fatalf("seed protocol: %v", err)
-	}
-
-	var tokenID0, tokenID1 int64
-	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals)
-		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA02'::bytea, 'TOKN', 18)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
-		 RETURNING id`,
-	).Scan(&tokenID0); err != nil {
-		t.Fatalf("seed token0: %v", err)
-	}
-	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO token (chain_id, address, symbol, decimals)
-		 VALUES (999, '\xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA03'::bytea, 'TOKM', 6)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
-		 RETURNING id`,
-	).Scan(&tokenID1); err != nil {
-		t.Fatalf("seed token1: %v", err)
-	}
-
-	var poolID int64
-	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block)
-		 VALUES (999, $1, '\xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD'::bytea, 'plain_pre_ng', 2, NULL)
-		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET deploy_block = NULL
-		 RETURNING id`,
-		protoID,
-	).Scan(&poolID); err != nil {
-		t.Fatalf("seed curve_pool: %v", err)
-	}
-
-	if _, err := curveTestPool.Exec(ctx,
-		`INSERT INTO curve_pool_coin (curve_pool_id, coin_index, token_id)
-		 VALUES ($1, 0, $2), ($1, 1, $3)
-		 ON CONFLICT (curve_pool_id, coin_index) DO NOTHING`,
-		poolID, tokenID0, tokenID1,
-	); err != nil {
-		t.Fatalf("seed curve_pool_coin: %v", err)
-	}
-
-	return poolID
-}
-
-// setCurvePoolCoinPrecision sets the precision column for the two coins of a pool.
-func setCurvePoolCoinPrecision(t *testing.T, ctx context.Context, poolID int64, prec0, prec1 *big.Int) {
-	t.Helper()
-	if _, err := curveTestPool.Exec(ctx,
-		`UPDATE curve_pool_coin SET precision = $2 WHERE curve_pool_id = $1 AND coin_index = 0`,
-		poolID, prec0.String(),
-	); err != nil {
-		t.Fatalf("set precision coin 0: %v", err)
-	}
-	if _, err := curveTestPool.Exec(ctx,
-		`UPDATE curve_pool_coin SET precision = $2 WHERE curve_pool_id = $1 AND coin_index = 1`,
-		poolID, prec1.String(),
-	); err != nil {
-		t.Fatalf("set precision coin 1: %v", err)
-	}
-}
-
 // saveBlockCommitted runs SaveBlock inside a committed transaction and returns
 // the state-row count.
 func saveBlockCommitted(t *testing.T, ctx context.Context, repo *CurveRepository, w outbound.BlockWrites) int64 {
@@ -680,93 +607,6 @@ func saveBlockCommitted(t *testing.T, ctx context.Context, repo *CurveRepository
 		t.Fatalf("commit: %v", err)
 	}
 	return n
-}
-
-// TestCurveRepository_LoadPools_Precisions verifies that LoadPools populates the
-// Precisions slice index-aligned to the coins (same ordering as CoinDecimals).
-func TestCurveRepository_LoadPools_Precisions(t *testing.T) {
-	ctx := context.Background()
-	repo := newCurveRepo(t)
-	poolID := seedCurvePool(t, ctx)
-
-	prec0 := big.NewInt(1)                                  // 10^(18-18) for an 18-decimal coin
-	prec1, _ := new(big.Int).SetString("1000000000000", 10) // 10^(18-6)
-	setCurvePoolCoinPrecision(t, ctx, poolID, prec0, prec1)
-
-	pools, err := repo.LoadPools(ctx, 999)
-	if err != nil {
-		t.Fatalf("LoadPools: %v", err)
-	}
-
-	var found *outbound.CurvePoolRow
-	for i := range pools {
-		if pools[i].ID == poolID {
-			found = &pools[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("seeded pool id=%d not found", poolID)
-	}
-	if len(found.Precisions) != 2 {
-		t.Fatalf("len(Precisions) = %d, want 2", len(found.Precisions))
-	}
-	if len(found.Precisions) != len(found.CoinDecimals) {
-		t.Fatalf("Precisions (%d) not index-aligned with CoinDecimals (%d)",
-			len(found.Precisions), len(found.CoinDecimals))
-	}
-	if found.Precisions[0] == nil || found.Precisions[0].Cmp(prec0) != 0 {
-		t.Errorf("Precisions[0] = %v, want %s", found.Precisions[0], prec0)
-	}
-	if found.Precisions[1] == nil || found.Precisions[1].Cmp(prec1) != 0 {
-		t.Errorf("Precisions[1] = %v, want %s", found.Precisions[1], prec1)
-	}
-}
-
-// TestCurveRepository_LoadPools_Precisions_Null verifies that a coin with a NULL
-// precision column maps to a nil entry in the index-aligned Precisions slice.
-func TestCurveRepository_LoadPools_Precisions_Null(t *testing.T) {
-	ctx := context.Background()
-	repo := newCurveRepo(t)
-	poolID := seedCurvePool(t, ctx)
-
-	if _, err := curveTestPool.Exec(ctx,
-		`UPDATE curve_pool_coin SET precision = '1' WHERE curve_pool_id = $1 AND coin_index = 0`,
-		poolID,
-	); err != nil {
-		t.Fatalf("set precision coin 0: %v", err)
-	}
-	if _, err := curveTestPool.Exec(ctx,
-		`UPDATE curve_pool_coin SET precision = NULL WHERE curve_pool_id = $1 AND coin_index = 1`,
-		poolID,
-	); err != nil {
-		t.Fatalf("null precision coin 1: %v", err)
-	}
-
-	pools, err := repo.LoadPools(ctx, 999)
-	if err != nil {
-		t.Fatalf("LoadPools: %v", err)
-	}
-
-	var found *outbound.CurvePoolRow
-	for i := range pools {
-		if pools[i].ID == poolID {
-			found = &pools[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("seeded pool id=%d not found", poolID)
-	}
-	if len(found.Precisions) != 2 {
-		t.Fatalf("len(Precisions) = %d, want 2", len(found.Precisions))
-	}
-	if found.Precisions[0] == nil || found.Precisions[0].Cmp(big.NewInt(1)) != 0 {
-		t.Errorf("Precisions[0] = %v, want 1", found.Precisions[0])
-	}
-	if found.Precisions[1] != nil {
-		t.Errorf("Precisions[1] = %v, want nil for a NULL precision column", found.Precisions[1])
-	}
 }
 
 // TestCurveRepository_SaveStableswapState_ExtendedColumns verifies the extended

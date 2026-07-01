@@ -159,7 +159,6 @@ func newTestPool() RegisteredPool {
 		Kind:         KindStableswapPreNG,
 		NCoins:       2,
 		CoinDecimals: []int{18, 18},
-		DeployBlock:  1,
 		HasAPrecise:  true,
 	}
 }

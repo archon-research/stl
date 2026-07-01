@@ -74,6 +74,17 @@ func getAddrField(data map[string]any, key string) (common.Address, error) {
 	return addr, nil
 }
 
+// coinIndexOrError converts an on-chain coin index (int128, decoded as *big.Int)
+// to an int, erroring if it falls outside [0, nCoins). A garbage index must stop
+// the block (SQS-retryable) rather than be silently truncated into a plausible
+// coin. Shared by the swap and remove-one decoders across both pool classes.
+func coinIndexOrError(field string, v *big.Int, nCoins int) (int, error) {
+	if !v.IsInt64() || v.Sign() < 0 || v.Int64() >= int64(nCoins) {
+		return 0, fmt.Errorf("%s %s out of range [0,%d)", field, v, nCoins)
+	}
+	return int(v.Int64()), nil
+}
+
 func getBigIntField(data map[string]any, key string) (*big.Int, error) {
 	v, ok := data[key]
 	if !ok {

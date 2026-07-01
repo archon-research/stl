@@ -87,32 +87,3 @@ func BigIntsToNullableNumericArray(bs []*big.Int) (pgtype.FlatArray[pgtype.Numer
 	}
 	return pgtype.FlatArray[pgtype.Numeric](elems), nil
 }
-
-// BigIntsToNullableElementArrayOrNull converts a slice to a NUMERIC[] payload
-// where a nil slice produces SQL NULL and nil elements become SQL NULL elements.
-// Used by the NG oracle columns (price_oracle / last_price) where individual
-// slots are legitimately absent: the EMA is uninitialised before the pool's
-// first swap, or the indexed selector reverts on factory-v2-era pools.
-func BigIntsToNullableElementArrayOrNull(bs []*big.Int) pgtype.FlatArray[pgtype.Numeric] {
-	if bs == nil {
-		return nil
-	}
-	return pgtype.FlatArray[pgtype.Numeric](BigIntsToNullableElementNumericArray(bs))
-}
-
-// BigIntsToNullableElementNumericArray converts a slice of *big.Int to a
-// NUMERIC[] payload where individual nil entries become SQL NULL elements
-// (rather than erroring). Used by columns that are NOT NULL on the array
-// itself but allow NULL per-element semantics — e.g. balancer_pool_state
-// balances where phantom BPT slots have no real reserve.
-func BigIntsToNullableElementNumericArray(bs []*big.Int) []pgtype.Numeric {
-	out := make([]pgtype.Numeric, len(bs))
-	for i, b := range bs {
-		if b == nil {
-			out[i] = pgtype.Numeric{Valid: false}
-			continue
-		}
-		out[i] = pgtype.Numeric{Int: new(big.Int).Set(b), Exp: 0, Valid: true}
-	}
-	return out
-}

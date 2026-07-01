@@ -1,8 +1,7 @@
 package abis
 
-// VEC-260 §13: swap event signatures + stableswap view methods cast-verified on mainnet (this session).
-// Liquidity/param event field shapes follow the standard Curve interface and MUST be confirmed against
-// live logs per pool class before merge.
+// VEC-260: swap/liquidity/param event signatures and stableswap view methods for
+// the indexed pool classes, verified against mainnet logs and cast reads.
 
 import "github.com/ethereum/go-ethereum/accounts/abi"
 

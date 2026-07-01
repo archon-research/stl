@@ -441,14 +441,14 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool, sigs cryptoswapL
 		if err != nil {
 			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_index: %w", err)
 		}
-		if !coinIdxBig.IsInt64() || coinIdxBig.Sign() < 0 || coinIdxBig.Int64() >= int64(pool.NCoins) {
-			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_index %s out of range [0,%d)", coinIdxBig, pool.NCoins)
+		coinIdx, err := coinIndexOrError("cryptoswap RemoveLiquidityOne coin_index", coinIdxBig, pool.NCoins)
+		if err != nil {
+			return nil, false, err
 		}
 		coinAmount, err := asBigInt(vals, 2)
 		if err != nil {
 			return nil, false, fmt.Errorf("cryptoswap RemoveLiquidityOne coin_amount: %w", err)
 		}
-		coinIdx := int(coinIdxBig.Int64())
 		rec := &LiquidityRecord{
 			Pool:         pool,
 			LogIndex:     logIndex,

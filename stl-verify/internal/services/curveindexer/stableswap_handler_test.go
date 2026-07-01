@@ -57,6 +57,44 @@ func TestStableswapHandler_RemoveLiquidityOne_ValidatesCoinIndex(t *testing.T) {
 	}
 }
 
+// TestStableswapHandler_TokenExchange_ValidatesCoinIndex: sold_id/bought_id are
+// int128 stored in INT columns, so an out-of-range index must fail the block
+// rather than be silently truncated (same coinIndexOrError guard as the
+// RemoveLiquidityOne path).
+func TestStableswapHandler_TokenExchange_ValidatesCoinIndex(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := newTestPool() // NCoins = 2
+	buyer := common.HexToAddress("0xabc")
+
+	cases := []struct {
+		name           string
+		soldID, bought int64
+		wantErr        bool
+	}{
+		{"in range", 0, 1, false},
+		{"sold_id == n_coins", 2, 0, true},
+		{"bought_id out of range", 0, 5, true},
+		{"negative sold_id", -1, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			receipt := buildReceiptWithTokenExchange(t, a, pool.Address, buyer,
+				tc.soldID, big.NewInt(1000), tc.bought, big.NewInt(999), 0)
+			_, err := h.DecodeEvents(receipt, pool, testChainID, 100, 0, time.Unix(100, 0).UTC())
+			if tc.wantErr && err == nil {
+				t.Fatalf("sold_id=%d bought_id=%d: expected out-of-range error, got nil", tc.soldID, tc.bought)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("sold_id=%d bought_id=%d: unexpected error: %v", tc.soldID, tc.bought, err)
+			}
+		})
+	}
+}
+
 // buildReceiptWithTokenExchange constructs a shared.TransactionReceipt containing
 // a single TokenExchange log. The indexed buyer goes in Topics[1]; the four
 // non-indexed fields (sold_id, tokens_sold, bought_id, tokens_bought) are
