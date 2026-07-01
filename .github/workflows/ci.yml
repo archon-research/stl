@@ -94,6 +94,7 @@ jobs:
       contents: read
       packages: write  # push BuildKit layer cache to GHCR
       id-token: write  # AWS OIDC
+      actions: read    # deploy-prod/notify-prod-rejected read run approvals (get-environment-review)
     needs:
       - detect-changes
       - ci-passed

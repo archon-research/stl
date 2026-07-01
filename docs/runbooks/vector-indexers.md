@@ -235,6 +235,37 @@ just duplicate `Stalled`.)
 
 ---
 
+## VectorMapleFTLBookActive
+
+**Severity:** info · **For:** 0m (1h window)
+
+### What it means
+
+The `fixed_term_loans` phase wrote > 0 rows to `maple_ftl_loan_state` in 1h.
+The FTL book has been dormant (0 live fixed-term loans), so the steady state is
+0 rows and there is intentionally no zero-rows alert (it would fire constantly).
+A nonzero write is the inverse signal: Maple reactivated the fixed-term-loan
+product and the indexer is now capturing it.
+
+### First checks
+
+- `SELECT COUNT(*), MAX(synced_at) FROM maple_ftl_loan_state;` — confirm rows
+  are landing and current.
+- Check `maple-graphql-indexer` logs for `fixed-term loans synced count=<n>`.
+- Spot-check a row against the Maple API (`loans` query) for the same loan id:
+  state, `interestRate` scale (6-decimal on live PoolV2), collateral/funds token
+  resolution.
+
+### Action
+
+Confirm the FTL path end-to-end, then add the data-quality alerts that only
+make sense once the book is live — most importantly an FTL silent-empty alert
+analogous to `VectorMaplePoolWritesZero` (cycling AND zero), so a later silent
+drop back to `[]` is caught. Until then this info alert is the only FTL
+data-quality signal.
+
+---
+
 ## VectorMapleSchemaDrift
 
 **Severity:** warning · **For:** 0m (1h window debounces)
