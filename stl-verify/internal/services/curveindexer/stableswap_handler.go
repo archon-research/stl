@@ -321,12 +321,13 @@ func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.
 	// 7. NG-only: price_oracle() and last_price() with AllowFailure=true.
 	//
 	// These no-arg oracle getters (and stored_rates/ema_price/get_p below) are
-	// gated by class, NOT by the per-pool capability probe that A_precise uses.
-	// Every stETH-ng-shaped plain_ng pool exposes them, but some plain_ng pools
-	// (e.g. GHO/crvUSD) expose only the indexed price_oracle(uint256) form and
-	// revert on the no-arg selector, which would poison-stall the block. Before
-	// seeding such a pool, generalize ProbePoolCapabilities to gate these
-	// per-pool (deferred to the pool-expansion follow-up, VEC-330/331).
+	// gated by class, NOT by a per-pool capability like A_precise (curated in
+	// curve_pool.has_a_precise). Every stETH-ng-shaped plain_ng pool exposes them,
+	// but some plain_ng pools (e.g. GHO/crvUSD) expose only the indexed
+	// price_oracle(uint256) form and revert on the no-arg selector, which would
+	// poison-stall the block. Before seeding such a pool, add curated capability
+	// columns for these getters as we did for A_precise (deferred to the
+	// pool-expansion follow-up, VEC-330/331).
 	if pool.Kind == KindStableswapNG {
 		data, err = h.stableABI.Pack("price_oracle")
 		if err != nil {

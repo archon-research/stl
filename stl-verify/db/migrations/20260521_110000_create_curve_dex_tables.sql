@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS curve_pool
     n_coins           SMALLINT    NOT NULL CHECK (n_coins >= 2),
     lp_token_address  BYTEA,
     deploy_block      BIGINT,
+    has_a_precise     BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (chain_id, pool_address)
 );
@@ -480,12 +481,12 @@ WITH proto AS (
     LIMIT 1
 ),
 pool_ins AS (
-    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block)
+    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block, has_a_precise)
     SELECT 1, proto.id,
            '\xDC24316b9AE028F1497c275EB9192a3Ea0f67022'::bytea,
            'plain_pre_ng', 2,
            '\x06325440D014e39736583c165C2963BA99fAf14E'::bytea,
-           11592551
+           11592551, TRUE  -- stETH classic exposes A_precise()
     FROM proto
     ON CONFLICT (chain_id, pool_address) DO NOTHING
     RETURNING id
@@ -517,12 +518,12 @@ WITH proto AS (
     LIMIT 1
 ),
 pool_ins AS (
-    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block)
+    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block, has_a_precise)
     SELECT 1, proto.id,
            '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea,
            'plain_ng', 2,
            NULL,
-           17500000
+           17500000, TRUE  -- stETH-ng (NG) exposes A_precise()
     FROM proto
     ON CONFLICT (chain_id, pool_address) DO NOTHING
     RETURNING id
@@ -552,12 +553,12 @@ WITH proto AS (
     LIMIT 1
 ),
 pool_ins AS (
-    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block)
+    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block, has_a_precise)
     SELECT 1, proto.id,
            '\xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7'::bytea,
            'plain_pre_ng', 3,
            '\x6c3F90f043a72FA612cbac8115EE7e52BDe6E490'::bytea,
-           10809473
+           10809473, FALSE  -- 3pool (oldest pre-NG) has no A_precise() getter
     FROM proto
     ON CONFLICT (chain_id, pool_address) DO NOTHING
     RETURNING id
@@ -593,12 +594,12 @@ WITH proto AS (
     LIMIT 1
 ),
 pool_ins AS (
-    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block)
+    INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, lp_token_address, deploy_block, has_a_precise)
     SELECT 1, proto.id,
            '\x7F86Bf177Dd4F3494b841a37e810A34dD56c829B'::bytea,
            'cryptoswap', 3,
            NULL,
-           17072859
+           17072859, FALSE  -- cryptoswap never calls A_precise()
     FROM proto
     ON CONFLICT (chain_id, pool_address) DO NOTHING
     RETURNING id

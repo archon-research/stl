@@ -408,6 +408,44 @@ func TestCurveRepository_LoadPools(t *testing.T) {
 	}
 }
 
+// TestCurveRepository_LoadPools_HasAPrecise verifies that curve_pool.has_a_precise
+// round-trips through LoadPools: FALSE by default and TRUE once curated, since it
+// gates the A_precise snapshot read (replacing the old startup capability probe).
+func TestCurveRepository_LoadPools_HasAPrecise(t *testing.T) {
+	ctx := context.Background()
+	repo := newCurveRepo(t)
+	poolID := seedCurvePool(t, ctx)
+
+	loadPool := func() outbound.CurvePoolRow {
+		t.Helper()
+		pools, err := repo.LoadPools(ctx, 999)
+		if err != nil {
+			t.Fatalf("LoadPools: %v", err)
+		}
+		for _, p := range pools {
+			if p.ID == poolID {
+				return p
+			}
+		}
+		t.Fatalf("seeded pool id=%d not found", poolID)
+		return outbound.CurvePoolRow{}
+	}
+
+	if loadPool().HasAPrecise {
+		t.Error("HasAPrecise = true, want false (default for a freshly seeded pool)")
+	}
+
+	if _, err := curveTestPool.Exec(ctx,
+		`UPDATE curve_pool SET has_a_precise = TRUE WHERE id = $1`, poolID,
+	); err != nil {
+		t.Fatalf("set has_a_precise: %v", err)
+	}
+
+	if !loadPool().HasAPrecise {
+		t.Error("HasAPrecise = false, want true after curating has_a_precise=TRUE")
+	}
+}
+
 // TestCurveRepository_LoadPools_NullDeployBlock verifies that a pool whose
 // deploy_block is NULL (registered before its deploy height was backfilled) is
 // still returned by LoadPools, with DeployBlock mapped to 0 rather than a scan

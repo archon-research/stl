@@ -50,20 +50,6 @@ func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound
 
 func (m *stableswapCallCountResults) Address() common.Address { return common.Address{} }
 
-// allSuccessMulticaller returns a Success result for every call. It is used to
-// drive ProbePoolCapabilities so the seeded stableswap pools report HasAPrecise=true.
-type allSuccessMulticaller struct{}
-
-func (allSuccessMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	out := make([]outbound.Result, len(calls))
-	for i := range out {
-		out[i] = outbound.Result{Success: true}
-	}
-	return out, nil
-}
-
-func (allSuccessMulticaller) Address() common.Address { return common.Address{} }
-
 // coordPreNGResults mirrors the curveindexer unit-test canned results for a
 // 2-coin pre-NG pool (21 reads). Kept local to the postgres package because the
 // curveindexer fixtures are test-only and not importable.
@@ -202,9 +188,9 @@ func seedCurveCoordPreNGPool(t *testing.T, ctx context.Context) (int64, common.A
 
 	var poolID int64
 	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, lp_token_address)
-		 VALUES ($1, $2, $3, 'plain_pre_ng', 2, 100, $4)
-		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET lp_token_address = EXCLUDED.lp_token_address, pool_kind = EXCLUDED.pool_kind
+		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, lp_token_address, has_a_precise)
+		 VALUES ($1, $2, $3, 'plain_pre_ng', 2, 100, $4, TRUE)
+		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET lp_token_address = EXCLUDED.lp_token_address, pool_kind = EXCLUDED.pool_kind, has_a_precise = EXCLUDED.has_a_precise
 		 RETURNING id`,
 		curveCoordChainID, protoID, poolAddr.Bytes(), lpAddr.Bytes(),
 	).Scan(&poolID); err != nil {
@@ -226,9 +212,9 @@ func seedCurveCoordNGPool(t *testing.T, ctx context.Context) (int64, common.Addr
 
 	var poolID int64
 	if err := curveTestPool.QueryRow(ctx,
-		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block)
-		 VALUES ($1, $2, $3, 'plain_ng', 2, 100)
-		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET pool_kind = EXCLUDED.pool_kind, lp_token_address = NULL
+		`INSERT INTO curve_pool (chain_id, protocol_id, pool_address, pool_kind, n_coins, deploy_block, has_a_precise)
+		 VALUES ($1, $2, $3, 'plain_ng', 2, 100, TRUE)
+		 ON CONFLICT (chain_id, pool_address) DO UPDATE SET pool_kind = EXCLUDED.pool_kind, lp_token_address = NULL, has_a_precise = EXCLUDED.has_a_precise
 		 RETURNING id`,
 		curveCoordChainID, protoID, poolAddr.Bytes(),
 	).Scan(&poolID); err != nil {
@@ -307,14 +293,9 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 		t.Fatalf("loading stableswap ABI: %v", err)
 	}
 
-	// Mirror production: run the startup capability probe so the seeded stableswap
-	// pools (which model real pools that expose A_precise) get HasAPrecise=true and
-	// the snapshot issues the gated A_precise call, keeping the 21/27 canned counts.
-	registered, err = curveindexer.ProbePoolCapabilities(ctx, allSuccessMulticaller{}, stableABI, registered, big.NewInt(100))
-	if err != nil {
-		t.Fatalf("ProbePoolCapabilities: %v", err)
-	}
-
+	// The seeded stableswap pools carry has_a_precise=TRUE (see seedCurveCoord*Pool),
+	// so LoadPools reports HasAPrecise=true and the snapshot issues the gated
+	// A_precise call, keeping the 21/27 canned result counts.
 	cryptoABI, err := abis.CurveCryptoswapABI()
 	if err != nil {
 		t.Fatalf("loading cryptoswap ABI: %v", err)

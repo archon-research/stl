@@ -34,8 +34,8 @@ type RegisteredPool struct {
 	LpTokenAddress *common.Address
 	// HasAPrecise records whether this stableswap pool exposes A_precise(). Some of
 	// the oldest pre-NG pools (e.g. 3pool) do not, so the snapshot must gate the call
-	// on this flag. Set by the startup capability probe (ProbePoolCapabilities);
-	// irrelevant (and left false) for cryptoswap pools, which never call A_precise.
+	// on this flag. Curated in the DB (curve_pool.has_a_precise) and carried through
+	// LoadPools; irrelevant (and false) for cryptoswap pools, which never call A_precise.
 	HasAPrecise bool
 }
 

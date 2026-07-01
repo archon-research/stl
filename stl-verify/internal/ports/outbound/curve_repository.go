@@ -28,6 +28,9 @@ type CurvePoolRow struct {
 	// separate contract (totalSupply lives there, not on the pool); nil when the
 	// pool is its own LP token (NG pools).
 	LpTokenAddress *common.Address
+	// HasAPrecise is curated pool metadata (curve_pool.has_a_precise): whether the
+	// pool exposes the A_precise() getter. Gates the A_precise snapshot read.
+	HasAPrecise bool
 }
 
 // SwapInput carries primitive values for a curve_swap insert.

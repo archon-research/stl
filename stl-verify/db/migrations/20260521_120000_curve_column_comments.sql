@@ -30,6 +30,8 @@ COMMENT ON COLUMN curve_pool.lp_token_address IS
   'LP/share token contract, 20 bytes. A separate contract for pre-NG pools (where totalSupply lives); NULL when the pool is its own LP token (NG pools).';
 COMMENT ON COLUMN curve_pool.deploy_block IS
   'Advisory deployment block; may be NULL or approximate for pools backfilled later.';
+COMMENT ON COLUMN curve_pool.has_a_precise IS
+  'Configuration. Whether the pool exposes the no-arg A_precise() getter, curated at seed time and used to gate the A_precise snapshot read. TRUE for most stableswap pools; FALSE for the oldest pre-NG pools (e.g. 3pool) that lack it and for cryptoswap pools, which never call it.';
 COMMENT ON COLUMN curve_pool.created_at IS
   'Audit. Row insertion timestamp (bookkeeping only; not an on-chain value).';
 
