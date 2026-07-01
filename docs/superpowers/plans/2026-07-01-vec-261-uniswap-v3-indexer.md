@@ -58,10 +58,10 @@
 - Modify: `stl-verify/internal/services/curveindexer/service.go` (delete `buildSnapshotSet`/`snapshotKey`/`lastSnapshot` logic, delegate to dexconsumer)
 
 **Interfaces:**
-- Produces: `dexconsumer.SnapshotTracker` with `func NewSnapshotTracker(heartbeatBlocks int64) *SnapshotTracker` and `func (t *SnapshotTracker) DueSet(pools []SnapshotPool, touchedIDs []int64, bn int64, ver int) []int64` where `type SnapshotPool interface { PoolID() int64; DeployBlockNum() int64 }`. **A1 fix:** `DueSet` excludes any pool with `bn < DeployBlockNum()`; a *touched* pool below its deploy block returns an error path (registry bug) — expose `DueSetChecked(...) ([]int64, error)`.
-- Consumes: `RegisteredPool` (curve) / `uniswapv3indexer` pool implement `SnapshotPool`.
+- Produces: `dexconsumer.SnapshotTracker` with `func NewSnapshotTracker(sweepBlocks int64) *SnapshotTracker` and `func (t *SnapshotTracker) DueSet(pools []SnapshotPool, touchedIDs []int64, bn int64, ver int) []int64` where `type SnapshotPool interface { PoolID() int64; DeployBlockNum() int64 }`. (Upstream renamed the curve field `HeartbeatBlocks`→`SweepBlocks`; use `sweepBlocks`/`SweepBlocks` for consistency — grep first to confirm the current name.) **A1 fix:** `DueSet` excludes any pool with `bn < DeployBlockNum()`; a *touched* pool below its deploy block returns an error path (registry bug) — expose `DueSetChecked(...) ([]int64, error)`.
+- Consumes: `RegisteredPool` (curve) / `uniswapv3indexer` pool implement `SnapshotPool`. Note: Curve currently inlines this bookkeeping in `service.go` (`buildSnapshotSet`/`snapshotKey`/`lastSnapshot`, keyed off `sweepBlocks`); this task extracts it and refactors Curve to delegate.
 
-- [ ] **Step 1:** Write failing tests in `snapshotset_test.go`: (a) heartbeat-due when unseen / `bn-last>=hb` / `bn==last && ver!=last`; (b) **excludes a pool with `bn < deployBlock`**; (c) touched pool below deploy block → error; (d) de-dupes touched+heartbeat; (e) returns sorted ascending IDs.
+- [ ] **Step 1:** Write failing tests in `snapshotset_test.go`: (a) sweep-due when unseen / `bn-last>=sweepBlocks` / `bn==last && ver!=last`; (b) **excludes a pool with `bn < deployBlock`**; (c) touched pool below deploy block → error; (d) de-dupes touched+sweep; (e) returns sorted ascending IDs.
 - [ ] **Step 2:** Run: `cd stl-verify && go test ./internal/services/dexconsumer/ -run TestSnapshotTracker -v` — expect FAIL (undefined).
 - [ ] **Step 3:** Implement `snapshotset.go` (port the curve logic verbatim + the deploy-block gate).
 - [ ] **Step 4:** Refactor `curveindexer/service.go` to construct and use `dexconsumer.SnapshotTracker`; delete the inlined logic.
