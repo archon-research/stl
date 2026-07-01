@@ -113,6 +113,10 @@ type fakeVatCaller struct {
 	debtRevertedByVault map[common.Address]bool // if true, ReadDebts marks Reverted on this vault
 	readDebtsErr        error                   // if set, ReadDebts returns this error (whole batch fails)
 	truncateResults     int                     // if > 0, return only this many results (to test short result handling)
+
+	// readHashes records the block hash ReadDebts was pinned to on each call,
+	// so tests can assert the service threads event.BlockHash through (VEC-471).
+	readHashes []common.Hash
 }
 
 func newFakeVatCaller() *fakeVatCaller {
@@ -173,9 +177,11 @@ func (f *fakeVatCaller) ResolveIlks(_ context.Context, vaults []common.Address, 
 	return result, nil
 }
 
-func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery, _ *big.Int) ([]entity.DebtResult, error) {
+func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery, blockHash common.Hash) ([]entity.DebtResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.readHashes = append(f.readHashes, blockHash)
 
 	if f.readDebtsErr != nil {
 		return nil, f.readDebtsErr
@@ -203,6 +209,17 @@ func (f *fakeVatCaller) ReadDebts(_ context.Context, queries []entity.DebtQuery,
 	}
 
 	return results, nil
+}
+
+// lastReadHash returns the block hash of the most recent ReadDebts call, or the
+// zero hash if none has happened yet.
+func (f *fakeVatCaller) lastReadHash() common.Hash {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.readHashes) == 0 {
+		return common.Hash{}
+	}
+	return f.readHashes[len(f.readHashes)-1]
 }
 
 // fakePrimeDebtRepository is a controllable in-memory repository.
@@ -509,6 +526,55 @@ func TestSync_WritesSnapshotPerPrime(t *testing.T) {
 
 	cancel()
 	_ = svc.Stop()
+}
+
+// TestSync_ReadDebtsPinnedToBlockHash asserts the sweep threads the event's
+// block hash into ReadDebts, not the block number: after a reorg an archive
+// node answers eth_call-by-number with the new fork's debt, which can silently
+// disagree with the reorged block being processed (VEC-471). makeBlockEvents
+// encodes the block number into BlockHash as 0x%064x, so the expected hash is
+// derived from the swept block number.
+func TestSync_ReadDebtsPinnedToBlockHash(t *testing.T) {
+	prime := entity.Prime{ID: 1, Name: "spark", VaultAddress: common.HexToAddress("0x691A6c29e9e96Dd897718305427Ad5D534db16BA")}
+
+	caller := newFakeVatCaller()
+	caller.setIlk(prime.VaultAddress, ilkFrom("ALLOCATOR-spark-A"))
+
+	events := makeBlockEvents(testBlockNum, 1)
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{prime}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if repo.savedCount() >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for snapshot")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	_ = svc.Stop()
+
+	wantHash := common.HexToHash(fmt.Sprintf("0x%064x", testBlockNum))
+	if got := caller.lastReadHash(); got != wantHash {
+		t.Errorf("ReadDebts block hash = %s, want %s (must pin to the event's block hash)", got, wantHash)
+	}
 }
 
 // TestSync_PartialRevert_OtherPrimesStillSaved verifies the
