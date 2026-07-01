@@ -611,4 +611,32 @@ ALTER TABLE ONLY security_subtype_ref
 ALTER TABLE ONLY security_type_ref
     ADD CONSTRAINT security_type_ref_asset_class_fkey FOREIGN KEY (asset_class) REFERENCES asset_class_ref(asset_class);
 
+-- Immutability guard: these are controlled vocabularies, changed only by a deliberate
+-- migration. REVOKE UPDATE/DELETE so any accidental mutation errors out - both for the
+-- indexer role (stl_readwrite, which stl_read_write inherits) AND for the table owner
+-- (stl_migrator), since a non-superuser owner's own writes are denied once revoked, so a
+-- stray fix-migration fails loudly instead of silently changing reference data.
+-- Guarded by role existence: stl_readwrite is created by 20260122_140100; stl_migrator is
+-- infra-provisioned (bootstrap-db.yaml / Terraform) and absent in unit-test databases.
+-- INSERT is left intact so the seed above and deliberate future additions still work.
+DO $$
+DECLARE
+    tbl  text;
+    role text;
+BEGIN
+    FOREACH tbl IN ARRAY ARRAY[
+        'asset_class_ref','security_type_ref','security_subtype_ref','credit_rating_ref',
+        'sector_ref','industry_group_ref','currency_ref','country_ref','deal_type_ref',
+        'entity_type_ref','counterparty_role_ref','origination_type_ref','corporate_action_type_ref']
+    LOOP
+        FOREACH role IN ARRAY ARRAY['stl_readwrite','stl_migrator']
+        LOOP
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role) THEN
+                EXECUTE format('REVOKE UPDATE, DELETE ON %I FROM %I', tbl, role);
+            END IF;
+        END LOOP;
+    END LOOP;
+END
+$$;
+
 INSERT INTO migrations (filename) VALUES ('20260630_130000_create_reference_tables.sql') ON CONFLICT (filename) DO NOTHING;
