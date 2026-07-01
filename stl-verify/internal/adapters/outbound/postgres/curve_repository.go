@@ -131,13 +131,15 @@ type liquidityConverted struct {
 	fees         pgtype.FlatArray[pgtype.Numeric]
 }
 
-// stableConverted holds pre-converted numeric values for a curve_stableswap_state insert.
+// stableConverted holds pre-converted numeric values for a curve_stableswap_state
+// insert. Field names mirror the columns: virtualPrice=get_virtual_price(),
+// amp=amplification coefficient A().
 type stableConverted struct {
-	s             *entity.CurveStableswapState
+	state         *entity.CurveStableswapState
 	balances      []pgtype.Numeric
-	vp            pgtype.Numeric
-	ts            pgtype.Numeric
-	a             pgtype.Numeric
+	virtualPrice  pgtype.Numeric
+	totalSupply   pgtype.Numeric
+	amp           pgtype.Numeric
 	fee           pgtype.Numeric
 	spotDy        []pgtype.Numeric
 	adminBalances pgtype.FlatArray[pgtype.Numeric]
@@ -145,13 +147,15 @@ type stableConverted struct {
 	calcWithdraw  pgtype.FlatArray[pgtype.Numeric]
 }
 
-// cryptoConverted holds pre-converted numeric values for a curve_cryptoswap_state insert.
+// cryptoConverted holds pre-converted numeric values for a curve_cryptoswap_state
+// insert. Field names mirror the columns: virtualPrice=get_virtual_price(),
+// amp=amplification coefficient A(), gamma=gamma().
 type cryptoConverted struct {
-	s             *entity.CurveCryptoswapState
+	state         *entity.CurveCryptoswapState
 	balances      []pgtype.Numeric
-	vp            pgtype.Numeric
-	ts            pgtype.Numeric
-	a             pgtype.Numeric
+	virtualPrice  pgtype.Numeric
+	totalSupply   pgtype.Numeric
+	amp           pgtype.Numeric
 	gamma         pgtype.Numeric
 	fee           pgtype.Numeric
 	priceScale    []pgtype.Numeric
@@ -244,45 +248,45 @@ func convertLiquidity(inputs []outbound.LiquidityInput) ([]liquidityConverted, e
 // convertStableStates pre-converts all numeric fields for stableswap state inserts.
 func convertStableStates(states []*entity.CurveStableswapState) ([]stableConverted, error) {
 	out := make([]stableConverted, 0, len(states))
-	for i, s := range states {
-		balances, convErr := BigIntsToNumericArray(s.Balances)
+	for i, state := range states {
+		balances, convErr := BigIntsToNumericArray(state.Balances)
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting balances: %w", i, convErr)
 		}
-		spotDy, convErr := BigIntsToNumericArray(s.SpotDy)
+		spotDy, convErr := BigIntsToNumericArray(state.SpotDy)
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting spot_dy: %w", i, convErr)
 		}
-		vp, convErr := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
+		virtualPrice, convErr := BigIntToNumericRequired(state.VirtualPrice, "virtual_price")
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting virtual_price: %w", i, convErr)
 		}
-		ts, convErr := BigIntToNumericRequired(s.TotalSupply, "total_supply")
+		totalSupply, convErr := BigIntToNumericRequired(state.TotalSupply, "total_supply")
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting total_supply: %w", i, convErr)
 		}
-		a, convErr := BigIntToNumericRequired(s.A, "a")
+		amp, convErr := BigIntToNumericRequired(state.A, "a")
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting a: %w", i, convErr)
 		}
-		fee, convErr := BigIntToNumericRequired(s.Fee, "fee")
+		fee, convErr := BigIntToNumericRequired(state.Fee, "fee")
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting fee: %w", i, convErr)
 		}
-		adminBalances, convErr := BigIntsToNullableNumericArray(s.AdminBalances)
+		adminBalances, convErr := BigIntsToNullableNumericArray(state.AdminBalances)
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting admin_balances: %w", i, convErr)
 		}
-		storedRates, convErr := BigIntsToNullableNumericArray(s.StoredRates)
+		storedRates, convErr := BigIntsToNullableNumericArray(state.StoredRates)
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting stored_rates: %w", i, convErr)
 		}
-		calcWithdraw, convErr := BigIntsToNullableNumericArray(s.CalcWithdrawOneCoin)
+		calcWithdraw, convErr := BigIntsToNullableNumericArray(state.CalcWithdrawOneCoin)
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting calc_withdraw_one_coin: %w", i, convErr)
 		}
 		out = append(out, stableConverted{
-			s: s, balances: balances, vp: vp, ts: ts, a: a, fee: fee, spotDy: spotDy,
+			state: state, balances: balances, virtualPrice: virtualPrice, totalSupply: totalSupply, amp: amp, fee: fee, spotDy: spotDy,
 			adminBalances: adminBalances, storedRates: storedRates, calcWithdraw: calcWithdraw,
 		})
 	}
@@ -292,61 +296,61 @@ func convertStableStates(states []*entity.CurveStableswapState) ([]stableConvert
 // convertCryptoStates pre-converts all numeric fields for cryptoswap state inserts.
 func convertCryptoStates(states []*entity.CurveCryptoswapState) ([]cryptoConverted, error) {
 	out := make([]cryptoConverted, 0, len(states))
-	for i, s := range states {
-		balances, convErr := BigIntsToNumericArray(s.Balances)
+	for i, state := range states {
+		balances, convErr := BigIntsToNumericArray(state.Balances)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting balances: %w", i, convErr)
 		}
-		vp, convErr := BigIntToNumericRequired(s.VirtualPrice, "virtual_price")
+		virtualPrice, convErr := BigIntToNumericRequired(state.VirtualPrice, "virtual_price")
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting virtual_price: %w", i, convErr)
 		}
-		ts, convErr := BigIntToNumericRequired(s.TotalSupply, "total_supply")
+		totalSupply, convErr := BigIntToNumericRequired(state.TotalSupply, "total_supply")
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting total_supply: %w", i, convErr)
 		}
-		a, convErr := BigIntToNumericRequired(s.A, "a")
+		amp, convErr := BigIntToNumericRequired(state.A, "a")
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting a: %w", i, convErr)
 		}
-		gamma, convErr := BigIntToNumericRequired(s.Gamma, "gamma")
+		gamma, convErr := BigIntToNumericRequired(state.Gamma, "gamma")
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting gamma: %w", i, convErr)
 		}
-		fee, convErr := BigIntToNumericRequired(s.Fee, "fee")
+		fee, convErr := BigIntToNumericRequired(state.Fee, "fee")
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting fee: %w", i, convErr)
 		}
-		priceScale, convErr := BigIntsToNumericArray(s.PriceScale)
+		priceScale, convErr := BigIntsToNumericArray(state.PriceScale)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting price_scale: %w", i, convErr)
 		}
-		priceOracle, convErr := BigIntsToNumericArray(s.PriceOracle)
+		priceOracle, convErr := BigIntsToNumericArray(state.PriceOracle)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting price_oracle: %w", i, convErr)
 		}
-		lastPrices, convErr := BigIntsToNumericArray(s.LastPrices)
+		lastPrices, convErr := BigIntsToNumericArray(state.LastPrices)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting last_prices: %w", i, convErr)
 		}
-		spotDy, convErr := BigIntsToNumericArray(s.SpotDy)
+		spotDy, convErr := BigIntsToNumericArray(state.SpotDy)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting spot_dy: %w", i, convErr)
 		}
-		adminBalances, convErr := BigIntsToNullableNumericArray(s.AdminBalances)
+		adminBalances, convErr := BigIntsToNullableNumericArray(state.AdminBalances)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting admin_balances: %w", i, convErr)
 		}
-		getDx, convErr := BigIntsToNullableNumericArray(s.GetDx)
+		getDx, convErr := BigIntsToNullableNumericArray(state.GetDx)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting get_dx: %w", i, convErr)
 		}
-		calcWithdraw, convErr := BigIntsToNullableNumericArray(s.CalcWithdrawOneCoin)
+		calcWithdraw, convErr := BigIntsToNullableNumericArray(state.CalcWithdrawOneCoin)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting calc_withdraw_one_coin: %w", i, convErr)
 		}
 		out = append(out, cryptoConverted{
-			s: s, balances: balances, vp: vp, ts: ts, a: a, gamma: gamma, fee: fee,
+			state: state, balances: balances, virtualPrice: virtualPrice, totalSupply: totalSupply, amp: amp, gamma: gamma, fee: fee,
 			priceScale: priceScale, priceOracle: priceOracle, lastPrices: lastPrices, spotDy: spotDy,
 			adminBalances: adminBalances, getDx: getDx, calcWithdraw: calcWithdraw,
 		})
@@ -405,12 +409,12 @@ func queueCurveBatch(
 			    ema_price, get_p, calc_token_amount, calc_withdraw_one_coin, build_id)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 			 ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, processing_version) DO NOTHING`,
-			c.s.CurvePoolID, c.s.BlockNumber, c.s.BlockVersion, c.s.Timestamp,
-			c.balances, c.vp, c.ts, c.a, c.fee, c.spotDy,
-			BigIntToNullableNumeric(c.s.LastPrice), BigIntToNullableNumeric(c.s.PriceOracle),
-			BigIntToNullableNumeric(c.s.APrecise), c.adminBalances, c.storedRates,
-			BigIntToNullableNumeric(c.s.EmaPrice), BigIntToNullableNumeric(c.s.GetP),
-			BigIntToNullableNumeric(c.s.CalcTokenAmount), c.calcWithdraw, int(buildID),
+			c.state.CurvePoolID, c.state.BlockNumber, c.state.BlockVersion, c.state.Timestamp,
+			c.balances, c.virtualPrice, c.totalSupply, c.amp, c.fee, c.spotDy,
+			BigIntToNullableNumeric(c.state.LastPrice), BigIntToNullableNumeric(c.state.PriceOracle),
+			BigIntToNullableNumeric(c.state.APrecise), c.adminBalances, c.storedRates,
+			BigIntToNullableNumeric(c.state.EmaPrice), BigIntToNullableNumeric(c.state.GetP),
+			BigIntToNullableNumeric(c.state.CalcTokenAmount), c.calcWithdraw, int(buildID),
 		)
 	}
 
@@ -424,12 +428,12 @@ func queueCurveBatch(
 			    get_dx, calc_token_amount, calc_withdraw_one_coin, build_id)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
 			 ON CONFLICT (curve_pool_id, block_timestamp, block_number, block_version, processing_version) DO NOTHING`,
-			c.s.CurvePoolID, c.s.BlockNumber, c.s.BlockVersion, c.s.Timestamp,
-			c.balances, c.vp, c.ts, c.a, c.gamma, c.fee,
-			BigIntToNullableNumeric(c.s.D), BigIntToNullableNumeric(c.s.XcpProfit),
+			c.state.CurvePoolID, c.state.BlockNumber, c.state.BlockVersion, c.state.Timestamp,
+			c.balances, c.virtualPrice, c.totalSupply, c.amp, c.gamma, c.fee,
+			BigIntToNullableNumeric(c.state.D), BigIntToNullableNumeric(c.state.XcpProfit),
 			c.priceScale, c.priceOracle, c.lastPrices, c.spotDy,
-			c.adminBalances, BigIntToNullableNumeric(c.s.LpPrice), BigIntToNullableNumeric(c.s.XcpProfitA),
-			c.s.LastPricesTimestamp, c.getDx, BigIntToNullableNumeric(c.s.CalcTokenAmount),
+			c.adminBalances, BigIntToNullableNumeric(c.state.LpPrice), BigIntToNullableNumeric(c.state.XcpProfitA),
+			c.state.LastPricesTimestamp, c.getDx, BigIntToNullableNumeric(c.state.CalcTokenAmount),
 			c.calcWithdraw, int(buildID),
 		)
 	}
