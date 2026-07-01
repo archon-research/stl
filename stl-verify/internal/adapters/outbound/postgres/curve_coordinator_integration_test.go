@@ -37,6 +37,17 @@ type stableswapCallCountResults struct {
 }
 
 func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return m.resultsFor(calls)
+}
+
+// ExecuteAtHash is the path CurveService.snapshotPools actually calls
+// (state snapshots are pinned to the block hash); Execute is kept to satisfy
+// outbound.Multicaller for callers that only have a block number.
+func (m *stableswapCallCountResults) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.resultsFor(calls)
+}
+
+func (m *stableswapCallCountResults) resultsFor(calls []outbound.Call) ([]outbound.Result, error) {
 	switch len(calls) {
 	case len(m.pre):
 		return m.pre, nil

@@ -83,21 +83,62 @@ func (m *inTxTrackingTxManager) WithTransaction(_ context.Context, fn func(pgx.T
 	return fn(nil)
 }
 
-// txCheckingMulticaller fails if Execute runs while the tracked tx manager is
-// inside a transaction, proving snapshot reads happen before the tx opens.
+// txCheckingMulticaller fails if a multicall runs while the tracked tx manager
+// is inside a transaction, proving snapshot reads happen before the tx opens.
+// Curve's snapshot path calls ExecuteAtHash (hash-pinned reads); Execute is kept
+// for other Multicaller consumers that only have a block number.
 type txCheckingMulticaller struct {
 	tracker *inTxTrackingTxManager
 	results []outbound.Result
 }
 
-func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+func (m *txCheckingMulticaller) checkNotInTx() error {
 	if m.tracker.inTx {
-		return nil, fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
+		return fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
+	}
+	return nil
+}
+
+func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	if err := m.checkNotInTx(); err != nil {
+		return nil, err
+	}
+	return m.results, nil
+}
+
+func (m *txCheckingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	if err := m.checkNotInTx(); err != nil {
+		return nil, err
 	}
 	return m.results, nil
 }
 
 func (m *txCheckingMulticaller) Address() common.Address {
+	return common.Address{}
+}
+
+// hashRecordingMulticaller is a test double for outbound.Multicaller that
+// records the block hash it was called with via ExecuteAtHash, so tests can
+// assert the coordinator pins state reads to the block hash (reorg-correctness)
+// rather than the block number alone.
+type hashRecordingMulticaller struct {
+	results     []outbound.Result
+	gotHash     common.Hash
+	executedVia string // "hash" or "number", whichever method was actually called
+}
+
+func (m *hashRecordingMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	m.executedVia = "number"
+	return m.results, nil
+}
+
+func (m *hashRecordingMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	m.executedVia = "hash"
+	m.gotHash = blockHash
+	return m.results, nil
+}
+
+func (m *hashRecordingMulticaller) Address() common.Address {
 	return common.Address{}
 }
 
@@ -498,6 +539,61 @@ func TestCurveService_SnapshotMulticallRunsOutsideTransaction(t *testing.T) {
 	}
 	if repo.stableswapSaves != 1 {
 		t.Errorf("stableswap snapshots = %d, want 1", repo.stableswapSaves)
+	}
+}
+
+// TestCurveService_SnapshotPinsToBlockHash: the state snapshot multicall must be
+// pinned to the block hash of the (blockNumber, version) being processed, not the
+// block number alone. After a reorg an archive node answers eth_call-by-number
+// with the new canonical state, which can silently disagree with the reorged
+// receipts being processed in this event; pinning by hash makes the read
+// unambiguous. See VEC-261 task A1 (fix A2).
+func TestCurveService_SnapshotPinsToBlockHash(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	mc := &hashRecordingMulticaller{results: stableswapPreNGResults(t, a)}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools:           []RegisteredPool{newTestPool()},
+		Handlers:        handlers,
+		Multicaller:     mc,
+		Repo:            repo,
+		EventWriter:     writer,
+		TxManager:       &fakeTxManager{},
+		HeartbeatBlocks: 1, // force a snapshot even with no events
+		ChainID:         testChainID,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+
+	wantHash := common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+	event := blockEvent(100)
+	event.BlockHash = wantHash.Hex()
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), event, nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if mc.executedVia != "hash" {
+		t.Fatalf("multicaller invoked via %q, want the hash-pinned path", mc.executedVia)
+	}
+	if mc.gotHash != wantHash {
+		t.Errorf("multicall block hash = %s, want %s", mc.gotHash, wantHash)
 	}
 }
 
@@ -968,7 +1064,7 @@ func (h *nilNilHandler) DecodeEvents(receipt shared.TransactionReceipt, pool Reg
 	return DecodedEvents{}, nil
 }
 
-func (h *nilNilHandler) SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, ts time.Time) (StateSnapshot, error) {
+func (h *nilNilHandler) SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, blockHash common.Hash, ts time.Time) (StateSnapshot, error) {
 	// Return StateSnapshot with both pointers nil.
 	return StateSnapshot{
 		Pool:         pool,

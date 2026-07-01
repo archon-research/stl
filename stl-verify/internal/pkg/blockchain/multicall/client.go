@@ -83,26 +83,63 @@ func (c *Client) Execute(ctx context.Context, calls []outbound.Call, blockNumber
 	// _count/_sum reflect attempted multicalls, not only successful ones.
 	c.recordBatch(ctx, len(calls))
 
-	data, err := c.abi.Pack("aggregate3", calls)
+	data, err := c.packAggregate3(calls)
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack multicall: %w", err)
+		return nil, err
 	}
 
-	msg := ethereum.CallMsg{
-		To:   &c.address,
-		Data: data,
-	}
-
-	result, err := c.ethClient.CallContract(ctx, msg, blockNumber)
+	result, err := c.ethClient.CallContract(ctx, c.callMsg(data), blockNumber)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call multicall contract at address=%s block=%s calls=%d: %w",
 			c.address.Hex(), blockNumberString(blockNumber), len(calls), err)
 	}
 
+	return c.unpackAggregate3(result, blockNumberString(blockNumber))
+}
+
+// ExecuteAtHash pins the read to blockHash instead of a block number. See the
+// outbound.Multicaller doc comment for why hash-pinning matters for reorg
+// correctness.
+func (c *Client) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	if len(calls) == 0 {
+		return []outbound.Result{}, nil
+	}
+
+	c.recordBatch(ctx, len(calls))
+
+	data, err := c.packAggregate3(calls)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := c.ethClient.CallContractAtHash(ctx, c.callMsg(data), blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call multicall contract at address=%s blockHash=%s calls=%d: %w",
+			c.address.Hex(), blockHash.Hex(), len(calls), err)
+	}
+
+	return c.unpackAggregate3(result, blockHash.Hex())
+}
+
+func (c *Client) callMsg(data []byte) ethereum.CallMsg {
+	return ethereum.CallMsg{
+		To:   &c.address,
+		Data: data,
+	}
+}
+
+func (c *Client) packAggregate3(calls []outbound.Call) ([]byte, error) {
+	data, err := c.abi.Pack("aggregate3", calls)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack multicall: %w", err)
+	}
+	return data, nil
+}
+
+func (c *Client) unpackAggregate3(result []byte, blockDesc string) ([]outbound.Result, error) {
 	unpacked, err := c.abi.Unpack("aggregate3", result)
 	if err != nil {
-		return nil, fmt.Errorf("failed to unpack multicall response at block=%s: %w",
-			blockNumberString(blockNumber), err)
+		return nil, fmt.Errorf("failed to unpack multicall response at block=%s: %w", blockDesc, err)
 	}
 
 	resultsRaw := unpacked[0].([]struct {

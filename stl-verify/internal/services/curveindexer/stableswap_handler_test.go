@@ -370,6 +370,10 @@ func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.I
 	return f.results, nil
 }
 
+func (f *fakeMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return f.results, nil
+}
+
 func (f *fakeMulticaller) Address() common.Address {
 	return common.Address{}
 }
@@ -485,7 +489,7 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 		HasAPrecise:  true,
 	}
 	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -560,7 +564,7 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 		HasAPrecise:  true,
 	}
 	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot NG: %v", err)
 	}
@@ -620,6 +624,11 @@ func (c *capturingMulticaller) Execute(_ context.Context, calls []outbound.Call,
 	return c.results, nil
 }
 
+func (c *capturingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	c.captured = append(c.captured, calls...)
+	return c.results, nil
+}
+
 func (c *capturingMulticaller) Address() common.Address {
 	return common.Address{}
 }
@@ -651,7 +660,7 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 	}
 
 	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -699,7 +708,7 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 	}
 
 	mc := &capturingMulticaller{results: stableswapNGResults(t, a)}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
@@ -738,7 +747,7 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 	revertResults[0] = outbound.Result{Success: false, ReturnData: nil} // First balances call reverts
 
 	mc := &fakeMulticaller{results: revertResults}
-	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Errorf("snapshot with required call revert should error, got nil")
 	}
@@ -765,7 +774,7 @@ func TestStableswapHandler_SnapshotExtendedRevertErrors(t *testing.T) {
 	results[preNG2CoinAPreciseIdx] = outbound.Result{Success: false} // A_precise reverts
 
 	mc := &fakeMulticaller{results: results}
-	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted extended read (A_precise) must error, got nil")
 	}
@@ -783,7 +792,7 @@ func TestStableswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	results[preNG2CoinInitialAIdx] = outbound.Result{Success: false} // initial_A reverts
 
 	mc := &fakeMulticaller{results: results}
-	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
 	}
@@ -812,7 +821,7 @@ func TestStableswapHandler_SnapshotNoAPreciseGatesCall(t *testing.T) {
 	}
 
 	mc := &capturingMulticaller{results: results}
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}

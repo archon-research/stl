@@ -84,7 +84,30 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 	if err != nil {
 		return results, err
 	}
+	m.archiveBatch(ctx, calls, results, blockNumber)
+	return results, nil
+}
 
+// ExecuteAtHash forwards to the inner multicaller's hash-pinned path, then
+// archives the batch the same way Execute does. The archived record's
+// BlockNumber is stamped 0 (the same "unknown" convention Execute uses for a
+// nil blockNumber) since a hash-pinned caller does not necessarily carry the
+// number; no production caller archives via this path today (archiving wraps
+// state-reading indexers other than Curve, which calls ExecuteAtHash).
+func (m *Multicaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	results, err := m.inner.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return results, err
+	}
+	m.archiveBatch(ctx, calls, results, nil)
+	return results, nil
+}
+
+// archiveBatch validates the call/result counts and schedules the detached
+// background archive write. Shared by Execute and ExecuteAtHash so both stay
+// in lockstep on truncation handling, metrics, and the fire-and-forget
+// contract.
+func (m *Multicaller) archiveBatch(ctx context.Context, calls []outbound.Call, results []outbound.Result, blockNumber *big.Int) {
 	n := len(calls)
 	if len(results) != n {
 		// The inner multicaller returned a different number of results than
@@ -103,7 +126,7 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 	if n == 0 {
 		// Nothing to archive — don't schedule a goroutine that would write a
 		// phantom empty object.
-		return results, nil
+		return
 	}
 
 	blockVersion, _ := BlockVersionFromContext(ctx)
@@ -111,9 +134,6 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 	detached := context.WithoutCancel(ctx)
 	record := m.buildBatchRecord(calls[:n], results[:n], blockNumber, blockVersion, mcAddr)
 	m.scheduleArchive(detached, record)
-	// err is provably nil here (the err != nil path returned above); archiving
-	// never affects the returned error.
-	return results, nil
 }
 
 // Address forwards to the inner multicaller.
