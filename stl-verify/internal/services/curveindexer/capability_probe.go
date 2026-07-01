@@ -70,7 +70,7 @@ func ProbePoolCapabilities(ctx context.Context, mc outbound.Multicaller, stableA
 		return nil, fmt.Errorf("executing A_precise capability probe: %w", err)
 	}
 	if len(results) != len(calls) {
-		return nil, fmt.Errorf("A_precise probe returned %d results, expected %d", len(results), len(calls))
+		return nil, fmt.Errorf("unexpected A_precise probe result count: got %d, want %d", len(results), len(calls))
 	}
 
 	// Re-walk the pools with a result cursor, applying the same stableswap filter
