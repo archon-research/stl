@@ -614,30 +614,25 @@ ALTER TABLE ONLY security_type_ref
     ADD CONSTRAINT security_type_ref_asset_class_fkey FOREIGN KEY (asset_class) REFERENCES asset_class_ref(asset_class);
 
 -- Immutability guard: these are controlled vocabularies, changed only by a deliberate
--- migration. REVOKE UPDATE/DELETE so any accidental mutation errors out - both for the
--- indexer role (stl_readwrite, which stl_read_write inherits) AND for the table owner
--- (stl_migrator), since a non-superuser owner's own writes are denied once revoked, so a
--- stray fix-migration fails loudly instead of silently changing reference data.
--- Guarded by role existence: stl_readwrite is created by 20260122_140100; stl_migrator is
--- infra-provisioned (bootstrap-db.yaml / Terraform) and absent in unit-test databases.
--- INSERT is left intact so the seed above and deliberate future additions still work.
+-- migration. REVOKE UPDATE/DELETE from the indexer role stl_readwrite (which the login user
+-- stl_read_write inherits from) so accidental app-side mutation errors out. INSERT and SELECT
+-- are left intact so the seed above, reads, and deliberate future additions still work.
+-- Guarded by role existence: stl_readwrite is created by 20260122_140100 but is absent in
+-- local unit-test databases. The table owner (stl_migrator) is intentionally NOT revoked - it
+-- must retain ownership to manage the schema; migration-time changes are governed by review.
 DO $$
 DECLARE
-    tbl  text;
-    role text;
+    tbl text;
 BEGIN
-    FOREACH tbl IN ARRAY ARRAY[
-        'asset_class_ref','security_type_ref','security_subtype_ref','credit_rating_ref',
-        'sector_ref','industry_group_ref','currency_ref','country_ref','deal_type_ref',
-        'entity_type_ref','counterparty_role_ref','origination_type_ref','corporate_action_type_ref']
-    LOOP
-        FOREACH role IN ARRAY ARRAY['stl_readwrite','stl_migrator']
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_readwrite') THEN
+        FOREACH tbl IN ARRAY ARRAY[
+            'asset_class_ref','security_type_ref','security_subtype_ref','credit_rating_ref',
+            'sector_ref','industry_group_ref','currency_ref','country_ref','deal_type_ref',
+            'entity_type_ref','counterparty_role_ref','origination_type_ref','corporate_action_type_ref']
         LOOP
-            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role) THEN
-                EXECUTE format('REVOKE UPDATE, DELETE ON %I FROM %I', tbl, role);
-            END IF;
+            EXECUTE format('REVOKE UPDATE, DELETE ON %I FROM stl_readwrite', tbl);
         END LOOP;
-    END LOOP;
+    END IF;
 END
 $$;
 
