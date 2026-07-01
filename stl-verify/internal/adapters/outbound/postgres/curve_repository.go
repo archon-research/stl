@@ -46,7 +46,7 @@ func NewCurveRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID buildre
 // LoadPools returns all pools for the given chain with their coin decimals in coin_index order.
 func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbound.CurvePoolRow, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT cp.id, cp.protocol_id, cp.pool_address, cp.pool_kind, cp.n_coins, cp.lp_token_address, cp.has_a_precise, t.decimals
+		`SELECT cp.id, cp.protocol_id, cp.pool_address, cp.pool_kind, cp.n_coins, cp.deploy_block, cp.lp_token_address, cp.has_a_precise, t.decimals
 		 FROM curve_pool cp
 		 JOIN curve_pool_coin cpc ON cpc.curve_pool_id = cp.id
 		 JOIN token t ON t.id = cpc.token_id
@@ -69,16 +69,25 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 			poolAddress []byte
 			kind        string
 			nCoins      int
+			deployBlock *int64
 			lpToken     []byte
 			hasAPrecise bool
 			decimals    int
 		)
-		if err := rows.Scan(&poolID, &protocolID, &poolAddress, &kind, &nCoins, &lpToken, &hasAPrecise, &decimals); err != nil {
+		if err := rows.Scan(&poolID, &protocolID, &poolAddress, &kind, &nCoins, &deployBlock, &lpToken, &hasAPrecise, &decimals); err != nil {
 			return nil, fmt.Errorf("scanning curve pool row: %w", err)
 		}
 
 		idx, exists := index[poolID]
 		if !exists {
+			// A NULL deploy_block (pool registered before its deploy height was
+			// backfilled) maps to 0 so LoadPools still returns the pool; the
+			// deploy-gate tracker treats 0 as "always due" (DeployBlockNum() > bn
+			// never holds for a real block number).
+			var db int64
+			if deployBlock != nil {
+				db = *deployBlock
+			}
 			var lpAddr *common.Address
 			if lpToken != nil {
 				a := common.BytesToAddress(lpToken)
@@ -92,6 +101,7 @@ func (r *CurveRepository) LoadPools(ctx context.Context, chainID int64) ([]outbo
 				Address:        common.BytesToAddress(poolAddress),
 				Kind:           kind,
 				NCoins:         nCoins,
+				DeployBlock:    db,
 				LpTokenAddress: lpAddr,
 				HasAPrecise:    hasAPrecise,
 			})

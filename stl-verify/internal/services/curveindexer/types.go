@@ -23,10 +23,15 @@ const (
 )
 
 type RegisteredPool struct {
-	ID           int64 // curve_pool.id
-	Address      common.Address
-	Kind         PoolKind
-	NCoins       int
+	ID      int64 // curve_pool.id
+	Address common.Address
+	Kind    PoolKind
+	NCoins  int
+	// DeployBlock is the pool's on-chain deployment block (0 when not yet
+	// backfilled); gates snapshot sweeps via dexconsumer's deploy-gate tracker
+	// (see DeployBlockNum) so a newly-registered pool isn't multicalled before
+	// it exists on chain.
+	DeployBlock  int64
 	CoinDecimals []int
 	// LpTokenAddress is the separate LP token for pre-NG pools (where totalSupply
 	// lives), nil when the pool is its own LP token.
