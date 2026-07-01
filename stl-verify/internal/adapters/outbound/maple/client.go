@@ -1150,6 +1150,10 @@ func (c *Client) doSingleRequest(ctx context.Context, body []byte, result any) e
 		// today) and the SDL is not machine-fetchable, so we log the raw
 		// errors[] to confirm the null granularity (single field vs whole
 		// collateral) and the exact path shape.
+		//
+		// Removal is driven by the VectorMapleCollateralUnpriceable alert: its
+		// first-fire runbook task captures this log, confirms the shape, then
+		// deletes this branch. See docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
 		c.logger.Warn("tolerating unpriceable-collateral GraphQL error; decoding partial data",
 			"errors", envelope.Errors,
 			"data_present", dataPresent,
