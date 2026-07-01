@@ -13,7 +13,7 @@
 -- curve_pool (registry)
 -- ===========================================================================
 COMMENT ON TABLE curve_pool IS
-  '[Dimension] Registry of indexed Curve AMM pools, one row per deployed pool. Migration-seeded and read-only at runtime; FK target for every curve_* fact table.';
+  '[Dimension] Registry of indexed Curve AMM pools, one row per deployed pool; FK target for every curve_* fact table.';
 COMMENT ON COLUMN curve_pool.id IS
   'PK. Surrogate pool ID; FK target for all curve_* fact tables.';
 COMMENT ON COLUMN curve_pool.chain_id IS
@@ -29,7 +29,7 @@ COMMENT ON COLUMN curve_pool.n_coins IS
 COMMENT ON COLUMN curve_pool.lp_token_address IS
   'LP/share token contract, 20 bytes. A separate contract for pre-NG pools (where totalSupply lives); NULL when the pool is its own LP token (NG pools).';
 COMMENT ON COLUMN curve_pool.deploy_block IS
-  'Advisory deployment block; may be NULL or approximate for pools backfilled later. Not read by the indexer at runtime.';
+  'Advisory deployment block; may be NULL or approximate for pools backfilled later.';
 COMMENT ON COLUMN curve_pool.created_at IS
   'Audit. Row insertion timestamp (bookkeeping only; not an on-chain value).';
 
@@ -37,7 +37,7 @@ COMMENT ON COLUMN curve_pool.created_at IS
 -- curve_pool_coin (registry)
 -- ===========================================================================
 COMMENT ON TABLE curve_pool_coin IS
-  '[Dimension] Coins within each pool, one row per (pool, coin index). Migration-seeded and read-only at runtime.';
+  '[Dimension] Coins within each pool, one row per (pool, coin index).';
 COMMENT ON COLUMN curve_pool_coin.curve_pool_id IS
   'PK, FK->curve_pool.id. Pool this coin belongs to.';
 COMMENT ON COLUMN curve_pool_coin.coin_index IS
@@ -237,9 +237,9 @@ COMMENT ON COLUMN curve_stableswap_config.block_version IS
 COMMENT ON COLUMN curve_stableswap_config.block_timestamp IS
   'Block timestamp (UTC) when the config was read.';
 COMMENT ON COLUMN curve_stableswap_config.initial_a IS
-  'A ramp start value (plain integer).';
+  'Amplification coefficient A at the current ramp start (plain integer). A() interpolates linearly from (initial_a, initial_a_time) to (future_a, future_a_time).';
 COMMENT ON COLUMN curve_stableswap_config.future_a IS
-  'A ramp end value (plain integer).';
+  'Amplification coefficient A at the current ramp end (plain integer); see initial_a.';
 COMMENT ON COLUMN curve_stableswap_config.initial_a_time IS
   'Unix seconds at which the A ramp started.';
 COMMENT ON COLUMN curve_stableswap_config.future_a_time IS

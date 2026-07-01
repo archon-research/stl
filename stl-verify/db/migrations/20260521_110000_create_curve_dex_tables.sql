@@ -777,12 +777,11 @@ CREATE TABLE IF NOT EXISTS curve_parameter_event
     block_timestamp    TIMESTAMPTZ NOT NULL,
     tx_hash            BYTEA       NOT NULL,
     log_index          INT         NOT NULL,
-    event_name         VARCHAR(40) NOT NULL CHECK (event_name IN (
-                           'ramp_a', 'stop_ramp_a', 'ramp_a_gamma',
-                           'new_fee', 'commit_new_fee', 'apply_new_fee',
-                           'new_parameters', 'commit_new_parameters',
-                           'claim_admin_fee', 'new_admin', 'commit_new_admin'
-                       )),
+    -- No CHECK enum: the decoder's event map is the gate (only known names are
+    -- written), and a CHECK would turn a future Curve event type into a
+    -- block-stopping INSERT failure even though protocol_event keeps the raw copy.
+    -- Documented values live in the column COMMENT.
+    event_name         VARCHAR(40) NOT NULL,
     params             JSONB       NOT NULL,
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
@@ -861,7 +860,7 @@ CREATE TABLE IF NOT EXISTS curve_lp_token_event
     block_timestamp    TIMESTAMPTZ NOT NULL,
     tx_hash            BYTEA       NOT NULL,
     log_index          INT         NOT NULL,
-    event_name         VARCHAR(10) NOT NULL CHECK (event_name IN ('transfer', 'approval')),
+    event_name         VARCHAR(10) NOT NULL, -- gated by the decoder (see curve_parameter_event.event_name); documented values in the column COMMENT
     from_address       BYTEA       NOT NULL,
     to_address         BYTEA       NOT NULL,
     value              NUMERIC     NOT NULL,
