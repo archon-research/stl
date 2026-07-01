@@ -261,12 +261,15 @@ func newTestCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *fakeC
 }
 
 // blockEvent builds a minimal outbound.BlockEvent for the given block number.
+// BlockHash defaults to a non-zero test hash so the suite exercises the real
+// hash-pinned snapshot path rather than the zero hash by accident.
 func blockEvent(bn int64) outbound.BlockEvent {
 	return outbound.BlockEvent{
 		ChainID:        testChainID,
 		BlockNumber:    bn,
 		Version:        0,
 		BlockTimestamp: bn,
+		BlockHash:      common.HexToHash("0x01").Hex(),
 	}
 }
 
@@ -566,15 +569,15 @@ func TestCurveService_SnapshotPinsToBlockHash(t *testing.T) {
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
 	c, err := NewCurveService(CurveServiceDeps{
-		Pools:           []RegisteredPool{newTestPool()},
-		Handlers:        handlers,
-		Multicaller:     mc,
-		Repo:            repo,
-		EventWriter:     writer,
-		TxManager:       &fakeTxManager{},
-		HeartbeatBlocks: 1, // force a snapshot even with no events
-		ChainID:         testChainID,
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 1, // force a snapshot even with no events
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -594,6 +597,57 @@ func TestCurveService_SnapshotPinsToBlockHash(t *testing.T) {
 	}
 	if mc.gotHash != wantHash {
 		t.Errorf("multicall block hash = %s, want %s", mc.gotHash, wantHash)
+	}
+}
+
+// TestCurveService_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestCurveService_MissingBlockHash_ReturnsError(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+	handlers := map[PoolKind]PoolClassHandler{
+		KindStableswapPreNG: stable,
+		KindStableswapNG:    stable,
+	}
+
+	mc := &hashRecordingMulticaller{results: stableswapPreNGResults(t, a)}
+
+	repo := &fakeCurveRepo{stateRowsReturn: 1}
+	eventRepo := &fakeEventRepo{}
+	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools:       []RegisteredPool{newTestPool()},
+		Handlers:    handlers,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   &fakeTxManager{},
+		SweepBlocks: 1, // force a snapshot even with no events
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+
+	event := blockEvent(100)
+	event.BlockHash = ""
+
+	bh := c.BlockHandler()
+	if err := bh(context.Background(), event, nil); err == nil {
+		t.Fatal("expected non-nil error from BlockHandler when event.BlockHash is empty")
+	}
+
+	if mc.executedVia != "" {
+		t.Errorf("multicaller invoked via %q, want it never called", mc.executedVia)
+	}
+	if repo.stableswapSaves != 0 {
+		t.Errorf("stableswapSaves = %d, want 0 (block must not be persisted)", repo.stableswapSaves)
 	}
 }
 
@@ -803,14 +857,15 @@ func TestCurveService_ReorgBlock_Resnapshots(t *testing.T) {
 	bh := c.BlockHandler()
 
 	// Block 100 version 0: initial snapshot.
-	ev0 := outbound.BlockEvent{ChainID: testChainID, BlockNumber: 100, Version: 0, BlockTimestamp: 100}
+	ev0 := blockEvent(100)
 	if err := bh(context.Background(), ev0, nil); err != nil {
 		t.Fatalf("BlockHandler v0: %v", err)
 	}
 	after0 := repo.stableswapSaves
 
 	// Block 100 version 1 (reorg): same bn, new version -> must re-snapshot.
-	ev1 := outbound.BlockEvent{ChainID: testChainID, BlockNumber: 100, Version: 1, BlockTimestamp: 100}
+	ev1 := blockEvent(100)
+	ev1.Version = 1
 	if err := bh(context.Background(), ev1, nil); err != nil {
 		t.Fatalf("BlockHandler v1: %v", err)
 	}
