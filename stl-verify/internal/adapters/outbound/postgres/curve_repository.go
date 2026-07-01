@@ -596,61 +596,67 @@ func distinctSortedConfigPoolIDs(
 }
 
 func (r *CurveRepository) writeStableswapConfig(ctx context.Context, tx pgx.Tx, cfg *entity.CurveStableswapConfig) error {
-	var (
-		initialA       pgtype.Numeric
-		initialATime   int64
-		futureA        pgtype.Numeric
-		futureATime    int64
-		adminFee       pgtype.Numeric
-		futureFee      pgtype.Numeric
-		futureAdminFee pgtype.Numeric
-		maExpTime      *int64
-		oracleMethod   pgtype.Numeric
-	)
-	err := tx.QueryRow(ctx,
-		`SELECT initial_a, initial_a_time, future_a, future_a_time,
-		        admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method
-		 FROM curve_stableswap_config
-		 WHERE curve_pool_id = $1
-		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
-		 LIMIT 1`,
-		cfg.CurvePoolID,
-	).Scan(&initialA, &initialATime, &futureA, &futureATime,
-		&adminFee, &futureFee, &futureAdminFee, &maExpTime, &oracleMethod)
-
-	switch {
-	case err == nil:
-		latest, convErr := toStableswapConfigValues(initialA, initialATime, futureA, futureATime,
-			adminFee, futureFee, futureAdminFee, maExpTime, oracleMethod)
-		if convErr != nil {
-			return fmt.Errorf("reading latest stableswap config for pool %d: %w", cfg.CurvePoolID, convErr)
-		}
-		if stableswapConfigUnchanged(latest, cfg) {
+	lockKey := fmt.Sprintf("curve_config|%d", cfg.CurvePoolID)
+	return AppendOnChange(ctx, tx, lockKey,
+		func(ctx context.Context, tx pgx.Tx) (*stableswapConfigValues, error) {
+			var (
+				initialA       pgtype.Numeric
+				initialATime   int64
+				futureA        pgtype.Numeric
+				futureATime    int64
+				adminFee       pgtype.Numeric
+				futureFee      pgtype.Numeric
+				futureAdminFee pgtype.Numeric
+				maExpTime      *int64
+				oracleMethod   pgtype.Numeric
+			)
+			err := tx.QueryRow(ctx,
+				`SELECT initial_a, initial_a_time, future_a, future_a_time,
+				        admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method
+				 FROM curve_stableswap_config
+				 WHERE curve_pool_id = $1
+				 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+				 LIMIT 1`,
+				cfg.CurvePoolID,
+			).Scan(&initialA, &initialATime, &futureA, &futureATime,
+				&adminFee, &futureFee, &futureAdminFee, &maExpTime, &oracleMethod)
+			switch {
+			case err == nil:
+				values, convErr := toStableswapConfigValues(initialA, initialATime, futureA, futureATime,
+					adminFee, futureFee, futureAdminFee, maExpTime, oracleMethod)
+				if convErr != nil {
+					return nil, fmt.Errorf("reading latest stableswap config for pool %d: %w", cfg.CurvePoolID, convErr)
+				}
+				return &values, nil
+			case errors.Is(err, pgx.ErrNoRows):
+				return nil, nil
+			default:
+				return nil, fmt.Errorf("querying latest stableswap config for pool %d: %w", cfg.CurvePoolID, err)
+			}
+		},
+		func(latest *stableswapConfigValues) bool {
+			return latest == nil || !stableswapConfigUnchanged(*latest, cfg)
+		},
+		func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO curve_stableswap_config
+				   (curve_pool_id, block_number, block_version, block_timestamp,
+				    initial_a, initial_a_time, future_a, future_a_time,
+				    admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method, build_id)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+				 ON CONFLICT (curve_pool_id, block_number, block_version, processing_version) DO NOTHING`,
+				cfg.CurvePoolID, cfg.BlockNumber, cfg.BlockVersion, cfg.Timestamp,
+				BigIntToNullableNumeric(cfg.InitialA), cfg.InitialATime,
+				BigIntToNullableNumeric(cfg.FutureA), cfg.FutureATime,
+				BigIntToNullableNumeric(cfg.AdminFee), BigIntToNullableNumeric(cfg.FutureFee),
+				BigIntToNullableNumeric(cfg.FutureAdminFee), cfg.MaExpTime,
+				BigIntToNullableNumeric(cfg.OracleMethod), int(r.buildID),
+			); err != nil {
+				return fmt.Errorf("inserting stableswap config for pool %d: %w", cfg.CurvePoolID, err)
+			}
 			return nil
-		}
-	case errors.Is(err, pgx.ErrNoRows):
-		// No prior row: fall through and insert the first one.
-	default:
-		return fmt.Errorf("querying latest stableswap config for pool %d: %w", cfg.CurvePoolID, err)
-	}
-
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO curve_stableswap_config
-		   (curve_pool_id, block_number, block_version, block_timestamp,
-		    initial_a, initial_a_time, future_a, future_a_time,
-		    admin_fee, future_fee, future_admin_fee, ma_exp_time, oracle_method, build_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		 ON CONFLICT (curve_pool_id, block_number, block_version, processing_version) DO NOTHING`,
-		cfg.CurvePoolID, cfg.BlockNumber, cfg.BlockVersion, cfg.Timestamp,
-		BigIntToNullableNumeric(cfg.InitialA), cfg.InitialATime,
-		BigIntToNullableNumeric(cfg.FutureA), cfg.FutureATime,
-		BigIntToNullableNumeric(cfg.AdminFee), BigIntToNullableNumeric(cfg.FutureFee),
-		BigIntToNullableNumeric(cfg.FutureAdminFee), cfg.MaExpTime,
-		BigIntToNullableNumeric(cfg.OracleMethod), int(r.buildID),
-	); err != nil {
-		return fmt.Errorf("inserting stableswap config for pool %d: %w", cfg.CurvePoolID, err)
-	}
-	return nil
+		},
+	)
 }
 
 type stableswapConfigValues struct {
@@ -709,64 +715,70 @@ func stableswapConfigUnchanged(latest stableswapConfigValues, cfg *entity.CurveS
 }
 
 func (r *CurveRepository) writeCryptoswapConfig(ctx context.Context, tx pgx.Tx, cfg *entity.CurveCryptoswapConfig) error {
-	var (
-		initialAGamma      pgtype.Numeric
-		futureAGamma       pgtype.Numeric
-		initialAGammaTime  int64
-		futureAGammaTime   int64
-		midFee             pgtype.Numeric
-		outFee             pgtype.Numeric
-		feeGamma           pgtype.Numeric
-		allowedExtraProfit pgtype.Numeric
-		adjustmentStep     pgtype.Numeric
-		maTime             pgtype.Numeric
-		adminFee           pgtype.Numeric
-	)
-	err := tx.QueryRow(ctx,
-		`SELECT initial_a_gamma, future_a_gamma, initial_a_gamma_time, future_a_gamma_time,
-		        mid_fee, out_fee, fee_gamma, allowed_extra_profit, adjustment_step, ma_time, admin_fee
-		 FROM curve_cryptoswap_config
-		 WHERE curve_pool_id = $1
-		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
-		 LIMIT 1`,
-		cfg.CurvePoolID,
-	).Scan(&initialAGamma, &futureAGamma, &initialAGammaTime, &futureAGammaTime,
-		&midFee, &outFee, &feeGamma, &allowedExtraProfit, &adjustmentStep, &maTime, &adminFee)
-
-	switch {
-	case err == nil:
-		latest, convErr := toCryptoswapConfigValues(initialAGamma, futureAGamma, initialAGammaTime, futureAGammaTime,
-			midFee, outFee, feeGamma, allowedExtraProfit, adjustmentStep, maTime, adminFee)
-		if convErr != nil {
-			return fmt.Errorf("reading latest cryptoswap config for pool %d: %w", cfg.CurvePoolID, convErr)
-		}
-		if cryptoswapConfigUnchanged(latest, cfg) {
+	lockKey := fmt.Sprintf("curve_config|%d", cfg.CurvePoolID)
+	return AppendOnChange(ctx, tx, lockKey,
+		func(ctx context.Context, tx pgx.Tx) (*cryptoswapConfigValues, error) {
+			var (
+				initialAGamma      pgtype.Numeric
+				futureAGamma       pgtype.Numeric
+				initialAGammaTime  int64
+				futureAGammaTime   int64
+				midFee             pgtype.Numeric
+				outFee             pgtype.Numeric
+				feeGamma           pgtype.Numeric
+				allowedExtraProfit pgtype.Numeric
+				adjustmentStep     pgtype.Numeric
+				maTime             pgtype.Numeric
+				adminFee           pgtype.Numeric
+			)
+			err := tx.QueryRow(ctx,
+				`SELECT initial_a_gamma, future_a_gamma, initial_a_gamma_time, future_a_gamma_time,
+				        mid_fee, out_fee, fee_gamma, allowed_extra_profit, adjustment_step, ma_time, admin_fee
+				 FROM curve_cryptoswap_config
+				 WHERE curve_pool_id = $1
+				 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+				 LIMIT 1`,
+				cfg.CurvePoolID,
+			).Scan(&initialAGamma, &futureAGamma, &initialAGammaTime, &futureAGammaTime,
+				&midFee, &outFee, &feeGamma, &allowedExtraProfit, &adjustmentStep, &maTime, &adminFee)
+			switch {
+			case err == nil:
+				values, convErr := toCryptoswapConfigValues(initialAGamma, futureAGamma, initialAGammaTime, futureAGammaTime,
+					midFee, outFee, feeGamma, allowedExtraProfit, adjustmentStep, maTime, adminFee)
+				if convErr != nil {
+					return nil, fmt.Errorf("reading latest cryptoswap config for pool %d: %w", cfg.CurvePoolID, convErr)
+				}
+				return &values, nil
+			case errors.Is(err, pgx.ErrNoRows):
+				return nil, nil
+			default:
+				return nil, fmt.Errorf("querying latest cryptoswap config for pool %d: %w", cfg.CurvePoolID, err)
+			}
+		},
+		func(latest *cryptoswapConfigValues) bool {
+			return latest == nil || !cryptoswapConfigUnchanged(*latest, cfg)
+		},
+		func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO curve_cryptoswap_config
+				   (curve_pool_id, block_number, block_version, block_timestamp,
+				    initial_a_gamma, future_a_gamma, initial_a_gamma_time, future_a_gamma_time,
+				    mid_fee, out_fee, fee_gamma, allowed_extra_profit, adjustment_step, ma_time, admin_fee, build_id)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+				 ON CONFLICT (curve_pool_id, block_number, block_version, processing_version) DO NOTHING`,
+				cfg.CurvePoolID, cfg.BlockNumber, cfg.BlockVersion, cfg.Timestamp,
+				BigIntToNullableNumeric(cfg.InitialAGamma), BigIntToNullableNumeric(cfg.FutureAGamma),
+				cfg.InitialAGammaTime, cfg.FutureAGammaTime,
+				BigIntToNullableNumeric(cfg.MidFee), BigIntToNullableNumeric(cfg.OutFee),
+				BigIntToNullableNumeric(cfg.FeeGamma), BigIntToNullableNumeric(cfg.AllowedExtraProfit),
+				BigIntToNullableNumeric(cfg.AdjustmentStep), BigIntToNullableNumeric(cfg.MaTime),
+				BigIntToNullableNumeric(cfg.AdminFee), int(r.buildID),
+			); err != nil {
+				return fmt.Errorf("inserting cryptoswap config for pool %d: %w", cfg.CurvePoolID, err)
+			}
 			return nil
-		}
-	case errors.Is(err, pgx.ErrNoRows):
-		// No prior row: fall through and insert the first one.
-	default:
-		return fmt.Errorf("querying latest cryptoswap config for pool %d: %w", cfg.CurvePoolID, err)
-	}
-
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO curve_cryptoswap_config
-		   (curve_pool_id, block_number, block_version, block_timestamp,
-		    initial_a_gamma, future_a_gamma, initial_a_gamma_time, future_a_gamma_time,
-		    mid_fee, out_fee, fee_gamma, allowed_extra_profit, adjustment_step, ma_time, admin_fee, build_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-		 ON CONFLICT (curve_pool_id, block_number, block_version, processing_version) DO NOTHING`,
-		cfg.CurvePoolID, cfg.BlockNumber, cfg.BlockVersion, cfg.Timestamp,
-		BigIntToNullableNumeric(cfg.InitialAGamma), BigIntToNullableNumeric(cfg.FutureAGamma),
-		cfg.InitialAGammaTime, cfg.FutureAGammaTime,
-		BigIntToNullableNumeric(cfg.MidFee), BigIntToNullableNumeric(cfg.OutFee),
-		BigIntToNullableNumeric(cfg.FeeGamma), BigIntToNullableNumeric(cfg.AllowedExtraProfit),
-		BigIntToNullableNumeric(cfg.AdjustmentStep), BigIntToNullableNumeric(cfg.MaTime),
-		BigIntToNullableNumeric(cfg.AdminFee), int(r.buildID),
-	); err != nil {
-		return fmt.Errorf("inserting cryptoswap config for pool %d: %w", cfg.CurvePoolID, err)
-	}
-	return nil
+		},
+	)
 }
 
 type cryptoswapConfigValues struct {
