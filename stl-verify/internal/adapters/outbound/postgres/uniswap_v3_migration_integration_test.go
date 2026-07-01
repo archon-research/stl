@@ -289,6 +289,70 @@ func TestUniswapV3Migration(t *testing.T) {
 	})
 }
 
+// TestUniswapV3ColumnComments asserts that every column on every
+// uniswap_v3_* table has a COMMENT set. Failures indicate that
+// 20260701_100100_uniswap_v3_comments.sql is missing entries for newly added
+// columns or tables.
+func TestUniswapV3ColumnComments(t *testing.T) {
+	ctx := context.Background()
+
+	uniswapV3Tables := []string{
+		"uniswap_v3_pool",
+		"uniswap_v3_pool_state",
+		"uniswap_v3_swap",
+		"uniswap_v3_liquidity_event",
+		"uniswap_v3_tick",
+		"uniswap_v3_pool_event",
+	}
+
+	type uncommentedCol struct {
+		table  string
+		column string
+	}
+	var missing []uncommentedCol
+
+	for _, table := range uniswapV3Tables {
+		// pg_table_is_visible resolves through this connection's search_path,
+		// the same way an unqualified table name in application SQL would.
+		// This harness's per-schema migration run is a no-op once
+		// public.migrations is populated (Migrator.getAppliedMigrations
+		// hardcodes table_schema='public'), so uniswap_v3_* tables live in
+		// public regardless of this test file's own schema; filtering on
+		// n.nspname = current_schema() would silently match zero rows.
+		rows, err := uniswapV3TestPool.Query(ctx, `
+			SELECT a.attname
+			FROM pg_attribute a
+			JOIN pg_class c ON c.oid = a.attrelid
+			WHERE c.relname = $1
+			  AND pg_table_is_visible(c.oid)
+			  AND a.attnum > 0
+			  AND NOT a.attisdropped
+			  AND col_description(a.attrelid, a.attnum) IS NULL
+			ORDER BY a.attnum`, table)
+		if err != nil {
+			t.Fatalf("querying uncommented columns for %s: %v", table, err)
+		}
+		for rows.Next() {
+			var col string
+			if err := rows.Scan(&col); err != nil {
+				rows.Close()
+				t.Fatalf("scanning row for %s: %v", table, err)
+			}
+			missing = append(missing, uncommentedCol{table: table, column: col})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterating rows for %s: %v", table, err)
+		}
+	}
+
+	if len(missing) != 0 {
+		for _, m := range missing {
+			t.Errorf("uniswap_v3 column missing COMMENT: %s.%s", m.table, m.column)
+		}
+	}
+}
+
 // insertTestUniswapV3Pool inserts a minimal uniswap_v3_pool row (with its
 // own protocol row plus token0/token1 rows) using addrHex as the pool
 // address, and returns the new pool's id. Each test that needs a pool calls
