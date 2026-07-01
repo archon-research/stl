@@ -549,3 +549,118 @@ func TestCurveRepository_LpTokenEvent_RoundTrip(t *testing.T) {
 		t.Errorf("value = %q, want 123456789", valueString)
 	}
 }
+
+// TestCurveRepository_SaveBlock_MixedBatchDrainOrder guards the invariant that
+// sendCurveBatch drains br.Exec() results in the exact order queueCurveBatch
+// queued them (swaps, liquidity, stableswap, cryptoswap, parameter, lp). The
+// state-row count SaveBlock returns is summed only over the stableswap+cryptoswap
+// drain positions, so if the queue and drain orders ever drift, the count is read
+// off the wrong statements. We make that observable: the non-state rows are
+// inserted once up front so they conflict (RowsAffected 0) in the measured save,
+// while the 3 state rows are new (RowsAffected 1 each). A correct drain returns
+// exactly 3; a mismatched drain would read the zero tags and return something else.
+func TestCurveRepository_SaveBlock_MixedBatchDrainOrder(t *testing.T) {
+	ctx := context.Background()
+	truncateCurveFactTables(t, ctx)
+	repo := newCurveRepo(t)
+	poolID := seedCurvePool(t, ctx)
+
+	ts := time.Unix(1700050000, 0).UTC()
+	swap := outbound.SwapInput{
+		CurvePoolID: poolID, BlockNumber: 1000, BlockVersion: 0, BlockTimestamp: ts,
+		LogIndex: 0, TxHash: common.HexToHash("0xa1"),
+		Buyer:  common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		SoldID: 0, BoughtID: 1, TokensSold: big.NewInt(1), TokensBought: big.NewInt(1),
+	}
+	liq := outbound.LiquidityInput{
+		CurvePoolID: poolID, BlockNumber: 1000, BlockVersion: 0, BlockTimestamp: ts,
+		LogIndex: 1, TxHash: common.HexToHash("0xb2"),
+		Provider: common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		Kind:     "add", TokenAmounts: []*big.Int{big.NewInt(1), big.NewInt(1)},
+		Invariant: big.NewInt(2), TokenSupply: big.NewInt(2),
+	}
+	param, err := entity.NewCurveParameterEvent(entity.CurveParameterEventParams{
+		CurvePoolID: poolID, BlockNumber: 1000, BlockVersion: 0, Timestamp: ts,
+		TxHash: common.HexToHash("0xc3"), LogIndex: 2, EventName: "ramp_a",
+		Params: json.RawMessage(`{"old_A":1,"new_A":2,"initial_time":1,"future_time":2}`),
+	})
+	if err != nil {
+		t.Fatalf("NewCurveParameterEvent: %v", err)
+	}
+	lp, err := entity.NewCurveLpTokenEvent(entity.CurveLpTokenEventParams{
+		CurvePoolID: poolID, BlockNumber: 1000, BlockVersion: 0, Timestamp: ts,
+		TxHash: common.HexToHash("0xd4"), LogIndex: 3, EventName: "transfer",
+		From:  common.HexToAddress("0x3333333333333333333333333333333333333333"),
+		To:    common.HexToAddress("0x4444444444444444444444444444444444444444"),
+		Value: big.NewInt(5),
+	})
+	if err != nil {
+		t.Fatalf("NewCurveLpTokenEvent: %v", err)
+	}
+
+	nonState := outbound.BlockWrites{
+		Swaps:           []outbound.SwapInput{swap},
+		Liquidity:       []outbound.LiquidityInput{liq},
+		ParameterEvents: []*entity.CurveParameterEvent{param},
+		LpTokenEvents:   []*entity.CurveLpTokenEvent{lp},
+	}
+	// Insert the non-state rows once so they conflict (RowsAffected 0) below.
+	saveBlockCommitted(t, ctx, repo, nonState)
+
+	newStable := func(bn int64) *entity.CurveStableswapState {
+		st, stErr := entity.NewCurveStableswapState(entity.CurveStableswapStateParams{
+			CurvePoolID: poolID, BlockNumber: bn, BlockVersion: 0, Timestamp: ts,
+			Balances: []*big.Int{big.NewInt(10), big.NewInt(11)}, VirtualPrice: big.NewInt(1),
+			TotalSupply: big.NewInt(21), A: big.NewInt(900), Fee: big.NewInt(1000000),
+			SpotDy: []*big.Int{big.NewInt(1), big.NewInt(1)},
+		})
+		if stErr != nil {
+			t.Fatalf("NewCurveStableswapState(%d): %v", bn, stErr)
+		}
+		return st
+	}
+	crypto, err := entity.NewCurveCryptoswapState(entity.CurveCryptoswapStateParams{
+		CurvePoolID: poolID, BlockNumber: 1003, BlockVersion: 0, Timestamp: ts,
+		Balances:     []*big.Int{big.NewInt(1000000), big.NewInt(2000000)},
+		VirtualPrice: big.NewInt(1000000000000000000), TotalSupply: big.NewInt(2000000000000000000),
+		A: big.NewInt(2700000), Gamma: big.NewInt(145000000000000000), Fee: big.NewInt(4000000),
+		PriceScale: []*big.Int{big.NewInt(1234567890)}, PriceOracle: []*big.Int{big.NewInt(1234560000)},
+		LastPrices: []*big.Int{big.NewInt(1234500000)}, SpotDy: []*big.Int{big.NewInt(990000000000000000)},
+	})
+	if err != nil {
+		t.Fatalf("NewCurveCryptoswapState: %v", err)
+	}
+
+	// Measured save: same non-state rows (now conflict) + 3 genuinely-new state rows.
+	mixed := nonState
+	mixed.StableStates = []*entity.CurveStableswapState{newStable(1001), newStable(1002)}
+	mixed.CryptoStates = []*entity.CurveCryptoswapState{crypto}
+
+	if stateRows := saveBlockCommitted(t, ctx, repo, mixed); stateRows != 3 {
+		t.Fatalf("stateRows = %d, want 3 (only the 3 new state rows count; the pre-existing swap/liquidity/parameter/lp rows conflict to 0). A wrong count means queueCurveBatch and sendCurveBatch iterate the batch groups in different orders.", stateRows)
+	}
+
+	// Data is bound at Queue time, so every row lands in its own table regardless
+	// of drain order; assert the queued inserts populated each table.
+	counts := []struct {
+		query string
+		want  int
+		name  string
+	}{
+		{`SELECT count(*) FROM curve_swap WHERE curve_pool_id=$1`, 1, "curve_swap"},
+		{`SELECT count(*) FROM curve_liquidity_event WHERE curve_pool_id=$1`, 1, "curve_liquidity_event"},
+		{`SELECT count(*) FROM curve_stableswap_state WHERE curve_pool_id=$1`, 2, "curve_stableswap_state"},
+		{`SELECT count(*) FROM curve_cryptoswap_state WHERE curve_pool_id=$1`, 1, "curve_cryptoswap_state"},
+		{`SELECT count(*) FROM curve_parameter_event WHERE curve_pool_id=$1`, 1, "curve_parameter_event"},
+		{`SELECT count(*) FROM curve_lp_token_event WHERE curve_pool_id=$1`, 1, "curve_lp_token_event"},
+	}
+	for _, c := range counts {
+		var n int
+		if err := curveTestPool.QueryRow(ctx, c.query, poolID).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", c.name, err)
+		}
+		if n != c.want {
+			t.Errorf("%s rows = %d, want %d", c.name, n, c.want)
+		}
+	}
+}
