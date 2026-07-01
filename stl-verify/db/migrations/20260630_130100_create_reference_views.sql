@@ -9,8 +9,7 @@
 -- row. So a type that has subtypes appears both at TYPE level (e.g. a vanilla CORPORATE_BOND with
 -- no subtype) and once per subtype. leaf_level marks the granularity of the row (TYPE / SUBTYPE);
 -- leaf_code is the code at that level (display-only, not unique - see the column comment).
-DROP VIEW IF EXISTS security_classification;
-CREATE VIEW security_classification AS
+CREATE OR REPLACE VIEW security_classification AS
 SELECT ac.asset_class,
        ac.category                                          AS asset_category,
        st.security_type,
