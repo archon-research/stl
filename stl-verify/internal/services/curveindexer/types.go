@@ -38,6 +38,12 @@ type RegisteredPool struct {
 	HasAPrecise bool
 }
 
+// PoolID and DeployBlockNum implement dexconsumer.SnapshotPool, letting
+// RegisteredPool feed the shared sweep/deploy-gate tracker without
+// dexconsumer depending on curveindexer.
+func (p RegisteredPool) PoolID() int64         { return p.ID }
+func (p RegisteredPool) DeployBlockNum() int64 { return p.DeployBlock }
+
 type SwapRecord struct {
 	Pool         RegisteredPool
 	LogIndex     uint

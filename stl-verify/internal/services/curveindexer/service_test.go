@@ -429,9 +429,15 @@ func TestCurveService_NilNilSnapshotErrors(t *testing.T) {
 		t.Fatal("expected error from BlockHandler, got nil")
 	}
 
-	// lastSnapshot should NOT be advanced (no DB write occurred).
-	if _, ok := c.lastSnapshot[newTestPool().ID]; ok {
-		t.Errorf("lastSnapshot[%d] should not be set after error", newTestPool().ID)
+	// The tracker should NOT have recorded a snapshot for this pool (no DB write
+	// occurred): calling DueSet again for the same block must still find it
+	// unseen (due), rather than already-snapshotted (not due).
+	stillDue, err := dexconsumer.DueSet(c.tracker, c.pools, map[int64]bool{}, 100, 0)
+	if err != nil {
+		t.Fatalf("DueSet: %v", err)
+	}
+	if len(stillDue) != 1 || stillDue[0].ID != newTestPool().ID {
+		t.Errorf("pool %d should still be due (unseen) after a failed BlockHandler call, got due set %v", newTestPool().ID, stillDue)
 	}
 
 	// No snapshot should be persisted.
