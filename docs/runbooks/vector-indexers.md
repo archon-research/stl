@@ -370,7 +370,7 @@ are stale and stale symbols stop being written, so the series flat-lines.
 
 ### Verify recovery
 
-`max(orderbook_last_update_age{exchange="<exchange>"}) < 120` and
+`max(orderbook_last_update_age_seconds{exchange="<exchange>"}) < 120` and
 `rate(orderbook_updates_emitted_total{exchange="<exchange>"}[5m]) > 0`.
 
 ---
@@ -385,7 +385,7 @@ The labelled `deployment` has <1 available replica for >10m (kube-state-metrics,
 independent of the pod's own OTLP export). The order book indexer is not
 running, so no snapshots are taken. This is the availability companion to
 `VectorCexOrderbookStreamStalled`: that one reads the pod's own
-`orderbook_last_update_age` gauge, which vanishes on a pod/exporter outage — so
+`orderbook_last_update_age_seconds` gauge, which vanishes on a pod/exporter outage — so
 `Down` catches the total-outage case `StreamStalled` cannot. If both fire,
 **this is the root cause.**
 
