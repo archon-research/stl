@@ -85,14 +85,18 @@ func (f *fakePSM3Caller) ResolveImmutables(_ context.Context, blockNumber *big.I
 	return nil
 }
 
-func (f *fakePSM3Caller) ReadState(_ context.Context, blockNumber *big.Int) (*entity.PSM3State, error) {
+// ReadState is now hash-pinned (VEC-471). makeBlockEvents encodes the block
+// number into BlockHash as 0x%064x, so decoding the hash back to an int64 lets
+// the existing block-number assertions keep working unchanged while proving the
+// service threaded the block hash through, not the number.
+func (f *fakePSM3Caller) ReadState(_ context.Context, blockHash common.Hash) (*entity.PSM3State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readAttempts++
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
-	f.readBlocks = append(f.readBlocks, blockNumber.Int64())
+	f.readBlocks = append(f.readBlocks, blockHash.Big().Int64())
 	state := f.state
 	return &state, nil
 }

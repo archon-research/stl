@@ -170,12 +170,12 @@ func (c *PSM3Caller) ResolveImmutables(ctx context.Context, blockNumber *big.Int
 	return nil
 }
 
-// ReadState reads the PSM3 reserve state pinned to blockNumber in two rounds:
+// ReadState reads the PSM3 reserve state pinned to blockHash in two rounds:
 // round 1 reads pocket(), USDS/sUSDS balances, totalAssets() and the
 // conversion rate in one multicall; round 2 reads USDC.balanceOf(pocket).
 // The pocket is governance-settable (PocketSet), so it is resolved every call
-// and never cached.
-func (c *PSM3Caller) ReadState(ctx context.Context, blockNumber *big.Int) (*entity.PSM3State, error) {
+// and never cached. Both rounds are hash-pinned (see executeAtHash / VEC-471).
+func (c *PSM3Caller) ReadState(ctx context.Context, blockHash common.Hash) (*entity.PSM3State, error) {
 	if c.rateProvider == (common.Address{}) {
 		return nil, fmt.Errorf("rate provider not resolved; call ResolveImmutables first")
 	}
@@ -205,7 +205,7 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockNumber *big.Int) (*enti
 		{Target: c.rateProvider, CallData: rateData},
 	}
 
-	results, err := c.execute(ctx, calls, blockNumber)
+	results, err := c.executeAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall psm3 state: %w", err)
 	}
@@ -236,7 +236,7 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockNumber *big.Int) (*enti
 		return nil, err
 	}
 
-	usdcBalance, err := c.readUSDCAtPocket(ctx, pocket, blockNumber)
+	usdcBalance, err := c.readUSDCAtPocket(ctx, pocket, blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -250,14 +250,14 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockNumber *big.Int) (*enti
 	}, nil
 }
 
-// readUSDCAtPocket reads USDC.balanceOf(pocket) at the given block.
-func (c *PSM3Caller) readUSDCAtPocket(ctx context.Context, pocket common.Address, blockNumber *big.Int) (*big.Int, error) {
+// readUSDCAtPocket reads USDC.balanceOf(pocket) pinned to blockHash.
+func (c *PSM3Caller) readUSDCAtPocket(ctx context.Context, pocket common.Address, blockHash common.Hash) (*big.Int, error) {
 	data, err := c.erc20ABI.Pack("balanceOf", pocket)
 	if err != nil {
 		return nil, fmt.Errorf("pack balanceOf(pocket): %w", err)
 	}
 
-	results, err := c.execute(ctx, []outbound.Call{{Target: c.cfg.USDC, CallData: data}}, blockNumber)
+	results, err := c.executeAtHash(ctx, []outbound.Call{{Target: c.cfg.USDC, CallData: data}}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall usdc balance at pocket %s: %w", pocket.Hex(), err)
 	}
@@ -269,17 +269,33 @@ func (c *PSM3Caller) readUSDCAtPocket(ctx context.Context, pocket common.Address
 	return balance, nil
 }
 
-// execute runs a multicall and verifies the result count. Callers build their
-// calls with AllowFailure=false, so any reverted or missing call is a hard error.
+// execute runs a number-pinned multicall and verifies the result count. Callers
+// build their calls with AllowFailure=false, so any reverted or missing call is
+// a hard error. Used by ResolveImmutables (static, startup-only).
 func (c *PSM3Caller) execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	results, err := c.multicaller.Execute(ctx, calls, blockNumber)
-	if err != nil {
-		return nil, err
+	return checkResultCount(c.multicaller.Execute(ctx, calls, blockNumber))(calls)
+}
+
+// executeAtHash runs a hash-pinned multicall and verifies the result count.
+// Used by ReadState so per-block reserve reads pin to the exact block being
+// processed (see outbound.Multicaller.ExecuteAtHash / VEC-471).
+func (c *PSM3Caller) executeAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	return checkResultCount(c.multicaller.ExecuteAtHash(ctx, calls, blockHash))(calls)
+}
+
+// checkResultCount curries the (results, err) of a multicall so both execute
+// and executeAtHash share the identical "propagate err, else require one
+// result per call" contract.
+func checkResultCount(results []outbound.Result, err error) func([]outbound.Call) ([]outbound.Result, error) {
+	return func(calls []outbound.Call) ([]outbound.Result, error) {
+		if err != nil {
+			return nil, err
+		}
+		if len(results) != len(calls) {
+			return nil, fmt.Errorf("expected %d multicall results, got %d", len(calls), len(results))
+		}
+		return results, nil
 	}
-	if len(results) != len(calls) {
-		return nil, fmt.Errorf("expected %d multicall results, got %d", len(calls), len(results))
-	}
-	return results, nil
 }
 
 // unpackAddress unpacks a single address return from a named ABI method.
