@@ -226,6 +226,13 @@ func (s *Service) Stop() error {
 // ReconcileVaults enumerates all vaults via the resolver at blockNumber and
 // registers any in-scope (targeted-debt, plain single) vault not already known.
 // Intended to be run at startup; it is also safe to call periodically.
+//
+// Reconcile is registry-only: it does not write a fluid_vault_state row. The
+// first snapshot for a reconciled vault is written on its next
+// LogOperate/LogLiquidate (see snapshotVaults), which is also when a real block
+// timestamp is available — BlockQuerier only exposes the head number, not its
+// timestamp, so there is no correct ts to stamp a reconcile-time snapshot with.
+// Backfilling historical states for pre-existing vaults is a separate concern.
 func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error {
 	ctx = archiving.WithBlockVersion(ctx, 0)
 	addrs, err := s.blockchain.GetAllVaultAddresses(ctx, blockNumber)
