@@ -237,7 +237,8 @@ func TestProcessBlock_ERC4626Oracle_UnderlyingFeedDecimalsMismatch(t *testing.T)
 }
 
 // ---------------------------------------------------------------------------
-// TestProcessBlock_ERC4626Oracle_VaultFails — underlying feed reverts, no upsert
+// TestProcessBlock_ERC4626Oracle_VaultFails — sole vault reverts, no upsert and
+// processing errors so SQS retries rather than dropping the price.
 // ---------------------------------------------------------------------------
 
 func TestProcessBlock_ERC4626Oracle_VaultFails(t *testing.T) {
@@ -284,8 +285,12 @@ func TestProcessBlock_ERC4626Oracle_VaultFails(t *testing.T) {
 		ChainID: 1, BlockNumber: 22000000, Version: 1,
 		BlockHash: "0xfsusdsfail", BlockTimestamp: blockTimestamp,
 	}
-	if err := svc.processBlock(context.Background(), event); err != nil {
-		t.Fatalf("processBlock: %v", err)
+	err = svc.processBlock(context.Background(), event)
+	if err == nil {
+		t.Fatal("expected error when the sole vault fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "erc4626 vaults failed") {
+		t.Errorf("error = %q, expected it to contain 'erc4626 vaults failed'", err)
 	}
 
 	repo.mu.Lock()

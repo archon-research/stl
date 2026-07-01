@@ -107,7 +107,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 			},
 		},
 		{
-			name:   "vault convertToAssets reverts - vault fails independently",
+			name:   "sole vault convertToAssets reverts - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -117,12 +117,10 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 					}, nil
 				},
 			},
-			wantResults: []FeedPriceResult{
-				{TokenID: 10, Success: false},
-			},
+			wantErr: true, errContains: "all 1 erc4626 vaults failed",
 		},
 		{
-			name:   "underlying feed reverts - vault fails (no underlying price)",
+			name:   "sole underlying feed reverts - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -132,12 +130,10 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 					}, nil
 				},
 			},
-			wantResults: []FeedPriceResult{
-				{TokenID: 10, Success: false},
-			},
+			wantErr: true, errContains: "all 1 erc4626 vaults failed",
 		},
 		{
-			name:   "underlying feed non-positive answer - vault fails",
+			name:   "sole underlying feed non-positive answer - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -147,8 +143,24 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 					}, nil
 				},
 			},
+			wantErr: true, errContains: "all 1 erc4626 vaults failed",
+		},
+		{
+			name:   "one of two vaults fails - partial success returns no error",
+			vaults: []ERC4626VaultConfig{vault, {TokenID: 11, VaultAddress: fsusds, ShareDecimals: 18, UnderlyingFeed: usdsFeed, UnderlyingDecimals: 18, FeedDecimals: 8}},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: packConvertToAssets(t, ratio105)},
+						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
+						{Success: false}, // second vault convertToAssets reverts
+						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
+					}, nil
+				},
+			},
 			wantResults: []FeedPriceResult{
-				{TokenID: 10, Success: false},
+				{TokenID: 10, Price: 1.05, Success: true},
+				{TokenID: 11, Success: false},
 			},
 		},
 		{

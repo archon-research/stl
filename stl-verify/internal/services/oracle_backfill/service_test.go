@@ -2494,7 +2494,19 @@ func TestRun_ERC4626Oracle(t *testing.T) {
 		},
 	}
 
+	callCount := 0
 	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		callCount++
+		if callCount == 1 {
+			// First multicaller validates the underlying feed decimals (config = 8).
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				},
+			}, nil
+		}
 		return &testutil.MockMulticaller{
 			ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 				if len(calls) != 2 {
@@ -2544,5 +2556,70 @@ func TestRun_ERC4626Oracle(t *testing.T) {
 	}
 	if _, ok := byBlock[101]; ok {
 		t.Errorf("block 101 should be skipped (unchanged price)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626FeedDecimalsValidation — the underlying feed's on-chain decimals
+// contradict the seeded feed_decimals, so backfill halts before writing any
+// mis-scaled historical prices.
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626FeedDecimalsValidation(t *testing.T) {
+	fsusds := common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
+	usdsFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
+
+	repo := &mockRepo{
+		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{{
+				ID: 5, Name: "fluid_fsusds", Enabled: true,
+				OracleType: entity.OracleTypeERC4626Share,
+			}}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return []*entity.OracleAsset{{
+				ID: 1, OracleID: 5, TokenID: 10, Enabled: true,
+				FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD",
+			}}, nil
+		},
+		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
+			return map[int64][]byte{10: fsusds.Bytes()}, nil
+		},
+		getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
+			return map[int64]int{10: 18}, nil
+		},
+	}
+
+	// decimals() returns 18 on-chain, contradicting the seeded 8.
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+				}, nil
+			},
+		}, nil
+	}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		&mockHeaderFetcher{},
+		mcFactory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Run(context.Background(), 100, 105)
+	if err == nil {
+		t.Fatal("expected decimals mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "feed decimals") {
+		t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
+	}
+
+	if upserted := repo.getUpserted(); len(upserted) != 0 {
+		t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
 	}
 }

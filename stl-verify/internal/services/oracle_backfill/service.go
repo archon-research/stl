@@ -165,7 +165,10 @@ func (s *Service) Run(ctx context.Context, fromBlock, toBlock int64) error {
 
 func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleWorkUnit, blockNum int64) error {
 	for _, wu := range workUnits {
-		if !wu.Oracle.OracleType.IsFeedOracle() {
+		feeds := wu.Feeds
+		if wu.Oracle.OracleType.IsERC4626Oracle() {
+			feeds = blockchain.ERC4626UnderlyingFeeds(wu.ERC4626Vaults)
+		} else if !wu.Oracle.OracleType.IsFeedOracle() {
 			continue
 		}
 		mc, err := s.newMulticaller(wu.Oracle.OracleType)
@@ -174,7 +177,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 		}
 		if err := blockchain.ValidateFeedDecimals(
 			ctx, mc, s.feedABI,
-			wu.Feeds, blockNum, s.logger,
+			feeds, blockNum, s.logger,
 		); err != nil {
 			return fmt.Errorf("oracle %s: %w", wu.Oracle.Name, err)
 		}

@@ -242,7 +242,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 	for _, unit := range s.units {
 		feeds := unit.Feeds
 		if unit.Oracle.OracleType.IsERC4626Oracle() {
-			feeds = erc4626UnderlyingFeeds(unit.ERC4626Vaults)
+			feeds = blockchain.ERC4626UnderlyingFeeds(unit.ERC4626Vaults)
 		} else if !unit.Oracle.OracleType.IsFeedOracle() {
 			continue
 		}
@@ -254,22 +254,6 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 		}
 	}
 	return nil
-}
-
-// erc4626UnderlyingFeeds projects each vault's underlying USD feed into a
-// FeedConfig so the shared decimals validation can verify on-chain feed
-// decimals match the seeded feed_decimals (a mismatch mis-scales prices).
-func erc4626UnderlyingFeeds(vaults []blockchain.ERC4626VaultConfig) []blockchain.FeedConfig {
-	feeds := make([]blockchain.FeedConfig, len(vaults))
-	for i, v := range vaults {
-		feeds[i] = blockchain.FeedConfig{
-			TokenID:       v.TokenID,
-			FeedAddress:   v.UnderlyingFeed,
-			FeedDecimals:  v.FeedDecimals,
-			QuoteCurrency: "USD",
-		}
-	}
-	return feeds
 }
 
 func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (retErr error) {

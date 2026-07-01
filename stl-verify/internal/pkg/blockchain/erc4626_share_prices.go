@@ -29,7 +29,8 @@ type ERC4626VaultConfig struct {
 // latestRoundData() on the underlying USD feed. Both calls use AllowFailure so
 // vaults fail independently; a vault whose vault call or underlying feed fails
 // (or returns a non-positive feed answer) is reported Success: false rather than
-// producing a wrong price.
+// producing a wrong price. If every vault fails it returns an error so the caller
+// retries instead of treating the block as a successful no-op.
 func FetchERC4626SharePrices(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
@@ -74,12 +75,32 @@ func FetchERC4626SharePrices(
 		out[i].Success = true
 	}
 
+	// A total failure is never a legitimate no-op: every vault reverting (or its
+	// feed reverting) at a block means the price is unknown, not unchanged. With a
+	// single seeded vault this is the common case, so returning nil here would let
+	// the worker delete the SQS message / backfill mark the block done and never
+	// retry, silently dropping the price. Partial success stays a soft skip.
 	if failCount == len(vaults) {
-		logger.Error("all erc4626 vaults failed, check configuration",
-			"block", blockNum, "vaultCount", len(vaults))
+		return nil, fmt.Errorf("all %d erc4626 vaults failed at block %d, check configuration", len(vaults), blockNum)
 	}
 
 	return out, nil
+}
+
+// ERC4626UnderlyingFeeds projects each vault's underlying USD feed into a
+// FeedConfig so ValidateFeedDecimals can verify on-chain feed decimals match the
+// seeded feed_decimals (a mismatch mis-scales share prices).
+func ERC4626UnderlyingFeeds(vaults []ERC4626VaultConfig) []FeedConfig {
+	feeds := make([]FeedConfig, len(vaults))
+	for i, v := range vaults {
+		feeds[i] = FeedConfig{
+			TokenID:       v.TokenID,
+			FeedAddress:   v.UnderlyingFeed,
+			FeedDecimals:  v.FeedDecimals,
+			QuoteCurrency: "USD",
+		}
+	}
+	return feeds
 }
 
 func buildERC4626Calls(shareABI, feedABI *abi.ABI, vaults []ERC4626VaultConfig) ([]outbound.Call, error) {
