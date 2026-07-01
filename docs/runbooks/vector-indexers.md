@@ -656,11 +656,14 @@ cannot see.
   `SELECT count(*) FROM curve_pool WHERE chain_id = <id>`.
 - Contract address mismatch (new pool deployed at different address) -> update
   the pool registry.
-- Sustained SQS replay / redrive: every message is a block already persisted at
-  this build, so each state INSERT hits ON CONFLICT DO NOTHING (0 rows) and
-  `curve_state_rows_written_total` does not advance even though processing
-  succeeds. Check the queue for a redrive or a backlog of already-seen blocks
-  before assuming a logic stall.
+- Sustained SQS replay / redrive, or a backfill re-run over an already-indexed
+  range under one `build_id`: every message is a block already persisted at this
+  build (same `build_id`, same `block_version`), so each state INSERT hits
+  ON CONFLICT DO NOTHING (0 rows) and `curve_state_rows_written_total` does not
+  advance even though processing succeeds. A redeploy (new `build_id`) or reorg
+  (new `block_version`) inserts fresh rows and clears the alert. Check the queue
+  for a redrive, and check whether a backfill is re-processing an already-indexed
+  range, before assuming a logic stall.
 
 ### Verify recovery
 

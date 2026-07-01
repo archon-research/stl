@@ -592,10 +592,9 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	if err != nil {
 		return nil, nil, fmt.Errorf("last_prices_timestamp: %w", err)
 	}
-	// lastPricesTimestamp is nil when the call reverted (optUint returns nil for
-	// a revert, which is the no-call structural path — the call was issued and
-	// allowed to fail). An issued call that returned a value outside int64 is
-	// a real data-quality error, not a structural absence.
+	// A revert already errored out above (optUint), so lastPricesTs is non-nil
+	// here; the guard is defensive. An issued call that returned a value outside
+	// int64 is a real data-quality error, not a structural absence.
 	var lastPricesTimestamp *int64
 	if lastPricesTs != nil {
 		if !lastPricesTs.IsInt64() {

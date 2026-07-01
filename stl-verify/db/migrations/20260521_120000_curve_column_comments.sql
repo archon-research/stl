@@ -193,9 +193,9 @@ COMMENT ON COLUMN curve_cryptoswap_state.gamma IS
 COMMENT ON COLUMN curve_cryptoswap_state.fee IS
   'Current dynamic fee fee(), in Curve fee units where 1e10 = 100% (interpolated between mid_fee and out_fee by pool balance).';
 COMMENT ON COLUMN curve_cryptoswap_state.d IS
-  'Pool invariant D(), 1e18-normalized internal units; NULL if the call reverted.';
+  'Pool invariant D(), 1e18-normalized internal units.';
 COMMENT ON COLUMN curve_cryptoswap_state.xcp_profit IS
-  'xcp_profit(): cumulative profit metric (1e18) used by the pool repegging logic; NULL if the call reverted.';
+  'xcp_profit(): cumulative profit metric (1e18) used by the pool repegging logic.';
 COMMENT ON COLUMN curve_cryptoswap_state.price_scale IS
   'price_scale(i) for i in [0, n-2]: the price the pool currently uses to concentrate liquidity, coin (i+1) relative to coin 0, 1e18-scaled.';
 COMMENT ON COLUMN curve_cryptoswap_state.price_oracle IS
