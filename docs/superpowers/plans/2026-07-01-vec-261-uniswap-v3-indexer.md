@@ -4,7 +4,7 @@
 
 **Goal:** A new Uniswap V3 indexer worker that captures the complete on-chain data surface (all 9 pool events, full pool-level state, authoritative per-tick liquidity map) for 18 active wstETH/stETH pools, plus a maintainability-driven hoist of cross-DEX plumbing out of `curveindexer` into the shared layer that also fixes two Curve blocking bugs.
 
-**Architecture:** Hexagonal, BlockHandler model, mirroring `curveindexer`. New worker consumes the watcher block stream over SQS via the VEC-328 shared base (dexbootstrap/dexconsumer/dextelemetry). Per touched block: decode logs → multicall pool-level + touched-tick state pinned to the block hash → persist all facts/state/events in one transaction. Design: `docs/superpowers/specs/2026-07-01-vec-261-uniswap-v3-indexer-design.md`.
+**Architecture:** Hexagonal, BlockHandler model, mirroring `curveindexer`. A single `dex-indexer` binary/image runs any one DEX selected from config via a per-DEX **factory registry** (one Deployment/pod-set per DEX, same image) — Curve migrates onto it too. The worker consumes the watcher block stream over SQS via the VEC-328 shared base (dexbootstrap/dexconsumer/dextelemetry). Per touched block: decode logs → multicall pool-level + touched-tick state pinned to the block hash → persist all facts/state/events in one transaction. Design: `docs/superpowers/specs/2026-07-01-vec-261-uniswap-v3-indexer-design.md`.
 
 **Tech Stack:** Go 1.26, pgx v5 batch, TimescaleDB hypertables, go-ethereum ABI + Multicall3, OTel.
 
@@ -207,14 +207,28 @@
 - [ ] **Step 1:** Write `service_test.go` (public API only): construction validates deps; BlockHandler on a block with mixed events persists via a mock repo/eventwriter with the right BlockWrites; quiet block → no tx; error from snapshot → BlockHandler returns error (no ack); first-seen pool triggers baseline. Mock the repo/multicaller/txmanager.
 - [ ] **Step 2:** Run — FAIL. **Step 3:** Implement (mirror curve `service.go` structure; single pool class, no capability probe). **Step 4:** Run — PASS (aim 100% service coverage). **Step 5:** Commit `feat(uniswap-v3): block-handler service orchestration`.
 
-### Task B10: Worker entrypoint
+### Task B10: Unified `dex-indexer` entrypoint + per-DEX factory registry (migrate Curve onto it)
 
-**Files:** Create `stl-verify/cmd/workers/uniswap-v3-indexer/main.go` + `main_test.go`.
+**Design decision (2026-07-01):** ONE binary/image for all DEX indexers. A per-DEX factory registry selects which DEX to run from config; deployed as one Deployment (pod set) per DEX, all from the same image. Replaces the per-DEX `main.go` binaries (curve-indexer, and the originally-planned uniswap-v3-indexer). Migrate the existing Curve entrypoint onto it (we own Curve).
 
-**Interfaces:** `main()` at top → `run(ctx, args)`; wires `dexbootstrap.ParseConfig("uniswap-v3-indexer", args)` → `Bootstrap` → `repo.LoadPools` → `dexconsumer.ResolveProtocolID(UniswapV3 descriptor)` → `NewProtocolEventWriter` → `NewUniswapV3Service` → `NewBlockProcessor` → `RunLoop`. Mirror `curve-indexer/main.go`.
+**Files:**
+- Create: `stl-verify/cmd/workers/dex-indexer/main.go`, `stl-verify/cmd/workers/dex-indexer/factories.go`, `stl-verify/cmd/workers/dex-indexer/main_test.go`.
+- Delete: `stl-verify/cmd/workers/curve-indexer/main.go` (+ its `main_test.go`) after migrating its wiring into `curveFactory`.
+- Modify: `stl-verify/cmd/workers/internal/dexbootstrap/parseconfig.go` — add a `Dex` selector (env `DEX` / `--dex`).
 
-- [ ] **Step 1:** Write `main_test.go` (integration-only convention): missing SQS_QUEUE_URL / DATABASE_URL / ALCHEMY_API_KEY → `run` returns the expected error. Mirror curve `main_test.go`.
-- [ ] **Step 2:** Run — FAIL. **Step 3:** Implement `main.go`. **Step 4:** Run — PASS. **Step 5:** Commit `feat(uniswap-v3): worker entrypoint`.
+**Interfaces:**
+- `type Factory interface { Kind() string; MetricPrefix() string; Protocol() dexconsumer.ProtocolDescriptor; BuildHandler(ctx context.Context, deps *dexbootstrap.Deps, protocolID, chainID int64) (dexconsumer.BlockHandler, error) }` — defined in the `dex-indexer` cmd package. It lives in `cmd` on purpose: only `cmd` may import both the postgres adapters and the service packages, so the per-DEX repo↔service wiring belongs here (respects the dependency rule — services never import adapters).
+- Concrete factories in `factories.go`: `curveFactory` (imports `postgres.NewCurveRepository` + `curveindexer.NewCurveService` + curve handler registry + capability probe) and `uniswapV3Factory` (imports `postgres.NewUniswapV3Repository` + `uniswapv3indexer.NewUniswapV3Service`). Each `BuildHandler` loads its pools, constructs its repo + service, returns the `BlockHandler`.
+- Registry built explicitly in `main`: `map[string]Factory{"curve": curveFactory{}, "uniswap-v3": uniswapV3Factory{}}` — NO global `init()` registration / singletons.
+- `main()` at top → `run(ctx, args)`: `ParseConfig` (now with `Dex`) → `Bootstrap` → `f, ok := registry[cfg.Dex]` (unknown → error listing valid keys) → `ResolveProtocolID(f.Protocol())` → `NewProtocolEventWriter` → `f.BuildHandler(...)` → `NewBlockProcessor` → `RunLoop`. Service name / metric prefix come from `f`.
+
+- [ ] **Step 1:** Write `main_test.go` (integration-only convention): (a) unknown `DEX` → error naming the valid keys; (b) missing SQS_QUEUE_URL / DATABASE_URL / ALCHEMY_API_KEY → `run` returns the expected error; (c) `DEX=curve` and `DEX=uniswap-v3` select factories with the right `Kind()`/`MetricPrefix()` (assert without touching infra). Mirror curve `main_test.go` for the config-fail cases.
+- [ ] **Step 2:** Run: `cd stl-verify && go test ./cmd/workers/dex-indexer/ -v` — expect FAIL.
+- [ ] **Step 3:** Implement the `Factory` interface + explicit registry + `run`, and both concrete factories. Move the Curve wiring out of `curve-indexer/main.go` into `curveFactory`; delete `curve-indexer/main.go` + its test.
+- [ ] **Step 4:** Run: `go test ./cmd/workers/dex-indexer/ -v`; `go build ./cmd/workers/dex-indexer/`; `go vet ./cmd/...` — expect PASS/clean.
+- [ ] **Step 5:** Commit: `git commit -m "feat(dex): unified dex-indexer entrypoint + per-DEX factory registry (migrate curve)"`
+
+> Depends on B5 (`postgres.NewUniswapV3Repository`) and B9 (`uniswapv3indexer.NewUniswapV3Service`) existing; the curve equivalents are already present on the branch.
 
 ### Task B11: Telemetry, alerts, runbook
 
@@ -224,15 +238,17 @@
 - [ ] **Step 2:** Add matching `## VectorUniswapV3Indexer*` runbook sections (first checks, common causes, recovery query), mirroring the curve sections.
 - [ ] **Step 3:** Validate YAML (`cd stl-verify && make lint` or a promtool check if available). Commit `feat(uniswap-v3): alert rules + runbook`.
 
-### Task B12: k8s manifests
+### Task B12: k8s manifests (single image, one Deployment per DEX)
 
-**Files:** Create `k8s/base/uniswap-v3-indexer/` (Deployment + ServiceAccount, mirror `curve-indexer` base); add to prod/staging overlays with pinned image tags; dev overlay if applicable.
+**Files:** Create `k8s/base/dex-indexer/` (parameterized Deployment + ServiceAccount using the single `dex-indexer` image, DEX chosen via the `DEX` env). Migrate the existing `curve-indexer` Deployment to a `dex-indexer` Deployment with `DEX=curve`; add a `dex-indexer` Deployment with `DEX=uniswap-v3`. Wire both into prod/staging overlays with pinned image tags; dev overlay if applicable.
 
-- [ ] **Step 1:** Copy the curve-indexer base + overlay patches; adjust names/images/queue env. **Step 2:** `kustomize build k8s/overlays/staging` and `.../prod` resolve without error. **Step 3:** Commit `feat(k8s): uniswap-v3-indexer manifests`. (Docker/release consolidation is VEC-329; note that here, don't duplicate it.)
+- [ ] **Step 1:** Create the `dex-indexer` base (mirror the curve-indexer base; parameterize name/queue/`DEX` per overlay). Add per-DEX overlay patches (curve, uniswap-v3) selecting the SAME image with different `DEX` + queue URL. Migrate the existing curve-indexer manifest to the `DEX=curve` deployment (remove the old curve-indexer Deployment).
+- [ ] **Step 2:** `kustomize build k8s/overlays/staging` and `.../prod` resolve without error and reference a single `dex-indexer` image for both DEX deployments.
+- [ ] **Step 3:** Commit: `git commit -m "feat(k8s): single dex-indexer image, one deployment per DEX (curve + uniswap-v3)"`. (Docker/release consolidation is VEC-329; the single binary simplifies it — note, don't duplicate here.)
 
 ### Task B13: Local real-mainnet validation
 
-- [ ] **Step 1:** `cd stl-verify && make dev-up` with real Alchemy key; deploy the uniswap-v3-indexer pod (or run `run-*` locally against the local cluster).
+- [ ] **Step 1:** `cd stl-verify && make dev-up` with real Alchemy key; deploy the `dex-indexer` with `DEX=uniswap-v3` (or run the binary locally with `DEX=uniswap-v3` against the local cluster).
 - [ ] **Step 2:** Let it process live blocks touching the deep wstETH/WETH 0.01% pool; query the DB (db-query skill / psql) and confirm each `uniswap_v3_*` table populates with non-NULL data; verify a swap row, a state row (all core cols non-null), tick rows, and the protocol_event mirror. Confirm baseline tick count is bounded/logged.
 - [ ] **Step 3:** Record row/size deltas + any silent-NULL findings in the design doc's validation note. No code commit unless a defect is found (then fix + test first).
 
