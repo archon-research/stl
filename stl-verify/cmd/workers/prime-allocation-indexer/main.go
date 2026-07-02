@@ -271,9 +271,6 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("allocation tracker telemetry: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("multicall client: %w", err)
-	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
 	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
