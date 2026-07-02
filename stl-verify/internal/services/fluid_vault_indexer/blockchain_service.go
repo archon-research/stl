@@ -244,10 +244,7 @@ func (s *blockchainService) getVaultsEntireData(ctx context.Context, vaults []co
 	}
 	out := make([]*VaultEntireData, len(vaults))
 	for start := 0; start < len(vaults); start += vaultEntireDataBatchSize {
-		end := start + vaultEntireDataBatchSize
-		if end > len(vaults) {
-			end = len(vaults)
-		}
+		end := min(start+vaultEntireDataBatchSize, len(vaults))
 		chunk := vaults[start:end]
 		if err := s.readVaultEntireDataChunk(ctx, chunk, blockNumber, bestEffort, out[start:end]); err != nil {
 			return nil, fmt.Errorf("getVaultEntireData chunk [%d:%d): %w", start, end, err)
