@@ -22,6 +22,7 @@ type PrimePositionHandler struct {
 	metadata    *metadataCache
 	primeLookup map[string]int64 // star name → prime.id
 	logger      *slog.Logger
+	telemetry   *Telemetry
 
 	// Tracks tokens already warned about for an estimated created_at_block, so
 	// the warning fires once per token rather than on every snapshot.
@@ -37,6 +38,7 @@ func NewPrimePositionHandler(
 	erc20ABI *abi.ABI,
 	primeLookup map[string]int64,
 	logger *slog.Logger,
+	tel *Telemetry,
 ) *PrimePositionHandler {
 	return &PrimePositionHandler{
 		repo:        repo,
@@ -45,6 +47,7 @@ func NewPrimePositionHandler(
 		metadata:    newMetadataCache(multicaller, erc20ABI, logger),
 		primeLookup: primeLookup,
 		logger:      logger.With("component", "postgres-handler"),
+		telemetry:   tel,
 	}
 }
 
@@ -94,7 +97,7 @@ func (h *PrimePositionHandler) HandleBatch(
 		return fmt.Errorf("metadata fetch: %w", err)
 	}
 
-	positions, err := h.buildPositions(batch.Snapshots, nonERC20Types)
+	positions, err := h.buildPositions(ctx, batch.Snapshots, nonERC20Types)
 	if err != nil {
 		return err
 	}
@@ -124,6 +127,7 @@ func (h *PrimePositionHandler) HandleBatch(
 }
 
 func (h *PrimePositionHandler) buildPositions(
+	ctx context.Context,
 	snapshots []*PositionSnapshot,
 	nonERC20Types map[string]bool,
 ) ([]*entity.AllocationPosition, error) {
@@ -176,6 +180,17 @@ func (h *PrimePositionHandler) buildPositions(
 			h.noteEstimatedCreatedAtBlock(s.Entry.ContractAddress, s.BlockNumber)
 		}
 
+		valuation, failReason := h.underlyingValuation(s)
+		if failReason != "" {
+			h.telemetry.RecordUnderlyingValueFailure(ctx, s.Entry.TokenType, s.Entry.ContractAddress, failReason)
+			h.logger.Warn("underlying value not computable; persisting NULL",
+				"token", s.Entry.ContractAddress.Hex(),
+				"wallet", s.Entry.WalletAddress.Hex(),
+				"block", s.BlockNumber,
+				"tokenType", s.Entry.TokenType,
+				"reason", failReason)
+		}
+
 		positions = append(positions, &entity.AllocationPosition{
 			ChainID:        s.ChainID,
 			TokenAddress:   s.Entry.ContractAddress,
@@ -185,6 +200,7 @@ func (h *PrimePositionHandler) buildPositions(
 			ProxyAddress:   s.Entry.WalletAddress,
 			Balance:        s.Balance,
 			ScaledBalance:  s.ScaledBalance,
+			Underlying:     valuation,
 			BlockNumber:    s.BlockNumber,
 			BlockVersion:   s.BlockVersion,
 			TxHash:         s.TxHash,
@@ -196,6 +212,58 @@ func (h *PrimePositionHandler) buildPositions(
 		})
 	}
 	return positions, nil
+}
+
+// underlyingValuation applies the per-token-type denomination policy
+// (VEC-307). Only types whose read result is a value in a known asset's units
+// get a valuation. NAV/RWA share tokens (buidl, securitize, superstate,
+// centrifuge, proxy) and pool positions (curve, uni_v3) stay nil: their
+// balanceOf is a share count, and denominating it in the entry's
+// asset_address (a pricing hint, e.g. USTB->USDC) would be plausible-but-wrong
+// data. The empty reason means "nil by design, not a failure".
+func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity.UnderlyingValuation, string) {
+	switch s.Entry.TokenType {
+	case "erc4626":
+		if s.Entry.AssetAddress == nil {
+			return nil, reasonMissingAssetAddress
+		}
+		if s.UnderlyingValue == nil {
+			return nil, reasonConvertFailed
+		}
+		return h.valuationFor(*s.Entry.AssetAddress, s.UnderlyingValue)
+	case "atoken":
+		// Aave balanceOf = scaledBalance x liquidityIndex: 1:1 in the
+		// underlying's units and decimals by construction. The balance IS the
+		// value; no extra call.
+		if s.Entry.AssetAddress == nil {
+			return nil, reasonMissingAssetAddress
+		}
+		return h.valuationFor(*s.Entry.AssetAddress, s.Balance)
+	case "erc20":
+		// A plain token is its own underlying. Deliberately duplicates
+		// balance so "underlying_value IS NOT NULL" uniformly means "valued".
+		// AssetAddress is ignored: for erc20 entries the axis-synome export
+		// uses it as a pricing hint (AUSD->USDC), not a redemption denomination.
+		return h.valuationFor(s.Entry.ContractAddress, s.Balance)
+	default:
+		return nil, ""
+	}
+}
+
+func (h *PrimePositionHandler) valuationFor(asset common.Address, value *big.Int) (*entity.UnderlyingValuation, string) {
+	if value == nil {
+		return nil, reasonConvertFailed
+	}
+	meta, ok := h.metadata.get(asset)
+	if !ok {
+		return nil, reasonAssetMetadataMissing
+	}
+	return &entity.UnderlyingValuation{
+		Value:         value,
+		AssetAddress:  asset,
+		AssetSymbol:   meta.symbol,
+		AssetDecimals: meta.decimals,
+	}, ""
 }
 
 // noteEstimatedCreatedAtBlock warns, once per token, that the persisted

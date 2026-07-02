@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -648,5 +649,147 @@ func TestHandleBatch_UnknownStar_Error(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for unknown star")
+	}
+}
+
+// policyTestAddrs are canonical addresses reused across the valuation policy tests.
+var (
+	policyVault  = common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
+	policyUSDC   = common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+	policyWallet = common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+)
+
+// newPolicyTestHandler returns a handler pre-populated with metadata for
+// policyVault and policyUSDC, suitable for valuation-policy tests. It
+// accepts an optional telemetry instance (nil is fine for most policy tests).
+func newPolicyTestHandler(t *testing.T, tel *Telemetry) *PrimePositionHandler {
+	t.Helper()
+	repo := &fakeAllocRepo{}
+	supplyRepo := &fakeSupplyRepo{}
+	h := newTestHandler(repo, supplyRepo,
+		map[string]int64{"spark": 1},
+		map[common.Address]tokenMeta{
+			policyVault: {symbol: "VAULT", decimals: 18},
+			policyUSDC:  {symbol: "USDC", decimals: 6},
+		},
+	)
+	h.telemetry = tel
+	return h
+}
+
+func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		tokenType  string
+		asset      *common.Address
+		balance    *big.Int
+		underlying *big.Int
+		wantVal    *big.Int
+		wantAsset  common.Address
+	}{
+		{"erc4626 uses convertToAssets result denominated in asset_address", "erc4626", &policyUSDC, big.NewInt(100), big.NewInt(123), big.NewInt(123), policyUSDC},
+		{"erc4626 convert failure stays NULL", "erc4626", &policyUSDC, big.NewInt(100), nil, nil, common.Address{}},
+		{"erc4626 without asset_address stays NULL", "erc4626", nil, big.NewInt(100), big.NewInt(123), nil, common.Address{}},
+		{"atoken uses balanceOf denominated in asset_address", "atoken", &policyUSDC, big.NewInt(555), nil, big.NewInt(555), policyUSDC},
+		{"atoken without asset_address stays NULL", "atoken", nil, big.NewInt(555), nil, nil, common.Address{}},
+		{"erc20 is its own underlying and ignores asset_address", "erc20", &policyUSDC, big.NewInt(42), nil, big.NewInt(42), policyVault},
+		{"superstate NAV token stays NULL", "superstate", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
+		{"centrifuge NAV token stays NULL", "centrifuge", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
+		{"curve stays NULL even at zero balance", "curve", &policyUSDC, big.NewInt(0), nil, nil, common.Address{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPolicyTestHandler(t, nil)
+			snap := &PositionSnapshot{
+				Entry: &TokenEntry{
+					ContractAddress: policyVault,
+					WalletAddress:   policyWallet,
+					AssetAddress:    tc.asset,
+					Star:            "spark",
+					TokenType:       tc.tokenType,
+				},
+				Balance:         tc.balance,
+				UnderlyingValue: tc.underlying,
+				ChainID:         1,
+				BlockNumber:     100,
+				Direction:       DirectionSweep,
+				BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
+			}
+			positions, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+			if err != nil {
+				t.Fatalf("buildPositions: %v", err)
+			}
+			got := positions[0].Underlying
+			if tc.wantVal == nil {
+				if got != nil {
+					t.Fatalf("Underlying = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("Underlying = nil, want valuation")
+			}
+			if got.Value.Cmp(tc.wantVal) != 0 {
+				t.Fatalf("Value = %s, want %s", got.Value, tc.wantVal)
+			}
+			if got.AssetAddress != tc.wantAsset {
+				t.Fatalf("AssetAddress = %s, want %s", got.AssetAddress.Hex(), tc.wantAsset.Hex())
+			}
+		})
+	}
+}
+
+func TestBuildPositions_RecordsFailureMetricWhenValuationMissing(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	h := newPolicyTestHandler(t, tel)
+
+	snap := &PositionSnapshot{
+		Entry: &TokenEntry{
+			ContractAddress: policyVault,
+			WalletAddress:   policyWallet,
+			AssetAddress:    &policyUSDC,
+			Star:            "spark",
+			TokenType:       "erc4626",
+		},
+		Balance:         big.NewInt(100),
+		UnderlyingValue: nil, // convert failed
+		ChainID:         1,
+		BlockNumber:     100,
+		Direction:       DirectionSweep,
+		BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
+	}
+
+	_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("buildPositions: %v", err)
+	}
+
+	m := collectMetric(t, reader, "allocation.underlying_value.failures.total")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("allocation.underlying_value.failures.total is %T, want Sum[int64]", m.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("got %d data points, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if dp.Value != 1 {
+		t.Errorf("datapoint value = %d, want 1", dp.Value)
+	}
+
+	reason, ok := dp.Attributes.Value("reason")
+	if !ok || reason.AsString() != reasonConvertFailed {
+		t.Errorf("reason attribute = %v, want %q", reason, reasonConvertFailed)
+	}
+
+	tokenType, ok := dp.Attributes.Value("token_type")
+	if !ok || tokenType.AsString() != "erc4626" {
+		t.Errorf("token_type attribute = %v, want %q", tokenType, "erc4626")
+	}
+
+	token, ok := dp.Attributes.Value("token")
+	if !ok || token.AsString() != policyVault.Hex() {
+		t.Errorf("token attribute = %v, want %s", token, policyVault.Hex())
 	}
 }
