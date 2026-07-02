@@ -361,9 +361,11 @@ export interface paths {
      *
      *     `token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), not the underlying ERC-20 address. Passing an underlying address yields a `404` whose body suggests matching receipt tokens.
      *
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *
      *     Errors:
      *     - `404` if the receipt token is not found.
-     *     - `422` if `chain_id` < 1 or `token_address` is malformed.
+     *     - `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
     get: operations['get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get'];
@@ -415,10 +417,13 @@ export interface paths {
      * @deprecated
      * @description Return the full risk-enriched collateral breakdown for a receipt-token position: one row per backing token with amount, USD value, price, liquidation threshold, and bonus.
      *
+     *     Pass an optional `prime_id` to scale the breakdown to that prime's position (per-prime, pro-rata by pool share); omit it for the pool-level breakdown.
+     *
      *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.
      *
      *     Errors:
      *     - `404` if the receipt token is not found.
+     *     - `422` if `prime_id` is malformed.
      *     - `503` (`share_data_*`) if the allocation-share lookup fails.
      */
     get: operations['get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get'];
@@ -607,7 +612,7 @@ export interface components {
       event_count: number;
       /**
        * Net Flow Usd
-       * @description Signed net flow valued in USD (inflows positive, outflows negative) at the receipt token's latest underlying oracle price. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
+       * @description Signed net flow valued in USD (inflows positive, outflows negative), using the receipt token's latest underlying oracle price for wrapped positions and the token's own latest oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
        * @example 1234567.89
        */
       net_flow_usd: string;
@@ -2472,7 +2477,10 @@ export interface operations {
   };
   get_risk_breakdown_by_address_v1_risk__chain_id___token_address__breakdown_get: {
     parameters: {
-      query?: never;
+      query?: {
+        /** @description Optional prime address; scales the breakdown to that prime's pro-rata pool share. */
+        prime_id?: string | null;
+      };
       header?: never;
       path: {
         /** @description EVM chain id. */
@@ -2540,7 +2548,10 @@ export interface operations {
   };
   get_risk_breakdown_v1_risk__receipt_token_id__breakdown_get: {
     parameters: {
-      query?: never;
+      query?: {
+        /** @description Optional prime address; scales the breakdown to that prime's pro-rata pool share. */
+        prime_id?: string | null;
+      };
       header?: never;
       path: {
         receipt_token_id: number;

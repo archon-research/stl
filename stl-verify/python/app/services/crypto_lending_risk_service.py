@@ -29,6 +29,7 @@ _DECIMAL_STR_MAX_LEN = 64
 # bounded-precision number instead of float-noise tails from gap_sweep math.
 _USD_CENT = Decimal("0.01")
 _HUNDRED = Decimal("100")
+_ONE = Decimal("1")
 
 
 class CryptoLendingRiskService:
@@ -136,9 +137,17 @@ class CryptoLendingRiskService:
     # Legacy public API — used by old endpoints, will be removed in VEC-183.
     # ------------------------------------------------------------------
 
-    async def get_risk_breakdown_legacy(self, receipt_token_id: int) -> RiskBreakdown | None:
-        """Return the legacy risk breakdown for a receipt token, or ``None`` if unknown."""
-        resolved = await self._load_enriched_items_or_none(receipt_token_id, prime_id=None)
+    async def get_risk_breakdown(
+        self,
+        receipt_token_id: int,
+        prime_id: EthAddress | None,
+    ) -> RiskBreakdown | None:
+        """Return the risk breakdown for a receipt token, or ``None`` if unknown.
+
+        With a ``prime_id`` the breakdown is scaled to that prime's position (per-prime,
+        pro-rata by pool share); with ``prime_id=None`` it is the pool-level breakdown.
+        """
+        resolved = await self._load_enriched_items_or_none(receipt_token_id, prime_id=prime_id)
         if resolved is None:
             return None
         backed_asset_id, items = resolved
@@ -170,9 +179,16 @@ class CryptoLendingRiskService:
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
         if not self._reader.requires_liquidation_enrichment(info):
             # Pool-level, USD-valued, symbol-keyed breakdown (e.g. Maple Syrup): no
-            # prime share to scale by and no per-asset liquidation params to enrich with.
+            # per-asset liquidation params to enrich with. When a prime_id is given,
+            # scale each asset by the prime's pool share (pro-rata, pari-passu); with
+            # no prime_id keep the pool-level view (share = 1). An empty breakdown is
+            # the graceful "no data yet" signal, so skip the share lookup — Maple has
+            # no warm-up concept and a prime-not-in-pool share error must not mask it.
             breakdown = await self._reader.get_breakdown(info)
-            return breakdown.backed_asset_id, self._build_unenriched_items(breakdown)
+            if not breakdown.items:
+                return breakdown.backed_asset_id, []
+            share = await self._reader.get_share(info, prime_id) if prime_id is not None else _ONE
+            return breakdown.backed_asset_id, self._build_unenriched_items(breakdown, share)
 
         # Legacy endpoints must validate share availability before returning an
         # empty breakdown so warm-up windows still surface as
@@ -192,9 +208,12 @@ class CryptoLendingRiskService:
         return breakdown.backed_asset_id, self._build_enriched_items(breakdown, share, liq_params)
 
     @staticmethod
-    def _build_unenriched_items(breakdown: BackedBreakdown) -> list[RiskEnrichedCollateral]:
+    def _build_unenriched_items(breakdown: BackedBreakdown, share: Decimal) -> list[RiskEnrichedCollateral]:
         # Pre-priced, symbol-keyed collateral (token_id is None) with no liquidation
-        # params — e.g. Maple Syrup. Derive token amount from value / price.
+        # params — e.g. Maple Syrup. Scale each asset's USD value (and derived token
+        # amount) by the prime's pool ``share`` for a per-prime, pro-rata view; ``share``
+        # is 1 for the pool-level (no-prime) case. ``backing_pct`` is a pool property, so
+        # it is identical for every prime and left unscaled.
         enriched: list[RiskEnrichedCollateral] = []
         for item in breakdown.items:
             price = item.price_usd
@@ -205,17 +224,18 @@ class CryptoLendingRiskService:
                     breakdown.backed_asset_id,
                     item.symbol,
                 )
+            scaled_backing_value = item.backing_value * share
             # Surface the missing price as null rather than masking it with 0: a null
             # price is a machine-detectable "unpriced" signal, whereas a 0 would read
             # as a real zero price and silently break amount × price == amount_usd.
-            amount = (item.backing_value / price) if price else Decimal("0")
+            amount = (scaled_backing_value / price) if price else Decimal("0")
             enriched.append(
                 RiskEnrichedCollateral(
                     token_id=item.token_id,
                     symbol=item.symbol,
                     amount=amount,
                     backing_pct=item.backing_pct,
-                    amount_usd=item.backing_value,
+                    amount_usd=scaled_backing_value,
                     price_usd=price if price else None,
                     liquidation_threshold=None,
                     liquidation_bonus=None,

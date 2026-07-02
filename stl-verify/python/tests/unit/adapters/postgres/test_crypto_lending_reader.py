@@ -283,13 +283,39 @@ async def test_get_share_uses_prime_wallet_for_morpho_supply_share(
 
 
 @pytest.mark.asyncio
+async def test_get_share_uses_prime_wallet_for_maple_supply_share(
+    reader: PostgresCryptoLendingReader,
+    engine: MagicMock,
+) -> None:
+    info = replace(_maple_info(), receipt_token_token_id=555)
+
+    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
+        mock_share = AsyncMock()
+        mock_share.get_share.return_value = Decimal("0.1")
+        mock_share_cls.return_value = mock_share
+
+        result = await reader.get_share(info, DUMMY_PRIME)
+
+    mock_share_cls.assert_called_once_with(
+        engine=engine,
+        chain_id=1,
+        token_id=555,
+        wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
+        max_stale_seconds=600,
+    )
+    mock_share.get_share.assert_awaited_once_with()
+    assert result == Decimal("0.1")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "info",
     [
         replace(_aave_like_info(), receipt_token_token_id=None),
         _morpho_info(),
+        _maple_info(),
     ],
-    ids=["aave-like-missing-token-id", "morpho-missing-token-id"],
+    ids=["aave-like-missing-token-id", "morpho-missing-token-id", "maple-missing-token-id"],
 )
 async def test_get_share_raises_when_receipt_token_token_id_missing(
     reader: PostgresCryptoLendingReader,

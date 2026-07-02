@@ -27,6 +27,7 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
   Allocation,
+  Prime,
   RiskBreakdown,
   Token,
   TokenPrice,
@@ -39,6 +40,7 @@ type RiskBreakdownTabProps = {
   isEnabled: boolean;
   searchQuery?: string;
   selectedReceiptToken: Allocation | null;
+  selectedPrime: Prime | null;
 };
 
 const tableHeaderTypographyClassName = css({
@@ -212,6 +214,7 @@ export function RiskBreakdownTab({
   isEnabled,
   searchQuery = '',
   selectedReceiptToken,
+  selectedPrime,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -222,6 +225,7 @@ export function RiskBreakdownTab({
   const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+  const primeId = selectedPrime?.id ?? null;
 
   useEffect(() => {
     const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
@@ -246,6 +250,7 @@ export function RiskBreakdownTab({
     void getRiskBreakdown(
       selectedReceiptToken.chain_id,
       receiptTokenAddress,
+      primeId,
       controller.signal,
     )
       .then((response) => {
@@ -274,7 +279,7 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, receiptTokenId, selectedReceiptToken]);
+  }, [isEnabled, receiptTokenId, primeId, selectedReceiptToken]);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -596,6 +601,9 @@ export function RiskBreakdownTab({
             on-chain. Internal (AMM/strategy) loans are excluded; the breakdown
             reflects external-loan collateral plus available pool liquidity, so
             it is less than total supply.
+            {selectedPrime
+              ? ' Per-prime USD values are a pro-rata approximation (each pool asset scaled by the prime’s pool share) and will not match data.spark.fi, which uses a different (coverage-capped) attribution model. Backing % is a pool property and is identical for every prime.'
+              : ''}
           </p>
         </div>
       ) : null}

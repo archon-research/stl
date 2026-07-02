@@ -40,6 +40,11 @@ _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
 
+def _parse_optional_prime(prime_id: str | None) -> EthAddress | None:
+    """Build an ``EthAddress`` from a validated optional prime query param."""
+    return EthAddress(prime_id) if prime_id is not None else None
+
+
 class BadDebtResponse(BaseModel):
     """Estimated bad debt for a receipt-token position at a given collateral gap."""
 
@@ -175,9 +180,10 @@ async def _compute_bad_debt(
 async def _compute_risk_breakdown(
     receipt_token_id: int,
     service: CryptoLendingRiskService,
+    prime_id: EthAddress | None = None,
 ) -> RiskBreakdownResponse:
     try:
-        breakdown = await service.get_risk_breakdown_legacy(receipt_token_id)
+        breakdown = await service.get_risk_breakdown(receipt_token_id, prime_id)
     except AllocationShareError as exc:
         raise _share_error_503(exc) from exc
     except ValueError as exc:
@@ -234,17 +240,27 @@ async def get_bad_debt(
     description=(
         "Return the full risk-enriched collateral breakdown for a receipt-token position: "
         "one row per backing token with amount, USD value, price, liquidation threshold, and bonus.\n\n"
+        "Pass an optional `prime_id` to scale the breakdown to that prime's position "
+        "(per-prime, pro-rata by pool share); omit it for the pool-level breakdown.\n\n"
         "**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/breakdown`.\n\n"
         "Errors:\n"
         "- `404` if the receipt token is not found.\n"
+        "- `422` if `prime_id` is malformed.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
 )
 async def get_risk_breakdown(
     receipt_token_id: int,
+    prime_id: Annotated[
+        OptionalEthAddressParam,
+        Query(
+            description="Optional prime address; scales the breakdown to that prime's pro-rata pool share.",
+            examples=["0x1234567890abcdef1234567890abcdef12345678"],
+        ),
+    ] = None,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
 ) -> RiskBreakdownResponse:
-    return await _compute_risk_breakdown(receipt_token_id, service)
+    return await _compute_risk_breakdown(receipt_token_id, service, _parse_optional_prime(prime_id))
 
 
 @router.get(
@@ -286,20 +302,29 @@ async def get_bad_debt_by_address(
         "`token_address` is the **receipt-token** address (e.g. `aUSDC`, `spWETH`), "
         "not the underlying ERC-20 address. Passing an underlying address yields a "
         "`404` whose body suggests matching receipt tokens.\n\n"
+        "Pass an optional `prime_id` to scale the breakdown to that prime's position "
+        "(per-prime, pro-rata by pool share); omit it for the pool-level breakdown.\n\n"
         "Errors:\n"
         "- `404` if the receipt token is not found.\n"
-        "- `422` if `chain_id` < 1 or `token_address` is malformed.\n"
+        "- `422` if `chain_id` < 1, `token_address` is malformed, or `prime_id` is malformed.\n"
         "- `503` (`share_data_*`) if the allocation-share lookup fails."
     ),
 )
 async def get_risk_breakdown_by_address(
     chain_id: ChainIdPath,
     token_address: TokenAddressPath,
+    prime_id: Annotated[
+        OptionalEthAddressParam,
+        Query(
+            description="Optional prime address; scales the breakdown to that prime's pro-rata pool share.",
+            examples=["0x1234567890abcdef1234567890abcdef12345678"],
+        ),
+    ] = None,
     service: CryptoLendingRiskService = Depends(get_crypto_lending_risk_service),
     lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
 ) -> RiskBreakdownResponse:
     info = await resolve_receipt_token(chain_id, token_address, lookup)
-    return await _compute_risk_breakdown(info.receipt_token_id, service)
+    return await _compute_risk_breakdown(info.receipt_token_id, service, _parse_optional_prime(prime_id))
 
 
 # ---------------------------------------------------------------------------

@@ -111,9 +111,11 @@ class PostgresCryptoLendingReader:
         return await self._receipt_token_repo.get(receipt_token_id)
 
     def requires_liquidation_enrichment(self, info: ReceiptTokenInfo) -> bool:
-        # A protocol carries per-asset liquidation params + prime shares to enrich
-        # with exactly when it has a quantitative risk model (``_SUPPORTED_PROTOCOLS``).
-        # Maple has neither: its pool-level, pre-priced breakdown is emitted as-is.
+        # Whether this protocol's breakdown needs per-asset liquidation params, which
+        # exist only for protocols with a quantitative risk model (``_SUPPORTED_PROTOCOLS``).
+        # Maple has none: its pool-level, pre-priced breakdown carries no liq params.
+        # Prime-share scaling is orthogonal — both branches scale by ``get_share`` when a
+        # prime_id is supplied — so this gates liquidation enrichment only, not shares.
         return _normalize_protocol_name(info.protocol_name) in _SUPPORTED_PROTOCOLS
 
     async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
@@ -162,9 +164,12 @@ class PostgresCryptoLendingReader:
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)
 
-        if normalized not in _AAVE_LIKE and normalized not in _MORPHO:
+        if normalized not in _AAVE_LIKE and normalized not in _MORPHO and normalized not in _MAPLE:
             raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
 
+        # Maple's prime share is the same balance/totalSupply ratio as the enriched
+        # protocols: the prime holds the syrup receipt token, so its pool share is its
+        # syrup balance over the vault's total shares (pari-passu, pro-rata attribution).
         token_id = self._require_receipt_token_token_id(info)
         return await self._load_share(
             chain_id=info.chain_id,
