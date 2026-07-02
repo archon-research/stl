@@ -2,6 +2,8 @@ package dexbootstrap
 
 import (
 	"context"
+	"fmt"
+	"math/big"
 	"slices"
 	"strings"
 	"testing"
@@ -82,6 +84,53 @@ func TestDepsClose_RunsCleanupsInReverseOrder(t *testing.T) {
 
 	if want := []int{3, 2, 1}; !slices.Equal(order, want) {
 		t.Errorf("cleanup order = %v, want %v (reverse of registration)", order, want)
+	}
+}
+
+// stubBlockNumberer is a blockNumberer double returning a preset head or error.
+type stubBlockNumberer struct {
+	head uint64
+	err  error
+}
+
+func (s stubBlockNumberer) BlockNumber(context.Context) (uint64, error) {
+	return s.head, s.err
+}
+
+func TestDeps_LatestBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		stub    stubBlockNumberer
+		want    *big.Int
+		wantErr bool
+	}{
+		{name: "returns head as big.Int", stub: stubBlockNumberer{head: 21_000_000}, want: big.NewInt(21_000_000)},
+		{name: "wraps client error", stub: stubBlockNumberer{err: fmt.Errorf("rpc down")}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &Deps{blockNumberer: tt.stub}
+			got, err := d.LatestBlock(context.Background())
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LatestBlock: %v", err)
+			}
+			if got.Cmp(tt.want) != 0 {
+				t.Errorf("LatestBlock = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDeps_LatestBlock_ErrorsWhenNumbererUninitialised(t *testing.T) {
+	d := &Deps{}
+	if _, err := d.LatestBlock(context.Background()); err == nil {
+		t.Fatal("LatestBlock with nil blockNumberer must error, got nil")
 	}
 }
 
