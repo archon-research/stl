@@ -492,7 +492,7 @@ func (r *UniswapV3Repository) writeTick(ctx context.Context, tx pgx.Tx, t *entit
 			}
 		},
 		func(latest *tickValues) bool {
-			return latest == nil || !tickUnchanged(*latest, t)
+			return !tickUnchanged(*latest, t)
 		},
 		func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx,
