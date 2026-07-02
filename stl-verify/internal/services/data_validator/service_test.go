@@ -3,6 +3,7 @@ package data_validator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,9 @@ func (m *mockBlockStateRepository) GetReorgEventsByBlockRange(ctx context.Contex
 type mockBlockVerifier struct {
 	blocks map[int64]*outbound.CanonicalBlock
 	name   string
+	// getBlockByNumber, when set, overrides the map lookup so a test can inject
+	// a per-call error (e.g. a transient canonical-source failure).
+	getBlockByNumber func(ctx context.Context, number int64) (*outbound.CanonicalBlock, error)
 }
 
 func (m *mockBlockVerifier) Name() string {
@@ -127,6 +131,9 @@ func (m *mockBlockVerifier) Name() string {
 }
 
 func (m *mockBlockVerifier) GetBlockByNumber(ctx context.Context, number int64) (*outbound.CanonicalBlock, error) {
+	if m.getBlockByNumber != nil {
+		return m.getBlockByNumber(ctx, number)
+	}
 	if block, ok := m.blocks[number]; ok {
 		return block, nil
 	}
@@ -414,6 +421,119 @@ func TestService_SpotChecks_Mismatch(t *testing.T) {
 	}
 	if report.Failed != 1 {
 		t.Errorf("got %d failed, want 1", report.Failed)
+	}
+}
+
+func TestService_SpotCheck_TransientCanonicalError_SkipsCheckAndRunSucceeds(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 100,
+		maxBlockNumber: 100,
+		blocks:         map[int64]*outbound.BlockState{100: {Number: 100, Hash: "0xabc"}},
+	}
+	verifier := &mockBlockVerifier{
+		name: "etherscan",
+		getBlockByNumber: func(_ context.Context, _ int64) (*outbound.CanonicalBlock, error) {
+			return nil, fmt.Errorf("fetching block: %w", outbound.ErrCanonicalSourceUnavailable)
+		},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 1
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Errors != 0 {
+		t.Errorf("Errors = %d, want 0 (transient must be skipped)", report.Errors)
+	}
+	if report.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", report.Skipped)
+	}
+	if !report.Success() {
+		t.Error("Success() = false, want true (transient throttle must not fail the run)")
+	}
+}
+
+func TestService_SpotCheck_PermanentCanonicalError_RecordsErrorAndRunFails(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 100,
+		maxBlockNumber: 100,
+		blocks:         map[int64]*outbound.BlockState{100: {Number: 100, Hash: "0xabc"}},
+	}
+	verifier := &mockBlockVerifier{
+		name: "etherscan",
+		getBlockByNumber: func(_ context.Context, _ int64) (*outbound.CanonicalBlock, error) {
+			return nil, fmt.Errorf("API error: invalid api key")
+		},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 1
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Errors == 0 {
+		t.Error("Errors = 0, want > 0 (a permanent canonical error is a real problem)")
+	}
+	if report.Success() {
+		t.Error("Success() = true, want false")
+	}
+}
+
+func TestService_Reorg_TransientCanonicalError_Skips(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 1,
+		maxBlockNumber: 200,
+		reorgEvents: []outbound.ReorgEvent{
+			{ID: 1, BlockNumber: 100, OldHash: "0xold", NewHash: "0xnew"},
+		},
+	}
+	verifier := &mockBlockVerifier{
+		name: "etherscan",
+		getBlockByNumber: func(_ context.Context, _ int64) (*outbound.CanonicalBlock, error) {
+			return nil, fmt.Errorf("fetching block: %w", outbound.ErrCanonicalSourceUnavailable)
+		},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = true
+	config.SpotCheckCount = 0
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Errors != 0 {
+		t.Errorf("Errors = %d, want 0", report.Errors)
+	}
+	if report.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", report.Skipped)
+	}
+	if !report.Success() {
+		t.Error("Success() = false, want true")
 	}
 }
 

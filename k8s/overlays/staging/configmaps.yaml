@@ -227,6 +227,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "0s"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -236,6 +237,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "10"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "15m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -245,6 +247,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "130"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "5m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -254,6 +257,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "8453"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "20m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -263,6 +267,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "42161"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "10m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -272,6 +277,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "43114"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "25m"
 ---
 apiVersion: v1
 kind: ConfigMap

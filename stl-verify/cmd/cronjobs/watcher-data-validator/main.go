@@ -42,11 +42,12 @@ func main() {
 		// The mainnet deployment's app label resolves to "watcher-data-validator",
 		// matching this default, so its existing schedule ID is preserved. The
 		// default only applies to local/non-k8s runs that set no SERVICE_NAME.
-		Name:            env.Get("SERVICE_NAME", "watcher-data-validator"),
-		IntervalEnv:     "DATA_VALIDATION_INTERVAL",
-		IntervalDefault: "1h",
-		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
-		Setup:           setupRunner,
+		Name:              env.Get("SERVICE_NAME", "watcher-data-validator"),
+		IntervalEnv:       "DATA_VALIDATION_INTERVAL",
+		IntervalDefault:   "1h",
+		IntervalOffsetEnv: "DATA_VALIDATION_SCHEDULE_OFFSET",
+		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
+		Setup:             setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)

@@ -67,16 +67,25 @@ func NewClient(cfg Config, logger *slog.Logger, errorParser ErrorParser) *Client
 	}
 
 	return &Client{
-		httpClient: &http.Client{Timeout: cfg.Timeout},
-		limiter:    rate.NewLimiter(cfg.RateLimit, cfg.RateBurst),
-		retryConfig: retry.Config{
-			MaxRetries:     cfg.MaxRetries,
-			InitialBackoff: cfg.InitialBackoff,
-			MaxBackoff:     cfg.MaxBackoff,
-			BackoffFactor:  cfg.BackoffFactor,
-		},
+		httpClient:  &http.Client{Timeout: cfg.Timeout},
+		limiter:     rate.NewLimiter(cfg.RateLimit, cfg.RateBurst),
+		retryConfig: buildRetryConfig(cfg),
 		logger:      logger,
 		errorParser: errorParser,
+	}
+}
+
+// buildRetryConfig maps the client config onto the shared retry config. Jitter
+// is always on: concurrent callers sharing one upstream rate limit (e.g. the
+// single Etherscan key shared across the per-chain validators) would otherwise
+// back off in lockstep after a throttle and re-collide on every retry.
+func buildRetryConfig(cfg Config) retry.Config {
+	return retry.Config{
+		MaxRetries:     cfg.MaxRetries,
+		InitialBackoff: cfg.InitialBackoff,
+		MaxBackoff:     cfg.MaxBackoff,
+		BackoffFactor:  cfg.BackoffFactor,
+		Jitter:         true,
 	}
 }
 

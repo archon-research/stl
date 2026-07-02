@@ -37,12 +37,12 @@ jobs:
       id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
       - name: Check out internal actions
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b  # v6.2.1
         with:
           role-to-assume: arn:aws:iam::579039992622:role/archonstaging-github-actions-mimir-rules
           aws-region: eu-west-1
@@ -106,12 +106,12 @@ jobs:
       id-token: write       # AWS OIDC assume
       pull-requests: write  # diff comment upsert
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           persist-credentials: false
 
       - name: Check out internal actions
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
@@ -120,7 +120,7 @@ jobs:
           persist-credentials: false
 
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37  # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b  # v6.2.1
         with:
           role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-mimir-rules
           aws-region: eu-west-1

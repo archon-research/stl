@@ -62,7 +62,7 @@ jobs:
           fi
           echo "Deploy SHA OK: $DEPLOY_SHA"
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -78,7 +78,7 @@ jobs:
       # build-only runs (push=false), which can run from any branch.
       - name: Configure AWS credentials (staging)
         if: ${{ inputs.push }}
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -118,7 +118,7 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           persist-credentials: false
@@ -203,7 +203,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: a42ba946a0cb774eef6a0d321a2545d2c1310b29  # argocd-wait (DNS fix #20)
@@ -243,7 +243,7 @@ jobs:
     steps:
       # Pull images from staging ECR, retag and push to prod (no build needed)
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -265,7 +265,7 @@ jobs:
 
       # Retag and push to prod ECR
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -308,7 +308,7 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           persist-credentials: false
@@ -461,7 +461,7 @@ jobs:
       APP: stl-prod
     steps:
       - name: Configure AWS credentials (ArgoCD read-only)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           aws-region: eu-west-1
@@ -553,7 +553,7 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.update-prod.outputs.deploy_sha }}
           fetch-depth: 0
@@ -614,7 +614,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout shared actions
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
@@ -666,7 +666,7 @@ jobs:
         id: mark-approved
         run: echo "started=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.update-prod.outputs.deploy_sha }}
           # Full history: re-validation diffs against the parent commit and the
@@ -750,7 +750,7 @@ jobs:
           state: approved
 
       - name: Checkout shared actions
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
@@ -832,7 +832,7 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -844,7 +844,7 @@ jobs:
           state: rejected
 
       - name: Checkout shared actions
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
@@ -883,7 +883,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout shared actions
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
