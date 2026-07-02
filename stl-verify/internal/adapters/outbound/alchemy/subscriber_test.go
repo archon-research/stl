@@ -13,7 +13,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/metrictest"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -1504,6 +1508,211 @@ func TestSubscribe_ReadTimeoutTriggersReconnect(t *testing.T) {
 
 	if connectCount.Load() < 2 {
 		t.Errorf("expected at least 2 connections due to timeout, got %d", connectCount.Load())
+	}
+}
+
+// --- Test: Data-freshness watchdog ---
+
+// newPongAliveSilentServer returns a mock server that completes the handshake,
+// answers client pings with pongs (keeping the transport alive), delivers one
+// header on the first connection, then goes silent. This is the VEC-388 stall:
+// zero newHeads while the pong keepalive holds the socket open, so ReadTimeout
+// never fires.
+func newPongAliveSilentServer(connectCount *atomic.Int32) *mockWSServer {
+	return newMockWSServer(func(conn *websocket.Conn) {
+		count := connectCount.Add(1)
+
+		conn.SetPingHandler(func(data string) error {
+			return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(time.Second))
+		})
+
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`"0x1234"`)}
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
+
+		if count == 1 {
+			header := outbound.BlockHeader{Number: "0x100", Hash: "0xabc", ParentHash: "0xdef"}
+			_ = conn.WriteJSON(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": "0x1234", "result": header},
+			})
+		}
+
+		// Drive the ping handler (so pongs flow) but send no further data.
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				return
+			}
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+}
+
+func TestSubscribe_DataSilenceTriggersReconnectDespitePong(t *testing.T) {
+	connectCount := atomic.Int32{}
+	server := newPongAliveSilentServer(&connectCount)
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		ReadTimeout:    5 * time.Second,        // long: pongs keep refreshing it so it never fires
+		HealthTimeout:  200 * time.Millisecond, // the data-freshness watchdog must fire here
+		PingInterval:   50 * time.Millisecond,
+		PongTimeout:    time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Without the watchdog, ReadTimeout (5s) never fires while pongs flow, so
+	// the connection count stays at 1 and this times out.
+	deadline := time.After(2 * time.Second)
+	for connectCount.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("expected reconnect within HealthTimeout, connectCount=%d", connectCount.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestSubscribe_DataSilenceRecordsStallMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	tel, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp, "base")
+	if err != nil {
+		t.Fatalf("failed to create telemetry: %v", err)
+	}
+
+	connectCount := atomic.Int32{}
+	server := newPongAliveSilentServer(&connectCount)
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		ReadTimeout:    5 * time.Second,
+		HealthTimeout:  200 * time.Millisecond,
+		PingInterval:   50 * time.Millisecond,
+		PongTimeout:    time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+		Telemetry:      tel,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Wait for the watchdog to fire and force the reconnect.
+	deadline := time.After(2 * time.Second)
+	for connectCount.Load() < 2 {
+		select {
+		case <-deadline:
+			t.Fatalf("watchdog did not fire, connectCount=%d", connectCount.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect metrics: %v", err)
+	}
+	chain, ok := metrictest.ChainValue(rm, "alchemy.subscriber.stalls.total")
+	if !ok {
+		t.Fatal("expected alchemy.subscriber.stalls.total to be recorded when the watchdog fires")
+	}
+	if chain != "base" {
+		t.Errorf("stall metric chain = %q, want base", chain)
+	}
+}
+
+func TestSubscribe_DataFlowingDoesNotTriggerWatchdog(t *testing.T) {
+	connectCount := atomic.Int32{}
+
+	server := newMockWSServer(func(conn *websocket.Conn) {
+		connectCount.Add(1)
+
+		var req jsonRPCRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		resp := jsonRPCResponse{JSONRPC: "2.0", ID: 1, Result: json.RawMessage(`"0x1234"`)}
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
+
+		// Stream headers faster than HealthTimeout; the watchdog must keep
+		// resetting and never fire.
+		for i := 0; ; i++ {
+			header := outbound.BlockHeader{
+				Number:     fmt.Sprintf("0x%x", 1000+i),
+				Hash:       "0xabc",
+				ParentHash: "0xdef",
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": "0x1234", "result": header},
+			}); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	defer server.Close()
+
+	sub, err := NewSubscriber(SubscriberConfig{
+		WebSocketURL:   server.URL(),
+		ReadTimeout:    5 * time.Second,
+		HealthTimeout:  200 * time.Millisecond, // headers arrive every 20ms, so this must never fire
+		PingInterval:   50 * time.Millisecond,
+		PongTimeout:    time.Second,
+		InitialBackoff: 10 * time.Millisecond,
+		MaxBackoff:     50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subscriber: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := sub.Subscribe(ctx); err != nil {
+		t.Fatalf("failed to subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	// Run past several HealthTimeout windows. Data is always flowing, so the
+	// watchdog must not force a reconnect.
+	time.Sleep(700 * time.Millisecond)
+
+	if got := connectCount.Load(); got != 1 {
+		t.Errorf("expected exactly 1 connection (no spurious watchdog reconnect), got %d", got)
 	}
 }
 

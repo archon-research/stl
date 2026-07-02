@@ -36,7 +36,10 @@ the same base manifests (no generated manifests).
 ## How overlays work
 
 Each overlay sets the target namespace and pins image names. For EKS, CI bumps
-`newTag` per service on merge to main.
+`newTag` per service: staging on merge to main, prod via the env-gated promotion
+(auto-committed to main, then synced only after the `production` GitHub
+Environment review is approved — see CONTRIBUTING.md §14). Do not hand-edit prod
+`newTag`s or sync `stl-prod` manually.
 
 ```bash
 # Preview what gets applied

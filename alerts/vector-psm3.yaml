@@ -1,0 +1,131 @@
+# =============================================================================
+# Vector — psm3-indexer alerts (VEC-350)
+# =============================================================================
+# psm3-indexer is a per-chain SQS-driven worker: it consumes block events and
+# every N blocks reads Spark PSM3 reserve state (two multicall rounds) and
+# appends one psm3_reserves row. One Deployment per chain
+# (base/optimism/unichain/arbitrum); NOT mainnet. It is the last hop before
+# downstream readers see PSM3 reserves, so a stall here makes those views stale.
+#
+# Metric source: OTel SDK in the indexer. Series carry:
+#   - service_name="psm3-indexer"
+#   - k8s_namespace_name="vector"
+#   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
+#   - chain  (base|optimism|unichain|arbitrum — fixed per process)
+#
+# `cluster` is propagated from the source metric (preserved through `sum by`) so
+# the Alertmanager Slack template's `Cluster:` header is populated. `namespace`
+# is a static rule label since every rule filters to k8s_namespace_name="vector"
+# (the mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows
+# `namespace`).
+#
+# Severity → routing (per the alerting routing spec):
+#   critical       → pages (Grafana IRM), [CRITICAL], 1h repeat.
+#   warning / info → no page, [WARNING]/[INFO], 4h repeat.
+#
+# Window sizing: steady state is ~1 sweep / 10m/chain, so the stall window is
+# [30m] (holds ~3 expected sweeps) — a shorter window reads 0 between normal
+# sweeps and would flap/false-page. Keyed on the status="success" series so a
+# flat counter means no fresh psm3_reserves row is landing — whether the worker
+# is wedged/SQS-starved/crash-looping or every sweep is erroring (the case a
+# `pgrep` liveness probe misses).
+# =============================================================================
+groups:
+  - name: vector-psm3
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL — page-worthy
+      # ---------------------------------------------------------------------
+
+      - alert: VectorPSM3IndexerStalled
+        # No SUCCESSFUL sweep wrote a row for ~45m. Keyed on status="success" (not
+        # all sweeps) so it covers BOTH the no-sweep case (SQS starvation, wedged
+        # loop, crash-loop) AND the all-error case (every ReadState/SaveReserves
+        # failing): in both, no fresh psm3_reserves row lands, so both must page.
+        # Catches the silent alive-but-behind case (pod Running, 0 restarts, hours
+        # behind) that the process-liveness probe cannot see. The error RATIO is a
+        # warning companion for the partial-failure case where rows still land.
+        # Window is [30m] because steady-state cadence is ~1 sweep / 10m/chain; a
+        # shorter window is 0 between normal sweeps and would flap/false-page.
+        expr: |
+          sum by (chain, cluster) (
+            rate(psm3_sweeps_total{status="success", k8s_namespace_name="vector"}[30m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: psm3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector psm3-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `psm3-indexer` on chain `{{ $labels.chain }}` has written no
+            snapshot for ~45m (no sweeps, or every sweep erroring). PSM3
+            reserve state in TimescaleDB is going stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-psm3.md#vectorpsm3indexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorPSM3IndexerErrorRateHigh
+        # A sustained fraction of sweeps erroring while some still succeed. Keyed
+        # on the error RATIO (errors / all sweeps), not on error presence: a
+        # single transient RPC failure or a shutdown-time `context canceled`
+        # sweep is one bad data point in a ~5/min stream and stays well under the
+        # threshold. A persistent total failure presents as VectorPSM3IndexerStalled
+        # instead (the success series goes flat). clamp_min avoids divide-by-zero
+        # when a chain briefly has no sweeps (ratio → 0, never fires).
+        expr: |
+          sum by (chain, cluster) (
+            rate(psm3_sweeps_total{status="error", k8s_namespace_name="vector"}[10m])
+          )
+          /
+          clamp_min(
+            sum by (chain, cluster) (
+              rate(psm3_sweeps_total{k8s_namespace_name="vector"}[10m])
+            ),
+            0.001
+          )
+          > 0.3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: psm3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector psm3-indexer error ratio >30% on {{ $labels.chain }}"
+          description: |
+            `psm3-indexer` on chain `{{ $labels.chain }}` is failing
+            `{{ $value | humanizePercentage }}` of sweeps over 10m while some
+            still succeed. Investigate the RPC / DB before it becomes a stall.
+
+      - alert: VectorPSM3IndexerSweepLatencyHigh
+        # p99 sweep duration >10s for 15m. A sweep is two multicall rounds plus a
+        # DB write; sustained high latency almost always means the upstream RPC is
+        # degraded. Histogram `psm3.sweep.duration_seconds` (OTel), exported as
+        # `psm3_sweep_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(psm3_sweep_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 10
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: psm3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector psm3-indexer p99 sweep latency >10s on {{ $labels.chain }}"
+          description: |
+            `psm3-indexer` on chain `{{ $labels.chain }}` p99 sweep duration is
+            `{{ $value | printf "%.1fs" }}` over 15m. Likely a degraded RPC;
+            expect lag in PSM3 reserve state.

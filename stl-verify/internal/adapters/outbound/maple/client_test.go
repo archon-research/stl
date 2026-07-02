@@ -715,6 +715,278 @@ func TestGetPools_MalformedValueNamesPoolID(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Fixed-term loans
+// ---------------------------------------------------------------------------
+
+const wbtcAddr = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+
+// ftlLoanJSON renders a full live FTL row mirroring the live API shape
+// (string-encoded integers including epoch dates, JSON-bool isImpaired).
+func ftlLoanJSON(id, state string) string {
+	return fmt.Sprintf(`{
+		"id": %q, "borrower": {"id": %q}, "fundingPool": {"id": %q},
+		"collateralAsset": {"id": %q, "symbol": "WBTC", "decimals": 8},
+		"liquidityAsset": {"id": %q, "symbol": "USDC", "decimals": 6},
+		"state": %q, "stateDetail": "ActiveInArrears",
+		"principalOwed": "10000000000000", "interestRate": "182000", "interestPaid": "5000",
+		"paymentsRemaining": "6", "paymentIntervalDays": "30", "termDays": "180",
+		"maturityDate": "1662393177", "nextPaymentDue": "1659801177",
+		"collateralAmount": "21510", "collateralRequired": "20000", "collateralRatio": "1500000",
+		"drawdownAmount": "16917002739727", "claimableAmount": "0",
+		"acmRatio": "1445731", "isImpaired": false
+	}`, id, borrowerAddr, poolAddr, wbtcAddr, usdcAddr, state)
+}
+
+func TestGetActiveFixedTermLoans_HappyPath(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, query string, _ map[string]any) {
+		if !strings.Contains(query, "loans(") || !strings.Contains(query, "state_in") {
+			t.Errorf("unexpected query: %s", query)
+		}
+		writeJSON(w, fmt.Sprintf(`{"data": {"loans": [%s, %s]}}`,
+			ftlLoanJSON(loanAddr, "Active"),
+			ftlLoanJSON("0x1111111111111111111111111111111111111111", "DrawdownFunds")))
+	}})
+
+	loans, err := client.GetActiveFixedTermLoans(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveFixedTermLoans: %v", err)
+	}
+	if len(loans) != 2 {
+		t.Fatalf("len(loans) = %d, want 2", len(loans))
+	}
+	l := loans[0]
+	if strings.ToLower(l.LoanID.Hex()) != loanAddr || strings.ToLower(l.Borrower.Hex()) != borrowerAddr {
+		t.Errorf("ids = %s/%s", l.LoanID.Hex(), l.Borrower.Hex())
+	}
+	if strings.ToLower(l.PoolAddress.Hex()) != poolAddr {
+		t.Errorf("PoolAddress = %s, want %s", l.PoolAddress.Hex(), poolAddr)
+	}
+	if strings.ToLower(l.Collateral.Address.Hex()) != wbtcAddr || l.Collateral.Symbol != "WBTC" || l.Collateral.Decimals != 8 {
+		t.Errorf("collateral = %+v, want WBTC/8 at %s", l.Collateral, wbtcAddr)
+	}
+	if strings.ToLower(l.Funds.Address.Hex()) != usdcAddr || l.Funds.Decimals != 6 {
+		t.Errorf("funds = %+v, want USDC/6", l.Funds)
+	}
+	if l.State != "Active" || l.StateDetail != "ActiveInArrears" {
+		t.Errorf("state/detail = %s/%s", l.State, l.StateDetail)
+	}
+	if l.InterestRate.Cmp(big.NewInt(182000)) != 0 || l.PrincipalOwed.Cmp(big.NewInt(10000000000000)) != 0 {
+		t.Errorf("interestRate/principal = %s/%s", l.InterestRate, l.PrincipalOwed)
+	}
+	if l.PaymentsRemaining != 6 || l.PaymentIntervalDays != 30 || l.TermDays != 180 {
+		t.Errorf("counts = %d/%d/%d, want 6/30/180", l.PaymentsRemaining, l.PaymentIntervalDays, l.TermDays)
+	}
+	if l.MaturityDate != 1662393177 || l.NextPaymentDue != 1659801177 {
+		t.Errorf("dates = %d/%d", l.MaturityDate, l.NextPaymentDue)
+	}
+	if l.AcmRatio.Cmp(big.NewInt(1445731)) != 0 {
+		t.Errorf("acmRatio = %s, want 1445731", l.AcmRatio)
+	}
+	if l.IsImpaired {
+		t.Error("IsImpaired = true, want false")
+	}
+	if loans[1].State != "DrawdownFunds" {
+		t.Errorf("loan[1].State = %s, want DrawdownFunds", loans[1].State)
+	}
+}
+
+func TestGetActiveFixedTermLoans_NullAcmRatioAndStateDetail(t *testing.T) {
+	// acmRatio and stateDetail are nullable in the schema; both surface as
+	// nil/"" without a failure. The null-downgrade signal is the service's
+	// concern, so the client does not log here.
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"loans": [{
+			"id": %q, "borrower": {"id": %q}, "fundingPool": {"id": %q},
+			"collateralAsset": {"id": %q, "symbol": "WBTC", "decimals": 8},
+			"liquidityAsset": {"id": %q, "symbol": "USDC", "decimals": 6},
+			"state": "WaitingForAcceptance", "stateDetail": null,
+			"principalOwed": "0", "interestRate": "0", "interestPaid": "0",
+			"paymentsRemaining": "0", "paymentIntervalDays": "0", "termDays": "0",
+			"maturityDate": "0", "nextPaymentDue": "0",
+			"collateralAmount": "0", "collateralRequired": "0", "collateralRatio": "0",
+			"drawdownAmount": "0", "claimableAmount": "0",
+			"acmRatio": null, "isImpaired": false
+		}]}}`, loanAddr, borrowerAddr, poolAddr, wbtcAddr, usdcAddr))
+	}})
+
+	loans, err := client.GetActiveFixedTermLoans(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveFixedTermLoans: %v", err)
+	}
+	if loans[0].AcmRatio != nil {
+		t.Errorf("AcmRatio = %v, want nil", loans[0].AcmRatio)
+	}
+	if loans[0].StateDetail != "" {
+		t.Errorf("StateDetail = %q, want empty", loans[0].StateDetail)
+	}
+	// Pre-funding state legitimately reports 0 epoch dates -> 0 ("none").
+	if loans[0].MaturityDate != 0 || loans[0].NextPaymentDue != 0 {
+		t.Errorf("dates = %d/%d, want 0/0", loans[0].MaturityDate, loans[0].NextPaymentDue)
+	}
+}
+
+func TestGetActiveFixedTermLoans_NonLiveStateRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"loans": [%s]}}`, ftlLoanJSON(loanAddr, "Matured")))
+	}})
+
+	_, err := client.GetActiveFixedTermLoans(context.Background())
+	if err == nil {
+		t.Fatal("expected error for non-live state, got nil")
+	}
+	if !strings.Contains(err.Error(), loanAddr) || !strings.Contains(err.Error(), "Matured") {
+		t.Errorf("error %q should name the loan id and the unexpected state", err.Error())
+	}
+}
+
+func TestGetActiveFixedTermLoans_NullFundingPoolRejected(t *testing.T) {
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, fmt.Sprintf(`{"data": {"loans": [{
+			"id": %q, "borrower": {"id": %q}, "fundingPool": null,
+			"collateralAsset": {"id": %q, "symbol": "WBTC", "decimals": 8},
+			"liquidityAsset": {"id": %q, "symbol": "USDC", "decimals": 6},
+			"state": "Active", "stateDetail": null,
+			"principalOwed": "1", "interestRate": "1", "interestPaid": "0",
+			"paymentsRemaining": "1", "paymentIntervalDays": "30", "termDays": "180",
+			"maturityDate": "1", "nextPaymentDue": "0",
+			"collateralAmount": "1", "collateralRequired": "1", "collateralRatio": "1",
+			"drawdownAmount": "1", "claimableAmount": "0",
+			"acmRatio": "1", "isImpaired": false
+		}]}}`, loanAddr, borrowerAddr, wbtcAddr, usdcAddr))
+	}})
+
+	_, err := client.GetActiveFixedTermLoans(context.Background())
+	if err == nil {
+		t.Fatal("expected error for null fundingPool, got nil")
+	}
+	if !strings.Contains(err.Error(), loanAddr) || !strings.Contains(err.Error(), "null fundingPool") {
+		t.Errorf("error %q should name the loan id and null fundingPool", err.Error())
+	}
+}
+
+func TestGetActiveFixedTermLoans_MalformedValuesFailHard(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]string
+		wantField string
+	}{
+		{name: "malformed principalOwed", overrides: map[string]string{"principalOwed": `"not-a-number"`}, wantField: "principalOwed"},
+		{name: "malformed interestRate", overrides: map[string]string{"interestRate": `"abc"`}, wantField: "interestRate"},
+		{name: "malformed termDays", overrides: map[string]string{"termDays": `"x"`}, wantField: "termDays"},
+		{name: "malformed maturityDate", overrides: map[string]string{"maturityDate": `"later"`}, wantField: "maturityDate"},
+		{name: "negative maturityDate", overrides: map[string]string{"maturityDate": `"-5"`}, wantField: "maturityDate"},
+		// Zero decimals is validated by the service (distinctFTLAssetTokens), not
+		// the client; the client only rejects a missing/null decimals value.
+		{name: "null funds decimals", overrides: map[string]string{"fundsDecimals": "null"}, wantField: "liquidityAsset.decimals"},
+		{name: "bad collateral address", overrides: map[string]string{"colAddr": `"garbage"`}, wantField: "collateralAsset.id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			get := func(key, def string) string {
+				if v, ok := tc.overrides[key]; ok {
+					return v
+				}
+				return def
+			}
+			body := fmt.Sprintf(`{"data": {"loans": [{
+				"id": %q, "borrower": {"id": %q}, "fundingPool": {"id": %q},
+				"collateralAsset": {"id": %s, "symbol": "WBTC", "decimals": %s},
+				"liquidityAsset": {"id": %q, "symbol": "USDC", "decimals": %s},
+				"state": "Active", "stateDetail": null,
+				"principalOwed": %s, "interestRate": %s, "interestPaid": "0",
+				"paymentsRemaining": "1", "paymentIntervalDays": "30", "termDays": %s,
+				"maturityDate": %s, "nextPaymentDue": "0",
+				"collateralAmount": "1", "collateralRequired": "1", "collateralRatio": "1",
+				"drawdownAmount": "1", "claimableAmount": "0",
+				"acmRatio": "1", "isImpaired": false
+			}]}}`,
+				loanAddr, borrowerAddr, poolAddr,
+				get("colAddr", fmt.Sprintf("%q", wbtcAddr)), get("colDecimals", "8"),
+				usdcAddr, get("fundsDecimals", "6"),
+				get("principalOwed", `"1"`), get("interestRate", `"1"`),
+				get("termDays", `"180"`), get("maturityDate", `"1"`))
+
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				writeJSON(w, body)
+			}})
+
+			_, err := client.GetActiveFixedTermLoans(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), loanAddr) || !strings.Contains(err.Error(), tc.wantField) {
+				t.Errorf("error %q should name loan %s and field %s", err, loanAddr, tc.wantField)
+			}
+		})
+	}
+}
+
+func TestGetActiveFixedTermLoans_NullCollectionFailsHard(t *testing.T) {
+	for _, body := range []string{`{"data": null}`, `{"data": {"loans": null}}`} {
+		client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+			writeJSON(w, body)
+		}})
+		_, err := client.GetActiveFixedTermLoans(context.Background())
+		if err == nil {
+			t.Fatalf("body %q: expected error, got nil", body)
+		}
+		if !strings.Contains(err.Error(), "null loans collection") {
+			t.Errorf("body %q: error %q should report null loans collection", body, err.Error())
+		}
+	}
+}
+
+func TestGetActiveFixedTermLoans_EmptyBookIsValid(t *testing.T) {
+	// The dormant FTL book returns []; that is a valid snapshot, not an error.
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+		writeJSON(w, `{"data": {"loans": []}}`)
+	}})
+	loans, err := client.GetActiveFixedTermLoans(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveFixedTermLoans: %v", err)
+	}
+	if len(loans) != 0 {
+		t.Errorf("len(loans) = %d, want 0", len(loans))
+	}
+}
+
+func TestGetActiveFixedTermLoans_Pagination(t *testing.T) {
+	var calls atomic.Int32
+	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, variables map[string]any) {
+		call := calls.Add(1)
+		skip := int(variables["skip"].(float64))
+		switch call {
+		case 1:
+			if skip != 0 {
+				t.Errorf("call 1 skip = %d, want 0", skip)
+			}
+			loans := make([]string, loanBatchSize)
+			for i := range loans {
+				loans[i] = ftlLoanJSON(fmt.Sprintf("0x%040x", i+1), "Active")
+			}
+			writeJSON(w, fmt.Sprintf(`{"data": {"loans": [%s]}}`, strings.Join(loans, ",")))
+		case 2:
+			if skip != loanBatchSize {
+				t.Errorf("call 2 skip = %d, want %d", skip, loanBatchSize)
+			}
+			writeJSON(w, fmt.Sprintf(`{"data": {"loans": [%s]}}`, ftlLoanJSON(loanAddr, "Active")))
+		default:
+			t.Errorf("unexpected call %d", call)
+		}
+	}})
+
+	loans, err := client.GetActiveFixedTermLoans(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveFixedTermLoans: %v", err)
+	}
+	if len(loans) != loanBatchSize+1 {
+		t.Errorf("len(loans) = %d, want %d", len(loans), loanBatchSize+1)
+	}
+	if calls.Load() != 2 {
+		t.Errorf("calls = %d, want 2", calls.Load())
+	}
+}
+
 func TestGetSkyStrategies_MalformedValueNamesStrategyID(t *testing.T) {
 	client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 		writeJSON(w, fmt.Sprintf(`{"data": {"skyStrategies": [{
@@ -950,6 +1222,153 @@ func TestExecute_GraphQLErrorsEnvelope(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Errorf("calls = %d, want 1 (GraphQL errors must not be retried)", calls.Load())
+	}
+}
+
+func TestTolerableUnpriceableCollateral(t *testing.T) {
+	collateralPath := []any{"openTermLoans", float64(0), "collateral", "assetValueUsd"}
+	for _, tc := range []struct {
+		name        string
+		errs        []graphqlError
+		dataPresent bool
+		want        bool
+	}{
+		{name: "no errors", errs: nil, dataPresent: true, want: false},
+		{name: "data absent", errs: []graphqlError{{Message: "No fiat value for PYUSD"}}, dataPresent: false, want: false},
+		{name: "message only, no path", errs: []graphqlError{{Message: "No fiat value for PYUSD"}}, dataPresent: true, want: true},
+		{name: "path through collateral", errs: []graphqlError{{Message: "No fiat value for USDG", Path: collateralPath}}, dataPresent: true, want: true},
+		{name: "case-insensitive message and node", errs: []graphqlError{{Message: "no FIAT value for HYPE", Path: []any{"openTermLoans", float64(0), "Collateral"}}}, dataPresent: true, want: true},
+		{name: "path outside collateral", errs: []graphqlError{{Message: "No fiat value for PYUSD", Path: []any{"openTermLoans", float64(0), "principalOwed"}}}, dataPresent: true, want: false},
+		{name: "unrelated message", errs: []graphqlError{{Message: "UNAUTHORIZED"}}, dataPresent: true, want: false},
+		{name: "mixed tolerable and unrelated", errs: []graphqlError{{Message: "No fiat value for PYUSD", Path: collateralPath}, {Message: "boom"}}, dataPresent: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tolerableUnpriceableCollateral(tc.errs, tc.dataPresent); got != tc.want {
+				t.Errorf("tolerableUnpriceableCollateral = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetActiveLoans_TolerateUnpriceableCollateral(t *testing.T) {
+	// Maple returns HTTP 200 with a "No fiat value" error scoped to a loan's
+	// collateral plus partial data; the client keeps the book and persists the
+	// offending price as NULL rather than discarding the whole snapshot.
+	for _, tc := range []struct {
+		name         string
+		body         string
+		wantCollat   bool
+		wantPriceNil bool
+	}{
+		{
+			name: "field null with path through collateral",
+			body: fmt.Sprintf(`{
+				"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "collateral", "assetValueUsd"]}],
+				"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "100", "acmRatio": "1445731",
+					"collateral": {"asset": "PYUSD", "assetAmount": "5", "assetValueUsd": null,
+						"decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+					"loanMeta": null, "fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, poolAddr),
+			wantCollat: true, wantPriceNil: true,
+		},
+		{
+			name: "whole collateral null with path at collateral node",
+			body: fmt.Sprintf(`{
+				"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "collateral"]}],
+				"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "100", "acmRatio": null,
+					"collateral": null, "loanMeta": null, "fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, poolAddr),
+			wantCollat: false,
+		},
+		{
+			name: "message only, no path",
+			body: fmt.Sprintf(`{
+				"errors": [{"message": "No fiat value for USDG"}],
+				"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "100", "acmRatio": "1445731",
+					"collateral": {"asset": "USDG", "assetAmount": "5", "assetValueUsd": null,
+						"decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+					"loanMeta": null, "fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, poolAddr),
+			wantCollat: true, wantPriceNil: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			handler := &testutil.SlogRecorder{}
+			client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				calls.Add(1)
+				writeJSON(w, tc.body)
+			}}, slog.New(handler))
+
+			loans, err := client.GetActiveLoans(context.Background())
+			if err != nil {
+				t.Fatalf("GetActiveLoans: %v", err)
+			}
+			if len(loans) != 1 {
+				t.Fatalf("len(loans) = %d, want 1 (tolerated error keeps the book)", len(loans))
+			}
+			if calls.Load() != 1 {
+				t.Errorf("calls = %d, want 1 (tolerated errors decode partial data, no retry)", calls.Load())
+			}
+			if tc.wantCollat {
+				if loans[0].Collateral == nil {
+					t.Fatal("Collateral = nil, want value with null price")
+				}
+				if tc.wantPriceNil && loans[0].Collateral.AssetValueUSD != nil {
+					t.Errorf("AssetValueUSD = %v, want nil", loans[0].Collateral.AssetValueUSD)
+				}
+			} else if loans[0].Collateral != nil {
+				t.Errorf("Collateral = %+v, want nil", loans[0].Collateral)
+			}
+			if got := handler.CountWarn("tolerating unpriceable-collateral"); got != 1 {
+				t.Errorf("diagnostic warn fired %d times, want 1", got)
+			}
+		})
+	}
+}
+
+func TestGetActiveLoans_UntolerableErrorsFatal(t *testing.T) {
+	// Every case that is not a collateral-scoped "No fiat value" over partial
+	// data must stay fatal and unretried, exactly as before the tolerance rule.
+	oneLoan := fmt.Sprintf(`{
+		"id": %q, "borrower": {"id": %q}, "state": "Active",
+		"principalOwed": "100", "acmRatio": "1445731",
+		"collateral": {"asset": "PYUSD", "assetAmount": "5", "assetValueUsd": null,
+			"decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+		"loanMeta": null, "fundingPool": {"id": %q}
+	}`, loanAddr, borrowerAddr, poolAddr)
+	for _, tc := range []struct {
+		name, body, wantSub string
+	}{
+		{name: "unrelated error with data null", body: `{"errors": [{"message": "UNAUTHORIZED"}], "data": null}`, wantSub: "UNAUTHORIZED"},
+		{name: "no fiat value but data null", body: `{"errors": [{"message": "No fiat value for PYUSD"}], "data": null}`, wantSub: "No fiat value"},
+		{name: "no fiat value path outside collateral", body: `{"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "principalOwed"]}], "data": {"openTermLoans": []}}`, wantSub: "No fiat value"},
+		{name: "mixed tolerable and unrelated", body: fmt.Sprintf(`{"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "collateral"]}, {"message": "boom"}], "data": {"openTermLoans": [%s]}}`, oneLoan), wantSub: "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				calls.Add(1)
+				writeJSON(w, tc.body)
+			}})
+
+			_, err := client.GetActiveLoans(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q should contain %q", err.Error(), tc.wantSub)
+			}
+			if calls.Load() != 1 {
+				t.Errorf("calls = %d, want 1 (GraphQL errors must not be retried)", calls.Load())
+			}
+		})
 	}
 }
 
