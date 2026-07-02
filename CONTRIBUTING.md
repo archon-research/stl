@@ -896,8 +896,13 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 5. **Merge to `main`** — CI then triggers `.github/workflows/deploy.yaml`,
    which bumps image tags in `k8s/overlays/staging/kustomization.yaml`
    and ArgoCD rolls the change into the `vector` namespace on the
-   staging EKS cluster. Prod is a separate manual promotion (bump the
-   tag in `k8s/overlays/prod/kustomization.yaml`).
+   staging EKS cluster. Once staging is healthy, the same run promotes
+   the images to the prod ECR, auto-commits the prod tag bump to `main`,
+   and posts an "awaiting approval" message to Slack. Prod does **not**
+   roll out until someone approves the `production` GitHub Environment
+   review on that run; on approval the run syncs `stl-prod` in ArgoCD to
+   the approved commit. Rejecting leaves the bump on `main` (it batches
+   into the next approved deploy).
 
 ---
 

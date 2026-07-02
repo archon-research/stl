@@ -52,6 +52,11 @@ func mapleFixtureServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"data": {"poolV2S": [{"id": "` + pool + `", "name": "Syrup USDC", "monthlyApy": "0", "spotApy": "0", "assets": "400", "collateralValue": "500", "principalOut": "600", "tvl": "1000", "asset": {"id": "` + usdc + `", "symbol": "USDC", "decimals": 6}, "syrupRouter": null}]}}`))
 		case strings.Contains(query, "openTermLoans"):
 			_, _ = w.Write([]byte(`{"data": {"openTermLoans": [{"id": "` + loan + `", "borrower": {"id": "` + borrower + `"}, "state": "Active", "principalOwed": "100", "acmRatio": "1000000", "collateral": null, "loanMeta": null, "fundingPool": {"id": "` + pool + `"}}]}}`))
+		case strings.Contains(query, "GetFixedTermLoans"):
+			// The FTL book is dormant today; the wiring test only needs the phase
+			// to run cleanly. Detailed FTL behavior is covered in the service
+			// integration test.
+			_, _ = w.Write([]byte(`{"data": {"loans": []}}`))
 		case strings.Contains(query, "skyStrategies"):
 			_, _ = w.Write([]byte(`{"data": {"skyStrategies": [{"id": "` + strategy + `", "state": "Active", "currentlyDeployed": "0", "depositedAssets": "1", "withdrawnAssets": "0", "strategyFeeRate": null, "totalFeesCollected": null, "version": 100, "pool": {"id": "` + pool + `", "name": "Syrup USDC"}}]}}`))
 		case strings.Contains(query, "syrupGlobals"):

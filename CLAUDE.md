@@ -187,6 +187,10 @@ git commit  # Hooks auto-fix, may stage changes
     - Never ignore errors.
     - Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
     - **Fail hard and early on unexpected errors.**
+    - **Never swallow a failure into partial success.** A sub-result that fails (a multicall sub-call, a batch row, one item in a loop) must propagate and stop the whole unit of work; do not default it to nil/zero/empty and keep going. Silent partial data is the worst outcome: it looks healthy, and repairing the holes later forces a backfiller rerun.
+    - **A partial failure stops the whole event/block.** Do not ack, commit, or persist a partially-processed event. Stopping and retrying is correct; continuing with a hole is not.
+    - **Poison pills get fixed or explicitly discarded, never silently skipped.** When an event persistently fails, the only acceptable responses are to make the code handle it, or to make a deliberate, explicit decision to discard that specific event. Silently dropping or defaulting it is forbidden.
+    - **"Best effort" / `AllowFailure` reads still bubble up.** A call you issue is expected to succeed, so treat a failed result as an error and propagate it. If a value is genuinely optional for some inputs (e.g. a getter that does not exist on a particular contract/pool variant), do not issue the call for those inputs; gate it structurally. A NULL or absent value must be a documented structural fact, never the residue of a swallowed failure.
     - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`.
 - **Testing**:
     - Table-driven tests, mock outbound ports for unit tests.
@@ -203,9 +207,12 @@ git commit  # Hooks auto-fix, may stage changes
     - **No test-order dependencies in integration tests sharing a schema**: never rely on migration-seeded rows or on rows another test created — sibling tests TRUNCATE/DELETE shared tables (e.g. `TRUNCATE protocol CASCADE`), so seed everything your test needs yourself via idempotent upserts. Verify by running the whole test file/package, not just your tests filtered with `-run` (a filtered run hides the wipe that breaks you).
 - **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
-- **Function composition**:
-    - Compose large functions from smaller functions.
-    - Large functions should read like prose, with each step delegated to a well-named helper function.
+- **Function composition** (read code like a book):
+    - A function body should read like prose: a short, linear sequence of named steps. Each step is a call to a well-named helper whose name says *what* it does, so the reader understands the flow without reading the helper's internals.
+    - Compose large functions from smaller ones. Treat these as signals to extract: a body longer than roughly one screen; comment-delimited "sections" inside a function (each section becomes a named helper, and the helper name replaces the comment); a `for`/`if` block more than a few lines deep; or any step you would describe with "and then".
+    - Name helpers for the outcome, not the mechanics (`decodeSwaps`, `snapshotTouchedPools`, `persistBlock`), not (`processLoop`, `handleStuff`).
+    - This is strongest for orchestration functions (block/event handlers, coordinators, `main` flows, batch builders): the top-level function must be a readable outline, with detail pushed down into helpers. A single sprawling handler that inlines decode + snapshot + persist is a defect, not a style preference.
+    - Enforced in the Review phase: the code-quality reviewer rejects any new or modified function that violates this. Audit EVERY changed function, not a named subset (scoping the review to specific files creates blind spots, which is how a 254-line function once slipped through). Pre-existing functions the PR does not touch are out of scope: refactor them in a separate follow-up PR, not the feature PR that happened to sit next to them. A function-length / complexity linter (golangci-lint `funlen`/`gocognit`) is the planned deterministic backstop so an over-long function fails CI automatically rather than relying on a reviewer noticing.
 - **Comments**: Explain *why*, not *what*; default to none.
     - Never restate the code or the language: no comments on signatures, field names, or standard Go behavior (zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc.). The reader knows Go.
     - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
@@ -213,6 +220,7 @@ git commit  # Hooks auto-fix, may stage changes
     - Keep package and exported-API doc comments, but make each say something the signature doesn't.
     - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
     - When unsure, leave it out: a stale or redundant comment is worse than none.
+    - No history in comments: don't duplicate what git tracks. Describe current code, not what it replaced or why something was removed.
 - **Libraries**:
     - Use the standard library as much as possible.
     - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
@@ -220,6 +228,10 @@ git commit  # Hooks auto-fix, may stage changes
     - Always think hard and carefully about how the wrong data could be written to the database.
     - Always think hard and carefully about schema design.
     - For timeseries tables, use Tigerdata primitives, and make sure they support distributed tables.
+    - Reading latest snapshot rows: state/snapshot tables carry `build_id` (audit-only: which deployment wrote the row) and `processing_version` (correction version: 0=original, N=Nth reprocess). To select the current/latest row per entity, order by the table's snapshot-time key — `block_number, block_version` for on-chain tables, `synced_at`/`timestamp`/`snapshot_time` for API-sourced — `DESC`, then `processing_version DESC`. NEVER use `build_id` to pick latest: it appears in no unique constraint and one `build_id` spans many sync cycles, so ordering by it picks an arbitrary cycle and mixes values across cycles (manufactures fake anomalies).
+    - Interpreting numeric columns: a column's name and magnitude don't determine its unit or scale — verify against the column `COMMENT` (psql `\d+ <table>`) or the domain entity doc before computing, aggregating, or flagging an anomaly. Conventions vary per column: raw native-decimal ints (scale by `token.decimals`), column-specific fixed-point (`maple_loan_collateral.asset_value_usd` = per-unit USD price ×1e8, not a total; `maple_loan_state.acm_ratio` = ratio ×1e6), already-normalized decimals (`onchain_token_price.price_usd`), or values that aren't what the name implies (`allocation_position.scaled_balance` = interest-free reading, not the balance). A value repeated across rows is usually correct (one per-unit price per asset per snapshot), not corruption.
+    - Document every new table and column with `COMMENT ON` in the same migration that creates it — these are the catalogue's source of truth and what the "Interpreting numeric columns" rule above reads. A `--` inline comment is not enough; it is invisible to `\d+` and the metadata catalogue. Match the established style from `20260609_120000_add_schema_comments.sql`: a `[Type]` tag (`Dimension` | `Configuration` | `Operational` | `Hypertable`) on the table; per-column `Roles` (`PK` | `FK→table.col` | `Derived` | `Partition` | `Audit`); and, for any numeric column, its exact unit/scale (raw native-decimal int vs fixed-point ×1eN vs normalized). A column whose unit/scale is not self-evident from its type MUST state it.
+    - Read-then-write races: when an insert decision depends on a prior read of the same key (read-latest-then-insert, MAX(version)+1, append-on-change), serialize concurrent writers with `pg_advisory_xact_lock` on the natural key — `ON CONFLICT` alone cannot guard a decision made before the insert (ADR-0002 §3); acquire locks in sorted key order to stay deadlock-free.
     - NEVER modify an existing migration file in `stl-verify/db/migrations/`. Migrations are immutable once applied — the migrator tracks checksums and will reject modified files. Always create a new migration file for fixes or additions.
     - Role admin vs object grants: role-level ops (`CREATE ROLE`, `ALTER ROLE … SET`, role-to-role membership grants) require superuser and belong in the infra repo's `bootstrap-db.sh`. Migrations run as `stl_migrator` (CREATEROLE only) and hold object-level grants only (`GRANT … ON <object> TO <role>`, `ALTER DEFAULT PRIVILEGES`). Rule: a role named on the left of ALTER/GRANT/DROP = bootstrap; object on left, role on right = migration.
 - **System-wide registries** (`chain`, `token`, `user`, `protocol`, `prime`, `oracle` + mapping tables): FK these instead of duplicating address/symbol/decimals/name columns.
@@ -227,6 +239,7 @@ git commit  # Hooks auto-fix, may stage changes
     - Assets with no on-chain address (custodied BTC/SOL, off-chain API symbols) get no `token` row: store raw symbol or curated nullable `token_id` (see `offchain_price_asset`). Never invent addresses.
 - **External API adapters**:
     - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
+    - Encoding can vary *across rows of the same field*. The Maple FTL `interestRate` is 18-decimal on V1-era loans (`fundingPoolV1` set, `fundingPool` null) but 6-decimal on live PoolV2 loans; a live smoke test surfaced this. When a field's scale depends on a row's lineage, scope the query to the lineage you index (here: live, non-terminal states, which are all PoolV2), re-check the discriminator in the parser (state + non-null pool), and store raw — never assume one global scale from one sample.
 
 ## Observability — alerts & runbooks (required for new indexers)
 

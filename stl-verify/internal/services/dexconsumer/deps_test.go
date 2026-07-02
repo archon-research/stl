@@ -11,6 +11,7 @@ type stubSQS struct{ outbound.SQSConsumer }
 type stubMulticaller struct{ outbound.Multicaller }
 type stubTxManager struct{ outbound.TxManager }
 type stubTokenRepo struct{ outbound.TokenRepository }
+type stubProtocolRepo struct{ outbound.ProtocolRepository }
 
 func validCommonDeps() CommonDeps {
 	return CommonDeps{
@@ -19,7 +20,7 @@ func validCommonDeps() CommonDeps {
 		Multicaller:  stubMulticaller{},
 		TxManager:    stubTxManager{},
 		TokenRepo:    stubTokenRepo{},
-		ProtocolRepo: &fakeProtocolRepo{},
+		ProtocolRepo: stubProtocolRepo{},
 		EventRepo:    &fakeEventRepo{},
 	}
 }

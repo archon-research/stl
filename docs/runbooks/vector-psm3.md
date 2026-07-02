@@ -9,10 +9,10 @@ multicall rounds, then appends one `psm3_reserves` row. One Deployment per chain
 (`base`, `optimism`, `unichain`, `arbitrum` — **not** mainnet). It is the last
 hop before downstream readers see PSM3 reserves; a stall makes those views stale.
 
-Steady state is ~5 sweeps/min/chain. A failed sweep is logged and ACKed (not
-retried): the worker skips that interval and sweeps again at the next one, so
-persistent failure surfaces here as a stall or a high error ratio, not in the
-DLQ.
+Steady state is ~1 sweep / ~10m/chain (one per N-block interval). A failed sweep
+is logged and ACKed (not retried): the worker skips that interval and sweeps
+again at the next one, so persistent failure surfaces here as a stall or a high
+error ratio, not in the DLQ.
 
 Metrics (per chain): `psm3_sweeps_total{status}`, `psm3_sweep_duration_seconds`,
 `psm3_last_snapshot_block`, `psm3_total_assets`, `psm3_conversion_rate`, plus
@@ -26,8 +26,9 @@ Metrics (per chain): `psm3_sweeps_total{status}`, `psm3_sweep_duration_seconds`,
 
 ### What it means
 
-`psm3-indexer` on the labelled `chain` has written **no snapshot** for >15m.
-Keyed on `psm3_sweeps_total{status="success"}` going flat, so it fires in two
+`psm3-indexer` on the labelled `chain` has written **no snapshot** for ~45m
+(`rate[30m] == 0` held for 15m). Keyed on `psm3_sweeps_total{status="success"}`
+going flat, so it fires in two
 cases: no sweep ran at all (SQS-starved, wedged loop, or crash-loop), or every
 sweep is erroring (`ReadState`/`SaveReserves` failing). Either way no fresh
 `psm3_reserves` row lands. This is the silent alive-but-behind case (pod
@@ -40,7 +41,7 @@ also firing, sweeps are running but all failing — go straight to the logs.
 1. **Pod status** — `kubectl -n vector get pods -l app=psm3-indexer-{{chain}}`
    (one Deployment per chain). Note `Running` vs `CrashLoopBackOff` and restarts.
 2. **Recent logs** — `kubectl -n vector logs -l app=psm3-indexer-{{chain}} --tail=100`.
-   Healthy logs `psm3 sweep complete` every ~12s. Look for repeated
+   Healthy logs `psm3 sweep complete` every ~10m. Look for repeated
    `psm3 sweep failed`, RPC `context deadline exceeded`, or DB connection errors.
 3. **SQS upstream** — confirm the watcher is publishing block events for this
    chain. No messages on the queue ⇒ the worker is correctly idle and the
@@ -58,8 +59,8 @@ also firing, sweeps are running but all failing — go straight to the logs.
 
 ### Verify recovery
 
-`rate(psm3_sweeps_total[5m]) > 0` for the affected chain, and a fresh row lands
-(`max(block_timestamp)` advances within a minute).
+`rate(psm3_sweeps_total{status="success"}[30m]) > 0` for the affected chain, and
+a fresh row lands (`max(block_timestamp)` advances within ~10m).
 
 ---
 

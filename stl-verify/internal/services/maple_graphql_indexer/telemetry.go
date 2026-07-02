@@ -158,3 +158,20 @@ func (t *Telemetry) RecordNullDowngrade(ctx context.Context, field string) {
 		attribute.String("field", field),
 	))
 }
+
+// RecordCollateralPriceNull is the collateral-price specialisation of
+// RecordNullDowngrade. It tags the null with why the price is missing —
+// reason="pending" (collateral still DepositPending) vs reason="unpriceable"
+// (Maple's oracle layer had no feed for the asset) — plus the collateral token,
+// so a chronic upstream pricing gap is separable from a normal pending null.
+func (t *Telemetry) RecordCollateralPriceNull(ctx context.Context, reason, token string) {
+	if t == nil {
+		return
+	}
+	t.nullDowngrades.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("field", "collateral_asset_value_usd"),
+		attribute.String("reason", reason),
+		attribute.String("token", token),
+	))
+}

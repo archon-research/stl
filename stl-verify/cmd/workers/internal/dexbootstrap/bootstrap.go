@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
@@ -56,6 +58,10 @@ type Deps struct {
 	PostgresPool  *pgxpool.Pool
 	BuildRegistry *buildregistry.Registry
 
+	// blockNumberer is the chain client used by LatestBlock; kept unexported so
+	// callers reach it via the accessor rather than the concrete eth client.
+	blockNumberer blockNumberer
+
 	TxManager    outbound.TxManager
 	ProtocolRepo outbound.ProtocolRepository
 	TokenRepo    outbound.TokenRepository
@@ -65,6 +71,24 @@ type Deps struct {
 
 	// cleanups runs registered teardown functions in reverse order on Close().
 	cleanups []func()
+}
+
+// blockNumberer is the subset of the eth client used to read chain head.
+type blockNumberer interface {
+	BlockNumber(ctx context.Context) (uint64, error)
+}
+
+// LatestBlock returns the current chain head as a *big.Int, for callers (e.g. a
+// startup capability probe) that need a concrete block for a Multicaller call.
+func (d *Deps) LatestBlock(ctx context.Context) (*big.Int, error) {
+	if d.blockNumberer == nil {
+		return nil, fmt.Errorf("block numberer not initialised")
+	}
+	bn, err := d.blockNumberer.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetching latest block: %w", err)
+	}
+	return new(big.Int).SetUint64(bn), nil
 }
 
 // Close releases every resource in reverse-registration order. Safe to call
@@ -180,14 +204,8 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		return nil, fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
 	d.cleanups = append(d.cleanups, func() { ethClient.Close() })
+	d.blockNumberer = ethClient
 	logger.Info("Ethereum node connected")
-
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		d.Close()
-		return nil, fmt.Errorf("creating multicall client: %w", err)
-	}
-	d.Multicaller = mc
 
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))
 	if err != nil {
@@ -231,6 +249,26 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		return nil, fmt.Errorf("creating dex telemetry: %w", err)
 	}
 	d.DexTelemetry = dexTel
+
+	// Multicaller is built after InitOTEL so its telemetry binds to the real
+	// meter provider (emits multicall_batch_size{chain}); resolving the chain
+	// name fails hard rather than emitting an empty chain label.
+	chainName, err := entity.ChainName(cfg.ChainID)
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("creating multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		d.Close()
+		return nil, fmt.Errorf("creating multicall client: %w", err)
+	}
+	d.Multicaller = mc
 
 	d.TxManager, err = postgres.NewTxManager(pool, logger)
 	if err != nil {
