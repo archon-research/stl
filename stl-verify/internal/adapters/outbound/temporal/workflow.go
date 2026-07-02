@@ -42,14 +42,17 @@ func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.
 
 // cronjobActivities wraps a Runner for Temporal activity execution.
 type cronjobActivities struct {
-	runner Runner
+	runner  Runner
+	metrics *cronjobMetrics
 }
 
-func newCronjobActivities(runner Runner) (*cronjobActivities, error) {
+// newCronjobActivities wraps runner for activity execution. metrics may be nil
+// (it is nil-receiver-safe), e.g. in unit tests that don't wire telemetry.
+func newCronjobActivities(runner Runner, metrics *cronjobMetrics) (*cronjobActivities, error) {
 	if runner == nil {
 		return nil, fmt.Errorf("runner cannot be nil")
 	}
-	return &cronjobActivities{runner: runner}, nil
+	return &cronjobActivities{runner: runner, metrics: metrics}, nil
 }
 
 // Execute runs the cronjob. scheduledAt is the workflow-recorded timestamp
@@ -60,7 +63,14 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
-	if err := a.runner.Run(ctx); err != nil {
+	start := time.Now()
+	err := a.runner.Run(ctx)
+	// Recorded per activity execution (so a retried run that ultimately
+	// succeeds emits both an error and a success); the vector-cronjobs alerts
+	// account for this by treating a warning as "any error" and a page as
+	// "errors with no success over the window".
+	a.metrics.RecordRun(ctx, time.Since(start), err)
+	if err != nil {
 		return fmt.Errorf("running cronjob: %w", err)
 	}
 

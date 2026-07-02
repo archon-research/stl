@@ -94,32 +94,6 @@ func nullIfEmpty(s string) *string {
 	return &s
 }
 
-// equalStringPtr reports NULL-safe equality of two nullable strings: both
-// nil is equal, nil vs non-nil is a mismatch, two non-nils compare by value.
-func equalStringPtr(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-// strOrNull renders a nullable string for mismatch messages, distinguishing
-// SQL NULL from an empty string.
-func strOrNull(s *string) string {
-	if s == nil {
-		return "NULL"
-	}
-	return fmt.Sprintf("%q", *s)
-}
-
-// intOrNull renders a nullable int for mismatch messages.
-func intOrNull(i *int) string {
-	if i == nil {
-		return "NULL"
-	}
-	return fmt.Sprintf("%d", *i)
-}
-
 // registryMismatchError builds the fail-hard error for an immutable-registry
 // guard: nil when nothing changed, else one error naming every changed field
 // with its stored and incoming values. Callers pass mismatches as
@@ -178,6 +152,27 @@ func writeValuesPlaceholders(sb *strings.Builder, row, cols int) {
 		fmt.Fprintf(sb, "$%d", row*cols+c+1)
 	}
 	sb.WriteString(")")
+}
+
+// checkDedupedStateRows makes append-only ON CONFLICT DO NOTHING dedup visible
+// for a logical state save. A full dedup (zero rows inserted) is the expected
+// signature of a same-key retry — the trigger reuses processing_version and the
+// insert dedupes — so it logs at warn and succeeds. A partial dedup (some rows
+// collided while siblings did not) means data the caller believed fresh
+// silently collided; committing would drop the collided rows, so it fails the
+// save and the caller's transaction rolls back. expected is the number of rows
+// the caller logically attempted; table names the table for messages.
+func checkDedupedStateRows(logger *slog.Logger, table string, inserted int64, expected int) error {
+	switch {
+	case inserted == int64(expected):
+		return nil
+	case inserted == 0:
+		logger.Warn("state insert fully deduplicated by ON CONFLICT DO NOTHING (expected on retries)",
+			"table", table, "expected", expected, "inserted", inserted)
+		return nil
+	default:
+		return fmt.Errorf("state insert into %s partially deduplicated by ON CONFLICT DO NOTHING (%d of %d rows inserted); failing the save so the caller rolls back instead of silently dropping the collided rows", table, inserted, expected)
+	}
 }
 
 // marshalMetadata safely marshals metadata to JSON, returning "{}" for nil/empty maps.

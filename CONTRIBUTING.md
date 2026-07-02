@@ -290,7 +290,7 @@ lifecycle:
 | `cmd/workers/` | Long-running SQS consumers — **one message per block** | `oracle-price-indexer`, `morpho-indexer`, `sparklend-indexer`, `raw-data-backup` |
 | `cmd/cronjobs/` | Long-running Temporal workers triggered on a **schedule** | `offchain-price-indexer`, `anchorage-indexer`, `watcher-data-validator` |
 | `cmd/backfillers/` | **One-shot** jobs that fill historical gaps | `oracle-pricing-backfill`, `sparklend-backfill`, `raw-block-bulk-downloader` |
-| `cmd/util/` | Dev tooling (`migrate`, `generate-er`, `cronjob-manifest`, stress-test helpers) | — |
+| `cmd/util/` | Dev tooling (`migrate`, `generate-er`, stress-test helpers) | — |
 
 If you're adding data acquisition, **pick the category first** — it
 determines the plumbing, deployment shape, and tests you'll write.
@@ -354,7 +354,9 @@ func run(ctx context.Context, args []string) error {
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
-   into `k8s/overlays/{staging,prod}/kustomization.yaml`.
+   into `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
+   kind, `k8s/overlays/dev/workers/kustomization.yaml` (add the base dir
+   under `resources:` and a `localhost/stl-<name>:local` `images:` entry).
 6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
    `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
@@ -469,15 +471,19 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
    Use the `uv` base image pattern already in the existing Dockerfile
    (`COPY --from=ghcr.io/astral-sh/uv …`, `uv sync --frozen --no-dev`).
 7. **Add Makefile targets** — `docker-build-<name>`,
-   `docker-release-<name>`, `kind-load-<name>`, `kind-deploy-<name>`,
-   and a `run-<name>` target for local dev (invokes `uv run` under
-   the hood). Follow the pattern of `docker-build-python-api` /
-   `docker-release-python-api` in `stl-verify/Makefile`.
+   `docker-release-<name>`, `kind-load-<name>`, and a `run-<name>`
+   target for local dev (invokes `uv run` under the hood). Local deploy
+   goes through the dev overlay (`kind-deploy-apps`, or
+   `kind-deploy-workers` for SQS workers) — there is no per-service
+   `kind-deploy-<name>` target. Follow the pattern of
+   `docker-build-python-api` / `docker-release-python-api` in
+   `stl-verify/Makefile`.
 8. **Add k8s manifests** under `k8s/base/<my-worker>/`
    (`deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`).
    Copy `k8s/base/oracle-price-worker/` as the template; update image
    name and any probes. Register in
-   `k8s/overlays/{staging,prod}/kustomization.yaml`.
+   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind,
+   `k8s/overlays/dev/workers/kustomization.yaml`.
 9. **Coordinate with infra.** Same SQS queue / SNS subscription / IAM
    PR as for a Go worker — the plumbing outside the worker is
    language-agnostic.
@@ -543,13 +549,15 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
    `k8s/base/offchain-price-indexer/` as the template — cronjob
    Deployments are small (50m/64Mi requests) because the work happens
    inside Temporal activities. Register the service in
-   `k8s/overlays/{staging,prod}/kustomization.yaml`.
-   A skeleton generator is available via
-   `go run ./cmd/util/cronjob-manifest` if you'd rather start from
-   generated YAML.
-4. **Add a `docker-build-cronjob-<name>` target** to the Makefile (follow
-   the pattern — most of the wiring is automatic thanks to the
-   `CRONJOBS := ...` glob in `stl-verify/Makefile`).
+   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind
+   runs, in `k8s/overlays/dev/kustomization.yaml` (add the base dir to
+   `resources:` and a `localhost/stl-<name>:local` entry under `images:`).
+4. **Wire the Makefile.** Image builds auto-discover via the
+   `CRONJOBS := ...` glob, so a `docker-build-cronjob-<name>` target is
+   already covered. Add the k8s Deployment name to `CRONJOB_DEPLOYMENTS`
+   in `stl-verify/Makefile` so `dev-up` rolls it out and waits on it
+   (this list is hand-maintained now that the manifest generator is
+   retired; `make check-dev-overlay-sync` enforces it matches the dev overlay).
 5. **Infra PR** for any new secrets/IAM + a Temporal namespace entry if
    needed.
 
@@ -674,7 +682,9 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
 7. **Add k8s manifests** under `k8s/base/<my-cronjob>/`. Copy
    `k8s/base/offchain-price-indexer/` as the template (small:
    50m/64Mi, because the work happens inside the activity). Register
-   in `k8s/overlays/{staging,prod}/kustomization.yaml`.
+   in `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
+   kind, `k8s/overlays/dev/kustomization.yaml` (and add the deployment
+   name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile`).
 8. **Infra PR** for any new secrets / IAM + a Temporal namespace entry
    if needed.
 
@@ -886,8 +896,13 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 5. **Merge to `main`** — CI then triggers `.github/workflows/deploy.yaml`,
    which bumps image tags in `k8s/overlays/staging/kustomization.yaml`
    and ArgoCD rolls the change into the `vector` namespace on the
-   staging EKS cluster. Prod is a separate manual promotion (bump the
-   tag in `k8s/overlays/prod/kustomization.yaml`).
+   staging EKS cluster. Once staging is healthy, the same run promotes
+   the images to the prod ECR, auto-commits the prod tag bump to `main`,
+   and posts an "awaiting approval" message to Slack. Prod does **not**
+   roll out until someone approves the `production` GitHub Environment
+   review on that run; on approval the run syncs `stl-prod` in ArgoCD to
+   the approved commit. Rejecting leaves the bump on `main` (it batches
+   into the next approved deploy).
 
 ---
 

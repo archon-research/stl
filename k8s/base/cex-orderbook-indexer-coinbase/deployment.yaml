@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cex-orderbook-indexer-coinbase
+spec:
+  # One pod per exchange (single persistent WebSocket connection group). The book
+  # is rebuilt from a fresh snapshot on restart, so a second replica would only
+  # duplicate writes — keep it at 1.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cex-orderbook-indexer-coinbase
+  template:
+    metadata:
+      labels:
+        app: cex-orderbook-indexer-coinbase
+    spec:
+      serviceAccountName: cex-orderbook-indexer-coinbase
+      containers:
+        - name: cex-orderbook-indexer-coinbase
+          # Image name is the Kustomize images-transformer key; the overlay sets
+          # newName + newTag. All three exchange pods share one binary, selected at
+          # runtime by EXCHANGE.
+          image: cex-orderbook-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: cex-orderbook-indexer-coinbase-config
+            - secretRef:
+                name: cex-orderbook-indexer-coinbase
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f cex-orderbook-indexer"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -35,3 +35,12 @@ func requireNonNegBigIntIfSet(name string, v *big.Int) error {
 	}
 	return nil
 }
+
+// requireNonNegInt64 validates that a required int64 count field is
+// non-negative.
+func requireNonNegInt64(name string, v int64) error {
+	if v < 0 {
+		return fmt.Errorf("%s must be non-negative, got %d", name, v)
+	}
+	return nil
+}

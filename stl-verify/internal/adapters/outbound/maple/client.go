@@ -29,6 +29,9 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -207,6 +210,44 @@ const activeLoansQuery = `query GetActiveLoans($first: Int!, $skip: Int!) {
   }
 }`
 
+// ftlLiveStates are the non-terminal fixed-term loan states the indexer
+// snapshots. A loan leaving this set has gone terminal (matured/liquidated) and
+// drops out of the snapshot, mirroring the OTL absence=inactive convention.
+// Restricting to live states also sidesteps the V1-era matured book, whose
+// loans carry a null fundingPool (PoolV2) and a different interest-rate scale.
+var ftlLiveStates = []string{"Active", "DrawdownFunds", "WaitingForAcceptance", "RemoveCollateral"}
+
+// fixedTermLoansQuery fetches live fixed-term loans. The `loans` root query IS
+// the FTL entity (Loan type); parseFixedTermLoan re-checks each returned state
+// against ftlLiveStates so a filter-semantics drift cannot push a terminal loan
+// into the snapshot.
+const fixedTermLoansQuery = `query GetFixedTermLoans($first: Int!, $skip: Int!) {
+  loans(first: $first, skip: $skip, where: { state_in: [Active, DrawdownFunds, WaitingForAcceptance, RemoveCollateral] }) {
+    id
+    borrower { id }
+    fundingPool { id }
+    collateralAsset { id symbol decimals }
+    liquidityAsset { id symbol decimals }
+    state
+    stateDetail
+    principalOwed
+    interestRate
+    interestPaid
+    paymentsRemaining
+    paymentIntervalDays
+    termDays
+    maturityDate
+    nextPaymentDue
+    collateralAmount
+    collateralRequired
+    collateralRatio
+    drawdownAmount
+    claimableAmount
+    acmRatio
+    isImpaired
+  }
+}`
+
 const skyStrategiesQuery = `query GetSkyStrategies($first: Int!, $skip: Int!) {
   skyStrategies(first: $first, skip: $skip) {
     id
@@ -282,6 +323,35 @@ type loanWire struct {
 	FundingPool   struct {
 		ID string `json:"id"`
 	} `json:"fundingPool"`
+}
+
+type ftlLoanWire struct {
+	ID       string `json:"id"`
+	Borrower struct {
+		ID string `json:"id"`
+	} `json:"borrower"`
+	FundingPool *struct { // nullable: V1-era loans carry null here (excluded by the live-states filter)
+		ID string `json:"id"`
+	} `json:"fundingPool"`
+	CollateralAsset     assetWire `json:"collateralAsset"`
+	LiquidityAsset      assetWire `json:"liquidityAsset"`
+	State               string    `json:"state"`
+	StateDetail         *string   `json:"stateDetail"` // nullable in schema
+	PrincipalOwed       string    `json:"principalOwed"`
+	InterestRate        string    `json:"interestRate"`
+	InterestPaid        string    `json:"interestPaid"`
+	PaymentsRemaining   string    `json:"paymentsRemaining"`
+	PaymentIntervalDays string    `json:"paymentIntervalDays"`
+	TermDays            string    `json:"termDays"`
+	MaturityDate        string    `json:"maturityDate"`   // epoch seconds; "0" = none
+	NextPaymentDue      string    `json:"nextPaymentDue"` // epoch seconds; "0" = none
+	CollateralAmount    string    `json:"collateralAmount"`
+	CollateralRequired  string    `json:"collateralRequired"`
+	CollateralRatio     string    `json:"collateralRatio"`
+	DrawdownAmount      string    `json:"drawdownAmount"`
+	ClaimableAmount     string    `json:"claimableAmount"`
+	AcmRatio            *string   `json:"acmRatio"` // nullable in schema
+	IsImpaired          bool      `json:"isImpaired"`
 }
 
 type skyStrategyWire struct {
@@ -388,6 +458,45 @@ func (c *Client) GetActiveLoans(ctx context.Context) ([]outbound.MapleActiveLoan
 				"assetAmountNull", w.Collateral.AssetAmount == nil,
 				"assetValueUsdNull", w.Collateral.AssetValueUSD == nil,
 			)
+		}
+		loans = append(loans, loan)
+	}
+	return loans, nil
+}
+
+// GetActiveFixedTermLoans fetches all fixed-term loans in a live (non-terminal)
+// state, paginating transparently. An empty result is a valid snapshot (the FTL
+// product is dormant today), so it is returned without error; the service
+// decides how to treat zero.
+func (c *Client) GetActiveFixedTermLoans(ctx context.Context) ([]outbound.MapleFixedTermLoan, error) {
+	wires, err := fetchAll(c.logger, "fixed-term loans", loanBatchSize, func(first, skip int) ([]ftlLoanWire, error) {
+		// Pointer decode: a null collection must fail hard, not look like an
+		// empty (dormant) loan book (see GetPools).
+		var resp struct {
+			Data struct {
+				Loans *[]ftlLoanWire `json:"loans"`
+			} `json:"data"`
+		}
+		if err := c.execute(ctx, fixedTermLoansQuery, pageVariables(first, skip), &resp); err != nil {
+			return nil, fmt.Errorf("querying fixed-term loans (skip=%d): %w", skip, err)
+		}
+		if resp.Data.Loans == nil {
+			return nil, fmt.Errorf("querying fixed-term loans (skip=%d): API returned null loans collection", skip)
+		}
+		return *resp.Data.Loans, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Null acmRatio / empty stateDetail are valid (schema-nullable). The service
+	// owns the null-downgrade signal (RecordNullDowngrade), so the adapter does
+	// not log about a persistence decision it does not make.
+	loans := make([]outbound.MapleFixedTermLoan, 0, len(wires))
+	for _, w := range wires {
+		loan, err := parseFixedTermLoan(w)
+		if err != nil {
+			return nil, err
 		}
 		loans = append(loans, loan)
 	}
@@ -600,6 +709,141 @@ func parseCollateral(w *collateralWire, loanID string) (*outbound.MapleLoanColla
 	}, nil
 }
 
+func parseFixedTermLoan(w ftlLoanWire) (outbound.MapleFixedTermLoan, error) {
+	if !slices.Contains(ftlLiveStates, w.State) {
+		return outbound.MapleFixedTermLoan{}, fmt.Errorf("fixed-term loan %s: unexpected state %q, want one of %v", w.ID, w.State, ftlLiveStates)
+	}
+	loanID, err := parseAddress(w.ID, "loan id", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	borrower, err := parseAddress(w.Borrower.ID, "borrower id", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	// A live FTL is always PoolV2-funded; a null fundingPool here means the
+	// live-states filter let a V1-era loan through (upstream surprise), so fail
+	// hard rather than snapshot a loan with no resolvable pool.
+	if w.FundingPool == nil {
+		return outbound.MapleFixedTermLoan{}, fmt.Errorf("fixed-term loan %s: null fundingPool on a live loan", w.ID)
+	}
+	poolAddress, err := parseAddress(w.FundingPool.ID, "funding pool id", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateral, err := parseAssetToken(w.CollateralAsset, "collateralAsset", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	funds, err := parseAssetToken(w.LiquidityAsset, "liquidityAsset", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	principalOwed, err := parseBigInt(w.PrincipalOwed, "principalOwed", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	interestRate, err := parseBigInt(w.InterestRate, "interestRate", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	interestPaid, err := parseBigInt(w.InterestPaid, "interestPaid", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateralAmount, err := parseBigInt(w.CollateralAmount, "collateralAmount", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateralRequired, err := parseBigInt(w.CollateralRequired, "collateralRequired", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	collateralRatio, err := parseBigInt(w.CollateralRatio, "collateralRatio", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	drawdownAmount, err := parseBigInt(w.DrawdownAmount, "drawdownAmount", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	claimableAmount, err := parseBigInt(w.ClaimableAmount, "claimableAmount", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	acmRatio, err := parseOptionalBigInt(w.AcmRatio, "acmRatio", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	paymentsRemaining, err := parseInt64(w.PaymentsRemaining, "paymentsRemaining", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	paymentIntervalDays, err := parseInt64(w.PaymentIntervalDays, "paymentIntervalDays", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	termDays, err := parseInt64(w.TermDays, "termDays", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	maturityDate, err := parseEpochSeconds(w.MaturityDate, "maturityDate", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+	nextPaymentDue, err := parseEpochSeconds(w.NextPaymentDue, "nextPaymentDue", w.ID)
+	if err != nil {
+		return outbound.MapleFixedTermLoan{}, err
+	}
+
+	return outbound.MapleFixedTermLoan{
+		LoanID:              loanID,
+		Borrower:            borrower,
+		PoolAddress:         poolAddress,
+		Collateral:          collateral,
+		Funds:               funds,
+		State:               w.State,
+		StateDetail:         deref(w.StateDetail),
+		PrincipalOwed:       principalOwed,
+		InterestRate:        interestRate,
+		InterestPaid:        interestPaid,
+		PaymentsRemaining:   paymentsRemaining,
+		PaymentIntervalDays: paymentIntervalDays,
+		TermDays:            termDays,
+		MaturityDate:        maturityDate,
+		NextPaymentDue:      nextPaymentDue,
+		CollateralAmount:    collateralAmount,
+		CollateralRequired:  collateralRequired,
+		CollateralRatio:     collateralRatio,
+		DrawdownAmount:      drawdownAmount,
+		ClaimableAmount:     claimableAmount,
+		AcmRatio:            acmRatio,
+		IsImpaired:          w.IsImpaired,
+	}, nil
+}
+
+// parseAssetToken validates a fixed-term loan's collateral/funds Asset (always
+// non-null per the schema), failing on a bad address or zero/missing decimals.
+// parseAssetToken decodes a fixed-term loan's collateral/funds Asset (always
+// non-null per the schema): it parses the address and the wire decimals (which
+// must be present, not null). Symbol emptiness and the decimals value/range are
+// validated by the service's distinctFTLAssetTokens, the single owner of asset
+// metadata validation (mirroring the OTL parsePool/distinctAssetTokens split).
+func parseAssetToken(w assetWire, field, id string) (outbound.MapleAssetToken, error) {
+	address, err := parseAddress(w.ID, field+".id", id)
+	if err != nil {
+		return outbound.MapleAssetToken{}, err
+	}
+	decimals, err := requireInt(w.Decimals, field+".decimals", id)
+	if err != nil {
+		return outbound.MapleAssetToken{}, err
+	}
+	return outbound.MapleAssetToken{Address: address, Symbol: w.Symbol, Decimals: decimals}, nil
+}
+
 func parseSkyStrategy(w skyStrategyWire) (outbound.MapleSkyStrategy, error) {
 	address, err := parseAddress(w.ID, "strategy id", w.ID)
 	if err != nil {
@@ -695,6 +939,32 @@ func parseOptionalBigInt(s *string, field, id string) (*big.Int, error) {
 		return nil, nil
 	}
 	return parseBigInt(*s, field, id)
+}
+
+// parseInt64 parses a string-encoded integer the API returns for counts
+// (paymentsRemaining, termDays, ...). These are BigInt! on the wire but fit
+// int64; a value that overflows int64 fails the whole call rather than wrapping.
+func parseInt64(s, field, id string) (int64, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parsing %s for %s: invalid integer string %q: %w", field, id, s, err)
+	}
+	return n, nil
+}
+
+// parseEpochSeconds parses a string-encoded epoch-second timestamp
+// (maturityDate, nextPaymentDue), where 0 means "none". A negative value is an
+// upstream bug (it would otherwise persist a pre-1970 timestamp), so it fails
+// the whole call rather than being silently stored.
+func parseEpochSeconds(s, field, id string) (int64, error) {
+	n, err := parseInt64(s, field, id)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("parsing %s for %s: negative epoch seconds %d", field, id, n)
+	}
+	return n, nil
 }
 
 // parseAddress validates with IsHexAddress before converting:
@@ -854,29 +1124,106 @@ func (c *Client) doSingleRequest(ctx context.Context, body []byte, result any) e
 			fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody)))
 	}
 
-	// Apollo can return HTTP 200 with a GraphQL errors[] envelope — check it
-	// before decoding data.
+	// Apollo can return HTTP 200 with a GraphQL errors[] envelope. Decode data
+	// and errors together so a tolerable per-asset pricing gap can keep its
+	// partial data (see tolerableUnpriceableCollateral); every other error, and
+	// a null data, stays fatal and unretried as before.
 	var envelope struct {
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+		Data   json.RawMessage `json:"data"`
+		Errors []graphqlError  `json:"errors"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
 		return httpclient.WrapNonRetryable(fmt.Errorf("decoding GraphQL response: %w", err))
 	}
 	if len(envelope.Errors) > 0 {
-		messages := make([]string, 0, len(envelope.Errors))
-		for _, e := range envelope.Errors {
-			messages = append(messages, e.Message)
+		dataPresent := len(envelope.Data) > 0 && !bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null"))
+		if !tolerableUnpriceableCollateral(envelope.Errors, dataPresent) {
+			messages := make([]string, 0, len(envelope.Errors))
+			for _, e := range envelope.Errors {
+				messages = append(messages, e.Message)
+			}
+			return httpclient.WrapNonRetryable(
+				fmt.Errorf("graphql error: %s", strings.Join(messages, "; ")))
 		}
-		return httpclient.WrapNonRetryable(
-			fmt.Errorf("graphql error: %s", strings.Join(messages, "; ")))
+		// TEMPORARY diagnostic — remove after the first confirmed occurrence.
+		// "No fiat value" is not reproducible on demand (all assets priceable
+		// today) and the SDL is not machine-fetchable, so we log the raw
+		// errors[] to confirm the null granularity (single field vs whole
+		// collateral) and the exact path shape.
+		//
+		// Removal is driven by the VectorMapleCollateralUnpriceable alert: its
+		// first-fire runbook task captures this log, confirms the shape, then
+		// deletes this branch. See docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
+		c.logger.Warn("tolerating unpriceable-collateral GraphQL error; decoding partial data",
+			"errors", envelope.Errors,
+			"data_present", dataPresent,
+		)
 	}
 
 	if err := json.Unmarshal(respBody, result); err != nil {
 		return httpclient.WrapNonRetryable(fmt.Errorf("decoding response: %w", err))
 	}
 	return nil
+}
+
+// graphqlError is one entry of a GraphQL errors[] envelope. Path and Extensions
+// are captured beyond Message so a "No fiat value" error can be classified as a
+// tolerable pricing gap scoped to a loan's collateral.
+type graphqlError struct {
+	Message    string         `json:"message"`
+	Path       []any          `json:"path"`
+	Extensions map[string]any `json:"extensions"`
+}
+
+// noFiatValuePattern matches Maple's transient per-asset pricing-gap error,
+// e.g. "No fiat value for PYUSD". The pricing layer (Chainlink oracle wrappers
+// with a manual-price fallback) had no feed for that asset at query time; it
+// self-heals the next cycle. Anchored to the start so an embedded or wrapped
+// occurrence fails closed (stays fatal) rather than widening the allowlist.
+var noFiatValuePattern = regexp.MustCompile(`(?i)^no fiat value for `)
+
+// tolerableUnpriceableCollateral reports whether the errors[] envelope is safe
+// to swallow: partial data must be present AND every error must be a
+// "No fiat value" error scoped to a collateral node. Only then is the offending
+// value already nulled in data, so decoding it drops one loan's collateral
+// price rather than the whole snapshot. Any other shape — null data, a
+// non-pricing error, or a pricing error not scoped to collateral — is fatal,
+// preserving the pre-existing all-or-nothing behaviour.
+func tolerableUnpriceableCollateral(errs []graphqlError, dataPresent bool) bool {
+	if !dataPresent || len(errs) == 0 {
+		return false
+	}
+	for _, e := range errs {
+		if !noFiatValuePattern.MatchString(e.Message) {
+			return false
+		}
+		if !pathThroughCollateral(e.Path) {
+			return false
+		}
+	}
+	return true
+}
+
+// pathThroughCollateral reports whether a GraphQL error path is either absent
+// (Maple omits path on some errors) or passes through a "collateral" node. A
+// path present but not touching collateral means the error nulls something
+// other than a loan's collateral, which is not safe to swallow.
+//
+// This runs in the generic transport for every query and matches the exact
+// segment name "collateral" (case-insensitive) — not a prefix, so scalar fields
+// like "collateralAsset"/"collateralAmount" on other queries do not match. Its
+// blast radius is any query whose only collateral-scoped node is named exactly
+// "collateral"; today only the OTL loans query qualifies.
+func pathThroughCollateral(path []any) bool {
+	if len(path) == 0 {
+		return true
+	}
+	for _, seg := range path {
+		if s, ok := seg.(string); ok && strings.EqualFold(s, "collateral") {
+			return true
+		}
+	}
+	return false
 }
 
 // maxErrorBodyBytes bounds how much of an error response body is included in
