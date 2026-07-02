@@ -281,6 +281,40 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordBlockProcessed(ctx, time.Second, errors.New("e"))
 	tel.RecordError(ctx, "op", errors.New("e"))
 	tel.RecordError(ctx, "op", nil)
+	tel.RecordStateRows(ctx, 5)
+	tel.RecordStateRows(ctx, 0)
+}
+
+func TestRecordStateRows_IncrementsCounter(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordStateRows(ctx, 3)
+	tel.RecordStateRows(ctx, 5)
+	tel.RecordStateRows(ctx, 0)  // no-op
+	tel.RecordStateRows(ctx, -1) // no-op
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	got := readSingleSumCount(t, &rm, "curve.state.rows.written")
+	if got != 8 {
+		t.Errorf("curve.state.rows.written = %d, want 8 (3+5; 0 and -1 are no-ops)", got)
+	}
 }
 
 // readBlockCounters returns the counter values for status=success and
