@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -462,6 +463,127 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 	}
 	if gotCallCount >= 65536 {
 		t.Errorf("calls issued = %d, must not scan all int16 words", gotCallCount)
+	}
+}
+
+// TestBaselineTicks_ChunksMultipleWordBatches uses tickSpacing=1, which
+// widens the word range past baselineTickBitmapWordsPerCall, to prove
+// BaselineTicks splits the scan into multiple ExecuteAtHash batches rather
+// than firing one multicall covering the entire word range.
+func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
+	pool := tickTestPool()
+	pool.TickSpacing = 1
+	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000005")
+
+	minWord, maxWord := wordBounds(pool.TickSpacing)
+	totalWords := int(maxWord) - int(minWord) + 1
+	if totalWords <= baselineTickBitmapWordsPerCall {
+		t.Fatalf("test fixture invalid: totalWords = %d, want > baselineTickBitmapWordsPerCall = %d", totalWords, baselineTickBitmapWordsPerCall)
+	}
+
+	var (
+		mu           sync.Mutex
+		batchSizes   []int
+		seenWords    = make(map[int16]bool)
+		executeCalls int
+	)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, gotHash common.Hash) ([]outbound.Result, error) {
+		if gotHash != blockHash {
+			t.Errorf("ExecuteAtHash blockHash = %s, want %s", gotHash, blockHash)
+		}
+
+		mu.Lock()
+		executeCalls++
+		batchSizes = append(batchSizes, len(calls))
+		mu.Unlock()
+
+		results := make([]outbound.Result, len(calls))
+		for i, call := range calls {
+			word := wordFromCallData(t, call.CallData)
+			mu.Lock()
+			seenWords[word] = true
+			mu.Unlock()
+
+			switch word {
+			case 0:
+				// tick 60 (bit 60) in the lowest-numbered chunk.
+				results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(bitmapWord(60).Bytes(), 32)}
+			case maxWord:
+				// bit 0 of the highest word, to prove the final chunk is
+				// reached and decoded too.
+				results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(bitmapWord(0).Bytes(), 32)}
+			default:
+				results[i] = outbound.Result{Success: true, ReturnData: common.LeftPadBytes(big.NewInt(0).Bytes(), 32)}
+			}
+		}
+		return results, nil
+	}
+
+	got, err := BaselineTicks(context.Background(), mc, pool, blockHash)
+	if err != nil {
+		t.Fatalf("BaselineTicks: %v", err)
+	}
+
+	if executeCalls <= 1 {
+		t.Fatalf("ExecuteAtHash invocation count = %d, want > 1 (word range must be chunked)", executeCalls)
+	}
+	for i, size := range batchSizes {
+		if size > baselineTickBitmapWordsPerCall {
+			t.Errorf("batch %d size = %d, want <= baselineTickBitmapWordsPerCall = %d", i, size, baselineTickBitmapWordsPerCall)
+		}
+	}
+	if len(seenWords) != totalWords {
+		t.Errorf("distinct words scanned across all chunks = %d, want %d (full range, no gaps/overlaps)", len(seenWords), totalWords)
+	}
+
+	wantLowTick := wordBitToTick(0, 60, pool.TickSpacing)
+	wantHighTick := wordBitToTick(maxWord, 0, pool.TickSpacing)
+	if len(got) != 2 {
+		t.Fatalf("BaselineTicks() = %v, want 2 ticks (one from first chunk, one from last chunk)", got)
+	}
+	if got[0] != wantLowTick {
+		t.Errorf("BaselineTicks()[0] = %d, want %d", got[0], wantLowTick)
+	}
+	if got[1] != wantHighTick {
+		t.Errorf("BaselineTicks()[1] = %d, want %d", got[1], wantHighTick)
+	}
+	if got[0] >= got[1] {
+		t.Errorf("BaselineTicks() = %v, want ascending sort across chunk boundaries", got)
+	}
+}
+
+// TestBaselineTicks_RevertInLaterChunkReturnsError proves a !Success result
+// in a chunk after the first still fails the whole baseline (no
+// partial/best-effort result survives past chunking).
+func TestBaselineTicks_RevertInLaterChunkReturnsError(t *testing.T) {
+	pool := tickTestPool()
+	pool.TickSpacing = 1
+	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000006")
+
+	var callIndex int
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		callIndex++
+		results := make([]outbound.Result, len(calls))
+		for i := range calls {
+			// Succeed on the first chunk, revert on the second: proves the
+			// failure check applies to every chunk, not just the first.
+			results[i] = outbound.Result{Success: callIndex == 1, ReturnData: common.LeftPadBytes(big.NewInt(0).Bytes(), 32)}
+		}
+		return results, nil
+	}
+
+	got, err := BaselineTicks(context.Background(), mc, pool, blockHash)
+	if err == nil {
+		t.Fatal("BaselineTicks: want error when a later chunk reverts, got nil")
+	}
+	if got != nil {
+		t.Errorf("BaselineTicks: want nil ticks on error, got %v", got)
+	}
+	if callIndex < 2 {
+		t.Fatalf("test fixture invalid: only %d chunk(s) issued, want >= 2 to exercise a later-chunk revert", callIndex)
 	}
 }
 
