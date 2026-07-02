@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -109,7 +110,20 @@ func (r *AllocationRepository) SavePositions(
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
 		tokenID := tokenIDs[key]
 
-		query, args, err := r.buildInsertArgs(pos, tokenID)
+		var underlyingTokenID *int64
+		if pos.Underlying != nil {
+			ukey := tokenCacheKey{ChainID: pos.ChainID, Address: pos.Underlying.AssetAddress}
+			id, ok := tokenIDs[ukey]
+			if !ok {
+				return fmt.Errorf(
+					"underlying token ID not resolved for chain=%d address=%s",
+					pos.ChainID, pos.Underlying.AssetAddress.Hex(),
+				)
+			}
+			underlyingTokenID = &id
+		}
+
+		query, args, err := r.buildInsertArgs(pos, tokenID, underlyingTokenID)
 		if err != nil {
 			return fmt.Errorf(
 				"build insert for chain=%d address=%s block=%d: %w",
@@ -142,6 +156,7 @@ func (r *AllocationRepository) SavePositions(
 func (r *AllocationRepository) buildInsertArgs(
 	pos *entity.AllocationPosition,
 	tokenID int64,
+	underlyingTokenID *int64,
 ) (string, []any, error) {
 	balance := toNumeric(pos.Balance, pos.TokenDecimals)
 	scaled := toNullableNumeric(pos.ScaledBalance, pos.TokenDecimals)
@@ -152,13 +167,21 @@ func (r *AllocationRepository) buildInsertArgs(
 		return "", nil, fmt.Errorf("encode tx_hash: %w", err)
 	}
 
+	// NULL by default; the DB CHECK enforces the pair invariant, entity
+	// Validate() guarantees a present valuation is complete.
+	underlyingValue := pgtype.Numeric{}
+	if pos.Underlying != nil {
+		underlyingValue = toNumeric(pos.Underlying.Value, pos.Underlying.AssetDecimals)
+	}
+
 	query := `
 		INSERT INTO allocation_position (
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction, created_at, build_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			tx_hash, log_index, tx_amount, direction, created_at, build_id,
+			underlying_value, underlying_token_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
@@ -177,6 +200,8 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.Direction,
 		pos.CreatedAt,
 		int(r.buildID),
+		underlyingValue,
+		underlyingTokenID,
 	}
 
 	return query, args, nil
@@ -249,6 +274,32 @@ func (r *AllocationRepository) resolveTokenIDs(
 			)
 		}
 		result[key] = tokenID
+
+		if pos.Underlying != nil {
+			ukey := tokenCacheKey{ChainID: pos.ChainID, Address: pos.Underlying.AssetAddress}
+			if _, exists := result[ukey]; !exists {
+				// The underlying's true deploy block is unknown here; the
+				// observation block is a non-zero floor and the token upsert's
+				// LEAST() merge self-corrects downward (same convention as
+				// buildSupplyEntities).
+				createdAtBlock := pos.BlockNumber
+				underlyingID, err := r.tokenRepo.GetOrCreateToken(
+					ctx, tx,
+					pos.ChainID,
+					pos.Underlying.AssetAddress,
+					pos.Underlying.AssetSymbol,
+					pos.Underlying.AssetDecimals,
+					&createdAtBlock,
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"GetOrCreateToken underlying chain=%d address=%s: %w",
+						pos.ChainID, pos.Underlying.AssetAddress.Hex(), err,
+					)
+				}
+				result[ukey] = underlyingID
+			}
+		}
 	}
 
 	return result, nil
