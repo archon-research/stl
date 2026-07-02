@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"sort"
 	"sync"
 	"time"
@@ -106,7 +105,8 @@ func NewService(
 		config.TargetDebtToken = SUSDSAddress
 	}
 
-	blockchain, err := newBlockchainService(multicaller)
+	logger := config.Logger.With("component", "fluid-vault-indexer")
+	blockchain, err := newBlockchainService(multicaller, logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockchain service: %w", err)
 	}
@@ -128,7 +128,6 @@ func NewService(
 		triggerTopics[ev.ID] = struct{}{}
 	}
 
-	logger := config.Logger.With("component", "fluid-vault-indexer")
 	return &Service{
 		config:        config,
 		consumer:      consumer,
@@ -225,7 +224,10 @@ func (s *Service) Stop() error {
 
 // ReconcileVaults enumerates all vaults via the resolver at blockNumber and
 // registers any in-scope (targeted-debt, plain single) vault not already known.
-// Intended to be run at startup; it is also safe to call periodically.
+// It must not run concurrently with the SQS consumer loop: discovery is
+// check-then-act across registry reads and DB writes, so a concurrent
+// discoverDeployedVault for the same address would double-process it. Start runs
+// this synchronously before launching the consumer goroutine.
 //
 // Reconcile is registry-only: it does not write a fluid_vault_state row. The
 // first snapshot for a reconciled vault is written on its next
@@ -251,11 +253,17 @@ func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error 
 		return nil
 	}
 
-	data, err := s.blockchain.GetVaultsEntireData(ctx, unknown, blockNumber)
+	data, err := s.blockchain.GetVaultsEntireDataBestEffort(ctx, unknown, blockNumber)
 	if err != nil {
 		return fmt.Errorf("reading vault data for reconcile: %w", err)
 	}
 	for _, ved := range data {
+		// nil entries are vaults the resolver could not serve (e.g. a vault type
+		// deployed ahead of a resolver upgrade). Leave them unknown so a later
+		// reconcile retries; do not MarkNotVault (the gap may be transient).
+		if ved == nil {
+			continue
+		}
 		if err := s.classifyAndRegister(ctx, ved, blockNumber); err != nil {
 			return fmt.Errorf("registering vault %s: %w", ved.Vault.Hex(), err)
 		}
@@ -344,9 +352,16 @@ func (s *Service) discoverDeployedVault(ctx context.Context, log shared.Log, blo
 	if s.registry.IsKnownVault(vault) || s.registry.IsKnownNotVault(vault) {
 		return nil
 	}
-	data, err := s.blockchain.GetVaultsEntireData(ctx, []common.Address{vault}, blockNumber)
+	data, err := s.blockchain.GetVaultsEntireDataBestEffort(ctx, []common.Address{vault}, blockNumber)
 	if err != nil {
 		return fmt.Errorf("reading deployed vault %s: %w", vault.Hex(), err)
+	}
+	// A nil entry means the resolver could not serve this vault yet; leave it
+	// unknown so it is retried at the next startup reconcile rather than caching
+	// it as not-a-vault (reconcile only runs at startup, so this defers discovery
+	// until the process next restarts).
+	if data[0] == nil {
+		return nil
 	}
 	return s.classifyAndRegister(ctx, data[0], blockNumber)
 }
@@ -450,10 +465,9 @@ func (s *Service) snapshotVaults(ctx context.Context, touched []common.Address, 
 }
 
 // buildVaultState maps decoded resolver data to a FluidVaultState. Exchange
-// prices are uint256 (always non-negative). Rates are int256 and the B1 entity
-// rejects negative values, so a negative rate is stored as nil rather than
-// failing the whole block — the rate is auxiliary, the collateral/debt totals
-// are the truth.
+// prices are uint256 (always non-negative). Rates are int256 and can genuinely
+// be negative, so they are passed through verbatim — a negative rate is real
+// data, not a capture error, and the entity stores it signed.
 func (s *Service) buildVaultState(vaultID int64, ved *VaultEntireData, blockNumber int64, blockVersion int, ts time.Time) (*entity.FluidVaultState, error) {
 	return entity.NewFluidVaultState(entity.FluidVaultStateParams{
 		FluidVaultID:        vaultID,
@@ -464,18 +478,7 @@ func (s *Service) buildVaultState(vaultID int64, ved *VaultEntireData, blockNumb
 		TotalDebt:           ved.TotalBorrowVault,
 		SupplyExchangePrice: ved.SupplyExchangePrice,
 		BorrowExchangePrice: ved.BorrowExchangePrice,
-		SupplyRate:          nonNegativeOrNil(ved.SupplyRate),
-		BorrowRate:          nonNegativeOrNil(ved.BorrowRate),
+		SupplyRate:          ved.SupplyRate,
+		BorrowRate:          ved.BorrowRate,
 	})
-}
-
-// nonNegativeOrNil returns v unless it is negative, in which case nil — Fluid's
-// vault rates are int256 and can in principle be negative, but the B1 state
-// entity stores rates as non-negative numerics. A negative rate is dropped to
-// nil (NULL) rather than fabricated as zero or failing the snapshot.
-func nonNegativeOrNil(v *big.Int) *big.Int {
-	if v == nil || v.Sign() < 0 {
-		return nil
-	}
-	return v
 }

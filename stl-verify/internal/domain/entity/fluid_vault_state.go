@@ -16,6 +16,12 @@ import (
 // own token decimals), stored unscaled. ExchangePrice and Rate fields are
 // optional: they are read straight from Fluid's VaultResolver and are nil when
 // the indexer did not capture them for a given snapshot.
+//
+// SupplyRate and BorrowRate are signed: Fluid stores them as int256 and a
+// negative supply rate is a genuine on-chain value, not a capture error, so a
+// negative rate must be stored verbatim rather than dropped. TotalCollateral,
+// TotalDebt, and the exchange prices are unsigned on-chain quantities and stay
+// non-negative.
 type FluidVaultState struct {
 	FluidVaultID        int64
 	BlockNumber         int64
@@ -86,8 +92,6 @@ func (s *FluidVaultState) Validate() error {
 	}{
 		{"supplyExchangePrice", s.SupplyExchangePrice},
 		{"borrowExchangePrice", s.BorrowExchangePrice},
-		{"supplyRate", s.SupplyRate},
-		{"borrowRate", s.BorrowRate},
 	} {
 		if f.v != nil && f.v.Sign() < 0 {
 			return fmt.Errorf("%s must be non-negative, got %s", f.name, f.v)

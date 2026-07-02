@@ -90,7 +90,7 @@ func (m *stubMulticaller) Address() common.Address { return m.addr }
 
 func newBlockchainServiceForTest(t *testing.T, mc outbound.Multicaller) *blockchainService {
 	t.Helper()
-	svc, err := newBlockchainService(mc)
+	svc, err := newBlockchainService(mc, testLogger())
 	if err != nil {
 		t.Fatalf("newBlockchainService: %v", err)
 	}
@@ -249,6 +249,202 @@ func TestGetVaultsEntireData_BatchesAndDecodes(t *testing.T) {
 	}
 }
 
+// TestGetVaultsEntireData_ChunksLargeBatch verifies that a vault set exceeding
+// vaultEntireDataBatchSize is split across multiple Execute calls while
+// preserving input order in the returned slice. The `smart` fixture is placed at
+// indices 49 and 50 (straddling the chunk boundary at 50) so per-index identity
+// is observable — an ordering bug would surface a plain vault where a smart one
+// is expected, or vice versa.
+func TestGetVaultsEntireData_ChunksLargeBatch(t *testing.T) {
+	single := readFixture(t, "vault_entire_data_single_susds.hex")
+	smart := readFixture(t, "vault_entire_data_smart.hex")
+	const n = vaultEntireDataBatchSize + 3
+
+	smartIndices := map[int]bool{49: true, 50: true}
+
+	vaults := make([]common.Address, n)
+	for i := range vaults {
+		vaults[i] = common.BigToAddress(big.NewInt(int64(i + 1)))
+	}
+
+	fixtureFor := func(i int) []byte {
+		if smartIndices[i] {
+			return smart
+		}
+		return single
+	}
+	firstChunk := make([]outbound.Result, vaultEntireDataBatchSize)
+	for i := range firstChunk {
+		firstChunk[i] = outbound.Result{Success: true, ReturnData: fixtureFor(i)}
+	}
+	secondChunk := make([]outbound.Result, n-vaultEntireDataBatchSize)
+	for i := range secondChunk {
+		secondChunk[i] = outbound.Result{Success: true, ReturnData: fixtureFor(vaultEntireDataBatchSize + i)}
+	}
+	mc := &stubMulticaller{responses: [][]outbound.Result{firstChunk, secondChunk}}
+	svc := newBlockchainServiceForTest(t, mc)
+
+	got, err := svc.GetVaultsEntireData(context.Background(), vaults, 200)
+	if err != nil {
+		t.Fatalf("GetVaultsEntireData: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d results, want %d", len(got), n)
+	}
+	for i, ved := range got {
+		if ved == nil {
+			t.Fatalf("result[%d] is nil", i)
+		}
+		wantPlain := !smartIndices[i]
+		if ved.IsPlainSingle() != wantPlain {
+			t.Errorf("result[%d].IsPlainSingle() = %v, want %v (ordering not preserved)", i, ved.IsPlainSingle(), wantPlain)
+		}
+	}
+	if len(mc.calls) != 2 {
+		t.Fatalf("expected 2 chunked Execute calls, got %d", len(mc.calls))
+	}
+	if len(mc.calls[0]) != vaultEntireDataBatchSize {
+		t.Errorf("first chunk = %d sub-calls, want %d", len(mc.calls[0]), vaultEntireDataBatchSize)
+	}
+	if len(mc.calls[1]) != n-vaultEntireDataBatchSize {
+		t.Errorf("second chunk = %d sub-calls, want %d", len(mc.calls[1]), n-vaultEntireDataBatchSize)
+	}
+
+	// The packed getVaultEntireData(address) calldata ends with the 32-byte
+	// left-padded vault address; its trailing 20 bytes must be the expected vault
+	// at boundary indices, confirming the right address is packed into the right
+	// chunk slot. Indices 0/49 fall in the first chunk, 50/52 in the second.
+	callAt := func(globalIdx int) outbound.Call {
+		if globalIdx < vaultEntireDataBatchSize {
+			return mc.calls[0][globalIdx]
+		}
+		return mc.calls[1][globalIdx-vaultEntireDataBatchSize]
+	}
+	for _, idx := range []int{0, 49, 50, 52} {
+		cd := callAt(idx).CallData
+		gotAddr := common.BytesToAddress(cd[len(cd)-20:])
+		if gotAddr != vaults[idx] {
+			t.Errorf("calldata at index %d packs vault %s, want %s", idx, gotAddr, vaults[idx])
+		}
+	}
+}
+
+// TestGetVaultsEntireDataBestEffort_SkipsFailedVault verifies the classification
+// path tolerates a per-vault failure: the failed vault yields a nil entry while
+// the servable vault is still decoded, with order preserved.
+func TestGetVaultsEntireDataBestEffort_SkipsFailedVault(t *testing.T) {
+	single := readFixture(t, "vault_entire_data_single_susds.hex")
+	smart := readFixture(t, "vault_entire_data_smart.hex")
+	vaults := []common.Address{
+		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x57fed7c9b3c763999c519264931790cBcA331417"),
+	}
+	mc := &stubMulticaller{responses: [][]outbound.Result{{
+		{Success: true, ReturnData: single},
+		{Success: false},
+		{Success: true, ReturnData: smart},
+	}}}
+	svc := newBlockchainServiceForTest(t, mc)
+
+	got, err := svc.GetVaultsEntireDataBestEffort(context.Background(), vaults, 1)
+	if err != nil {
+		t.Fatalf("GetVaultsEntireDataBestEffort: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d results, want 3", len(got))
+	}
+	if got[0] == nil || !got[0].IsPlainSingle() {
+		t.Errorf("vault[0] should be decoded plain single, got %v", got[0])
+	}
+	if got[1] != nil {
+		t.Errorf("vault[1] failed and must be nil, got %v", got[1])
+	}
+	if got[2] == nil || got[2].IsPlainSingle() {
+		t.Errorf("vault[2] should be decoded smart vault, got %v", got[2])
+	}
+	// The best-effort path must mark sub-calls AllowFailure so the resolver
+	// serves the servable vaults instead of the whole batch reverting.
+	for _, c := range mc.calls[0] {
+		if !c.AllowFailure {
+			t.Errorf("best-effort sub-call must set AllowFailure=true")
+		}
+	}
+}
+
+// TestGetVaultsEntireDataBestEffort_SkipsUndecodableVault verifies the
+// best-effort path tolerates a sub-call that succeeds but returns undecodable
+// data: the garbage vault yields a nil entry (decode-failure branch) while the
+// servable vault is still decoded.
+func TestGetVaultsEntireDataBestEffort_SkipsUndecodableVault(t *testing.T) {
+	single := readFixture(t, "vault_entire_data_single_susds.hex")
+	vaults := []common.Address{
+		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+	}
+	mc := &stubMulticaller{responses: [][]outbound.Result{{
+		{Success: true, ReturnData: single},
+		{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}, // succeeds but cannot decode
+	}}}
+	svc := newBlockchainServiceForTest(t, mc)
+
+	got, err := svc.GetVaultsEntireDataBestEffort(context.Background(), vaults, 1)
+	if err != nil {
+		t.Fatalf("GetVaultsEntireDataBestEffort: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d results, want 2", len(got))
+	}
+	if got[0] == nil || !got[0].IsPlainSingle() {
+		t.Errorf("vault[0] should be decoded plain single, got %v", got[0])
+	}
+	if got[1] != nil {
+		t.Errorf("vault[1] returned undecodable data and must be nil, got %v", got[1])
+	}
+}
+
+// TestGetVaultsEntireData_StrictRejectsUndecodable confirms the strict snapshot
+// path aborts the whole batch when one sub-call succeeds but returns undecodable
+// data, even if a sibling decodes cleanly.
+func TestGetVaultsEntireData_StrictRejectsUndecodable(t *testing.T) {
+	single := readFixture(t, "vault_entire_data_single_susds.hex")
+	vaults := []common.Address{
+		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+	}
+	mc := &stubMulticaller{responses: [][]outbound.Result{{
+		{Success: true, ReturnData: single},
+		{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}, // succeeds but cannot decode
+	}}}
+	svc := newBlockchainServiceForTest(t, mc)
+	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, 1); err == nil {
+		t.Fatal("expected error when one sub-call returns undecodable data on the strict path")
+	}
+}
+
+// TestGetVaultsEntireData_StrictRejectsFailure confirms the strict snapshot path
+// keeps AllowFailure=false and aborts on any sub-call failure.
+func TestGetVaultsEntireData_StrictRejectsFailure(t *testing.T) {
+	single := readFixture(t, "vault_entire_data_single_susds.hex")
+	vaults := []common.Address{
+		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+	}
+	mc := &stubMulticaller{responses: [][]outbound.Result{{
+		{Success: true, ReturnData: single},
+		{Success: false},
+	}}}
+	svc := newBlockchainServiceForTest(t, mc)
+	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, 1); err == nil {
+		t.Fatal("expected error when a sub-call fails on the strict path")
+	}
+	for _, c := range mc.calls[0] {
+		if c.AllowFailure {
+			t.Errorf("strict sub-call must set AllowFailure=false")
+		}
+	}
+}
+
 func TestGetVaultsEntireData_SubCallReverted(t *testing.T) {
 	single := readFixture(t, "vault_entire_data_single_susds.hex")
 	vaults := []common.Address{
@@ -302,7 +498,7 @@ func TestGetVaultsEntireData_ResultCountMismatch(t *testing.T) {
 }
 
 func TestNewBlockchainService_NilMulticaller(t *testing.T) {
-	if _, err := newBlockchainService(nil); err == nil {
+	if _, err := newBlockchainService(nil, testLogger()); err == nil {
 		t.Fatal("expected error for nil multicaller")
 	}
 }
@@ -349,7 +545,10 @@ func TestGetTokenMetadata_ERC20(t *testing.T) {
 
 func TestGetTokenMetadata_DecimalsReverted(t *testing.T) {
 	erc20 := mustERC20ABI(t)
-	symbol, _ := erc20.Methods["symbol"].Outputs.Pack("X")
+	symbol, err := erc20.Methods["symbol"].Outputs.Pack("X")
+	if err != nil {
+		t.Fatalf("pack symbol: %v", err)
+	}
 	mc := &stubMulticaller{responses: [][]outbound.Result{{
 		{Success: true, ReturnData: symbol},
 		{Success: false},
@@ -362,7 +561,10 @@ func TestGetTokenMetadata_DecimalsReverted(t *testing.T) {
 
 func TestGetTokenMetadata_SymbolRevertedTolerated(t *testing.T) {
 	erc20 := mustERC20ABI(t)
-	decimals, _ := erc20.Methods["decimals"].Outputs.Pack(uint8(6))
+	decimals, err := erc20.Methods["decimals"].Outputs.Pack(uint8(6))
+	if err != nil {
+		t.Fatalf("pack decimals: %v", err)
+	}
 	mc := &stubMulticaller{responses: [][]outbound.Result{{
 		{Success: false},
 		{Success: true, ReturnData: decimals},

@@ -3,6 +3,7 @@ package fluid_vault_indexer
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"reflect"
 
@@ -54,10 +55,11 @@ const (
 )
 
 // abiTokens / abiExchangePricesAndRates / abiTotalSupplyAndBorrow mirror the
-// resolver's nested tuples for abi.ConvertType. Field names must match the
-// capitalized ABI parameter names exactly — ConvertType matches by name, not
-// position. The unused fields are retained so the conversion target matches the
-// full sub-tuple shape.
+// resolver's nested tuples for abi.ConvertType. Go struct convertibility (which
+// ConvertType relies on) is positional: these fields must match the ABI tuple's
+// field names, order, and types exactly — struct tags are ignored and a
+// mismatch is not silently tolerated. The unused fields are retained so the
+// conversion target matches the full sub-tuple shape.
 type abiTokens struct {
 	Token0 common.Address
 	Token1 common.Address
@@ -95,11 +97,15 @@ type blockchainService struct {
 	resolverABI  *abi.ABI
 	erc20ABI     *abi.ABI
 	resolverAddr common.Address
+	logger       *slog.Logger
 }
 
-func newBlockchainService(multicaller outbound.Multicaller) (*blockchainService, error) {
+func newBlockchainService(multicaller outbound.Multicaller, logger *slog.Logger) (*blockchainService, error) {
 	if multicaller == nil {
 		return nil, fmt.Errorf("multicaller is required")
+	}
+	if logger == nil {
+		logger = slog.Default()
 	}
 	resolverABI, err := abis.GetFluidVaultResolverABI()
 	if err != nil {
@@ -114,6 +120,7 @@ func newBlockchainService(multicaller outbound.Multicaller) (*blockchainService,
 		resolverABI:  resolverABI,
 		erc20ABI:     erc20ABI,
 		resolverAddr: FluidVaultResolverAddress,
+		logger:       logger,
 	}, nil
 }
 
@@ -205,44 +212,87 @@ func (s *blockchainService) GetAllVaultAddresses(ctx context.Context, blockNumbe
 	return addrs, nil
 }
 
-// GetVaultsEntireData reads getVaultEntireData for each vault in a single
-// Multicall3 batch, pinned to blockNumber. Results are returned in the same
-// order as vaults. A vault whose sub-call reverted or fails to decode aborts
-// the batch with an error — the on-chain read is the truth, so a partial read
-// must not silently produce a snapshot.
+// getVaultEntireData returns a very large positional tuple; Alchemy caps
+// eth_call at 550M gas, so a batch of every known vault in one Multicall3 would
+// risk exceeding the gas/result-size envelope. Chunking keeps each Execute
+// bounded while preserving input order across chunks.
+const vaultEntireDataBatchSize = 50
+
+// GetVaultsEntireData reads getVaultEntireData for every vault, chunked into
+// fixed-size Multicall3 batches, pinned to blockNumber. Results are returned in
+// the same order as vaults. A vault whose sub-call reverted or fails to decode
+// aborts with an error — the on-chain read is the truth, so a partial read must
+// not silently produce a snapshot. This is the strict path used for snapshots
+// of known vaults, where all-or-nothing is correct.
 func (s *blockchainService) GetVaultsEntireData(ctx context.Context, vaults []common.Address, blockNumber int64) ([]*VaultEntireData, error) {
+	return s.getVaultsEntireData(ctx, vaults, blockNumber, false)
+}
+
+// GetVaultsEntireDataBestEffort reads getVaultEntireData for every vault, chunked
+// like GetVaultsEntireData, but tolerates per-vault failures: a vault whose
+// sub-call reverts or fails to decode yields a nil entry (aligned by index) and
+// a warning rather than aborting the batch. This is the classification path for
+// unknown vaults — Fluid ships new vault types ahead of resolver redeployments,
+// so one unservable vault must not stall discovery of the rest.
+func (s *blockchainService) GetVaultsEntireDataBestEffort(ctx context.Context, vaults []common.Address, blockNumber int64) ([]*VaultEntireData, error) {
+	return s.getVaultsEntireData(ctx, vaults, blockNumber, true)
+}
+
+func (s *blockchainService) getVaultsEntireData(ctx context.Context, vaults []common.Address, blockNumber int64, bestEffort bool) ([]*VaultEntireData, error) {
 	if len(vaults) == 0 {
 		return nil, nil
 	}
+	out := make([]*VaultEntireData, len(vaults))
+	for start := 0; start < len(vaults); start += vaultEntireDataBatchSize {
+		end := start + vaultEntireDataBatchSize
+		if end > len(vaults) {
+			end = len(vaults)
+		}
+		chunk := vaults[start:end]
+		if err := s.readVaultEntireDataChunk(ctx, chunk, blockNumber, bestEffort, out[start:end]); err != nil {
+			return nil, fmt.Errorf("getVaultEntireData chunk [%d:%d): %w", start, end, err)
+		}
+	}
+	return out, nil
+}
+
+func (s *blockchainService) readVaultEntireDataChunk(ctx context.Context, vaults []common.Address, blockNumber int64, bestEffort bool, out []*VaultEntireData) error {
 	calls := make([]outbound.Call, len(vaults))
 	for i, v := range vaults {
 		callData, err := s.resolverABI.Pack("getVaultEntireData", v)
 		if err != nil {
-			return nil, fmt.Errorf("packing getVaultEntireData(%s): %w", v.Hex(), err)
+			return fmt.Errorf("packing getVaultEntireData(%s): %w", v.Hex(), err)
 		}
-		calls[i] = outbound.Call{Target: s.resolverAddr, AllowFailure: false, CallData: callData}
+		calls[i] = outbound.Call{Target: s.resolverAddr, AllowFailure: bestEffort, CallData: callData}
 	}
 
 	results, err := s.multicaller.Execute(ctx, calls, big.NewInt(blockNumber))
 	if err != nil {
-		return nil, fmt.Errorf("multicall getVaultEntireData batch: %w", err)
+		return fmt.Errorf("multicall getVaultEntireData batch: %w", err)
 	}
 	if len(results) != len(vaults) {
-		return nil, fmt.Errorf("getVaultEntireData batch: expected %d results, got %d", len(vaults), len(results))
+		return fmt.Errorf("getVaultEntireData batch: expected %d results, got %d", len(vaults), len(results))
 	}
 
-	out := make([]*VaultEntireData, len(vaults))
 	for i, r := range results {
 		if !r.Success || len(r.ReturnData) == 0 {
-			return nil, fmt.Errorf("getVaultEntireData(%s) call failed", vaults[i].Hex())
+			if bestEffort {
+				s.logger.Warn("skipping unservable Fluid vault (resolver could not serve getVaultEntireData)", "vault", vaults[i].Hex())
+				continue
+			}
+			return fmt.Errorf("getVaultEntireData(%s) call failed", vaults[i].Hex())
 		}
 		decoded, err := s.decodeVaultEntireData(r.ReturnData)
 		if err != nil {
-			return nil, fmt.Errorf("decoding getVaultEntireData(%s): %w", vaults[i].Hex(), err)
+			if bestEffort {
+				s.logger.Warn("skipping Fluid vault with undecodable getVaultEntireData", "vault", vaults[i].Hex(), "error", err)
+				continue
+			}
+			return fmt.Errorf("decoding getVaultEntireData(%s): %w", vaults[i].Hex(), err)
 		}
 		out[i] = decoded
 	}
-	return out, nil
+	return nil
 }
 
 // decodeVaultEntireData unpacks a getVaultEntireData return blob into the subset
@@ -281,27 +331,18 @@ func (s *blockchainService) decodeVaultEntireData(returnData []byte) (*VaultEnti
 	if cv.Kind() != reflect.Struct || cv.NumField() <= cvFieldVaultType {
 		return nil, fmt.Errorf("constantVariables has unexpected shape")
 	}
-	supplyToken, ok := abi.ConvertType(cv.Field(cvFieldSupplyToken).Interface(), abiTokens{}).(abiTokens)
-	if !ok {
-		return nil, fmt.Errorf("converting supplyToken tuple")
-	}
-	borrowToken, ok := abi.ConvertType(cv.Field(cvFieldBorrowToken).Interface(), abiTokens{}).(abiTokens)
-	if !ok {
-		return nil, fmt.Errorf("converting borrowToken tuple")
-	}
+	// ConvertType returns exactly the proto type on success and panics on ABI
+	// drift (its set() fallback cannot write a non-addressable proto), so these
+	// assertions never fail — a panic is the intended fail-hard signal.
+	supplyToken := abi.ConvertType(cv.Field(cvFieldSupplyToken).Interface(), abiTokens{}).(abiTokens)
+	borrowToken := abi.ConvertType(cv.Field(cvFieldBorrowToken).Interface(), abiTokens{}).(abiTokens)
 	vaultType, ok := cv.Field(cvFieldVaultType).Interface().(*big.Int)
 	if !ok {
 		return nil, fmt.Errorf("vaultType field has unexpected type")
 	}
 
-	epr, ok := abi.ConvertType(top.Field(vedFieldExchangePricesAndRates).Interface(), abiExchangePricesAndRates{}).(abiExchangePricesAndRates)
-	if !ok {
-		return nil, fmt.Errorf("converting exchangePricesAndRates tuple")
-	}
-	tsb, ok := abi.ConvertType(top.Field(vedFieldTotalSupplyAndBorrow).Interface(), abiTotalSupplyAndBorrow{}).(abiTotalSupplyAndBorrow)
-	if !ok {
-		return nil, fmt.Errorf("converting totalSupplyAndBorrow tuple")
-	}
+	epr := abi.ConvertType(top.Field(vedFieldExchangePricesAndRates).Interface(), abiExchangePricesAndRates{}).(abiExchangePricesAndRates)
+	tsb := abi.ConvertType(top.Field(vedFieldTotalSupplyAndBorrow).Interface(), abiTotalSupplyAndBorrow{}).(abiTotalSupplyAndBorrow)
 
 	return &VaultEntireData{
 		Vault:               vault,
