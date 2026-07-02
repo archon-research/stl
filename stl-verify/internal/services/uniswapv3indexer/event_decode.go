@@ -13,6 +13,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
+// anonymousLogEventName names a capture-net entry for a log with zero topics
+// (no topic0 to key off of). entity.ProtocolEvent.Validate rejects an empty
+// EventName, which would abort SaveBatch and poison-stall the block on
+// redelivery, so this sentinel must stay non-empty.
+const anonymousLogEventName = "anonymous"
+
 // eventsByID indexes the pool ABI's events by topic0 for O(1) log dispatch.
 func eventsByID(poolABI *abi.ABI) map[common.Hash]*abi.Event {
 	out := make(map[common.Hash]*abi.Event, len(poolABI.Events))
@@ -60,7 +66,7 @@ func DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		if len(log.Topics) == 0 {
-			captured, err := rawCapturedLog(addr, logIndex, txHash, "", log)
+			captured, err := rawCapturedLog(addr, logIndex, txHash, anonymousLogEventName, log)
 			if err != nil {
 				return DecodedEvents{}, err
 			}
@@ -71,7 +77,7 @@ func DecodeEvents(
 		topic0 := common.HexToHash(log.Topics[0])
 		ev, known := byID[topic0]
 		if !known {
-			captured, err := rawCapturedLog(addr, logIndex, txHash, "", log)
+			captured, err := rawCapturedLog(addr, logIndex, txHash, topic0.Hex(), log)
 			if err != nil {
 				return DecodedEvents{}, err
 			}
@@ -372,6 +378,8 @@ func decodedCapturedLog(addr common.Address, logIndex uint, txHash common.Hash, 
 // rawCapturedLog builds a CapturedLog for a log whose topic0 did not match
 // any known event (or which carries no topics at all), holding the raw
 // {topics, data} of the log so protocol_event stays a complete mirror.
+// Callers must pass a non-empty eventName (topic0 hex, or a sentinel for a
+// zero-topic log) — see anonymousLogEventName.
 func rawCapturedLog(addr common.Address, logIndex uint, txHash common.Hash, eventName string, log shared.Log) (CapturedLog, error) {
 	payload, err := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
 	if err != nil {
