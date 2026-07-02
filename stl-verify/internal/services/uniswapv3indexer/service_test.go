@@ -86,6 +86,22 @@ func (m *countingTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) e
 	return fn(nil)
 }
 
+// State-read batch indices, matching the fixed order SnapshotState's reads
+// pack calls in (slot0, liquidity, feeGrowthGlobal0/1, protocolFees, both
+// token balances, observe). Local to this test file: state.go itself has no
+// positional cursor to keep in sync (see shared.RunSnapshotReads).
+const (
+	testCallSlot0 = iota
+	testCallLiquidity
+	testCallFeeGrowthGlobal0
+	testCallFeeGrowthGlobal1
+	testCallProtocolFees
+	testCallBalance0
+	testCallBalance1
+	testCallObserve
+	testStateCallCount
+)
+
 // recordingMulticaller serves canned results for the state-read batch, the
 // touched-tick batch, and the baseline tickBitmap scan, disambiguating a
 // batch by decoding each call's selector and packed argument (BuildTickCalls
@@ -113,7 +129,7 @@ func (m *recordingMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *
 
 func (m *recordingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 	m.executeAtHashCalls++
-	if len(calls) == stateCallCount && m.isStateBatch(calls) {
+	if len(calls) == testStateCallCount && m.isStateBatch(calls) {
 		m.stateCalls++
 		if m.stateErr != nil {
 			return nil, m.stateErr
@@ -287,15 +303,15 @@ func stateResultsFixture(t *testing.T) []outbound.Result {
 		t.Fatalf("packing balanceOf (token1): %v", err)
 	}
 
-	results := make([]outbound.Result, stateCallCount)
-	results[callSlot0] = outbound.Result{Success: true, ReturnData: slot0}
-	results[callLiquidity] = outbound.Result{Success: true, ReturnData: liquidity}
-	results[callFeeGrowthGlobal0] = outbound.Result{Success: true, ReturnData: fg0}
-	results[callFeeGrowthGlobal1] = outbound.Result{Success: true, ReturnData: fg1}
-	results[callProtocolFees] = outbound.Result{Success: true, ReturnData: protocolFees}
-	results[callBalance0] = outbound.Result{Success: true, ReturnData: bal0}
-	results[callBalance1] = outbound.Result{Success: true, ReturnData: bal1}
-	results[callObserve] = outbound.Result{Success: false}
+	results := make([]outbound.Result, testStateCallCount)
+	results[testCallSlot0] = outbound.Result{Success: true, ReturnData: slot0}
+	results[testCallLiquidity] = outbound.Result{Success: true, ReturnData: liquidity}
+	results[testCallFeeGrowthGlobal0] = outbound.Result{Success: true, ReturnData: fg0}
+	results[testCallFeeGrowthGlobal1] = outbound.Result{Success: true, ReturnData: fg1}
+	results[testCallProtocolFees] = outbound.Result{Success: true, ReturnData: protocolFees}
+	results[testCallBalance0] = outbound.Result{Success: true, ReturnData: bal0}
+	results[testCallBalance1] = outbound.Result{Success: true, ReturnData: bal1}
+	results[testCallObserve] = outbound.Result{Success: false}
 	return results
 }
 

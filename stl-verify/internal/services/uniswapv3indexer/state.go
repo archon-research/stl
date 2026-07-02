@@ -72,19 +72,6 @@ func erc20ABI() (*abi.ABI, error) {
 	return &parsed, nil
 }
 
-// state call batch indices, fixed by the order SnapshotState packs calls in.
-const (
-	callSlot0 = iota
-	callLiquidity
-	callFeeGrowthGlobal0
-	callFeeGrowthGlobal1
-	callProtocolFees
-	callBalance0
-	callBalance1
-	callObserve
-	stateCallCount
-)
-
 // SnapshotState reads a pool's slot0/liquidity/fee-growth/protocol-fee/real-
 // balance state, plus a best-effort TWAP, all pinned to blockHash in a single
 // multicall batch. It returns ONLY pool-level state: tick-level reads live in
@@ -107,23 +94,12 @@ func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool Registered
 		return nil, err
 	}
 
-	calls, err := buildStateCalls(pool, stateABI, erc20)
-	if err != nil {
-		return nil, err
+	state := &entity.UniswapV3PoolState{}
+	reads := stateSnapshotReads(state, stateABI, erc20)
+	if err := shared.RunSnapshotReads(ctx, mc, pool, blockHash, reads); err != nil {
+		return nil, fmt.Errorf("snapshotting pool %s state: %w", pool.Address, err)
 	}
 
-	results, err := mc.ExecuteAtHash(ctx, calls, blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("executing pool state multicall on pool %s: %w", pool.Address, err)
-	}
-	if len(results) != stateCallCount {
-		return nil, fmt.Errorf("unexpected pool state result count: got %d, want %d", len(results), stateCallCount)
-	}
-
-	state, err := decodeStateResults(pool, stateABI, erc20, results)
-	if err != nil {
-		return nil, err
-	}
 	state.PoolID = pool.ID
 	state.BlockNumber = blockNumber
 	state.BlockVersion = version
@@ -135,102 +111,144 @@ func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool Registered
 	return state, nil
 }
 
-// buildStateCalls packs the fixed 8-call batch (slot0, liquidity, both
-// fee-growth globals, protocolFees, both token balances, observe) in the
-// exact order the state*/callState* indices assume.
-func buildStateCalls(pool RegisteredPool, stateABI, erc20 *abi.ABI) ([]outbound.Call, error) {
-	slot0Data, err := stateABI.Pack("slot0")
-	if err != nil {
-		return nil, fmt.Errorf("packing slot0(): %w", err)
+// stateSnapshotReads describes the 8-call state batch as self-contained
+// pack/decode units, each closing over the state being built. Keeping every
+// read's Pack next to its Decode means the call order below is the only
+// place that determines wire order: there is no separate positional index to
+// keep in sync.
+func stateSnapshotReads(state *entity.UniswapV3PoolState, stateABI, erc20 *abi.ABI) []shared.SnapshotRead[RegisteredPool] {
+	return []shared.SnapshotRead[RegisteredPool]{
+		{
+			Name: "slot0",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := stateABI.Pack("slot0")
+				if err != nil {
+					return nil, fmt.Errorf("packing slot0(): %w", err)
+				}
+				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				return decodeSlot0(pool, stateABI, results[0], state)
+			},
+		},
+		{
+			Name: "liquidity",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := stateABI.Pack("liquidity")
+				if err != nil {
+					return nil, fmt.Errorf("packing liquidity(): %w", err)
+				}
+				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				liquidity, err := shared.UnpackUint(stateABI, "liquidity", results[0])
+				if err != nil {
+					return fmt.Errorf("pool %s liquidity(): %w", pool.Address, err)
+				}
+				state.Liquidity = liquidity
+				return nil
+			},
+		},
+		{
+			Name: "feeGrowthGlobal0X128",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := stateABI.Pack("feeGrowthGlobal0X128")
+				if err != nil {
+					return nil, fmt.Errorf("packing feeGrowthGlobal0X128(): %w", err)
+				}
+				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				feeGrowth0, err := shared.UnpackUint(stateABI, "feeGrowthGlobal0X128", results[0])
+				if err != nil {
+					return fmt.Errorf("pool %s feeGrowthGlobal0X128(): %w", pool.Address, err)
+				}
+				state.FeeGrowthGlobal0X128 = feeGrowth0
+				return nil
+			},
+		},
+		{
+			Name: "feeGrowthGlobal1X128",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := stateABI.Pack("feeGrowthGlobal1X128")
+				if err != nil {
+					return nil, fmt.Errorf("packing feeGrowthGlobal1X128(): %w", err)
+				}
+				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				feeGrowth1, err := shared.UnpackUint(stateABI, "feeGrowthGlobal1X128", results[0])
+				if err != nil {
+					return fmt.Errorf("pool %s feeGrowthGlobal1X128(): %w", pool.Address, err)
+				}
+				state.FeeGrowthGlobal1X128 = feeGrowth1
+				return nil
+			},
+		},
+		{
+			Name: "protocolFees",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := stateABI.Pack("protocolFees")
+				if err != nil {
+					return nil, fmt.Errorf("packing protocolFees(): %w", err)
+				}
+				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				return decodeProtocolFees(pool, stateABI, results[0], state)
+			},
+		},
+		{
+			Name: "balanceOf token0",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := erc20.Pack("balanceOf", pool.Address)
+				if err != nil {
+					return nil, fmt.Errorf("packing balanceOf(pool) for token0: %w", err)
+				}
+				return []outbound.Call{{Target: pool.Token0, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				balance0, err := shared.UnpackUint(erc20, "balanceOf", results[0])
+				if err != nil {
+					return fmt.Errorf("pool %s token0 balanceOf(): %w", pool.Address, err)
+				}
+				state.Balance0 = balance0
+				return nil
+			},
+		},
+		{
+			Name: "balanceOf token1",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := erc20.Pack("balanceOf", pool.Address)
+				if err != nil {
+					return nil, fmt.Errorf("packing balanceOf(pool) for token1: %w", err)
+				}
+				return []outbound.Call{{Target: pool.Token1, AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				balance1, err := shared.UnpackUint(erc20, "balanceOf", results[0])
+				if err != nil {
+					return fmt.Errorf("pool %s token1 balanceOf(): %w", pool.Address, err)
+				}
+				state.Balance1 = balance1
+				return nil
+			},
+		},
+		{
+			Name: "observe",
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := stateABI.Pack("observe", []uint32{uint32(twapWindowSecs), 0})
+				if err != nil {
+					return nil, fmt.Errorf("packing observe(): %w", err)
+				}
+				return []outbound.Call{{Target: pool.Address, AllowFailure: true, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				decodeTwap(stateABI, results[0], state)
+				return nil
+			},
+		},
 	}
-	liquidityData, err := stateABI.Pack("liquidity")
-	if err != nil {
-		return nil, fmt.Errorf("packing liquidity(): %w", err)
-	}
-	feeGrowth0Data, err := stateABI.Pack("feeGrowthGlobal0X128")
-	if err != nil {
-		return nil, fmt.Errorf("packing feeGrowthGlobal0X128(): %w", err)
-	}
-	feeGrowth1Data, err := stateABI.Pack("feeGrowthGlobal1X128")
-	if err != nil {
-		return nil, fmt.Errorf("packing feeGrowthGlobal1X128(): %w", err)
-	}
-	protocolFeesData, err := stateABI.Pack("protocolFees")
-	if err != nil {
-		return nil, fmt.Errorf("packing protocolFees(): %w", err)
-	}
-	balance0Data, err := erc20.Pack("balanceOf", pool.Address)
-	if err != nil {
-		return nil, fmt.Errorf("packing balanceOf(pool) for token0: %w", err)
-	}
-	balance1Data, err := erc20.Pack("balanceOf", pool.Address)
-	if err != nil {
-		return nil, fmt.Errorf("packing balanceOf(pool) for token1: %w", err)
-	}
-	observeData, err := stateABI.Pack("observe", []uint32{uint32(twapWindowSecs), 0})
-	if err != nil {
-		return nil, fmt.Errorf("packing observe(): %w", err)
-	}
-
-	calls := make([]outbound.Call, stateCallCount)
-	calls[callSlot0] = outbound.Call{Target: pool.Address, AllowFailure: false, CallData: slot0Data}
-	calls[callLiquidity] = outbound.Call{Target: pool.Address, AllowFailure: false, CallData: liquidityData}
-	calls[callFeeGrowthGlobal0] = outbound.Call{Target: pool.Address, AllowFailure: false, CallData: feeGrowth0Data}
-	calls[callFeeGrowthGlobal1] = outbound.Call{Target: pool.Address, AllowFailure: false, CallData: feeGrowth1Data}
-	calls[callProtocolFees] = outbound.Call{Target: pool.Address, AllowFailure: false, CallData: protocolFeesData}
-	calls[callBalance0] = outbound.Call{Target: pool.Token0, AllowFailure: false, CallData: balance0Data}
-	calls[callBalance1] = outbound.Call{Target: pool.Token1, AllowFailure: false, CallData: balance1Data}
-	calls[callObserve] = outbound.Call{Target: pool.Address, AllowFailure: true, CallData: observeData}
-	return calls, nil
-}
-
-// decodeStateResults maps the fixed 8-result batch onto a UniswapV3PoolState,
-// erroring on any core (non-observe) revert and leaving TWAP fields nil on an
-// observe revert.
-func decodeStateResults(pool RegisteredPool, stateABI, erc20 *abi.ABI, results []outbound.Result) (*entity.UniswapV3PoolState, error) {
-	state := &entity.UniswapV3PoolState{}
-
-	if err := decodeSlot0(pool, stateABI, results[callSlot0], state); err != nil {
-		return nil, err
-	}
-
-	liquidity, err := shared.UnpackUint(stateABI, "liquidity", results[callLiquidity])
-	if err != nil {
-		return nil, fmt.Errorf("pool %s liquidity(): %w", pool.Address, err)
-	}
-	state.Liquidity = liquidity
-
-	feeGrowth0, err := shared.UnpackUint(stateABI, "feeGrowthGlobal0X128", results[callFeeGrowthGlobal0])
-	if err != nil {
-		return nil, fmt.Errorf("pool %s feeGrowthGlobal0X128(): %w", pool.Address, err)
-	}
-	state.FeeGrowthGlobal0X128 = feeGrowth0
-
-	feeGrowth1, err := shared.UnpackUint(stateABI, "feeGrowthGlobal1X128", results[callFeeGrowthGlobal1])
-	if err != nil {
-		return nil, fmt.Errorf("pool %s feeGrowthGlobal1X128(): %w", pool.Address, err)
-	}
-	state.FeeGrowthGlobal1X128 = feeGrowth1
-
-	if err := decodeProtocolFees(pool, stateABI, results[callProtocolFees], state); err != nil {
-		return nil, err
-	}
-
-	balance0, err := shared.UnpackUint(erc20, "balanceOf", results[callBalance0])
-	if err != nil {
-		return nil, fmt.Errorf("pool %s token0 balanceOf(): %w", pool.Address, err)
-	}
-	state.Balance0 = balance0
-
-	balance1, err := shared.UnpackUint(erc20, "balanceOf", results[callBalance1])
-	if err != nil {
-		return nil, fmt.Errorf("pool %s token1 balanceOf(): %w", pool.Address, err)
-	}
-	state.Balance1 = balance1
-
-	decodeTwap(stateABI, results[callObserve], state)
-
-	return state, nil
 }
 
 // decodeSlot0 unpacks slot0()'s 7-tuple into state. tick and feeProtocol need
