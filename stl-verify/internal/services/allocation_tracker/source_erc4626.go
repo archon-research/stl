@@ -145,19 +145,24 @@ func (s *ERC4626Source) fetchUnderlyingValues(ctx context.Context, entries []*To
 	if err != nil {
 		return fmt.Errorf("convertToAssets multicall: %w", err)
 	}
+	if len(mc) != len(valid) {
+		return fmt.Errorf("convertToAssets multicall returned %d results for %d calls", len(mc), len(valid))
+	}
 
 	for i, e := range valid {
-		if i >= len(mc) || !mc[i].Success || len(mc[i].ReturnData) == 0 {
+		if !mc[i].Success || len(mc[i].ReturnData) == 0 {
 			s.logger.Warn("convertToAssets failed; underlying value will be NULL",
 				"contract", e.ContractAddress.Hex(),
-				"wallet", e.WalletAddress.Hex())
+				"wallet", e.WalletAddress.Hex(),
+				"block", block)
 			continue
 		}
 		v := unpackUint256(&s.vaultABI, "convertToAssets", mc[i].ReturnData)
 		if v == nil {
 			s.logger.Warn("convertToAssets decode failed; underlying value will be NULL",
 				"contract", e.ContractAddress.Hex(),
-				"wallet", e.WalletAddress.Hex())
+				"wallet", e.WalletAddress.Hex(),
+				"block", block)
 			continue
 		}
 		result.Balances[e.Key()].UnderlyingValue = v

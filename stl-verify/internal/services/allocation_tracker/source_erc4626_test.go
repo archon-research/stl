@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -115,13 +116,16 @@ func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 
 // respondTwoRounds returns an ExecuteFn serving round 1 (balanceOf) then
 // round 2 (convertToAssets); pass &outbound.Result{Success: false} to simulate a revert.
+// It asserts that round 2 pins the exact same block number as round 1.
 func respondTwoRounds(t *testing.T, src *ERC4626Source, shares *big.Int, convertResult *outbound.Result) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
 	t.Helper()
 	round := 0
+	var round1Block *big.Int
 	return func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 		round++
 		switch round {
 		case 1:
+			round1Block = blockNumber
 			ret, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(shares)
 			if err != nil {
 				t.Fatalf("pack balanceOf output: %v", err)
@@ -130,6 +134,9 @@ func respondTwoRounds(t *testing.T, src *ERC4626Source, shares *big.Int, convert
 		case 2:
 			if blockNumber == nil {
 				t.Fatal("round 2 must pin the same block")
+			}
+			if round1Block == nil || blockNumber.Cmp(round1Block) != 0 {
+				t.Fatalf("round 2 block %v != round 1 block %v: both rounds must pin the same block", blockNumber, round1Block)
 			}
 			return []outbound.Result{*convertResult}, nil
 		default:
@@ -217,6 +224,36 @@ func TestERC4626Source_FetchBalances_ZeroSharesSkipConvertAndWriteZero(t *testin
 	got := results.Balances[entries[0].Key()]
 	if got.UnderlyingValue == nil || got.UnderlyingValue.Sign() != 0 {
 		t.Fatalf("UnderlyingValue = %v, want 0", got.UnderlyingValue)
+	}
+}
+
+func TestERC4626Source_FetchBalances_TruncatedResultReturnsError(t *testing.T) {
+	mc := testutil.NewMockMulticaller()
+	src, err := NewERC4626Source(mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	round := 0
+	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		round++
+		if round == 1 {
+			ret, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(5))
+			if err != nil {
+				t.Fatalf("pack balanceOf output: %v", err)
+			}
+			return []outbound.Result{{Success: true, ReturnData: ret}}, nil
+		}
+		// Truncated: 0 results for 1 call.
+		return []outbound.Result{}, nil
+	}
+
+	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
+	_, err = src.FetchBalances(context.Background(), entries, 100)
+	if err == nil {
+		t.Fatal("expected error for truncated round-2 result")
+	}
+	if !strings.Contains(err.Error(), "returned 0 results for 1 calls") {
+		t.Fatalf("error %q does not mention count mismatch", err.Error())
 	}
 }
 

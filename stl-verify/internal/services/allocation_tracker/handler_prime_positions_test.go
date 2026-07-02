@@ -696,6 +696,7 @@ func TestBuildPositions_UnderlyingValuationPolicy(t *testing.T) {
 		{"superstate NAV token stays NULL", "superstate", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
 		{"centrifuge NAV token stays NULL", "centrifuge", &policyUSDC, big.NewInt(7), nil, nil, common.Address{}},
 		{"curve stays NULL even at zero balance", "curve", &policyUSDC, big.NewInt(0), nil, nil, common.Address{}},
+		{"erc7540 deferred stays NULL even when UnderlyingValue set", "erc7540", &policyUSDC, big.NewInt(7), big.NewInt(9), nil, common.Address{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -779,7 +780,7 @@ func TestBuildPositions_RecordsFailureMetricWhenValuationMissing(t *testing.T) {
 	}
 
 	reason, ok := dp.Attributes.Value("reason")
-	if !ok || reason.AsString() != reasonConvertFailed {
+	if !ok || reason.AsString() != string(reasonConvertFailed) {
 		t.Errorf("reason attribute = %v, want %q", reason, reasonConvertFailed)
 	}
 
@@ -791,5 +792,114 @@ func TestBuildPositions_RecordsFailureMetricWhenValuationMissing(t *testing.T) {
 	token, ok := dp.Attributes.Value("token")
 	if !ok || token.AsString() != policyVault.Hex() {
 		t.Errorf("token attribute = %v, want %s", token, policyVault.Hex())
+	}
+}
+
+func TestBuildPositions_RecordsFailureMetric_MissingAssetAddress(t *testing.T) {
+	tel, reader := newRecordingTelemetry(t)
+	h := newPolicyTestHandler(t, tel)
+
+	snap := &PositionSnapshot{
+		Entry: &TokenEntry{
+			ContractAddress: policyVault,
+			WalletAddress:   policyWallet,
+			AssetAddress:    nil, // no asset address: missing_asset_address reason
+			Star:            "spark",
+			TokenType:       "erc4626",
+		},
+		Balance:         big.NewInt(100),
+		UnderlyingValue: big.NewInt(123),
+		ChainID:         1,
+		BlockNumber:     100,
+		Direction:       DirectionSweep,
+		BlockTimestamp:  time.Unix(1750000000, 0).UTC(),
+	}
+
+	_, err := h.buildPositions(context.Background(), []*PositionSnapshot{snap}, map[string]bool{})
+	if err != nil {
+		t.Fatalf("buildPositions: %v", err)
+	}
+
+	m := collectMetric(t, reader, "allocation.underlying_value.failures.total")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("metric data is %T, want Sum[int64]", m.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("got %d data points, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if dp.Value != 1 {
+		t.Errorf("datapoint value = %d, want 1", dp.Value)
+	}
+
+	reason, ok := dp.Attributes.Value("reason")
+	if !ok || reason.AsString() != string(reasonMissingAssetAddress) {
+		t.Errorf("reason attribute = %v, want %q", reason, reasonMissingAssetAddress)
+	}
+}
+
+func TestHandleBatch_ERC4626_SetsUnderlyingOnPosition(t *testing.T) {
+	susds := common.HexToAddress("0xa3931d71877c0e7a3148cb7eb4463524fec27fbd")
+	usds := common.HexToAddress("0xdc035d45d973e3ec169d2276ddab16f1e407384f")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	underlyingRaw := big.NewInt(1_050_000_000_000_000_000) // 1.05 USDS in 18-decimal raw units
+	shares := big.NewInt(1_000_000_000_000_000_000)
+
+	repo := &fakeAllocRepo{}
+	supplyRepo := &fakeSupplyRepo{}
+	handler := newTestHandler(repo, supplyRepo,
+		map[string]int64{"spark": 1},
+		map[common.Address]tokenMeta{
+			susds: {symbol: "sUSDS", decimals: 18},
+			usds:  {symbol: "USDS", decimals: 18},
+		},
+	)
+
+	err := handler.HandleBatch(context.Background(), &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: susds,
+					WalletAddress:   wallet,
+					AssetAddress:    &usds,
+					Star:            "spark",
+					Chain:           "mainnet",
+					TokenType:       "erc4626",
+				},
+				Balance:         new(big.Int).Set(shares),
+				ScaledBalance:   new(big.Int).Set(shares),
+				UnderlyingValue: new(big.Int).Set(underlyingRaw),
+				ChainID:         1,
+				BlockNumber:     100,
+				TxAmount:        big.NewInt(0),
+				Direction:       DirectionSweep,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleBatch: %v", err)
+	}
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
+	}
+
+	pos := repo.saved[0]
+	if pos.Underlying == nil {
+		t.Fatal("Underlying = nil, want valuation")
+	}
+	if pos.Underlying.Value.Cmp(underlyingRaw) != 0 {
+		t.Errorf("Underlying.Value = %s, want %s", pos.Underlying.Value, underlyingRaw)
+	}
+	if pos.Underlying.AssetAddress != usds {
+		t.Errorf("Underlying.AssetAddress = %s, want %s", pos.Underlying.AssetAddress.Hex(), usds.Hex())
+	}
+	if pos.Underlying.AssetDecimals != 18 {
+		t.Errorf("Underlying.AssetDecimals = %d, want 18", pos.Underlying.AssetDecimals)
+	}
+	if pos.Underlying.AssetSymbol != "USDS" {
+		t.Errorf("Underlying.AssetSymbol = %q, want USDS", pos.Underlying.AssetSymbol)
 	}
 }

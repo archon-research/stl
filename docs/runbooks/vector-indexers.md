@@ -752,9 +752,10 @@ USD exposure computed from these rows silently undercounts (VEC-307).
 - `missing_asset_address` -- the axis-synome entry for a vault/atoken has no
   `asset_address`. Fix the entry in the axis-synome export; the indexer
   cannot invent a denomination.
-- `asset_metadata_missing` -- decimals/symbol multicall for the underlying
-  failed. Usually transient RPC trouble; correlate with
-  `VectorRPCRetryRatioHigh`.
+- `asset_metadata_missing` -- should not occur: metadata for every denomination
+  address is prefetched, and a fetch failure hard-fails the batch before
+  persistence. If this fires, a code path built a valuation for an address the
+  handler did not prefetch -- treat as a bug, not as transient RPC trouble.
 
 ### First checks
 

@@ -491,7 +491,7 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 	entry := &TokenEntry{ContractAddress: contract, WalletAddress: wallet, Star: "spark", Chain: "mainnet"}
 
 	balances := map[EntryKey]*PositionBalance{
-		entry.Key(): {Balance: big.NewInt(1000000), ScaledBalance: big.NewInt(2000000)},
+		entry.Key(): {Balance: big.NewInt(1000000), ScaledBalance: big.NewInt(2000000), UnderlyingValue: big.NewInt(42)},
 	}
 
 	transfers := []*TransferEvent{
@@ -513,6 +513,9 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 	}
 	if s.ScaledBalance.Cmp(big.NewInt(2000000)) != 0 {
 		t.Errorf("expected scaledBalance 2000000, got %s", s.ScaledBalance.String())
+	}
+	if s.UnderlyingValue == nil || s.UnderlyingValue.Cmp(big.NewInt(42)) != 0 {
+		t.Errorf("expected underlyingValue 42, got %v", s.UnderlyingValue)
 	}
 	if s.ChainID != 1 {
 		t.Errorf("expected chainID 1, got %d", s.ChainID)

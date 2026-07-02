@@ -221,7 +221,7 @@ func (h *PrimePositionHandler) buildPositions(
 // balanceOf is a share count, and denominating it in the entry's
 // asset_address (a pricing hint, e.g. USTB->USDC) would be plausible-but-wrong
 // data. The empty reason means "nil by design, not a failure".
-func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity.UnderlyingValuation, string) {
+func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity.UnderlyingValuation, FailureReason) {
 	switch s.Entry.TokenType {
 	case "erc4626":
 		if s.Entry.AssetAddress == nil {
@@ -250,7 +250,7 @@ func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity
 	}
 }
 
-func (h *PrimePositionHandler) valuationFor(asset common.Address, value *big.Int) (*entity.UnderlyingValuation, string) {
+func (h *PrimePositionHandler) valuationFor(asset common.Address, value *big.Int) (*entity.UnderlyingValuation, FailureReason) {
 	if value == nil {
 		return nil, reasonConvertFailed
 	}

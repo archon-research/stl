@@ -12,12 +12,17 @@ import (
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 
+// FailureReason is the bounded set of reasons a position is persisted with a
+// NULL underlying_value. It is a metric label; adding a new value requires a
+// corresponding runbook section.
+type FailureReason string
+
 // Failure reasons for the underlying-value counter. Bounded set: it is a
 // metric label.
 const (
-	reasonConvertFailed        = "convert_failed"
-	reasonMissingAssetAddress  = "missing_asset_address"
-	reasonAssetMetadataMissing = "asset_metadata_missing"
+	reasonConvertFailed        FailureReason = "convert_failed"
+	reasonMissingAssetAddress  FailureReason = "missing_asset_address"
+	reasonAssetMetadataMissing FailureReason = "asset_metadata_missing"
 )
 
 // Telemetry provides OpenTelemetry metrics for the allocation tracker.
@@ -57,7 +62,7 @@ func NewTelemetryWithProvider(mp metric.MeterProvider, chain string) (*Telemetry
 // path fires. Nil-safe so unit tests may pass a nil Telemetry. The token
 // label is the contract address hex (symbols are not unique); cardinality is
 // bounded by the axis-synome entry registry.
-func (t *Telemetry) RecordUnderlyingValueFailure(ctx context.Context, tokenType string, token common.Address, reason string) {
+func (t *Telemetry) RecordUnderlyingValueFailure(ctx context.Context, tokenType string, token common.Address, reason FailureReason) {
 	if t == nil {
 		return
 	}
@@ -65,6 +70,6 @@ func (t *Telemetry) RecordUnderlyingValueFailure(ctx context.Context, tokenType 
 		t.chainAttr,
 		attribute.String("token_type", tokenType),
 		attribute.String("token", token.Hex()),
-		attribute.String("reason", reason),
+		attribute.String("reason", string(reason)),
 	))
 }
