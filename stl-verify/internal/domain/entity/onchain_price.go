@@ -38,11 +38,16 @@ func (t OracleType) IsFeedOracle() bool {
 	}
 }
 
-// IsERC4626Oracle returns true for ERC-4626 share-pricing oracles, which derive
-// a vault share's USD price from convertToAssets(1e18) and the underlying token's
-// USD feed.
+// IsERC4626Oracle reports whether t prices ERC-4626 vault shares.
 func (t OracleType) IsERC4626Oracle() bool {
 	return t == OracleTypeERC4626Share
+}
+
+// RequiresDirectCall reports whether t must be called via a direct eth_call rather
+// than batched through Multicall3. Chronicle feeds and erc4626_share underlying
+// feeds are tollgated and revert when called through Multicall3.
+func (t OracleType) RequiresDirectCall() bool {
+	return t == OracleTypeChronicle || t == OracleTypeERC4626Share
 }
 
 // Oracle represents an onchain oracle price provider (e.g., SparkLend).

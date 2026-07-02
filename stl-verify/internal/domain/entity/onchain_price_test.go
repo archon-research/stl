@@ -8,16 +8,17 @@ import (
 
 func TestOracleTypeClassification(t *testing.T) {
 	tests := []struct {
-		name        string
-		oracleType  OracleType
-		wantFeed    bool
-		wantERC4626 bool
+		name           string
+		oracleType     OracleType
+		wantFeed       bool
+		wantERC4626    bool
+		wantDirectCall bool
 	}{
 		{name: "chainlink is feed", oracleType: OracleTypeChainlinkFeed, wantFeed: true},
-		{name: "chronicle is feed", oracleType: OracleTypeChronicle, wantFeed: true},
+		{name: "chronicle is feed and requires direct call", oracleType: OracleTypeChronicle, wantFeed: true, wantDirectCall: true},
 		{name: "redstone is feed", oracleType: OracleTypeRedstone, wantFeed: true},
 		{name: "aave is neither", oracleType: OracleTypeAave},
-		{name: "erc4626 share is erc4626 only", oracleType: OracleTypeERC4626Share, wantERC4626: true},
+		{name: "erc4626 share requires direct call", oracleType: OracleTypeERC4626Share, wantERC4626: true, wantDirectCall: true},
 	}
 
 	for _, tt := range tests {
@@ -27,6 +28,9 @@ func TestOracleTypeClassification(t *testing.T) {
 			}
 			if got := tt.oracleType.IsERC4626Oracle(); got != tt.wantERC4626 {
 				t.Errorf("IsERC4626Oracle() = %v, want %v", got, tt.wantERC4626)
+			}
+			if got := tt.oracleType.RequiresDirectCall(); got != tt.wantDirectCall {
+				t.Errorf("RequiresDirectCall() = %v, want %v", got, tt.wantDirectCall)
 			}
 		})
 	}
