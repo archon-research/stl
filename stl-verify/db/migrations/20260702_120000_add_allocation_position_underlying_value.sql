@@ -1,0 +1,35 @@
+-- VEC-307: store each position's current value in underlying-asset units.
+--
+-- PR #216 (VEC-125) deliberately made balance == raw share count for
+-- ERC4626/Curve entries, so the underlying value (convertToAssets) is no
+-- longer stored anywhere. These columns restore it additively, without
+-- touching the balance/scaled_balance semantics VEC-125 fixed.
+--
+-- allocation_position is a columnstore-enabled hypertable with a tiering
+-- policy: columns are added bare (nullable, no DEFAULT) per the TigerData
+-- restriction documented in 20260410_110000. Constraints are separate
+-- statements; both columns are all-NULL at add time so validation is trivial.
+
+ALTER TABLE allocation_position ADD COLUMN IF NOT EXISTS underlying_value NUMERIC;
+ALTER TABLE allocation_position ADD COLUMN IF NOT EXISTS underlying_token_id BIGINT;
+
+ALTER TABLE allocation_position
+  DROP CONSTRAINT IF EXISTS allocation_position_underlying_token_id_fkey;
+ALTER TABLE allocation_position
+  ADD CONSTRAINT allocation_position_underlying_token_id_fkey
+  FOREIGN KEY (underlying_token_id) REFERENCES token (id);
+
+-- A value without its denomination is meaningless; a denomination without a
+-- value is noise. Enforce both-set-or-both-NULL at the DB so no writer
+-- (including future backfill scripts) can violate it silently.
+ALTER TABLE allocation_position
+  DROP CONSTRAINT IF EXISTS allocation_position_underlying_pair_check;
+ALTER TABLE allocation_position
+  ADD CONSTRAINT allocation_position_underlying_pair_check
+  CHECK ((underlying_value IS NULL) = (underlying_token_id IS NULL));
+
+COMMENT ON COLUMN allocation_position.underlying_value IS
+  'Current position value denominated in underlying_token_id''s asset (decimals-normalised by that asset), read on-chain at (block_number, block_version) at the same pinned block as balance. erc4626: convertToAssets(shares). atoken: balanceOf (1:1 underlying by construction). erc20: balanceOf — deliberately duplicates balance so non-NULL uniformly means "valued"; do not deduplicate. NULL: not computable (curve/uni_v3/NAV-token rows this phase, reverting or undecodable convertToAssets, missing asset_address) and every row written before this column existed. NULL is never zero exposure; consumers fall back to balance-based pricing.';
+
+COMMENT ON COLUMN allocation_position.underlying_token_id IS
+  'FK to token: the asset underlying_value is denominated in. NULL iff underlying_value is NULL (enforced by allocation_position_underlying_pair_check).';
