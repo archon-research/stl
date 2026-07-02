@@ -255,25 +255,23 @@ func (r *AllocationRepository) resolveTokenIDs(
 
 	for _, pos := range positions {
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		if _, exists := result[key]; exists {
-			continue
-		}
-
-		tokenID, err := r.tokenRepo.GetOrCreateToken(
-			ctx, tx,
-			pos.ChainID,
-			pos.TokenAddress,
-			pos.TokenSymbol,
-			pos.TokenDecimals,
-			&pos.CreatedAtBlock,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"GetOrCreateToken chain=%d address=%s: %w",
-				pos.ChainID, pos.TokenAddress.Hex(), err,
+		if _, exists := result[key]; !exists {
+			tokenID, err := r.tokenRepo.GetOrCreateToken(
+				ctx, tx,
+				pos.ChainID,
+				pos.TokenAddress,
+				pos.TokenSymbol,
+				pos.TokenDecimals,
+				&pos.CreatedAtBlock,
 			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"GetOrCreateToken chain=%d address=%s: %w",
+					pos.ChainID, pos.TokenAddress.Hex(), err,
+				)
+			}
+			result[key] = tokenID
 		}
-		result[key] = tokenID
 
 		if pos.Underlying != nil {
 			ukey := tokenCacheKey{ChainID: pos.ChainID, Address: pos.Underlying.AssetAddress}

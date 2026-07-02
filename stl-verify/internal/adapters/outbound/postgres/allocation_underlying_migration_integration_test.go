@@ -218,3 +218,154 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 		t.Fatalf("position B underlying_token_id = %v, want NULL", *nullTokenID)
 	}
 }
+
+// TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen reproduces the
+// batch-ordering bug where the first position on a vault has Underlying==nil
+// (valuation failed), so the share token is cached in resolveTokenIDs but no
+// underlying key is registered. The second position for the same vault but a
+// different wallet DOES have an underlying valuation. The bug: resolveTokenIDs
+// hit the early-continue on the cached share token and never reached the
+// underlying resolution block, causing SavePositions to fail with
+// "underlying token ID not resolved".
+func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T) {
+	ctx := context.Background()
+
+	if _, err := allocUnderlyingPool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT (chain_id) DO NOTHING`,
+	); err != nil {
+		t.Fatalf("seed chain: %v", err)
+	}
+
+	var primeID int64
+	if err := allocUnderlyingPool.QueryRow(ctx,
+		`SELECT id FROM prime WHERE name = 'spark'`).Scan(&primeID); err != nil {
+		t.Fatalf("look up spark prime: %v", err)
+	}
+
+	if _, err := allocUnderlyingPool.Exec(ctx, `DELETE FROM allocation_position`); err != nil {
+		t.Fatalf("delete allocation_position: %v", err)
+	}
+
+	tokenRepo, err := NewTokenRepository(allocUnderlyingPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewTokenRepository: %v", err)
+	}
+
+	txm, err := NewTxManager(allocUnderlyingPool, nil)
+	if err != nil {
+		t.Fatalf("NewTxManager: %v", err)
+	}
+
+	repo := NewAllocationRepository(allocUnderlyingPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
+
+	vaultAddr := common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
+	walletA := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+	walletB := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	usdcAddr := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+	blockTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	// Position 1: same vault, walletA, Underlying == nil (valuation failed).
+	// This position is sorted first (lower ProxyAddress bytes), so it caches
+	// the share token in resolveTokenIDs without registering an underlying key.
+	pos1 := &entity.AllocationPosition{
+		ChainID:        1,
+		TokenAddress:   vaultAddr,
+		TokenSymbol:    "bbqUSDC",
+		TokenDecimals:  18,
+		PrimeID:        primeID,
+		ProxyAddress:   walletA,
+		Balance:        big.NewInt(1_000_000_000_000_000_000),
+		BlockNumber:    24_584_300,
+		BlockVersion:   0,
+		TxHash:         "0xaa50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+		LogIndex:       10,
+		TxAmount:       big.NewInt(1_000_000_000_000_000_000),
+		Direction:      "in",
+		CreatedAtBlock: 24_584_300,
+		CreatedAt:      blockTime,
+		Underlying:     nil,
+	}
+
+	// Position 2: same vault, walletB, WITH a complete UnderlyingValuation.
+	// The bug triggers when the resolveTokenIDs loop hits this position after
+	// pos1 already cached the share token: the early-continue prevented the
+	// underlying block from running, so the underlying key was never resolved.
+	pos2 := &entity.AllocationPosition{
+		ChainID:        1,
+		TokenAddress:   vaultAddr,
+		TokenSymbol:    "bbqUSDC",
+		TokenDecimals:  18,
+		PrimeID:        primeID,
+		ProxyAddress:   walletB,
+		Balance:        big.NewInt(2_000_000_000_000_000_000),
+		BlockNumber:    24_584_400,
+		BlockVersion:   0,
+		TxHash:         "0xbb50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+		LogIndex:       20,
+		TxAmount:       big.NewInt(2_000_000_000_000_000_000),
+		Direction:      "in",
+		CreatedAtBlock: 24_584_400,
+		CreatedAt:      blockTime,
+		Underlying: &entity.UnderlyingValuation{
+			Value:         big.NewInt(5_000_000_000_000),
+			AssetAddress:  usdcAddr,
+			AssetSymbol:   "USDC",
+			AssetDecimals: 6,
+		},
+	}
+
+	tx, err := allocUnderlyingPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if err := repo.SavePositions(ctx, tx, []*entity.AllocationPosition{pos1, pos2}); err != nil {
+		t.Fatalf("SavePositions: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// pos2: underlying_token_id must point to USDC.
+	var usdcTokenID int64
+	if err := allocUnderlyingPool.QueryRow(ctx,
+		`SELECT id FROM token WHERE chain_id = 1 AND address = $1`,
+		usdcAddr.Bytes(),
+	).Scan(&usdcTokenID); err != nil {
+		t.Fatalf("look up USDC token: %v", err)
+	}
+
+	var pos2UnderlyingValueStr string
+	var pos2UnderlyingTokenID int64
+	if err := allocUnderlyingPool.QueryRow(ctx, `
+		SELECT underlying_value::text, underlying_token_id
+		FROM allocation_position
+		WHERE block_number = 24584400 AND log_index = 20`,
+	).Scan(&pos2UnderlyingValueStr, &pos2UnderlyingTokenID); err != nil {
+		t.Fatalf("query pos2: %v", err)
+	}
+	if pos2UnderlyingValueStr != "5000000.000000" {
+		t.Fatalf("pos2 underlying_value = %q, want 5000000.000000", pos2UnderlyingValueStr)
+	}
+	if pos2UnderlyingTokenID != usdcTokenID {
+		t.Fatalf("pos2 underlying_token_id = %d, want %d (USDC token.id)", pos2UnderlyingTokenID, usdcTokenID)
+	}
+
+	// pos1: both columns must be NULL.
+	var pos1Value *string
+	var pos1TokenID *int64
+	if err := allocUnderlyingPool.QueryRow(ctx, `
+		SELECT underlying_value::text, underlying_token_id
+		FROM allocation_position
+		WHERE block_number = 24584300 AND log_index = 10`,
+	).Scan(&pos1Value, &pos1TokenID); err != nil {
+		t.Fatalf("query pos1: %v", err)
+	}
+	if pos1Value != nil {
+		t.Fatalf("pos1 underlying_value = %v, want NULL", *pos1Value)
+	}
+	if pos1TokenID != nil {
+		t.Fatalf("pos1 underlying_token_id = %v, want NULL", *pos1TokenID)
+	}
+}
