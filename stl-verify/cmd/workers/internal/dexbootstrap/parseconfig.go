@@ -38,6 +38,10 @@ type Config struct {
 	// snapshots even on blocks with no pool event. 0 disables the sweep
 	// (event-driven snapshots only).
 	SweepBlocks int64
+	// Dex selects which DEX factory dex-indexer runs (e.g. "curve",
+	// "uniswap-v3"). Validating the value against the registry's known keys
+	// is the caller's job; ParseConfig only requires it be present.
+	Dex string
 }
 
 // ParseConfig reads the canonical DEX-worker flag + env set and validates
@@ -58,6 +62,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	sweepBlocks := fs.Int64("sweep-blocks", 50, "Blocks between guaranteed state snapshots (0 disables)")
+	dex := fs.String("dex", "", "DEX to run (e.g. curve, uniswap-v3)")
 	if err := fs.Parse(args); err != nil {
 		// %w preserves flag.ErrHelp so callers can still distinguish -help.
 		return Config{}, fmt.Errorf("parsing %s flags: %w", flagSetName, err)
@@ -77,6 +82,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		WaitTime:          *waitTime,
 		VisibilityTimeout: *visibilityTimeout,
 		SweepBlocks:       *sweepBlocks,
+		Dex:               *dex,
 	}
 
 	if cfg.QueueURL == "" {
@@ -84,6 +90,13 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 	}
 	if cfg.QueueURL == "" {
 		return Config{}, fmt.Errorf("queue URL not provided (use -queue flag or AWS_SQS_QUEUE_URL env var)")
+	}
+
+	if cfg.Dex == "" {
+		cfg.Dex = env.Get("DEX", "")
+	}
+	if cfg.Dex == "" {
+		return Config{}, fmt.Errorf("DEX not provided (use -dex flag or DEX env var)")
 	}
 
 	if cfg.DBURL == "" {
