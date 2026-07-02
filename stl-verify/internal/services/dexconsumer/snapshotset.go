@@ -2,6 +2,7 @@ package dexconsumer
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 )
 
@@ -112,6 +113,6 @@ func sortedKeys(set map[int64]bool) []int64 {
 	for k := range set {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 	return keys
 }

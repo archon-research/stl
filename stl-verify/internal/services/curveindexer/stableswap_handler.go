@@ -727,7 +727,6 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 		{"future_fee", &acc.futureFee},
 	}
 	for _, g := range configGetters {
-		g := g
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: g.name,
 			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {

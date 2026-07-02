@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,12 +22,7 @@ import (
 // one address (e.g. a pre-NG Curve pool's separate LP-token contract), so
 // callers pass every address that should route to it.
 func LogBelongsTo(addr common.Address, addrs ...common.Address) bool {
-	for _, a := range addrs {
-		if addr == a {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(addrs, addr)
 }
 
 // DecodeLog extracts both indexed (from topics) and non-indexed (from data)
