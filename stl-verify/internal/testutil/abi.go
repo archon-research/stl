@@ -4,6 +4,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
 
@@ -59,6 +61,20 @@ func PackLatestAnswer(t *testing.T, answer *big.Int) []byte {
 	data, err := feedABI.Methods["latestAnswer"].Outputs.Pack(answer)
 	if err != nil {
 		t.Fatalf("packing latestAnswer: %v", err)
+	}
+	return data
+}
+
+// PackAsset ABI-encodes an address as asset() return data.
+func PackAsset(t *testing.T, addr common.Address) []byte {
+	t.Helper()
+	shareABI, err := abis.GetERC4626ABI()
+	if err != nil {
+		t.Fatalf("loading ERC4626 ABI: %v", err)
+	}
+	data, err := shareABI.Methods["asset"].Outputs.Pack(addr)
+	if err != nil {
+		t.Fatalf("packing asset: %v", err)
 	}
 	return data
 }

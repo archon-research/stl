@@ -86,27 +86,6 @@ func SeedFeedOracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name,
 	return id
 }
 
-// SeedERC4626Oracle inserts an erc4626_share oracle (with a vault contract address) and returns its ID.
-func SeedERC4626Oracle(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name, displayName string, chainID int, vaultAddress string) int64 {
-	t.Helper()
-	addrBytes, err := HexToBytes(vaultAddress)
-	if err != nil {
-		t.Fatalf("failed to parse vault address %s: %v", vaultAddress, err)
-	}
-
-	var id int64
-	err = pool.QueryRow(ctx, `
-		INSERT INTO oracle (name, display_name, chain_id, address, oracle_type, deployment_block, enabled, price_decimals)
-		VALUES ($1, $2, $3, $4, 'erc4626_share', 100, true, 8)
-		ON CONFLICT (name) DO UPDATE SET display_name = EXCLUDED.display_name
-		RETURNING id
-	`, name, displayName, chainID, addrBytes).Scan(&id)
-	if err != nil {
-		t.Fatalf("failed to insert erc4626 oracle %s: %v", name, err)
-	}
-	return id
-}
-
 // SeedFeedOracleAsset inserts a feed-based oracle asset with feed address, decimals, and quote currency.
 func SeedFeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, feedAddress string, feedDecimals int, quoteCurrency string) {
 	t.Helper()

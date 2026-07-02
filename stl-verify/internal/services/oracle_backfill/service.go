@@ -181,6 +181,18 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 		); err != nil {
 			return fmt.Errorf("oracle %s: %w", wu.Oracle.Name, err)
 		}
+		if wu.Oracle.OracleType.IsERC4626Oracle() {
+			mc2, err := s.newMulticaller(wu.Oracle.OracleType)
+			if err != nil {
+				return fmt.Errorf("oracle %s: creating multicaller for underlying decimals validation: %w", wu.Oracle.Name, err)
+			}
+			if err := blockchain.ValidateERC4626UnderlyingDecimals(
+				ctx, mc2, s.shareABI, s.feedABI,
+				wu.ERC4626Vaults, blockNum, s.logger,
+			); err != nil {
+				return fmt.Errorf("oracle %s: %w", wu.Oracle.Name, err)
+			}
+		}
 	}
 	return nil
 }

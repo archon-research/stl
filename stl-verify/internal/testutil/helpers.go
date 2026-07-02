@@ -5,12 +5,18 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// E18 returns n * 10^18 as a *big.Int.
+func E18(n int64) *big.Int {
+	return new(big.Int).Mul(big.NewInt(n), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+}
 
 // DiscardLogger returns an slog.Logger that writes to io.Discard.
 func DiscardLogger() *slog.Logger {

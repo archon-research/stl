@@ -255,8 +255,10 @@ func run(ctx context.Context, args []string) error {
 		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
-			if oracleType == entity.OracleTypeChronicle {
-				// Direct single eth_call path, not a multicall batch, so it intentionally carries no multicall.batch.size telemetry.
+			if oracleType == entity.OracleTypeChronicle || oracleType == entity.OracleTypeERC4626Share {
+				// Chronicle feeds and erc4626_share underlying feeds are tollgated and
+				// revert through Multicall3; use a direct single eth_call instead.
+				// Direct path carries no multicall.batch.size telemetry by design.
 				direct, err := multicall.NewDirectCaller(ethClient.Client())
 				if err != nil {
 					return nil, err

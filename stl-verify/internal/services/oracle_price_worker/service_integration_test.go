@@ -621,29 +621,6 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 }
 
-// erc4626Multicaller answers the worker's one-time decimals() validation (single
-// call → decimals=8) and the per-block [convertToAssets, latestRoundData] batch.
-func erc4626Multicaller(t *testing.T, assets, feedAnswer *big.Int) *testutil.MockMulticaller {
-	t.Helper()
-	convertData := testutil.PackConvertToAssets(t, assets)
-	roundData := testutil.PackLatestRoundData(t,
-		big.NewInt(1), feedAnswer, big.NewInt(1000), big.NewInt(1000), big.NewInt(1))
-	return &testutil.MockMulticaller{
-		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-			if len(calls) == 1 {
-				return []outbound.Result{{Success: true, ReturnData: testutil.PackDecimals(t, 8)}}, nil
-			}
-			if len(calls) != 2 {
-				return nil, fmt.Errorf("expected 1 (decimals) or 2 (price) calls, got %d", len(calls))
-			}
-			return []outbound.Result{
-				{Success: true, ReturnData: convertData},
-				{Success: true, ReturnData: roundData},
-			}, nil
-		},
-	}
-}
-
 func TestIntegration_WorkerERC4626SharePrice(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
@@ -653,8 +630,7 @@ func TestIntegration_WorkerERC4626SharePrice(t *testing.T) {
 
 	testutil.DisableAllOracles(t, ctx, pool)
 
-	oracleID := testutil.SeedERC4626Oracle(t, ctx, pool, "fluid_fsusds_it", "Fluid fsUSDS IT", 1,
-		"0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
+	oracleID := testutil.SeedFeedOracle(t, ctx, pool, "fluid_fsusds_it", "Fluid fsUSDS IT", "erc4626_share", 1, 8)
 	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11", "fsUSDS-IT", 18)
 	testutil.SeedFeedOracleAsset(t, ctx, pool, oracleID, tokenID,
 		"0xfF30586cD0F29eD462364C7e81375FC0C71219b1", 8, "USD")
@@ -667,7 +643,7 @@ func TestIntegration_WorkerERC4626SharePrice(t *testing.T) {
 	// convertToAssets(1e18) = 1.05e18 → ratio 1.05; USDS/USD = 1.0 → $1.05.
 	oneE18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	assets := new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20)))
-	mc := erc4626Multicaller(t, assets, big.NewInt(100_000_000))
+	mc := newERC4626Multicaller(t, assets, big.NewInt(100_000_000))
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 	messages := []outbound.SQSMessage{

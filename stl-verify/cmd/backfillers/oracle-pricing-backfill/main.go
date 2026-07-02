@@ -145,7 +145,9 @@ func run(args []string) error {
 	newMulticaller := func(oracleType entity.OracleType) (outbound.Multicaller, error) {
 		var mc outbound.Multicaller
 		var err error
-		if oracleType == entity.OracleTypeChronicle {
+		if oracleType == entity.OracleTypeChronicle || oracleType == entity.OracleTypeERC4626Share {
+			// Chronicle feeds and erc4626_share underlying feeds are tollgated and
+			// revert through Multicall3; use a direct single eth_call instead.
 			mc, err = multicall.NewDirectCaller(rpcClient)
 		} else {
 			mc, err = multicall.NewClient(ethClient, blockchain.Multicall3)

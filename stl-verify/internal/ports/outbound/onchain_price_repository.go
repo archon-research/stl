@@ -6,6 +6,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
+// TokenInfo holds the on-chain address and decimals for a token registry entry.
+// Returned by GetTokenInfos to avoid two round-trips for data from the same join.
+type TokenInfo struct {
+	Address  []byte
+	Decimals int
+}
+
 // OnchainPriceRepository defines the interface for onchain oracle price data persistence.
 type OnchainPriceRepository interface {
 	// UpsertPrices inserts onchain price records in batches.
@@ -25,14 +32,10 @@ type OnchainPriceRepository interface {
 	// Used for resume support in backfill.
 	GetLatestBlock(ctx context.Context, oracleID int64) (int64, error)
 
-	// GetTokenAddresses returns a map of token_id → on-chain address for all enabled
-	// oracle assets of the given oracle. Used to build the asset address list for oracle calls.
-	GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error)
-
-	// GetTokenDecimals returns a map of token_id → on-chain decimals for all enabled
-	// oracle assets of the given oracle. Used by ERC-4626 share pricing to scale
-	// convertToAssets output to whole-token units.
-	GetTokenDecimals(ctx context.Context, oracleID int64) (map[int64]int, error)
+	// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for all
+	// enabled oracle assets of the given oracle. Used to build address lists and scale
+	// convertToAssets output for ERC-4626 vaults.
+	GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]TokenInfo, error)
 
 	// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
 	GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error)

@@ -133,19 +133,19 @@ func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		return nil, nil
 	}
 
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
 	if err != nil {
-		return nil, fmt.Errorf("getting token addresses: %w", err)
+		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
 
 	tokenAddrs := make([]common.Address, len(assets))
 	tokenIDs := make([]int64, len(assets))
 	for i, asset := range assets {
-		addrBytes, ok := tokenAddrBytes[asset.TokenID]
+		info, ok := tokenInfos[asset.TokenID]
 		if !ok {
 			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
 		}
-		tokenAddrs[i] = common.BytesToAddress(addrBytes)
+		tokenAddrs[i] = common.BytesToAddress(info.Address)
 		tokenIDs[i] = asset.TokenID
 	}
 
@@ -170,9 +170,9 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		return nil, nil
 	}
 
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
 	if err != nil {
-		return nil, fmt.Errorf("getting token addresses: %w", err)
+		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
 
 	feeds := make([]blockchain.FeedConfig, len(assets))
@@ -197,7 +197,7 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		tokenIDs[i] = asset.TokenID
 	}
 
-	tokenAddrs := bytesToAddressMap(tokenAddrBytes)
+	tokenAddrs := tokenInfosToAddressMap(tokenInfos)
 	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrs)
 
 	if err := validateRefFeeds(nonUSDFeeds, refFeedIdx, oracle.Name); err != nil {
@@ -228,24 +228,20 @@ func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository,
 		return nil, nil
 	}
 
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
 	if err != nil {
-		return nil, fmt.Errorf("getting token addresses: %w", err)
-	}
-	tokenDecimals, err := repo.GetTokenDecimals(ctx, oracle.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting token decimals: %w", err)
+		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
 
 	vaults := make([]blockchain.ERC4626VaultConfig, len(assets))
 	tokenIDs := make([]int64, len(assets))
 	for i, asset := range assets {
-		addrBytes, ok := tokenAddrBytes[asset.TokenID]
+		info, ok := tokenInfos[asset.TokenID]
 		if !ok {
 			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
 		}
-		decimals, ok := tokenDecimals[asset.TokenID]
-		if !ok {
+		decimals := info.Decimals
+		if decimals == 0 {
 			return nil, fmt.Errorf("token decimals not found for token_id %d", asset.TokenID)
 		}
 		if asset.FeedAddress == (common.Address{}) {
@@ -260,7 +256,7 @@ func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository,
 
 		vaults[i] = blockchain.ERC4626VaultConfig{
 			TokenID:            asset.TokenID,
-			VaultAddress:       common.BytesToAddress(addrBytes),
+			VaultAddress:       common.BytesToAddress(info.Address),
 			ShareDecimals:      decimals,
 			UnderlyingFeed:     asset.FeedAddress,
 			UnderlyingDecimals: decimals,
@@ -330,10 +326,10 @@ func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.
 	return refFeedIdx, nonUSDFeeds
 }
 
-func bytesToAddressMap(raw map[int64][]byte) map[int64]common.Address {
-	out := make(map[int64]common.Address, len(raw))
-	for id, b := range raw {
-		out[id] = common.BytesToAddress(b)
+func tokenInfosToAddressMap(infos map[int64]outbound.TokenInfo) map[int64]common.Address {
+	out := make(map[int64]common.Address, len(infos))
+	for id, info := range infos {
+		out[id] = common.BytesToAddress(info.Address)
 	}
 	return out
 }

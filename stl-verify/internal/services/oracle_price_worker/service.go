@@ -252,6 +252,14 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 		); err != nil {
 			return fmt.Errorf("oracle %s: %w", unit.Oracle.Name, err)
 		}
+		if unit.Oracle.OracleType.IsERC4626Oracle() {
+			if err := blockchain.ValidateERC4626UnderlyingDecimals(
+				ctx, unit.multicaller, s.shareABI, s.feedABI,
+				unit.ERC4626Vaults, blockNum, s.logger,
+			); err != nil {
+				return fmt.Errorf("oracle %s: %w", unit.Oracle.Name, err)
+			}
+		}
 	}
 	return nil
 }
@@ -436,45 +444,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 
 	results = oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
-	// Detect changes
-	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
-		attribute.Int("prices.total", len(results)))
-	changed, err := s.detectFeedChanges(results, event, blockTimestamp, unit)
-	if err != nil {
-		telemetry.SetSpanError(detectSpan, err, "detect feed changes failed")
-		detectSpan.End()
-		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
-	}
-	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
-	recordPriceChangeEvents(detectSpan, unit, changed)
-	detectSpan.End()
-
-	if len(changed) == 0 {
-		s.logger.Debug("no price changes", "oracle", unit.Oracle.Name, "block", event.BlockNumber)
-		return nil
-	}
-
-	// Upsert prices (DB span)
-	ctx, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
-		attribute.Int("prices.changed", len(changed)))
-	err = s.repo.UpsertPrices(ctx, changed)
-	if err != nil {
-		telemetry.SetSpanError(upsertSpan, err, "upsert prices failed")
-	}
-	upsertSpan.End()
-	if err != nil {
-		return fmt.Errorf("storing prices at block %d: %w", event.BlockNumber, err)
-	}
-
-	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
-
-	s.logger.Info("stored feed prices",
-		"oracle", unit.Oracle.Name,
-		"block", event.BlockNumber,
-		"changed", len(changed),
-		"total", len(unit.Feeds))
-
-	return nil
+	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "feed changes", "stored feed prices", len(unit.Feeds))
 }
 
 func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
@@ -492,13 +462,20 @@ func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbou
 		return fmt.Errorf("fetching erc4626 share prices at block %d: %w", event.BlockNumber, err)
 	}
 
+	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "erc4626 changes", "stored erc4626 share prices", len(unit.ERC4626Vaults))
+}
+
+// storeFeedResults runs the detect-changes + upsert tail shared by processBlockForFeedOracle
+// and processBlockForERC4626Oracle. kind and logMsg carry the per-path strings that differ
+// between the two callers; total is the source-collection size for the log line.
+func (s *Service) storeFeedResults(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit, results []blockchain.FeedPriceResult, kind, logMsg string, total int) error {
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))
 	changed, err := s.detectFeedChanges(results, event, blockTimestamp, unit)
 	if err != nil {
-		telemetry.SetSpanError(detectSpan, err, "detect erc4626 changes failed")
+		telemetry.SetSpanError(detectSpan, err, "detect "+kind+" failed")
 		detectSpan.End()
-		return fmt.Errorf("detecting erc4626 changes at block %d: %w", event.BlockNumber, err)
+		return fmt.Errorf("detecting %s at block %d: %w", kind, event.BlockNumber, err)
 	}
 	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
 	recordPriceChangeEvents(detectSpan, unit, changed)
@@ -522,11 +499,11 @@ func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbou
 
 	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
 
-	s.logger.Info("stored erc4626 share prices",
+	s.logger.Info(logMsg,
 		"oracle", unit.Oracle.Name,
 		"block", event.BlockNumber,
 		"changed", len(changed),
-		"total", len(unit.ERC4626Vaults))
+		"total", total)
 
 	return nil
 }

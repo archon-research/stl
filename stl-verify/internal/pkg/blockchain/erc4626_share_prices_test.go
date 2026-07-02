@@ -24,39 +24,25 @@ func erc4626ABI(t *testing.T) *abi.ABI {
 	return parsed
 }
 
-func packConvertToAssets(t *testing.T, assets *big.Int) []byte {
-	t.Helper()
-	a := erc4626ABI(t)
-	data, err := a.Methods["convertToAssets"].Outputs.Pack(assets)
-	if err != nil {
-		t.Fatalf("packing convertToAssets: %v", err)
-	}
-	return data
-}
-
-func e18(n int64) *big.Int {
-	return new(big.Int).Mul(big.NewInt(n), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
-}
-
 func TestFetchERC4626SharePrices(t *testing.T) {
 	shareABI := erc4626ABI(t)
 	fABI := feedABI(t)
 	blockNum := int64(22_000_000)
 
 	fsusds := common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
-	usdsFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
+	sUSDSFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
 
 	vault := ERC4626VaultConfig{
 		TokenID:            10,
 		VaultAddress:       fsusds,
 		ShareDecimals:      18,
-		UnderlyingFeed:     usdsFeed,
+		UnderlyingFeed:     sUSDSFeed,
 		UnderlyingDecimals: 18,
 		FeedDecimals:       8,
 	}
 
-	// convertToAssets(1e18) = 1.05 * 1e18 → ratio 1.05; USDS/USD = 1.0 (8 decimals) → $1.05.
-	ratio105 := new(big.Int).Add(e18(1), new(big.Int).Div(e18(1), big.NewInt(20)))
+	// convertToAssets(1e18) = 1.05 * 1e18 → ratio 1.05; sUSDS/USD = 1.0 (8 decimals) → $1.05.
+	ratio105 := new(big.Int).Add(testutil.E18(1), new(big.Int).Div(testutil.E18(1), big.NewInt(20)))
 
 	tests := []struct {
 		name        string
@@ -67,7 +53,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		wantResults []FeedPriceResult
 	}{
 		{
-			name:   "happy path - ratio 1.05 times USDS 1.0",
+			name:   "happy path - ratio 1.05 times sUSDS 1.0",
 			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
@@ -77,11 +63,11 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 					if calls[0].Target != fsusds {
 						t.Errorf("call[0] target = %s, want vault %s", calls[0].Target, fsusds)
 					}
-					if calls[1].Target != usdsFeed {
-						t.Errorf("call[1] target = %s, want feed %s", calls[1].Target, usdsFeed)
+					if calls[1].Target != sUSDSFeed {
+						t.Errorf("call[1] target = %s, want feed %s", calls[1].Target, sUSDSFeed)
 					}
 					return []outbound.Result{
-						{Success: true, ReturnData: packConvertToAssets(t, ratio105)},
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
 					}, nil
 				},
@@ -95,9 +81,9 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					// ratio 1.0, USDS/USD = 1.01 → $1.01
+					// ratio 1.0, sUSDS/USD = 1.01 → $1.01
 					return []outbound.Result{
-						{Success: true, ReturnData: packConvertToAssets(t, e18(1))},
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, testutil.E18(1))},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(101_000_000), big.NewInt(1000))},
 					}, nil
 				},
@@ -125,7 +111,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
-						{Success: true, ReturnData: packConvertToAssets(t, ratio105)},
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: false},
 					}, nil
 				},
@@ -138,7 +124,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
-						{Success: true, ReturnData: packConvertToAssets(t, ratio105)},
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))},
 					}, nil
 				},
@@ -146,12 +132,25 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 			wantErr: true, errContains: "all 1 erc4626 vaults failed",
 		},
 		{
-			name:   "one of two vaults fails - partial success returns no error",
-			vaults: []ERC4626VaultConfig{vault, {TokenID: 11, VaultAddress: fsusds, ShareDecimals: 18, UnderlyingFeed: usdsFeed, UnderlyingDecimals: 18, FeedDecimals: 8}},
+			name:   "sole vault convertToAssets returns zero assets - all failed, returns error",
+			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
-						{Success: true, ReturnData: packConvertToAssets(t, ratio105)},
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, big.NewInt(0))},
+						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
+					}, nil
+				},
+			},
+			wantErr: true, errContains: "all 1 erc4626 vaults failed",
+		},
+		{
+			name:   "one of two vaults fails - partial success returns no error",
+			vaults: []ERC4626VaultConfig{vault, {TokenID: 11, VaultAddress: fsusds, ShareDecimals: 18, UnderlyingFeed: sUSDSFeed, UnderlyingDecimals: 18, FeedDecimals: 8}},
+			mock: &mockMulticaller{
+				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
 						{Success: false}, // second vault convertToAssets reverts
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
@@ -189,7 +188,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 			vaults: []ERC4626VaultConfig{vault},
 			mock: &mockMulticaller{
 				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-					return []outbound.Result{{Success: true, ReturnData: packConvertToAssets(t, ratio105)}}, nil
+					return []outbound.Result{{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)}}, nil
 				},
 			},
 			wantErr: true, errContains: "expected 2 multicall results",

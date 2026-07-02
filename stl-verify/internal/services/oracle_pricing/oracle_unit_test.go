@@ -10,6 +10,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -22,8 +23,7 @@ type mockRepo struct {
 	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
-	getTokenDecimalsFn             func(ctx context.Context, oracleID int64) (map[int64]int, error)
+	getTokenInfosFn                func(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -58,15 +58,9 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	}
 	return 0, nil
 }
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
-	if m.getTokenAddressesFn != nil {
-		return m.getTokenAddressesFn(ctx, oracleID)
-	}
-	return nil, errors.New("not mocked")
-}
-func (m *mockRepo) GetTokenDecimals(ctx context.Context, oracleID int64) (map[int64]int, error) {
-	if m.getTokenDecimalsFn != nil {
-		return m.getTokenDecimalsFn(ctx, oracleID)
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+	if m.getTokenInfosFn != nil {
+		return m.getTokenInfosFn(ctx, oracleID)
 	}
 	return nil, errors.New("not mocked")
 }
@@ -152,10 +146,10 @@ func TestLoadOracleUnits(t *testing.T) {
 							{ID: 2, OracleID: 1, TokenID: 2, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{
-							1: wethAddr.Bytes(),
-							2: daiAddr.Bytes(),
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{
+							1: {Address: wethAddr.Bytes()},
+							2: {Address: daiAddr.Bytes()},
 						}, nil
 					},
 				}
@@ -191,8 +185,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -224,8 +218,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 18, QuoteCurrency: "USD",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -252,8 +246,8 @@ func TestLoadOracleUnits(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 1, Enabled: true}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -316,10 +310,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							{ID: 1, OracleID: 1, TokenID: 1, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{
-							1: wethAddr.Bytes(),
-						}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -342,8 +334,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							// FeedAddress zero value — missing
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -366,8 +358,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -390,8 +382,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 0, QuoteCurrency: "USD",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -413,8 +405,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							{ID: 1, OracleID: 40000, TokenID: 1, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -436,8 +428,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							{ID: 1, OracleID: 42, TokenID: 1, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: wethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -466,8 +458,8 @@ func TestLoadOracleUnits(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "ETH",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{1: nonWethAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{1: {Address: nonWethAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -536,11 +528,8 @@ func TestLoadOracleUnits_ERC4626(t *testing.T) {
 							FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{10: fsusds.Bytes()}, nil
-					},
-					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
-						return map[int64]int{10: 18}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{10: {Address: fsusds.Bytes(), Decimals: 18}}, nil
 					},
 				}
 			},
@@ -578,11 +567,8 @@ func TestLoadOracleUnits_ERC4626(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 10, Enabled: true, FeedDecimals: 8, QuoteCurrency: "USD"}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{10: fsusds.Bytes()}, nil
-					},
-					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
-						return map[int64]int{10: 18}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{10: {Address: fsusds.Bytes(), Decimals: 18}}, nil
 					},
 				}
 			},
@@ -598,11 +584,8 @@ func TestLoadOracleUnits_ERC4626(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 10, Enabled: true, FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "ETH"}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{10: fsusds.Bytes()}, nil
-					},
-					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
-						return map[int64]int{10: 18}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{10: {Address: fsusds.Bytes(), Decimals: 18}}, nil
 					},
 				}
 			},
@@ -618,11 +601,8 @@ func TestLoadOracleUnits_ERC4626(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{{ID: 1, OracleID: 1, TokenID: 10, Enabled: true, FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD"}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{10: fsusds.Bytes()}, nil
-					},
-					getTokenDecimalsFn: func(_ context.Context, _ int64) (map[int64]int, error) {
-						return map[int64]int{}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{10: {Address: fsusds.Bytes(), Decimals: 0}}, nil
 					},
 				}
 			},
