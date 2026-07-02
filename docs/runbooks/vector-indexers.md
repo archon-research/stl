@@ -730,3 +730,187 @@ cannot see.
 confirm on-chain that no Curve activity occurred (legitimate quiet window).
 
 ---
+
+## uniswap-v3-indexer (VEC-261)
+
+Runs via the unified `dex-indexer` binary (`DEX=uniswap-v3`), metric prefix
+`uniswap_v3` (set by `uniswapV3Factory` in
+`cmd/workers/dex-indexer/factories.go`). Unlike `curve-indexer` there is no
+periodic sweep: `handleBlock` decodes events per block, derives the touched
+pool set via `dexconsumer.DueSet`, and snapshots only those pools' state and
+tick rows through one multicall before the transaction commit. A block with
+no Uniswap V3 activity legitimately writes zero state rows.
+
+## VectorUniswapV3IndexerStalled
+
+**Severity:** critical · **For:** 15m
+
+### What it means
+
+`uniswap_v3_blocks_processed_total{status="success"}` has not incremented for
+15 minutes on the labelled `chain`. Uniswap V3 pool state in TimescaleDB is
+going stale; no swaps, liquidity events, or tick updates are being recorded.
+
+### First checks (<=5 min)
+
+1. **Pod status** — `kubectl -n vector get pods -l app=uniswap-v3-indexer`
+2. **Recent logs** — look for decode panics, DB connection errors,
+   `context deadline exceeded`, or SQS poll failures:
+   `kubectl -n vector logs -l app=uniswap-v3-indexer --tail=100`
+3. **Upstream lag** — confirm the watcher is producing blocks for this chain
+   (if not, the root cause is upstream — see `VectorWatcherNoBlocks`).
+4. **SQS queue depth** — check the uniswap-v3-indexer SQS queue. A depth of 0
+   with no processing means the consumer lost its connection or the queue is
+   empty.
+5. **TimescaleDB health** — connection pool exhaustion or replication lag can
+   stall writes; check the Postgres dashboard.
+
+### Common causes
+
+- Indexer stuck on a malformed event after a contract upgrade -> add the new
+  ABI / decoder and redeploy.
+- DB connection pool saturated -> restart the pod; longer-term raise the pool
+  limit.
+- SQS consumer lost connection -> pod restart reconnects.
+- Block latency high enough that the worker is processing but not completing
+  within the 5m rate window (see `VectorUniswapV3IndexerBlockLatencyHigh`).
+
+### Verify recovery
+
+`rate(uniswap_v3_blocks_processed_total{status="success"}[5m]) > 0` for the
+affected chain.
+
+---
+
+## VectorUniswapV3IndexerErrorsHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+`uniswap_v3_errors_total` is above 0.1 errors/sec sustained for 15 minutes.
+Errors are counted per operation (attribute `operation`, currently
+`blockHandler` — recorded once at the `BlockHandler` boundary on any non-nil
+error); the indexer continues processing but errors at this rate often
+precede a full stall.
+
+### First checks
+
+1. **Dominant error class** — `sum by (operation)(rate(uniswap_v3_errors_total[10m]))`
+   to see which operation is failing most.
+2. **Pod logs** — `kubectl -n vector logs -l app=uniswap-v3-indexer | grep "ERROR"`
+3. **Recent deploys** — `kubectl rollout history deploy/uniswap-v3-indexer -n vector`.
+   A failed ABI decode after a contract change is a common trigger.
+4. **Chain reorgs** — check watcher logs; a reorg delivers blocks the indexer
+   may reject until the version advances.
+
+### Common causes
+
+- ABI decode failure after a Uniswap V3 contract upgrade -> update the
+  ABI/decoder.
+- DB write error (FK constraint, duplicate key) -> inspect the failing pool
+  and block number.
+- Transient RPC timeout on the DueSet multicall -> usually self-clears;
+  investigate if sustained.
+
+### Verify recovery
+
+`rate(uniswap_v3_errors_total[10m]) == 0` for the affected chain.
+
+---
+
+## VectorUniswapV3IndexerBlockLatencyHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+p99 block processing duration (`uniswap_v3_block_duration_seconds`) exceeds 3
+seconds sustained for 15 minutes. The indexer is degraded; expect downstream
+lag in Uniswap V3 pool state.
+
+### First checks
+
+1. **Multicall/RPC latency** — `snapshotDueSet` issues one batched multicall
+   per block for all touched pools before opening the transaction. High
+   latency there dominates block duration. Check the archive RPC pod health
+   and CPU.
+2. **Touched-pool count** — a block touching many pools (e.g. a heavy swap
+   block across the registered pool set) multiplies multicall payload size.
+   Check pool count for this chain.
+3. **DB write latency** — confirm TimescaleDB is not under I/O pressure.
+4. **Pod CPU/memory** — `kubectl top pod -n vector -l app=uniswap-v3-indexer`.
+
+### Common causes
+
+- Archive RPC node degraded -> coordinate with infra; consider circuit-
+  breaker or fallback RPC.
+- Large touched-pool set in a single block -> expected under high on-chain
+  activity; confirm against block explorer before escalating.
+- TimescaleDB I/O contention -> investigate concurrent write patterns.
+
+### Verify recovery
+
+`histogram_quantile(0.99, sum by (le)(rate(uniswap_v3_block_duration_seconds_bucket[10m]))) < 3`
+for the affected chain.
+
+---
+
+## VectorUniswapV3IndexerNotWritingState
+
+**Severity:** warning · **For:** 10m
+The 30m rate window tolerates a genuinely quiet block with no Uniswap V3
+events; there is no sweep to guarantee periodic writes the way curve's
+`SWEEP_BLOCKS` does, so 30m of zero on an otherwise-active chain is the
+actionable signal.
+
+### What it means
+
+Blocks are advancing (`uniswap_v3_blocks_processed_total{status="success"}` is
+non-zero) but no state/tick snapshot rows have been written
+(`uniswap_v3_state_rows_written_total` is zero) for 30 minutes. The error path
+will NOT catch this: a quietly-empty touched-pool set (e.g. `DueSet` always
+returns empty, or every `snapshotDueSet` call silently no-ops) produces no
+errors, just no state rows.
+
+This is the data-quality / silent-empty check that `VectorUniswapV3IndexerStalled`
+cannot see.
+
+### First checks
+
+1. **On-chain activity** — confirm there is genuine Uniswap V3 swap/mint/burn
+   activity on this chain in the window; a real quiet period is not a bug.
+2. **Touched pools** — check whether any registered pool addresses match logs
+   in the processed blocks. `kubectl logs -l app=uniswap-v3-indexer` should
+   show pool-touch debug entries (or absence thereof).
+3. **Pool registry** — if the pool list is empty (`LoadPools` returned 0
+   rows), `DueSet` can never produce entries. Confirm the DB has rows in the
+   Uniswap V3 pool registry for this chain.
+4. **No separate DueSet-size metric** is emitted; use
+   `uniswap_v3_state_rows_written_total` as the proxy. A sudden drop to zero
+   after previously non-zero is more urgent than a fresh deploy with no
+   history.
+
+### Common causes
+
+- No Uniswap V3 events on this chain in 30m (legitimate low-activity window)
+  -> confirm on-chain before escalating.
+- Pool registry empty (migration not applied, wrong chain ID) -> verify the
+  Uniswap V3 pool registry row count for this chain.
+- Contract address mismatch (new pool deployed at a different address) ->
+  update the pool registry.
+- Sustained SQS replay / redrive over an already-indexed range under one
+  `build_id`: every message is a block already persisted at this build (same
+  `build_id`, same `block_version`), so each state INSERT hits `ON CONFLICT DO
+  NOTHING` (0 rows) and `uniswap_v3_state_rows_written_total` does not advance
+  even though processing succeeds. A redeploy (new `build_id`) or reorg (new
+  `block_version`) inserts fresh rows and clears the alert. Check the queue
+  for a redrive before assuming a logic stall.
+
+### Verify recovery
+
+`rate(uniswap_v3_state_rows_written_total[30m]) > 0` for the affected chain,
+or confirm on-chain that no Uniswap V3 activity occurred (legitimate quiet
+window).
+
+---
