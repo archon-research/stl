@@ -20,12 +20,20 @@ const erc4626ABIJson = `[
 		"stateMutability": "view",
 		"type": "function"
 	}
+	,{
+		"inputs": [{"name": "shares", "type": "uint256"}],
+		"name": "convertToAssets",
+		"outputs": [{"name": "", "type": "uint256"}],
+		"stateMutability": "view",
+		"type": "function"
+	}
 ]`
 
-// ERC4626Source fetches vault share balances via balanceOf(proxy).
-// We store the token's own on-chain units in Balance so allocation tracking
-// matches the held receipt token, while ScaledBalance preserves the raw share
-// amount for consumers that want it explicitly.
+// ERC4626Source fetches vault share balances in two multicall rounds, both
+// pinned to the same block. Round 1: balanceOf(wallet) per entry; round 2:
+// convertToAssets(shares) per non-zero entry. Balance and ScaledBalance hold
+// raw shares; UnderlyingValue holds the asset equivalent or NULL when
+// convertToAssets reverts or is undecodable (NULL = unknown, not 0).
 type ERC4626Source struct {
 	multicaller outbound.Multicaller
 	vaultABI    abi.ABI
@@ -66,6 +74,7 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
 
+	var toConvert []*TokenEntry
 	for _, e := range valid1 {
 		sh := shares[e.Key()]
 		if sh == nil {
@@ -73,8 +82,9 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 		}
 		if sh.Sign() == 0 {
 			result.Balances[e.Key()] = &PositionBalance{
-				Balance:       big.NewInt(0),
-				ScaledBalance: big.NewInt(0),
+				Balance:         big.NewInt(0),
+				ScaledBalance:   big.NewInt(0),
+				UnderlyingValue: big.NewInt(0),
 			}
 			continue
 		}
@@ -85,9 +95,74 @@ func (s *ERC4626Source) FetchBalances(ctx context.Context, entries []*TokenEntry
 			Balance:       new(big.Int).Set(sh),
 			ScaledBalance: new(big.Int).Set(sh),
 		}
+		toConvert = append(toConvert, e)
+	}
+
+	if err := s.fetchUnderlyingValues(ctx, toConvert, shares, block, result); err != nil {
+		return nil, err
 	}
 
 	return result, nil
+}
+
+// fetchUnderlyingValues is the second multicall round: convertToAssets(shares)
+// per non-zero position, pinned to the same block as the balanceOf round.
+// Multicall3 cannot feed one call's output into another's input, so the two
+// reads cannot share a batch; the same pinned block number preserves the
+// same-state snapshot. Raw (undecimalised) shares go in -- VEC-307 §8.4.
+//
+// A reverting/undecodable convertToAssets (observed on grove-bbqUSDC-V2)
+// leaves UnderlyingValue nil: NULL is "unknown", while 0 or the share count
+// would be plausible-but-wrong data poisoning downstream USD exposure. A
+// transport-level multicall failure propagates instead, so SQS redelivers the
+// block (VEC-188 invariant).
+func (s *ERC4626Source) fetchUnderlyingValues(ctx context.Context, entries []*TokenEntry, shares map[EntryKey]*big.Int, block *big.Int, result *FetchResult) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	calls := make([]outbound.Call, 0, len(entries))
+	var valid []*TokenEntry
+	for _, e := range entries {
+		sh := shares[e.Key()]
+		if sh == nil {
+			// Invariant: every entry passed here must have a shares result.
+			return fmt.Errorf("missing shares for %s/%s in convertToAssets round", e.ContractAddress.Hex(), e.WalletAddress.Hex())
+		}
+		data, err := s.vaultABI.Pack("convertToAssets", sh)
+		if err != nil {
+			s.logger.Warn("pack convertToAssets failed", "contract", e.ContractAddress.Hex(), "error", err)
+			continue
+		}
+		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: data})
+		valid = append(valid, e)
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+
+	mc, err := s.multicaller.Execute(ctx, calls, block)
+	if err != nil {
+		return fmt.Errorf("convertToAssets multicall: %w", err)
+	}
+
+	for i, e := range valid {
+		if i >= len(mc) || !mc[i].Success || len(mc[i].ReturnData) == 0 {
+			s.logger.Warn("convertToAssets failed; underlying value will be NULL",
+				"contract", e.ContractAddress.Hex(),
+				"wallet", e.WalletAddress.Hex())
+			continue
+		}
+		v := unpackUint256(&s.vaultABI, "convertToAssets", mc[i].ReturnData)
+		if v == nil {
+			s.logger.Warn("convertToAssets decode failed; underlying value will be NULL",
+				"contract", e.ContractAddress.Hex(),
+				"wallet", e.WalletAddress.Hex())
+			continue
+		}
+		result.Balances[e.Key()].UnderlyingValue = v
+	}
+	return nil
 }
 
 func (s *ERC4626Source) fetchShares(ctx context.Context, entries []*TokenEntry, block *big.Int) (map[EntryKey]*big.Int, []*TokenEntry, error) {
