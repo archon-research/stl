@@ -730,3 +730,41 @@ cannot see.
 confirm on-chain that no Curve activity occurred (legitimate quiet window).
 
 ---
+
+## VectorAllocationUnderlyingValueFailures
+
+**Severity:** warning · **For:** 30m
+
+### What it means
+
+The prime-allocation-indexer persisted `allocation_position` rows with
+`underlying_value = NULL` for a token type that should produce one
+(`erc4626` / `atoken` / `erc20`). Writes succeed, so no error alert fires;
+USD exposure computed from these rows silently undercounts (VEC-307).
+
+`reason` tells you where it broke:
+
+- `convert_failed` -- the vault's `convertToAssets(shares)` reverted or
+  returned undecodable data (known case: grove-bbqUSDC-V2). Check the
+  contract on Etherscan at the alerting block; if the vault genuinely has no
+  working `convertToAssets`, reclassify the entry's `token_type` in the
+  axis-synome export instead of leaving a permanent warning.
+- `missing_asset_address` -- the axis-synome entry for a vault/atoken has no
+  `asset_address`. Fix the entry in the axis-synome export; the indexer
+  cannot invent a denomination.
+- `asset_metadata_missing` -- decimals/symbol multicall for the underlying
+  failed. Usually transient RPC trouble; correlate with
+  `VectorRPCRetryRatioHigh`.
+
+### First checks
+
+1. `sum by (token, reason) (increase(allocation_underlying_value_failures_total[6h]))`
+   -- which contracts, which reason.
+2. Logs: `{app="prime-allocation-indexer"} |= "underlying value not computable"`
+   -- carries token, wallet, block, reason.
+3. Rows stay NULL until the next successful sweep writes new rows (the table
+   is append-only; nothing backfills automatically). Consumers fall back to
+   balance-based pricing for NULL rows, so impact is undercounted yield, not
+   zeroed exposure.
+
+---
