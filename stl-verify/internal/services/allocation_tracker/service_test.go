@@ -341,6 +341,50 @@ func TestProcessBlock_SweepHandlerFailure_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestProcessBlock_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching a position source, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}}
+	source := &mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+	}
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(source)
+
+	handler := &testHandler{}
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          entries,
+		handler:          handler,
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: ""}
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected non-nil error from processBlock when event.BlockHash is empty")
+	}
+
+	if source.called != 0 {
+		t.Errorf("position source invoked %d times, want 0 (block must not be read)", source.called)
+	}
+	if len(handler.batches) != 0 {
+		t.Errorf("HandleBatch called %d times, want 0 (block must not be persisted)", len(handler.batches))
+	}
+}
+
 // ── matchTransfers ──
 
 func TestMatchTransfers_MatchesKnownEntry(t *testing.T) {

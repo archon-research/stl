@@ -873,6 +873,54 @@ func TestSync_ReadDebtsBatchError(t *testing.T) {
 	_ = svc.Stop()
 }
 
+// TestProcessBlock_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the vat caller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
+	caller := newFakeVatCaller()
+	caller.setIlk(sparkPrime().VaultAddress, ilkFrom("ALLOCATOR-SPARK-A"))
+
+	events := []outbound.BlockEvent{{
+		ChainID:        testChainID,
+		BlockNumber:    testBlockNum,
+		Version:        0,
+		BlockHash:      "",
+		ParentHash:     fmt.Sprintf("0x%064x", testBlockNum-1),
+		BlockTimestamp: time.Now().Unix(),
+		ReceivedAt:     time.Now(),
+	}}
+	consumer := newFakeSQSConsumer(events)
+
+	repo := &fakePrimeDebtRepository{primes: []entity.Prime{sparkPrime()}}
+	svc, err := prime_debt.NewVaultDebtService(defaultConfig(1), caller, repo, consumer, newFakeBlockQuerier(testBlockNum))
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	_ = svc.Stop()
+
+	if len(caller.readHashes) != 0 {
+		t.Errorf("ReadDebts invoked %d times, want 0 (guard must fire before the caller)", len(caller.readHashes))
+	}
+	if repo.savedCount() != 0 {
+		t.Errorf("expected 0 saved snapshots on missing block hash, got %d", repo.savedCount())
+	}
+	// The message must not be ACKed: a malformed event must be retried like any
+	// other transient processing failure, not silently dropped.
+	if consumer.deleteCount() != 0 {
+		t.Errorf("expected message to not be ACKed on missing block hash, deleteCount = %d", consumer.deleteCount())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Missing result for prime (truncated results)
 // ---------------------------------------------------------------------------

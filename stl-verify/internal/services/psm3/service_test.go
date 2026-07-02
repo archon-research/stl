@@ -567,6 +567,45 @@ func TestSweep_ReadStateError_NoSaveACKsAndSkips(t *testing.T) {
 	}
 }
 
+// TestSweep_MissingBlockHash_NoCallerReadACKsAndSkips: an event with an empty
+// BlockHash must fail loud before ever reaching the PSM3 caller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors). Like
+// every other sweep failure, this is logged and ACKed rather than NACKed (see
+// processBlock's cadence-clock rationale), so the observable signal is "no
+// chain read, no snapshot saved" rather than a returned error.
+func TestSweep_MissingBlockHash_NoCallerReadACKsAndSkips(t *testing.T) {
+	caller := newFakePSM3Caller()
+	repo := &fakePSM3Repo{}
+	events := []outbound.BlockEvent{{
+		ChainID:        testChainID,
+		BlockNumber:    testBlockNum,
+		Version:        0,
+		BlockHash:      "",
+		ParentHash:     fmt.Sprintf("0x%064x", testBlockNum-1),
+		BlockTimestamp: 1700000000 + testBlockNum,
+		ReceivedAt:     time.Now(),
+	}}
+	consumer := newFakeSQSConsumer(events)
+	svc := newService(t, defaultConfig(1), caller, repo, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not ACKed after missing block hash")
+	cancel()
+	_ = svc.Stop()
+
+	if got := caller.attemptCount(); got != 0 {
+		t.Errorf("expected 0 ReadState attempts (guard must fire before the caller), got %d", got)
+	}
+	if got := repo.savedCount(); got != 0 {
+		t.Errorf("expected 0 saved snapshots on missing block hash, got %d", got)
+	}
+}
+
 func TestSweep_SaveReservesError_ACKsAndSkips(t *testing.T) {
 	caller := newFakePSM3Caller()
 	repo := &fakePSM3Repo{saveErr: errors.New("database write failed")}

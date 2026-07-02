@@ -3690,6 +3690,47 @@ func TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlockEvent_MissingBlockHash_ReturnsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.setupMarketExistsInDB(testMarketID, 42)
+	h.storeReceipts(t, 1, 20000000, 0, []shared.TransactionReceipt{
+		makeReceipt(testTxHash, h.makeSupplyLog(testMarketID, testCaller, testOnBehalf, big.NewInt(1000), big.NewInt(900))),
+	})
+
+	var multicallCalled int32
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		atomic.AddInt32(&multicallCalled, 1)
+		return nil, fmt.Errorf("multicaller must not be called")
+	}
+	var stateSaved, positionSaved int32
+	h.morphoRepo.SaveMarketStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarketState) error {
+		atomic.AddInt32(&stateSaved, 1)
+		return nil
+	}
+	h.morphoRepo.SaveMarketPositionFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarketPosition) error {
+		atomic.AddInt32(&positionSaved, 1)
+		return nil
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 20000000, Version: 0, BlockHash: ""}
+	if err := h.svc.processBlockEvent(context.Background(), event); err == nil {
+		t.Fatal("expected non-nil error from processBlockEvent when event.BlockHash is empty")
+	}
+
+	if atomic.LoadInt32(&multicallCalled) != 0 {
+		t.Error("multicaller invoked, want it never called")
+	}
+	if atomic.LoadInt32(&stateSaved) != 0 {
+		t.Error("SaveMarketState invoked, want it never called (block must not be persisted)")
+	}
+	if atomic.LoadInt32(&positionSaved) != 0 {
+		t.Error("SaveMarketPosition invoked, want it never called (block must not be persisted)")
+	}
+}
+
 // Suppress unused import warnings.
 var (
 	_ = testutil.DiscardLogger
