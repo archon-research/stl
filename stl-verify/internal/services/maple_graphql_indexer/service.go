@@ -419,7 +419,7 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_amount")
 			}
 			if l.Collateral.AssetValueUSD == nil {
-				s.telemetry.RecordNullDowngrade(ctx, "collateral_asset_value_usd")
+				s.telemetry.RecordCollateralPriceNull(ctx, collateralPriceNullReason(l.Collateral.State), l.Collateral.Asset)
 			}
 			if l.Collateral.LiquidationLevel == nil {
 				s.telemetry.RecordNullDowngrade(ctx, "collateral_liquidation_level")
@@ -474,6 +474,26 @@ func (s *Service) syncLoans(ctx context.Context, syncedAt time.Time, poolIDs map
 	s.telemetry.RecordRowsWritten(ctx, "maple_loan_collateral", collateralCount)
 	s.logger.Info("loans synced", "count", len(loans), "collaterals", collateralCount, "borrowers", len(borrowers))
 	return nil
+}
+
+// Collateral-price null reasons (see Telemetry.RecordCollateralPriceNull).
+const (
+	collateralPriceNullPending     = "pending"
+	collateralPriceNullUnpriceable = "unpriceable"
+)
+
+// collateralPriceNullReason classifies a null collateral USD price for the
+// null-downgrade metric, reading only the returned collateral state: a
+// DepositPending collateral has no price yet ("pending"); a null price in any
+// other state is treated as an upstream oracle gap ("unpriceable"). It does not
+// consult whether the client tolerated a "No fiat value" error this cycle, so
+// "unpriceable" means "null price in a non-pending state" — not a guaranteed
+// 1:1 with a tolerated error. Alerting must not assume that correspondence.
+func collateralPriceNullReason(collateralState string) string {
+	if strings.EqualFold(collateralState, "DepositPending") {
+		return collateralPriceNullPending
+	}
+	return collateralPriceNullUnpriceable
 }
 
 // buildLoanEntities maps API loans to registry entities with resolved pool

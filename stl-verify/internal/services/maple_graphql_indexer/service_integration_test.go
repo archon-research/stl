@@ -391,6 +391,113 @@ func TestSyncIntegration_FullCycle(t *testing.T) {
 	}
 }
 
+func TestSyncIntegration_UnpriceableCollateralPersistsNullPrice(t *testing.T) {
+	// Maple returns a collateral-scoped "No fiat value" error with partial data.
+	// The loans phase must commit: the priceable loan persists normally and the
+	// unpriceable loan persists with asset_value_usd = NULL, rather than the
+	// whole cycle rolling back.
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+
+	poolsJSON := `[{"id": "` + itPoolSyrup + `", "name": "Syrup USDC", "monthlyApy": "0", "spotApy": "0",
+		"assets": "400", "collateralValue": "500", "principalOut": "600", "tvl": "1000",
+		"asset": {"id": "` + itUSDC + `", "symbol": "USDC", "decimals": 6},
+		"syrupRouter": {"id": "0x1234567890123456789012345678901234567890"}}]`
+
+	// Two loans: itLoanInternal priceable, itLoanExternal unpriceable (PYUSD
+	// collateral with a null assetValueUsd), alongside the errors[] envelope.
+	loansResp := `{
+		"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 1, "collateral", "assetValueUsd"]}],
+		"data": {"openTermLoans": [
+			{"id": "` + itLoanInternal + `", "borrower": {"id": "` + itBorrowerA + `"}, "state": "Active",
+			 "principalOwed": "10000000000000", "acmRatio": "1000000",
+			 "collateral": {"asset": "USDC", "assetAmount": "10000000000000", "assetValueUsd": "100000000",
+			                "decimals": 6, "state": "Deposited", "custodian": null, "liquidationLevel": 900000},
+			 "loanMeta": null, "fundingPool": {"id": "` + itPoolSyrup + `"}},
+			{"id": "` + itLoanExternal + `", "borrower": {"id": "` + itBorrowerB + `"}, "state": "Active",
+			 "principalOwed": "7000000", "acmRatio": "1953569",
+			 "collateral": {"asset": "PYUSD", "assetAmount": "215100000", "assetValueUsd": null,
+			                "decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+			 "loanMeta": null, "fundingPool": {"id": "` + itPoolSyrup + `"}}
+		]}}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		skip := 0
+		if v, ok := req.Variables["skip"].(float64); ok {
+			skip = int(v)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(req.Query, "poolV2S"):
+			payload := poolsJSON
+			if skip > 0 {
+				payload = "[]"
+			}
+			_, _ = w.Write([]byte(`{"data": {"poolV2S": ` + payload + `}}`))
+		case strings.Contains(req.Query, "openTermLoans"):
+			if skip > 0 {
+				_, _ = w.Write([]byte(`{"data": {"openTermLoans": []}}`))
+				return
+			}
+			_, _ = w.Write([]byte(loansResp))
+		case strings.Contains(req.Query, "GetFixedTermLoans"):
+			_, _ = w.Write([]byte(`{"data": {"loans": []}}`))
+		case strings.Contains(req.Query, "skyStrategies"):
+			_, _ = w.Write([]byte(`{"data": {"skyStrategies": []}}`))
+		case strings.Contains(req.Query, "syrupGlobals"):
+			_, _ = w.Write([]byte(`{"data": {"syrupGlobals": {"apy": "1", "collateralApy": "2", "poolApy": "3", "dripsYieldBoost": "0", "tvl": "100"}}}`))
+		default:
+			t.Errorf("unexpected query: %s", req.Query)
+		}
+	}))
+	defer server.Close()
+
+	service := newIntegrationService(t, pool, server.URL)
+	if err := service.Sync(ctx); err != nil {
+		t.Fatalf("Sync must commit despite the unpriceable collateral: %v", err)
+	}
+
+	if got := countRows(t, ctx, pool, "maple_loan"); got != 2 {
+		t.Errorf("maple_loan rows = %d, want 2", got)
+	}
+	if got := countRows(t, ctx, pool, "maple_loan_collateral"); got != 2 {
+		t.Errorf("maple_loan_collateral rows = %d, want 2", got)
+	}
+
+	// The PYUSD collateral persisted with a NULL price; the USDC one kept its price.
+	var pyusdPrice *string
+	if err := pool.QueryRow(ctx, `
+		SELECT c.asset_value_usd::text
+		FROM maple_loan_collateral c JOIN maple_loan l ON l.id = c.maple_loan_id
+		WHERE l.loan_address = decode($1, 'hex')`,
+		strings.TrimPrefix(itLoanExternal, "0x")).Scan(&pyusdPrice); err != nil {
+		t.Fatalf("querying unpriceable collateral: %v", err)
+	}
+	if pyusdPrice != nil {
+		t.Errorf("unpriceable collateral asset_value_usd = %v, want NULL", *pyusdPrice)
+	}
+
+	var usdcPrice *string
+	if err := pool.QueryRow(ctx, `
+		SELECT c.asset_value_usd::text
+		FROM maple_loan_collateral c JOIN maple_loan l ON l.id = c.maple_loan_id
+		WHERE l.loan_address = decode($1, 'hex')`,
+		strings.TrimPrefix(itLoanInternal, "0x")).Scan(&usdcPrice); err != nil {
+		t.Fatalf("querying priceable collateral: %v", err)
+	}
+	if usdcPrice == nil || *usdcPrice != "100000000" {
+		t.Errorf("priceable collateral asset_value_usd = %v, want 100000000", usdcPrice)
+	}
+}
+
 func TestSyncIntegration_PoolsPhaseFailsOthersIsolated(t *testing.T) {
 	// Only the pools query breaks (null top-level collection). Phases run in
 	// their own transactions, so the run must fail yet the independent globals
