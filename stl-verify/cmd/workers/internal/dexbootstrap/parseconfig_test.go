@@ -281,3 +281,43 @@ func TestParseConfig_FlagOverridesEnvVar(t *testing.T) {
 		t.Errorf("QueueURL = %q, want flag-queue (flag wins over env)", cfg.QueueURL)
 	}
 }
+
+func TestParseConfig_SweepBlocks(t *testing.T) {
+	tests := []struct {
+		name    string
+		flag    []string
+		env     map[string]string
+		want    int64
+		wantErr bool
+	}{
+		{name: "default when unset", flag: nil, want: 50},
+		{name: "flag overrides default", flag: []string{"-sweep-blocks", "10"}, want: 10},
+		{name: "env used when flag absent", env: map[string]string{"SWEEP_BLOCKS": "25"}, want: 25},
+		{name: "flag overrides env", flag: []string{"-sweep-blocks", "10"}, env: map[string]string{"SWEEP_BLOCKS": "25"}, want: 10},
+		{name: "zero disables sweep", flag: []string{"-sweep-blocks", "0"}, want: 0},
+		{name: "negative rejected", flag: []string{"-sweep-blocks", "-1"}, wantErr: true},
+		{name: "non-numeric env rejected", env: map[string]string{"SWEEP_BLOCKS": "abc"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envSet(t, happyEnv())
+			t.Setenv("SWEEP_BLOCKS", "")
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := ParseConfig("test", tt.flag)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.SweepBlocks != tt.want {
+				t.Fatalf("SweepBlocks = %d, want %d", cfg.SweepBlocks, tt.want)
+			}
+		})
+	}
+}

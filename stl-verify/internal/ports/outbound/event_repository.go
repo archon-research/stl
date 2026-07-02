@@ -10,6 +10,10 @@ import (
 // EventRepository defines the interface for protocol event persistence.
 type EventRepository interface {
 	// SaveEvent saves a single protocol event within an external transaction.
-	// Uses ON CONFLICT DO NOTHING — duplicate events are silently ignored.
+	// Uses ON CONFLICT DO NOTHING -- duplicate events are silently ignored.
 	SaveEvent(ctx context.Context, tx pgx.Tx, event *entity.ProtocolEvent) error
+
+	// SaveBatch saves a batch of protocol events within an external transaction.
+	// Empty slice returns nil without sending.
+	SaveBatch(ctx context.Context, tx pgx.Tx, evts []*entity.ProtocolEvent) error
 }
