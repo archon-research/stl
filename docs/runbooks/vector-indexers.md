@@ -760,7 +760,7 @@ USD exposure computed from these rows silently undercounts (VEC-307).
 
 1. `sum by (token, reason) (increase(allocation_underlying_value_failures_total[6h]))`
    -- which contracts, which reason.
-2. Logs: `{app="prime-allocation-indexer"} |= "underlying value not computable"`
+2. Logs: `{app="allocation-tracker"} |= "underlying value not computable"`
    -- carries token, wallet, block, reason.
 3. Rows stay NULL until the next successful sweep writes new rows (the table
    is append-only; nothing backfills automatically). Consumers fall back to
