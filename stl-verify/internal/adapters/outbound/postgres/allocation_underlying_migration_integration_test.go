@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -39,7 +40,7 @@ func TestAllocationPositionUnderlyingColumnsExist(t *testing.T) {
 	}
 }
 
-func TestAllocationPositionUnderlyingPairCheckRejectsHalfSetRow(t *testing.T) {
+func TestAllocationPositionUnderlyingPairCheckConstraintExists(t *testing.T) {
 	ctx := context.Background()
 	// Constraint metadata is enough: inserting a full row needs the whole
 	// natural key; the CHECK's presence + definition is the behaviour under test.
@@ -49,6 +50,9 @@ func TestAllocationPositionUnderlyingPairCheckRejectsHalfSetRow(t *testing.T) {
 		WHERE conname = 'allocation_position_underlying_pair_check'`).Scan(&def)
 	if err != nil {
 		t.Fatalf("CHECK constraint missing: %v", err)
+	}
+	if !strings.Contains(def, "underlying_value IS NULL") || !strings.Contains(def, "underlying_token_id IS NULL") || !strings.Contains(def, "=") {
+		t.Fatalf("CHECK definition = %q, want both-NULL equality expression", def)
 	}
 }
 
@@ -60,5 +64,8 @@ func TestAllocationPositionUnderlyingTokenFKExists(t *testing.T) {
 		WHERE conname = 'allocation_position_underlying_token_id_fkey'`).Scan(&def)
 	if err != nil {
 		t.Fatalf("FK constraint missing: %v", err)
+	}
+	if !strings.Contains(def, "REFERENCES token(id)") {
+		t.Fatalf("FK definition = %q, want REFERENCES token(id)", def)
 	}
 }

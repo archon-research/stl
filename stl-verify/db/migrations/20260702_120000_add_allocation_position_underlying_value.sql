@@ -13,6 +13,11 @@
 ALTER TABLE allocation_position ADD COLUMN IF NOT EXISTS underlying_value NUMERIC;
 ALTER TABLE allocation_position ADD COLUMN IF NOT EXISTS underlying_token_id BIGINT;
 
+-- DROP before ADD: allocation_position is a hypertable pinned to public; the
+-- multi-schema test harness replays this migration against the same public
+-- table once per registered test schema, so the constraint can already exist
+-- on the second pass. In prod (one transactional run per DB) the DROPs are
+-- no-ops.
 ALTER TABLE allocation_position
   DROP CONSTRAINT IF EXISTS allocation_position_underlying_token_id_fkey;
 ALTER TABLE allocation_position
