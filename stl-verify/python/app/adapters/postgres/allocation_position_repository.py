@@ -237,6 +237,16 @@ class AllocationRepository:
                             else None
                         ),
                         latest_activity_at=row.latest_activity_at,
+                        latest_activity_action=row.latest_activity_action,
+                        latest_activity_amount=(
+                            _safe_decimal(
+                                row.latest_activity_amount,
+                                "latest_activity_amount",
+                                row.receipt_token_id,
+                            )
+                            if row.latest_activity_amount is not None
+                            else None
+                        ),
                     )
                     for row in result
                 ]
@@ -276,6 +286,16 @@ class AllocationRepository:
                             else None
                         ),
                         latest_activity_at=row.latest_activity_at,
+                        latest_activity_action=row.latest_activity_action,
+                        latest_activity_amount=(
+                            _safe_decimal(
+                                row.latest_activity_amount,
+                                "latest_activity_amount",
+                                row.token_id,
+                            )
+                            if row.latest_activity_amount is not None
+                            else None
+                        ),
                     )
                     for row in result
                 ]
@@ -807,7 +827,9 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             pr.name                                  AS protocol_name,
             ap.chain_id                              AS chain_id,
             ap.balance                               AS balance,
-            ap.created_at                            AS latest_activity_at
+            ap.created_at                            AS latest_activity_at,
+            ap.direction                             AS latest_activity_action,
+            ap.tx_amount                             AS latest_activity_amount
         FROM allocation_position ap
         JOIN token t          ON t.id = ap.token_id
         JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
@@ -829,7 +851,9 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         p.protocol_name,
         p.balance,
         (p.balance * lp.price_usd) AS amount_usd,
-        p.latest_activity_at
+        p.latest_activity_at,
+        p.latest_activity_action,
+        p.latest_activity_amount
     FROM latest_receipt_positions p
     LEFT JOIN LATERAL (
         SELECT otp.price_usd
@@ -861,7 +885,9 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             ap.chain_id,
             ap.token_id,
             ap.balance,
-            ap.created_at AS latest_activity_at
+            ap.created_at AS latest_activity_at,
+            ap.direction AS latest_activity_action,
+            ap.tx_amount AS latest_activity_amount
         FROM allocation_position ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
         ORDER BY ap.token_id,
@@ -875,7 +901,9 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         t.symbol                 AS symbol,
         lp.balance,
         (lp.balance * px.price_usd) AS amount_usd,
-        lp.latest_activity_at
+        lp.latest_activity_at,
+        lp.latest_activity_action,
+        lp.latest_activity_amount
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
     LEFT JOIN receipt_token rt

@@ -1104,7 +1104,6 @@ function App() {
           errorMessage={allocationsErrorMessage}
           isDrawerOpen={isDrawerOpen}
           isLoading={isAllocationsLoading}
-          localProtocols={localProtocols}
           selectedAllocation={selectedAllocation}
           selectedPrime={selectedPrime}
         />

@@ -98,6 +98,8 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "balance": "100.0",
             "amount_usd": None,
             "latest_activity_at": None,
+            "latest_activity_action": None,
+            "latest_activity_amount": None,
             "category": "allocation",
         }
     ]
@@ -133,6 +135,8 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
             "balance": "250.0",
             "amount_usd": None,
             "latest_activity_at": None,
+            "latest_activity_action": None,
+            "latest_activity_amount": None,
             "category": "asset",
         }
     ]
@@ -154,6 +158,29 @@ def test_list_allocations_prices_direct_asset_holding_from_oracle():
     rows = response.json()
     assert rows[0]["symbol"] == "PYUSD"
     assert rows[0]["amount_usd"] == "249.5"
+
+
+def test_list_allocations_surfaces_latest_activity_action_and_amount():
+    """The most recent flow's direction and token-unit magnitude ride along the
+    same row that supplies ``latest_activity_at``.
+    """
+    from app.api.v1 import allocations
+
+    position = make_receipt_token_position(
+        latest_activity_at=datetime(2026, 5, 7, 12, 0, tzinfo=UTC),
+        latest_activity_action="out",
+        latest_activity_amount=Decimal("12.5"),
+    )
+    service = _make_service(positions=[position])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["latest_activity_action"] == "out"
+    assert row["latest_activity_amount"] == "12.5"
 
 
 def test_list_allocations_combines_receipt_and_direct_rows():

@@ -115,6 +115,19 @@ class AllocationResponse(BaseModel):
         description="ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.",
         examples=["2026-05-07T12:00:00Z"],
     )
+    latest_activity_action: str | None = Field(
+        default=None,
+        description="Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+        examples=["out"],
+    )
+    latest_activity_amount: Decimal | None = Field(
+        default=None,
+        description=(
+            "Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a "
+            "JSON string. `null` when there is no activity."
+        ),
+        examples=["12.5"],
+    )
     category: AllocationCategory = Field(
         description="Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`).",
     )
@@ -133,6 +146,8 @@ class AllocationResponse(BaseModel):
                 "balance": "1234567.89",
                 "amount_usd": "1234567.89",
                 "latest_activity_at": "2026-05-07T12:00:00Z",
+                "latest_activity_action": "out",
+                "latest_activity_amount": "12.5",
                 "category": "allocation",
             }
         }
@@ -522,6 +537,8 @@ async def list_allocations(
             balance=p.balance,
             amount_usd=p.amount_usd,
             latest_activity_at=p.latest_activity_at.isoformat() if p.latest_activity_at else None,
+            latest_activity_action=p.latest_activity_action,
+            latest_activity_amount=p.latest_activity_amount,
             category=category_service.classify(p.protocol_name, p.symbol),
         )
         for p in positions
@@ -539,6 +556,8 @@ async def list_allocations(
             balance=h.balance,
             amount_usd=h.amount_usd,
             latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
+            latest_activity_action=h.latest_activity_action,
+            latest_activity_amount=h.latest_activity_amount,
             category=category_service.classify(None, h.symbol),
         )
         for h in direct_holdings
