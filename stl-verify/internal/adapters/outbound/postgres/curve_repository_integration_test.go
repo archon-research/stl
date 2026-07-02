@@ -174,7 +174,7 @@ func TestCurveRepository_SaveStableswapState_Idempotent(t *testing.T) {
 		Balances:     []*big.Int{big.NewInt(10), big.NewInt(11)},
 		VirtualPrice: big.NewInt(1),
 		TotalSupply:  big.NewInt(21),
-		A:            big.NewInt(900),
+		Amp:          big.NewInt(900),
 		Fee:          big.NewInt(1000000),
 		SpotDy:       []*big.Int{big.NewInt(1), big.NewInt(1)},
 	})
@@ -234,7 +234,7 @@ func TestCurveRepository_SaveCryptoswapState_RoundTrip(t *testing.T) {
 		Balances:     []*big.Int{big.NewInt(1000000), big.NewInt(1000000000000000000)},
 		VirtualPrice: big.NewInt(1000000000000000000),
 		TotalSupply:  big.NewInt(2000000000000000000),
-		A:            big.NewInt(2700000),
+		Amp:          big.NewInt(2700000),
 		Gamma:        big.NewInt(145000000000000000),
 		Fee:          big.NewInt(4000000),
 		D:            big.NewInt(5000000000000000000),
@@ -626,7 +626,7 @@ func TestCurveRepository_SaveStableswapState_ExtendedColumns(t *testing.T) {
 		Balances:        []*big.Int{big.NewInt(10), big.NewInt(11)},
 		VirtualPrice:    big.NewInt(1),
 		TotalSupply:     big.NewInt(21),
-		A:               big.NewInt(900),
+		Amp:             big.NewInt(900),
 		Fee:             big.NewInt(1000000),
 		SpotDy:          []*big.Int{big.NewInt(1), big.NewInt(1)},
 		APrecise:        big.NewInt(90000),
@@ -694,7 +694,7 @@ func TestCurveRepository_SaveCryptoswapState_ExtendedColumns(t *testing.T) {
 		Balances:            []*big.Int{big.NewInt(1000000), big.NewInt(2000000)},
 		VirtualPrice:        big.NewInt(1000000000000000000),
 		TotalSupply:         big.NewInt(2000000000000000000),
-		A:                   big.NewInt(2700000),
+		Amp:                 big.NewInt(2700000),
 		Gamma:               big.NewInt(145000000000000000),
 		Fee:                 big.NewInt(4000000),
 		PriceScale:          []*big.Int{big.NewInt(1234567890)},
@@ -1082,7 +1082,7 @@ func TestCurveRepository_SaveBlock_MixedBatchDrainOrder(t *testing.T) {
 		st, stErr := entity.NewCurveStableswapState(entity.CurveStableswapStateParams{
 			CurvePoolID: poolID, BlockNumber: bn, BlockVersion: 0, Timestamp: ts,
 			Balances: []*big.Int{big.NewInt(10), big.NewInt(11)}, VirtualPrice: big.NewInt(1),
-			TotalSupply: big.NewInt(21), A: big.NewInt(900), Fee: big.NewInt(1000000),
+			TotalSupply: big.NewInt(21), Amp: big.NewInt(900), Fee: big.NewInt(1000000),
 			SpotDy: []*big.Int{big.NewInt(1), big.NewInt(1)},
 		})
 		if stErr != nil {
@@ -1094,7 +1094,7 @@ func TestCurveRepository_SaveBlock_MixedBatchDrainOrder(t *testing.T) {
 		CurvePoolID: poolID, BlockNumber: 1003, BlockVersion: 0, Timestamp: ts,
 		Balances:     []*big.Int{big.NewInt(1000000), big.NewInt(2000000)},
 		VirtualPrice: big.NewInt(1000000000000000000), TotalSupply: big.NewInt(2000000000000000000),
-		A: big.NewInt(2700000), Gamma: big.NewInt(145000000000000000), Fee: big.NewInt(4000000),
+		Amp: big.NewInt(2700000), Gamma: big.NewInt(145000000000000000), Fee: big.NewInt(4000000),
 		PriceScale: []*big.Int{big.NewInt(1234567890)}, PriceOracle: []*big.Int{big.NewInt(1234560000)},
 		LastPrices: []*big.Int{big.NewInt(1234500000)}, SpotDy: []*big.Int{big.NewInt(990000000000000000)},
 	})

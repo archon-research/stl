@@ -123,36 +123,36 @@ type liquidityConverted struct {
 // insert. Field names mirror the columns: virtualPrice=get_virtual_price(),
 // amp=amplification coefficient A().
 type stableConverted struct {
-	state         *entity.CurveStableswapState
-	balances      []pgtype.Numeric
-	virtualPrice  pgtype.Numeric
-	totalSupply   pgtype.Numeric
-	amp           pgtype.Numeric
-	fee           pgtype.Numeric
-	spotDy        []pgtype.Numeric
-	adminBalances pgtype.FlatArray[pgtype.Numeric]
-	storedRates   pgtype.FlatArray[pgtype.Numeric]
-	calcWithdraw  pgtype.FlatArray[pgtype.Numeric]
+	state               *entity.CurveStableswapState
+	balances            []pgtype.Numeric
+	virtualPrice        pgtype.Numeric
+	totalSupply         pgtype.Numeric
+	amp                 pgtype.Numeric
+	fee                 pgtype.Numeric
+	spotDy              []pgtype.Numeric
+	adminBalances       pgtype.FlatArray[pgtype.Numeric]
+	storedRates         pgtype.FlatArray[pgtype.Numeric]
+	calcWithdrawOneCoin pgtype.FlatArray[pgtype.Numeric]
 }
 
 // cryptoConverted holds pre-converted numeric values for a curve_cryptoswap_state
 // insert. Field names mirror the columns: virtualPrice=get_virtual_price(),
 // amp=amplification coefficient A(), gamma=gamma().
 type cryptoConverted struct {
-	state         *entity.CurveCryptoswapState
-	balances      []pgtype.Numeric
-	virtualPrice  pgtype.Numeric
-	totalSupply   pgtype.Numeric
-	amp           pgtype.Numeric
-	gamma         pgtype.Numeric
-	fee           pgtype.Numeric
-	priceScale    []pgtype.Numeric
-	priceOracle   []pgtype.Numeric
-	lastPrices    []pgtype.Numeric
-	spotDy        []pgtype.Numeric
-	adminBalances pgtype.FlatArray[pgtype.Numeric]
-	getDx         pgtype.FlatArray[pgtype.Numeric]
-	calcWithdraw  pgtype.FlatArray[pgtype.Numeric]
+	state               *entity.CurveCryptoswapState
+	balances            []pgtype.Numeric
+	virtualPrice        pgtype.Numeric
+	totalSupply         pgtype.Numeric
+	amp                 pgtype.Numeric
+	gamma               pgtype.Numeric
+	fee                 pgtype.Numeric
+	priceScale          []pgtype.Numeric
+	priceOracle         []pgtype.Numeric
+	lastPrices          []pgtype.Numeric
+	spotDy              []pgtype.Numeric
+	adminBalances       pgtype.FlatArray[pgtype.Numeric]
+	getDx               pgtype.FlatArray[pgtype.Numeric]
+	calcWithdrawOneCoin pgtype.FlatArray[pgtype.Numeric]
 }
 
 // SaveBlock persists all of a block's curve rows in one pgx.Batch within tx.
@@ -253,9 +253,9 @@ func convertStableStates(states []*entity.CurveStableswapState) ([]stableConvert
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting total_supply: %w", i, convErr)
 		}
-		amp, convErr := BigIntToNumericRequired(state.A, "a")
+		amp, convErr := BigIntToNumericRequired(state.Amp, "amp")
 		if convErr != nil {
-			return nil, fmt.Errorf("stableswap %d converting a: %w", i, convErr)
+			return nil, fmt.Errorf("stableswap %d converting amp: %w", i, convErr)
 		}
 		fee, convErr := BigIntToNumericRequired(state.Fee, "fee")
 		if convErr != nil {
@@ -269,13 +269,13 @@ func convertStableStates(states []*entity.CurveStableswapState) ([]stableConvert
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting stored_rates: %w", i, convErr)
 		}
-		calcWithdraw, convErr := BigIntsToNullableNumericArray(state.CalcWithdrawOneCoin)
+		calcWithdrawOneCoin, convErr := BigIntsToNullableNumericArray(state.CalcWithdrawOneCoin)
 		if convErr != nil {
 			return nil, fmt.Errorf("stableswap %d converting calc_withdraw_one_coin: %w", i, convErr)
 		}
 		out = append(out, stableConverted{
 			state: state, balances: balances, virtualPrice: virtualPrice, totalSupply: totalSupply, amp: amp, fee: fee, spotDy: spotDy,
-			adminBalances: adminBalances, storedRates: storedRates, calcWithdraw: calcWithdraw,
+			adminBalances: adminBalances, storedRates: storedRates, calcWithdrawOneCoin: calcWithdrawOneCoin,
 		})
 	}
 	return out, nil
@@ -297,9 +297,9 @@ func convertCryptoStates(states []*entity.CurveCryptoswapState) ([]cryptoConvert
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting total_supply: %w", i, convErr)
 		}
-		amp, convErr := BigIntToNumericRequired(state.A, "a")
+		amp, convErr := BigIntToNumericRequired(state.Amp, "amp")
 		if convErr != nil {
-			return nil, fmt.Errorf("cryptoswap %d converting a: %w", i, convErr)
+			return nil, fmt.Errorf("cryptoswap %d converting amp: %w", i, convErr)
 		}
 		gamma, convErr := BigIntToNumericRequired(state.Gamma, "gamma")
 		if convErr != nil {
@@ -333,14 +333,14 @@ func convertCryptoStates(states []*entity.CurveCryptoswapState) ([]cryptoConvert
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting get_dx: %w", i, convErr)
 		}
-		calcWithdraw, convErr := BigIntsToNullableNumericArray(state.CalcWithdrawOneCoin)
+		calcWithdrawOneCoin, convErr := BigIntsToNullableNumericArray(state.CalcWithdrawOneCoin)
 		if convErr != nil {
 			return nil, fmt.Errorf("cryptoswap %d converting calc_withdraw_one_coin: %w", i, convErr)
 		}
 		out = append(out, cryptoConverted{
 			state: state, balances: balances, virtualPrice: virtualPrice, totalSupply: totalSupply, amp: amp, gamma: gamma, fee: fee,
 			priceScale: priceScale, priceOracle: priceOracle, lastPrices: lastPrices, spotDy: spotDy,
-			adminBalances: adminBalances, getDx: getDx, calcWithdraw: calcWithdraw,
+			adminBalances: adminBalances, getDx: getDx, calcWithdrawOneCoin: calcWithdrawOneCoin,
 		})
 	}
 	return out, nil
@@ -402,7 +402,7 @@ func queueCurveBatch(
 			BigIntToNullableNumeric(c.state.LastPrice), BigIntToNullableNumeric(c.state.PriceOracle),
 			BigIntToNullableNumeric(c.state.APrecise), c.adminBalances, c.storedRates,
 			BigIntToNullableNumeric(c.state.EmaPrice), BigIntToNullableNumeric(c.state.GetP),
-			BigIntToNullableNumeric(c.state.CalcTokenAmount), c.calcWithdraw, int(buildID),
+			BigIntToNullableNumeric(c.state.CalcTokenAmount), c.calcWithdrawOneCoin, int(buildID),
 		)
 	}
 
@@ -422,7 +422,7 @@ func queueCurveBatch(
 			c.priceScale, c.priceOracle, c.lastPrices, c.spotDy,
 			c.adminBalances, BigIntToNullableNumeric(c.state.LpPrice), BigIntToNullableNumeric(c.state.XcpProfitA),
 			c.state.LastPricesTimestamp, c.getDx, BigIntToNullableNumeric(c.state.CalcTokenAmount),
-			c.calcWithdraw, int(buildID),
+			c.calcWithdrawOneCoin, int(buildID),
 		)
 	}
 

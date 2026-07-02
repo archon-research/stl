@@ -19,7 +19,7 @@ type CurveStableswapStateParams struct {
 	Balances     []*big.Int
 	VirtualPrice *big.Int
 	TotalSupply  *big.Int
-	A            *big.Int
+	Amp          *big.Int
 	Fee          *big.Int
 	SpotDy       []*big.Int
 	LastPrice    *big.Int // NG only; nil for pre-NG
@@ -39,7 +39,7 @@ type CurveStableswapStateParams struct {
 // generation") pool implementation; the NG-only fields are nil on the legacy
 // pre-NG plain pools that do not expose those getters. Non-obvious fields:
 //
-//	A                    amplification coefficient, A()
+//	Amp                  amplification coefficient A()
 //	Fee                  swap fee in Curve units (1e10 = 100%)
 //	SpotDy               marginal get_dy(i,j) per ordered coin pair i!=j
 //	LastPrice            last_price() (NG-only)
@@ -59,7 +59,7 @@ type CurveStableswapState struct {
 	Balances     []*big.Int
 	VirtualPrice *big.Int
 	TotalSupply  *big.Int
-	A            *big.Int
+	Amp          *big.Int
 	Fee          *big.Int
 	SpotDy       []*big.Int
 	LastPrice    *big.Int
@@ -76,7 +76,7 @@ type CurveStableswapState struct {
 
 func NewCurveStableswapState(p CurveStableswapStateParams) (*CurveStableswapState, error) {
 	for name, v := range map[string]*big.Int{
-		"virtual_price": p.VirtualPrice, "total_supply": p.TotalSupply, "a": p.A, "fee": p.Fee,
+		"virtual_price": p.VirtualPrice, "total_supply": p.TotalSupply, "amp": p.Amp, "fee": p.Fee,
 	} {
 		if v == nil {
 			return nil, fmt.Errorf("curve stableswap state: %s must not be nil", name)
@@ -88,7 +88,7 @@ func NewCurveStableswapState(p CurveStableswapStateParams) (*CurveStableswapStat
 	return &CurveStableswapState{
 		CurvePoolID: p.CurvePoolID, BlockNumber: p.BlockNumber, BlockVersion: p.BlockVersion,
 		Timestamp: p.Timestamp, Balances: p.Balances, VirtualPrice: p.VirtualPrice,
-		TotalSupply: p.TotalSupply, A: p.A, Fee: p.Fee, SpotDy: p.SpotDy,
+		TotalSupply: p.TotalSupply, Amp: p.Amp, Fee: p.Fee, SpotDy: p.SpotDy,
 		LastPrice: p.LastPrice, PriceOracle: p.PriceOracle,
 		APrecise: p.APrecise, AdminBalances: p.AdminBalances, StoredRates: p.StoredRates,
 		EmaPrice: p.EmaPrice, GetP: p.GetP, CalcTokenAmount: p.CalcTokenAmount,
@@ -106,7 +106,7 @@ type CurveCryptoswapStateParams struct {
 	Balances     []*big.Int
 	VirtualPrice *big.Int
 	TotalSupply  *big.Int
-	A            *big.Int
+	Amp          *big.Int
 	Gamma        *big.Int
 	Fee          *big.Int
 	D            *big.Int // nullable
@@ -128,7 +128,7 @@ type CurveCryptoswapStateParams struct {
 // CurveCryptoswapState is a per-block snapshot of a Curve Cryptoswap pool
 // (Tricrypto-NG), one field per on-chain view function. Non-obvious fields:
 //
-//	A / Gamma            amplification and gamma parameters, A() / gamma()
+//	Amp / Gamma          amplification and gamma parameters, A() / gamma()
 //	Fee                  current dynamic fee, fee() (1e10 = 100%)
 //	D                    pool invariant, D()
 //	XcpProfit            cumulative profit metric, xcp_profit()
@@ -150,7 +150,7 @@ type CurveCryptoswapState struct {
 	Balances     []*big.Int
 	VirtualPrice *big.Int
 	TotalSupply  *big.Int
-	A            *big.Int
+	Amp          *big.Int
 	Gamma        *big.Int
 	Fee          *big.Int
 	D            *big.Int
@@ -171,7 +171,7 @@ type CurveCryptoswapState struct {
 
 func NewCurveCryptoswapState(p CurveCryptoswapStateParams) (*CurveCryptoswapState, error) {
 	for name, v := range map[string]*big.Int{
-		"virtual_price": p.VirtualPrice, "total_supply": p.TotalSupply, "a": p.A, "gamma": p.Gamma, "fee": p.Fee,
+		"virtual_price": p.VirtualPrice, "total_supply": p.TotalSupply, "amp": p.Amp, "gamma": p.Gamma, "fee": p.Fee,
 	} {
 		if v == nil {
 			return nil, fmt.Errorf("curve cryptoswap state: %s must not be nil", name)
@@ -183,7 +183,7 @@ func NewCurveCryptoswapState(p CurveCryptoswapStateParams) (*CurveCryptoswapStat
 	return &CurveCryptoswapState{
 		CurvePoolID: p.CurvePoolID, BlockNumber: p.BlockNumber, BlockVersion: p.BlockVersion,
 		Timestamp: p.Timestamp, Balances: p.Balances, VirtualPrice: p.VirtualPrice,
-		TotalSupply: p.TotalSupply, A: p.A, Gamma: p.Gamma, Fee: p.Fee, D: p.D,
+		TotalSupply: p.TotalSupply, Amp: p.Amp, Gamma: p.Gamma, Fee: p.Fee, D: p.D,
 		XcpProfit: p.XcpProfit, PriceScale: p.PriceScale, PriceOracle: p.PriceOracle,
 		LastPrices: p.LastPrices, SpotDy: p.SpotDy,
 		AdminBalances: p.AdminBalances, LpPrice: p.LpPrice, XcpProfitA: p.XcpProfitA,

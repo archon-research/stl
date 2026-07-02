@@ -474,7 +474,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 	idx++
 
 	// 4. A
-	a, err := shared.UnpackUint(h.stableABI, "A", results[idx])
+	amp, err := shared.UnpackUint(h.stableABI, "A", results[idx])
 	if err != nil {
 		return nil, nil, fmt.Errorf("decoding A: %w", err)
 	}
@@ -636,7 +636,7 @@ func (h *StableswapHandler) decodeSnapshotResults(
 		Balances:            balances,
 		VirtualPrice:        virtualPrice,
 		TotalSupply:         totalSupply,
-		A:                   a,
+		Amp:                 amp,
 		Fee:                 fee,
 		SpotDy:              spotDy,
 		LastPrice:           lastPrice,

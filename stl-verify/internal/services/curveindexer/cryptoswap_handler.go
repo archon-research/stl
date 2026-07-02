@@ -484,7 +484,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 	idx++
 
 	// 4. A
-	a, err := shared.UnpackUint(h.cryptoABI, "A", results[idx])
+	amp, err := shared.UnpackUint(h.cryptoABI, "A", results[idx])
 	if err != nil {
 		return nil, nil, fmt.Errorf("decoding A: %w", err)
 	}
@@ -650,7 +650,7 @@ func (h *CryptoswapHandler) decodeSnapshotResults(
 		Balances:     balances,
 		VirtualPrice: virtualPrice,
 		TotalSupply:  totalSupply,
-		A:            a,
+		Amp:          amp,
 		Gamma:        gamma,
 		Fee:          fee,
 		D:            d,
