@@ -267,6 +267,14 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("multicall client: %w", err)
 	}
 
+	atTel, err := at.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("allocation tracker telemetry: %w", err)
+	}
+	if err != nil {
+		return fmt.Errorf("multicall client: %w", err)
+	}
+
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
 	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
 	if err != nil {
@@ -325,7 +333,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
 	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
+	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, atTel)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
 
