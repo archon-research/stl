@@ -285,8 +285,17 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 	// SDK versions, so we check both the gRPC status code and the error message.
 	if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
 		// Reconcile so a changed interval or offset takes effect on redeploy
-		// without a manual schedule deletion.
-		return reconcileScheduleSpec(ctx, c, logger, scheduleID, spec)
+		// without a manual schedule deletion. ensureSchedule is shared by every
+		// cronjob worker, and the schedule already exists with a valid spec, so a
+		// failed reconcile (e.g. a transient Temporal error) must not crashloop the
+		// worker: log it and start against the existing schedule. The offset is
+		// best-effort defence in depth; the semantic skip fix is what actually
+		// stops the alert noise, and the next successful startup reconciles again.
+		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, spec); reconcileErr != nil {
+			logger.Warn("schedule reconcile failed; starting with the existing schedule",
+				"scheduleID", scheduleID, "error", reconcileErr)
+		}
+		return nil
 	}
 	return fmt.Errorf("creating schedule %q: %w", scheduleID, err)
 }

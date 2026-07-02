@@ -3,15 +3,18 @@ package temporal
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/mock"
 	"go.opentelemetry.io/otel"
 	mnoop "go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/mocks"
 )
 
 // TestRunCronjob_InitializesOTEL pins the OTel bootstrap in RunCronjob:
@@ -148,5 +151,29 @@ func TestApplyScheduleSpecUpdate_PreservesActionReplacesSpec(t *testing.T) {
 	}
 	if gotAction.ID != "scheduled-x" || gotAction.TaskQueue != "x" {
 		t.Fatalf("Action = %+v, want ID=scheduled-x TaskQueue=x (action must be untouched)", gotAction)
+	}
+}
+
+// TestEnsureSchedule_ReconcileFailureIsNonFatal pins that a failed reconcile of
+// an already-existing schedule does not abort worker startup. ensureSchedule is
+// shared by every cronjob worker; the schedule already exists with a valid spec,
+// so a transient Temporal error while re-applying the (best-effort) offset must
+// not crashloop the worker.
+func TestEnsureSchedule_ReconcileFailureIsNonFatal(t *testing.T) {
+	handle := &mocks.ScheduleHandle{}
+	handle.On("Update", mock.Anything, mock.Anything).Return(errors.New("temporal unavailable"))
+
+	scheduleClient := &mocks.ScheduleClient{}
+	scheduleClient.On("Create", mock.Anything, mock.Anything).
+		Return(nil, errors.New("schedule already registered"))
+	scheduleClient.On("GetHandle", mock.Anything, mock.Anything).Return(handle)
+
+	c := &mocks.Client{}
+	c.On("ScheduleClient").Return(scheduleClient)
+
+	cfg := CronjobConfig{Name: "test-job", IntervalDefault: "1h"}
+	err := ensureSchedule(context.Background(), c, slog.Default(), "test-job", cfg)
+	if err != nil {
+		t.Fatalf("ensureSchedule returned %v, want nil (reconcile failure must be non-fatal)", err)
 	}
 }
