@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"strings"
 	"sync"
@@ -1032,5 +1033,61 @@ func TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure(t *testing.T) {
 	// The good token's metadata is still returned and cached.
 	if md, ok := result[tokenA]; !ok || md.Symbol != "AAA" || md.Decimals != 18 {
 		t.Errorf("tokenA metadata wrong: present=%v meta=%+v", ok, md)
+	}
+}
+
+func TestBigIntToTimestamp(t *testing.T) {
+	maxInt64PlusOne := new(big.Int).Add(new(big.Int).SetInt64(math.MaxInt64), big.NewInt(1))
+
+	tests := []struct {
+		name        string
+		input       *big.Int
+		want        int64
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:  "valid unix timestamp",
+			input: big.NewInt(1640995200),
+			want:  1640995200,
+		},
+		{
+			name:  "zero",
+			input: big.NewInt(0),
+			want:  0,
+		},
+		{
+			name:        "negative value",
+			input:       big.NewInt(-1),
+			wantErr:     true,
+			errContains: "negative",
+		},
+		{
+			name:        "overflows int64",
+			input:       maxInt64PlusOne,
+			wantErr:     true,
+			errContains: "overflows int64",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := bigIntToTimestamp(tt.input, "lastUpdateTimestamp")
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("bigIntToTimestamp() expected error, got nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("bigIntToTimestamp() error = %v, want containing %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bigIntToTimestamp() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("bigIntToTimestamp() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

@@ -863,7 +863,10 @@ func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*Reserve
 	if err != nil {
 		return nil, err
 	}
-	result.LastUpdateTimestamp = timestamp.Int64()
+	result.LastUpdateTimestamp, err = bigIntToTimestamp(timestamp, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -936,7 +939,10 @@ func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*Reserve
 	if err != nil {
 		return nil, err
 	}
-	result.LastUpdateTimestamp = timestamp.Int64()
+	result.LastUpdateTimestamp, err = bigIntToTimestamp(timestamp, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -1002,7 +1008,10 @@ func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*Rese
 	if err != nil {
 		return nil, err
 	}
-	result.LastUpdateTimestamp = timestamp.Int64()
+	result.LastUpdateTimestamp, err = bigIntToTimestamp(timestamp, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -1104,6 +1113,21 @@ func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string
 	}
 
 	return v, nil
+}
+
+// bigIntToTimestamp converts a *big.Int ABI field to an int64 Unix timestamp.
+// The ABI decoder returns timestamp fields as unbounded *big.Int regardless of the
+// on-chain Solidity type (e.g. uint40), so a malformed or unexpected contract value
+// could silently truncate without this guard.
+func bigIntToTimestamp(v *big.Int, fieldName string) (int64, error) {
+	if !v.IsInt64() {
+		return 0, fmt.Errorf("field %s value %s overflows int64", fieldName, v.String())
+	}
+	ts := v.Int64()
+	if ts < 0 {
+		return 0, fmt.Errorf("field %s value %s is negative", fieldName, v.String())
+	}
+	return ts, nil
 }
 
 // getBoolByName extracts a boolean value identified by fieldName from an unpacked ABI output using fieldIndex.
