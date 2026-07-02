@@ -9,9 +9,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-//go:fix inline
-func intPtr(v int) *int { return new(v) }
-
 func TestUniswapV3PoolState_Validate(t *testing.T) {
 	valid := func() *UniswapV3PoolState {
 		return &UniswapV3PoolState{

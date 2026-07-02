@@ -404,7 +404,8 @@ func packUint256Array2(t *testing.T, a, b int64) outbound.Result {
 }
 
 // stableswapPreNGResults builds canned multicall results for a 2-coin pre-NG pool.
-// Order matches buildSnapshotCalls for NCoins=2, Kind=plain_pre_ng: the 8 core
+// Order matches the snapshot reads issued by SnapshotState (via
+// shared.RunSnapshotReads) for NCoins=2, Kind=plain_pre_ng: the 8 core
 // reads, then the extended reads (A_precise, admin_balances x2, calc_token_amount,
 // calc_withdraw_one_coin x2), then the 6 config getters, then future_admin_fee.
 func stableswapPreNGResults(t *testing.T, _ *abi.ABI) []outbound.Result {
@@ -436,7 +437,8 @@ func stableswapPreNGResults(t *testing.T, _ *abi.ABI) []outbound.Result {
 }
 
 // stableswapNGResults builds canned results for a 2-coin NG pool. Order matches
-// buildSnapshotCalls for NCoins=2, Kind=plain_ng: 8 core + price_oracle +
+// the snapshot reads issued by SnapshotState (via shared.RunSnapshotReads) for
+// NCoins=2, Kind=plain_ng: 8 core + price_oracle +
 // last_price + extended (A_precise, admin_balances x2, calc_token_amount,
 // calc_withdraw x2) + NG (stored_rates, ema_price, get_p) + 6 config getters +
 // ma_exp_time + oracle_method.
