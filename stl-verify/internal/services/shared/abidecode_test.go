@@ -1,4 +1,4 @@
-package dexconsumer
+package shared
 
 import (
 	"math/big"

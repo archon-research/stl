@@ -507,6 +507,45 @@ groups:
             schema change. Cross-check the published SDL.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleschemadrift
 
+      - alert: VectorMapleCollateralUnpriceable
+        # Collateral USD price came back null in a non-pending state — Maple's
+        # oracle layer had no fiat feed for the token, so the client tolerated a
+        # "No fiat value" GraphQL error and persisted asset_value_usd = NULL
+        # (reason="unpriceable"; reason="pending" is the normal DepositPending
+        # null and is NOT alerted). Distinct from VectorMapleSchemaDrift: that
+        # canary watches contractually-populated fields, this watches a
+        # data-quality hole the error path deliberately swallows.
+        #
+        # Pre-baseline: fires on ANY occurrence (>0) because this shape has
+        # never been seen live. FIRST fire has a second job — the runbook uses
+        # it to capture the raw errors[] shape from the client's temporary
+        # `tolerating unpriceable-collateral` warn and then delete that warn.
+        # Once the shape is confirmed and the warn removed, re-baseline this to
+        # a sustained threshold (>N/1h) so only a chronic gap pages.
+        expr: |
+          sum by (chain, cluster, token) (
+            increase(maple_sync_null_downgrades_total{
+              field="collateral_asset_value_usd",
+              reason="unpriceable",
+              k8s_namespace_name="vector"
+            }[1h])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer collateral unpriceable: `{{ $labels.token }}`"
+          description: |
+            Collateral token `{{ $labels.token }}` was null-downgraded as
+            unpriceable `{{ $value | printf "%.0f" }}` time(s) in 1h: Maple's
+            oracle had no fiat feed, so its USD value persisted as NULL. A
+            transient blip self-heals next cycle; a sustained count is an
+            upstream Maple pricing gap.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
+
       - alert: VectorMaplePhaseLatencyHigh
         # Phase p95 duration. Normal p95 is seconds (loans ~4s, others <1s).
         # >30s means the Maple API is degraded; alert well before a phase
@@ -534,7 +573,115 @@ groups:
             likely degraded; expect lag and possible cycle timeouts.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
 
-  # =========================================================================
+  # curve-indexer (VEC-260) — Curve DEX pool/swap/liquidity indexer.
+  - name: vector-curve-indexer
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveIndexerStalled
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Curve pool state in TimescaleDB will go
+            stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcurveindexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveIndexerErrorsHigh
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorCurveIndexerBlockLatencyHigh
+        # Block processing p99 >3s for 15m. Sustained high latency means the
+        # multicall/RPC path is degraded or pool snapshot decoding is blocking.
+        #
+        # Histogram `curve.block.duration_seconds` (OTel instrument), exported
+        # as `curve_block_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(curve_block_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m.
+            Indexer is degraded; expect lag in downstream Curve pool state.
+
+      - alert: VectorCurveIndexerNoStateWritten
+        # Silent-empty guard: blocks are advancing (success rate > 0) but no
+        # pool-state snapshot rows are being written. The error path will NOT
+        # catch a quietly-empty snapshot loop (e.g. buildSnapshotSet always
+        # returns empty, or all SnapshotState calls silently no-op). This
+        # alert catches that gap.
+        #
+        # Counter `curve.state.rows.written` (OTel) -> Prometheus
+        # `curve_state_rows_written_total`. Emitted by the Coordinator after
+        # each successful WithTransaction that writes at least one state row.
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
+          ) > 0
+          and
+          sum by (chain, cluster) (
+            rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+          ) == 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer writing no state rows on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 30m but written zero pool-state snapshot
+            rows. The snapshot loop may be silently empty (all pools skipped,
+            sweep disabled, or snapshotSet always returning empty).
+
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange
   # (service_name="cex-orderbook-indexer-<exchange>", label `exchange`). Unlike
@@ -574,7 +721,7 @@ groups:
       - alert: VectorCexOrderbookStreamStalled
         expr: |
           max by (exchange, cluster) (
-            orderbook_last_update_age{k8s_namespace_name="vector"}
+            orderbook_last_update_age_seconds{k8s_namespace_name="vector"}
           ) > 120
         for: 10m
         labels:
@@ -593,7 +740,7 @@ groups:
 
       - alert: VectorCexOrderbookDown
         # Availability companion to StreamStalled, mirroring the Maple
-        # Stalled/Down pair (VEC-360). orderbook_last_update_age is a gauge from
+        # Stalled/Down pair (VEC-360). orderbook_last_update_age_seconds is a gauge from
         # the pod's own OTLP export, so it disappears on a pod/exporter outage
         # and StreamStalled goes silent (no series to compare). kube-state-metrics
         # is independent of that export, so this still fires when the process or
