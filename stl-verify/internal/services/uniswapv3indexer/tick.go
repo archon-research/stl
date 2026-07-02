@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -64,7 +64,7 @@ func TouchedTicks(evs DecodedEvents) []int32 {
 	for t := range seen {
 		out = append(out, t)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 
@@ -225,10 +225,7 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 
 	var ticks []int32
 	for chunkStart := int(minWord); chunkStart <= int(maxWord); chunkStart += baselineTickBitmapWordsPerCall {
-		chunkEnd := chunkStart + baselineTickBitmapWordsPerCall - 1
-		if chunkEnd > int(maxWord) {
-			chunkEnd = int(maxWord)
-		}
+		chunkEnd := min(chunkStart+baselineTickBitmapWordsPerCall-1, int(maxWord))
 
 		words := make([]int16, 0, chunkEnd-chunkStart+1)
 		calls := make([]outbound.Call, 0, cap(words))
@@ -254,7 +251,7 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 			if err != nil {
 				return nil, fmt.Errorf("tickBitmap(%d) on pool %s: %w", words[i], pool.Address, err)
 			}
-			for bit := 0; bit < 256; bit++ {
+			for bit := range 256 {
 				if word.Bit(bit) == 0 {
 					continue
 				}
@@ -263,6 +260,6 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 		}
 	}
 
-	sort.Slice(ticks, func(i, j int) bool { return ticks[i] < ticks[j] })
+	slices.Sort(ticks)
 	return ticks, nil
 }

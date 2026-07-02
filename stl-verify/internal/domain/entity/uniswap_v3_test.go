@@ -9,7 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
-func intPtr(v int) *int { return &v }
+//go:fix inline
+func intPtr(v int) *int { return new(v) }
 
 func TestUniswapV3PoolState_Validate(t *testing.T) {
 	valid := func() *UniswapV3PoolState {
@@ -44,8 +45,8 @@ func TestUniswapV3PoolState_Validate(t *testing.T) {
 	}{
 		{"ok", func(*UniswapV3PoolState) {}, false},
 		{"ok with twap set", func(s *UniswapV3PoolState) {
-			s.TwapTick = intPtr(100)
-			s.TwapWindowSecs = intPtr(3600)
+			s.TwapTick = new(100)
+			s.TwapWindowSecs = new(3600)
 		}, false},
 		{"missing pool id", func(s *UniswapV3PoolState) { s.PoolID = 0 }, true},
 		{"missing block number", func(s *UniswapV3PoolState) { s.BlockNumber = 0 }, true},
