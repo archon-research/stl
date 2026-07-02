@@ -209,26 +209,19 @@ func (h *StableswapHandler) SnapshotState(
 	version int,
 	blockHash common.Hash,
 	ts time.Time,
-) (StateSnapshot, error) {
+) (*entity.CurveStableswapState, *entity.CurveStableswapConfig, error) {
 	acc := &stableswapSnapshotAcc{}
 	reads := h.stableswapSnapshotReads(pool, blockNumber, acc)
 	if err := shared.RunSnapshotReads(ctx, mc, pool, blockHash, reads); err != nil {
-		return StateSnapshot{}, fmt.Errorf("snapshotting pool %s state: %w", pool.Address, err)
+		return nil, nil, fmt.Errorf("snapshotting pool %s state: %w", pool.Address, err)
 	}
 
 	st, cfg, err := acc.build(pool, blockNumber, version, ts)
 	if err != nil {
-		return StateSnapshot{}, fmt.Errorf("decoding snapshot results for pool %s: %w", pool.Address, err)
+		return nil, nil, fmt.Errorf("decoding snapshot results for pool %s: %w", pool.Address, err)
 	}
 
-	return StateSnapshot{
-		Pool:             pool,
-		BlockNumber:      blockNumber,
-		BlockVersion:     version,
-		Timestamp:        ts,
-		Stableswap:       st,
-		StableswapConfig: cfg,
-	}, nil
+	return st, cfg, nil
 }
 
 // stableswapSnapshotAcc accumulates the raw getter results for one pool

@@ -21,16 +21,22 @@ import (
 // No doc comments on self-evident fields: the field names explain themselves.
 // Telemetry is optional (nil = no-op).
 type CurveServiceDeps struct {
-	Pools       []RegisteredPool
-	Handlers    map[PoolKind]PoolClassHandler
-	Multicaller outbound.Multicaller
-	Repo        outbound.CurveRepository
-	EventWriter *dexconsumer.ProtocolEventWriter
-	TxManager   outbound.TxManager
-	SweepBlocks int64
-	ChainID     int64
-	Logger      *slog.Logger
-	Telemetry   *dextelemetry.Telemetry
+	Pools    []RegisteredPool
+	Handlers map[PoolKind]PoolClassHandler
+	// StableHandler and CryptoHandler snapshot state for their pool class. They are
+	// concrete types (not PoolClassHandler) because each returns its own class's
+	// typed (state, config) pair; the coordinator dispatches between them with a
+	// single switch on pool.Kind rather than through a shared polymorphic method.
+	StableHandler *StableswapHandler
+	CryptoHandler *CryptoswapHandler
+	Multicaller   outbound.Multicaller
+	Repo          outbound.CurveRepository
+	EventWriter   *dexconsumer.ProtocolEventWriter
+	TxManager     outbound.TxManager
+	SweepBlocks   int64
+	ChainID       int64
+	Logger        *slog.Logger
+	Telemetry     *dextelemetry.Telemetry
 }
 
 // CurveService drives per-block event decoding and transactional persistence for
@@ -48,6 +54,8 @@ type CurveService struct {
 	poolsByWatchedAddr map[common.Address]RegisteredPool
 	pools              []RegisteredPool // ordered for deterministic iteration
 	handlers           map[PoolKind]PoolClassHandler
+	stableHandler      *StableswapHandler
+	cryptoHandler      *CryptoswapHandler
 	multicaller        outbound.Multicaller
 	repo               outbound.CurveRepository
 	eventWriter        *dexconsumer.ProtocolEventWriter
@@ -80,7 +88,9 @@ func (d CurveServiceDeps) validate() error {
 }
 
 // NewCurveService validates deps and builds a CurveService. Every registered
-// pool's Kind must have a corresponding handler entry.
+// pool's Kind must have a corresponding handler entry, and a snapshot handler
+// for its class (StableHandler for the two stableswap kinds, CryptoHandler for
+// cryptoswap).
 func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
@@ -94,6 +104,17 @@ func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
 		// Warm the handler's per-coin-count caches now, while construction is still
 		// single-threaded, so the per-block decode path performs no lazy cache writes.
 		h.Warm(p.NCoins)
+
+		switch p.Kind {
+		case KindStableswapPreNG, KindStableswapNG:
+			if deps.StableHandler == nil {
+				return nil, fmt.Errorf("pool %s (id=%d) has kind %q but StableHandler is nil", p.Address, p.ID, p.Kind)
+			}
+		case KindCryptoswap:
+			if deps.CryptoHandler == nil {
+				return nil, fmt.Errorf("pool %s (id=%d) has kind %q but CryptoHandler is nil", p.Address, p.ID, p.Kind)
+			}
+		}
 	}
 
 	watched, err := indexPoolsByWatchedAddress(deps.Pools)
@@ -105,6 +126,8 @@ func NewCurveService(deps CurveServiceDeps) (*CurveService, error) {
 		poolsByWatchedAddr: watched,
 		pools:              deps.Pools,
 		handlers:           deps.Handlers,
+		stableHandler:      deps.StableHandler,
+		cryptoHandler:      deps.CryptoHandler,
 		multicaller:        deps.Multicaller,
 		repo:               deps.Repo,
 		eventWriter:        deps.EventWriter,
@@ -184,7 +207,7 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 
 	// Quiet block: nothing decoded and no snapshot due. Skip the empty transaction.
 	if len(acc.swaps) == 0 && len(acc.liquidity) == 0 && len(acc.paramEvts) == 0 &&
-		len(acc.lpEvts) == 0 && len(acc.captured) == 0 && len(snapshots) == 0 {
+		len(acc.lpEvts) == 0 && len(acc.captured) == 0 && snapshots.stateCount() == 0 {
 		return nil
 	}
 
@@ -243,30 +266,61 @@ func (c *CurveService) decodeBlockEvents(ctx context.Context, receipts []shared.
 	return acc, nil
 }
 
-// snapshotPools calls each pool's SnapshotState via multicall, pinned to
-// blockHash so the read cannot silently answer from a post-reorg fork (see
-// outbound.Multicaller.ExecuteAtHash), and validates the result. It must run
-// BEFORE the DB transaction opens (see BlockHandler doc).
-func (c *CurveService) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, blockHash common.Hash, ts time.Time) ([]StateSnapshot, error) {
-	snapshots := make([]StateSnapshot, 0, len(snapshotSet))
+// snapshotResult accumulates one block's pool-state snapshots, already split by
+// class, so buildBlockWrites can append them into outbound.BlockWrites directly.
+type snapshotResult struct {
+	stableStates  []*entity.CurveStableswapState
+	cryptoStates  []*entity.CurveCryptoswapState
+	stableConfigs []*entity.CurveStableswapConfig
+	cryptoConfigs []*entity.CurveCryptoswapConfig
+}
+
+// stateCount returns the number of state rows snapshotted, across both classes,
+// so the quiet-block check can skip the empty transaction when no snapshot fired.
+func (r snapshotResult) stateCount() int {
+	return len(r.stableStates) + len(r.cryptoStates)
+}
+
+// snapshotPools calls each pool's class-specific SnapshotState via multicall,
+// pinned to blockHash so the read cannot silently answer from a post-reorg fork
+// (see outbound.Multicaller.ExecuteAtHash). It must run BEFORE the DB
+// transaction opens (see BlockHandler doc). pool.Kind is switched on once per
+// pool to pick the concrete handler; each handler returns its own class's typed
+// (state, config), so there is no cross-class shape to validate afterwards.
+func (c *CurveService) snapshotPools(ctx context.Context, snapshotSet []RegisteredPool, bn int64, ver int, blockHash common.Hash, ts time.Time) (snapshotResult, error) {
+	var result snapshotResult
 	for _, pool := range snapshotSet {
-		snap, err := c.handlers[pool.Kind].SnapshotState(ctx, c.multicaller, pool, bn, ver, blockHash, ts)
-		if err != nil {
-			return nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
+		switch pool.Kind {
+		case KindStableswapPreNG, KindStableswapNG:
+			state, cfg, err := c.stableHandler.SnapshotState(ctx, c.multicaller, pool, bn, ver, blockHash, ts)
+			if err != nil {
+				return snapshotResult{}, fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
+			}
+			result.stableStates = append(result.stableStates, state)
+			if cfg != nil {
+				result.stableConfigs = append(result.stableConfigs, cfg)
+			}
+		case KindCryptoswap:
+			state, cfg, err := c.cryptoHandler.SnapshotState(ctx, c.multicaller, pool, bn, ver, blockHash, ts)
+			if err != nil {
+				return snapshotResult{}, fmt.Errorf("snapshotting pool %s block %d: %w", pool.Address, bn, err)
+			}
+			result.cryptoStates = append(result.cryptoStates, state)
+			if cfg != nil {
+				result.cryptoConfigs = append(result.cryptoConfigs, cfg)
+			}
+		default:
+			return snapshotResult{}, fmt.Errorf("pool %s: unknown kind %s", pool.Address, pool.Kind)
 		}
-		if err := snap.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid snapshot for pool %s block %d: %w", pool.Address, bn, err)
-		}
-		snapshots = append(snapshots, snap)
 	}
-	return snapshots, nil
+	return result, nil
 }
 
 // buildBlockWrites converts decoded accumulators and snapshots into the typed
 // input structs that the repo and event writer expect. Conversion errors are
 // returned before the transaction opens so they fail fast without touching the
 // connection pool.
-func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots []StateSnapshot, bn int64, ver int, ts time.Time) (outbound.BlockWrites, []dexconsumer.ProtocolEventInput, error) {
+func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots snapshotResult, bn int64, ver int, ts time.Time) (outbound.BlockWrites, []dexconsumer.ProtocolEventInput, error) {
 	swapIns := make([]outbound.SwapInput, 0, len(acc.swaps))
 	for _, s := range acc.swaps {
 		swapIns = append(swapIns, toSwapInput(s, bn, ver, ts))
@@ -276,8 +330,6 @@ func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots []State
 	for _, l := range acc.liquidity {
 		liqIns = append(liqIns, toLiquidityInput(l, bn, ver, ts))
 	}
-
-	split := splitSnapshots(snapshots)
 
 	paramIns, err := collectParameterEvents(acc.paramEvts, bn, ver, ts)
 	if err != nil {
@@ -306,10 +358,10 @@ func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots []State
 	writes := outbound.BlockWrites{
 		Swaps:             swapIns,
 		Liquidity:         liqIns,
-		StableStates:      split.stableStates,
-		CryptoStates:      split.cryptoStates,
-		StableswapConfigs: split.stableConfigs,
-		CryptoswapConfigs: split.cryptoConfigs,
+		StableStates:      snapshots.stableStates,
+		CryptoStates:      snapshots.cryptoStates,
+		StableswapConfigs: snapshots.stableConfigs,
+		CryptoswapConfigs: snapshots.cryptoConfigs,
 		ParameterEvents:   paramIns,
 		LpTokenEvents:     lpIns,
 	}
@@ -388,34 +440,6 @@ func (c *CurveService) poolsTouchedByReceipt(receipt shared.TransactionReceipt, 
 // ---------------------------------------------------------------------------
 // Mapping helpers: domain records -> repo input structs
 // ---------------------------------------------------------------------------
-
-// splitSnapshots groups class-tagged snapshots into the per-class state and
-// config slices the repo's BlockWrites expects.
-type splitSnapshotResult struct {
-	stableStates  []*entity.CurveStableswapState
-	cryptoStates  []*entity.CurveCryptoswapState
-	stableConfigs []*entity.CurveStableswapConfig
-	cryptoConfigs []*entity.CurveCryptoswapConfig
-}
-
-func splitSnapshots(snapshots []StateSnapshot) splitSnapshotResult {
-	var r splitSnapshotResult
-	for _, snap := range snapshots {
-		switch {
-		case snap.Stableswap != nil:
-			r.stableStates = append(r.stableStates, snap.Stableswap)
-		case snap.Cryptoswap != nil:
-			r.cryptoStates = append(r.cryptoStates, snap.Cryptoswap)
-		}
-		if snap.StableswapConfig != nil {
-			r.stableConfigs = append(r.stableConfigs, snap.StableswapConfig)
-		}
-		if snap.CryptoswapConfig != nil {
-			r.cryptoConfigs = append(r.cryptoConfigs, snap.CryptoswapConfig)
-		}
-	}
-	return r
-}
 
 func collectParameterEvents(recs []ParameterEventRecord, bn int64, ver int, ts time.Time) ([]*entity.CurveParameterEvent, error) {
 	out := make([]*entity.CurveParameterEvent, 0, len(recs))
