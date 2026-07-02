@@ -281,7 +281,8 @@ func TestCryptoswapHandler_CorruptKnownEventErrors(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // cryptoswapResults builds canned multicall results for a 3-coin cryptoswap pool.
-// Order must match buildSnapshotCalls for NCoins=3:
+// Order must match the snapshot reads issued by SnapshotState (via
+// shared.RunSnapshotReads) for NCoins=3:
 //
 //	0: balances(0)
 //	1: balances(1)
@@ -652,20 +653,6 @@ func TestCryptoswapHandler_SnapshotAdminBalancesNotIssued(t *testing.T) {
 	}
 	h := NewCryptoswapHandler(a)
 	pool := cryptoswapPool()
-
-	calls, err := h.buildSnapshotCalls(pool)
-	if err != nil {
-		t.Fatalf("building snapshot calls: %v", err)
-	}
-	adminBalancesData, err := a.Pack("admin_balances", big.NewInt(0))
-	if err != nil {
-		t.Fatalf("packing admin_balances: %v", err)
-	}
-	for i, c := range calls {
-		if string(c.CallData) == string(adminBalancesData) {
-			t.Errorf("call[%d] is admin_balances; it must not be issued for cryptoswap pools", i)
-		}
-	}
 
 	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())

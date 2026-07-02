@@ -231,24 +231,6 @@ func (h *StableswapHandler) SnapshotState(
 	}, nil
 }
 
-// buildSnapshotCalls packs the stableswap snapshot reads into their flat
-// multicall call list, in the same order SnapshotState issues them. It exists
-// so tests can inspect the exact wire-level call list without an
-// ExecuteAtHash round trip; production code goes through SnapshotState /
-// shared.RunSnapshotReads instead.
-func (h *StableswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.Call, error) {
-	reads := h.stableswapSnapshotReads(pool, 0, &stableswapSnapshotAcc{})
-	var calls []outbound.Call
-	for _, read := range reads {
-		readCalls, err := read.Pack(pool)
-		if err != nil {
-			return nil, fmt.Errorf("packing %s reads: %w", read.Name, err)
-		}
-		calls = append(calls, readCalls...)
-	}
-	return calls, nil
-}
-
 // stableswapSnapshotAcc accumulates the raw getter results for one pool
 // snapshot as shared.SnapshotRead Decode callbacks fill it in, then builds the
 // state and config rows in build(). Each field's zero value (nil) is only

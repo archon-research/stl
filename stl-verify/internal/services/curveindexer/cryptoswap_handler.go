@@ -196,24 +196,6 @@ func (h *CryptoswapHandler) SnapshotState(
 	}, nil
 }
 
-// buildSnapshotCalls packs the cryptoswap snapshot reads into their flat
-// multicall call list, in the same order SnapshotState issues them. It exists
-// so tests can inspect the exact wire-level call list without an
-// ExecuteAtHash round trip; production code goes through SnapshotState /
-// shared.RunSnapshotReads instead.
-func (h *CryptoswapHandler) buildSnapshotCalls(pool RegisteredPool) ([]outbound.Call, error) {
-	reads := h.cryptoswapSnapshotReads(pool, 0, &cryptoswapSnapshotAcc{})
-	var calls []outbound.Call
-	for _, read := range reads {
-		readCalls, err := read.Pack(pool)
-		if err != nil {
-			return nil, fmt.Errorf("packing %s reads: %w", read.Name, err)
-		}
-		calls = append(calls, readCalls...)
-	}
-	return calls, nil
-}
-
 // cryptoswapConfigGetters is the ordered list of config view methods read at the
 // tail of every cryptoswap snapshot, in cryptoswapConfigReads field order.
 var cryptoswapConfigGetters = []string{
