@@ -13,10 +13,13 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // Uniswap V3 TickMath MIN_TICK/MAX_TICK: the widest tick range any pool can
-// ever report, regardless of tickSpacing.
+// ever report, regardless of tickSpacing. This is the TickMath usable tick
+// range, distinct from entity's int24 wire bounds (-8388608/8388607) used by
+// Validate() elsewhere.
 const (
 	minTick = -887272
 	maxTick = 887272
@@ -197,12 +200,21 @@ func wordBounds(tickSpacing int) (int16, int16) {
 	return int16(minWord), int16(maxWord)
 }
 
+// baselineTickBitmapWordsPerCall bounds how many tickBitmap(int16) sub-calls
+// BaselineTicks packs into a single multicall3 aggregate call. At
+// tickSpacing=1 the full word range is ~6932 words; sending them all in one
+// aggregate call risks exceeding an RPC provider's request/response/gas caps.
+// 500 words per call keeps that worst case to ~14 batches.
+const baselineTickBitmapWordsPerCall = 500
+
 // BaselineTicks performs a one-time enumeration of every currently
 // initialized tick on pool by scanning its tickBitmap across the full
 // tickSpacing-derived word range. It is a pure read: callers own logging and
 // retry policy. A reverted call is returned as an error immediately (no
 // partial/best-effort baseline), since a silently incomplete baseline would
-// under-report initialized ticks forever after.
+// under-report initialized ticks forever after. The word range is scanned in
+// bounded batches (see baselineTickBitmapWordsPerCall) rather than one
+// multicall covering the whole range.
 func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockHash common.Hash) ([]int32, error) {
 	a, err := tickViewABI()
 	if err != nil {
@@ -210,46 +222,44 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 	}
 
 	minWord, maxWord := wordBounds(pool.TickSpacing)
-	words := make([]int16, 0, int(maxWord)-int(minWord)+1)
-	calls := make([]outbound.Call, 0, cap(words))
-	for w := minWord; ; w++ {
-		data, err := a.Pack("tickBitmap", w)
-		if err != nil {
-			return nil, fmt.Errorf("packing tickBitmap(%d): %w", w, err)
-		}
-		calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
-		words = append(words, w)
-		if w == maxWord {
-			break
-		}
-	}
-
-	results, err := mc.ExecuteAtHash(ctx, calls, blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("executing tickBitmap baseline scan: %w", err)
-	}
-	if len(results) != len(calls) {
-		return nil, fmt.Errorf("unexpected tickBitmap result count: got %d, want %d", len(results), len(calls))
-	}
 
 	var ticks []int32
-	for i, res := range results {
-		if !res.Success {
-			return nil, fmt.Errorf("tickBitmap(%d) reverted on pool %s", words[i], pool.Address)
+	for chunkStart := int(minWord); chunkStart <= int(maxWord); chunkStart += baselineTickBitmapWordsPerCall {
+		chunkEnd := chunkStart + baselineTickBitmapWordsPerCall - 1
+		if chunkEnd > int(maxWord) {
+			chunkEnd = int(maxWord)
 		}
-		out, err := a.Unpack("tickBitmap", res.ReturnData)
-		if err != nil {
-			return nil, fmt.Errorf("unpacking tickBitmap(%d): %w", words[i], err)
-		}
-		word, ok := out[0].(*big.Int)
-		if !ok {
-			return nil, fmt.Errorf("tickBitmap(%d) return type = %T, want *big.Int", words[i], out[0])
-		}
-		for bit := 0; bit < 256; bit++ {
-			if word.Bit(bit) == 0 {
-				continue
+
+		words := make([]int16, 0, chunkEnd-chunkStart+1)
+		calls := make([]outbound.Call, 0, cap(words))
+		for w := chunkStart; w <= chunkEnd; w++ {
+			data, err := a.Pack("tickBitmap", int16(w))
+			if err != nil {
+				return nil, fmt.Errorf("packing tickBitmap(%d): %w", w, err)
 			}
-			ticks = append(ticks, wordBitToTick(words[i], uint8(bit), pool.TickSpacing))
+			calls = append(calls, outbound.Call{Target: pool.Address, AllowFailure: false, CallData: data})
+			words = append(words, int16(w))
+		}
+
+		results, err := mc.ExecuteAtHash(ctx, calls, blockHash)
+		if err != nil {
+			return nil, fmt.Errorf("executing tickBitmap baseline scan (words %d..%d): %w", words[0], words[len(words)-1], err)
+		}
+		if len(results) != len(calls) {
+			return nil, fmt.Errorf("unexpected tickBitmap result count: got %d, want %d", len(results), len(calls))
+		}
+
+		for i, res := range results {
+			word, err := shared.UnpackUint(a, "tickBitmap", res)
+			if err != nil {
+				return nil, fmt.Errorf("tickBitmap(%d) on pool %s: %w", words[i], pool.Address, err)
+			}
+			for bit := 0; bit < 256; bit++ {
+				if word.Bit(bit) == 0 {
+					continue
+				}
+				ticks = append(ticks, wordBitToTick(words[i], uint8(bit), pool.TickSpacing))
+			}
 		}
 	}
 
