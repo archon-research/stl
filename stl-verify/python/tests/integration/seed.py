@@ -253,12 +253,16 @@ async def insert_maple_loan_collateral(
     loan_id: int,
     synced_at: dt.datetime,
     symbol: str,
-    amount: int,
+    amount: int | None,
     decimals: int,
-    value_usd: int,
+    value_usd: int | None,
     state: str = "Deposited",
 ) -> None:
-    """Insert a maple_loan_collateral snapshot row."""
+    """Insert a maple_loan_collateral snapshot row.
+
+    ``amount`` / ``value_usd`` accept ``None`` to model the API reporting null
+    (e.g. a DepositPending asset), which the breakdown query filters out.
+    """
     await conn.execute(
         """
         INSERT INTO maple_loan_collateral
@@ -268,9 +272,9 @@ async def insert_maple_loan_collateral(
         loan_id,
         synced_at,
         symbol,
-        Decimal(amount),
+        Decimal(amount) if amount is not None else None,
         decimals,
-        Decimal(value_usd),
+        Decimal(value_usd) if value_usd is not None else None,
         state,
     )
 

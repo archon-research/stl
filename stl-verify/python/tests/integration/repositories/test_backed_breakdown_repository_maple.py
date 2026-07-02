@@ -35,7 +35,10 @@ _EXTERNAL_LOAN_CBBTC = bytes.fromhex("1212121212121212121212121212121212121212")
 _INTERNAL_LOAN = bytes.fromhex("2222222222222222222222222222222222222222")
 _INACTIVE_LOAN = bytes.fromhex("3333333333333333333333333333333333333333")
 _BORROWER = bytes.fromhex("4444444444444444444444444444444444444444")
+_PENDING_LOAN = bytes.fromhex("5555555555555555555555555555555555555555")
+_STALE_LOAN = bytes.fromhex("6666666666666666666666666666666666666666")
 _SYNCED = dt.datetime(2026, 6, 18, 12, 0, tzinfo=dt.timezone.utc)
+_SYNCED_OLD = dt.datetime(2026, 6, 17, 12, 0, tzinfo=dt.timezone.utc)
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -119,6 +122,36 @@ async def _seed_data(db_url: str) -> None:
             decimals=18,
             value_usd=99900000000,
         )
+
+        # DepositPending collateral with NULL amount/value — must be excluded
+        # (query filters asset_amount / asset_value_usd IS NOT NULL).
+        pending = await seed_loan(_PENDING_LOAN, None, "Active", 50000000000, 1656007)
+        await insert_maple_loan_collateral(
+            conn,
+            loan_id=pending,
+            synced_at=_SYNCED,
+            symbol="PENDINGBTC",
+            amount=None,
+            decimals=8,
+            value_usd=None,
+            state="DepositPending",
+        )
+
+        # Collateral attached to an older snapshot than the loan's latest
+        # loan_state — must be excluded (collateral joins the latest state on
+        # synced_at + processing_version, never mixing stale collateral with
+        # fresh principal). Loan is Active + external, so only the snapshot
+        # mismatch keeps it out.
+        stale = await seed_loan(_STALE_LOAN, None, "Active", 70000000000, 1656007)
+        await insert_maple_loan_collateral(
+            conn,
+            loan_id=stale,
+            synced_at=_SYNCED_OLD,
+            symbol="STALEBTC",
+            amount=100000000,
+            decimals=8,
+            value_usd=7000000000000,
+        )
     finally:
         await conn.close()
 
@@ -165,6 +198,18 @@ async def test_items_ordered_by_value_desc(repository: MapleBackedBreakdownRepos
     result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
     values = [i.backing_value for i in result.items]
     assert values == sorted(values, reverse=True)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_null_valued_collateral_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
+    result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
+    assert "PENDINGBTC" not in {i.symbol for i in result.items}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_stale_collateral_snapshot_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
+    result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
+    assert "STALEBTC" not in {i.symbol for i in result.items}
 
 
 @pytest.mark.asyncio(loop_scope="module")

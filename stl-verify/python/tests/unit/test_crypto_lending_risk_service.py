@@ -247,6 +247,20 @@ class TestCompute:
             await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={"gap_pct": bad_gap_pct})
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_gap_pct",
+        [None, "NaN", "Infinity"],
+        ids=["null", "nan", "infinity"],
+    )
+    async def test_compute_rejects_invalid_gap_pct(
+        self,
+        service: CryptoLendingRiskService,
+        bad_gap_pct: object,
+    ) -> None:
+        with pytest.raises(ValueError, match="invalid gap_pct"):
+            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={"gap_pct": bad_gap_pct})
+
+    @pytest.mark.asyncio
     async def test_compute_missing_receipt_token_share_propagates(
         self,
         service: CryptoLendingRiskService,
@@ -275,6 +289,55 @@ class TestCompute:
         # collateral basis is also 0, so comparable CRR is 0 (not div-by-zero).
         assert result.rrc_usd == Decimal("0")
         assert result.comparable_crr_pct == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_compute_items_without_liquidation_params_are_skipped(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(10, "WETH", "10000", "2000"),),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        # No liquidation params for token 10 -> the item is dropped before enrichment.
+        reader.get_liquidation_params.return_value = {}
+
+        result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        assert result.rrc_usd == Decimal("0")
+        assert result.comparable_crr_pct == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_compute_excludes_null_token_id_items_from_enrichment(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # An enriched-protocol breakdown that happens to carry a symbol-keyed
+        # (token_id=None) item: it must not be fed to the liquidation-param
+        # lookup and must be dropped, leaving only the real token-keyed item.
+        reader.get_breakdown.return_value = _breakdown(
+            (
+                _contrib(10, "WETH", "10000", "2000"),
+                CollateralContribution(
+                    token_id=None,
+                    symbol="BTC",
+                    backing_value=Decimal("5000"),
+                    backing_pct=Decimal("100"),
+                    price_usd=Decimal("60000"),
+                ),
+            ),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
+
+        result = await service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID)
+
+        assert result is not None
+        assert [i.symbol for i in result.items] == ["WETH"]
+        # The null-token_id item never reaches the liquidation lookup.
+        assert reader.get_liquidation_params.await_args.args[2] == [10]
 
     @pytest.mark.asyncio
     async def test_compute_comparable_crr_uses_collateral_sum(
