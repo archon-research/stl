@@ -25,22 +25,6 @@ func validPosition() *AllocationPosition {
 }
 
 func TestAllocationPosition_Validate(t *testing.T) {
-	addr := common.HexToAddress("0x0102030405060708090a0b0c0d0e0f1011121314")
-
-	valid := func() *AllocationPosition {
-		return &AllocationPosition{
-			ChainID:        1,
-			TokenAddress:   addr,
-			ProxyAddress:   addr,
-			Balance:        big.NewInt(1),
-			Direction:      "in",
-			PrimeID:        1,
-			BlockNumber:    100,
-			CreatedAtBlock: 100,
-			CreatedAt:      time.Unix(1, 0).UTC(),
-		}
-	}
-
 	cases := []struct {
 		name    string
 		mut     func(*AllocationPosition)
@@ -61,7 +45,7 @@ func TestAllocationPosition_Validate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := valid()
+			p := validPosition()
 			tc.mut(p)
 			err := p.Validate()
 			if tc.wantErr && err == nil {
