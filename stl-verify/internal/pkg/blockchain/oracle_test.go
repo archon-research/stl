@@ -25,6 +25,12 @@ func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, bl
 	return m.executeFn(ctx, calls, blockNumber)
 }
 
+// ExecuteAtHash is not exercised by these tests (oracle reads are all
+// number-pinned); it is here only to satisfy outbound.Multicaller.
+func (m *mockMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return nil, errors.New("ExecuteAtHash not mocked")
+}
+
 func (m *mockMulticaller) Address() common.Address {
 	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 }

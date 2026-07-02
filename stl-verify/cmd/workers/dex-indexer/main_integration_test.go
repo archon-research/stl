@@ -57,6 +57,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEX", "curve")
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
@@ -116,6 +117,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("S3_BUCKET", bucket)
 	t.Setenv("DEPLOY_ENV", deployEnv)
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEX", "curve")
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
