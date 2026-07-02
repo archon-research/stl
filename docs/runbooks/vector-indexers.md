@@ -296,6 +296,65 @@ decide whether downstream consumers tolerate the gap. The allowlist and the
 
 ---
 
+## VectorMapleCollateralUnpriceable
+
+**Severity:** warning · **For:** 0m (1h window debounces)
+
+### What it means
+
+A loan's collateral USD price came back null in a non-pending state. Maple's
+oracle layer had no fiat feed for the token at query time, so its API returned
+HTTP 200 with a top-level `errors[]` entry `No fiat value for <TOKEN>` scoped to
+the collateral node. The client tolerates that specific case: it keeps the rest
+of the loan book and persists the offending `asset_value_usd` as SQL NULL
+(metric `reason="unpriceable"`), rather than discarding the whole cycle's
+snapshot. `reason="pending"` (collateral still `DepositPending`, no price yet)
+is normal and is **not** alerted.
+
+This is expected to self-heal — Maple's pricing layer restores the feed and the
+next 10m cycle writes a real value. A **sustained** count is an upstream Maple
+pricing gap, not our bug.
+
+### First checks
+
+- `sum by (token) (increase(maple_sync_null_downgrades_total{reason="unpriceable"}[1h]))`
+  — which token(s), and whether it's a single blip or sustained.
+- Inspect rows: `SELECT l.loan_address, c.asset, c.state, c.synced_at FROM
+  maple_loan_collateral c JOIN maple_loan l ON l.id = c.maple_loan_id WHERE
+  c.asset_value_usd IS NULL AND c.state <> 'DepositPending' ORDER BY c.synced_at
+  DESC LIMIT 20;` — confirm the price, not the whole loan, is what dropped.
+
+### Action
+
+- **Transient (fires once, resolves within ~1h):** expected self-heal. No
+  action beyond the one-time task below.
+- **Sustained (fires across many cycles):** upstream Maple pricing gap. Raise
+  with Maple; decide whether downstream consumers tolerate the NULL. Not a code
+  bug.
+
+### One-time task on the FIRST-EVER fire
+
+This shape has never been observed live, so the client carries a temporary
+diagnostic warn. On the first fire:
+
+1. Pull the client log `tolerating unpriceable-collateral GraphQL error` from
+   Loki (service `maple-graphql-indexer`). It captures the raw `errors[]`:
+   `path`, `extensions`, and `data_present`.
+2. Confirm the null granularity matches what the client assumes — the price
+   field (`collateral.assetValueUsd`) or the whole `collateral` node went null,
+   and the `path` passes through a `collateral` segment (or is absent).
+3. If the client classified it correctly (the alert firing over persisted NULLs
+   proves it did): **delete the TEMPORARY warn in
+   `stl-verify/internal/adapters/outbound/maple/client.go` in a follow-up PR**,
+   and re-baseline this alert's `>0` threshold to a sustained `>N/1h` so only a
+   chronic gap pages.
+4. If the shape does **not** match (path outside collateral, extensions reveal a
+   different failure): the tolerance classifier
+   (`tolerableUnpriceableCollateral` / `pathThroughCollateral`) needs
+   tightening — fix it so that shape stays fatal.
+
+---
+
 ## VectorMaplePhaseLatencyHigh
 
 **Severity:** warning · **For:** 15m
