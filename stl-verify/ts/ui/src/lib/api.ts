@@ -171,12 +171,14 @@ export async function getExposureEnvelope(
 export function getRiskBreakdown(
   chainId: number,
   tokenAddress: string,
+  primeId?: string | null,
   signal?: AbortSignal,
 ): Promise<RiskBreakdown> {
   return requestData(
     apiClient.GET('/v1/risk/{chain_id}/{token_address}/breakdown', {
       params: {
         path: { chain_id: chainId, token_address: tokenAddress },
+        query: primeId ? { prime_id: primeId } : undefined,
       },
       signal,
     }),
