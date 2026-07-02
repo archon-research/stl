@@ -341,6 +341,53 @@ func TestProcessBlock_SweepHandlerFailure_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc4626",
+	}
+	result := NewFetchResult()
+	result.Balances[entry.Key()] = &PositionBalance{
+		Balance:         big.NewInt(500),
+		UnderlyingValue: big.NewInt(777),
+	}
+
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(&mockSource{
+		name:       "erc4626",
+		tokenTypes: map[string]bool{"erc4626": true},
+		result:     result,
+	})
+
+	handler := &testHandler{}
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          []*TokenEntry{entry},
+		handler:          handler,
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	if err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if len(handler.batches) != 1 || len(handler.batches[0].Snapshots) != 1 {
+		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(handler.batches))
+	}
+	got := handler.batches[0].Snapshots[0]
+	if got.UnderlyingValue == nil || got.UnderlyingValue.Cmp(big.NewInt(777)) != 0 {
+		t.Fatalf("UnderlyingValue = %v, want 777", got.UnderlyingValue)
+	}
+}
+
 // ── matchTransfers ──
 
 func TestMatchTransfers_MatchesKnownEntry(t *testing.T) {
