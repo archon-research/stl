@@ -11,12 +11,21 @@ import (
 // key: it takes the per-key advisory xact lock, reads the latest row, and calls
 // insert only when there is no prior row or the candidate differs. This closes
 // the read-then-write race that ON CONFLICT alone cannot guard (ADR-0002 §3).
-// lockKey must be the SAME natural-key string the table's pv trigger locks on.
 //
-// readLatest returns latest == nil when no prior row exists. changed receives
-// that same latest (nil on no prior row, where it must report true) and decides
-// whether insert runs. insert is expected to use ON CONFLICT DO NOTHING so a
-// replayed event stays idempotent.
+// lockKey must identify the ENTITY whose append-decision is being serialized:
+// a block-free natural key (e.g. "curve_config|<pool_id>",
+// "uniswap_v3_tick|<pool_id>|<tick>"), shared by every writer of that table's
+// append decision. It is deliberately distinct from the table's pv trigger
+// lock key, which is a row-identity key that includes block number + version.
+// A block-scoped lockKey would let two writers for the same entity at
+// different blocks take different locks and not serialize, reopening the
+// read-then-write race this helper exists to close.
+//
+// readLatest returns latest == nil when no prior row exists, in which case
+// AppendOnChange inserts directly without calling changed. Otherwise changed
+// receives that (guaranteed non-nil) latest and decides whether insert runs.
+// insert is expected to use ON CONFLICT DO NOTHING so a replayed event stays
+// idempotent.
 func AppendOnChange[T any](
 	ctx context.Context,
 	tx pgx.Tx,
@@ -44,7 +53,7 @@ func AppendOnChange[T any](
 		return fmt.Errorf("reading latest for %q: %w", lockKey, err)
 	}
 
-	if !changed(latest) {
+	if latest != nil && !changed(latest) {
 		return nil
 	}
 

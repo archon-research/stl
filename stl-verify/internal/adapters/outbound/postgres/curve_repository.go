@@ -635,7 +635,7 @@ func (r *CurveRepository) writeStableswapConfig(ctx context.Context, tx pgx.Tx, 
 			}
 		},
 		func(latest *stableswapConfigValues) bool {
-			return latest == nil || !stableswapConfigUnchanged(*latest, cfg)
+			return !stableswapConfigUnchanged(*latest, cfg)
 		},
 		func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx,
@@ -756,7 +756,7 @@ func (r *CurveRepository) writeCryptoswapConfig(ctx context.Context, tx pgx.Tx, 
 			}
 		},
 		func(latest *cryptoswapConfigValues) bool {
-			return latest == nil || !cryptoswapConfigUnchanged(*latest, cfg)
+			return !cryptoswapConfigUnchanged(*latest, cfg)
 		},
 		func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx,
