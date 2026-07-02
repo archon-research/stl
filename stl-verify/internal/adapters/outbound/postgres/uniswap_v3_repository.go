@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -21,12 +22,13 @@ var _ outbound.UniswapV3Repository = (*UniswapV3Repository)(nil)
 
 // UniswapV3Repository is a PostgreSQL implementation of the outbound.UniswapV3Repository port.
 type UniswapV3Repository struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	buildID buildregistry.BuildID
 }
 
 // NewUniswapV3Repository creates a new PostgreSQL Uniswap V3 repository.
-func NewUniswapV3Repository(pool *pgxpool.Pool) *UniswapV3Repository {
-	return &UniswapV3Repository{pool: pool}
+func NewUniswapV3Repository(pool *pgxpool.Pool, buildID buildregistry.BuildID) *UniswapV3Repository {
+	return &UniswapV3Repository{pool: pool, buildID: buildID}
 }
 
 // LoadPools returns all pools for the given chain with their token addresses
@@ -144,7 +146,7 @@ func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	}
 
 	batch := &pgx.Batch{}
-	queueUniswapV3Batch(batch, states, swaps, liqs, w.PoolEvents)
+	queueUniswapV3Batch(batch, states, swaps, liqs, w.PoolEvents, r.buildID)
 
 	stateRows, err = sendUniswapV3Batch(ctx, tx, batch, states, swaps, liqs, w.PoolEvents)
 	if err != nil {
@@ -261,6 +263,7 @@ func queueUniswapV3Batch(
 	swaps []swapConvertedV3,
 	liqs []liquidityEventConverted,
 	poolEvents []*entity.UniswapV3PoolEvent,
+	buildID buildregistry.BuildID,
 ) {
 	for _, c := range states {
 		s := c.s
@@ -271,15 +274,15 @@ func queueUniswapV3Batch(
 			    observation_cardinality_next, fee_protocol, unlocked, liquidity,
 			    fee_growth_global0_x128, fee_growth_global1_x128,
 			    protocol_fees_token0, protocol_fees_token1, balance0, balance1,
-			    twap_tick, twap_window_secs)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			    twap_tick, twap_window_secs, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, processing_version) DO NOTHING`,
 			s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp,
 			c.sqrtPriceX96, s.Tick, s.ObservationIndex, s.ObservationCardinality,
 			s.ObservationCardinalityNext, s.FeeProtocol, s.Unlocked, c.liquidity,
 			c.feeGrowthGlobal0, c.feeGrowthGlobal1,
 			c.protocolFeesToken0, c.protocolFeesToken1, c.balance0, c.balance1,
-			s.TwapTick, s.TwapWindowSecs,
+			s.TwapTick, s.TwapWindowSecs, int(buildID),
 		)
 	}
 
@@ -289,12 +292,12 @@ func queueUniswapV3Batch(
 			`INSERT INTO uniswap_v3_swap
 			   (pool_id, block_number, block_version, block_timestamp,
 			    tx_hash, log_index, sender, recipient, amount0, amount1,
-			    sqrt_price_x96, liquidity, tick)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			    sqrt_price_x96, liquidity, tick, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp,
 			s.TxHash.Bytes(), s.LogIndex, s.Sender.Bytes(), s.Recipient.Bytes(),
-			c.amount0, c.amount1, c.sqrtPriceX96, c.liquidity, s.Tick,
+			c.amount0, c.amount1, c.sqrtPriceX96, c.liquidity, s.Tick, int(buildID),
 		)
 	}
 
@@ -304,13 +307,13 @@ func queueUniswapV3Batch(
 			`INSERT INTO uniswap_v3_liquidity_event
 			   (pool_id, block_number, block_version, block_timestamp,
 			    tx_hash, log_index, event_name, owner, sender, recipient,
-			    tick_lower, tick_upper, amount, amount0, amount1)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+			    tick_lower, tick_upper, amount, amount0, amount1, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp,
 			e.TxHash.Bytes(), e.LogIndex, string(e.EventName), e.Owner.Bytes(),
 			addressBytesOrNil(e.Sender), addressBytesOrNil(e.Recipient),
-			e.TickLower, e.TickUpper, c.amount, c.amount0, c.amount1,
+			e.TickLower, e.TickUpper, c.amount, c.amount0, c.amount1, int(buildID),
 		)
 	}
 
@@ -318,11 +321,11 @@ func queueUniswapV3Batch(
 		batch.Queue(
 			`INSERT INTO uniswap_v3_pool_event
 			   (pool_id, block_number, block_version, block_timestamp,
-			    tx_hash, log_index, event_name, params)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			    tx_hash, log_index, event_name, params, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 			 ON CONFLICT (pool_id, block_timestamp, block_number, block_version, log_index, processing_version) DO NOTHING`,
 			e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp,
-			e.TxHash.Bytes(), e.LogIndex, string(e.EventName), []byte(e.Params),
+			e.TxHash.Bytes(), e.LogIndex, string(e.EventName), []byte(e.Params), int(buildID),
 		)
 	}
 }
@@ -398,6 +401,11 @@ func (r *UniswapV3Repository) writeTicks(ctx context.Context, tx pgx.Tx, ticks [
 	}
 
 	for _, key := range distinctSortedTickKeys(ticks) {
+		// This "uniswap_v3_tick|<pool>|<tick>" key is a distinct lock domain from
+		// the pv-trigger's row-identity key ("uvt|pool|tick|block|version") on
+		// purpose: this guards the app-level read-latest-then-insert decision, the
+		// trigger guards processing_version assignment. They must not be
+		// harmonized (same curve_config precedent, see curve_repository.go).
 		lockKey := fmt.Sprintf("uniswap_v3_tick|%d|%d", key.poolID, key.tick)
 		if _, err := tx.Exec(ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -491,12 +499,12 @@ func (r *UniswapV3Repository) writeTick(ctx context.Context, tx pgx.Tx, t *entit
 				`INSERT INTO uniswap_v3_tick
 				   (pool_id, tick, block_number, block_version, block_timestamp,
 				    liquidity_gross, liquidity_net, fee_growth_outside0_x128,
-				    fee_growth_outside1_x128, initialized)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+				    fee_growth_outside1_x128, initialized, build_id)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 				 ON CONFLICT (pool_id, tick, block_number, block_version, processing_version) DO NOTHING`,
 				t.PoolID, t.Tick, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
 				converted.liquidityGross, converted.liquidityNet,
-				converted.feeGrowthOutside0X128, converted.feeGrowthOutside1X128, t.Initialized,
+				converted.feeGrowthOutside0X128, converted.feeGrowthOutside1X128, t.Initialized, int(r.buildID),
 			); err != nil {
 				return fmt.Errorf("inserting tick for pool=%d tick=%d: %w", t.PoolID, t.Tick, err)
 			}

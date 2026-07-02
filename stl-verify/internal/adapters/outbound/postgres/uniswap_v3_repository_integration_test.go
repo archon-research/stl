@@ -12,14 +12,21 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// newUniswapV3Repo builds a UniswapV3Repository backed by uniswapV3TestPool.
+// testUniswapV3BuildID is the fixed buildID new UniswapV3Repository test
+// instances are constructed with, so tests can assert build_id is threaded
+// through instead of defaulting to 0.
+const testUniswapV3BuildID = buildregistry.BuildID(1)
+
+// newUniswapV3Repo builds a UniswapV3Repository backed by uniswapV3TestPool
+// with buildID testUniswapV3BuildID.
 func newUniswapV3Repo(t *testing.T) *UniswapV3Repository {
 	t.Helper()
-	return NewUniswapV3Repository(uniswapV3TestPool)
+	return NewUniswapV3Repository(uniswapV3TestPool, testUniswapV3BuildID)
 }
 
 // withUniswapV3Tx runs fn inside a transaction against uniswapV3TestPool,
@@ -298,20 +305,24 @@ func TestUniswapV3Repository_SaveBlock_State_RoundTrip(t *testing.T) {
 		gotFeeProtocol                                           int
 		gotUnlocked                                              bool
 		gotTwapTick, gotTwapWindow                               *int
+		gotBuildID                                               int
 	)
 	if err := uniswapV3TestPool.QueryRow(ctx,
 		`SELECT sqrt_price_x96::text, tick, observation_index, observation_cardinality,
 		        observation_cardinality_next, fee_protocol, unlocked, liquidity::text,
 		        fee_growth_global0_x128::text, fee_growth_global1_x128::text,
 		        protocol_fees_token0::text, protocol_fees_token1::text,
-		        balance0::text, balance1::text, twap_tick, twap_window_secs
+		        balance0::text, balance1::text, twap_tick, twap_window_secs, build_id
 		 FROM uniswap_v3_pool_state WHERE pool_id=$1 AND block_number=18000000`,
 		poolID,
 	).Scan(&gotSqrtPrice, &gotTick, &gotObsIndex, &gotObsCard, &gotObsCardNext, &gotFeeProtocol, &gotUnlocked,
 		&gotLiquidity, &gotFeeGrowth0, &gotFeeGrowth1, &gotProtoFee0, &gotProtoFee1, &gotBalance0, &gotBalance1,
-		&gotTwapTick, &gotTwapWindow,
+		&gotTwapTick, &gotTwapWindow, &gotBuildID,
 	); err != nil {
 		t.Fatalf("read back state: %v", err)
+	}
+	if gotBuildID != int(testUniswapV3BuildID) {
+		t.Errorf("build_id = %d, want %d (threaded from repository constructor, not defaulted)", gotBuildID, testUniswapV3BuildID)
 	}
 
 	if gotSqrtPrice != "79228162514264337593543950336" {
