@@ -232,39 +232,89 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 }
 
 // splitStatements splits SQL content into individual statements by semicolons.
-// It handles comments and preserves statement integrity.
+// Semicolons inside dollar-quoted string literals (PostgreSQL `$$ ... $$` or
+// `$tag$ ... $tag$`) are ignored so DO blocks and function bodies stay intact.
 func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
 
-	lines := strings.SplitSeq(content, "\n")
-	for line := range lines {
+	inDollarQuote := false
+	dollarTag := ""
+
+	for line := range strings.SplitSeq(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 
-		// Skip pure comment lines
-		if strings.HasPrefix(trimmed, "--") {
+		// Pure comment lines are dropped only when we are between statements.
+		// Inside a dollar-quoted body, a leading `--` is legitimate content
+		// (e.g. comments inside a PL/pgSQL function body) and must be kept.
+		if !inDollarQuote && strings.HasPrefix(trimmed, "--") {
 			continue
 		}
 
-		// Add line to current statement
 		if current.Len() > 0 {
 			current.WriteString("\n")
 		}
 		current.WriteString(line)
 
-		// Check if line ends with semicolon (end of statement)
-		if strings.HasSuffix(trimmed, ";") {
+		// Toggle dollar-quote state for each $...$ tag found on this line.
+		updateDollarQuoteState(line, &inDollarQuote, &dollarTag)
+
+		if !inDollarQuote && strings.HasSuffix(trimmed, ";") {
 			statements = append(statements, current.String())
 			current.Reset()
 		}
 	}
 
-	// Add any remaining content as the last statement
 	if current.Len() > 0 {
 		statements = append(statements, current.String())
 	}
 
 	return statements
+}
+
+// updateDollarQuoteState walks `line` and flips `*inDollarQuote` each time the
+// active dollar-quote opener or its matching closer is found. PostgreSQL
+// dollar-quote tags are `$$` or `$identifier$` where the identifier is letters,
+// digits, or underscores and does not start with a digit.
+func updateDollarQuoteState(line string, inDollarQuote *bool, dollarTag *string) {
+	i := 0
+	for i < len(line) {
+		if line[i] != '$' {
+			i++
+			continue
+		}
+		// Find the matching closing `$` that ends the tag.
+		j := i + 1
+		valid := true
+		for j < len(line) && line[j] != '$' {
+			c := line[j]
+			if !(c == '_' ||
+				(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+				(c >= '0' && c <= '9')) {
+				valid = false
+				break
+			}
+			// Identifier cannot start with a digit.
+			if j == i+1 && (c >= '0' && c <= '9') {
+				valid = false
+				break
+			}
+			j++
+		}
+		if !valid || j >= len(line) {
+			i++
+			continue
+		}
+		tag := line[i : j+1] // includes both surrounding `$`
+		if !*inDollarQuote {
+			*inDollarQuote = true
+			*dollarTag = tag
+		} else if tag == *dollarTag {
+			*inDollarQuote = false
+			*dollarTag = ""
+		}
+		i = j + 1
+	}
 }
 
 func (m *Migrator) ListApplied(ctx context.Context) ([]string, error) {

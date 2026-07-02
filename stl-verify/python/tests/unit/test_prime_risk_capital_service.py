@@ -1,6 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import cast
+from typing import Protocol, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,6 +10,17 @@ from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 from tests.factories import make_receipt_token_position
+
+
+class _AppliesTo(Protocol):
+    """Structural type for anything the fake registry can dispatch on.
+
+    Both ``_FakeModel`` and the concrete ``CryptoLendingRiskService`` expose
+    ``applies_to``; widening the parameter lets tests mix them without a cast.
+    """
+
+    def applies_to(self, asset_id: int, prime_id: EthAddress) -> bool: ...
+
 
 _PRIME = EthAddress("0x" + "ab" * 20)
 
@@ -31,7 +42,7 @@ class _FakeModel:
 
 
 class _FakeRegistry:
-    def __init__(self, models: list[_FakeModel]) -> None:
+    def __init__(self, models: list[_AppliesTo]) -> None:
         self._models = models
 
     def applicable(self, asset_id: int, prime_id: EthAddress):
@@ -144,3 +155,162 @@ async def test_compute_ignores_non_default_models():
     assert result.required_risk_capital_usd == Decimal("0")
     assert result.per_allocation[0].applied is False
     assert result.modeled_exposure_usd == Decimal("0")
+
+
+# ----------------------------------------------------------------------
+# Share fan-out elimination
+# ----------------------------------------------------------------------
+
+from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader  # noqa: E402
+from app.domain.entities.backed_breakdown import BackedBreakdown  # noqa: E402
+from app.domain.entities.receipt_token import ReceiptTokenInfo  # noqa: E402
+from app.services.crypto_lending_risk_service import CryptoLendingRiskService  # noqa: E402
+
+
+def _info(receipt_token_id: int, receipt_token_token_id: int = 777) -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=receipt_token_id,
+        protocol_id=1,
+        underlying_token_id=42,
+        receipt_token_address=bytes.fromhex("e7df13b8e3d6740fe17cbe928c7334243d86c92f"),
+        chain_id=1,
+        protocol_name="Aave V3",
+        receipt_token_token_id=receipt_token_token_id,
+    )
+
+
+def _crypto_lending_service(reader) -> CryptoLendingRiskService:
+    return CryptoLendingRiskService(
+        reader=reader,
+        default_gap_pct=Decimal("0.15"),
+        supported_asset_ids={1, 2, 3},
+    )
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share():
+    """The prime service must collapse per-allocation share lookups into one DB call.
+
+    Regression check: if someone re-introduces ``reader.get_share`` inside the
+    ``asyncio.gather`` loop, this test catches it — ``get_share`` must remain
+    un-awaited and ``batch_get_shares`` must be called exactly once with all
+    crypto-lending asset infos.
+    """
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+        make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    infos = {1: _info(1, 777), 2: _info(2, 888)}
+    # AsyncMock with a sync callable side_effect calls it for each invocation
+    # and wraps the return value into a coroutine. Using a callable avoids
+    # StopAsyncIteration when ``compute_with_share`` re-fetches infos.
+    reader.get_receipt_token.side_effect = lambda aid: infos[aid]
+    reader.batch_get_shares.return_value = {1: Decimal("0.4"), 2: Decimal("0.25")}
+    reader.get_breakdown.return_value = BackedBreakdown(backed_asset_id=42, items=())
+
+    model = _crypto_lending_service(reader)
+    registry = _FakeRegistry([model])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME)
+
+    # batch_get_shares hit once, get_share never hit.
+    reader.batch_get_shares.assert_awaited_once()
+    reader.get_share.assert_not_awaited()
+    # The result still surfaces the per-allocation entries even though the
+    # gap-sweep RRC happens to be zero (no breakdown items in the test fixture).
+    assert len(result.per_allocation) == 2
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_propagates_per_asset_share_errors():
+    """A ``MissingShareError`` from the batch must surface when the asset has a non-empty breakdown.
+
+    The endpoint translates ``MissingShareError`` to ``503 share_data_missing``;
+    swallowing it for assets that *do* have a backed-breakdown would silently
+    hide the warm-up window from clients. (Assets with an *empty* breakdown
+    are covered by the test below — the un-batched path never called
+    ``get_share`` for those, so the batched path must not surface a 503 for
+    them either.)
+    """
+    from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
+    from app.domain.exceptions import MissingShareError
+
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.return_value = _info(1, 777)
+    reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
+    # Non-empty breakdown means ``_load_enriched_items_for_info`` reaches the
+    # share-consumption branch, where the prefetched error must be raised.
+    reader.get_breakdown.return_value = BackedBreakdown(
+        backed_asset_id=42,
+        items=(
+            CollateralContribution(
+                token_id=99,
+                symbol="WETH",
+                backing_value=Decimal("1"),
+                backing_pct=Decimal("1"),
+                price_usd=Decimal("2000"),
+            ),
+        ),
+    )
+
+    model = _crypto_lending_service(reader)
+    registry = _FakeRegistry([model])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    with pytest.raises(MissingShareError, match="warm-up"):
+        await service.compute(_PRIME)
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_swallows_share_error_for_empty_breakdown():
+    """Empty-breakdown assets must return 200, not 503, even when share lookup failed.
+
+    Regression check for parity with the un-batched ``compute`` path: that
+    path returned early on empty breakdowns and never called ``get_share``,
+    so an asset with no backed-breakdown rows and a missing supply row
+    contributed zero items without ever surfacing the share-lookup failure.
+    The batched dispatcher must preserve that semantics.
+    """
+    from app.domain.entities.backed_breakdown import BackedBreakdown
+    from app.domain.exceptions import MissingShareError
+
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.return_value = _info(1, 777)
+    reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
+    reader.get_breakdown.return_value = BackedBreakdown(backed_asset_id=42, items=())
+
+    model = _crypto_lending_service(reader)
+    registry = _FakeRegistry([model])
+    service = _service(_repo(positions, Decimal("1000")), registry)
+
+    result = await service.compute(_PRIME)
+
+    assert result.required_risk_capital_usd == Decimal("0")
+    # The position is still reported (with zero RRC), matching the un-batched
+    # behaviour for empty breakdowns.
+    assert len(result.per_allocation) == 1
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_unaffected_for_non_crypto_lending_models():
+    """The legacy ``model.compute`` path must remain unchanged for non-crypto-lending models.
+
+    SURAF/CORE are not crypto-lending and will route through the unbatched
+    dispatch. The ``isinstance`` check must not poison their flow.
+    """
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="X", amount_usd=Decimal("100"))]
+    fake = _FakeModel("gap_sweep", {1}, rrc=Decimal("7"), crr=Decimal("1"))
+    service = _service(_repo(positions, Decimal("100")), _FakeRegistry([fake]))
+
+    result = await service.compute(_PRIME)
+
+    assert fake.computed_ids == [1]
+    assert result.required_risk_capital_usd == Decimal("7")

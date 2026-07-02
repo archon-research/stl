@@ -46,6 +46,16 @@ class CryptoLendingRiskService:
         self._default_gap_pct = default_gap_pct
         self._supported_asset_ids = frozenset(supported_asset_ids)
 
+    @property
+    def reader(self) -> CryptoLendingReader:
+        """Expose the underlying reader so callers can drive batch lookups.
+
+        ``PrimeRiskCapitalService.compute`` uses this to call
+        ``batch_get_shares`` once for every prime allocation, then dispatches
+        each compute via :meth:`compute_with_share`.
+        """
+        return self._reader
+
     # ------------------------------------------------------------------
     # RiskModel interface implementation
     # ------------------------------------------------------------------
@@ -65,6 +75,46 @@ class CryptoLendingRiskService:
 
         gap_pct = self._resolve_gap_pct(overrides)
         items = await self._load_enriched_items(receipt_token_id=asset_id, prime_id=prime_id)
+        return self._build_result(asset_id, prime_id, gap_pct, items)
+
+    async def compute_with_share(
+        self,
+        asset_id: int,
+        prime_id: EthAddress,
+        overrides: Mapping[str, Any],
+        share_or_err: Decimal | Exception,
+    ) -> RrcResult:
+        """Compute the RRC reusing a pre-resolved share.
+
+        Identical to :meth:`compute` but skips the per-asset ``get_share`` DB
+        round-trip; callers (currently ``PrimeRiskCapitalService.compute``) use
+        ``reader.batch_get_shares`` to fetch every prime-allocation share in a
+        single query, then dispatch via this method.
+
+        ``share_or_err`` may be either a resolved :class:`Decimal` share or an
+        ``Exception`` carrying a share-lookup failure (e.g.
+        :class:`MissingShareError`). The exception is only raised after the
+        breakdown is fetched and known to be non-empty, mirroring the un-batched
+        ``compute`` path where ``get_share`` was never called for assets with
+        an empty breakdown.
+        """
+        if not self.applies_to(asset_id, prime_id):
+            raise ValueError(f"unsupported asset_id={asset_id}")
+
+        gap_pct = self._resolve_gap_pct(overrides)
+        info = await self._reader.get_receipt_token(asset_id)
+        if info is None:
+            raise ValueError(f"receipt token not found: {asset_id}")
+        _, items = await self._load_enriched_items_for_info(info, prime_id=prime_id, share_override=share_or_err)
+        return self._build_result(asset_id, prime_id, gap_pct, items)
+
+    def _build_result(
+        self,
+        asset_id: int,
+        prime_id: EthAddress,
+        gap_pct: Decimal,
+        items: list[RiskEnrichedCollateral],
+    ) -> RrcResult:
         raw = gap_sweep.total_bad_debt(items, gap_pct)
         rrc_usd = abs(raw).quantize(_USD_CENT, rounding=ROUND_HALF_EVEN)
         # Use the *protocol's own* collateral USD as the basis: gap-sweep
@@ -167,6 +217,7 @@ class CryptoLendingRiskService:
         self,
         info: ReceiptTokenInfo,
         prime_id: EthAddress | None,
+        share_override: Decimal | Exception | None = None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
         # Legacy endpoints must validate share availability before returning an
         # empty breakdown so warm-up windows still surface as
@@ -176,10 +227,25 @@ class CryptoLendingRiskService:
 
         breakdown = await self._reader.get_breakdown(info)
         if not breakdown.items:
+            # Mirror the un-batched path: an asset with no backed-breakdown
+            # rows contributes zero items, and any share-lookup error is
+            # *never observed* because ``get_share`` is never called. Raising
+            # the prefetched share-lookup error here would surface 503s for
+            # warm-up/uncovered assets that previously returned 200.
             return breakdown.backed_asset_id, []
 
         if prime_id is not None:
-            share = await self._reader.get_share(info, prime_id)
+            # ``compute_with_share`` plumbs a pre-fetched share (or a
+            # share-lookup error) through here to eliminate the
+            # per-allocation ``get_share`` fan-out in
+            # ``PrimeRiskCapitalService.compute``. Defer raising the error
+            # until after the empty-breakdown short-circuit above.
+            if share_override is None:
+                share = await self._reader.get_share(info, prime_id)
+            elif isinstance(share_override, Exception):
+                raise share_override
+            else:
+                share = share_override
 
         token_ids = [item.token_id for item in breakdown.items]
         liq_params = await self._reader.get_liquidation_params(info, breakdown.backed_asset_id, token_ids)

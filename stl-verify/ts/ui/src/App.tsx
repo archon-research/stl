@@ -1,18 +1,26 @@
 import {
   buildRowSearchString,
-  DEFAULT_RANGE_PRESET,
-  defaultTimeRange,
-  isRangePreset,
   matchesSearchQuery,
-  presetToRange,
-  type RangePreset,
   SidebarLayout,
   type SortingState,
-  type TimeRange,
 } from '@archon-research/design-system';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
+// DEFAULT_RANGE_PRESET / defaultTimeRange come from the local shared barrel so
+// the temporary 24h override in components/shared/index.ts applies here too;
+// see that file for context.
+import {
+  ChainLogo,
+  DEFAULT_RANGE_PRESET,
+  defaultTimeRange,
+  isRangePreset,
+  presetToRange,
+  ProtocolLogo,
+  type RangePreset,
+  type TimeRange,
+  TokenLogo,
+} from './components/shared';
 
 import type {
   ChartDatum,
@@ -25,7 +33,6 @@ import {
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
-import { ChainLogo, ProtocolLogo, TokenLogo } from './components/shared';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
