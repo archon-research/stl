@@ -525,8 +525,20 @@ jobs:
           # yields an empty changelog range (only this deploy's own tag commit).
           # The running image tag is the true "what's in prod" and correctly
           # batches any rejected deploys (prod keeps the last-approved tag).
-          BASELINE=$(argocd app get "$APP_NAME" -o json 2>/dev/null \
-            | jq -r '[.status.summary.images[]? | capture(":(?<t>[0-9a-f]{7,40})$")? | .t] | unique | .[0] // ""' 2>/dev/null || true)
+          # Match only bare deploy-tag refs (`repo:<hex>`); the `$`-anchored
+          # 7-40 hex window can't match a 64-char `@sha256:` digest suffix.
+          LIVE_TAGS=$(argocd app get "$APP_NAME" -o json 2>/dev/null \
+            | jq -r '[.status.summary.images[]? | capture(":(?<t>[0-9a-f]{7,40})$")? | .t] | unique | .[]' 2>/dev/null || true)
+          N_TAGS=$(printf '%s' "$LIVE_TAGS" | grep -c . || true); N_TAGS=${N_TAGS:-0}
+          # Only anchor when there's exactly one distinct live tag. Multiple tags
+          # (mid-rollout, or a workload pinned elsewhere) have no single "what's
+          # in prod", so fall back to the no-range message rather than guessing.
+          if [ "$N_TAGS" -eq 1 ]; then
+            BASELINE="$LIVE_TAGS"
+          else
+            BASELINE=""
+            [ "$N_TAGS" -gt 1 ] && echo "::warning::stl-prod reports ${N_TAGS} distinct live image tags; cannot anchor changelog baseline"
+          fi
           echo "baseline=${BASELINE}" >> "$GITHUB_OUTPUT"
 
           # Refresh first so ArgoCD fetches the just-pushed deploy commit into
@@ -535,7 +547,10 @@ jobs:
           argocd app get "$APP_NAME" --refresh -o json >/dev/null 2>&1 || true
           # `argocd app diff` exits non-zero when there IS a diff — expected.
           # Best-effort: a diff hiccup must not block the approval request.
-          DIFF=$(argocd app diff "$APP_NAME" --revision "$DEPLOY_SHA" 2>&1 || true)
+          # Keep stderr out of the diff body so a benign CLI warning can't be
+          # mistaken for diff content (or trigger a false "unavailable" note).
+          DIFF=$(argocd app diff "$APP_NAME" --revision "$DEPLOY_SHA" 2>/tmp/argocd_diff.err || true)
+          DIFF_ERR=$(cat /tmp/argocd_diff.err 2>/dev/null || true)
           # A prod deploy only bumps image tags, so the raw diff is one near
           # identical 6-line block per workload — a huge wall in Slack. Collapse
           # it to the count + changed resource names (the tag is the deploy SHA,
@@ -550,7 +565,7 @@ jobs:
           # Distinguish "no diff" from "diff produced unparseable output" (a
           # transient CLI/fetch error) so the summary is never silently dropped.
           DIFF_NOTE=""
-          if [ "$COUNT" -eq 0 ] && [ -n "$(printf '%s' "$DIFF" | tr -d '[:space:]')" ]; then
+          if [ "$COUNT" -eq 0 ] && [ -n "$(printf '%s' "$DIFF_ERR" | tr -d '[:space:]')" ]; then
             DIFF_NOTE="diff unavailable (see run logs)"
           fi
           {
