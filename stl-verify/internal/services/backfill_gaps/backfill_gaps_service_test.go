@@ -1754,16 +1754,25 @@ func TestBackfillService_RetryLoopIsIndependentOfGapFill(t *testing.T) {
 		}
 	}
 
-	// Block 1 should now be marked published.
-	blk, err := stateRepo.GetBlockByHash(ctx, hdr1.Hash)
-	if err != nil {
-		t.Fatalf("get block 1: %v", err)
-	}
-	if blk == nil {
-		t.Fatal("block 1 missing from state repo after retry")
-	}
-	if !blk.BlockPublished {
-		t.Fatal("block 1 should be marked block_published=true after retry")
+	// Block 1 should now be marked published. MarkPublishComplete runs after the
+	// publish that signalled block1Published, so poll rather than read once.
+	deadline := time.After(2 * time.Second)
+	for {
+		blk, err := stateRepo.GetBlockByHash(ctx, hdr1.Hash)
+		if err != nil {
+			t.Fatalf("get block 1: %v", err)
+		}
+		if blk == nil {
+			t.Fatal("block 1 missing from state repo after retry")
+		}
+		if blk.BlockPublished {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("block 1 should be marked block_published=true after retry")
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 }
 
