@@ -18,12 +18,14 @@ class CryptoLendingReader(Protocol):
         """Return receipt-token routing metadata, or ``None`` if unknown."""
         ...
 
-    def is_maple(self, info: ReceiptTokenInfo) -> bool:
-        """Return whether this receipt token is a Maple Syrup vault.
+    def requires_liquidation_enrichment(self, info: ReceiptTokenInfo) -> bool:
+        """Return whether this protocol's breakdown needs share + liq-param enrichment.
 
-        Maple takes a distinct enrichment path: its breakdown is pool-level,
-        USD-valued and symbol-keyed, with no prime-share scaling and no
-        per-asset liquidation params.
+        ``True`` for protocols with a quantitative risk model (Aave-like, Morpho):
+        their items are scaled by the prime's share and enriched with per-asset
+        liquidation params. ``False`` for protocols whose breakdown is already
+        pool-level, USD-valued and symbol-keyed (e.g. Maple Syrup), whose items
+        are emitted directly with neither.
         """
         ...
 

@@ -11,13 +11,12 @@ class CollateralContribution:
       - Aave-like / Morpho: attributed debt-token units (not necessarily USD), computed
         as (collateral_usd / total_collateral_usd_for_user) * target_debt summed across
         borrowers, so SUM(backing_value) == total backed asset debt.
-      - Maple (MapleBackedBreakdownRepository): raw USD value of the collateral row.
-    Consumers must therefore branch on protocol (see CryptoLendingRiskService.is_maple)
-    rather than assume a single basis; treating Maple's value as debt-token units would
-    silently mis-scale it.
+      - Pre-priced protocols (e.g. Maple Syrup): raw USD value of the collateral row.
+    Consumers must therefore branch on the protocol's basis rather than assume a single
+    one; treating a USD value as debt-token units would silently mis-scale it.
 
-    token_id is None for symbol-keyed collateral (e.g. Maple custody assets such as
-    BTC/SOL that have no on-chain Ethereum token).
+    token_id is None for symbol-keyed collateral (custody assets such as BTC/SOL that
+    have no on-chain Ethereum token).
     """
 
     token_id: int | None

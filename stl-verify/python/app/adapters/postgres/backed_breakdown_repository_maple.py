@@ -12,8 +12,12 @@ from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralCont
 # because their collateral is a par-USDC placeholder, not real backing
 # (docs/maple_spec.md "loanMeta and Internal Maple Positions"). Collateral values are
 # Maple-attested (asset_value_usd, 8 decimals) — see "Collateral Data Provenance".
+#
+# is_syrup and is_internal are editorial attributes that live in the SCD2 satellites
+# (maple_pool_meta / maple_loan_meta), so we read them through the maple_pool_current /
+# maple_loan_current views (hub identity + latest live satellite row), not the hubs.
 _POOL_ID_SQL = """
-SELECT id FROM maple_pool WHERE chain_id = :chain_id AND address = :addr AND is_syrup
+SELECT id FROM maple_pool_current WHERE chain_id = :chain_id AND address = :addr AND is_syrup
 """
 
 # Collateral is tied to the SAME snapshot (synced_at, processing_version) as the latest
@@ -23,13 +27,13 @@ SELECT id FROM maple_pool WHERE chain_id = :chain_id AND address = :addr AND is_
 _MAPLE_BACKED_BREAKDOWN_SQL = """
 WITH pool AS (
     SELECT mp.id AS pool_id, ut.symbol AS underlying_symbol, ut.decimals AS underlying_decimals
-    FROM maple_pool mp
+    FROM maple_pool_current mp
     JOIN token ut ON ut.id = mp.asset_token_id
     WHERE mp.chain_id = :chain_id AND mp.address = :addr AND mp.is_syrup
 ),
 loan_latest AS (
     SELECT l.id AS loan_id, ls.synced_at, ls.processing_version
-    FROM maple_loan l
+    FROM maple_loan_current l
     JOIN LATERAL (
         SELECT synced_at, processing_version, state
         FROM maple_loan_state s
@@ -101,12 +105,14 @@ class MapleBackedBreakdownRepository:
         self._engine = engine
 
     async def resolve_pool_id(self, address: bytes, chain_id: int) -> int | None:
-        async with self._engine.connect() as conn:
-            result = await conn.execute(text(_POOL_ID_SQL), {"addr": address, "chain_id": chain_id})
+        """Resolve a Syrup pool's internal ID from its onchain vault address."""
+        async with self._engine.connect() as connection:
+            result = await connection.execute(text(_POOL_ID_SQL), {"addr": address, "chain_id": chain_id})
             row = result.fetchone()
         return row.id if row is not None else None
 
     async def get_backed_breakdown(self, receipt_token_address: bytes, chain_id: int) -> BackedBreakdown:
+        """Execute the Maple Syrup backed breakdown query and return domain objects."""
         pool_id = await self.resolve_pool_id(receipt_token_address, chain_id)
         if pool_id is None:
             # The syrup receipt token is registered (static migration seed) but the
@@ -115,8 +121,8 @@ class MapleBackedBreakdownRepository:
             # is just not available yet. Maple has no share-warmup concept, so this
             # is the graceful "no data yet" signal (200 with empty items).
             return BackedBreakdown(backed_asset_id=0, items=())
-        async with self._engine.connect() as conn:
-            result = await conn.execute(
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
                 text(_MAPLE_BACKED_BREAKDOWN_SQL),
                 {"addr": receipt_token_address, "chain_id": chain_id},
             )

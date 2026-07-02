@@ -168,11 +168,11 @@ class CryptoLendingRiskService:
         info: ReceiptTokenInfo,
         prime_id: EthAddress | None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
-        if self._reader.is_maple(info):
-            # Maple breakdown is pool-level, USD-valued and symbol-keyed: no prime
-            # share to scale by and no per-asset liquidation params to enrich with.
+        if not self._reader.requires_liquidation_enrichment(info):
+            # Pool-level, USD-valued, symbol-keyed breakdown (e.g. Maple Syrup): no
+            # prime share to scale by and no per-asset liquidation params to enrich with.
             breakdown = await self._reader.get_breakdown(info)
-            return breakdown.backed_asset_id, self._build_maple_items(breakdown)
+            return breakdown.backed_asset_id, self._build_unenriched_items(breakdown)
 
         # Legacy endpoints must validate share availability before returning an
         # empty breakdown so warm-up windows still surface as
@@ -192,15 +192,15 @@ class CryptoLendingRiskService:
         return breakdown.backed_asset_id, self._build_enriched_items(breakdown, share, liq_params)
 
     @staticmethod
-    def _build_maple_items(breakdown: BackedBreakdown) -> list[RiskEnrichedCollateral]:
-        # Maple collateral is USD-valued upstream and symbol-keyed (token_id is None);
-        # there are no liquidation params. Derive token amount from value / price.
+    def _build_unenriched_items(breakdown: BackedBreakdown) -> list[RiskEnrichedCollateral]:
+        # Pre-priced, symbol-keyed collateral (token_id is None) with no liquidation
+        # params — e.g. Maple Syrup. Derive token amount from value / price.
         enriched: list[RiskEnrichedCollateral] = []
         for item in breakdown.items:
             price = item.price_usd
             if not price:
                 logger.warning(
-                    "Maple collateral backed_asset_id=%d symbol=%s has missing or zero price; "
+                    "Unenriched collateral backed_asset_id=%d symbol=%s has missing or zero price; "
                     "emitting amount=0 and price_usd=null (amount_usd preserved)",
                     breakdown.backed_asset_id,
                     item.symbol,

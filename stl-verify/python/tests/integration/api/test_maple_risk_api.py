@@ -17,7 +17,15 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.main import create_app
-from tests.integration.seed import insert_user
+from tests.integration.seed import (
+    insert_maple_loan,
+    insert_maple_loan_collateral,
+    insert_maple_loan_state,
+    insert_maple_pool,
+    insert_maple_pool_state,
+    insert_user,
+    maple_seed_ids,
+)
 
 SYRUP_USDC_HEX = "80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"
 _PRIME_ID = "0x" + "01" * 20
@@ -29,43 +37,35 @@ _SYNCED = dt.datetime(2026, 6, 18, 12, 0, tzinfo=dt.timezone.utc)
 async def _seed(db_url: str) -> None:
     conn = await asyncpg.connect(db_url)
     try:
-        protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 1 AND name = 'maple'")
-        usdc_id = await conn.fetchval("SELECT id FROM token WHERE chain_id = 1 AND symbol = 'USDC'")
-        pool_id = await conn.fetchval(
-            "INSERT INTO maple_pool (chain_id, protocol_id, address, name, asset_token_id, is_syrup) "
-            "VALUES (1, $1, $2, 'Syrup USDC', $3, true) RETURNING id",
-            protocol_id,
-            bytes.fromhex(SYRUP_USDC_HEX),
-            usdc_id,
+        protocol_id, usdc_id = await maple_seed_ids(conn)
+        pool_id = await insert_maple_pool(
+            conn,
+            protocol_id=protocol_id,
+            address=bytes.fromhex(SYRUP_USDC_HEX),
+            asset_token_id=usdc_id,
+            synced_at=_SYNCED,
         )
-        await conn.execute(
-            "INSERT INTO maple_pool_state "
-            "(maple_pool_id, synced_at, liquid_assets, principal_out, utilization, monthly_apy, spot_apy) "
-            "VALUES ($1, $2, 1000000000000, 0, 0, 0, 0)",
-            pool_id,
-            _SYNCED,
-        )
+        await insert_maple_pool_state(conn, pool_id=pool_id, synced_at=_SYNCED, liquid_assets=1000000000000)
         borrower_id = await insert_user(conn, _BORROWER)
-        loan_id = await conn.fetchval(
-            "INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id) "
-            "VALUES (1, $1, $2, $3, $4) RETURNING id",
-            protocol_id,
-            _EXTERNAL_LOAN,
-            pool_id,
-            borrower_id,
+        loan_id = await insert_maple_loan(
+            conn,
+            protocol_id=protocol_id,
+            pool_id=pool_id,
+            borrower_user_id=borrower_id,
+            address=_EXTERNAL_LOAN,
+            synced_at=_SYNCED,
         )
-        await conn.execute(
-            "INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio) "
-            "VALUES ($1, $2, 'Active', 120000000000, 1656007)",
-            loan_id,
-            _SYNCED,
+        await insert_maple_loan_state(
+            conn, loan_id=loan_id, synced_at=_SYNCED, state="Active", principal_owed=120000000000, acm_ratio=1656007
         )
-        await conn.execute(
-            "INSERT INTO maple_loan_collateral "
-            "(maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state) "
-            "VALUES ($1, $2, 'BTC', 200000000, 8, 6500000000000, 'Deposited')",
-            loan_id,
-            _SYNCED,
+        await insert_maple_loan_collateral(
+            conn,
+            loan_id=loan_id,
+            synced_at=_SYNCED,
+            symbol="BTC",
+            amount=200000000,
+            decimals=8,
+            value_usd=6500000000000,
         )
     finally:
         await conn.close()

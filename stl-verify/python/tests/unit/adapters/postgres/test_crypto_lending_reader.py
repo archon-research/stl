@@ -345,12 +345,12 @@ def test_normalize_maple() -> None:
     assert _normalize_protocol_name("maple") == "maple"
 
 
-def test_is_maple_true_for_maple(reader: PostgresCryptoLendingReader) -> None:
-    assert reader.is_maple(_maple_info()) is True
+def test_requires_liquidation_enrichment_false_for_maple(reader: PostgresCryptoLendingReader) -> None:
+    assert reader.requires_liquidation_enrichment(_maple_info()) is False
 
 
-def test_is_maple_false_for_aave(reader: PostgresCryptoLendingReader) -> None:
-    assert reader.is_maple(_aave_like_info()) is False
+def test_requires_liquidation_enrichment_true_for_aave(reader: PostgresCryptoLendingReader) -> None:
+    assert reader.requires_liquidation_enrichment(_aave_like_info()) is True
 
 
 @pytest.mark.asyncio

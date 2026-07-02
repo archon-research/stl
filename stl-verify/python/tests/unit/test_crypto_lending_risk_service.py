@@ -65,7 +65,7 @@ def _morpho_info() -> ReceiptTokenInfo:
 @pytest.fixture
 def reader() -> MagicMock:
     reader = MagicMock()
-    reader.is_maple = MagicMock(return_value=False)
+    reader.requires_liquidation_enrichment = MagicMock(return_value=True)
     reader.get_receipt_token = AsyncMock(return_value=_aave_like_info())
     reader.get_breakdown = AsyncMock(
         return_value=_breakdown((_contrib(10, "WETH", "10000", "2000"),), backed_asset_id=UNDERLYING_TOKEN_ID)
@@ -410,7 +410,7 @@ def _maple_info() -> ReceiptTokenInfo:
 class TestMaplePath:
     @pytest.fixture
     def maple_reader(self, reader: MagicMock) -> MagicMock:
-        reader.is_maple = MagicMock(return_value=True)
+        reader.requires_liquidation_enrichment = MagicMock(return_value=False)
         reader.get_receipt_token = AsyncMock(return_value=_maple_info())
         reader.get_breakdown = AsyncMock(
             return_value=_breakdown(
@@ -464,8 +464,9 @@ class TestMaplePath:
         maple_reader.get_legacy_share.assert_not_awaited()
         maple_reader.get_liquidation_params.assert_not_awaited()
 
-    # Both a None price and a literal zero price hit distinct ternary predicates
-    # in _build_maple_items (``if price`` vs ``price is not None``); cover both.
+    # A None price and a literal zero price both take the falsy branch in
+    # _build_unenriched_items (uniform truthiness), yielding amount=0 and
+    # price_usd=null; parametrized to document both inputs are handled safely.
     @pytest.mark.parametrize("price", [None, Decimal("0")])
     @pytest.mark.asyncio
     async def test_zero_or_missing_price_yields_zero_amount(

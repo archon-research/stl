@@ -54,5 +54,5 @@ WHERE o.name = 'aave_v3'
 ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING;
 
 INSERT INTO migrations (filename)
-VALUES ('20260618_120000_maple_syrup_allocation_exposure.sql')
+VALUES ('20260702_120000_maple_syrup_allocation_exposure.sql')
 ON CONFLICT (filename) DO NOTHING;

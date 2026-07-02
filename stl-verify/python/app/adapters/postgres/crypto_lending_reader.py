@@ -110,8 +110,11 @@ class PostgresCryptoLendingReader:
     async def get_receipt_token(self, receipt_token_id: int) -> ReceiptTokenInfo | None:
         return await self._receipt_token_repo.get(receipt_token_id)
 
-    def is_maple(self, info: ReceiptTokenInfo) -> bool:
-        return _normalize_protocol_name(info.protocol_name) in _MAPLE
+    def requires_liquidation_enrichment(self, info: ReceiptTokenInfo) -> bool:
+        # A protocol carries per-asset liquidation params + prime shares to enrich
+        # with exactly when it has a quantitative risk model (``_SUPPORTED_PROTOCOLS``).
+        # Maple has neither: its pool-level, pre-priced breakdown is emitted as-is.
+        return _normalize_protocol_name(info.protocol_name) in _SUPPORTED_PROTOCOLS
 
     async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
         normalized = _normalize_protocol_name(info.protocol_name)

@@ -21,5 +21,5 @@ def default_allocation_category_rules() -> list[AllocationCategoryMapping]:
         AllocationCategoryMapping("Curve", None, AllocationCategory.ALLOCATION, priority=100),
         # Standard lending allocations.
         AllocationCategoryMapping("Morpho", None, AllocationCategory.ALLOCATION, priority=100),
-        AllocationCategoryMapping("maple", None, AllocationCategory.ALLOCATION, priority=100),
+        AllocationCategoryMapping("Maple", None, AllocationCategory.ALLOCATION, priority=100),
     ]
