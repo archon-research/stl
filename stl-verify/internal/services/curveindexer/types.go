@@ -1,16 +1,12 @@
 package curveindexer
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
-	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -129,52 +125,8 @@ type DecodedEvents struct {
 	Captured        []CapturedEvent
 }
 
-// StateSnapshot is a pool-class-tagged state row plus its close-to-static
-// governance config. Exactly one of the two state pointers is non-nil, matching
-// Pool.Kind; the matching config pointer carries the per-block config reads (the
-// repo decides via append-on-change whether to persist a new config row).
-type StateSnapshot struct {
-	Pool             RegisteredPool
-	BlockNumber      int64
-	BlockVersion     int
-	Timestamp        time.Time
-	Stableswap       *entity.CurveStableswapState
-	Cryptoswap       *entity.CurveCryptoswapState
-	StableswapConfig *entity.CurveStableswapConfig
-	CryptoswapConfig *entity.CurveCryptoswapConfig
-}
-
-// Validate enforces that exactly one state pointer is set matching Pool.Kind,
-// and that any attached config pointer also matches Kind (a cross-class config
-// is a handler bug and must fail at the boundary, not become a mismatched row).
-func (s StateSnapshot) Validate() error {
-	switch s.Pool.Kind {
-	case KindStableswapPreNG, KindStableswapNG:
-		if s.Stableswap == nil || s.Cryptoswap != nil {
-			return fmt.Errorf("pool %s (kind %s): expected stableswap snapshot only", s.Pool.Address, s.Pool.Kind)
-		}
-		if s.CryptoswapConfig != nil {
-			return fmt.Errorf("pool %s (kind %s): stableswap snapshot carries a cryptoswap config", s.Pool.Address, s.Pool.Kind)
-		}
-	case KindCryptoswap:
-		if s.Cryptoswap == nil || s.Stableswap != nil {
-			return fmt.Errorf("pool %s (kind %s): expected cryptoswap snapshot only", s.Pool.Address, s.Pool.Kind)
-		}
-		if s.StableswapConfig != nil {
-			return fmt.Errorf("pool %s (kind %s): cryptoswap snapshot carries a stableswap config", s.Pool.Address, s.Pool.Kind)
-		}
-	default:
-		return fmt.Errorf("pool %s: unknown kind %s", s.Pool.Address, s.Pool.Kind)
-	}
-	return nil
-}
-
 type PoolClassHandler interface {
 	DecodeEvents(receipt shared.TransactionReceipt, pool RegisteredPool, chainID, blockNumber int64, version int, ts time.Time) (DecodedEvents, error)
-	// SnapshotState reads pool state via mc pinned to blockHash, the hash of the
-	// (blockNumber, version) block being processed (reorg-correctness: see
-	// outbound.Multicaller.ExecuteAtHash).
-	SnapshotState(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockNumber int64, version int, blockHash common.Hash, ts time.Time) (StateSnapshot, error)
 	// Warm precomputes any per-coin-count state (e.g. event-signature hashes) for
 	// pools with nCoins coins. The coordinator calls it once per registered pool at
 	// construction so the per-block decode path is a pure cache read, keeping the

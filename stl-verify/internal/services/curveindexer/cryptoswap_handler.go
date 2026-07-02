@@ -174,26 +174,19 @@ func (h *CryptoswapHandler) SnapshotState(
 	version int,
 	blockHash common.Hash,
 	ts time.Time,
-) (StateSnapshot, error) {
+) (*entity.CurveCryptoswapState, *entity.CurveCryptoswapConfig, error) {
 	acc := &cryptoswapSnapshotAcc{}
 	reads := h.cryptoswapSnapshotReads(pool, blockNumber, acc)
 	if err := shared.RunSnapshotReads(ctx, mc, pool, blockHash, reads); err != nil {
-		return StateSnapshot{}, fmt.Errorf("snapshotting pool %s state: %w", pool.Address, err)
+		return nil, nil, fmt.Errorf("snapshotting pool %s state: %w", pool.Address, err)
 	}
 
 	st, cfg, err := acc.build(pool, blockNumber, version, ts)
 	if err != nil {
-		return StateSnapshot{}, fmt.Errorf("decoding snapshot results for pool %s: %w", pool.Address, err)
+		return nil, nil, fmt.Errorf("decoding snapshot results for pool %s: %w", pool.Address, err)
 	}
 
-	return StateSnapshot{
-		Pool:             pool,
-		BlockNumber:      blockNumber,
-		BlockVersion:     version,
-		Timestamp:        ts,
-		Cryptoswap:       st,
-		CryptoswapConfig: cfg,
-	}, nil
+	return st, cfg, nil
 }
 
 // cryptoswapConfigGetters is the ordered list of config view methods read at the

@@ -311,10 +311,9 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	if err != nil {
 		t.Fatalf("loading cryptoswap ABI: %v", err)
 	}
-	handlers := curveindexer.NewHandlerRegistry(
-		curveindexer.NewStableswapHandler(stableABI),
-		curveindexer.NewCryptoswapHandler(cryptoABI),
-	)
+	stableHandler := curveindexer.NewStableswapHandler(stableABI)
+	cryptoHandler := curveindexer.NewCryptoswapHandler(cryptoABI)
+	handlers := curveindexer.NewHandlerRegistry(stableHandler, cryptoHandler)
 
 	txMgr, err := NewTxManager(curveTestPool, logger)
 	if err != nil {
@@ -333,15 +332,17 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	mc := &stableswapCallCountResults{t: t, pre: coordPreNGResults(), ng: coordNGResults(t)}
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
-		Pools:       registered,
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: eventWriter,
-		TxManager:   txMgr,
-		SweepBlocks: 0,
-		ChainID:     curveCoordChainID,
-		Logger:      logger,
+		Pools:         registered,
+		Handlers:      handlers,
+		StableHandler: stableHandler,
+		CryptoHandler: cryptoHandler,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   eventWriter,
+		TxManager:     txMgr,
+		SweepBlocks:   0,
+		ChainID:       curveCoordChainID,
+		Logger:        logger,
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)

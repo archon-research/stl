@@ -61,21 +61,25 @@ func (curveFactory) BuildHandler(ctx context.Context, deps *dexbootstrap.Deps, c
 	if err != nil {
 		return nil, fmt.Errorf("loading cryptoswap abi: %w", err)
 	}
+	stableHandler := curveindexer.NewStableswapHandler(stableABI)
+	cryptoHandler := curveindexer.NewCryptoswapHandler(cryptoABI)
 
 	protocolID := poolRows[0].ProtocolID
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
-		Pools:       pools,
-		Handlers:    curveindexer.NewHandlerRegistry(curveindexer.NewStableswapHandler(stableABI), curveindexer.NewCryptoswapHandler(cryptoABI)),
-		Multicaller: deps.Multicaller,
-		Repo:        repo,
-		EventWriter: eventWriter,
-		TxManager:   deps.TxManager,
-		SweepBlocks: cfg.SweepBlocks,
-		ChainID:     cfg.ChainID,
-		Logger:      deps.Logger,
-		Telemetry:   deps.DexTelemetry,
+		Pools:         pools,
+		Handlers:      curveindexer.NewHandlerRegistry(stableHandler, cryptoHandler),
+		StableHandler: stableHandler,
+		CryptoHandler: cryptoHandler,
+		Multicaller:   deps.Multicaller,
+		Repo:          repo,
+		EventWriter:   eventWriter,
+		TxManager:     deps.TxManager,
+		SweepBlocks:   cfg.SweepBlocks,
+		ChainID:       cfg.ChainID,
+		Logger:        deps.Logger,
+		Telemetry:     deps.DexTelemetry,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating curve coordinator: %w", err)
