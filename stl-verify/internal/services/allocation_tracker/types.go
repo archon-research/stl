@@ -116,7 +116,12 @@ type SnapshotBatch struct {
 type PositionSource interface {
 	Name() string
 	Supports(tokenType string, protocol string) bool
-	FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error)
+	// FetchBalances reads on-chain state pinned to blockHash, not blockNumber
+	// alone: after a reorg an archive node answers eth_call-by-number with the
+	// new canonical state, which can silently disagree with the reorged
+	// (older-version) data this call is being made for. blockNumber is kept
+	// for logging/labelling only.
+	FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error)
 }
 
 // AllocationHandler processes position+supply batches.

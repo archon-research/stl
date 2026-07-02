@@ -903,6 +903,69 @@ func TestFetchAndProcessReceipts_CacheMiss_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlockEvent_MissingBlockHash_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	receiptsJSON, err := json.Marshal([]shared.TransactionReceipt{{
+		TransactionHash: "0xabc",
+		Logs: []shared.Log{{
+			Address:         "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
+			Topics:          []string{"0x0000000000000000000000000000000000000000000000000000000000000000"},
+			Data:            "0x",
+			TransactionHash: "0xabc",
+			LogIndex:        "0x0",
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("marshal receipts: %v", err)
+	}
+	cache.SetReceipts(1, 99999, 0, receiptsJSON)
+
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, errors.New("multicaller must not be called")
+	}
+	reader := aavelike.NewPositionReader(nil, multicaller, mustERC20ABI(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	eventExtractor, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+
+	var txCalled int
+	txManager := &testutil.MockTxManager{
+		WithTransactionFn: func(_ context.Context, fn func(tx pgx.Tx) error) error {
+			txCalled++
+			return fn(nil)
+		},
+	}
+	svc := &Service{
+		cacheReader:    cache,
+		reader:         reader,
+		eventExtractor: eventExtractor,
+		txManager:      txManager,
+		userRepo:       &testutil.MockUserRepository{},
+		protocolRepo:   &testutil.MockProtocolRepository{},
+		tokenRepo:      &testutil.MockTokenRepository{},
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err = svc.processBlockEvent(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 99999, Version: 0, BlockHash: "",
+	})
+	if err == nil {
+		t.Fatal("expected non-nil error from processBlockEvent when event.BlockHash is empty")
+	}
+
+	if multicaller.CallCount != 0 {
+		t.Errorf("multicaller invoked %d times, want 0", multicaller.CallCount)
+	}
+	if txCalled != 0 {
+		t.Errorf("txManager.WithTransaction invoked %d times, want 0 (block must not be persisted)", txCalled)
+	}
+}
+
 func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1090,7 +1153,7 @@ func TestExtractUserPositionData_ReturnsDebtAndCollateral(t *testing.T) {
 
 	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
 
-	collaterals, debts, err := svc.extractUserPositionData(context.Background(), userAddress, protocolAddress, chainID, blockNumber, "0xabc")
+	collaterals, debts, err := svc.extractUserPositionData(context.Background(), userAddress, protocolAddress, chainID, blockNumber, common.Hash{}, "0xabc")
 	if err != nil {
 		t.Fatalf("extractUserPositionData() failed: %v", err)
 	}
@@ -1480,7 +1543,7 @@ func TestSavePositionSnapshot_AllEventTypesFailWhenPositionExtractionFails(t *te
 				User:      userAddress,
 				Reserve:   wethAddress,
 				Amount:    oneETH,
-			}, protocolAddress, chainID, blockNumber, 0, time.Unix(1700000000, 0).UTC())
+			}, protocolAddress, chainID, blockNumber, common.Hash{}, 0, time.Unix(1700000000, 0).UTC())
 			if err == nil {
 				t.Fatal("expected savePositionSnapshot to fail, got nil")
 			}
@@ -1525,7 +1588,7 @@ func TestSavePositionSnapshot_TokenMetadataFailurePropagatesError(t *testing.T) 
 		User:      userAddress,
 		Reserve:   wethAddress,
 		Amount:    oneETH,
-	}, protocolAddress, chainID, blockNumber, 0, time.Unix(1700000000, 0).UTC())
+	}, protocolAddress, chainID, blockNumber, common.Hash{}, 0, time.Unix(1700000000, 0).UTC())
 	if err == nil {
 		t.Fatal("expected error when token metadata fetch fails, got nil")
 	}
@@ -1715,7 +1778,7 @@ func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing
 	svc.txManager = &testutil.MockTxManager{}
 	svc.receiptTokenRepo = receiptTokenRepo
 
-	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1787,7 +1850,7 @@ func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 	svc.txManager = &testutil.MockTxManager{}
 	svc.receiptTokenRepo = receiptTokenRepo
 
-	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
 	if err == nil {
 		t.Fatal("expected error when receipt token repo fails, got nil")
 	}

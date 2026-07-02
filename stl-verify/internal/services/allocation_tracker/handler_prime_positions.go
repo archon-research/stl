@@ -330,6 +330,9 @@ func (c *metadataCache) fetchMissing(
 		)
 	}
 
+	// Number-pinned intentionally: decimals/symbol are structurally static
+	// (immutable per contract), not versioned per-block state, so the
+	// reorg-correctness concern behind ExecuteAtHash (VEC-471) doesn't apply here.
 	block := big.NewInt(blockNumber)
 	results, err := c.multicaller.Execute(ctx, calls, block)
 	if err != nil {

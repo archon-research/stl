@@ -48,7 +48,7 @@ func TestSkipSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 	src := NewSkipSource("test-skip", "atoken", nil, logger)
 
 	entries := []*TokenEntry{{TokenType: "atoken"}}
-	result, err := src.FetchBalances(context.Background(), entries, 0)
+	result, err := src.FetchBalances(context.Background(), entries, 0, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestStubSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 	logger := slog.Default()
 	src := NewStubSource("test-stub", "psm3", logger)
 
-	result, err := src.FetchBalances(context.Background(), nil, 0)
+	result, err := src.FetchBalances(context.Background(), nil, 0, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

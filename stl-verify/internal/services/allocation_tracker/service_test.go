@@ -215,7 +215,7 @@ func TestProcessBlock_PartialFetchFailure_ReturnsErrorAndDoesNotPersist(t *testi
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockTimestamp: 1700000000})
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()})
 	if err == nil {
 		t.Fatal("expected partial fetch failure to be returned")
 	}
@@ -251,7 +251,7 @@ func TestProcessBlock_SweepFetchFailure_ReturnsError(t *testing.T) {
 		blocksSinceSweep: 0,
 	}
 
-	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockTimestamp: 1700000000})
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 200, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()})
 	if err == nil {
 		t.Fatal("expected sweep fetch failure to be returned")
 	}
@@ -285,7 +285,7 @@ func TestProcessBlock_FailedSweepDoesNotResetCounter(t *testing.T) {
 		blocksSinceSweep: 0,
 	}
 
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 300, Version: 0, BlockTimestamp: 1700000000}
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 300, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
 	if err := svc.processBlock(context.Background(), event); err == nil {
 		t.Fatal("expected first sweep attempt to fail")
 	}
@@ -335,9 +335,53 @@ func TestProcessBlock_SweepHandlerFailure_ReturnsError(t *testing.T) {
 		blocksSinceSweep: 0,
 	}
 
-	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 400, Version: 0, BlockTimestamp: 1700000000})
+	err := svc.processBlock(context.Background(), outbound.BlockEvent{ChainID: 1, BlockNumber: 400, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()})
 	if err == nil {
 		t.Fatal("expected sweep handler failure to be returned")
+	}
+}
+
+// TestProcessBlock_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching a position source, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}}
+	source := &mockSource{
+		name:       "erc20",
+		tokenTypes: map[string]bool{"erc20": true},
+	}
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(source)
+
+	handler := &testHandler{}
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          entries,
+		handler:          handler,
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: ""}
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected non-nil error from processBlock when event.BlockHash is empty")
+	}
+
+	if source.called != 0 {
+		t.Errorf("position source invoked %d times, want 0 (block must not be read)", source.called)
+	}
+	if len(handler.batches) != 0 {
+		t.Errorf("HandleBatch called %d times, want 0 (block must not be persisted)", len(handler.batches))
 	}
 }
 

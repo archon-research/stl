@@ -24,6 +24,13 @@ func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.I
 	return f.results, nil
 }
 
+func (f *fakeMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.results, nil
+}
+
 func (f *fakeMulticaller) Address() common.Address {
 	return common.Address{}
 }
@@ -76,7 +83,7 @@ func TestUniV3Source_FetchBalances_EmptyEntries(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := src.FetchBalances(context.Background(), nil, 100)
+	result, err := src.FetchBalances(context.Background(), nil, 100, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -101,7 +108,7 @@ func TestUniV3Source_FetchBalances_UnknownChain(t *testing.T) {
 		},
 	}
 
-	result, err := src.FetchBalances(context.Background(), entries, 100)
+	result, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -109,4 +116,69 @@ func TestUniV3Source_FetchBalances_UnknownChain(t *testing.T) {
 	if len(result.Balances) != 0 {
 		t.Errorf("expected empty result for unknown chain, got %d", len(result.Balances))
 	}
+}
+
+// TestUniV3Source_FetchBalances_PinsToBlockHash asserts the NFT-position and
+// pool-state reads are pinned to the block hash, not the block number: after a
+// reorg an archive node answers eth_call-by-number with the new canonical
+// state, which can silently disagree with the reorged (older-version) data
+// this fetch is being made for.
+func TestUniV3Source_FetchBalances_PinsToBlockHash(t *testing.T) {
+	mc := &hashRecordingFakeMulticaller{}
+	src, err := NewUniV3Source(mc, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	entries := []*TokenEntry{
+		{
+			ContractAddress: common.HexToAddress("0x1111"),
+			WalletAddress:   common.HexToAddress("0x2222"),
+			Star:            "spark",
+			Chain:           "mainnet",
+			TokenType:       "uni_v3_pool",
+		},
+	}
+
+	if _, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if mc.callCount == 0 {
+		t.Fatal("expected at least one multicall")
+	}
+	if mc.executedVia != "hash" {
+		t.Fatalf("multicaller invoked via %q, want the hash-pinned path", mc.executedVia)
+	}
+	if mc.gotHash != testBlockHash {
+		t.Fatalf("multicall block hash = %s, want %s", mc.gotHash, testBlockHash)
+	}
+}
+
+// hashRecordingFakeMulticaller is a test double for outbound.Multicaller that
+// records the block hash it was called with via ExecuteAtHash and returns an
+// empty-but-successful result batch big enough for any call count, so tests
+// can assert the reader pins state reads to the block hash rather than the
+// block number, without needing to model exact multicall shapes.
+type hashRecordingFakeMulticaller struct {
+	callCount   int
+	gotHash     common.Hash
+	executedVia string // "hash" or "number", whichever method was actually called
+}
+
+func (m *hashRecordingFakeMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	m.callCount++
+	m.executedVia = "number"
+	return make([]outbound.Result, len(calls)), nil
+}
+
+func (m *hashRecordingFakeMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	m.callCount++
+	m.executedVia = "hash"
+	m.gotHash = blockHash
+	return make([]outbound.Result, len(calls)), nil
+}
+
+func (m *hashRecordingFakeMulticaller) Address() common.Address {
+	return common.Address{}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -333,12 +334,29 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 	}
 }
 
+// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
+// on an empty string rather than letting common.HexToHash silently produce the
+// zero hash: state (price) reads must be pinned to the exact block being
+// processed (see blockchain.executeOracleState / VEC-471) — a malformed live
+// event must not sail through as the backfill number-pinned fallback.
+func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
+	if event.BlockHash == "" {
+		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
+	}
+	return common.HexToHash(event.BlockHash), nil
+}
+
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := blockHashFromEvent(event)
+	if err != nil {
+		return err
+	}
+
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "getAssetsPrices"))
 	rpcStart := time.Now()
-	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber)
+	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber, blockHash)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "getAssetsPrices", rpcDuration, err)
 	if err != nil {
@@ -395,11 +413,16 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := blockHashFromEvent(event)
+	if err != nil {
+		return err
+	}
+
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "latestRoundData"))
 	rpcStart := time.Now()
-	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, s.logger)
+	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, blockHash, s.logger)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "latestRoundData", rpcDuration, err)
 	if err != nil {

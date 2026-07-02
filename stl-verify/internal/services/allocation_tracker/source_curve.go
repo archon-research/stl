@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -43,18 +44,14 @@ func (s *CurveSource) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
 	blockNumber int64,
+	blockHash common.Hash,
 ) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
 	}
 
-	var block *big.Int
-	if blockNumber > 0 {
-		block = big.NewInt(blockNumber)
-	}
-
-	shares, valid1, err := s.fetchShares(ctx, entries, block)
+	shares, valid1, err := s.fetchShares(ctx, entries, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch shares: %w", err)
 	}
@@ -86,7 +83,7 @@ func (s *CurveSource) FetchBalances(
 func (s *CurveSource) fetchShares(
 	ctx context.Context,
 	entries []*TokenEntry,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[EntryKey]*big.Int, []*TokenEntry, error) {
 	calls := make([]outbound.Call, 0, len(entries))
 	var valid []*TokenEntry
@@ -111,7 +108,7 @@ func (s *CurveSource) fetchShares(
 		return nil, nil, nil
 	}
 
-	mc, err := s.multicaller.Execute(ctx, calls, block)
+	mc, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("balanceOf multicall: %w", err)
 	}

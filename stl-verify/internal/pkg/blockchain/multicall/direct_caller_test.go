@@ -432,6 +432,71 @@ func TestDirectCaller_ContractRevertIsNotPropagated(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestDirectCaller_ExecuteAtHash
+// ---------------------------------------------------------------------------
+
+// TestDirectCaller_ExecuteAtHash_SendsBlockHashArg pins the JSON-RPC wire
+// contract: the batch's second positional eth_call argument must be a
+// {"blockHash": ...} object, not a block-number/tag string, so the read is
+// unambiguous across a reorg (see outbound.Multicaller.ExecuteAtHash).
+func TestDirectCaller_ExecuteAtHash_SendsBlockHashArg(t *testing.T) {
+	target := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	callData := []byte{0xAB, 0xCD}
+	wantHash := common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+
+	var gotParams json.RawMessage
+	srv := startBatchRPCServer(t, func(req rpcutil.Request) (json.RawMessage, *rpcError) {
+		gotParams = req.Params
+		return json.RawMessage(`"0xaa"`), nil
+	})
+	defer srv.Close()
+
+	dc := newTestDirectCaller(t, srv.URL)
+	calls := []outbound.Call{{Target: target, AllowFailure: false, CallData: callData}}
+	results, err := dc.ExecuteAtHash(context.Background(), calls, wantHash)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 || !results[0].Success {
+		t.Fatalf("results = %+v, want one successful result", results)
+	}
+
+	var params []json.RawMessage
+	if err := json.Unmarshal(gotParams, &params); err != nil {
+		t.Fatalf("unmarshaling params: %v", err)
+	}
+	if len(params) != 2 {
+		t.Fatalf("params len = %d, want 2 (callArg, blockArg)", len(params))
+	}
+	var blockArg blockHashArg
+	if err := json.Unmarshal(params[1], &blockArg); err != nil {
+		t.Fatalf("unmarshaling block arg: %v", err)
+	}
+	if blockArg.BlockHash != wantHash {
+		t.Errorf("blockArg.BlockHash = %s, want %s", blockArg.BlockHash, wantHash)
+	}
+}
+
+// TestDirectCaller_ExecuteAtHash_EmptyCallsReturnsEmpty mirrors the Execute
+// contract: no calls means no RPC round trip and an empty (not nil) result.
+func TestDirectCaller_ExecuteAtHash_EmptyCallsReturnsEmpty(t *testing.T) {
+	srv := startBatchRPCServer(t, func(req rpcutil.Request) (json.RawMessage, *rpcError) {
+		t.Fatal("no RPC call expected for empty calls")
+		return nil, nil
+	})
+	defer srv.Close()
+
+	dc := newTestDirectCaller(t, srv.URL)
+	results, err := dc.ExecuteAtHash(context.Background(), nil, common.Hash{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("results len = %d, want 0", len(results))
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestNewDirectCaller
 // ---------------------------------------------------------------------------
 
