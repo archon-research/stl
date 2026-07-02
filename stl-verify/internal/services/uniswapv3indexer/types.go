@@ -36,7 +36,7 @@ type CapturedLog struct {
 	Address   common.Address
 	LogIndex  uint
 	TxHash    common.Hash
-	EventName string // decoded event name, or "" for an unknown topic0
+	EventName string // decoded event name, or topic0 hex (or a sentinel) when unrecognized — never empty
 	Payload   json.RawMessage
 }
 

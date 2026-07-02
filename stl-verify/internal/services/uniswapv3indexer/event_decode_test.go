@@ -620,8 +620,8 @@ func TestDecodeEvents_UnknownTopic0IsCapturedRaw(t *testing.T) {
 		t.Fatalf("Captured = %d, want 1", len(got.Captured))
 	}
 	c := got.Captured[0]
-	if c.EventName != "" {
-		t.Errorf("Captured EventName = %q, want empty for unknown topic0", c.EventName)
+	if c.EventName != unknownTopic0 {
+		t.Errorf("Captured EventName = %q, want topic0 hex %q for unknown topic0", c.EventName, unknownTopic0)
 	}
 	if c.Address != pool.Address {
 		t.Errorf("Captured Address = %s, want %s", c.Address, pool.Address)
@@ -629,6 +629,7 @@ func TestDecodeEvents_UnknownTopic0IsCapturedRaw(t *testing.T) {
 	if c.LogIndex != 2 {
 		t.Errorf("Captured LogIndex = %d, want 2", c.LogIndex)
 	}
+	assertValidProtocolEventName(t, c.EventName)
 
 	var payload struct {
 		Topics []string `json:"topics"`
@@ -642,6 +643,65 @@ func TestDecodeEvents_UnknownTopic0IsCapturedRaw(t *testing.T) {
 	}
 	if payload.Data != "0x0102030405" {
 		t.Errorf("payload.data = %q, want 0x0102030405", payload.Data)
+	}
+}
+
+func TestDecodeEvents_ZeroTopicsLogIsCapturedWithSentinelName(t *testing.T) {
+	pool := testPool()
+	log := buildRawLog(pool.Address, "0x3", nil, "0x0a0b0c")
+
+	got, err := DecodeEvents(receiptOf(log), pool, chainID, blockNumber, blockVer, blockTS)
+	if err != nil {
+		t.Fatalf("DecodeEvents: %v", err)
+	}
+	if len(got.Swaps) != 0 || len(got.LiquidityEvents) != 0 || len(got.PoolEvents) != 0 {
+		t.Fatalf("zero-topics log must not produce any typed entity: swaps=%d liquidity=%d poolEvents=%d",
+			len(got.Swaps), len(got.LiquidityEvents), len(got.PoolEvents))
+	}
+	if len(got.Captured) != 1 {
+		t.Fatalf("Captured = %d, want 1", len(got.Captured))
+	}
+	c := got.Captured[0]
+	if c.EventName == "" {
+		t.Fatal("Captured EventName is empty for zero-topics log, want non-empty sentinel")
+	}
+	assertValidProtocolEventName(t, c.EventName)
+
+	var payload struct {
+		Topics []string `json:"topics"`
+		Data   string   `json:"data"`
+	}
+	if err := json.Unmarshal(c.Payload, &payload); err != nil {
+		t.Fatalf("unmarshalling raw captured payload: %v", err)
+	}
+	if len(payload.Topics) != 0 {
+		t.Errorf("payload.topics = %v, want empty", payload.Topics)
+	}
+	if payload.Data != "0x0a0b0c" {
+		t.Errorf("payload.data = %q, want 0x0a0b0c", payload.Data)
+	}
+}
+
+// assertValidProtocolEventName confirms that a CapturedLog.EventName produced
+// by the capture-net path would survive entity.NewProtocolEvent's validation
+// (specifically the non-empty EventName check that made ""  poison-stall the
+// worker: an aborted SaveBatch is redelivered by SQS and fails identically).
+func assertValidProtocolEventName(t *testing.T, eventName string) {
+	t.Helper()
+	_, err := entity.NewProtocolEvent(
+		int(chainID),
+		1,
+		blockNumber,
+		blockVer,
+		[]byte{0x01},
+		0,
+		[]byte{0x02},
+		eventName,
+		json.RawMessage(`{"topics":[]}`),
+		blockTS,
+	)
+	if err != nil {
+		t.Errorf("NewProtocolEvent rejected capture-net EventName %q: %v", eventName, err)
 	}
 }
 
@@ -713,9 +773,8 @@ func TestDecodeEvents_MultipleLogsInReceipt(t *testing.T) {
 		[]common.Hash{addrTopic(sender), addrTopic(recipient)},
 		big.NewInt(1), big.NewInt(1), big.NewInt(1), big.NewInt(1), big.NewInt(1),
 	)
-	unknownLog := buildRawLog(pool.Address, "0x2",
-		[]string{common.HexToHash("0xabcdef0000000000000000000000000000000000000000000000000000000009").Hex()},
-		"0x")
+	unknownTopic0 := common.HexToHash("0xabcdef0000000000000000000000000000000000000000000000000000000009").Hex()
+	unknownLog := buildRawLog(pool.Address, "0x2", []string{unknownTopic0}, "0x")
 
 	got, err := DecodeEvents(receiptOf(swapLog, foreignLog, unknownLog), pool, chainID, blockNumber, blockVer, blockTS)
 	if err != nil {
@@ -730,7 +789,7 @@ func TestDecodeEvents_MultipleLogsInReceipt(t *testing.T) {
 	if got.Captured[0].EventName != "Swap" {
 		t.Errorf("Captured[0].EventName = %q, want Swap", got.Captured[0].EventName)
 	}
-	if got.Captured[1].EventName != "" {
-		t.Errorf("Captured[1].EventName = %q, want empty (unknown topic0)", got.Captured[1].EventName)
+	if got.Captured[1].EventName != unknownTopic0 {
+		t.Errorf("Captured[1].EventName = %q, want topic0 hex %q (unknown topic0)", got.Captured[1].EventName, unknownTopic0)
 	}
 }
