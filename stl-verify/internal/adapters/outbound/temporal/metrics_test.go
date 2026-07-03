@@ -9,9 +9,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// Guards the startup seed in seedStatusSeries: both terminal-status series must
-// exist at 0 before the first run, so increase() can see the first real
-// increment. See seedStatusSeries for the full rationale.
+// Guards the startup seed (telemetry.SeedStatusCounter in
+// newCronjobMetricsWithProvider): both terminal-status series must exist at 0
+// before the first run, so increase() can see the first real increment.
 func TestNewCronjobMetrics_SeedsBothStatusSeriesAtZero(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
