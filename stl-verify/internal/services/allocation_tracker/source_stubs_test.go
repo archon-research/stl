@@ -59,9 +59,9 @@ func TestSkipSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 
 func TestStubSource_Supports(t *testing.T) {
 	logger := slog.Default()
-	src := NewStubSource("test-stub", "centrifuge", logger)
+	src := NewStubSource("test-stub", "psm3", logger)
 
-	if !src.Supports("centrifuge", "anything") {
+	if !src.Supports("psm3", "anything") {
 		t.Error("stub should match its tokenType regardless of protocol")
 	}
 	if src.Supports("erc20", "") {
@@ -71,7 +71,7 @@ func TestStubSource_Supports(t *testing.T) {
 
 func TestStubSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 	logger := slog.Default()
-	src := NewStubSource("test-stub", "centrifuge", logger)
+	src := NewStubSource("test-stub", "psm3", logger)
 
 	result, err := src.FetchBalances(context.Background(), nil, 0)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestStubSource_FetchBalances_ReturnsEmpty(t *testing.T) {
 
 func TestDefaultSkipSources(t *testing.T) {
 	logger := slog.Default()
-	sources := DefaultSkipSources(logger)
+	sources := defaultSkipSources(logger)
 
 	if len(sources) != 1 {
 		t.Fatalf("expected 1 skip source, got %d", len(sources))
@@ -111,7 +111,7 @@ func TestDefaultSkipSources(t *testing.T) {
 
 func TestDefaultStubSources(t *testing.T) {
 	logger := slog.Default()
-	sources := DefaultStubSources(logger)
+	sources := defaultStubSources(logger)
 
 	if len(sources) == 0 {
 		t.Fatal("expected at least 1 stub source")
@@ -121,7 +121,11 @@ func TestDefaultStubSources(t *testing.T) {
 	for _, s := range sources {
 		names[s.Name()] = true
 	}
-	if !names["centrifuge"] {
-		t.Error("centrifuge stub not found")
+	if !names["centrifuge-feeder"] {
+		t.Error("centrifuge-feeder stub not found")
+	}
+	// Centrifuge tranche tokens are handled by BalanceOfSource, not stubbed.
+	if names["centrifuge"] {
+		t.Error("centrifuge should no longer be a stub source")
 	}
 }

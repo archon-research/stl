@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
@@ -22,7 +23,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 )
 
 const (
@@ -67,6 +68,7 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger *slog.Logger
 }
 
@@ -75,6 +77,7 @@ func NewService(
 	consumer outbound.SQSConsumer,
 	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
+	multicaller outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
 	protocolRepo outbound.ProtocolRepository,
@@ -83,7 +86,7 @@ func NewService(
 	eventRepo outbound.EventRepository,
 	receiptTokenRepo outbound.ReceiptTokenRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cacheReader, ethClient, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, multicaller, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, err
 	}
 
@@ -92,18 +95,13 @@ func NewService(
 		return nil, err
 	}
 
-	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create multicall client: %w", err)
-	}
-
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load ERC20 ABI: %w", err)
 	}
 
 	readerLogger := config.Logger.With("component", "aavelike-position-tracker")
-	reader := aavelike.NewPositionReader(ethClient, mc, erc20ABI, readerLogger)
+	reader := aavelike.NewPositionReader(ethClient, multicaller, erc20ABI, readerLogger)
 
 	eventExtractor, err := NewEventExtractor()
 	if err != nil {
@@ -156,23 +154,29 @@ func (s *Service) Start(ctx context.Context) error {
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlockEvent)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.consumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlockEvent)
+	})
 
 	s.logger.Info("aavelike position tracker started",
 		"maxMessages", s.config.MaxMessages)
 	return nil
 }
 
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("aavelike position tracker stopped")
 	return nil
 }
@@ -209,6 +213,11 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 // ProcessReceipts processes a slice of transaction receipts for a given block.
 // It is safe to call from the backfill service without Redis or SQS.
 func (s *Service) ProcessReceipts(ctx context.Context, chainID, blockNumber int64, version int, receipts []shared.TransactionReceipt, blockTimestamp time.Time) error {
+	// Stamp the reorg-aware block version onto the context so raw SC calls archived
+	// downstream key correctly. This is the single chokepoint for both the live SQS
+	// path and the backfill path, so both archive under their actual block version.
+	ctx = archiving.WithBlockVersion(ctx, version)
+
 	var errs []error
 	for _, receipt := range receipts {
 		if err := s.processReceipt(ctx, receipt, chainID, blockNumber, version, blockTimestamp); err != nil {
@@ -426,7 +435,7 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		}
 
 		// Get or create token
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reserve, normalizeTokenSymbol(tokenMetadata.Symbol), tokenMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -549,7 +558,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 		userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 			ChainID:        chainID,
 			Address:        eventData.User,
-			FirstSeenBlock: blockNumber,
+			FirstSeenBlock: &blockNumber,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to ensure user: %w", err)
@@ -565,7 +574,7 @@ func (s *Service) saveCollateralToggleEvent(ctx context.Context, eventData *Posi
 			return fmt.Errorf("failed to get protocol: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, eventData.Reserve, normalizeTokenSymbol(metadata.Symbol), metadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
@@ -644,7 +653,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 		userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 			ChainID:        chainID,
 			Address:        eventData.User,
-			FirstSeenBlock: blockNumber,
+			FirstSeenBlock: &blockNumber,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to ensure user: %w", err)
@@ -672,7 +681,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, eventData *PositionE
 				Address:        eventData.Reserve,
 				Symbol:         normalizeTokenSymbol(tokenMetadata.Symbol),
 				Decimals:       tokenMetadata.Decimals,
-				CreatedAtBlock: blockNumber,
+				CreatedAtBlock: &blockNumber,
 			}}
 		}
 		tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, nil, extras...)
@@ -726,7 +735,7 @@ func (s *Service) snapshotUserPosition(ctx context.Context, tx pgx.Tx, user comm
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to ensure user: %w", err)
@@ -814,7 +823,7 @@ func (s *Service) persistPositionData(
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to ensure user: %w", err)
@@ -910,7 +919,7 @@ func (s *Service) resolvePositionTokens(
 			Address:        c.Asset,
 			Symbol:         normalizeTokenSymbol(c.Symbol),
 			Decimals:       c.Decimals,
-			CreatedAtBlock: blockNumber,
+			CreatedAtBlock: &blockNumber,
 		}
 	}
 	for _, d := range debts {
@@ -922,7 +931,7 @@ func (s *Service) resolvePositionTokens(
 			Address:        d.Asset,
 			Symbol:         normalizeTokenSymbol(d.Symbol),
 			Decimals:       d.Decimals,
-			CreatedAtBlock: blockNumber,
+			CreatedAtBlock: &blockNumber,
 		}
 	}
 	for _, e := range extras {
@@ -1012,7 +1021,7 @@ func (s *Service) PersistUserPositionBatch(
 			userEntities[i] = entity.User{
 				ChainID:        chainID,
 				Address:        p.User,
-				FirstSeenBlock: blockNumber,
+				FirstSeenBlock: &blockNumber,
 			}
 		}
 		userIDs, err := s.userRepo.GetOrCreateUsers(ctx, tx, userEntities)
@@ -1036,7 +1045,7 @@ func (s *Service) PersistUserPositionBatch(
 						Address:        d.Asset,
 						Symbol:         normalizeTokenSymbol(d.Symbol),
 						Decimals:       d.Decimals,
-						CreatedAtBlock: blockNumber,
+						CreatedAtBlock: &blockNumber,
 					}
 				}
 			}
@@ -1047,7 +1056,7 @@ func (s *Service) PersistUserPositionBatch(
 						Address:        c.Asset,
 						Symbol:         normalizeTokenSymbol(c.Symbol),
 						Decimals:       c.Decimals,
-						CreatedAtBlock: blockNumber,
+						CreatedAtBlock: &blockNumber,
 					}
 				}
 			}
@@ -1055,16 +1064,6 @@ func (s *Service) PersistUserPositionBatch(
 		tokenSlice := make([]outbound.TokenInput, 0, len(tokenInputs))
 		for _, t := range tokenInputs {
 			tokenSlice = append(tokenSlice, t)
-		}
-
-		// Defensive: all tokens in a batch must belong to the same chain.
-		if len(tokenSlice) > 1 {
-			chainID := tokenSlice[0].ChainID
-			for _, t := range tokenSlice[1:] {
-				if t.ChainID != chainID {
-					return fmt.Errorf("mixed chain IDs in token batch: %d and %d", chainID, t.ChainID)
-				}
-			}
 		}
 
 		tokenIDs, err := s.tokenRepo.GetOrCreateTokens(ctx, tx, tokenSlice)
@@ -1189,6 +1188,7 @@ func validateDependencies(
 	consumer outbound.SQSConsumer,
 	cacheReader outbound.BlockCacheReader,
 	ethClient *ethclient.Client,
+	multicaller outbound.Multicaller,
 	txManager outbound.TxManager,
 	userRepo outbound.UserRepository,
 	protocolRepo outbound.ProtocolRepository,
@@ -1200,6 +1200,9 @@ func validateDependencies(
 	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
 		return fmt.Errorf("ethClient is required")
+	}
+	if multicaller == nil {
+		return fmt.Errorf("multicaller is required")
 	}
 	if txManager == nil {
 		return fmt.Errorf("txManager is required")

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -20,8 +21,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -50,6 +53,7 @@ type Service struct {
 
 	oracleABI *abi.ABI
 	feedABI   *abi.ABI
+	shareABI  *abi.ABI
 	units     []*oracleUnit
 
 	decimalsValidated bool // set after first successful feed decimals check
@@ -58,6 +62,7 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger *slog.Logger
 }
 
@@ -104,6 +109,11 @@ func NewService(
 		return nil, fmt.Errorf("loading AggregatorV3 ABI: %w", err)
 	}
 
+	shareABI, err := abis.GetERC4626ABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading ERC4626 ABI: %w", err)
+	}
+
 	return &Service{
 		config:         config,
 		consumer:       consumer,
@@ -112,6 +122,7 @@ func NewService(
 		newMulticaller: newMulticaller,
 		oracleABI:      oracleABI,
 		feedABI:        feedABI,
+		shareABI:       shareABI,
 		logger:         config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
@@ -124,24 +135,29 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("initializing: %w", err)
 	}
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlock)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.consumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlock)
+	})
 
 	s.logger.Info("oracle price worker started",
 		"oracles", len(s.units))
 	return nil
 }
 
-// Stop stops the service.
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("oracle price worker stopped")
 	return nil
 }
@@ -183,7 +199,19 @@ func (s *Service) initialize(ctx context.Context) error {
 }
 
 func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]float64) {
-	if su.Oracle.OracleType.IsFeedOracle() {
+	switch {
+	case su.Oracle.OracleType.IsERC4626Oracle():
+		vaultAddrs := make([]string, len(su.ERC4626Vaults))
+		for i, v := range su.ERC4626Vaults {
+			vaultAddrs[i] = v.VaultAddress.Hex()
+		}
+		s.logger.Info("loaded erc4626 oracle",
+			"name", su.Oracle.Name,
+			"type", su.Oracle.OracleType,
+			"vaults", len(su.ERC4626Vaults),
+			"vaultAddrs", vaultAddrs,
+			"cachedPrices", len(cached))
+	case su.Oracle.OracleType.IsFeedOracle():
 		feedAddrs := make([]string, len(su.Feeds))
 		for i, f := range su.Feeds {
 			feedAddrs[i] = f.FeedAddress.Hex()
@@ -195,7 +223,7 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 			"feedAddrs", feedAddrs,
 			"nonUSDFeeds", len(su.NonUSDFeeds),
 			"cachedPrices", len(cached))
-	} else {
+	default:
 		tokenHexAddrs := make([]string, len(su.TokenAddrs))
 		for i, addr := range su.TokenAddrs {
 			tokenHexAddrs[i] = addr.Hex()
@@ -212,20 +240,32 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 
 func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
 	for _, unit := range s.units {
-		if !unit.Oracle.OracleType.IsFeedOracle() {
+		feeds := unit.Feeds
+		if unit.Oracle.OracleType.IsERC4626Oracle() {
+			feeds = blockchain.ERC4626UnderlyingFeeds(unit.ERC4626Vaults)
+		} else if !unit.Oracle.OracleType.IsFeedOracle() {
 			continue
 		}
 		if err := blockchain.ValidateFeedDecimals(
 			ctx, unit.multicaller, s.feedABI,
-			unit.Feeds, blockNum, s.logger,
+			feeds, blockNum, s.logger,
 		); err != nil {
 			return fmt.Errorf("oracle %s: %w", unit.Oracle.Name, err)
+		}
+		if unit.Oracle.OracleType.IsERC4626Oracle() {
+			if err := blockchain.ValidateERC4626UnderlyingDecimals(
+				ctx, unit.multicaller, s.shareABI, s.feedABI,
+				unit.ERC4626Vaults, blockNum, s.logger,
+			); err != nil {
+				return fmt.Errorf("oracle %s: %w", unit.Oracle.Name, err)
+			}
 		}
 	}
 	return nil
 }
 
 func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 
@@ -234,7 +274,7 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (
 		duration := time.Since(start)
 		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "block processing failed")
+			telemetry.SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "processBlock", retErr)
 		}
 	}()
@@ -308,7 +348,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 		attribute.String("oracle.type", string(unit.Oracle.OracleType)))
 	defer func() {
 		if retErr != nil {
-			SetSpanError(span, retErr, "oracle processing failed")
+			telemetry.SetSpanError(span, retErr, "oracle processing failed")
 		}
 		span.End()
 	}()
@@ -318,6 +358,8 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 		return s.processBlockForFeedOracle(ctx, event, blockTimestamp, unit)
 	case entity.OracleTypeAave:
 		return s.processBlockForAaveOracle(ctx, event, blockTimestamp, unit)
+	case entity.OracleTypeERC4626Share:
+		return s.processBlockForERC4626Oracle(ctx, event, blockTimestamp, unit)
 	default:
 		return fmt.Errorf("unsupported oracle type: %s", unit.Oracle.OracleType)
 	}
@@ -332,7 +374,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "getAssetsPrices", rpcDuration, err)
 	if err != nil {
-		SetSpanError(fetchSpan, err, "fetch oracle prices failed")
+		telemetry.SetSpanError(fetchSpan, err, "fetch oracle prices failed")
 	}
 	fetchSpan.End()
 	if err != nil {
@@ -348,7 +390,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		attribute.Int("prices.total", len(prices)))
 	changed, err := s.detectChanges(prices, event, blockTimestamp, unit)
 	if err != nil {
-		SetSpanError(detectSpan, err, "detect changes failed")
+		telemetry.SetSpanError(detectSpan, err, "detect changes failed")
 		detectSpan.End()
 		return fmt.Errorf("detecting changes at block %d: %w", event.BlockNumber, err)
 	}
@@ -366,7 +408,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		attribute.Int("prices.changed", len(changed)))
 	err = s.repo.UpsertPrices(ctx, changed)
 	if err != nil {
-		SetSpanError(upsertSpan, err, "upsert prices failed")
+		telemetry.SetSpanError(upsertSpan, err, "upsert prices failed")
 	}
 	upsertSpan.End()
 	if err != nil {
@@ -393,7 +435,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "latestRoundData", rpcDuration, err)
 	if err != nil {
-		SetSpanError(fetchSpan, err, "fetch feed prices failed")
+		telemetry.SetSpanError(fetchSpan, err, "fetch feed prices failed")
 	}
 	fetchSpan.End()
 	if err != nil {
@@ -402,14 +444,38 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 
 	results = oracle_pricing.ConvertNonUSDPrices(results, unit.OracleUnit, s.logger, event.BlockNumber)
 
-	// Detect changes
+	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "feed changes", "stored feed prices", len(unit.Feeds))
+}
+
+func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
+		attribute.String("rpc.method", "convertToAssets"))
+	rpcStart := time.Now()
+	results, err := blockchain.FetchERC4626SharePrices(ctx, unit.multicaller, s.shareABI, s.feedABI, unit.ERC4626Vaults, event.BlockNumber, s.logger)
+	rpcDuration := time.Since(rpcStart)
+	s.telemetry.RecordRPCCall(ctx, "convertToAssets", rpcDuration, err)
+	if err != nil {
+		telemetry.SetSpanError(fetchSpan, err, "fetch erc4626 share prices failed")
+	}
+	fetchSpan.End()
+	if err != nil {
+		return fmt.Errorf("fetching erc4626 share prices at block %d: %w", event.BlockNumber, err)
+	}
+
+	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "erc4626 changes", "stored erc4626 share prices", len(unit.ERC4626Vaults))
+}
+
+// storeFeedResults runs the detect-changes + upsert tail shared by processBlockForFeedOracle
+// and processBlockForERC4626Oracle. kind and logMsg carry the per-path strings that differ
+// between the two callers; total is the source-collection size for the log line.
+func (s *Service) storeFeedResults(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit, results []blockchain.FeedPriceResult, kind, logMsg string, total int) error {
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))
 	changed, err := s.detectFeedChanges(results, event, blockTimestamp, unit)
 	if err != nil {
-		SetSpanError(detectSpan, err, "detect feed changes failed")
+		telemetry.SetSpanError(detectSpan, err, "detect "+kind+" failed")
 		detectSpan.End()
-		return fmt.Errorf("detecting feed changes at block %d: %w", event.BlockNumber, err)
+		return fmt.Errorf("detecting %s at block %d: %w", kind, event.BlockNumber, err)
 	}
 	detectSpan.SetAttributes(attribute.Int("prices.changed", len(changed)))
 	recordPriceChangeEvents(detectSpan, unit, changed)
@@ -420,12 +486,11 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 		return nil
 	}
 
-	// Upsert prices (DB span)
 	ctx, upsertSpan := s.telemetry.StartSpan(ctx, "oracle.upsertPrices",
 		attribute.Int("prices.changed", len(changed)))
 	err = s.repo.UpsertPrices(ctx, changed)
 	if err != nil {
-		SetSpanError(upsertSpan, err, "upsert prices failed")
+		telemetry.SetSpanError(upsertSpan, err, "upsert prices failed")
 	}
 	upsertSpan.End()
 	if err != nil {
@@ -434,11 +499,11 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 
 	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
 
-	s.logger.Info("stored feed prices",
+	s.logger.Info(logMsg,
 		"oracle", unit.Oracle.Name,
 		"block", event.BlockNumber,
 		"changed", len(changed),
-		"total", len(unit.Feeds))
+		"total", total)
 
 	return nil
 }

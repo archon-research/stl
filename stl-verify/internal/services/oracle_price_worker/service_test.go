@@ -106,6 +106,10 @@ func (m *mockConsumer) DeleteMessage(ctx context.Context, receiptHandle string) 
 	return nil
 }
 
+func (m *mockConsumer) VisibilityTimeout() time.Duration {
+	return 300 * time.Second
+}
+
 func (m *mockConsumer) Close() error {
 	return nil
 }
@@ -117,7 +121,7 @@ type mockRepo struct {
 	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenInfosFn                func(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -159,11 +163,11 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
-	if m.getTokenAddressesFn != nil {
-		return m.getTokenAddressesFn(ctx, oracleID)
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+	if m.getTokenInfosFn != nil {
+		return m.getTokenInfosFn(ctx, oracleID)
 	}
-	return nil, errors.New("GetTokenAddresses not mocked")
+	return nil, errors.New("GetTokenInfos not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
@@ -257,10 +261,10 @@ func defaultAssets() []*entity.OracleAsset {
 	}
 }
 
-func defaultTokenAddressBytes() map[int64][]byte {
-	return map[int64][]byte{
-		1: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes(), // WETH
-		2: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F").Bytes(), // DAI
+func defaultTokenInfos() map[int64]outbound.TokenInfo {
+	return map[int64]outbound.TokenInfo{
+		1: {Address: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes()}, // WETH
+		2: {Address: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F").Bytes()}, // DAI
 	}
 }
 
@@ -272,8 +276,8 @@ func defaultRepoSetup(r *mockRepo) {
 	r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 		return defaultAssets(), nil
 	}
-	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return defaultTokenAddressBytes(), nil
+	r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return defaultTokenInfos(), nil
 	}
 	r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 		return map[int64]float64{1: 2000.0, 2: 1.0}, nil
@@ -508,8 +512,8 @@ func TestStart(t *testing.T) {
 						{ID: 1, OracleID: 1, TokenID: 999, Enabled: true}, // 999 not in tokenAddresses
 					}, nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil // has 1, 2 but not 999
+				r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil // has 1, 2 but not 999
 				}
 			},
 			wantErr:     true,
@@ -524,8 +528,8 @@ func TestStart(t *testing.T) {
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil
+				r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil
 				}
 				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 					return nil, fmt.Errorf("redis unavailable")
@@ -544,8 +548,8 @@ func TestStart(t *testing.T) {
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil
+				r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil
 				}
 				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 					return map[int64]float64{}, nil
@@ -578,12 +582,12 @@ func TestStart(t *testing.T) {
 						{ID: 3, OracleID: 2, TokenID: 3, Enabled: true},
 					}, nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, oracleID int64) (map[int64][]byte, error) {
+				r.getTokenInfosFn = func(_ context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
 					if oracleID == 1 {
-						return defaultTokenAddressBytes(), nil
+						return defaultTokenInfos(), nil
 					}
-					return map[int64][]byte{
-						3: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").Bytes(),
+					return map[int64]outbound.TokenInfo{
+						3: {Address: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").Bytes()},
 					}, nil
 				}
 				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
@@ -1279,8 +1283,8 @@ func feedOracleSetup(r *mockRepo) {
 			FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 		}}, nil
 	}
-	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return map[int64][]byte{1: wethAddr.Bytes()}, nil
+	r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 	}
 	r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 		return map[int64]float64{}, nil
@@ -1379,8 +1383,8 @@ func TestStart_ChronicleOracle(t *testing.T) {
 			FeedAddress: feedAddr, FeedDecimals: 18, QuoteCurrency: "USD",
 		}}, nil
 	}
-	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return map[int64][]byte{1: wethAddr.Bytes()}, nil
+	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 	}
 	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 		return map[int64]float64{}, nil
@@ -1611,10 +1615,10 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 			},
 		}, nil
 	}
-	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return map[int64][]byte{
-			1: wethAddr.Bytes(),  // Token 1 = WETH → matches quoteCurrencyTokenAddr["ETH"]
-			2: weethAddr.Bytes(), // Token 2 = weETH
+	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{
+			1: {Address: wethAddr.Bytes()},  // Token 1 = WETH → matches quoteCurrencyTokenAddr["ETH"]
+			2: {Address: weethAddr.Bytes()}, // Token 2 = weETH
 		}, nil
 	}
 	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {

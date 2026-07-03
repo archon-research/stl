@@ -46,6 +46,10 @@ data:
   CHAIN_ID: "1"
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -57,6 +61,10 @@ data:
   CHAIN_ID: "1"
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#393 (VEC-361).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -68,6 +76,10 @@ data:
   DEPLOY_ENV: "prod"
   CHAIN_ID: "1"
   ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -78,6 +90,10 @@ data:
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -114,6 +130,10 @@ data:
   CHAIN_ID: "43114"
   DEPLOY_ENV: "prod"
   ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#393 (VEC-361).
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -122,6 +142,11 @@ metadata:
 data:
   CHAIN_ID: "1"
   AWS_SQS_QUEUE_URL: "https://sqs.eu-west-1.amazonaws.com/030797368798/stl-sentinelprod-ethereum-prime-debt.fifo"
+  AWS_REGION: "eu-west-1"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -145,11 +170,74 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: maple-graphql-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  MAPLE_SYNC_INTERVAL: "10m"
+  MAPLE_GRAPHQL_ENDPOINT: "https://api.maple.finance/v2/graphql"
+  ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: watcher-data-validator
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "0s"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "10"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "15m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "130"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "5m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "8453"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "20m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "42161"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "10m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: avalanche-watcher-data-validator
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "43114"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "25m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -202,9 +290,9 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
-  # Arbitrum produces ~4 blocks/s (measured 3.98 blk/s over 7d in prod).
-  # 20 blocks every 5s = 4 blk/s, matching the incoming rate exactly.
-  BACKFILL_BATCH_SIZE: "20"
+  # Arbitrum produces ~4 blocks/s; the 10/30s defaults can't keep up with live,
+  # let alone drain a backlog. 100 blocks every 5s = ~20 blk/s, ~5x live.
+  BACKFILL_BATCH_SIZE: "100"
   BACKFILL_POLL_INTERVAL: "5s"
 ---
 apiVersion: v1
@@ -265,6 +353,10 @@ data:
   CHAIN_ID: "43114"
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -276,3 +368,39 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-psm3-indexer
+data:
+  CHAIN_ID: "8453"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  SWEEP_BLOCKS: "300"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-psm3-indexer
+data:
+  CHAIN_ID: "10"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  SWEEP_BLOCKS: "300"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-psm3-indexer
+data:
+  CHAIN_ID: "130"
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  SWEEP_BLOCKS: "600"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-psm3-indexer
+data:
+  CHAIN_ID: "42161"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  SWEEP_BLOCKS: "2400"

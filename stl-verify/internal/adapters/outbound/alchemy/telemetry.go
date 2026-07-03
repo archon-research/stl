@@ -13,12 +13,14 @@
 //   - alchemy.subscriber.blocks.received.total: Counter of blocks received
 //   - alchemy.subscriber.blocks.dropped.total: Counter of dropped blocks (buffer full)
 //   - alchemy.subscriber.connection.state: Gauge of connection state (1=connected, 0=disconnected)
+//   - alchemy.subscriber.stalls.total: Counter of data-freshness stalls (no newHeads within HealthTimeout) that forced a reconnect
 package alchemy
 
 import (
 	"context"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -46,25 +48,36 @@ type Telemetry struct {
 	blocksReceivedTotal metric.Int64Counter
 	blocksDroppedTotal  metric.Int64Counter
 	connectionState     metric.Int64UpDownCounter
+	stallsTotal         metric.Int64Counter
+
+	// chainAttr is the constant per-chain attribute attached to every metric.
+	// One watcher process serves one chain, so the value is fixed at
+	// construction. It surfaces as the `chain` Prometheus label that the Vector
+	// dashboards and the backup-worker stalled alert group/join on; without it
+	// per-chain Alchemy attribution collapses.
+	chainAttr attribute.KeyValue
 }
 
 // NewTelemetry creates a new Telemetry instance with OpenTelemetry instrumentation.
-// Uses the global tracer and meter providers by default.
-func NewTelemetry() (*Telemetry, error) {
+// Uses the global tracer and meter providers by default. chain is the chain name
+// (e.g. "base") attached as the `chain` label on every metric.
+func NewTelemetry(chain string) (*Telemetry, error) {
 	return NewTelemetryWithProviders(
 		otel.GetTracerProvider(),
 		otel.GetMeterProvider(),
+		chain,
 	)
 }
 
 // NewTelemetryWithProviders creates a new Telemetry instance with custom providers.
-func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider) (*Telemetry, error) {
+func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider, chain string) (*Telemetry, error) {
 	tracer := tp.Tracer(instrumentationName)
 	meter := mp.Meter(instrumentationName)
 
 	t := &Telemetry{
-		tracer: tracer,
-		meter:  meter,
+		tracer:    tracer,
+		meter:     meter,
+		chainAttr: attribute.String("chain", chain),
 	}
 
 	var err error
@@ -74,6 +87,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"alchemy.client.request.duration",
 		metric.WithDescription("Duration of HTTP RPC requests in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, err
@@ -136,6 +150,14 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		return nil, err
 	}
 
+	t.stallsTotal, err = meter.Int64Counter(
+		"alchemy.subscriber.stalls.total",
+		metric.WithDescription("Total number of data-freshness stalls (no newHeads within HealthTimeout) that forced a reconnect"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	return t, nil
 }
 
@@ -157,6 +179,7 @@ func (t *Telemetry) StartSpan(ctx context.Context, method string) (context.Conte
 // RecordRequest records metrics for an HTTP RPC request.
 func (t *Telemetry) RecordRequest(ctx context.Context, method string, duration time.Duration, err error) {
 	attrs := []attribute.KeyValue{
+		t.chainAttr,
 		attribute.String("rpc.method", method),
 	}
 
@@ -173,6 +196,7 @@ func (t *Telemetry) RecordRequest(ctx context.Context, method string, duration t
 // RecordRetry records a retry attempt.
 func (t *Telemetry) RecordRetry(ctx context.Context, method string, attempt int) {
 	t.retriesTotal.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
 		attribute.String("rpc.method", method),
 		attribute.Int("attempt", attempt),
 	))
@@ -180,32 +204,38 @@ func (t *Telemetry) RecordRetry(ctx context.Context, method string, attempt int)
 
 // RecordBatchSize records the size of a batch request.
 func (t *Telemetry) RecordBatchSize(ctx context.Context, size int) {
-	t.batchSize.Record(ctx, int64(size))
+	t.batchSize.Record(ctx, int64(size), metric.WithAttributes(t.chainAttr))
 }
 
 // --- WebSocket Subscriber instrumentation ---
 
 // RecordReconnection records a WebSocket reconnection event.
 func (t *Telemetry) RecordReconnection(ctx context.Context) {
-	t.reconnectionsTotal.Add(ctx, 1)
+	t.reconnectionsTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }
 
 // RecordBlockReceived records a block header being received.
 func (t *Telemetry) RecordBlockReceived(ctx context.Context) {
-	t.blocksReceivedTotal.Add(ctx, 1)
+	t.blocksReceivedTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }
 
 // RecordBlockDropped records a block header being dropped due to full channel.
 func (t *Telemetry) RecordBlockDropped(ctx context.Context) {
-	t.blocksDroppedTotal.Add(ctx, 1)
+	t.blocksDroppedTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }
 
 // RecordConnectionUp records the connection becoming established.
 func (t *Telemetry) RecordConnectionUp(ctx context.Context) {
-	t.connectionState.Add(ctx, 1)
+	t.connectionState.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }
 
 // RecordConnectionDown records the connection being lost.
 func (t *Telemetry) RecordConnectionDown(ctx context.Context) {
-	t.connectionState.Add(ctx, -1)
+	t.connectionState.Add(ctx, -1, metric.WithAttributes(t.chainAttr))
+}
+
+// RecordStall records a data-freshness stall: no newHeads arrived within
+// HealthTimeout, so the subscriber forced a reconnect.
+func (t *Telemetry) RecordStall(ctx context.Context) {
+	t.stallsTotal.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }

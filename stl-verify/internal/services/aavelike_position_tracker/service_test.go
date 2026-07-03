@@ -2096,7 +2096,7 @@ func TestResolvePositionTokens_DedupesAcrossCollateralsDebtsAndExtras(t *testing
 		{Asset: tokenA, Symbol: "USDC", Decimals: 6}, // overlaps with collateral
 	}
 	extras := []outbound.TokenInput{
-		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: 100}, // overlaps with collateral
+		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: new(int64(100))}, // overlaps with collateral
 	}
 
 	var captured []outbound.TokenInput
@@ -2126,7 +2126,7 @@ func TestResolvePositionTokens_IncludesBorrowReserveExtras(t *testing.T) {
 		{Asset: collateralToken, Symbol: "WETH", Decimals: 18},
 	}
 	extras := []outbound.TokenInput{
-		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: 100},
+		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: new(int64(100))},
 	}
 
 	var captured []outbound.TokenInput
@@ -2162,4 +2162,61 @@ func TestResolvePositionTokens_EmptyInputs(t *testing.T) {
 	if len(captured) != 0 {
 		t.Errorf("GetOrCreateTokens should not see any inputs; got %d", len(captured))
 	}
+}
+
+// TestNewService covers the multicaller injection introduced for raw SC call
+// archiving (VEC-319): the multicaller now arrives as a dependency rather than
+// being built internally, so the composition root can wrap it for archiving.
+func TestNewService(t *testing.T) {
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	newServiceWith := func(consumer outbound.SQSConsumer, cacheReader outbound.BlockCacheReader, multicaller outbound.Multicaller) (*Service, error) {
+		return NewService(
+			shared.SQSConsumerConfig{ChainID: 1},
+			consumer,
+			cacheReader,
+			ethClient,
+			multicaller,
+			&testutil.MockTxManager{},
+			&testutil.MockUserRepository{},
+			&testutil.MockProtocolRepository{},
+			&testutil.MockTokenRepository{},
+			&mockPositionRepository{},
+			&testutil.MockEventRepository{},
+			&testutil.MockReceiptTokenRepository{},
+		)
+	}
+
+	t.Run("builds the position reader from the injected multicaller", func(t *testing.T) {
+		svc, err := newServiceWith(&testutil.MockSQSConsumer{}, &testutil.MockBlockCache{}, testutil.NewMockMulticaller())
+		if err != nil {
+			t.Fatalf("NewService() unexpected error: %v", err)
+		}
+		if svc == nil || svc.reader == nil {
+			t.Fatal("NewService() did not build a position reader from the injected multicaller")
+		}
+	})
+
+	t.Run("builds in backfill mode with nil consumer and cacheReader", func(t *testing.T) {
+		// Both backfillers pass nil for the SQS consumer and cache reader; this
+		// pins the invariant they depend on (validateDependencies permits both).
+		svc, err := newServiceWith(nil, nil, testutil.NewMockMulticaller())
+		if err != nil {
+			t.Fatalf("NewService() in backfill mode unexpected error: %v", err)
+		}
+		if svc == nil || svc.reader == nil {
+			t.Fatal("NewService() did not build a position reader in backfill mode")
+		}
+	})
+
+	t.Run("fails when the multicaller is missing", func(t *testing.T) {
+		_, err := newServiceWith(&testutil.MockSQSConsumer{}, nil, nil)
+		if err == nil {
+			t.Fatal("NewService() expected an error for a nil multicaller, got nil")
+		}
+		if !strings.Contains(err.Error(), "multicaller is required") {
+			t.Fatalf("NewService() error = %q, want it to mention 'multicaller is required'", err)
+		}
+	})
 }

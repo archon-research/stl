@@ -1,9 +1,10 @@
 from collections.abc import Iterable
 from decimal import Decimal
 
-from axis_synome.spec.risk_capital.formulas.required_risk_capital import loss_given_default
-
 from app.domain.entities.risk import RiskEnrichedCollateral
+from app.risk_engine._vendored_synome.risk_capital.formulas.required_risk_capital import (
+    loss_given_default,
+)
 
 
 def bad_debt_at_gap(item: RiskEnrichedCollateral, gap_pct: Decimal) -> Decimal:

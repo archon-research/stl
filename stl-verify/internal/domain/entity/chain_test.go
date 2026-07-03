@@ -5,6 +5,42 @@ import (
 	"testing"
 )
 
+func TestChainName(t *testing.T) {
+	tests := []struct {
+		name     string
+		chainID  int64
+		want     string
+		wantErr  bool
+		errMatch string
+	}{
+		{name: "mainnet", chainID: 1, want: "mainnet"},
+		{name: "arbitrum", chainID: 42161, want: "arbitrum"},
+		{name: "avalanche", chainID: 43114, want: "avalanche-c"},
+		{name: "unknown", chainID: 999999, wantErr: true, errMatch: "unknown chain ID 999999"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ChainName(tt.chainID)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ChainName(%d) expected error, got nil", tt.chainID)
+				}
+				if tt.errMatch != "" && !strings.Contains(err.Error(), tt.errMatch) {
+					t.Errorf("ChainName(%d) error = %q, want containing %q", tt.chainID, err, tt.errMatch)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ChainName(%d) unexpected error: %v", tt.chainID, err)
+			}
+			if got != tt.want {
+				t.Errorf("ChainName(%d) = %q, want %q", tt.chainID, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewChain(t *testing.T) {
 	tests := []struct {
 		name        string

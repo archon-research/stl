@@ -43,6 +43,19 @@ var ChainIDToName = map[int64]string{
 	43114: "avalanche-c",
 }
 
+// ChainName returns the internal chain name for a chain ID (the same value used
+// in service configs and emitted as the `chain` metric label). It errors on an
+// unrecognised chain ID so callers fail hard at startup rather than silently
+// emitting an empty `chain` label, which is what left the Vector alerts showing
+// an empty chain.
+func ChainName(chainID int64) (string, error) {
+	name, ok := ChainIDToName[chainID]
+	if !ok {
+		return "", fmt.Errorf("unknown chain ID %d", chainID)
+	}
+	return name, nil
+}
+
 // ChainIDToS3Bucket maps chain IDs to canonical names expected in S3 bucket names.
 // Example: stl-sentinelstaging-ethereum-raw, stl-sentinelstaging-avalanche-raw.
 var ChainIDToS3Bucket = map[int64]string{

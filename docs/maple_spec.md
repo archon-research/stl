@@ -1,8 +1,10 @@
 # Maple Finance Protocol Specification
 
-**Version:** 1.0  
-**Last Updated:** January 2026  
+**Version:** 1.4
+**Last Updated:** June 2026
 **Purpose:** Technical reference for understanding Maple Finance protocol mechanics and data retrieval
+
+> **Note:** GraphQL introspection on the Maple API is disabled (Apollo `INTROSPECTION_DISABLED`), but the full schema (SDL, ~19,400 lines) is published to [Apollo Studio](https://studio.apollographql.com/public/maple-api/variant/mainnet/schema/reference) and fetchable unauthenticated via the Apollo platform API. Two caveats keep live verification relevant: the public SDL strips `@auth` directive applications, so field-level auth gating is only discoverable by execution; and schema-vs-runtime encoding drift exists (the schema says `String`, but some fields arrive as JSON numbers). Re-verify queries against the live API before relying on this document.
 
 ---
 
@@ -33,11 +35,17 @@ Maple Finance is a **digital asset lending platform** that provides institutiona
 #### Layer 1: Institutional Lending
 - **Open Term Loans (OTL)**: Evergreen loans, callable by lender with notice
 - **Fixed Term Loans (FTL)**: Traditional loans with specific maturity dates
-- **Native Loans**: Non-Ethereum assets (SOL, BTC) held in custody
+- **Native Loans**: Off-chain custody loans collateralized by native assets (BTC, SOL, ETH, weETH observed) — records in Maple's operational database (Mongo ObjectId IDs), not smart contracts
+
+> **Note:** `openTermLoans` is the active book, but not the only loan query with live data:
+> - **FTLs** are exposed via the generic `loans` root query (there is no `fixedTermLoans` query; the `Loan` type *is* the fixed-term entity — `maturityDate`, `termDays`, `paymentsRemaining`). The FTL book is **dormant, not retired**: zero loans in any live state as of 2026-06-12, but originations ran through 2025-02-28 (overlapping the open-term era by ~15 months), and the Fixed Term Loan Manager remains part of Maple's documented pool architecture. New FTLs could appear without warning.
+> - **Native loans** are exposed via `nativeLoans` / `nativeLoanById` / `nativeLoansSnapshot(timestamp)`. As of 2026-06-11: 12 records, 1 with outstanding principal (~20k USDT against BTC), no new origination since 2025-08-14, but the book is still administered. `nativeLoans` takes no arguments (no pagination or filters), and there is no state field — nonzero `principalOwed` is the only liveness signal.
+> - Two further families are auth-gated and unreachable without credentials: `collateralizedLoans` (root-level `UNAUTHORIZED`) and OTC loans (no public root query; only `otcCollateralTxs(loanId)`).
 
 #### Layer 2: Syrup Vaults (ERC-4626)
 - **SyrupUSDC**: USDC-denominated vault
 - **SyrupUSDT**: USDT-denominated vault
+- **SyrupUSDG**: USDG-denominated vault (returned by the GraphQL API as `syrupUSDG`)
 
 **Flow:**
 ```
@@ -59,6 +67,9 @@ Users → Deposit to Syrup Vault → Vault lends to pools → Pools fund institu
 **SyrupUSDT:**
 - Ethereum: `0x356b8d89c1e1239cbbb9de4815c39a1474d5ba7d`
 - Plasma: `0xC4374775489CB9C56003BF2C9b12495fC64F0771`
+
+**SyrupUSDG:**
+- Ethereum: `0x87b65c4aaffa76881f9e96f3e7ed945ddfc3cd7a` (GraphQL `poolV2` ID; deployments on other chains, if any, are TBD)
 
 Each chain deployment is independent but unified through CCIP cross-chain bridging.
 
@@ -167,7 +178,7 @@ Syrup vault yield comes from:
 Borrowers post collateral:
 - Crypto assets: ETH, WBTC, wstETH, cbETH
 - Stablecoins: USDC, USDT, DAI (over-collateralization)
-- Native assets: BTC, SOL (custody arrangements)
+- Native assets: BTC, SOL, XRP (custody arrangements; these flow through `openTermLoans` as `collateral.asset` symbols with `custodian`/`loanMeta.walletType` hints — distinct from the `nativeLoans` entity)
 
 **Collateral Ratio (ACM):**
 
@@ -318,9 +329,11 @@ Individual loans include both:
 1. **External loans** - Loans made to external parties with traditional collateral backing
 2. **Internal loans** - Loans made internally to Maple for strategies and positions (identified by `loanMeta.type` = `"amm"` or `"strategy"`)
 
-On Maple's frontend, they explicitly report collateral backing for **external parties' collateral only**. If following this methodology, internal Maple loan collateral should be filtered out. 
+On Maple's frontend, they explicitly report collateral backing for **external parties' collateral only**. If following this methodology, internal Maple loan collateral should be filtered out.
 
-**Note:** More research is needed to determine whether the backing for Syrup pools is truly isolated from the collateral backing for internal loans. Additionally, internal Maple strategies called **`skyStrategies`** may also need to be fetched if it is determined they are backing the pools (see [Sky Strategies section](#sky-strategies) below).
+**Note:** Internal Maple positions back Syrup pools through **two distinct channels** (verified live 2026-06-15):
+1. **AMM/strategy loans** — `openTermLoans` with `loanMeta.type` in `["amm", "strategy"]`, funded by the Syrup pools. **~$100M outstanding across Syrup USDC + USDT as of 2026-06-15.** These are counted in `poolV2.principalOut` (they carry `principalOwed`), so the principal is not missing from pool metrics — but their `collateral` field is a placeholder and misrepresents the real backing (see warning below).
+2. **Sky Strategies** (`skyStrategies`) — pool cash deployed into Sky/Maker DeFi yield. **Dormant: `currentlyDeployed = 0` for every strategy as of 2026-06-15**, but the Syrup USDC strategy has cycled ~9.46B USDC cumulatively (`depositedAssets`), so it is live infrastructure that can become nonzero without notice. Only Syrup USDC has a Sky Strategy entity; Syrup USDT and USDG have none. See [Sky Strategies section](#sky-strategies) below.
 
 ---
 
@@ -367,9 +380,9 @@ query GetAllActiveLoans($block: Block_height!, $first: Int!, $skip: Int!) {
 - `id`: Loan contract address
 - `borrower.id`: Borrower's address
 - `principalOwed`: Outstanding principal (integer string, 6 decimals for USDC/USDT)
-- `acmRatio`: Asset Coverage Margin ratio (6 decimals, e.g., `1445731` = 144.57%)
+- `acmRatio`: Asset Coverage Margin ratio (6 decimals, e.g., `1445731` = 144.57%). **Nullable**: active uncollateralized loans return `acmRatio: null` (and `collateral: null`). Consumers must not assume a value on active loans.
 - `collateral.assetValueUsd`: **Asset price per unit in USD** (integer, 8 decimals) - multiply by `assetAmount` to get total value
-- `loanMeta`: Metadata about internal Maple positions (see warning below)
+- `loanMeta`: Loan metadata (see warning below). Present on most loans, internal and external alike; its presence does **not** indicate an internal position.
 
 **Usage:**
 
@@ -382,7 +395,11 @@ This query supports pagination (required for >1000 loans) and returns all active
 
 **⚠️ IMPORTANT: `loanMeta` and Internal Maple Positions**
 
-When `loanMeta` is **not null** and `loanMeta.type` is either `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
+The **only** reliable signal that a loan is an internal Maple position is `loanMeta.type` being `"amm"` or `"strategy"`. Do **not** treat the mere presence of `loanMeta` as an internal-loan indicator: most active loans (internal and external) carry a non-null `loanMeta`, and every field inside it (including `type`) is nullable. External loans commonly have `loanMeta` present with `type: null`.
+
+Observed `loanMeta.type` values across the loan book include `null`, `"amm"`, `"strategy"`, `"tBills"`, `"intercompany"`, `"mapleTrading"`, and `"defi"`. The schema defines a `LoanType` enum (`amm`, `intercompany`, `mapleTrading`, `strategy`), but treat it as approximate: `"tBills"` and `"defi"` (both observed live) are absent from the enum. The semantics of `"tBills"`, `"intercompany"`, and `"defi"` are undocumented and need confirmation from Maple. New values appear over time both on new loans and on existing loans whose `type` was previously `null` — `loanMeta` is off-chain editorial metadata that fills in after origination, so a loan can be reclassified `null → value` mid-life (see [Field Stability](#field-stability-on-chain-identity-immutable-off-chain-loanmeta-fills-late)). `"defi"` in particular may be another internal Maple deployment that `is_internal` does not currently flag (see the `is_internal` note above).
+
+When `loanMeta.type` is `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
 
 **For these loans:**
 - ❌ The `collateral` field **may not accurately represent** the actual backing
@@ -422,6 +439,12 @@ In this case:
 
 **Recommendation:** When aggregating collateral data, flag loans with `loanMeta.type` in `["amm", "strategy"]` as having potentially incomplete asset information.
 
+**Why the collateral is a placeholder (verified live 2026-06-15):** on internal loans the `collateral` block restates the loan principal as same-asset collateral at par — an accounting identity, not market backing. All 9 live `amm` loans show `acmRatio = 1000000` (exactly 100%), `collateral.asset` equal to the lent stablecoin, `assetAmount` equal to `principalOwed` to the wei, and `assetValueUsd = 100000000` ($1.00 flat). The real backing is the DeFi position at `loanMeta.walletAddress` (e.g. a Uniswap/Orca LP, often on another chain), whose value Maple's loan contract does not track. (The one `strategy` loan, `0xd2443e…`, shows `acmRatio = 1666600` against an "Idle " Finance position — same par-USDC placeholder, just a notional 1.67× multiple.)
+
+**Double-count hazard:** this placeholder USDC is the *same capital* already counted in `poolV2.principalOut` (it was lent out to the strategy wallet). Summing `collateral.assetValueUsd` across all loans therefore (a) double-counts internal principal, (b) reports volatile DeFi positions as par stablecoin, and (c) hides LP/depeg risk. **Backing aggregations must exclude internal loans.**
+
+**Indexer support (`is_internal`):** the `maple_loan` table carries a STORED generated column `is_internal = COALESCE(loan_meta_type IN ('amm','strategy'), FALSE)`, so internal loans are flagged at write time. **Caveat:** the flag lives on `maple_loan`, not on `maple_loan_collateral` — the indexer still persists the placeholder collateral row for every internal loan. Consumers must filter it themselves by joining the loan, e.g. `… JOIN maple_loan l ON l.id = c.maple_loan_id WHERE NOT l.is_internal`. Nothing enforces this downstream. Note the flag hardcodes `{amm, strategy}`: new/undocumented internal types (`tBills`, `intercompany`, …) are **not** flagged and would need a new migration to include.
+
 ---
 
 #### Sky Strategies
@@ -457,10 +480,19 @@ query GetSkyStrategies($poolId: ID!, $first: Int!, $skip: Int!) {
 - `strategyFeeRate`: Fee rate for the strategy (integer, likely 6 decimals)
 - `totalFeesCollected`: Total fees collected by the strategy (integer string)
 
-**Note:** Further investigation is needed to determine:
-1. Whether Sky Strategies contribute to Syrup pool backing
-2. The underlying assets and positions held by each strategy
-3. How to value these positions for collateral calculations
+**Live findings (2026-06-15):** querying `skyStrategies(first: 100)` returns 4 strategies total, 1 tied to a Syrup pool:
+
+| Strategy `id` | `pool.id` (= vault addr) | pool name | state | `currentlyDeployed` | `depositedAssets` (cumulative) |
+|---|---|---|---|---|---|
+| `0x859c…b038c` | `0x80ac24aa…` | Syrup USDC | Active | `0` | `9464548714891221` (~9.46B) |
+| `0x34e7…3b00` | `0xc9c9bab5…` | Maple Lend + Long USDC2 | Active | `0` | `0` |
+| `0xb390…5807` | `0x37154b07…` | Maple Lend+Long USDC1 | Active | `0` | `0` |
+| `0xe3ee…55cc` | `0xc39a5a61…` | High Yield Secured Lending USDC1 | Active | `0` | `419563235236556` |
+
+Resolved:
+1. **Do Sky Strategies back Syrup pools?** Yes in principle — only Syrup USDC has a strategy, and it has cycled ~9.46B cumulatively. **But `currentlyDeployed = 0` everywhere right now**, so they contribute **zero** to current backing. Treat as a live source that must be re-polled, not a one-time decision.
+2. **`pool.id` on a strategy equals the pool's VAULT address** (`0x80ac24aa…` for Syrup USDC), which is the same key as `poolV2.id` — they join cleanly. (See the [vault-address keying note](#graphql-api) — `poolV2` is keyed by vault address, not by the "Pool Address" in the contract tables.)
+3. **Double-count / valuation:** undeterminable while `currentlyDeployed = 0`. When a strategy goes nonzero, confirm whether its deployed amount is already reflected in `poolV2.assets`/`principalOut` before adding it to a backing total, and verify the underlying asset + decimals/encoding live (`version` arrives as a JSON number, e.g. `100`; `currentlyDeployed`/`depositedAssets`/`totalFeesCollected` arrive as integer strings; `strategyFeeRate` observed `100000`).
 
 ### TVL (Total Value Locked)
 
@@ -490,9 +522,15 @@ const protocolTvl = (usdcAssets / 1e6) + (usdtAssets / 1e6);
 **GraphQL API (Pool-Level Data):**
 
 ```graphql
+# ⚠️ `poolV2` is keyed by the VAULT address, NOT the "Pool Address" in the contract tables below.
+#   poolV2(id: "0x80ac24aa…")  [Syrup USDC vault]  → returns the pool ✅
+#   poolV2(id: "0x20b79d39…")  [Syrup USDC pool addr] → null ❌  (verified 2026-06-15)
+# `skyStrategies.pool.id` also uses the vault address, so the two join cleanly.
 query PoolData($poolAddress: ID!) {
   poolV2(id: $poolAddress) {
-    tvl                  # Sum of assets + collateralValue + principalOut (not the same as vault totalAssets)
+    tvl                  # NOT a clean sum of assets + collateralValue + principalOut, and NOT vault totalAssets.
+                         # Verified 2026-06-15: USDC tvl=2835.13M but assets+collateral+principalOut=3172.36M;
+                         # USDT tvl=838.36M vs sum 895.47M. Treat `tvl` as an opaque API-provided figure.
     assets               # Liquid pool cash (6 decimals)
     collateralValue      # USD value of loan collateral (6 decimals)
     principalOut         # Outstanding loan principal (6 decimals)
@@ -518,7 +556,7 @@ query GlobalSyrupStats {
 ```graphql
 query UserTransactions($userAddress: String!) {
   txes(
-    where: { 
+    where: {
       poolV2_: { syrupRouter_not: null },
       account: $userAddress     # MUST be lowercase (e.g., "0x123abc" not "0x123ABC")
     }
@@ -570,6 +608,37 @@ const sharePrice = await syrupVault.convertToAssets(1e18) / 1e18;
 const syrupUsdcPrice = underlyingPrice * sharePrice;
 ```
 
+### Field Stability (on-chain identity immutable; off-chain loanMeta fills late)
+
+It matters which fields can change for an existing entity versus which are fixed for its life. Verified empirically via subgraph time-travel: the same field was queried at four historical blocks (≈2025-06, 2025-09, 2026-03, and latest) and diffed per entity.
+
+**Result: zero changes to any on-chain-derived identity/relationship field on an existing entity across ~1 year.** This holds for fields the subgraph derives from chain state. It does **not** hold for `loanMeta.*`, which is off-chain editorial metadata and fills in late (see the carve-out below).
+
+| Entity | Distinct ids checked | Fields | Changes |
+|---|---|---|---|
+| `openTermLoans` | 355 | `fundingPool.id` | 0 |
+| `poolV2S` | 21 | `name`, `asset.id`, `syrupRouter` (syrup flag) | 0 |
+| `skyStrategies` | 4 | `pool.id`, `version` | 0 |
+
+Entity counts grew over the window (20→21 pools, 191→355 loans) purely because **new entities arrive pre-populated** — never because an on-chain-derived field changed on an existing one.
+
+**Implications:**
+
+- A loan's `fundingPool`, a strategy's `pool`, and a pool's underlying `asset` are stable for the life of the entity — consistent with the on-chain protocol (a loan is funded by exactly one pool, a strategy interacts with exactly one Pool Manager, a pool's ERC-4626 `asset()` is fixed at deployment). A change would signal upstream data corruption rather than a normal event.
+- `skyStrategy.version` is the one on-chain field with a live mutation path (Governor-enabled proxy upgrade) — it simply has not changed yet in the observed window. Treat it as refreshable, not immutable.
+
+#### `loanMeta.*` is off-chain editorial metadata — mutable, not immutable
+
+All six `loanMeta.*` fields (`type`, `assetSymbol`, `dexName`, `location`, `walletAddress`, `walletType`) are **not** on-chain loan state and can change on an existing loan. Observed live 2026-06-19: loan `0xEE87b60f227149Bf90A627931495b7028db2052D` had `loanMeta.type` go from `null` to `"intercompany"`.
+
+**Why it changes.** `loanMeta` is not loan-contract state. The on-chain `OpenTermLoan` knows borrower, funding pool, principal, collateral, payment schedule, and state — it has no concept of a loan "type", a DEX name, or a custody wallet. None of the `loanMeta.*` fields appear anywhere in Maple's smart-contract reference. They are operational/editorial labels Maple's backend attaches off-chain (the same class of data as `nativeLoans`, which live in Maple's Mongo store, not the subgraph). A loan is served with `loanMeta.type = null` the moment it deploys on-chain; later Maple's finance/ops classifies it (e.g. tags an inter-affiliate book transfer as `"intercompany"`) and the field flips `null → value`. No new block, no contract event — a backend field edit. Changes can go any direction: `null → value`, `value → value`, `value → null`.
+
+**Why a naive time-travel study misses it.** Two compounding gaps make `loanMeta.*` falsely look immutable:
+1. **Time-travel blind spot.** Subgraph `block:` time-travel replays *chain-derived* state at a historical block. A field resolved at query time from a mutable off-chain store returns *today's* value for every historical block argument, so all historical reads are identical → a false "0 changes".
+2. **Coarse sampling.** Quarterly samples miss a `null → value` enrichment that lands in a loan's first days, between origination and the first sample. "0 changes across the sampled blocks" ≠ "never changes".
+
+**Consequence for internal/external classification.** Because `loanMeta.type` fills in late, a loan can be reclassified from external to internal **after** it is first seen — `is_internal` (and any backing aggregation that filters on it) reflects the change only from the point Maple sets the type.
+
 ---
 
 ## Smart Contracts & Addresses
@@ -614,7 +683,9 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 
 **Endpoint:** `https://api.maple.finance/v2/graphql`
 
-**Authentication:** Public, no authentication required
+**Authentication:** Most resources are public and need no authentication. Some resources are internal-use only and return `UNAUTHORIZED` — root-level (e.g. `collateralizedLoans`) or field-level (e.g. `NativeLoan.collateralAccountType`, `NativeLoan.marginCallActive`). Maple provides **no third-party authentication mechanism at all**; access to gated resources requires a direct arrangement with Maple (partnerships@maple.finance).
+
+**Gated-field behavior:** a gated *nullable* field produces per-row `UNAUTHORIZED` partial errors alongside usable `data`; a gated **non-nullable** field cannot be nulled per-row, so the error propagates and nulls the entire result (e.g. selecting `NativeLoan.marginCallActive` anonymously nulls the whole `nativeLoans` array). Omit gated fields rather than tolerating partial errors.
 
 **Key Conventions:**
 - All addresses must be **lowercased** (e.g., `0x123abc` not `0x123ABC`)
@@ -622,6 +693,9 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 - APY values: 30 decimals
 - Collateral ratios: 6 decimals
 - Interest rates: 6 decimals
+- **Exceptions (JSON numbers, not strings):** `collateral.liquidationLevel` (e.g. `900000`) and `skyStrategy.version` (e.g. `100`) arrive as JSON numbers. Decoders that strictly expect string-encoded integers will fail on these two fields.
+- **Encoding is not uniform across entity families.** The conventions above hold for subgraph entities (`OpenTermLoan`, `PoolV2`, `Loan`). `NativeLoan` uses strings for amounts but JSON `Int`s for `liquidationLevel`/`initialLevel`/thresholds, and epoch-millis strings for timestamps (e.g. `"1716566130811"`). `NativeLoanSnapshot` uses plain `Float`s for all monetary values.
+- Introspection is disabled (`INTROSPECTION_DISABLED`), but the schema is published to Apollo Studio (see [References](#references)). Auth-gating directives are stripped from the public SDL, so field-level access must still be verified by execution
 
 **Pagination:**
 
@@ -629,12 +703,12 @@ function asset() external view returns (address)  // Returns USDC or USDT addres
 query {
   poolV2S(
     first: 100,              # Limit
-    skip: 0,                 # Offset
-    orderBy: tvl,
-    orderDirection: desc
+    skip: 0                  # Offset
   ) { ... }
 }
 ```
+
+**Note:** `orderBy: tvl` is rejected (`Value "tvl" does not exist in "PoolV2_orderBy" enum`); plain `first`/`skip` works. Skip-based pagination has no stable order, so callers needing a complete set should fetch all pages within one cycle and treat duplicates across pages as an error.
 
 ### Cross-Chain Considerations
 
@@ -660,8 +734,8 @@ query {
 ### GraphQL API
 
 - **Endpoint:** https://api.maple.finance/v2/graphql
-- **Graph Registry:** maple-api@mainnet
-- **Schema:** Available via GraphQL introspection
+- **Graph Registry:** maple-api@mainnet (single variant `mainnet` — the endpoint is global and Ethereum-mainnet-scoped; `mainnet` is the Apollo Studio variant name, not a URL path segment)
+- **Schema:** Introspection is disabled. Browsable schema reference: https://studio.apollographql.com/public/maple-api/variant/mainnet/schema/reference (full SDL also fetchable unauthenticated via the Apollo platform API)
 
 ### Technical Standards
 
@@ -682,8 +756,5 @@ query {
 - **Twitter:** https://twitter.com/maplefinance
 
 ---
-
-**Document Version:** 1.0  
-**Last Updated:** January 2026
 
 **Contributors:** Technical specification based on Maple Finance protocol documentation, GraphQL API schema, and smart contract interfaces.

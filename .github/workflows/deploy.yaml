@@ -45,12 +45,29 @@ jobs:
       contents: read
       packages: write  # push BuildKit layer cache to GHCR
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # A short or malformed sha input gets stamped verbatim into every image
+      # tag, and the 40-char-only update regex (update-staging / create-prod-pr)
+      # can never rewrite it again, silently freezing the environment. Reject
+      # anything that is not a full 40-char commit SHA before any build, push, or
+      # tag commit. The automated path always supplies github.sha (40 chars), so
+      # this only ever trips a hand-entered dispatch sha. Gates the whole
+      # workflow: every tag-writing job depends on this one.
+      - name: Validate deploy SHA is a full 40-char commit SHA
+        env:
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deploy SHA '$DEPLOY_SHA' is not a full 40-char commit SHA. Pass the full SHA (git rev-parse <ref>); a short SHA poisons every image tag."
+            exit 1
+          fi
+          echo "Deploy SHA OK: $DEPLOY_SHA"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
         with:
           platforms: arm64
 
@@ -61,7 +78,7 @@ jobs:
       # build-only runs (push=false), which can run from any branch.
       - name: Configure AWS credentials (staging)
         if: ${{ inputs.push }}
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -101,7 +118,7 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           persist-credentials: false
@@ -186,7 +203,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: a42ba946a0cb774eef6a0d321a2545d2c1310b29  # argocd-wait (DNS fix #20)
@@ -219,14 +236,14 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer migrate python-api
-      CRONJOBS: anchorage-indexer offchain-price-indexer watcher-data-validator
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer migrate python-api
+      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator
     permissions:
       id-token: write
     steps:
       # Pull images from staging ECR, retag and push to prod (no build needed)
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -248,7 +265,7 @@ jobs:
 
       # Retag and push to prod ECR
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -270,17 +287,19 @@ jobs:
             docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
           done
 
-  create-prod-pr:
-    name: Create Prod Deploy PR
+  update-prod:
+    name: Auto-merge Prod Image Tags
     needs: build-push-prod
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     concurrency:
-      group: deploy-prod-pr
+      group: deploy-update-prod
       cancel-in-progress: false
+    permissions:
+      contents: read
     outputs:
-      pr_url: ${{ steps.create-pr.outputs.pr_url }}
-      changelog: ${{ steps.changelog.outputs.changelog }}
+      deploy_sha: ${{ steps.commit.outputs.deploy_sha }}
+      changed: ${{ steps.commit.outputs.changed }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -289,10 +308,254 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          token: ${{ steps.app-token.outputs.token }}
           ref: main
+          persist-credentials: false
+
+      # Auto-merge the prod image-tag bump straight to main (no PR), guarded so a
+      # compromised CI/bot cannot smuggle anything else into a prod deploy:
+      #   1. the diff must touch ONLY k8s/overlays/prod/kustomization.yaml,
+      #   2. every changed line must be a `newTag:` line, and
+      #   3. every image in the file must resolve to our prod ECR account.
+      # Any violation fails the job closed; nothing is committed. stl-prod stays
+      # on MANUAL sync, so this commit does not roll out until the gated
+      # deploy-prod job runs `argocd app sync` on the approved revision.
+      - name: Bump, validate, and commit prod image tags to main
+        id: commit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+          REPO: ${{ github.repository }}
+          PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
+          KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
+        run: |
+          set -euo pipefail
+
+          # Fail closed on a malformed deploy SHA before we touch main.
+          if [[ ! "$DEPLOY_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::DEPLOY_SHA must be a 40-char lowercase git SHA: ${DEPLOY_SHA}"
+            exit 1
+          fi
+
+          MAX_RETRIES=3
+          for attempt in $(seq 1 "$MAX_RETRIES"); do
+            echo "Attempt ${attempt}/${MAX_RETRIES}"
+
+            git fetch origin main
+            git checkout FETCH_HEAD -- "$KUSTOMIZATION"
+
+            # Update plain SHA tags (regular services) and prefixed tags
+            # (cronjobs: name-SHA).
+            sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2${DEPLOY_SHA}/" "$KUSTOMIZATION"
+
+            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
+              echo "Prod already at ${DEPLOY_SHA}; nothing to commit"
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            # GUARD 1: only the prod kustomization may change.
+            CHANGED_FILES=$(git diff --name-only FETCH_HEAD)
+            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+              echo "::error::Prod deploy diff touches unexpected files:"
+              echo "$CHANGED_FILES"
+              exit 1
+            fi
+
+            # GUARD 2: every changed content line must be a `newTag:` line.
+            # -U0 = no context; ignore the +++/--- file headers.
+            OFFENDING=$(git diff -U0 FETCH_HEAD -- "$KUSTOMIZATION" \
+              | grep -E '^[+-]' \
+              | grep -Ev '^(\+\+\+|---)' \
+              | grep -Ev '^[+-][[:space:]]*newTag:' \
+              || true)
+            if [ -n "$OFFENDING" ]; then
+              echo "::error::Prod deploy diff changes non-newTag lines:"
+              echo "$OFFENDING"
+              exit 1
+            fi
+
+            # GUARD 3: every image name must START WITH our prod ECR account.
+            # Anchored (not substring) so a name that merely embeds the prefix
+            # elsewhere (e.g. evil.example/030797...) cannot pass.
+            BAD_IMAGES=$(awk -v p="$PROD_ECR_PREFIX" '
+              /^[[:space:]]*newName:/ {
+                v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
+                if (index(v,p)!=1) print
+              }' "$KUSTOMIZATION")
+            if [ -n "$BAD_IMAGES" ]; then
+              echo "::error::Prod kustomization references images outside the prod ECR account:"
+              echo "$BAD_IMAGES"
+              exit 1
+            fi
+
+            # GUARD 4: every tag must be (optional name prefix +) exactly this
+            # deploy SHA — fail closed on any unexpected tag value.
+            BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+              | grep -Ev "^[[:space:]]*newTag:[[:space:]]*\"([a-z0-9]+-)*${DEPLOY_SHA}\"[[:space:]]*$" \
+              || true)
+            if [ -n "$BAD_TAGS" ]; then
+              echo "::error::Prod tags do not all target ${DEPLOY_SHA}:"
+              echo "$BAD_TAGS"
+              exit 1
+            fi
+
+            SHORT_SHA=${DEPLOY_SHA:0:7}
+            MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+
+            NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
+              --method POST \
+              --input - <<TREE_EOF | jq -r '.sha'
+          {
+            "base_tree": "${BASE_TREE}",
+            "tree": [{
+              "path": "${KUSTOMIZATION}",
+              "mode": "100644",
+              "type": "blob",
+              "content": $(jq -Rs . < "$KUSTOMIZATION")
+            }]
+          }
+          TREE_EOF
+            )
+
+            NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
+              --method POST \
+              --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
+              --field "tree=${NEW_TREE}" \
+              --field "parents[]=${MAIN_SHA}" \
+              --jq '.sha')
+
+            # Fast-forward main — fails if main moved since we read MAIN_SHA.
+            if REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
+              --method PATCH \
+              --field "sha=${NEW_COMMIT}" 2>&1); then
+              echo "Committed prod tag bump to main as ${NEW_COMMIT}"
+              echo "deploy_sha=${NEW_COMMIT}" >> "$GITHUB_OUTPUT"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Ref update failed: ${REF_OUTPUT}"
+            echo "Retrying..."
+            sleep 1
+          done
+
+          echo "::error::Failed to update main after ${MAX_RETRIES} attempts"
+          exit 1
+
+  notify-prod-pending:
+    name: Notify Prod Deploy Awaiting Approval
+    needs: update-prod
+    if: ${{ needs.update-prod.result == 'success' && needs.update-prod.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      ts: ${{ steps.notify.outputs.ts }}
+    env:
+      ARGOCD_SERVER_HOST: argocd-prod-archon
+      APP: stl-prod
+    steps:
+      - name: Configure AWS credentials (ArgoCD read-only)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
+          aws-region: eu-west-1
+
+      - name: Fetch Tailscale + ArgoCD read-only token
+        uses: aws-actions/aws-secretsmanager-get-secrets@a9a7eb4e2f2871d30dc5b892576fde60a2ecc802 # v2.0.10
+        with:
+          secret-ids: |
+            TS, archon-prod-argocd-ci-tailscale-oauth
+            ARGOCD, archon-prod-argocd-ci-token
+          parse-json-secrets: true
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@4e4c49acaa9818630ce0bd7a564372c17e33fb4d # v2
+        with:
+          oauth-client-id: ${{ env.TS_CLIENT_ID }}
+          oauth-secret: ${{ env.TS_CLIENT_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Install ArgoCD CLI
+        env:
+          ARGOCD_VERSION: v2.13.3
+        run: |
+          set -euo pipefail
+          base="https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}"
+          # Download under the release's own filename so the published checksum
+          # line (`<hash>  argocd-linux-amd64`) matches what `sha256sum -c` looks
+          # for in /tmp — otherwise it errors "No such file or directory".
+          curl -sSfL -o /tmp/argocd-linux-amd64 "${base}/argocd-linux-amd64"
+          curl -sSfL -o /tmp/cli_checksums.txt "${base}/cli_checksums.txt"
+          ( cd /tmp && grep 'argocd-linux-amd64$' cli_checksums.txt | sha256sum -c - )
+          sudo install -m 0755 /tmp/argocd-linux-amd64 /usr/local/bin/argocd
+
+      - name: Resolve ArgoCD server and read baseline + diff
+        id: argocd
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ env.ARGOCD_TOKEN }}
+          ARGOCD_OPTS: --plaintext --grpc-web
+          HOST: ${{ env.ARGOCD_SERVER_HOST }}
+          APP_NAME: ${{ env.APP }}
+          DEPLOY_SHA: ${{ needs.update-prod.outputs.deploy_sha }}
+        run: |
+          set -euo pipefail
+          IP=""
+          for i in $(seq 1 30); do
+            IP=$(tailscale ip -4 "$HOST" 2>/dev/null || echo "")
+            if [ -n "$IP" ]; then break; fi
+            echo "Attempt ${i}/30: cannot resolve ${HOST} yet..."
+            sleep 2
+          done
+          if [ -z "$IP" ]; then
+            echo "::error::Failed to resolve ${HOST} via Tailscale"
+            exit 1
+          fi
+          ARGOCD_SERVER="$IP"
+          export ARGOCD_SERVER
+
+          # Baseline = the revision ArgoCD currently has synced. Computing the
+          # changelog from this (not from main) keeps changes that were merged
+          # but rejected / not-yet-synced visible — they batch into this deploy.
+          BASELINE=$(argocd app get "$APP_NAME" -o json | jq -r '.status.sync.revision // ""')
+          echo "baseline=${BASELINE}" >> "$GITHUB_OUTPUT"
+
+          # `argocd app diff` exits non-zero when there IS a diff — expected.
+          # Best-effort: a diff hiccup must not block the approval request.
+          DIFF=$(argocd app diff "$APP_NAME" --revision "$DEPLOY_SHA" 2>&1 || true)
+          # A prod deploy only bumps image tags, so the raw diff is one near
+          # identical 6-line block per workload — a huge wall in Slack. Collapse
+          # it to the count + changed resource names (the tag is the deploy SHA,
+          # shown once in the changelog). Resource headers look like
+          # `===== apps/Deployment vector/allocation-tracker =====`.
+          RESOURCES=$(printf '%s\n' "$DIFF" \
+            | sed -nE 's/^=====[[:space:]]+(.*)[[:space:]]+=====$/\1/p' \
+            | awk '{print $NF}' || true)
+          COUNT=$(printf '%s' "$RESOURCES" | grep -c . || true); COUNT=${COUNT:-0}
+          LIST=$(printf '%s\n' "$RESOURCES" | sed '/^$/d' | head -20 | paste -sd ', ' - || true)
+          if [ "$COUNT" -gt 20 ]; then LIST="${LIST}, …and $((COUNT - 20)) more"; fi
+          {
+            echo "diff_count=${COUNT}"
+            echo "diff_list<<ARGOCD_DIFF_EOF"
+            printf '%s\n' "$LIST"
+            echo "ARGOCD_DIFF_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.DEPLOY_APP_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.update-prod.outputs.deploy_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -300,188 +563,344 @@ jobs:
         id: changelog
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASELINE: ${{ steps.argocd.outputs.baseline }}
+          DEPLOY_SHA: ${{ needs.update-prod.outputs.deploy_sha }}
+          ARGOCD_DIFF_COUNT: ${{ steps.argocd.outputs.diff_count }}
+          ARGOCD_DIFF_LIST: ${{ steps.argocd.outputs.diff_list }}
         run: |
-          set -o pipefail
-          SHA=${{ inputs.sha || github.sha }}
-          SHORT_SHA=${SHA:0:7}
-          REPO="${{ github.repository }}"
+          set -euo pipefail
+          DEPLOY_SHORT=${DEPLOY_SHA:0:7}
+          BASE_SHORT=${BASELINE:0:7}
 
-          # Get the SHA currently deployed in prod
-          PROD_SHA=$(grep -m1 -oP '[a-f0-9]{40}' k8s/overlays/prod/kustomization.yaml || echo "")
-          PROD_SHORT=${PROD_SHA:0:7}
-
-          if [ -z "$PROD_SHA" ]; then
-            echo "::error::Could not parse current prod SHA from kustomization.yaml"
-            exit 1
-          fi
-
-          CHANGELOG=""
-
-          if [ "$PROD_SHA" = "$SHA" ]; then
-            CHANGELOG="No code changes (same SHA as current prod)."
+          if [ -z "$BASELINE" ] || ! git cat-file -e "${BASELINE}^{commit}" 2>/dev/null; then
+            # Baseline unknown or not in history (first deploy / squashed) — show
+            # the deploy SHA without a commit range rather than guessing.
+            CHANGELOG="*Prod deploy* \`${DEPLOY_SHORT}\`"$'\n'"_No diff range against last-synced revision (\`${BASE_SHORT:-unknown}\`)._"
+          elif [ "$BASELINE" = "$DEPLOY_SHA" ]; then
+            CHANGELOG="*Prod deploy* \`${DEPLOY_SHORT}\` — no code changes since last sync."
           else
-            # List merged PRs between the two SHAs
-            TOTAL_PRS=0
-            MERGED_PRS=$(git log --merges --format="%s" "${PROD_SHA}..${SHA}" \
-              | grep -oP '#\d+' | sort -u || echo "")
-            TOTAL_PRS=$(echo "$MERGED_PRS" | grep -c . || echo 0)
-            DISPLAY_PRS=$(echo "$MERGED_PRS" | head -15)
+            MERGED_PRS=$(git log --merges --format="%s" "${BASELINE}..${DEPLOY_SHA}" | grep -oE '#[0-9]+' | sort -u || true)
+            TOTAL_PRS=$(printf '%s\n' "$MERGED_PRS" | grep -c . || true)
 
             PR_LIST=""
-            for pr_num in $DISPLAY_PRS; do
+            for pr_num in $(printf '%s\n' "$MERGED_PRS" | head -15); do
               num=${pr_num#\#}
-              PR_INFO=$(gh pr view "$num" --json title,url,author --jq '"- [#'"$num"' \(.title)](\(.url)) by @\(.author.login)"' 2>/dev/null || echo "")
-              if [ -n "$PR_INFO" ]; then
-                PR_LIST="${PR_LIST}${PR_INFO}\n"
-              fi
+              PR_INFO=$(gh pr view "$num" --json title,url,author --jq '"- <\(.url)|#'"$num"' \(.title)> by @\(.author.login)"' 2>/dev/null || true)
+              if [ -n "$PR_INFO" ]; then PR_LIST="${PR_LIST}${PR_INFO}"$'\n'; fi
             done
 
-            # List commits between current prod and new SHA (stl-verify/ only).
-            # Use git's -n flag to limit at the source — piping through `head` can
-            # SIGPIPE the upstream `git log`, which `set -o pipefail` + `bash -e`
-            # turn into exit 141.
-            TOTAL_COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | wc -l | tr -d ' ')
-            COMMITS=$(git log --oneline --no-merges -n 20 "${PROD_SHA}..${SHA}" -- stl-verify/)
+            TOTAL_COMMITS=$(git log --oneline --no-merges "${BASELINE}..${DEPLOY_SHA}" -- stl-verify/ | wc -l | tr -d ' ')
+            COMMITS=$(git log --oneline --no-merges -n 20 "${BASELINE}..${DEPLOY_SHA}" -- stl-verify/ || true)
 
-            CHANGELOG="### Changes: \`${PROD_SHORT}\` → \`${SHORT_SHA}\`"
+            CHANGELOG="*Changes:* \`${BASE_SHORT}\` → \`${DEPLOY_SHORT}\` (last-synced → deploy)"
             if [ -n "$PR_LIST" ]; then
-              CHANGELOG="${CHANGELOG}\n\n**Merged PRs:**\n${PR_LIST}"
-              if [ "$TOTAL_PRS" -gt 15 ]; then
-                CHANGELOG="${CHANGELOG}…and $((TOTAL_PRS - 15)) more"
-              fi
+              CHANGELOG="${CHANGELOG}"$'\n\n'"*Merged PRs:*"$'\n'"${PR_LIST}"
+              if [ "$TOTAL_PRS" -gt 15 ]; then CHANGELOG="${CHANGELOG}…and $((TOTAL_PRS - 15)) more"; fi
             fi
             if [ -n "$COMMITS" ]; then
-              CHANGELOG="${CHANGELOG}\n\n**Commits (stl-verify):**\n\`\`\`\n${COMMITS}\n\`\`\`"
-              if [ "$TOTAL_COMMITS" -gt 20 ]; then
-                CHANGELOG="${CHANGELOG}\n…and $((TOTAL_COMMITS - 20)) more"
-              fi
+              CHANGELOG="${CHANGELOG}"$'\n\n'"*Commits (stl-verify):*"$'\n''```'$'\n'"${COMMITS}"$'\n''```'
+              if [ "$TOTAL_COMMITS" -gt 20 ]; then CHANGELOG="${CHANGELOG}"$'\n'"…and $((TOTAL_COMMITS - 20)) more"; fi
             fi
           fi
 
-          # Write to file to avoid quoting issues, then set output
-          echo -e "$CHANGELOG" > /tmp/changelog.md
+          if [ "${ARGOCD_DIFF_COUNT:-0}" -gt 0 ]; then
+            CHANGELOG="${CHANGELOG}"$'\n\n'"*ArgoCD (\`stl-prod\`):* ${ARGOCD_DIFF_COUNT} workloads → \`${DEPLOY_SHORT}\`"$'\n'"${ARGOCD_DIFF_LIST}"
+          fi
+
           {
-            echo "changelog<<CHANGELOG_EOF"
-            cat /tmp/changelog.md
+            echo "body<<CHANGELOG_EOF"
+            printf '%s\n' "$CHANGELOG"
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Update prod kustomization image tags
-        run: |
-          SHA=${{ inputs.sha || github.sha }}
-          # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
-          sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/prod/kustomization.yaml
+      - name: Checkout shared actions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: archon-research/github-actions
+          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
 
-      - name: Create or update prod PR
-        id: create-pr
+      - name: Notify Slack — awaiting approval
+        id: notify
+        uses: ./.github-actions/slack-notify
+        with:
+          status: pending
+          context: Prod Deploy
+          body: ${{ steps.changelog.outputs.body }}
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+
+  deploy-prod:
+    name: Deploy Prod (ArgoCD sync)
+    needs: [update-prod, notify-prod-pending]
+    if: ${{ needs.update-prod.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    # Shared across all prod-deploy runs: a newer run cancels an older one that
+    # is still waiting for approval, so only the latest revision is pending at a
+    # time. Best-effort UX — the freshness guard below is the real safety net if
+    # GitHub does not cancel an approval-waiting job.
+    concurrency:
+      group: stl-prod-deploy
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write
+      # get-environment-review reads GET /actions/runs/{run_id}/approvals.
+      actions: read
+    outputs:
+      started: ${{ steps.mark-approved.outputs.started }}
+    env:
+      APP: stl-prod
+      PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
+      DEPLOY_SHA: ${{ needs.update-prod.outputs.deploy_sha }}
+    steps:
+      # First step in the gated job: a rejected review never reaches this, so a
+      # missing `started` output is how notify-prod-rejected tells reject apart
+      # from a genuine sync failure (mirrors infra archon-prod-deploy).
+      - name: Mark approved
+        id: mark-approved
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.update-prod.outputs.deploy_sha }}
+          # Full history: re-validation diffs against the parent commit and the
+          # freshness guard greps main for a newer prod-bump commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-validate image-tags-only + ECR provenance (fail closed)
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
         run: |
-          SHA=${{ inputs.sha || github.sha }}
-          SHORT_SHA=${SHA:0:7}
-          BRANCH="deploy/prod-${SHORT_SHA}"
-          REPO="${{ github.repository }}"
+          set -euo pipefail
 
-          # Get current main HEAD and its tree
-          MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
-          BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+          # The exact revision being synced must itself be a pure tag bump to our
+          # ECR — re-checked here inside the privileged job, independent of CI.
+          PARENT=$(git rev-parse "${DEPLOY_SHA}^")
 
-          # Create a new tree with the updated file
-          NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
-            --method POST \
-            --input - <<TREE_EOF | jq -r '.sha'
-          {
-            "base_tree": "${BASE_TREE}",
-            "tree": [{
-              "path": "k8s/overlays/prod/kustomization.yaml",
-              "mode": "100644",
-              "type": "blob",
-              "content": $(cat k8s/overlays/prod/kustomization.yaml | jq -Rs .)
-            }]
-          }
-          TREE_EOF
-          )
+          CHANGED_FILES=$(git diff --name-only "${PARENT}" "${DEPLOY_SHA}")
+          if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+            echo "::error::Deploy revision ${DEPLOY_SHA} changes unexpected files:"
+            echo "$CHANGED_FILES"
+            exit 1
+          fi
 
-          # Create a verified commit via the API
-          NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
-            --method POST \
-            --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
-            --field "tree=${NEW_TREE}" \
-            --field "parents[]=${MAIN_SHA}" \
-            --jq '.sha')
+          OFFENDING=$(git diff -U0 "${PARENT}" "${DEPLOY_SHA}" -- "$KUSTOMIZATION" \
+            | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' \
+            | grep -Ev '^[+-][[:space:]]*newTag:' || true)
+          if [ -n "$OFFENDING" ]; then
+            echo "::error::Deploy revision changes non-newTag lines:"
+            echo "$OFFENDING"
+            exit 1
+          fi
 
-          # Create the branch pointing to the new commit
-          gh api "repos/${REPO}/git/refs" \
-            --method POST \
-            --field "ref=refs/heads/${BRANCH}" \
-            --field "sha=${NEW_COMMIT}" || \
-          gh api "repos/${REPO}/git/refs/heads/${BRANCH}" \
-            --method PATCH \
-            --field "sha=${NEW_COMMIT}" \
-            --field "force=true"
+          # Anchored: image name must START WITH the prod ECR prefix, not merely
+          # contain it. DEPLOY_SHA here is the commit revision, not the image
+          # tag, so tags are validated by shape (optional prefix + 40-hex sha).
+          BAD_IMAGES=$(awk -v p="$PROD_ECR_PREFIX" '
+            /^[[:space:]]*newName:/ {
+              v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
+              if (index(v,p)!=1) print
+            }' "$KUSTOMIZATION")
+          if [ -n "$BAD_IMAGES" ]; then
+            echo "::error::Prod kustomization references images outside the prod ECR account:"
+            echo "$BAD_IMAGES"
+            exit 1
+          fi
 
-          # Build the PR body in a file and use --body-file. Avoid passing the
-          # body via $(cat <<EOF ... EOF) — backticks in the changelog (code
-          # fences, inline code) get interpreted as command substitution by
-          # bash inside $(...) and the changelog gets silently dropped.
-          {
-            cat <<HEADER_EOF
-          Automated prod image tag update.
+          BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+            | grep -Ev '^[[:space:]]*newTag:[[:space:]]*"([a-z0-9]+-)*[a-f0-9]{40}"[[:space:]]*$' \
+            || true)
+          if [ -n "$BAD_TAGS" ]; then
+            echo "::error::Prod kustomization has malformed image tags:"
+            echo "$BAD_TAGS"
+            exit 1
+          fi
+          echo "Re-validation passed: ${DEPLOY_SHA} is a prod-ECR tag-only bump."
 
-          **Deploy SHA:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${SHA})
-          **Images pushed to:** prod ECR (\`030797368798\`)
-          **Triggered by:** @${{ github.actor }}
+      # Freshness: only the latest prod-bump on main may roll out. If a newer
+      # deploy(prod) commit landed while this run waited for approval, this
+      # approval is stale — skip the sync; the newer run's approval rolls
+      # everything out (the changes batch). Concurrency-independent safety.
+      - name: Check this is still the latest prod deploy
+        id: fresh
+        run: |
+          set -euo pipefail
+          git fetch -q origin main
+          LATEST=$(git log origin/main --grep '^deploy(prod): update image tags' --format='%H' -1 || true)
+          if [ -n "$LATEST" ] && [ "$LATEST" != "$DEPLOY_SHA" ] \
+            && git merge-base --is-ancestor "$DEPLOY_SHA" "$LATEST"; then
+            echo "::warning::Superseded by newer prod deploy ${LATEST}; skipping sync (batches into it)."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          HEADER_EOF
-            cat /tmp/changelog.md
-            cat <<'FOOTER_EOF'
+      - name: Fetch approval review
+        id: review
+        uses: ./.github/actions/get-environment-review
+        with:
+          environment: production
+          state: approved
 
-          ---
-          Merge this PR to update prod kustomization, then sync in ArgoCD.
-          FOOTER_EOF
-          } > /tmp/pr-body.md
+      - name: Checkout shared actions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: archon-research/github-actions
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
 
-          # Create the new prod deploy PR FIRST, so that if `gh pr create`
-          # fails transiently we don't end up with no open prod-deploy PR
-          # (older PRs would have already been closed).
-          gh pr create \
-            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
-            --body-file /tmp/pr-body.md \
-            --head "$BRANCH" \
-            --base main
+      - name: React to Slack message — superseded
+        if: ${{ steps.fresh.outputs.superseded == 'true' }}
+        uses: ./.github-actions/slack-notify
+        with:
+          status: pending
+          context: Prod Deploy
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+          message-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+          reaction: recycle
 
-          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+      - name: React to Slack message — approved
+        if: ${{ steps.review.outputs.found == 'true' && steps.fresh.outputs.superseded != 'true' }}
+        uses: ./.github-actions/slack-notify
+        with:
+          status: approved
+          context: Prod Deploy
+          reviewer: ${{ steps.review.outputs.reviewer }}
+          comment: ${{ steps.review.outputs.comment }}
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+          message-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+          reaction: white_check_mark
 
-          # Now that the new PR exists, close any older open deploy/prod-* PRs
-          # (excluding the one we just created). Branch protection's "strict"
-          # rule plus our concurrency group make this defensive, but it keeps
-          # the PR list clean and removes ambiguity about which deploy is
-          # current.
-          # NOTE: filter by branch prefix — `gh pr list --search` treats `:` as
-          # a search qualifier so the previous title-based search returned 0.
-          EXISTING_PRS=$(gh pr list \
-            --state open \
-            --base main \
-            --json number,headRefName \
-            --jq '.[] | select(.headRefName | startswith("deploy/prod-")) | select(.headRefName != "'"$BRANCH"'") | .number')
-          for pr in $EXISTING_PRS; do
-            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
-          done
+      - name: Sync stl-prod to the approved revision
+        if: ${{ steps.fresh.outputs.superseded != 'true' }}
+        uses: ./.github-actions/argocd-sync
+        with:
+          app: ${{ env.APP }}
+          revision: ${{ needs.update-prod.outputs.deploy_sha }}
+          server: http://argocd-prod-archon
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-sync
+          tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
+          argocd-token-secret-id: archon-prod-argocd-deploy-token
 
-  notify-prod-pr-created:
-    name: Notify Prod Deploy Awaiting Approval
-    needs: create-prod-pr
-    if: ${{ needs.create-prod-pr.result == 'success' }}
-    uses: ./.github/workflows/slack-notify.yaml
-    with:
-      status: pending
-      context: Prod Deploy
-      pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
-      body: ${{ needs.create-prod-pr.outputs.changelog }}
-    secrets:
-      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+      - name: Notify Slack — deploy succeeded
+        if: ${{ success() && steps.fresh.outputs.superseded != 'true' }}
+        uses: ./.github-actions/slack-notify
+        with:
+          status: success
+          context: Prod Deploy
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+          thread-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+
+      - name: Notify Slack — deploy failed
+        if: ${{ failure() && steps.mark-approved.outputs.started == 'true' }}
+        uses: ./.github-actions/slack-notify
+        with:
+          status: failure
+          context: Prod Deploy
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+          thread-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+
+  notify-prod-rejected:
+    name: Notify Prod Deploy Rejected
+    needs: [notify-prod-pending, deploy-prod]
+    if: >-
+      always() &&
+      needs.notify-prod-pending.result == 'success' &&
+      needs.deploy-prod.result == 'failure' &&
+      needs.deploy-prod.outputs.started != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Fetch rejection review
+        id: review
+        uses: ./.github/actions/get-environment-review
+        with:
+          environment: production
+          state: rejected
+
+      - name: Checkout shared actions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: archon-research/github-actions
+          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - name: React to Slack message — rejected
+        uses: ./.github-actions/slack-notify
+        with:
+          status: rejected
+          context: Prod Deploy
+          reviewer: ${{ steps.review.outputs.reviewer }}
+          comment: ${{ steps.review.outputs.comment }}
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+          message-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+          reaction: no_entry
+
+  # Best-effort cleanup when a newer run cancels this one while it waits for
+  # approval (concurrency: cancel-in-progress). Marks the orphaned pending
+  # message as superseded. The freshness guard in deploy-prod covers the case
+  # where the cancel does not fire and a stale approval lands instead.
+  notify-prod-superseded:
+    name: Notify Prod Deploy Superseded
+    needs: [notify-prod-pending, deploy-prod]
+    if: >-
+      always() &&
+      needs.notify-prod-pending.result == 'success' &&
+      needs.deploy-prod.result == 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout shared actions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: archon-research/github-actions
+          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - name: React to Slack message — superseded
+        uses: ./.github-actions/slack-notify
+        with:
+          status: pending
+          context: Prod Deploy
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID_PROD }}
+          slack-token-secret-id: archon-prod-slack-bot-token
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
+          message-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+          reaction: recycle
 
   notify-staging-failure:
     name: Notify Staging Deploy Failure
@@ -499,17 +918,21 @@ jobs:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
+  # Covers the pre-gate prod pipeline only. The gated deploy-prod job posts its
+  # own threaded success/failure, and notify-prod-rejected handles a rejected
+  # review — so those jobs are deliberately excluded here.
   notify-prod-failure:
     name: Notify Prod Deploy Failure
-    if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.create-prod-pr.result == 'failure') }}
-    needs: [build-push-prod, create-prod-pr]
+    if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.update-prod.result == 'failure' || needs.notify-prod-pending.result == 'failure') }}
+    needs: [build-push-prod, update-prod, notify-prod-pending]
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
       context: Prod Deploy
       failed-jobs: |
         Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
-        Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+        Auto-merge Prod Image Tags=${{ needs.update-prod.result }}
+        Notify Prod Deploy Awaiting Approval=${{ needs.notify-prod-pending.result }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

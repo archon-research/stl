@@ -1869,7 +1869,7 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 		}
 	})
 
-	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
+	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider(), "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders: %v", err)
 	}
@@ -1924,7 +1924,7 @@ func TestProcessReceipt_KnownNotVault_SkipsSpan(t *testing.T) {
 		}
 	})
 
-	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider())
+	telemetry, err := NewTelemetryWithProviders(tp, noop.NewMeterProvider(), "mainnet")
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProviders: %v", err)
 	}
@@ -2989,7 +2989,7 @@ func TestProcessBlockEvent_VaultDiscovery_GetOrCreateTokenError(t *testing.T) {
 		}
 	}
 
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, _ common.Address, _ string, _ int, _ *int64) (int64, error) {
 		return 0, errors.New("token creation failed")
 	}
 
@@ -3027,7 +3027,7 @@ func TestProcessBlockEvent_CreateMarket_LoanTokenError(t *testing.T) {
 		}
 	}
 
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, _ string, _ int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, _ string, _ int, _ *int64) (int64, error) {
 		if addr == testLoanToken {
 			return 0, errors.New("loan token creation error")
 		}
@@ -3143,7 +3143,7 @@ func TestProcessBlockEvent_EnsureMarket_IdleMarket(t *testing.T) {
 	tokenAddrs := []common.Address{}
 	tokenSymbols := []string{}
 	tokenDecimals := []int{}
-	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, dec int, _ int64) (int64, error) {
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, dec int, _ *int64) (int64, error) {
 		tokenAddrs = append(tokenAddrs, addr)
 		tokenSymbols = append(tokenSymbols, sym)
 		tokenDecimals = append(tokenDecimals, dec)
@@ -3336,6 +3336,357 @@ func TestProcessBlockEvent_VaultDiscovery_ReceiptTokenRepoError(t *testing.T) {
 	}
 	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
 		t.Error("vault should NOT be marked as not-vault on transient receipt token error")
+	}
+}
+
+// TestCreateMarket_SymbolRevert_StoresEmptySymbol verifies that when a
+// CreateMarket event is processed and the collateral token's symbol() call
+// reverts, the collateral token is persisted with an empty symbol (which
+// acts as the pending marker for the sweep). The loan token (whose symbol
+// resolved) must be stored with its real symbol.
+func TestCreateMarket_SymbolRevert_StoresEmptySymbol(t *testing.T) {
+	const blockNumber = int64(20000001)
+	h := newTestHarness(t)
+
+	// getTokenPairMetadata: 4 calls [symbol(loan), decimals(loan), symbol(coll), decimals(coll)].
+	// Loan symbol resolves; collateral symbol reverts (Success=false); both decimals OK.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 4:
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packString("LOAN")}, // loan symbol OK
+				{Success: true, ReturnData: h.packUint8(18)},      // loan decimals OK
+				{Success: false, ReturnData: nil},                 // coll symbol REVERTS
+				{Success: true, ReturnData: h.packUint8(8)},       // coll decimals OK
+			}, nil
+		case 1:
+			return []outbound.Result{h.defaultMarketStateResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateMarketFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarket) (int64, error) {
+		return 10, nil
+	}
+	h.morphoRepo.SaveMarketStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoMarketState) error {
+		return nil
+	}
+
+	// Capture GetOrCreateToken calls to inspect what symbol was stored.
+	type tokenCall struct {
+		address common.Address
+		symbol  string
+	}
+	var tokenCalls []tokenCall
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ *int64) (int64, error) {
+		tokenCalls = append(tokenCalls, tokenCall{addr, sym})
+		return int64(len(tokenCalls)), nil
+	}
+
+	log := h.makeCreateMarketLog(testMarketID, testLoanToken, testCollToken, testOracle, testIrm, big.NewInt(800000000000000000))
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, blockNumber, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	// Both tokens must have been persisted: loan with "LOAN", collateral with "".
+	if len(tokenCalls) != 2 {
+		t.Fatalf("GetOrCreateToken called %d times, want 2", len(tokenCalls))
+	}
+	loanCall := tokenCalls[0]
+	collCall := tokenCalls[1]
+	if loanCall.address != testLoanToken {
+		t.Errorf("first token call addr = %s, want loan %s", loanCall.address.Hex(), testLoanToken.Hex())
+	}
+	if loanCall.symbol != "LOAN" {
+		t.Errorf("loan token symbol = %q, want LOAN", loanCall.symbol)
+	}
+	if collCall.address != testCollToken {
+		t.Errorf("second token call addr = %s, want coll %s", collCall.address.Hex(), testCollToken.Hex())
+	}
+	if collCall.symbol != "" {
+		t.Errorf("collateral token symbol = %q, want empty (pending marker)", collCall.symbol)
+	}
+}
+
+func TestReconcilePendingSymbols_ResolvesAtCurrentBlock(t *testing.T) {
+	h := newTestHarness(t)
+
+	pending := common.HexToAddress("0x2f010444C6a61feaEBCDd4040fA8B30F519e6c31")
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		return []common.Address{pending}, nil
+	}
+	resolved := map[common.Address]string{}
+	h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, address common.Address, symbol string) error {
+		resolved[address] = symbol
+		return nil
+	}
+	var sawBlock *big.Int
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		sawBlock = blockNumber
+		return []outbound.Result{{Success: true, ReturnData: h.packString("stakedao-frxUsDOLA")}}, nil
+	}
+
+	// Block 25252160 is a sweep block (multiple of 10).
+	h.svc.reconcilePendingSymbols(context.Background(), 1, 25252160)
+
+	if resolved[pending] != "stakedao-frxUsDOLA" {
+		t.Fatalf("resolved = %v, want symbol persisted for %s", resolved, pending.Hex())
+	}
+	if sawBlock == nil || sawBlock.Int64() != 25252160 {
+		t.Fatalf("symbol read at block %v, want 25252160 (the block being processed)", sawBlock)
+	}
+}
+
+// TestReconcilePendingSymbols_FullBatchStillSweeps covers the batch-full branch:
+// a full batch (potential truncation) warns but still resolves what it fetched.
+func TestReconcilePendingSymbols_FullBatchStillSweeps(t *testing.T) {
+	h := newTestHarness(t)
+
+	full := make([]common.Address, symbolSweepBatchSize)
+	for i := range full {
+		full[i] = common.BigToAddress(big.NewInt(int64(i + 1)))
+	}
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		return full, nil
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: false}
+		}
+		// Only the first token resolves; the rest still revert.
+		results[0] = outbound.Result{Success: true, ReturnData: h.packString("FIRST")}
+		return results, nil
+	}
+	var resolved []common.Address
+	h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, address common.Address, _ string) error {
+		resolved = append(resolved, address)
+		return nil
+	}
+
+	h.svc.reconcilePendingSymbols(context.Background(), 1, 100)
+
+	if len(resolved) != 1 || resolved[0] != full[0] {
+		t.Errorf("resolved = %v, want exactly the first token despite the full batch", resolved)
+	}
+}
+
+func TestReconcilePendingSymbols_NonSweepBlockIsNoop(t *testing.T) {
+	h := newTestHarness(t)
+	listed := false
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		listed = true
+		return nil, nil
+	}
+	h.svc.reconcilePendingSymbols(context.Background(), 1, 25252161) // not a multiple of 10
+	if listed {
+		t.Error("non-sweep block must not query missing-symbol tokens")
+	}
+}
+
+func TestReconcilePendingSymbols_ListErrorDoesNotPanicOrPropagate(t *testing.T) {
+	h := newTestHarness(t)
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		return nil, fmt.Errorf("db down")
+	}
+	// Best-effort: must not panic. It is a void method, so nothing to assert beyond no panic.
+	h.svc.reconcilePendingSymbols(context.Background(), 1, 100)
+}
+
+// --- processBlockEvent / reconcilePendingSymbols integration ---
+
+// TestProcessBlockEvent_FetchError_SkipsReconcile asserts that when
+// fetchAndProcessReceipts fails (cache miss), reconcilePendingSymbols is never
+// reached. Reconcile is best-effort and runs ONLY after a successful block
+// fetch; a failed block must propagate its error without touching the token
+// repo.
+func TestProcessBlockEvent_FetchError_SkipsReconcile(t *testing.T) {
+	h := newTestHarness(t)
+
+	listCalled := false
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+		listCalled = true
+		return nil, nil
+	}
+
+	// Do NOT store receipts in cache: GetReceipts returns nil, nil which
+	// fetchAndProcessReceipts converts to a "receipts not found" error.
+	err := h.svc.processBlockEvent(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 20, Version: 0,
+	})
+	if err == nil {
+		t.Fatal("expected error for cache miss, got nil")
+	}
+	if listCalled {
+		t.Error("ListTokensMissingSymbol must not be called when fetchAndProcessReceipts fails")
+	}
+}
+
+// TestProcessBlockEvent_Success_RunsReconcileOnSweepBlock asserts that on a
+// successful block that falls on a sweep-eligible block number (multiple of
+// symbolSweepIntervalBlocks), reconcilePendingSymbols is called with the
+// correct chainID. Empty receipts are used so no Morpho-specific processing
+// is needed.
+func TestProcessBlockEvent_Success_RunsReconcileOnSweepBlock(t *testing.T) {
+	h := newTestHarness(t)
+
+	var listCalledWithChainID int64
+	listCalled := false
+	h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, chainID int64, _ int) ([]common.Address, error) {
+		listCalled = true
+		listCalledWithChainID = chainID
+		return nil, nil // empty list, nothing to reconcile
+	}
+
+	// Block 20 is a multiple of symbolSweepIntervalBlocks (10).
+	if err := h.processBlock(t, 1, 20, 0, []shared.TransactionReceipt{}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if !listCalled {
+		t.Error("ListTokensMissingSymbol must be called on a sweep-eligible block after successful processing")
+	}
+	if listCalledWithChainID != 1 {
+		t.Errorf("ListTokensMissingSymbol called with chainID %d, want 1", listCalledWithChainID)
+	}
+}
+
+// TestReconcilePendingSymbols_SwallowedErrors covers the two best-effort
+// error-swallow branches inside reconcilePendingSymbols. None of them must
+// panic or propagate an error (the method is void).
+func TestReconcilePendingSymbols_SwallowedErrors(t *testing.T) {
+	addr1 := common.HexToAddress("0xAAAA000000000000000000000000000000001111")
+	addr2 := common.HexToAddress("0xBBBB000000000000000000000000000000002222")
+
+	t.Run("ResolveSymbolsAt_error_does_not_propagate", func(t *testing.T) {
+		// ResolveSymbolsAt errors (multicaller returns error). reconcilePendingSymbols
+		// must swallow it. ResolveTokenSymbolFn must NOT be called.
+		h := newTestHarness(t)
+
+		h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+			return []common.Address{addr1}, nil
+		}
+		h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			return nil, errors.New("rpc timeout")
+		}
+		resolveCalled := false
+		h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, _ common.Address, _ string) error {
+			resolveCalled = true
+			return nil
+		}
+
+		h.svc.reconcilePendingSymbols(context.Background(), 1, 2000)
+
+		if resolveCalled {
+			t.Error("ResolveTokenSymbol must not be called when ResolveSymbolsAt errors")
+		}
+	})
+
+	t.Run("ResolveTokenSymbol_error_continues_to_next_token", func(t *testing.T) {
+		// ResolveTokenSymbolFn returns an error for ONE of TWO resolved tokens.
+		// The other token's persist must still be attempted — one failing persist
+		// must not drop the rest.
+		h := newTestHarness(t)
+
+		h.tokenRepo.ListTokensMissingSymbolFn = func(_ context.Context, _ int64, _ int) ([]common.Address, error) {
+			return []common.Address{addr1, addr2}, nil
+		}
+		// Both symbols resolve successfully via multicall.
+		h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			results := make([]outbound.Result, len(calls))
+			for i := range calls {
+				results[i] = outbound.Result{Success: true, ReturnData: h.packString("SYM")}
+			}
+			return results, nil
+		}
+
+		// ResolveTokenSymbol fails for the first address it sees; succeeds for the second.
+		var resolveAttempted []common.Address
+		h.tokenRepo.ResolveTokenSymbolFn = func(_ context.Context, _ int64, address common.Address, _ string) error {
+			resolveAttempted = append(resolveAttempted, address)
+			if len(resolveAttempted) == 1 {
+				return errors.New("persist failed")
+			}
+			return nil
+		}
+
+		h.svc.reconcilePendingSymbols(context.Background(), 1, 2000)
+
+		// Both addresses must have been attempted regardless of the first failure.
+		if len(resolveAttempted) != 2 {
+			t.Errorf("ResolveTokenSymbol called %d times, want 2 (one failure must not skip the other)", len(resolveAttempted))
+		}
+	})
+}
+
+// TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol verifies that when a
+// vault is discovered via the V2 AccrueInterest path and the asset token's
+// symbol() reverts while decimals() succeeds, the asset token is persisted
+// with an empty symbol (the sweep picks it up later).
+func TestVaultDiscovery_AssetSymbolRevert_StoresEmptySymbol(t *testing.T) {
+	const blockNumber = int64(20000005)
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0x9898989898989898989898989898989898989898")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case 4:
+			if h.isProbeMulticall(calls) {
+				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+			}
+			return h.vaultDetailResults("Asset Revert Vault", "aRV", 18, false), nil
+		case 2:
+			if calls[0].Target == unknownVault {
+				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+			}
+			// getTokenMetadata for the asset: symbol() reverts, decimals() succeeds.
+			return []outbound.Result{
+				{Success: false, ReturnData: nil},           // symbol() reverts
+				{Success: true, ReturnData: h.packUint8(6)}, // decimals() OK
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) {
+		return 77, nil
+	}
+
+	// Capture GetOrCreateToken calls to assert the asset is stored with empty symbol.
+	type tokenCall struct {
+		address common.Address
+		symbol  string
+	}
+	var tokenCalls []tokenCall
+	h.tokenRepo.GetOrCreateTokenFn = func(_ context.Context, _ pgx.Tx, _ int64, addr common.Address, sym string, _ int, _ *int64) (int64, error) {
+		tokenCalls = append(tokenCalls, tokenCall{addr, sym})
+		return int64(len(tokenCalls)), nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	receipt := makeReceipt(testTxHash, log)
+
+	if err := h.processBlock(t, 1, blockNumber, 0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	// Find the asset token call (testLoanToken) and assert it has an empty symbol.
+	var assetCall *tokenCall
+	for i := range tokenCalls {
+		if tokenCalls[i].address == testLoanToken {
+			assetCall = &tokenCalls[i]
+			break
+		}
+	}
+	if assetCall == nil {
+		t.Fatalf("GetOrCreateToken never called for asset token %s; calls: %v", testLoanToken.Hex(), tokenCalls)
+	}
+	if assetCall.symbol != "" {
+		t.Errorf("asset token symbol = %q, want empty (pending marker for sweep)", assetCall.symbol)
 	}
 }
 

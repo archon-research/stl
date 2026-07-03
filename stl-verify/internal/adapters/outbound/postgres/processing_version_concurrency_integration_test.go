@@ -646,3 +646,134 @@ func isUniqueViolation(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "23505") || strings.Contains(msg, "unique constraint")
 }
+
+// mapleLoanStateKey identifies a single (maple_loan_id, synced_at) tuple that
+// the maple_loan_state race test inserts under.
+type mapleLoanStateKey struct {
+	mapleLoanID int64
+	syncedAt    time.Time
+}
+
+func truncateMapleForConcurrency(t *testing.T, ctx context.Context) {
+	t.Helper()
+	for _, table := range []string{"maple_loan_state", "maple_loan", "maple_pool"} {
+		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatalf("truncate %s: %v", table, err)
+		}
+	}
+}
+
+func seedMapleLoanStateKey(t *testing.T, ctx context.Context) mapleLoanStateKey {
+	t.Helper()
+
+	// Upsert rather than rely on the migration-seeded row: the morpho race
+	// tests in this file TRUNCATE protocol CASCADE, so the seed row may be
+	// gone by the time this test runs. Values mirror
+	// 20260610_120000_create_maple_graphql_tables.sql.
+	var protocolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\x804a6F5F667170F545Bf14e5DDB48C70B788390C'::bytea, 'maple', 'lending', 11964925, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`).Scan(&protocolID); err != nil {
+		t.Fatalf("seed maple protocol: %v", err)
+	}
+
+	var userID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO "user" (chain_id, address, created_at, updated_at, metadata)
+		 VALUES (1, '\x5511111111111111111111111111111111111155'::bytea, NOW(), NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = "user".id
+		 RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("seed borrower user: %v", err)
+	}
+
+	var assetTokenID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals, metadata, updated_at)
+		 VALUES (1, '\x8844444444444444444444444444444444444488'::bytea, 'USDC', 6, '{}'::jsonb, NOW())
+		 ON CONFLICT (chain_id, address) DO UPDATE SET id = token.id
+		 RETURNING id`).Scan(&assetTokenID); err != nil {
+		t.Fatalf("seed asset token: %v", err)
+	}
+
+	var poolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+		 VALUES (1, $1, '\x6622222222222222222222222222222222222266'::bytea, $2)
+		 RETURNING id`, protocolID, assetTokenID).Scan(&poolID); err != nil {
+		t.Fatalf("seed maple pool: %v", err)
+	}
+
+	var loanID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+		 VALUES (1, $1, '\x7733333333333333333333333333333333333377'::bytea, $2, $3)
+		 RETURNING id`, protocolID, poolID, userID).Scan(&loanID); err != nil {
+		t.Fatalf("seed maple loan: %v", err)
+	}
+
+	return mapleLoanStateKey{
+		mapleLoanID: loanID,
+		syncedAt:    time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+func runMapleLoanStateRace(t *testing.T, ctx context.Context, key mapleLoanStateKey) (versions []int, errs [2]error) {
+	t.Helper()
+	errs = runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, buildID int) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id)
+			 VALUES ($1, $2, 'Active', 100, 1000000, $3)
+			 ON CONFLICT (maple_loan_id, synced_at, processing_version) DO NOTHING`,
+			key.mapleLoanID, key.syncedAt, buildID,
+		)
+		return err
+	})
+
+	rows, err := concurrencyPool.Query(ctx,
+		`SELECT processing_version FROM maple_loan_state
+		 WHERE maple_loan_id = $1 AND synced_at = $2
+		 ORDER BY processing_version`,
+		key.mapleLoanID, key.syncedAt,
+	)
+	if err != nil {
+		t.Fatalf("query versions: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iter versions: %v", err)
+	}
+	return versions, errs
+}
+
+// TestProcessingVersionTrigger_CrossBuildRace_MapleLoanState exercises the
+// maple snapshot trigger shape: natural key (maple_loan_id, synced_at) with
+// the lock key timestamp normalised via EXTRACT(epoch FROM ...). Same race
+// semantics as the morpho test; covers the 5 maple triggers added in
+// 20260610_120000_create_maple_graphql_tables.sql (they share one template;
+// maple_loan_state is the highest-volume representative).
+func TestProcessingVersionTrigger_CrossBuildRace_MapleLoanState(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+	truncateMapleForConcurrency(t, ctx)
+	key := seedMapleLoanStateKey(t, ctx)
+
+	versions, errs := runMapleLoanStateRace(t, ctx, key)
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+	if want := []int{0, 1}; !slices.Equal(versions, want) {
+		t.Fatalf("processing_version assignment incorrect: got %v, want %v — both rows must survive with distinct versions", versions, want)
+	}
+}

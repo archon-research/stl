@@ -1,0 +1,155 @@
+# =============================================================================
+# Vector — Temporal cronjob alerts (ORB-284)
+# =============================================================================
+# Generic failure alerts for every Temporal cronjob. All cronjobs run the
+# shared cronjobWorkflow (stl-verify/internal/adapters/outbound/temporal/) and
+# now emit a single instrumented outcome counter from the shared activity path:
+#
+#   cronjob_runs_total{status="success"|"error"}
+#   cronjob_run_duration_seconds_*  (histogram, for dashboards)
+#
+# RunCronjob initialises OTel with ServiceName=<cronjob name>, so every series
+# carries service_name="anchorage-indexer" | "offchain-price-indexer" | ... .
+# Grouping by service_name gives one alert per cronjob — current AND future —
+# with no per-job rule wiring. A new cronjob is covered the moment it ships.
+#
+# Series carry (set by the OTel SDK + gateway resource processor):
+#   - service_name="<cronjob name>"   (== CronjobConfig.Name)
+#   - k8s_namespace_name="vector"
+#   - cluster="archon-prod" | "archon-staging"
+# `cluster` is preserved through `sum by (...)` so the Alertmanager Slack
+# template's `Cluster:` header is populated. `namespace` is a static rule label
+# (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
+#
+# maple-graphql-indexer is EXCLUDED here (service_name!=) — it has richer
+# dedicated rules in vector-indexers.yaml (VEC-320). Every other cronjob,
+# including any added later, is covered automatically.
+#
+# Severity → routing (per the alerting routing spec):
+#   critical       → pages, prod #at_stl_prod_alerts / staging
+#                    #at_stl_staging_alerts, [CRITICAL], 1h repeat.
+#   warning / info → no page, prod #at_stl_alerts / staging
+#                    #at_stl_staging_alerts, [WARNING]/[INFO], 4h repeat.
+# Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
+# `alert_env` label is needed — every rule reads objects in its own tenant.
+# =============================================================================
+groups:
+  - name: vector-cronjobs
+    interval: 60s
+    rules:
+      # -----------------------------------------------------------------------
+      # WARNING — a run failed
+      # -----------------------------------------------------------------------
+      - alert: VectorCronjobRunFailing
+        # Any cronjob run returned an error in the last 15m. RecordRun fires
+        # once per activity execution, so a transient failure that the retry
+        # policy later recovers also lands here — that is intentional for a
+        # warning (you want to see flapping). A sustained, total failure is
+        # escalated to a page by VectorCronjobAllRunsFailing below.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(cronjob_runs_total{
+              status="error",
+              service_name!="maple-graphql-indexer",
+              k8s_namespace_name="vector"
+            }[15m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `{{ $labels.service_name }}` run failing"
+          description: |
+            Temporal cronjob `{{ $labels.service_name }}` recorded
+            `{{ $value | printf "%.0f" }}` failed run(s) in 15m. Check the pod
+            logs and the Temporal UI (vector namespace) for the failed
+            execution. If it recovers on retry this is informational; if it
+            persists, VectorCronjobAllRunsFailing will page.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobrunfailing
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — every run is failing (worker up, but nothing succeeds)
+      # -----------------------------------------------------------------------
+      - alert: VectorCronjobAllRunsFailing
+        # Errors > 0 AND zero successes over 1h => the job is consistently
+        # failing, not flapping. The 1h window spans >=1 cycle for even the
+        # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
+        # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
+        # IS running and emitting metrics, every run just errors.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              increase(cronjob_runs_total{
+                status="error",
+                service_name!="maple-graphql-indexer",
+                k8s_namespace_name="vector"
+              }[1h])
+            ) > 0
+          )
+          and
+          (
+            sum by (service_name, cluster) (
+              increase(cronjob_runs_total{
+                status="success",
+                service_name!="maple-graphql-indexer",
+                k8s_namespace_name="vector"
+              }[1h])
+            ) == 0
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `{{ $labels.service_name }}` failing every run"
+          description: |
+            Temporal cronjob `{{ $labels.service_name }}` has had zero
+            successful runs and at least one failure over the last 1h. Its
+            output (TimescaleDB snapshots / validations) is going stale. Triage
+            the pod logs and the Temporal UI; if the worker pod itself is gone
+            see VectorCronjobWorkerDown.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjoballrunsfailing
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — the worker isn't running at all (no metrics to read)
+      # -----------------------------------------------------------------------
+      - alert: VectorCronjobWorkerDown
+        # Deployment-availability companion to the metric-based alerts, sourced
+        # from kube-state-metrics so it still fires when the OTLP/metrics
+        # pipeline is the thing that broke (a dead worker emits no
+        # cronjob_runs_total at all, so the metric-based rules above cannot see
+        # it). <1 available replica = no worker pod is running, so the schedule
+        # fires into the void.
+        #
+        # NB: keyed on the kube-state-metrics `deployment` label, NOT the OTel
+        # service_name — anchorage-indexer's Deployment is `spark-anchorage-
+        # indexer`. maple-graphql-indexer is excluded (it has its own
+        # VectorMapleIndexerDown). When a new cronjob ships, add its Deployment
+        # name to this regex.
+        expr: |
+          max by (cluster, deployment) (
+            kube_deployment_status_replicas_available{
+              namespace="vector",
+              deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `{{ $labels.deployment }}` has no available replica"
+          description: |
+            Deployment `{{ $labels.deployment }}` has <1 available replica for
+            >10m. The Temporal cron worker is not running, so its schedule
+            fires with no worker to pick it up and no snapshots/validations are
+            produced. Check the pod (CrashLoopBackOff, OOM, image pull) before
+            data goes stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobworkerdown

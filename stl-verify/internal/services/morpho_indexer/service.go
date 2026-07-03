@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -19,6 +20,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -75,6 +78,7 @@ type Service struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger *slog.Logger
 }
 
@@ -150,13 +154,15 @@ func (s *Service) Start(ctx context.Context) error {
 		return fmt.Errorf("loading vault registry: %w", err)
 	}
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.consumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlockEvent)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.consumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlockEvent)
+	})
 
 	s.logger.Info("morpho indexer started",
 		"maxMessages", s.config.MaxMessages,
@@ -164,20 +170,90 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop stops the service.
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("morpho indexer stopped")
 	return nil
 }
 
 func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
-	return s.fetchAndProcessReceipts(ctx, event)
+	// Stamp the reorg-aware block version once, here, so both receipt processing
+	// and the symbol-reconciliation sweep below archive raw SC calls under the
+	// block's actual version. Setting it only inside fetchAndProcessReceipts would
+	// leave reconcilePendingSymbols' multicalls keyed as version 0.
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	if err := s.fetchAndProcessReceipts(ctx, event); err != nil {
+		return err
+	}
+	// Best-effort symbol reconciliation. Never fails the block: the block is
+	// already fully indexed, and a sweep error just leaves tokens pending for the
+	// next sweep. Reads only at the block just processed.
+	s.reconcilePendingSymbols(ctx, event.ChainID, event.BlockNumber)
+	return nil
+}
+
+// Sweep cadence and batch bound for symbol reconciliation. Hardcoded: the sweep
+// is one bounded multicall every symbolSweepIntervalBlocks blocks, so there is
+// nothing worth tuning per environment.
+const (
+	symbolSweepIntervalBlocks = 10
+	symbolSweepBatchSize      = 500
+)
+
+// reconcilePendingSymbols runs, every symbolSweepIntervalBlocks processed blocks,
+// a best-effort pass that re-reads symbol() for tokens still missing one, at the
+// block just processed. An empty symbol column is itself the "pending" marker, so
+// there is no extra bookkeeping state; tokens whose symbol() never becomes
+// readable are simply retried each sweep (one bounded multicall). All errors are
+// logged and swallowed: the block is already indexed and must never be failed by
+// this pass.
+func (s *Service) reconcilePendingSymbols(ctx context.Context, chainID, blockNumber int64) {
+	if blockNumber%symbolSweepIntervalBlocks != 0 {
+		return
+	}
+	missing, err := s.tokenRepo.ListTokensMissingSymbol(ctx, chainID, symbolSweepBatchSize)
+	if err != nil {
+		s.logger.Warn("symbol reconciliation: listing tokens missing symbol failed", "error", err, "block", blockNumber)
+		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
+		return
+	}
+	// Surface the backlog size on every sweep (capped at the batch size): with no
+	// backstop, growth toward the batch limit is the signal that tokens are
+	// accumulating that never resolve, and oldest-first ordering would starve
+	// newer ones once the limit is hit.
+	s.telemetry.RecordSymbolsMissing(ctx, int64(len(missing)))
+	if len(missing) == 0 {
+		return
+	}
+	if len(missing) == symbolSweepBatchSize {
+		s.logger.Warn("symbol reconciliation: batch full; remaining tokens are picked up on later sweeps",
+			"batch", symbolSweepBatchSize, "block", blockNumber)
+	}
+	resolved, err := s.blockchainSvc.resolveSymbolsAt(ctx, missing, blockNumber)
+	if err != nil {
+		s.logger.Warn("symbol reconciliation: resolving symbols failed", "error", err, "block", blockNumber)
+		s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
+		return
+	}
+	for addr, sym := range resolved {
+		if err := s.tokenRepo.ResolveTokenSymbol(ctx, chainID, addr, sym); err != nil {
+			s.logger.Warn("symbol reconciliation: persisting resolved symbol failed", "error", err, "address", addr.Hex())
+			s.telemetry.RecordError(ctx, "reconcilePendingSymbols", err)
+			continue
+		}
+		s.logger.Info("symbol reconciliation: resolved token symbol", "address", addr.Hex(), "symbol", sym, "block", blockNumber)
+	}
 }
 
 func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	// Block version is stamped by the caller (processBlockEvent) so the symbol
+	// sweep shares it; see the comment there.
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 
@@ -186,7 +262,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		duration := time.Since(start)
 		s.telemetry.RecordBlockProcessed(ctx, duration, retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "block processing failed")
+			telemetry.SetSpanError(span, retErr, "block processing failed")
 			s.telemetry.RecordError(ctx, "fetchAndProcessReceipts", retErr)
 		}
 		s.logger.Debug("fetchAndProcessReceipts completed",
@@ -290,7 +366,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 		attribute.String("tx.hash", receipt.TransactionHash))
 	defer func() {
 		if retErr != nil {
-			SetSpanError(span, retErr, "receipt processing failed")
+			telemetry.SetSpanError(span, retErr, "receipt processing failed")
 		}
 		span.End()
 	}()
@@ -651,7 +727,7 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 			return fmt.Errorf("fetching asset token metadata: %w", err)
 		}
 
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting asset token: %w", err)
 		}
@@ -835,12 +911,12 @@ func (s *Service) handleCreateMarket(ctx context.Context, e *CreateMarketEvent, 
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.LoanToken, loanMetadata.Symbol, loanMetadata.Decimals, blockNumber)
+		loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.LoanToken, loanMetadata.Symbol, loanMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting loan token: %w", err)
 		}
 
-		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, blockNumber)
+		collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, mp.CollateralToken, collMetadata.Symbol, collMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting collateral token: %w", err)
 		}
@@ -1116,12 +1192,12 @@ func (s *Service) ensureMarket(ctx context.Context, tx pgx.Tx, marketID [32]byte
 		return 0, fmt.Errorf("getting protocol: %w", err)
 	}
 
-	loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.LoanToken, loanMd.Symbol, loanMd.Decimals, blockNumber)
+	loanTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.LoanToken, loanMd.Symbol, loanMd.Decimals, &blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("getting loan token: %w", err)
 	}
 
-	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, blockNumber)
+	collTokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, params.CollateralToken, collMd.Symbol, collMd.Decimals, &blockNumber)
 	if err != nil {
 		return 0, fmt.Errorf("getting collateral token: %w", err)
 	}
@@ -1185,7 +1261,7 @@ func (s *Service) savePositionSnapshot(ctx context.Context, tx pgx.Tx, user comm
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("ensuring user: %w", err)
@@ -1219,7 +1295,7 @@ func (s *Service) saveVaultPositionInTx(ctx context.Context, tx pgx.Tx, user com
 	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
 		ChainID:        chainID,
 		Address:        user,
-		FirstSeenBlock: blockNumber,
+		FirstSeenBlock: &blockNumber,
 	})
 	if err != nil {
 		return fmt.Errorf("ensuring user: %w", err)

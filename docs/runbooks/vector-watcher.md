@@ -77,6 +77,71 @@ absorb the failures; above that, the watcher will start lagging.
 
 ---
 
+## VectorWatcherAlchemyLatencyHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+p99 Alchemy RPC latency from the labelled watcher `service_name` is over 5s
+sustained for 15m. Healthy p99 is sub-second. The poll loop is degraded but
+not broken — a leading indicator before `VectorWatcherNoBlocks` fires.
+
+### First checks (≤5 min)
+
+1. **Alchemy status page** — https://status.alchemy.com/ for that chain.
+2. **Correlate** with `VectorWatcherAlchemyErrorsHigh` /
+   `VectorWatcherAlchemyRetriesHigh` — latency usually rises alongside a
+   429/error storm.
+3. **Watcher logs** for `context deadline exceeded` and slow-request entries.
+
+### Common causes
+
+- Alchemy degraded for that chain → wait for upstream recovery.
+- Quota throttling under load → check the Alchemy dashboard; bump plan or
+  rotate to a backup key.
+- Network path between the watcher node group and Alchemy degraded.
+
+### Verify recovery
+
+`histogram_quantile(0.99, rate(alchemy_client_request_duration_seconds_bucket[10m]))`
+returns sub-second for the chain.
+
+---
+
+## VectorWatcherAlchemyRetriesHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+Over 20% of Alchemy calls from the labelled watcher `service_name` are being
+retried, sustained for 15m. Alchemy is intermittently failing and the SDK is
+masking it via retries. Below 20% is normal noise. Left unchecked this escalates
+to `VectorWatcherAlchemyErrorsHigh` (retries exhausted).
+
+### First checks (≤5 min)
+
+1. **Alchemy status page** — intermittent upstream failures are the usual cause.
+2. **Recent logs** — identify the retried error class (`429` rate-limit is most
+   common; `5xx` = upstream instability).
+3. **Shared-key contention** — check for a concurrent bulk refill / backfill tool
+   hitting the same Alchemy key (429 storms are the known trigger; see the
+   2026-06-02 arbitrum incident).
+
+### Common causes
+
+- Alchemy rate-limiting (429) → reduce concurrent load or rotate to a backup key.
+- Transient upstream 5xx → usually self-clears; confirm the ratio drops.
+- Quota near exhaustion → bump the plan.
+
+### Verify recovery
+
+The retry ratio (`alchemy_client_retries_total / alchemy_client_requests_total`)
+returns below 0.2 sustained.
+
+---
+
 ## VectorWatcherSilentBackfillNoCanonical
 
 **Severity:** critical · **For:** 10m
@@ -182,11 +247,16 @@ it to catch upstream degradation early.
 `live_block_out_of_order_total{outcome="reorg"}` on the labelled `service_name`
 is nonzero over the last 10m: a header arrived at or below the canonical head
 and did NOT link cleanly onto our chain, so it was routed to reorg handling
-rather than classified as a clean gap fill. On single-sequencer chains (e.g.
-Arbitrum) a real reorg is essentially impossible, so this is the over-orphaning
-trigger from the 2026-06-02 incident. Unlike VectorWatcherOutOfOrderBlocksHigh
-(a sustained-rate warning across all outcomes), this fires on a single
-occurrence of the dangerous subset.
+rather than classified as a clean gap fill. The rule is scoped to an explicit
+allow-list of the single-sequencer rollup watchers (arbitrum, optimism, base,
+unichain, avalanche), where a real reorg is essentially impossible, so this is
+the over-orphaning trigger from the 2026-06-02 incident. Ethereum (the bare
+`watcher`) reorgs normally (depth 1, a few times a day) and is deliberately not
+listed. New single-sequencer chains must be added to the allow-list when
+onboarded. Scoping by service name is interim; the proper fix is a chain-behavior
+label so alerts stop hardcoding chain names (see VEC-295). Unlike
+VectorWatcherOutOfOrderBlocksHigh (a sustained-rate warning across all outcomes),
+this fires on a single occurrence of the dangerous subset.
 
 ### First checks (≤5 min)
 

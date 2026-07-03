@@ -8,9 +8,10 @@ from fastapi.testclient import TestClient
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.time_series_bucket import AllocationActivityBucket
 from app.main import app
 from app.services.allocation_service import AllocationService
-from tests.conftest import make_direct_asset_holding, make_receipt_token_position
+from tests.factories import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = "0x" + "ab" * 20
 
@@ -27,6 +28,7 @@ def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: 
     service.list_receipt_token_positions.return_value = positions or []
     service.list_direct_asset_holdings.return_value = direct_holdings or []
     service.prime_exists.return_value = exists
+    service.list_activity_buckets.return_value = []
     return service
 
 
@@ -104,9 +106,9 @@ def test_list_allocations_returns_200_with_enriched_holdings():
 
 def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     """Direct holdings (e.g. raw PYUSD in a proxy) surface as their own rows.
-    receipt_token_id / receipt_token_address / protocol_name / amount_usd
-    are null; symbol and underlying_symbol both name the held asset; category
-    defaults to ASSET.
+    receipt_token_id / receipt_token_address / protocol_name are null; symbol
+    and underlying_symbol both name the held asset; category defaults to ASSET.
+    A holding with no oracle price carries a null amount_usd.
     """
     from app.api.v1 import allocations
 
@@ -135,6 +137,23 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
         }
     ]
     service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_prices_direct_asset_holding_from_oracle():
+    """A direct holding with an oracle price surfaces its USD value rather than null."""
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding(balance=Decimal("250.0"), amount_usd=Decimal("249.5"))
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert rows[0]["symbol"] == "PYUSD"
+    assert rows[0]["amount_usd"] == "249.5"
 
 
 def test_list_allocations_combines_receipt_and_direct_rows():
@@ -291,8 +310,9 @@ def test_list_allocation_activity_returns_rows_and_forwards_filters():
 
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["token_symbol"] == "USDC"
+    assert payload["mode"] == "raw"
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["token_symbol"] == "USDC"
 
     kwargs = service.list_allocation_activity.await_args.kwargs
     assert kwargs["prime_id"] == EthAddress(_VALID_ADDR)
@@ -304,6 +324,46 @@ def test_list_allocation_activity_returns_rows_and_forwards_filters():
     assert kwargs["from_timestamp"] == from_ts
     assert kwargs["to_timestamp"] == to_ts
     assert kwargs["limit"] == 50
+
+
+def test_list_allocation_activity_returns_aggregated_buckets():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_activity_buckets.return_value = [
+        AllocationActivityBucket(
+            bucket_start=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+            event_count=3,
+            total_tx_amount=Decimal("450.5"),
+            net_flow_usd=Decimal("-120.25"),
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-01-02T00:00:00Z",
+            "aggregate": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "aggregated"
+    assert payload["data"] == [
+        {
+            "bucket_start": "2026-01-01T12:00:00Z",
+            "event_count": 3,
+            "total_tx_amount": "450.5",
+            "net_flow_usd": "-120.25",
+        }
+    ]
+    kwargs = service.list_activity_buckets.await_args.kwargs
+    assert kwargs["bucket_seconds"] == 5 * 60  # 24h window -> PT5M default
+    service.list_allocation_activity.assert_not_awaited()
 
 
 def test_list_allocation_activity_returns_422_for_invalid_prime_id():
@@ -322,6 +382,38 @@ def test_list_allocation_activity_returns_422_for_invalid_prime_id():
     service.list_allocation_activity.assert_not_awaited()
 
 
+def test_list_allocation_activity_hides_synthetic_sweep_tx_hash():
+    from app.api.v1 import allocations
+
+    created_at = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    service = _make_service()
+    service.list_allocation_activity.return_value = [
+        AllocationActivityEvent(
+            chain_id=1,
+            prime_address=_VALID_ADDR,
+            prime_name="spark",
+            protocol_name="SparkLend",
+            token_id=1,
+            token_symbol="spUSDC",
+            action_type="sweep",
+            tx_amount=Decimal("0"),
+            balance=Decimal("200.0"),
+            tx_hash="0x" + "cd" * 32,
+            log_index=0,
+            block_number=100,
+            block_version=0,
+            created_at=created_at,
+        )
+    ]
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity", params={"action_type": "sweep"})
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["tx_hash"] is None
+
+
 def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id():
     """Valid-format prime_id with no rows is a filter miss, not a missing resource → 200 []."""
     from app.api.v1 import allocations
@@ -338,7 +430,9 @@ def test_list_allocation_activity_returns_200_empty_for_unknown_valid_prime_id()
     )
 
     assert response.status_code == 200
-    assert response.json() == []
+    body = response.json()
+    assert body["mode"] == "raw"
+    assert body["data"] == []
     service.list_allocation_activity.assert_awaited_once()
     assert service.list_allocation_activity.await_args.kwargs["prime_id"] == EthAddress(unknown_addr)
 
@@ -370,6 +464,111 @@ def test_list_allocation_activity_returns_500_when_service_raises_value_error():
 
     assert response.status_code == 500
     assert response.json() == {"detail": "Failed to retrieve allocation activity"}
+
+
+def test_list_allocation_activity_returns_422_for_wide_window_without_filter():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-03-15T00:00:00Z",  # > 30d, no selective filter
+        },
+    )
+
+    assert response.status_code == 422
+    assert "selective filter" in response.json()["detail"]
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_allows_wide_window_with_prime_id_filter():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "prime_id": _VALID_ADDR,
+            "from_timestamp": "2026-01-01T00:00:00Z",
+            "to_timestamp": "2026-03-15T00:00:00Z",
+            "resolution": "PT6H",
+        },
+    )
+
+    assert response.status_code == 200
+    service.list_allocation_activity.assert_awaited_once()
+
+
+def test_list_allocation_activity_returns_422_for_invalid_tx_hash():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity", params={"tx_hash": "not-a-hash"})
+
+    assert response.status_code == 422
+    service.list_allocation_activity.assert_not_awaited()
+
+
+def test_list_allocation_activity_accepts_uppercase_0x_tx_hash():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity", params={"tx_hash": "0X" + "AB" * 32})
+
+    assert response.status_code == 200
+    assert service.list_allocation_activity.await_args.kwargs["tx_hash"] == "0x" + "AB" * 32
+
+
+def test_list_allocation_activity_sets_public_cache_control_on_pinned_window():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(
+        "/v1/allocations/activity",
+        params={
+            "from_timestamp": "2026-03-05T00:00:00Z",
+            "to_timestamp": "2026-03-05T12:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=300"
+
+
+def test_list_allocation_activity_sets_no_store_when_bounds_not_pinned():
+    from app.api.v1 import allocations
+
+    service = _make_service()
+    service.list_allocation_activity.return_value = []
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get("/v1/allocations/activity")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
 
 
 # --- capital-metrics endpoint ---
@@ -428,15 +627,15 @@ def test_list_capital_metrics_maps_star_risk_capital_data(monkeypatch):
     assert len(data) == 2
 
     grove = next(m for m in data if m["prime_id"] == grove_addr)
-    assert grove["risk_capital"] == "500.00"
-    assert grove["total_capital"] == "100.00"
-    assert grove["first_loss_capital"] == "40.00"
+    assert grove["exposure"] == "500.00"
+    assert grove["total_risk_capital"] == "100.00"
+    assert grove["required_risk_capital"] == "40.00"
     assert grove["capital_buffer"] == "60.00"
-    assert grove["risk_to_capital_ratio"] == "5.00"
+    assert grove["encumbrance_ratio"] == "5.00"
 
     spark = next(m for m in data if m["prime_id"] == spark_addr)
-    assert spark["risk_capital"] == "200.00"
-    assert spark["risk_to_capital_ratio"] == "2.50"
+    assert spark["exposure"] == "200.00"
+    assert spark["encumbrance_ratio"] == "2.50"
 
 
 def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monkeypatch):
@@ -481,14 +680,14 @@ def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monke
     data = response.json()
     assert len(data) == 2
     grove = next(item for item in data if item["prime_name"] == "grove")
-    assert grove["risk_capital"] == "100.00"
+    assert grove["exposure"] == "100.00"
 
     missing = next(item for item in data if item["prime_name"] == "unknown-prime")
-    assert missing["risk_capital"] == "0"
+    assert missing["exposure"] == "0"
     assert missing["capital_buffer"] == "0"
-    assert missing["first_loss_capital"] == "0"
-    assert missing["total_capital"] == "0"
-    assert missing["risk_to_capital_ratio"] is None
+    assert missing["required_risk_capital"] == "0"
+    assert missing["total_risk_capital"] == "0"
+    assert missing["encumbrance_ratio"] is None
     assert missing["validation_note"] == "No upstream Star risk-capital row matched this prime."
 
 
@@ -570,7 +769,7 @@ def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch
     payload = response.json()
     assert len(payload) == 1
     assert payload[0]["prime_id"] == _VALID_ADDR
-    assert payload[0]["risk_capital"] == "0"
+    assert payload[0]["exposure"] == "0"
     assert payload[0]["is_validated"] is False
 
 
