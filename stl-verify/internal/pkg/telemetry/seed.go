@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"slices"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -29,8 +30,7 @@ func SeedCounter(ctx context.Context, c metric.Int64Counter, attrs ...attribute.
 // SeedStatusCounter seeds both terminal-status series (success and error) of c
 // at 0, each also carrying base. See SeedCounter for the rationale.
 func SeedStatusCounter(ctx context.Context, c metric.Int64Counter, base ...attribute.KeyValue) {
-	// Copy base per call: appending twice to one slice can alias when base has
-	// spare capacity, so the second append would overwrite the first's status.
-	SeedCounter(ctx, c, append(append(make([]attribute.KeyValue, 0, len(base)+1), base...), SuccessStatusAttr())...)
-	SeedCounter(ctx, c, append(append(make([]attribute.KeyValue, 0, len(base)+1), base...), ErrorStatusAttr())...)
+	// See SeedCounter for the rationale.
+	SeedCounter(ctx, c, slices.Concat(base, []attribute.KeyValue{SuccessStatusAttr()})...)
+	SeedCounter(ctx, c, slices.Concat(base, []attribute.KeyValue{ErrorStatusAttr()})...)
 }
