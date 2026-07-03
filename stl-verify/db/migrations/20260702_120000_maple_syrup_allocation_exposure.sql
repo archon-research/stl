@@ -36,22 +36,28 @@ JOIN protocol p ON p.chain_id = 1 AND p.name = 'maple'
 JOIN token t    ON t.chain_id = 1 AND t.address = v.underlying::bytea
 ON CONFLICT (chain_id, receipt_token_address) DO NOTHING;
 
--- 3. Price Maple syrup positions: bind maple -> aave_v3 oracle so the allocations USD join
--- (protocol_oracle -> onchain_token_price) resolves, and register the syrup share tokens as
--- oracle assets. syrupUSDT is already an aave_v3 oracle asset (20260305_100000). amount_usd
--- degrades to null (UI shows token amount) for any token the oracle does not price.
+-- 3. Bind maple -> aave_v3 oracle so the allocations USD join
+-- (protocol_oracle -> onchain_token_price) can resolve. syrupUSDT is an aave_v3 oracle
+-- asset (20260305_100000) AND has a real feed source on-chain, so it prices via this
+-- binding; amount_usd degrades to null (UI shows token amount) for maple tokens the
+-- oracle does not price.
+--
+-- syrupUSDC and syrupUSDG are DELIBERATELY NOT registered as aave_v3 oracle assets.
+-- Verified on mainnet AaveOracle (0x54586be6...): both have no price source
+-- (getSourceOfAsset -> 0x0) and the oracle's fallback is unset (getFallbackOracle ->
+-- 0x0), so getAssetPrice reverts for them (0.8.x extcodesize check on the zero-address
+-- fallback), and getAssetsPrices([...]) reverts as a whole. The oracle worker fetches
+-- every non-feed aave_v3 asset in ONE getAssetsPrices multicall with AllowFailure=false;
+-- including an unpriceable syrup share would revert that batch every block and stall the
+-- ENTIRE aave_v3 oracle (USDC, syrupUSDT, all of it) — not merely leave syrup unpriced.
+-- The breakdown query does not use this oracle (it prices from Maple-attested
+-- asset_value_usd + $1 liquidity), so leaving syrupUSDC/USDG unregistered costs nothing.
+-- If Maple/Aave ever list a real feed for them, add them then.
 INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
 SELECT p.id, o.id, 16291127
 FROM protocol p, oracle o
 WHERE p.chain_id = 1 AND p.name = 'maple' AND o.name = 'aave_v3'
 ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
-
-INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-SELECT o.id, t.id, true
-FROM oracle o
-JOIN token t ON t.chain_id = 1 AND t.symbol IN ('syrupUSDC', 'syrupUSDG')
-WHERE o.name = 'aave_v3'
-ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING;
 
 INSERT INTO migrations (filename)
 VALUES ('20260702_120000_maple_syrup_allocation_exposure.sql')

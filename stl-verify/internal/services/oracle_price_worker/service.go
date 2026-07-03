@@ -520,11 +520,14 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent,
 		tokenID := unit.TokenIDs[i]
 
 		if rawPrice == nil || rawPrice.Sign() == 0 {
-			// A 0 (or absent) price means the oracle does not price this asset —
-			// Aave's getAssetsPrices returns 0 for an unlisted asset (e.g. a Maple
-			// syrup share bound to aave_v3 for the allocation-USD join). Skip it so
-			// amount_usd degrades to null downstream rather than persisting a bogus
-			// $0 that reads as a real quote. Mirrors detectFeedChanges' !Success skip.
+			// A 0 (or absent) price is never a real USD quote — treat it as
+			// unpriceable and skip so amount_usd degrades to null downstream rather
+			// than persisting a bogus $0 that reads as a real price. Mirrors
+			// detectFeedChanges' !Success skip. (The AaveOracle reverts rather than
+			// returning 0 for a source-less asset with a zero fallback, so an
+			// unpriceable asset must be kept out of the getAssetsPrices batch in the
+			// first place — see 20260702_120000_maple_syrup_allocation_exposure.sql;
+			// this guard is the general safety net for any 0 that does slip through.)
 			s.logger.Warn("skipping unpriceable asset (oracle returned zero price)",
 				"oracle", unit.Oracle.Name, "tokenID", tokenID, "block", event.BlockNumber)
 			continue
