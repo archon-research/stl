@@ -37,6 +37,26 @@ func TestNewFluidVaultState_Valid(t *testing.T) {
 	}
 }
 
+// TestNewFluidVaultState_NegativeRatesValid: Fluid rates are int256 and can be
+// genuinely negative, so a negative supply/borrow rate must be accepted and
+// stored verbatim rather than rejected.
+func TestNewFluidVaultState_NegativeRatesValid(t *testing.T) {
+	p := validFluidVaultStateParams()
+	p.SupplyRate = big.NewInt(-300)
+	p.BorrowRate = big.NewInt(-1)
+
+	s, err := NewFluidVaultState(p)
+	if err != nil {
+		t.Fatalf("negative rates must be valid, got: %v", err)
+	}
+	if s.SupplyRate.Cmp(big.NewInt(-300)) != 0 {
+		t.Errorf("SupplyRate = %s, want -300", s.SupplyRate)
+	}
+	if s.BorrowRate.Cmp(big.NewInt(-1)) != 0 {
+		t.Errorf("BorrowRate = %s, want -1", s.BorrowRate)
+	}
+}
+
 func TestNewFluidVaultState_OptionalFieldsNil(t *testing.T) {
 	s, err := NewFluidVaultState(validFluidVaultStateParams())
 	if err != nil {
@@ -62,7 +82,7 @@ func TestNewFluidVaultState_Invalid(t *testing.T) {
 		{"nil debt", func(p *FluidVaultStateParams) { p.TotalDebt = nil }, "totalDebt must not be nil"},
 		{"negative debt", func(p *FluidVaultStateParams) { p.TotalDebt = big.NewInt(-1) }, "totalDebt must be non-negative"},
 		{"negative supply exchange price", func(p *FluidVaultStateParams) { p.SupplyExchangePrice = big.NewInt(-1) }, "supplyExchangePrice must be non-negative"},
-		{"negative borrow rate", func(p *FluidVaultStateParams) { p.BorrowRate = big.NewInt(-1) }, "borrowRate must be non-negative"},
+		{"negative borrow exchange price", func(p *FluidVaultStateParams) { p.BorrowExchangePrice = big.NewInt(-1) }, "borrowExchangePrice must be non-negative"},
 	}
 
 	for _, tt := range tests {
