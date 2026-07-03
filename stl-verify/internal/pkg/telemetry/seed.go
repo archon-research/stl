@@ -30,7 +30,6 @@ func SeedCounter(ctx context.Context, c metric.Int64Counter, attrs ...attribute.
 // SeedStatusCounter seeds both terminal-status series (success and error) of c
 // at 0, each also carrying base. See SeedCounter for the rationale.
 func SeedStatusCounter(ctx context.Context, c metric.Int64Counter, base ...attribute.KeyValue) {
-	// See SeedCounter for the rationale.
 	SeedCounter(ctx, c, slices.Concat(base, []attribute.KeyValue{SuccessStatusAttr()})...)
 	SeedCounter(ctx, c, slices.Concat(base, []attribute.KeyValue{ErrorStatusAttr()})...)
 }
