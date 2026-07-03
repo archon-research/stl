@@ -389,35 +389,185 @@ func sendUniswapV3Batch(
 	return stateRows, nil
 }
 
-// writeTicks persists the append-on-change uniswap_v3_tick rows. It first
-// locks every affected (pool_id, tick) slot (sorted ascending) so a
-// SELECT-latest then INSERT decision is serialized against concurrent
-// writers, then writes a new row only when no prior row exists, any field
-// differs from the latest one, or block_version differs (a reorg
-// re-observation must always insert, even with identical values).
+// writeTicks persists the append-on-change uniswap_v3_tick rows. It locks
+// every affected (pool_id, tick) slot (sorted ascending) so the SELECT-latest
+// then INSERT decision is serialized against concurrent writers, then writes a
+// new row only when no prior row exists, any field differs from the latest one,
+// or block_version differs (a reorg re-observation must always insert, even
+// with identical values).
+//
+// All three phases are batched into one round-trip each — the locks in a single
+// unnest() Exec, the latest-row reads in a single DISTINCT ON query, the
+// changed-tick inserts in a single pgx.Batch — instead of ~4 sequential
+// round-trips per tick, which for a dense pool's first touch (O(100+) ticks)
+// was hundreds of round-trips under the advisory locks. Semantics are
+// unchanged: same keys locked in the same sorted order, same latest-row
+// ordering, same per-tick append-on-change decision.
+//
+// Ticks within one block share one (block_number, block_version) and are
+// deduplicated per (pool_id, tick) upstream (TouchedTicks / mergeTickSets), so
+// each (pool_id, tick) appears at most once here; the per-key decision below
+// therefore needs no in-batch same-key sequencing.
 func (r *UniswapV3Repository) writeTicks(ctx context.Context, tx pgx.Tx, ticks []*entity.UniswapV3Tick) error {
 	if len(ticks) == 0 {
 		return nil
 	}
 
-	for _, key := range distinctSortedTickKeys(ticks) {
-		// This "uniswap_v3_tick|<pool>|<tick>" key is a distinct lock domain from
-		// the pv-trigger's row-identity key ("uvt|pool|tick|block|version") on
-		// purpose: this guards the app-level read-latest-then-insert decision, the
-		// trigger guards processing_version assignment. They must not be
-		// harmonized (same curve_config precedent, see curve_repository.go).
-		lockKey := fmt.Sprintf("uniswap_v3_tick|%d|%d", key.poolID, key.tick)
-		if _, err := tx.Exec(ctx,
-			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-			lockKey,
-		); err != nil {
-			return fmt.Errorf("locking uniswap_v3 tick pool=%d tick=%d: %w", key.poolID, key.tick, err)
-		}
+	keys := distinctSortedTickKeys(ticks)
+	if err := lockTickKeys(ctx, tx, keys); err != nil {
+		return err
 	}
 
+	latest, err := readLatestTicks(ctx, tx, keys)
+	if err != nil {
+		return err
+	}
+
+	return r.insertChangedTicks(ctx, tx, ticks, latest)
+}
+
+// lockTickKeys acquires the per-slot advisory lock for every key in one
+// round-trip via unnest(). keys must already be in the canonical sorted order
+// (distinctSortedTickKeys) so concurrent SaveBlock transactions touching
+// overlapping ticks acquire overlapping locks in the same order and never
+// deadlock (CLAUDE.md read-then-write rule).
+//
+// The "uniswap_v3_tick|<pool>|<tick>" lock domain is deliberately distinct from
+// the pv-trigger's row-identity key ("uvt|pool|tick|block|version"): this guards
+// the app-level read-latest-then-insert decision, the trigger guards
+// processing_version assignment. They must not be harmonized (same curve_config
+// precedent, see curve_repository.go).
+func lockTickKeys(ctx context.Context, tx pgx.Tx, keys []tickKey) error {
+	lockKeys := make([]string, len(keys))
+	for i, k := range keys {
+		lockKeys[i] = fmt.Sprintf("uniswap_v3_tick|%d|%d", k.poolID, k.tick)
+	}
+	// pg_advisory_xact_lock is acquired left-to-right as unnest() yields rows,
+	// preserving the sorted-key lock order the single-lock loop used.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended(k, 0))
+		 FROM unnest($1::text[]) WITH ORDINALITY AS u(k, ord)
+		 ORDER BY ord`,
+		lockKeys,
+	); err != nil {
+		return fmt.Errorf("locking %d uniswap_v3 tick slots: %w", len(keys), err)
+	}
+	return nil
+}
+
+// readLatestTicks fetches the latest row per (pool_id, tick) for every key in
+// one query. The DISTINCT ON ... ORDER BY block_number DESC, block_version DESC,
+// processing_version DESC per key is exactly the ordering the old per-tick
+// single-row SELECT ... LIMIT 1 used, so it selects the identical latest row.
+// Keys with no prior row are simply absent from the returned map (the caller
+// treats absence as "no prior row" — insert unconditionally).
+func readLatestTicks(ctx context.Context, tx pgx.Tx, keys []tickKey) (map[tickKey]tickValues, error) {
+	poolIDs := make([]int64, len(keys))
+	tickNums := make([]int32, len(keys))
+	for i, k := range keys {
+		poolIDs[i] = k.poolID
+		tickNums[i] = int32(k.tick)
+	}
+
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT ON (t.pool_id, t.tick)
+		        t.pool_id, t.tick, t.block_number, t.block_version,
+		        t.liquidity_gross, t.liquidity_net,
+		        t.fee_growth_outside0_x128, t.fee_growth_outside1_x128, t.initialized
+		 FROM uniswap_v3_tick t
+		 JOIN unnest($1::bigint[], $2::int[]) AS k(pool_id, tick)
+		   ON t.pool_id = k.pool_id AND t.tick = k.tick
+		 ORDER BY t.pool_id, t.tick,
+		          t.block_number DESC, t.block_version DESC, t.processing_version DESC`,
+		poolIDs, tickNums,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying latest ticks for %d slots: %w", len(keys), err)
+	}
+	defer rows.Close()
+
+	latest := make(map[tickKey]tickValues, len(keys))
+	for rows.Next() {
+		var (
+			poolID                int64
+			tick                  int
+			blockNumber           int64
+			blockVersion          int
+			liquidityGross        pgtype.Numeric
+			liquidityNet          pgtype.Numeric
+			feeGrowthOutside0X128 pgtype.Numeric
+			feeGrowthOutside1X128 pgtype.Numeric
+			initialized           bool
+		)
+		if err := rows.Scan(&poolID, &tick, &blockNumber, &blockVersion,
+			&liquidityGross, &liquidityNet, &feeGrowthOutside0X128, &feeGrowthOutside1X128,
+			&initialized); err != nil {
+			return nil, fmt.Errorf("scanning latest tick row: %w", err)
+		}
+		values, convErr := toTickValues(blockNumber, blockVersion, liquidityGross, liquidityNet,
+			feeGrowthOutside0X128, feeGrowthOutside1X128, initialized)
+		if convErr != nil {
+			return nil, fmt.Errorf("reading latest tick for pool=%d tick=%d: %w", poolID, tick, convErr)
+		}
+		latest[tickKey{poolID: poolID, tick: tick}] = values
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating latest ticks: %w", err)
+	}
+	return latest, nil
+}
+
+// insertChangedTicks queues an INSERT for every tick whose latest row is absent
+// (no prior row) or differs from it, then sends them in one pgx.Batch. The
+// per-tick decision (insert vs skip) is byte-for-byte the same as the old
+// per-tick AppendOnChange path: no prior row inserts, an unchanged tick is
+// skipped, a changed tick (or a bumped block_version reorg) inserts. The
+// INSERTs run through the table's BEFORE INSERT ROW trigger — pgx.Batch issues
+// ordinary INSERT statements, so the per-row processing_version trigger fires
+// exactly as it did for the single-row path.
+func (r *UniswapV3Repository) insertChangedTicks(
+	ctx context.Context, tx pgx.Tx,
+	ticks []*entity.UniswapV3Tick,
+	latest map[tickKey]tickValues,
+) (err error) {
+	batch := &pgx.Batch{}
+	var queued int
 	for i, t := range ticks {
-		if err := r.writeTick(ctx, tx, t); err != nil {
-			return fmt.Errorf("tick %d: %w", i, err)
+		prior, hasPrior := latest[tickKey{poolID: t.PoolID, tick: t.Tick}]
+		if hasPrior && tickUnchanged(prior, t) {
+			continue
+		}
+		converted, convErr := convertTick(t)
+		if convErr != nil {
+			return fmt.Errorf("tick %d: converting tick pool=%d tick=%d: %w", i, t.PoolID, t.Tick, convErr)
+		}
+		batch.Queue(
+			`INSERT INTO uniswap_v3_tick
+			   (pool_id, tick, block_number, block_version, block_timestamp,
+			    liquidity_gross, liquidity_net, fee_growth_outside0_x128,
+			    fee_growth_outside1_x128, initialized, build_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			 ON CONFLICT (pool_id, tick, block_number, block_version, processing_version) DO NOTHING`,
+			t.PoolID, t.Tick, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
+			converted.liquidityGross, converted.liquidityNet,
+			converted.feeGrowthOutside0X128, converted.feeGrowthOutside1X128, t.Initialized, int(r.buildID),
+		)
+		queued++
+	}
+
+	if queued == 0 {
+		return nil
+	}
+
+	br := tx.SendBatch(ctx, batch)
+	defer func() {
+		if closeErr := br.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing uniswap_v3 tick batch: %w", closeErr))
+		}
+	}()
+	for i := 0; i < queued; i++ {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("inserting tick batch entry %d: %w", i, err)
 		}
 	}
 	return nil
@@ -447,70 +597,6 @@ func distinctSortedTickKeys(ticks []*entity.UniswapV3Tick) []tickKey {
 		return a.tick - b.tick
 	})
 	return keys
-}
-
-func (r *UniswapV3Repository) writeTick(ctx context.Context, tx pgx.Tx, t *entity.UniswapV3Tick) error {
-	converted, convErr := convertTick(t)
-	if convErr != nil {
-		return fmt.Errorf("converting tick pool=%d tick=%d: %w", t.PoolID, t.Tick, convErr)
-	}
-
-	lockKey := fmt.Sprintf("uniswap_v3_tick|%d|%d", t.PoolID, t.Tick)
-	return AppendOnChange(ctx, tx, lockKey,
-		func(ctx context.Context, tx pgx.Tx) (*tickValues, error) {
-			var (
-				blockNumber           int64
-				blockVersion          int
-				liquidityGross        pgtype.Numeric
-				liquidityNet          pgtype.Numeric
-				feeGrowthOutside0X128 pgtype.Numeric
-				feeGrowthOutside1X128 pgtype.Numeric
-				initialized           bool
-			)
-			err := tx.QueryRow(ctx,
-				`SELECT block_number, block_version, liquidity_gross, liquidity_net,
-				        fee_growth_outside0_x128, fee_growth_outside1_x128, initialized
-				 FROM uniswap_v3_tick
-				 WHERE pool_id = $1 AND tick = $2
-				 ORDER BY block_number DESC, block_version DESC, processing_version DESC
-				 LIMIT 1`,
-				t.PoolID, t.Tick,
-			).Scan(&blockNumber, &blockVersion, &liquidityGross, &liquidityNet,
-				&feeGrowthOutside0X128, &feeGrowthOutside1X128, &initialized)
-			switch {
-			case err == nil:
-				values, convErr := toTickValues(blockNumber, blockVersion, liquidityGross, liquidityNet,
-					feeGrowthOutside0X128, feeGrowthOutside1X128, initialized)
-				if convErr != nil {
-					return nil, fmt.Errorf("reading latest tick for pool=%d tick=%d: %w", t.PoolID, t.Tick, convErr)
-				}
-				return &values, nil
-			case errors.Is(err, pgx.ErrNoRows):
-				return nil, nil
-			default:
-				return nil, fmt.Errorf("querying latest tick for pool=%d tick=%d: %w", t.PoolID, t.Tick, err)
-			}
-		},
-		func(latest *tickValues) bool {
-			return !tickUnchanged(*latest, t)
-		},
-		func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx,
-				`INSERT INTO uniswap_v3_tick
-				   (pool_id, tick, block_number, block_version, block_timestamp,
-				    liquidity_gross, liquidity_net, fee_growth_outside0_x128,
-				    fee_growth_outside1_x128, initialized, build_id)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-				 ON CONFLICT (pool_id, tick, block_number, block_version, processing_version) DO NOTHING`,
-				t.PoolID, t.Tick, t.BlockNumber, t.BlockVersion, t.BlockTimestamp,
-				converted.liquidityGross, converted.liquidityNet,
-				converted.feeGrowthOutside0X128, converted.feeGrowthOutside1X128, t.Initialized, int(r.buildID),
-			); err != nil {
-				return fmt.Errorf("inserting tick for pool=%d tick=%d: %w", t.PoolID, t.Tick, err)
-			}
-			return nil
-		},
-	)
 }
 
 func convertTick(t *entity.UniswapV3Tick) (tickConverted, error) {
