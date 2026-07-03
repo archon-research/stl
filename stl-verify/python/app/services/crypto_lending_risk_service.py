@@ -260,7 +260,7 @@ class CryptoLendingRiskService:
         for item in breakdown.items:
             if item.token_id not in liq_params:
                 logger.warning(
-                    "Dropping collateral item backed_asset_id=%d token_id=%d symbol=%s: missing liquidation params",
+                    "Dropping collateral item backed_asset_id=%d token_id=%s symbol=%s: missing liquidation params",
                     breakdown.backed_asset_id,
                     item.token_id,
                     item.symbol,
@@ -268,7 +268,7 @@ class CryptoLendingRiskService:
                 continue
             if item.price_usd is None or item.price_usd == 0:
                 logger.warning(
-                    "Dropping collateral item backed_asset_id=%d token_id=%d symbol=%s: missing or zero price",
+                    "Dropping collateral item backed_asset_id=%d token_id=%s symbol=%s: missing or zero price",
                     breakdown.backed_asset_id,
                     item.token_id,
                     item.symbol,

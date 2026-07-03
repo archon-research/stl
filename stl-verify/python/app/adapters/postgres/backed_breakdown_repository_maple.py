@@ -129,7 +129,7 @@ total AS (SELECT sum(amount_usd) AS total_usd FROM agg)
 SELECT a.symbol,
        round(a.amount_usd::numeric, 2)                                       AS amount_usd,
        round(CASE WHEN a.amount > 0 THEN (a.amount_usd / a.amount) ELSE 0 END::numeric, 8) AS price_usd,
-       round((a.amount_usd / NULLIF(t.total_usd, 0) * 100)::numeric, 2)      AS backing_pct
+       round(COALESCE(a.amount_usd / NULLIF(t.total_usd, 0) * 100, 0)::numeric, 2) AS backing_pct
 FROM agg a, total t
 ORDER BY amount_usd DESC
 """

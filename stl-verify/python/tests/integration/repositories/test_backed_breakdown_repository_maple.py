@@ -48,6 +48,7 @@ _PV_LOAN = bytes.fromhex("abababababababababababababababababababab")
 _NONSTABLE_POOL = bytes.fromhex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 _NONSTABLE_LOAN = bytes.fromhex("bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc")
 _WBTC = bytes.fromhex("2260fac5e5542a773aa44fbcfedf7c193bc2c599")
+_DRAINED_POOL = bytes.fromhex("cccccccccccccccccccccccccccccccccccccccc")
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -261,6 +262,14 @@ async def _seed_data(db_url: str) -> None:
             decimals=18,
             value_usd=300000000000,
         )
+
+        # Drained stablecoin pool: zero liquidity, no active external loans. Its only
+        # row is the $0 USDC liquidity row, so total_usd = 0 and backing_pct hits the
+        # NULLIF(0,0) -> NULL path — must COALESCE to 0, not crash Decimal('None').
+        drained_pool = await insert_maple_pool(
+            conn, protocol_id=protocol_id, address=_DRAINED_POOL, asset_token_id=usdc_id, synced_at=_SYNCED
+        )
+        await insert_maple_pool_state(conn, pool_id=drained_pool, synced_at=_SYNCED, liquid_assets=0)
     finally:
         await conn.close()
 
@@ -365,6 +374,17 @@ async def test_loan_absent_from_current_cycle_is_excluded(repository: MapleBacke
     # it never counts as live backing forever (B1).
     result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
     assert "REPAIDBTC" not in {i.symbol for i in result.items}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_drained_pool_backing_pct_is_zero_not_null(repository: MapleBackedBreakdownRepository) -> None:
+    # Zero-liquidity, no-loan pool: total_usd = 0, so backing_pct = amount_usd/0.
+    # COALESCE must fold the NULLIF(0,0) NULL to 0 — otherwise Decimal(str(None))
+    # raises InvalidOperation and the endpoint 500s on a valid drained pool.
+    result = await repository.get_backed_breakdown(_DRAINED_POOL, chain_id=1)
+    by_symbol = {i.symbol: i for i in result.items}
+    assert by_symbol["USDC"].backing_value == Decimal("0.00")
+    assert by_symbol["USDC"].backing_pct == Decimal("0.00")
 
 
 @pytest.mark.asyncio(loop_scope="module")
