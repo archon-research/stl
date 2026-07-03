@@ -294,8 +294,8 @@ func TestUniswapV3Migration(t *testing.T) {
 
 // TestUniswapV3ColumnComments asserts that every column on every
 // uniswap_v3_* table has a COMMENT set. Failures indicate that
-// 20260701_100100_uniswap_v3_comments.sql is missing entries for newly added
-// columns or tables.
+// 20260701_100000_create_uniswap_v3_tables.sql is missing COMMENT entries for
+// newly added columns or tables.
 func TestUniswapV3ColumnComments(t *testing.T) {
 	ctx := context.Background()
 
