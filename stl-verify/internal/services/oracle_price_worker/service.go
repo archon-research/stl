@@ -517,8 +517,20 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent,
 
 	var changed []*entity.OnchainTokenPrice
 	for i, rawPrice := range rawPrices {
-		priceUSD := blockchain.ScaleByDecimals(rawPrice, priceDecimals)
 		tokenID := unit.TokenIDs[i]
+
+		if rawPrice == nil || rawPrice.Sign() == 0 {
+			// A 0 (or absent) price means the oracle does not price this asset —
+			// Aave's getAssetsPrices returns 0 for an unlisted asset (e.g. a Maple
+			// syrup share bound to aave_v3 for the allocation-USD join). Skip it so
+			// amount_usd degrades to null downstream rather than persisting a bogus
+			// $0 that reads as a real quote. Mirrors detectFeedChanges' !Success skip.
+			s.logger.Warn("skipping unpriceable asset (oracle returned zero price)",
+				"oracle", unit.Oracle.Name, "tokenID", tokenID, "block", event.BlockNumber)
+			continue
+		}
+
+		priceUSD := blockchain.ScaleByDecimals(rawPrice, priceDecimals)
 
 		if cachedPrice, ok := unit.priceCache[tokenID]; ok && cachedPrice == priceUSD {
 			continue

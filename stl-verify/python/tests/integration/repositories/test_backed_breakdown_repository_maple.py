@@ -23,6 +23,7 @@ from tests.integration.seed import (
     insert_maple_loan_state,
     insert_maple_pool,
     insert_maple_pool_state,
+    insert_token,
     insert_user,
     maple_seed_ids,
 )
@@ -40,6 +41,13 @@ _STALE_LOAN = bytes.fromhex("6666666666666666666666666666666666666666")
 _REPAID_LOAN = bytes.fromhex("7777777777777777777777777777777777777777")
 _SYNCED = dt.datetime(2026, 6, 18, 12, 0, tzinfo=dt.timezone.utc)
 _SYNCED_OLD = dt.datetime(2026, 6, 17, 12, 0, tzinfo=dt.timezone.utc)
+
+# Isolated pools for scenarios that would otherwise pollute the SYRUP_USDC assertions.
+_PV_POOL = bytes.fromhex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+_PV_LOAN = bytes.fromhex("abababababababababababababababababababab")
+_NONSTABLE_POOL = bytes.fromhex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+_NONSTABLE_LOAN = bytes.fromhex("bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc")
+_WBTC = bytes.fromhex("2260fac5e5542a773aa44fbcfedf7c193bc2c599")
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -188,6 +196,71 @@ async def _seed_data(db_url: str) -> None:
             decimals=8,
             value_usd=9000000000000,
         )
+
+        # Reprocess pool: one loan snapshot re-processed within the same cycle
+        # (_SYNCED). build_id 0 -> processing_version 0 (OLDVERBTC), build_id 1 ->
+        # processing_version 1 (NEWVERBTC). The query must select the latest
+        # processing_version, so NEWVERBTC counts and OLDVERBTC is dropped.
+        pv_pool = await insert_maple_pool(
+            conn, protocol_id=protocol_id, address=_PV_POOL, asset_token_id=usdc_id, synced_at=_SYNCED
+        )
+        await insert_maple_pool_state(conn, pool_id=pv_pool, synced_at=_SYNCED, liquid_assets=0)
+        pv_loan = await insert_maple_loan(
+            conn,
+            protocol_id=protocol_id,
+            pool_id=pv_pool,
+            borrower_user_id=borrower_id,
+            address=_PV_LOAN,
+            synced_at=_SYNCED,
+        )
+        for build_id, (sym, value) in enumerate((("OLDVERBTC", 5000000000000), ("NEWVERBTC", 6000000000000))):
+            await insert_maple_loan_state(
+                conn, loan_id=pv_loan, synced_at=_SYNCED, state="Active", principal_owed=40000000000, build_id=build_id
+            )
+            await insert_maple_loan_collateral(
+                conn,
+                loan_id=pv_loan,
+                synced_at=_SYNCED,
+                symbol=sym,
+                amount=100000000,
+                decimals=8,
+                value_usd=value,
+                build_id=build_id,
+            )
+
+        # Non-stable-underlying pool: WBTC is outside the stablecoin allowlist, so
+        # its liquid_assets must NOT be valued at $1 — the pool contributes only its
+        # loan collateral, no liquidity row.
+        wbtc_id = await insert_token(conn, "WBTC", 8, _WBTC)
+        ns_pool = await insert_maple_pool(
+            conn,
+            protocol_id=protocol_id,
+            address=_NONSTABLE_POOL,
+            asset_token_id=wbtc_id,
+            synced_at=_SYNCED,
+            name="Syrup WBTC",
+        )
+        await insert_maple_pool_state(conn, pool_id=ns_pool, synced_at=_SYNCED, liquid_assets=500000000)
+        ns_loan = await insert_maple_loan(
+            conn,
+            protocol_id=protocol_id,
+            pool_id=ns_pool,
+            borrower_user_id=borrower_id,
+            address=_NONSTABLE_LOAN,
+            synced_at=_SYNCED,
+        )
+        await insert_maple_loan_state(
+            conn, loan_id=ns_loan, synced_at=_SYNCED, state="Active", principal_owed=10000000000
+        )
+        await insert_maple_loan_collateral(
+            conn,
+            loan_id=ns_loan,
+            synced_at=_SYNCED,
+            symbol="ETH",
+            amount=1000000000000000000,
+            decimals=18,
+            value_usd=300000000000,
+        )
     finally:
         await conn.close()
 
@@ -246,6 +319,43 @@ async def test_null_valued_collateral_is_excluded(repository: MapleBackedBreakdo
 async def test_stale_collateral_snapshot_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
     result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
     assert "STALEBTC" not in {i.symbol for i in result.items}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_internal_loan_collateral_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
+    # The internal amm loan holds $100,000 of placeholder USDC collateral. It must
+    # be excluded (NOT l.is_internal), so the USDC row equals pool liquidity alone.
+    result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
+    by_symbol = {i.symbol: i for i in result.items}
+    assert by_symbol["USDC"].backing_value == Decimal("1000000.00")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_non_active_loan_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
+    # The Closed external loan holds ETH collateral; only Active loans back the
+    # vault, so ETH must not appear.
+    result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
+    assert "ETH" not in {i.symbol for i in result.items}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_latest_processing_version_is_selected(repository: MapleBackedBreakdownRepository) -> None:
+    # A reprocess of the same cycle appends processing_version 1; the query must
+    # read it and drop the superseded processing_version 0 collateral.
+    result = await repository.get_backed_breakdown(_PV_POOL, chain_id=1)
+    symbols = {i.symbol for i in result.items}
+    assert "NEWVERBTC" in symbols
+    assert "OLDVERBTC" not in symbols
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_non_stable_underlying_omits_liquidity(repository: MapleBackedBreakdownRepository) -> None:
+    # WBTC underlying is outside the stablecoin allowlist, so pool liquidity is not
+    # valued at $1: the breakdown carries the loan collateral but no WBTC liquidity row.
+    result = await repository.get_backed_breakdown(_NONSTABLE_POOL, chain_id=1)
+    symbols = {i.symbol for i in result.items}
+    assert "ETH" in symbols  # the pool resolves and its collateral is present
+    assert "WBTC" not in symbols  # liquidity omitted rather than valued at $1
 
 
 @pytest.mark.asyncio(loop_scope="module")

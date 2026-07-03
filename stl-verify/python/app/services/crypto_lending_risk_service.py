@@ -133,10 +133,6 @@ class CryptoLendingRiskService:
         _, items = await self._load_enriched_items_for_info(info, prime_id=prime_id)
         return items
 
-    # ------------------------------------------------------------------
-    # Legacy public API — used by old endpoints, will be removed in VEC-183.
-    # ------------------------------------------------------------------
-
     async def get_risk_breakdown(
         self,
         receipt_token_id: int,
@@ -153,8 +149,19 @@ class CryptoLendingRiskService:
         backed_asset_id, items = resolved
         return RiskBreakdown(backed_asset_id=backed_asset_id, items=tuple(items))
 
+    # ------------------------------------------------------------------
+    # Legacy public API — used by old endpoints, will be removed in VEC-183.
+    # ------------------------------------------------------------------
+
     async def get_bad_debt_legacy(self, receipt_token_id: int, gap_pct: Decimal) -> Decimal | None:
         """Return legacy bad debt for a receipt token, or ``None`` if unknown."""
+        info = await self._reader.get_receipt_token(receipt_token_id)
+        if info is None or not self._reader.requires_liquidation_enrichment(info):
+            # No quantitative risk model for this protocol (e.g. Maple has no
+            # per-asset liquidation params): bad debt is not modellable. Return
+            # None (→ 404) rather than a gap-sweep sum of 0, which would read as a
+            # genuinely fully-covered position instead of "no model for this asset".
+            return None
         resolved = await self._load_enriched_items_or_none(receipt_token_id, prime_id=None)
         if resolved is None:
             return None

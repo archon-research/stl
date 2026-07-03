@@ -629,3 +629,18 @@ class TestMaplePath:
         # not a misleading 0 that would imply amount × price == amount_usd.
         assert result.items[0].price_usd is None
         assert result.items[0].amount_usd == Decimal("500")
+
+    @pytest.mark.asyncio
+    async def test_get_bad_debt_legacy_returns_none_without_risk_model(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        # Maple has no quantitative risk model: bad debt is not modellable, so the
+        # legacy endpoint must return None (→ 404) rather than a gap-sweep sum of 0
+        # that reads as a genuinely fully-covered position. Short-circuit before any
+        # breakdown/share lookup.
+        assert await maple_service.get_bad_debt_legacy(RECEIPT_TOKEN_ID, Decimal("0.15")) is None
+        maple_reader.get_breakdown.assert_not_awaited()
+        maple_reader.get_share.assert_not_awaited()
+        maple_reader.get_legacy_share.assert_not_awaited()

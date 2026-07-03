@@ -232,18 +232,25 @@ async def insert_maple_loan_state(
     state: str,
     principal_owed: int,
     acm_ratio: int | None = None,
+    build_id: int = 0,
 ) -> None:
-    """Insert a maple_loan_state snapshot."""
+    """Insert a maple_loan_state snapshot.
+
+    ``processing_version`` is trigger-assigned per (loan, synced_at): a distinct
+    ``build_id`` for the same key gets ``MAX(processing_version) + 1``, so pass
+    successive build_ids to model a reprocess (pv 0, then pv 1) of one cycle.
+    """
     await conn.execute(
         """
-        INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         """,
         loan_id,
         synced_at,
         state,
         Decimal(principal_owed),
         Decimal(acm_ratio) if acm_ratio is not None else None,
+        build_id,
     )
 
 
@@ -257,17 +264,21 @@ async def insert_maple_loan_collateral(
     decimals: int,
     value_usd: int | None,
     state: str = "Deposited",
+    build_id: int = 0,
 ) -> None:
     """Insert a maple_loan_collateral snapshot row.
 
     ``amount`` / ``value_usd`` accept ``None`` to model the API reporting null
     (e.g. a DepositPending asset), which the breakdown query filters out.
+    ``build_id`` drives trigger-assigned ``processing_version`` as in
+    ``insert_maple_loan_state``; pin a collateral row to the same build as its
+    loan_state so they share a processing_version.
     """
     await conn.execute(
         """
         INSERT INTO maple_loan_collateral
-            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """,
         loan_id,
         synced_at,
@@ -276,6 +287,7 @@ async def insert_maple_loan_collateral(
         decimals,
         Decimal(value_usd) if value_usd is not None else None,
         state,
+        build_id,
     )
 
 
