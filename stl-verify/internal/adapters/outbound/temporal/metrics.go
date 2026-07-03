@@ -2,6 +2,7 @@ package temporal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,7 +29,11 @@ type cronjobMetrics struct {
 }
 
 func newCronjobMetrics() (*cronjobMetrics, error) {
-	meter := otel.Meter(instrumentationName)
+	return newCronjobMetricsWithProvider(otel.GetMeterProvider())
+}
+
+func newCronjobMetricsWithProvider(mp metric.MeterProvider) (*cronjobMetrics, error) {
+	meter := mp.Meter(instrumentationName)
 
 	runsTotal, err := meter.Int64Counter(
 		"cronjob.runs.total",
@@ -48,7 +53,26 @@ func newCronjobMetrics() (*cronjobMetrics, error) {
 		return nil, fmt.Errorf("creating cronjob.run.duration_seconds histogram: %w", err)
 	}
 
-	return &cronjobMetrics{runsTotal: runsTotal, runDuration: runDuration}, nil
+	m := &cronjobMetrics{runsTotal: runsTotal, runDuration: runDuration}
+	m.seedStatusSeries()
+	return m, nil
+}
+
+// errSeed is a non-nil sentinel so StatusAttr yields status="error"; it is only
+// used to seed the error series and is never surfaced as a real run outcome.
+var errSeed = errors.New("seed")
+
+// seedStatusSeries exports both terminal-status series of cronjob.runs.total at
+// 0 at worker startup. Without it the {status="success"} series only appears on
+// the first success, so Prometheus never observes the 0->1 transition and
+// increase()/rate() report 0 successes for up to a full window after a pod
+// (re)start. That trips VectorCronjobAllRunsFailing on every rollover (see
+// alerts/vector-cronjobs.yaml). Seeding to 0 makes the first real increment
+// visible to increase().
+func (m *cronjobMetrics) seedStatusSeries() {
+	ctx := context.Background()
+	m.runsTotal.Add(ctx, 0, metric.WithAttributes(telemetry.StatusAttr(nil)))
+	m.runsTotal.Add(ctx, 0, metric.WithAttributes(telemetry.StatusAttr(errSeed)))
 }
 
 // RecordRun records the outcome and duration of one cronjob run. nil-safe.
