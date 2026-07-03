@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	"math/big"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -44,9 +45,15 @@ const stateViewMethodsJSON = `[
 	]}
 ]`
 
-const erc20BalanceOfJSON = `[
-	{"name":"balanceOf","type":"function","stateMutability":"view","inputs":[{"name":"account","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}
-]`
+// poolStateABIOnce parses stateViewMethodsJSON exactly once: SnapshotState
+// runs per due pool per block, so re-parsing the JSON each call is pure waste.
+var poolStateABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
+	parsed, err := abis.ParseABI(stateViewMethodsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parsing pool state ABI: %w", err)
+	}
+	return parsed, nil
+})
 
 // poolStateABI returns the ABI fragment for the pool's state-reading view
 // methods (slot0, liquidity, feeGrowthGlobal0/1X128, protocolFees, observe).
@@ -54,23 +61,60 @@ const erc20BalanceOfJSON = `[
 // from the tick-reading methods in tick.go (a distinct, single-responsibility
 // read path per B7/B8 split).
 func poolStateABI() (*abi.ABI, error) {
-	parsed, err := abi.JSON(strings.NewReader(stateViewMethodsJSON))
-	if err != nil {
-		return nil, fmt.Errorf("parsing pool state ABI: %w", err)
-	}
-	return &parsed, nil
+	return poolStateABIOnce()
 }
 
-// erc20ABI returns the ABI fragment for the ERC20 balanceOf view method,
-// used to read a pool's real token balances (the pool itself exposes no
-// balance accessor).
-func erc20ABI() (*abi.ABI, error) {
-	parsed, err := abi.JSON(strings.NewReader(erc20BalanceOfJSON))
-	if err != nil {
-		return nil, fmt.Errorf("parsing ERC20 balanceOf ABI: %w", err)
-	}
-	return &parsed, nil
+// stateConstCallData holds the packed calldata for every state read whose
+// arguments are pool-independent. slot0/liquidity/fee-growth/protocolFees take
+// no arguments, and observe() always reads the same [twapWindowSecs, 0] window,
+// so their selectors+args are identical for every pool at every block. Only
+// balanceOf differs per pool (it takes pool.Address), so it stays packed inline.
+type stateConstCallData struct {
+	slot0                []byte
+	liquidity            []byte
+	feeGrowthGlobal0X128 []byte
+	feeGrowthGlobal1X128 []byte
+	protocolFees         []byte
+	observe              []byte
 }
+
+// stateConstCallDataOnce packs the pool-independent state calldata exactly
+// once. SnapshotState runs per due pool per block, so re-packing these constant
+// blobs each call is pure waste (the byte slices are read-only after packing).
+var stateConstCallDataOnce = sync.OnceValues(func() (stateConstCallData, error) {
+	a, err := poolStateABI()
+	if err != nil {
+		return stateConstCallData{}, err
+	}
+	pack := func(method string, args ...any) ([]byte, error) {
+		data, err := a.Pack(method, args...)
+		if err != nil {
+			return nil, fmt.Errorf("packing %s(): %w", method, err)
+		}
+		return data, nil
+	}
+
+	var c stateConstCallData
+	for _, step := range []struct {
+		dst  *[]byte
+		name string
+		args []any
+	}{
+		{&c.slot0, "slot0", nil},
+		{&c.liquidity, "liquidity", nil},
+		{&c.feeGrowthGlobal0X128, "feeGrowthGlobal0X128", nil},
+		{&c.feeGrowthGlobal1X128, "feeGrowthGlobal1X128", nil},
+		{&c.protocolFees, "protocolFees", nil},
+		{&c.observe, "observe", []any{[]uint32{uint32(twapWindowSecs), 0}}},
+	} {
+		data, err := pack(step.name, step.args...)
+		if err != nil {
+			return stateConstCallData{}, err
+		}
+		*step.dst = data
+	}
+	return c, nil
+})
 
 // SnapshotState reads a pool's slot0/liquidity/fee-growth/protocol-fee/real-
 // balance state, plus a best-effort TWAP, all pinned to blockHash in a single
@@ -89,13 +133,17 @@ func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool Registered
 	if err != nil {
 		return nil, err
 	}
-	erc20, err := erc20ABI()
+	erc20, err := abis.GetERC20ABI()
+	if err != nil {
+		return nil, err
+	}
+	constCalls, err := stateConstCallDataOnce()
 	if err != nil {
 		return nil, err
 	}
 
 	state := &entity.UniswapV3PoolState{}
-	reads := stateSnapshotReads(state, stateABI, erc20)
+	reads := stateSnapshotReads(state, stateABI, erc20, constCalls)
 	if err := shared.RunSnapshotReads(ctx, mc, pool, blockHash, reads); err != nil {
 		return nil, fmt.Errorf("snapshotting pool %s state: %w", pool.Address, err)
 	}
@@ -116,132 +164,76 @@ func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool Registered
 // read's Pack next to its Decode means the call order below is the only
 // place that determines wire order: there is no separate positional index to
 // keep in sync.
-func stateSnapshotReads(state *entity.UniswapV3PoolState, stateABI, erc20 *abi.ABI) []shared.SnapshotRead[RegisteredPool] {
+//
+// The pool-independent reads (slot0/liquidity/fee-growth/protocolFees/observe)
+// return the pre-packed constCalls blobs rather than re-packing per pool per
+// block; only balanceOf packs inline, since its argument is the pool address.
+func stateSnapshotReads(state *entity.UniswapV3PoolState, stateABI, erc20 *abi.ABI, constCalls stateConstCallData) []shared.SnapshotRead[RegisteredPool] {
+	// poolConstRead builds a CORE read (allowFailure=false; a revert fails the
+	// snapshot) targeting the pool's own address with pre-packed,
+	// pool-independent calldata.
+	poolConstRead := func(name string, callData []byte, decode func(pool RegisteredPool, res outbound.Result) error) shared.SnapshotRead[RegisteredPool] {
+		return shared.SnapshotRead[RegisteredPool]{
+			Name: name,
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: callData}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				return decode(pool, results[0])
+			},
+		}
+	}
+
+	unpackUintRead := func(name, method string, callData []byte, assign func(*entity.UniswapV3PoolState, *big.Int)) shared.SnapshotRead[RegisteredPool] {
+		return poolConstRead(name, callData, func(pool RegisteredPool, res outbound.Result) error {
+			v, err := shared.UnpackUint(stateABI, method, res)
+			if err != nil {
+				return fmt.Errorf("pool %s %s(): %w", pool.Address, method, err)
+			}
+			assign(state, v)
+			return nil
+		})
+	}
+
+	// balanceOf's account argument is the pool's own address, so its calldata
+	// varies per pool but not per read: pack it once and reuse for both tokens.
+	balanceRead := func(name string, target func(pool RegisteredPool) common.Address, assign func(*entity.UniswapV3PoolState, *big.Int)) shared.SnapshotRead[RegisteredPool] {
+		return shared.SnapshotRead[RegisteredPool]{
+			Name: name,
+			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
+				data, err := erc20.Pack("balanceOf", pool.Address)
+				if err != nil {
+					return nil, fmt.Errorf("packing %s: %w", name, err)
+				}
+				return []outbound.Call{{Target: target(pool), AllowFailure: false, CallData: data}}, nil
+			},
+			Decode: func(pool RegisteredPool, results []outbound.Result) error {
+				balance, err := shared.UnpackUint(erc20, "balanceOf", results[0])
+				if err != nil {
+					return fmt.Errorf("pool %s %s: %w", pool.Address, name, err)
+				}
+				assign(state, balance)
+				return nil
+			},
+		}
+	}
+
 	return []shared.SnapshotRead[RegisteredPool]{
-		{
-			Name: "slot0",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := stateABI.Pack("slot0")
-				if err != nil {
-					return nil, fmt.Errorf("packing slot0(): %w", err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				return decodeSlot0(pool, stateABI, results[0], state)
-			},
-		},
-		{
-			Name: "liquidity",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := stateABI.Pack("liquidity")
-				if err != nil {
-					return nil, fmt.Errorf("packing liquidity(): %w", err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				liquidity, err := shared.UnpackUint(stateABI, "liquidity", results[0])
-				if err != nil {
-					return fmt.Errorf("pool %s liquidity(): %w", pool.Address, err)
-				}
-				state.Liquidity = liquidity
-				return nil
-			},
-		},
-		{
-			Name: "feeGrowthGlobal0X128",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := stateABI.Pack("feeGrowthGlobal0X128")
-				if err != nil {
-					return nil, fmt.Errorf("packing feeGrowthGlobal0X128(): %w", err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				feeGrowth0, err := shared.UnpackUint(stateABI, "feeGrowthGlobal0X128", results[0])
-				if err != nil {
-					return fmt.Errorf("pool %s feeGrowthGlobal0X128(): %w", pool.Address, err)
-				}
-				state.FeeGrowthGlobal0X128 = feeGrowth0
-				return nil
-			},
-		},
-		{
-			Name: "feeGrowthGlobal1X128",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := stateABI.Pack("feeGrowthGlobal1X128")
-				if err != nil {
-					return nil, fmt.Errorf("packing feeGrowthGlobal1X128(): %w", err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				feeGrowth1, err := shared.UnpackUint(stateABI, "feeGrowthGlobal1X128", results[0])
-				if err != nil {
-					return fmt.Errorf("pool %s feeGrowthGlobal1X128(): %w", pool.Address, err)
-				}
-				state.FeeGrowthGlobal1X128 = feeGrowth1
-				return nil
-			},
-		},
-		{
-			Name: "protocolFees",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := stateABI.Pack("protocolFees")
-				if err != nil {
-					return nil, fmt.Errorf("packing protocolFees(): %w", err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				return decodeProtocolFees(pool, stateABI, results[0], state)
-			},
-		},
-		{
-			Name: "balanceOf token0",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := erc20.Pack("balanceOf", pool.Address)
-				if err != nil {
-					return nil, fmt.Errorf("packing balanceOf(pool) for token0: %w", err)
-				}
-				return []outbound.Call{{Target: pool.Token0, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				balance0, err := shared.UnpackUint(erc20, "balanceOf", results[0])
-				if err != nil {
-					return fmt.Errorf("pool %s token0 balanceOf(): %w", pool.Address, err)
-				}
-				state.Balance0 = balance0
-				return nil
-			},
-		},
-		{
-			Name: "balanceOf token1",
-			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := erc20.Pack("balanceOf", pool.Address)
-				if err != nil {
-					return nil, fmt.Errorf("packing balanceOf(pool) for token1: %w", err)
-				}
-				return []outbound.Call{{Target: pool.Token1, AllowFailure: false, CallData: data}}, nil
-			},
-			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				balance1, err := shared.UnpackUint(erc20, "balanceOf", results[0])
-				if err != nil {
-					return fmt.Errorf("pool %s token1 balanceOf(): %w", pool.Address, err)
-				}
-				state.Balance1 = balance1
-				return nil
-			},
-		},
+		poolConstRead("slot0", constCalls.slot0, func(pool RegisteredPool, res outbound.Result) error {
+			return decodeSlot0(pool, stateABI, res, state)
+		}),
+		unpackUintRead("liquidity", "liquidity", constCalls.liquidity, func(s *entity.UniswapV3PoolState, v *big.Int) { s.Liquidity = v }),
+		unpackUintRead("feeGrowthGlobal0X128", "feeGrowthGlobal0X128", constCalls.feeGrowthGlobal0X128, func(s *entity.UniswapV3PoolState, v *big.Int) { s.FeeGrowthGlobal0X128 = v }),
+		unpackUintRead("feeGrowthGlobal1X128", "feeGrowthGlobal1X128", constCalls.feeGrowthGlobal1X128, func(s *entity.UniswapV3PoolState, v *big.Int) { s.FeeGrowthGlobal1X128 = v }),
+		poolConstRead("protocolFees", constCalls.protocolFees, func(pool RegisteredPool, res outbound.Result) error {
+			return decodeProtocolFees(pool, stateABI, res, state)
+		}),
+		balanceRead("balanceOf(pool) for token0", func(pool RegisteredPool) common.Address { return pool.Token0 }, func(s *entity.UniswapV3PoolState, v *big.Int) { s.Balance0 = v }),
+		balanceRead("balanceOf(pool) for token1", func(pool RegisteredPool) common.Address { return pool.Token1 }, func(s *entity.UniswapV3PoolState, v *big.Int) { s.Balance1 = v }),
 		{
 			Name: "observe",
 			Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
-				data, err := stateABI.Pack("observe", []uint32{uint32(twapWindowSecs), 0})
-				if err != nil {
-					return nil, fmt.Errorf("packing observe(): %w", err)
-				}
-				return []outbound.Call{{Target: pool.Address, AllowFailure: true, CallData: data}}, nil
+				return []outbound.Call{{Target: pool.Address, AllowFailure: true, CallData: constCalls.observe}}, nil
 			},
 			Decode: func(pool RegisteredPool, results []outbound.Result) error {
 				if err := decodeTwap(stateABI, results[0], state); err != nil {

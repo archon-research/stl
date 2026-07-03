@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -39,15 +40,22 @@ const tickViewMethodsJSON = `[
 	{"name":"tickBitmap","type":"function","stateMutability":"view","inputs":[{"name":"wordPosition","type":"int16"}],"outputs":[{"name":"","type":"uint256"}]}
 ]`
 
+// tickViewABIOnce parses tickViewMethodsJSON exactly once: this ABI is on the
+// per-tick hot path (DecodeTick runs ~116×/first-touch, plus BuildTickCalls and
+// BaselineTicks), so re-parsing the JSON per call is pure waste.
+var tickViewABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
+	parsed, err := abis.ParseABI(tickViewMethodsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parsing tick view ABI: %w", err)
+	}
+	return parsed, nil
+})
+
 // tickViewABI returns the ABI fragment for the pool's tick-reading view
 // methods (ticks, tickBitmap). These are not events, so they live apart from
 // PoolABI in abi.go.
 func tickViewABI() (*abi.ABI, error) {
-	parsed, err := abi.JSON(strings.NewReader(tickViewMethodsJSON))
-	if err != nil {
-		return nil, fmt.Errorf("parsing tick view ABI: %w", err)
-	}
-	return &parsed, nil
+	return tickViewABIOnce()
 }
 
 // TouchedTicks returns the deduplicated, ascending-sorted union of every

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -19,15 +20,22 @@ import (
 // redelivery, so this sentinel must stay non-empty.
 const anonymousLogEventName = "anonymous"
 
-// eventsByID indexes the pool ABI's events by topic0 for O(1) log dispatch.
-func eventsByID(poolABI *abi.ABI) map[common.Hash]*abi.Event {
+// eventsByID returns the pool ABI's events indexed by topic0 for O(1) log
+// dispatch, built exactly once alongside the once-parsed PoolABI: like the ABI
+// itself, this map is immutable and on the per-receipt hot path, so rebuilding
+// it per matched receipt is pure waste.
+var eventsByID = sync.OnceValues(func() (map[common.Hash]*abi.Event, error) {
+	poolABI, err := PoolABI()
+	if err != nil {
+		return nil, err
+	}
 	out := make(map[common.Hash]*abi.Event, len(poolABI.Events))
 	for _, ev := range poolABI.Events {
 		e := ev
 		out[e.ID] = &e
 	}
-	return out
-}
+	return out, nil
+})
 
 // DecodeEvents extracts typed entities from a single transaction receipt for
 // one Uniswap V3 pool.
@@ -43,11 +51,10 @@ func DecodeEvents(
 	version int,
 	ts time.Time,
 ) (DecodedEvents, error) {
-	poolABI, err := PoolABI()
+	byID, err := eventsByID()
 	if err != nil {
 		return DecodedEvents{}, fmt.Errorf("loading pool ABI: %w", err)
 	}
-	byID := eventsByID(poolABI)
 
 	var result DecodedEvents
 	for _, log := range receipt.Logs {

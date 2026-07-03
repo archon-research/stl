@@ -1,20 +1,25 @@
 package uniswapv3indexer
 
 import (
-	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 )
+
+// poolABIOnce parses poolEventsJSON exactly once: PoolABI is on the per-receipt
+// hot path (DecodeEvents), so re-parsing the JSON on every matched receipt is
+// pure waste. Callers still get the historical (*abi.ABI, error) signature.
+var poolABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
+	return abis.ParseABI(poolEventsJSON)
+})
 
 // PoolABI returns the ABI fragment covering all 9 Uniswap V3 pool events.
 // Signatures match v3-core's UniswapV3Pool.sol exactly, including which
 // arguments are indexed.
 func PoolABI() (*abi.ABI, error) {
-	parsed, err := abi.JSON(strings.NewReader(poolEventsJSON))
-	if err != nil {
-		return nil, err
-	}
-	return &parsed, nil
+	return poolABIOnce()
 }
 
 const poolEventsJSON = `[

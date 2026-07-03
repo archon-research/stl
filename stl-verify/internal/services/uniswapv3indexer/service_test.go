@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -267,9 +268,9 @@ func stateResultsFixture(t *testing.T) []outbound.Result {
 	if err != nil {
 		t.Fatalf("poolStateABI: %v", err)
 	}
-	erc20, err := erc20ABI()
+	erc20, err := abis.GetERC20ABI()
 	if err != nil {
-		t.Fatalf("erc20ABI: %v", err)
+		t.Fatalf("GetERC20ABI: %v", err)
 	}
 
 	slot0, err := stateABI.Methods["slot0"].Outputs.Pack(

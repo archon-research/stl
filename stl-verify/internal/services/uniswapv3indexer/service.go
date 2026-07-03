@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"time"
 
@@ -303,14 +304,37 @@ func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool Registere
 	return rows, isFirstSeen, nil
 }
 
-// readTicks issues one ticks() multicall batch for the given tick positions
-// and decodes every result into an authoritative entity.UniswapV3Tick.
+// ticksPerCall bounds how many ticks(int24) sub-calls readTicks packs into a
+// single multicall3 aggregate call. A dense pool's first touch can enumerate
+// O(10³) initialized ticks; sending them all in one aggregate call risks
+// exceeding an RPC provider's request/response/gas caps, the same worst case
+// BaselineTicks chunks against (see baselineTickBitmapWordsPerCall).
+const ticksPerCall = 500
+
+// readTicks reads the given tick positions in bounded multicall batches (see
+// ticksPerCall), decoding every result into an authoritative
+// entity.UniswapV3Tick. Batches are issued in order and their rows concatenated
+// so the returned slice stays aligned with ticksToRead.
 func (s *UniswapV3Service) readTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, ticksToRead []int32) ([]*entity.UniswapV3Tick, error) {
 	if len(ticksToRead) == 0 {
 		return nil, nil
 	}
 
-	calls, err := BuildTickCalls(pool, ticksToRead)
+	rows := make([]*entity.UniswapV3Tick, 0, len(ticksToRead))
+	for chunk := range slices.Chunk(ticksToRead, ticksPerCall) {
+		chunkRows, err := s.readTickChunk(ctx, pool, blockHash, bn, ver, ts, chunk)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, chunkRows...)
+	}
+	return rows, nil
+}
+
+// readTickChunk issues one ticks() multicall for a single bounded batch of tick
+// positions and decodes every result positionally.
+func (s *UniswapV3Service) readTickChunk(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, chunk []int32) ([]*entity.UniswapV3Tick, error) {
+	calls, err := BuildTickCalls(pool, chunk)
 	if err != nil {
 		return nil, fmt.Errorf("building tick calls for pool %s block %d: %w", pool.Address, bn, err)
 	}
@@ -318,12 +342,12 @@ func (s *UniswapV3Service) readTicks(ctx context.Context, pool RegisteredPool, b
 	if err != nil {
 		return nil, fmt.Errorf("executing tick multicall for pool %s block %d: %w", pool.Address, bn, err)
 	}
-	if len(results) != len(ticksToRead) {
-		return nil, fmt.Errorf("pool %s block %d: got %d tick results, want %d", pool.Address, bn, len(results), len(ticksToRead))
+	if len(results) != len(chunk) {
+		return nil, fmt.Errorf("pool %s block %d: got %d tick results, want %d", pool.Address, bn, len(results), len(chunk))
 	}
 
-	rows := make([]*entity.UniswapV3Tick, 0, len(ticksToRead))
-	for i, tick := range ticksToRead {
+	rows := make([]*entity.UniswapV3Tick, 0, len(chunk))
+	for i, tick := range chunk {
 		row, err := DecodeTick(pool, tick, bn, ver, ts, results[i])
 		if err != nil {
 			return nil, fmt.Errorf("decoding tick %d for pool %s block %d: %w", tick, pool.Address, bn, err)
@@ -349,16 +373,8 @@ func mergeTickSets(touched, baseline []int32) []int32 {
 			out = append(out, tick)
 		}
 	}
-	sortInt32s(out)
+	slices.Sort(out)
 	return out
-}
-
-func sortInt32s(s []int32) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j-1] > s[j]; j-- {
-			s[j-1], s[j] = s[j], s[j-1]
-		}
-	}
 }
 
 // buildBlockWrites converts decoded accumulators and snapshots into the typed
