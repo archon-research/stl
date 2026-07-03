@@ -36,12 +36,17 @@ type TableMeta struct {
 }
 
 // Transform is a column the transformation layer rewrites: rename / cast / fill.
+// GuardMin/GuardMax are the plausibility bounds for an epoch (int8 -> timestamptz) cast: values
+// outside the range are NULLed rather than cast. They are policy read by the materializer and the
+// runtime check (VEC-472); the conformance check here does not use them.
 type Transform struct {
 	Table     string `yaml:"table"`
 	Column    string `yaml:"column"`
 	Canonical string `yaml:"canonical"`
 	Action    string `yaml:"action"`
 	From      string `yaml:"from"`
+	GuardMin  *int   `yaml:"guard_min"`
+	GuardMax  *int   `yaml:"guard_max"`
 }
 
 // Override is a sanctioned TYPE exemption: a column deliberately kept at accepted_type rather
