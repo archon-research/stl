@@ -187,3 +187,31 @@ func exerciseAll(t *testing.T, tel *Telemetry) {
 	tel.RecordSweep(ctx, time.Second, errors.New("e"))
 	tel.RecordSnapshot(ctx, 1, sweepState())
 }
+
+// Guards the startup seed: VectorPSM3IndexerStalled reads
+// psm3_sweeps_total{status="success"} with rate()==0 and must be computable
+// from process start. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsSweepStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	m := collectMetric(t, reader, "psm3.sweeps.total")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("psm3.sweeps.total is %T, want metricdata.Sum[int64]", m.Data)
+	}
+	got := map[string]int64{}
+	for _, dp := range sum.DataPoints {
+		status, _ := dp.Attributes.Value("status")
+		got[status.AsString()] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("psm3.sweeps.total missing status=%q series before any sweep", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("psm3.sweeps.total{status=%q} = %d, want 0", status, v)
+		}
+	}
+}
