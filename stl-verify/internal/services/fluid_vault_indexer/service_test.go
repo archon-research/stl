@@ -70,6 +70,13 @@ func newFakeChain(t *testing.T) *fakeChain {
 
 func (f *fakeChain) Address() common.Address { return common.Address{} }
 
+// ExecuteAtHash satisfies the outbound.Multicaller interface (widened for
+// reorg-safe hash-pinned reads); block identity is irrelevant to this fake, so
+// it delegates to the same selector-dispatch logic as Execute.
+func (f *fakeChain) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return f.Execute(ctx, calls, nil)
+}
+
 func (f *fakeChain) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 	if f.executeErr != nil {
 		return nil, f.executeErr
