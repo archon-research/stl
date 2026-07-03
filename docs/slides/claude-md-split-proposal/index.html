@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Splitting CLAUDE.md — Mechanics & Proposal</title>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+    <style>
+        /* === THEME (Archon) === */
+        :root {
+            --bg-primary: #000020;
+            --bg-secondary: #0a0a30;
+            --bg-card: rgba(10, 10, 48, 0.7);
+            --text-primary: #e8eaed;
+            --text-secondary: #9598a8;
+            --text-muted: #5e6178;
+            --accent: #6DFB6E;
+            --accent-dim: rgba(109, 251, 110, 0.12);
+            --accent-glow: rgba(109, 251, 110, 0.25);
+            --accent-secondary: #4ae04b;
+            --warn: #ffc14d;
+            --border: rgba(109, 251, 110, 0.1);
+
+            --font-display: 'Outfit', sans-serif;
+            --font-body: 'Inter', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+            --title-size: clamp(2.6rem, 7vw, 5.2rem);
+            --h2-size: clamp(1.9rem, 4.4vw, 3.4rem);
+            --h3-size: clamp(1.4rem, 3.4vw, 2.4rem);
+            --body-size: clamp(1rem, 2vw, 1.5rem);
+            --small-size: clamp(0.8rem, 1.35vw, 1.05rem);
+            --tag-size: clamp(0.85rem, 1.25vw, 1.05rem);
+
+            --slide-padding: clamp(1.5rem, 5vw, 5rem);
+            --content-gap: clamp(0.7rem, 1.8vw, 1.5rem);
+            --element-gap: clamp(0.35rem, 0.9vh, 0.7rem);
+
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --duration: 0.7s;
+        }
+
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html { height: 100%; overflow: hidden; }
+        body { font-family: var(--font-body); background: var(--bg-primary); color: var(--text-primary); height: 100%; overflow: hidden; -webkit-font-smoothing: antialiased; }
+
+        .slides-wrapper { position: relative; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; }
+
+        .slide {
+            width: 100%; height: 100%; overflow: hidden;
+            display: flex; flex-direction: column; position: absolute; inset: 0;
+            opacity: 0; pointer-events: none; transform: translateY(12px);
+            transition: opacity 300ms var(--ease-out-expo), transform 300ms var(--ease-out-expo);
+            will-change: opacity, transform;
+        }
+        .slide.active { opacity: 1; pointer-events: auto; transform: translateY(0); z-index: 1; }
+        .slide-content {
+            flex: 1; display: flex; flex-direction: column; justify-content: center;
+            max-height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;
+            padding: var(--slide-padding);
+            padding-top: max(var(--slide-padding), 1rem);
+            padding-bottom: max(clamp(3.5rem, 6vh, 5rem), 2rem);
+            position: relative; z-index: 1;
+        }
+        .title-slide .slide-content { padding-bottom: var(--slide-padding); }
+
+        .slide::after { content: ''; position: absolute; inset: -20px; background: radial-gradient(ellipse at 80% 50%, rgba(26, 26, 75, 0.3) 0%, transparent 50%); pointer-events: none; }
+
+        .triangle-mosaic { position: absolute; right: 0; bottom: 0; width: 45vw; height: 100%; z-index: 1; pointer-events: none; overflow: hidden; display: flex; align-items: flex-end; justify-content: flex-end; }
+        .triangle-mosaic svg { width: 100%; height: auto; display: block; }
+
+        .slide-footer { position: fixed; bottom: 0; left: 0; right: 0; height: clamp(3.5rem, 6.5vh, 5.5rem); display: flex; align-items: center; justify-content: space-between; padding: 0 var(--slide-padding); z-index: 100; transition: opacity 0.4s ease; }
+        .slide-footer.hidden { opacity: 0; pointer-events: none; }
+        .footer-brand { height: clamp(24px, 3.5vh, 42px); opacity: 0.5; display: block; }
+        .footer-page { font-family: var(--font-mono); font-size: var(--small-size); color: var(--text-muted); }
+
+        h1 { font-family: var(--font-display); font-size: var(--title-size); font-weight: 400; line-height: 1.05; letter-spacing: -0.02em; }
+        h2 { font-family: var(--font-display); font-size: var(--h2-size); font-weight: 500; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: var(--content-gap); }
+        h3 { font-family: var(--font-display); font-size: var(--h3-size); font-weight: 500; line-height: 1.2; }
+        .gradient-text { background: linear-gradient(135deg, #b8ffb9 0%, #6DFB6E 50%, #4dd84e 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+
+        .episode-tag { display: inline-flex; align-items: center; gap: 0.5em; font-family: var(--font-mono); font-size: var(--tag-size); color: var(--accent); letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: clamp(0.6rem, 1.3vh, 1.1rem); }
+        .episode-tag::before { content: ''; width: 8px; height: 8px; background: var(--accent); border-radius: 2px; display: inline-block; }
+
+        .bullet-list { list-style: none; display: flex; flex-direction: column; gap: var(--element-gap); }
+        .bullet-list li { font-size: var(--body-size); line-height: 1.45; color: #c8cad6; padding-left: 1.5em; position: relative; transition: color 200ms ease; }
+        .bullet-list li:hover { color: var(--text-primary); }
+        .bullet-list li::before { content: ''; position: absolute; left: 0; top: 0.55em; width: 6px; height: 6px; border-radius: 1px; background: var(--accent); opacity: 0.6; transition: opacity 200ms ease, box-shadow 200ms ease; }
+        .bullet-list li:hover::before { opacity: 1; box-shadow: 0 0 8px var(--accent-glow); }
+        .bullet-list li.sub-item { padding-left: 3em; font-size: var(--small-size); color: var(--text-secondary); }
+        .bullet-list li.sub-item::before { left: 1.5em; width: 4px; height: 4px; background: var(--accent-secondary); opacity: 0.4; border-radius: 50%; }
+        .bullet-list li strong, .bullet-list li b { color: var(--text-primary); font-weight: 500; }
+        .bullet-list li code, .card-body code, .highlight-text code, .callout code, .spec-table code { font-family: var(--font-mono); font-size: 0.9em; color: var(--accent); background: rgba(109,251,110,0.08); padding: 0.05em 0.35em; border-radius: 3px; }
+
+        .callout { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: clamp(0.85rem, 1.8vw, 1.4rem); margin-top: var(--content-gap); backdrop-filter: blur(10px); }
+        .callout p { font-size: var(--small-size); color: var(--text-secondary); font-weight: 400; line-height: 1.5; }
+        .callout.warn { border-color: rgba(255,193,77,0.35); background: rgba(60,45,10,0.35); }
+        .callout.warn p { color: #ffe1a3; }
+        .callout.warn strong { color: var(--warn); }
+
+        .highlight-text { font-size: var(--body-size); line-height: 1.55; color: var(--text-primary); border-left: 2px solid var(--accent); padding-left: clamp(0.75rem, 1.5vw, 1.25rem); margin-bottom: var(--content-gap); }
+
+        .code-block { font-family: var(--font-mono); font-size: clamp(0.7rem, 1.3vw, 1rem); line-height: 1.6; background: rgba(0,0,0,0.4); border: 1px solid var(--border); border-radius: 8px; padding: clamp(0.9rem, 2vw, 1.6rem); color: #c8cad6; white-space: pre; overflow-x: auto; backdrop-filter: blur(10px); margin-top: var(--content-gap); }
+        .code-block .c-accent { color: var(--accent); }
+        .code-block .c-muted { color: var(--text-muted); }
+        .code-block .c-warn { color: var(--warn); }
+        .code-block .c-key { color: #8ab4ff; }
+
+        .spec-table { width: 100%; border-collapse: collapse; margin-top: var(--content-gap); font-size: clamp(0.78rem, 1.5vw, 1.15rem); }
+        .spec-table th, .spec-table td { text-align: left; padding: clamp(0.5rem, 1.2vw, 0.95rem) clamp(0.6rem, 1.4vw, 1.2rem); border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.4; }
+        .spec-table thead th { font-family: var(--font-mono); font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); border-bottom: 1px solid rgba(109,251,110,0.3); }
+        .spec-table tbody tr { transition: background 0.2s ease; }
+        .spec-table tbody tr:hover { background: rgba(109,251,110,0.05); }
+        .spec-table td:first-child { font-family: var(--font-mono); color: var(--text-primary); font-weight: 500; white-space: nowrap; }
+        .spec-table .yes { color: var(--accent); font-weight: 600; }
+        .spec-table .no { color: #ff6b6b; font-weight: 600; }
+
+        .flow-cols { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(1rem, 2.5vw, 2.5rem); margin-top: var(--content-gap); }
+        .flow-col h3 { font-size: var(--h3-size); margin-bottom: clamp(0.4rem, 1vh, 0.8rem); color: var(--accent); }
+        .flow-col .flow-caption { font-size: var(--small-size); color: var(--text-muted); margin-bottom: clamp(0.5rem, 1vh, 0.9rem); }
+
+        /* === TITLE === */
+        .title-slide .slide-content { justify-content: center; padding-right: clamp(100px, 20vw, 300px); }
+        .title-slide .title-logo { position: absolute; top: var(--slide-padding); left: var(--slide-padding); height: clamp(32px, 4.5vh, 56px); width: auto; object-fit: contain; z-index: 2; }
+        .title-slide h1 { margin-bottom: clamp(0.5rem, 1vh, 1rem); background: none; -webkit-background-clip: unset; -webkit-text-fill-color: #fff; background-clip: unset; color: #fff; }
+        .title-slide .subtitle { font-size: clamp(1rem, 2vw, 1.4rem); color: rgba(232,234,237,0.9); font-weight: 400; max-width: 800px; }
+        .title-slide .divider { width: 60px; height: 2px; background: linear-gradient(90deg, transparent, var(--accent), transparent); margin-top: clamp(1.5rem, 3vh, 2.5rem); }
+
+        /* === SECTION HEADER === */
+        .section-header .slide-content { align-items: center; text-align: center; justify-content: center; }
+        .section-header .section-num { font-family: var(--font-display); font-size: clamp(4rem, 10vw, 9rem); font-weight: 700; color: rgba(255,255,255,0.15); line-height: 1; margin-bottom: clamp(0.25rem, 0.5vh, 0.5rem); }
+        .section-header h2 { font-size: var(--h2-size); font-weight: 500; margin-bottom: clamp(0.5rem, 1vh, 1rem); background: none; -webkit-background-clip: unset; -webkit-text-fill-color: #fff; background-clip: unset; color: #fff; }
+        .section-header .section-line { width: 60px; height: 3px; background: var(--accent); margin-bottom: clamp(1rem, 2vh, 1.5rem); }
+        .section-header .section-subtitle { font-size: var(--body-size); color: rgba(232,234,237,0.9); font-weight: 400; max-width: 580px; }
+        .section-header .triangle-mosaic { display: none; }
+
+        /* === AGENDA === */
+        .agenda-slide .slide-content { justify-content: center; }
+        .agenda-slide h2 { background: none; -webkit-background-clip: unset; -webkit-text-fill-color: #fff; background-clip: unset; color: #fff; }
+        .agenda-pattern { position: absolute; bottom: 45%; right: -25%; width: 250%; height: auto; opacity: 0.12; pointer-events: none; z-index: 1; transform: rotate(-42deg); transform-origin: bottom right; }
+        .agenda-bars { display: flex; flex-direction: column; gap: clamp(0.5rem, 1.3vh, 1rem); margin-top: var(--content-gap); }
+        .agenda-bar { display: flex; align-items: center; gap: clamp(1rem, 2vw, 2rem); position: relative; }
+        .agenda-num { font-family: var(--font-display); font-size: var(--h3-size); font-weight: 600; color: var(--accent); min-width: 2.5em; text-align: right; }
+        .agenda-bar-text { font-family: var(--font-display); font-size: var(--body-size); font-weight: 500; color: var(--text-primary); text-transform: uppercase; letter-spacing: 0.05em; }
+
+        .content-slide .slide-content { justify-content: center; }
+
+        /* === CARDS === */
+        .two-content h2 { background: none; -webkit-background-clip: unset; -webkit-text-fill-color: #fff; background-clip: unset; color: #fff; }
+        .two-content .slide-content { justify-content: center; }
+        .card-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: clamp(0.75rem, 1.5vw, 1.25rem); margin-top: var(--content-gap); }
+        .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: clamp(0.9rem, 1.9vw, 1.5rem); backdrop-filter: blur(10px); transition: border-color 0.3s ease; }
+        .card:hover { border-color: var(--accent-glow); }
+        .card.refuted { border-color: rgba(255,107,107,0.25); }
+        .card-number { font-family: var(--font-display); font-size: clamp(1.5rem, 3vw, 2.4rem); font-weight: 700; color: var(--accent); line-height: 1; margin-bottom: clamp(0.4rem, 0.8vh, 0.7rem); }
+        .card.refuted .card-number { color: #ff6b6b; }
+        .card-title { font-family: var(--font-display); font-size: clamp(1.1rem, 2.2vw, 1.65rem); font-weight: 500; color: var(--text-primary); margin-bottom: clamp(0.3rem, 0.5vh, 0.5rem); }
+        .card-body { font-size: var(--small-size); line-height: 1.45; color: var(--text-secondary); }
+        .card-body .verdict { display: inline-block; font-family: var(--font-mono); font-size: 0.85em; color: #ff6b6b; letter-spacing: 0.08em; margin-top: 0.4em; }
+
+        /* === END === */
+        .end-slide .slide-content { align-items: center; text-align: center; }
+        .end-slide .end-logo { height: clamp(60px, 10vh, 120px); opacity: 0.8; margin-bottom: clamp(1.5rem, 3vh, 2.5rem); }
+        .end-slide h2 { font-size: var(--title-size); margin-bottom: clamp(0.5rem, 1vh, 1rem); background: none; -webkit-background-clip: unset; -webkit-text-fill-color: var(--accent); background-clip: unset; color: var(--accent); }
+        .end-slide .end-subtitle { font-size: clamp(1rem, 2vw, 1.4rem); color: rgba(232,234,237,0.9); font-weight: 400; max-width: 740px; }
+
+        /* === ANIMATIONS === */
+        .reveal { opacity: 0; transform: translateY(10px); transition: opacity var(--duration) var(--ease-out-expo), transform var(--duration) var(--ease-out-expo); }
+        .slide.visible .reveal { opacity: 1; transform: translateY(0); }
+        .slide.visible .reveal:nth-child(1) { transition-delay: 0.02s; }
+        .slide.visible .reveal:nth-child(2) { transition-delay: 0.06s; }
+        .slide.visible .reveal:nth-child(3) { transition-delay: 0.10s; }
+        .slide.visible .reveal:nth-child(4) { transition-delay: 0.14s; }
+        .slide.visible .reveal:nth-child(5) { transition-delay: 0.18s; }
+        .slide.visible .reveal:nth-child(6) { transition-delay: 0.22s; }
+        .slide.visible .reveal:nth-child(7) { transition-delay: 0.26s; }
+        .slide.visible .reveal:nth-child(8) { transition-delay: 0.30s; }
+
+        .progress-bar { position: fixed; top: 0; left: 0; height: 3px; background: linear-gradient(90deg, var(--accent), #3dd63e); z-index: 100; width: 0%; transition: width 0.3s ease; }
+
+        .nav-dots { position: fixed; right: clamp(0.75rem, 1.5vw, 1.5rem); top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 100; }
+        .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); opacity: 0.3; cursor: pointer; transition: all 0.3s ease; border: none; padding: 0; }
+        .nav-dot:hover { opacity: 0.7; transform: scale(1.3); }
+        .nav-dot.active { opacity: 1; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+        .nav-dot.section-sep { width: 6px; height: 2px; border-radius: 1px; background: var(--accent); opacity: 0.3; cursor: default; }
+
+        /* === RESPONSIVE === */
+        @media (max-height: 700px) {
+            :root { --slide-padding: clamp(1rem, 4vw, 3rem); --content-gap: clamp(0.5rem, 1.4vw, 1.1rem); --title-size: clamp(1.5rem, 5vw, 3rem); --h2-size: clamp(1.2rem, 3vw, 2rem); --h3-size: clamp(1.1rem, 2.6vw, 1.7rem); }
+        }
+        @media (max-height: 600px) {
+            :root { --slide-padding: clamp(0.75rem, 3vw, 2rem); --content-gap: clamp(0.4rem, 1vw, 0.7rem); --title-size: clamp(1.25rem, 4.5vw, 2.5rem); --body-size: clamp(0.72rem, 1.2vw, 0.95rem); --small-size: clamp(0.68rem, 1vw, 0.85rem); }
+            .nav-dots { display: none; }
+            .triangle-mosaic svg { width: clamp(250px, 35vw, 400px); }
+            .title-slide .slide-content { padding-right: var(--slide-padding); }
+        }
+        @media (max-height: 500px) {
+            :root { --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem); --title-size: clamp(1rem, 4vw, 2rem); --h2-size: clamp(0.9rem, 2.5vw, 1.5rem); --body-size: clamp(0.65rem, 1vw, 0.85rem); }
+        }
+        @media (max-width: 900px) { .title-slide .slide-content { padding-right: clamp(80px, 15vw, 200px); } }
+        @media (max-width: 600px) {
+            :root { --title-size: clamp(1.5rem, 8vw, 3rem); --h2-size: clamp(1.1rem, 5vw, 2rem); --h3-size: clamp(0.95rem, 4vw, 1.4rem); --body-size: clamp(0.85rem, 3.5vw, 1.1rem); --small-size: clamp(0.75rem, 2.8vw, 0.95rem); --tag-size: clamp(0.7rem, 2.5vw, 0.9rem); --slide-padding: clamp(1rem, 4vw, 2rem); }
+            .title-slide .slide-content { padding-right: var(--slide-padding); }
+            .card-grid { grid-template-columns: 1fr; }
+            .flow-cols { grid-template-columns: 1fr; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.2s !important; }
+            .slide { transition-duration: 0.01ms !important; }
+            .reveal { opacity: 1; transform: none; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="progress-bar" id="progressBar"></div>
+    <nav class="nav-dots" id="navDots" aria-label="Slide navigation"></nav>
+
+    <div class="slides-wrapper" id="slidesWrapper">
+
+    <!-- === SLIDE 1: TITLE === -->
+    <section class="slide title-slide active visible" data-slide="0">
+        <img src="assets/logo-hor-green-white.png" alt="Archon" class="title-logo">
+        <div class="slide-content">
+            <h1 class="reveal">Splitting<br>CLAUDE.md</h1>
+            <p class="subtitle reveal">How Claude Code memory actually loads &mdash; and a concrete proposal to break our 290-line monolith into scoped files that cost less and get followed more. Every claim verified against Anthropic's docs.</p>
+            <div class="divider reveal"></div>
+        </div>
+        <div class="triangle-mosaic">
+            <svg viewBox="0 0 924 720" fill="none" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMaxYMid meet">
+                <polygon points="717,360 615,180 513,360" fill="#FFFFFF"/>
+                <polygon points="718,720 513,360 308,720" fill="#6DFB6E"/>
+                <polygon points="205,540 103,360 0,540" fill="#6DFB6E"/>
+                <polygon points="410,540 308,360 205,540" fill="#FFFFFF"/>
+                <polygon points="513,360 410,180 308,360" fill="#FFFFFF"/>
+                <polygon points="410,180 308,0 205,180" fill="#939397"/>
+                <polygon points="820,540 717,360 615,540" fill="#6DFB6E"/>
+                <polygon points="308,720 205,540 103,720" fill="#939397"/>
+                <polygon points="924,720 821,539 717,720" fill="#FFFFFF"/>
+            </svg>
+        </div>
+    </section>
+
+    <!-- === SLIDE 2: AGENDA === -->
+    <section class="slide agenda-slide" data-slide="1">
+        <div class="slide-content">
+            <h2 class="gradient-text reveal">Agenda</h2>
+            <div class="agenda-bars reveal">
+                <div class="agenda-bar"><span class="agenda-num">01</span><span class="agenda-bar-text">The problem &amp; how memory loads</span></div>
+                <div class="agenda-bar"><span class="agenda-num">02</span><span class="agenda-bar-text">Imports, scoped rules &amp; pitfalls</span></div>
+                <div class="agenda-bar"><span class="agenda-num">03</span><span class="agenda-bar-text">The proposal: structure &amp; rollout</span></div>
+            </div>
+        </div>
+        <img src="assets/logo-pattern-white-3.png" alt="" class="agenda-pattern" aria-hidden="true">
+    </section>
+
+    <!-- === SLIDE 3: SECTION 01 === -->
+    <section class="slide section-header" data-slide="2" data-section="s1">
+        <div class="slide-content">
+            <span class="section-num reveal">01</span>
+            <div class="section-line reveal"></div>
+            <h2 class="reveal">The Problem &amp; the Loading Model</h2>
+            <p class="section-subtitle reveal">Why one file, loaded on every session, is the wrong default.</p>
+        </div>
+    </section>
+
+    <!-- === SLIDE 4: THE PROBLEM (our repo) === -->
+    <section class="slide content-slide" data-slide="3">
+        <div class="slide-content">
+            <span class="episode-tag reveal">Where we are</span>
+            <h2 class="reveal">One file, paid on every task</h2>
+            <ul class="bullet-list reveal">
+                <li>Root <b>CLAUDE.md</b> is <b>290 lines / ~23 KB</b> &mdash; ~1.5&times; the recommended per-file ceiling.</li>
+                <li>Nearly every session launches from repo root, so the <b>whole file loads every time</b> &mdash; regardless of task.</li>
+                <li>Most of it is <b>Go-only</b> (errors, testing, DB schema, API-adapter lore): dead weight on Python, TS, k8s, and docs work.</li>
+                <li><b>Drift already bit us:</b> <code>stl-verify/AGENTS.md</code> describes <code>cmd/server/</code>, <code>application/</code>, <code>valueobject/</code> &mdash; none exist. Two instruction files, out of sync.</li>
+            </ul>
+        </div>
+    </section>
+
+    <!-- === SLIDE 5: LOADING MODEL TABLE === -->
+    <section class="slide content-slide" data-slide="4">
+        <div class="slide-content">
+            <span class="episode-tag reveal">Discovery &amp; timing</span>
+            <h2 class="reveal">Ancestors eager, descendants lazy</h2>
+            <table class="spec-table reveal">
+                <thead><tr><th>Launch location</th><th>Loaded at startup (full)</th><th>Loaded on demand</th></tr></thead>
+                <tbody>
+                    <tr><td>Repo root</td><td>Root <code>CLAUDE.md</code> + global <code>~/.claude</code></td><td>Every subdirectory file, when its subtree is read</td></tr>
+                    <tr><td>A subdirectory</td><td>That file <b>+ every ancestor</b> up to root</td><td>Sibling / deeper subtrees not yet touched</td></tr>
+                </tbody>
+            </table>
+            <div class="callout reveal"><p>&ldquo;Files <b>above</b> the working directory load in full at launch. Files in subdirectories load <b>on demand</b> when Claude reads files in those directories.&rdquo; &mdash; code.claude.com/docs/en/memory. <b>This is the lever: a scoped subdir file costs nothing until its code is touched.</b></p></div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 6: CONCATENATION & PRECEDENCE === -->
+    <section class="slide content-slide" data-slide="5">
+        <div class="slide-content">
+            <span class="episode-tag reveal">Merge order</span>
+            <h2 class="reveal">Concatenated, not overridden</h2>
+            <div class="code-block reveal"><span class="c-muted"># Load order — broadest → most specific (read LAST = closest to cwd)</span>
+<span class="c-key">1.</span> managed policy      <span class="c-muted">(enterprise/admin)</span>
+<span class="c-key">2.</span> user                <span class="c-accent">~/.claude/CLAUDE.md</span>
+<span class="c-key">3.</span> project             <span class="c-accent">./CLAUDE.md</span> or <span class="c-accent">./.claude/CLAUDE.md</span>
+<span class="c-key">4.</span> local               <span class="c-accent">./CLAUDE.local.md</span>
+
+<span class="c-muted"># Files are CONCATENATED, not replaced. Deeper files ADD.</span>
+<span class="c-muted"># Root survives /compact — re-read from disk.</span></div>
+            <div class="callout reveal"><p>Ordering is a <b>reading order</b>, not a precedence winner &mdash; a subtlety we'll return to when we bust two myths.</p></div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 7: SECTION 02 === -->
+    <section class="slide section-header" data-slide="6" data-section="s2">
+        <div class="slide-content">
+            <span class="section-num reveal">02</span>
+            <div class="section-line reveal"></div>
+            <h2 class="reveal">Imports, Rules &amp; Pitfalls</h2>
+            <p class="section-subtitle reveal">The syntax, what actually defers, and the traps to avoid.</p>
+        </div>
+    </section>
+
+    <!-- === SLIDE 8: @IMPORT SPEC === -->
+    <section class="slide content-slide" data-slide="7">
+        <div class="slide-content">
+            <span class="episode-tag reveal">@path/to/import</span>
+            <h2 class="reveal">Import syntax &mdash; full spec</h2>
+            <div class="code-block reveal">@README.md                      <span class="c-muted"># relative to the IMPORTING file</span>
+@/abs/path/to/file.md           <span class="c-muted"># absolute</span>
+@docs/git-instructions.md       <span class="c-muted"># docs subpath</span>
+@~/.claude/my-rules.md          <span class="c-muted"># home dir</span>
+
+<span class="c-muted"># Recurses up to 4 hops. Skipped inside code spans:</span>
+`@not-an-import.md`             <span class="c-muted"># backticks → mentioned, not loaded</span></div>
+            <div class="callout reveal"><p>Useful trick: an <code>AGENTS.md</code> that is just <code>@CLAUDE.md</code> bridges other tools to one source of truth &mdash; killing the drift from slide 4.</p></div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 9: TOKEN TRAP + 3 LEVERS === -->
+    <section class="slide content-slide" data-slide="8">
+        <div class="slide-content">
+            <span class="episode-tag reveal">The counter-intuitive part</span>
+            <h2 class="reveal">@import &ne; token savings</h2>
+            <div class="highlight-text reveal">&ldquo;Splitting into @path imports helps organization but <b>does not reduce context</b>, since imported files load at launch.&rdquo;</div>
+            <div class="flow-cols reveal">
+                <div class="flow-col">
+                    <h3>Does NOT defer</h3>
+                    <p class="flow-caption">Expands eagerly at startup</p>
+                    <ul class="bullet-list">
+                        <li><code>@import</code> in root</li>
+                        <li>Rule file with <b>no</b> <code>paths:</code></li>
+                    </ul>
+                </div>
+                <div class="flow-col">
+                    <h3>DOES defer</h3>
+                    <p class="flow-caption">Loads only when relevant</p>
+                    <ul class="bullet-list">
+                        <li>Per-subdirectory <code>CLAUDE.md</code></li>
+                        <li>Rule with a <code>paths:</code> glob</li>
+                        <li>Skills (on-demand)</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 10: PATH-SCOPED RULE ANATOMY === -->
+    <section class="slide content-slide" data-slide="9">
+        <div class="slide-content">
+            <span class="episode-tag reveal">.claude/rules/*.md</span>
+            <h2 class="reveal">Anatomy of a path-scoped rule</h2>
+            <div class="code-block reveal"><span class="c-muted">--- </span><span class="c-muted"># .claude/rules/go-database.md</span>
+<span class="c-key">paths:</span>
+  <span class="c-accent">- "stl-verify/db/migrations/**"</span>
+  <span class="c-accent">- "**/*repository*.go"</span>
+<span class="c-muted">---</span>
+<span class="c-warn"># Loads ONLY when Claude reads a matching file.</span>
+<span class="c-muted"># Omit `paths:` → loads at launch, like .claude/CLAUDE.md.</span></div>
+            <div class="callout warn reveal"><p><strong>&#9888; Verify empirically.</strong> GitHub issues (#21858, #16853, #13905) report <code>paths:</code> misfiring &mdash; an undocumented <code>globs:</code> reportedly works, and user-level <code>~/.claude/rules/</code> scoping is ignored. Test before relying; fall back to per-dir <code>CLAUDE.md</code>.</p></div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 11: TWO MYTHS REFUTED === -->
+    <section class="slide two-content" data-slide="10">
+        <div class="slide-content">
+            <h2 class="gradient-text reveal">Two myths, refuted by the docs</h2>
+            <div class="card-grid reveal">
+                <div class="card refuted">
+                    <div class="card-number">&times;</div>
+                    <div class="card-title">"Deeper files override"</div>
+                    <div class="card-body">Subdirectory files do <b>not</b> take precedence over parents. The mechanism is concatenation &mdash; deeper content is added, not substituted.<span class="verdict">VERIFIED FALSE &middot; 0&ndash;3</span></div>
+                </div>
+                <div class="card refuted">
+                    <div class="card-number">&times;</div>
+                    <div class="card-title">"Last-read = weighted higher"</div>
+                    <div class="card-body">No verified generation-time priority for the deepest rule. Reading order is not attention weighting.<span class="verdict">VERIFIED FALSE &middot; 1&ndash;2</span></div>
+                </div>
+            </div>
+            <div class="callout reveal"><p>Consequence: <b>don't</b> encode conflict-resolution via nesting depth. Keep each rule unambiguous where it lives.</p></div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 12: WHY IT MATTERS (motivation bridge) === -->
+    <section class="slide two-content" data-slide="11">
+        <div class="slide-content">
+            <h2 class="gradient-text reveal">Why this is worth doing</h2>
+            <div class="card-grid reveal">
+                <div class="card">
+                    <div class="card-number">&infin;&#8202;&rarr;&#8202;0</div>
+                    <div class="card-title">Finite attention</div>
+                    <div class="card-body">"Context is a finite resource with diminishing marginal returns; every token depletes this budget." &mdash; Anthropic.</div>
+                </div>
+                <div class="card">
+                    <div class="card-number">&frac12;</div>
+                    <div class="card-title">Rules get lost</div>
+                    <div class="card-body">Half your rules may get lost in the noise: "if your CLAUDE.md is too long, Claude ignores half of it." &mdash; Anthropic best-practices.</div>
+                </div>
+                <div class="card">
+                    <div class="card-number">&#8635;</div>
+                    <div class="card-title">Reloaded every session</div>
+                    <div class="card-body">The root loads at launch on every session regardless of task &mdash; a cost you pay whether or not it's relevant to the work.</div>
+                </div>
+                <div class="card">
+                    <div class="card-number">&lt;200</div>
+                    <div class="card-title">The targets</div>
+                    <div class="card-body">Root ~60 lines (pointers + gotchas); each file &lt;200. Per-line test: "would removing this cause a mistake? If not, cut it."</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 13: SECTION 03 === -->
+    <section class="slide section-header" data-slide="12" data-section="s3">
+        <div class="slide-content">
+            <span class="section-num reveal">03</span>
+            <div class="section-line reveal"></div>
+            <h2 class="reveal">The Proposal</h2>
+            <p class="section-subtitle reveal">Lean root, scoped everything else &mdash; then an 8-step rollout.</p>
+        </div>
+    </section>
+
+    <!-- === SLIDE 14: TARGET STRUCTURE === -->
+    <section class="slide content-slide" data-slide="13">
+        <div class="slide-content">
+            <span class="episode-tag reveal">Target structure</span>
+            <h2 class="reveal">Lean root, scoped everything else</h2>
+            <div class="code-block reveal"><span class="c-accent">CLAUDE.md</span>                      <span class="c-muted"># ~60 lines: repo map + cross-cutting rules + pointers</span>
+.claude/
+  rules/
+    <span class="c-accent">go-database.md</span>           <span class="c-muted"># paths: db/migrations/** — schema/migration/DB</span>
+    <span class="c-accent">observability.md</span>         <span class="c-muted"># paths: alerts/**, docs/runbooks/**</span>
+  skills/
+    <span class="c-accent">review-phase/</span>            <span class="c-muted"># spawn-reviewers workflow — invoked on demand</span>
+    <span class="c-accent">new-indexer/</span>             <span class="c-muted"># alerts + runbooks checklist — invoked on demand</span>
+stl-verify/
+  <span class="c-accent">CLAUDE.md</span>                   <span class="c-muted"># Go: hexagonal, errors, testing, comments (&lt;200)</span>
+  python/<span class="c-accent">CLAUDE.md</span>            <span class="c-muted"># ruff, uv, pytest</span>
+  ts/<span class="c-accent">CLAUDE.md</span>                <span class="c-muted"># oxlint, oxfmt, build</span></div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 15: DECISION MATRIX === -->
+    <section class="slide content-slide" data-slide="14">
+        <div class="slide-content">
+            <span class="episode-tag reveal">Which mechanism, when</span>
+            <h2 class="reveal">Where each rule should live</h2>
+            <table class="spec-table reveal">
+                <thead><tr><th>Mechanism</th><th>Loads when</th><th>Use for</th></tr></thead>
+                <tbody>
+                    <tr><td>Root <code>CLAUDE.md</code></td><td class="no">Always</td><td>Repo map, cross-cutting rules, pointers &mdash; ~60 lines</td></tr>
+                    <tr><td>Subdir <code>CLAUDE.md</code></td><td class="yes">Subtree read</td><td>Per-package conventions owned next to the code</td></tr>
+                    <tr><td><code>.claude/rules/</code> + <code>paths:</code></td><td class="yes">Match read</td><td>One concern across scattered paths (DB, observability)</td></tr>
+                    <tr><td>Skill</td><td class="yes">Invoked</td><td>Sometimes-relevant workflows (review, new-indexer)</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- === SLIDE 16: ROLLOUT === -->
+    <section class="slide two-content" data-slide="15">
+        <div class="slide-content">
+            <h2 class="gradient-text reveal">The rollout &mdash; 8 low-risk steps</h2>
+            <div class="card-grid reveal">
+                <div class="card">
+                    <div class="card-number">1&ndash;2</div>
+                    <div class="card-title">Move by language</div>
+                    <div class="card-body">Go content &rarr; <code>stl-verify/CLAUDE.md</code> (delete stale AGENTS.md, or bridge via <code>@</code>). Python + TS lint &rarr; their own files.</div>
+                </div>
+                <div class="card">
+                    <div class="card-number">3&ndash;4</div>
+                    <div class="card-title">Scoped rules</div>
+                    <div class="card-body">DB block &rarr; <code>go-database.md</code>. Alerts + runbooks &rarr; <code>observability.md</code>, each with a <code>paths:</code> glob.</div>
+                </div>
+                <div class="card">
+                    <div class="card-number">5&ndash;6</div>
+                    <div class="card-title">Workflows &amp; trim</div>
+                    <div class="card-body">Review phase &rarr; a skill. Rewrite root to ~60 lines: map, cross-cutting rules, pointers only.</div>
+                </div>
+                <div class="card">
+                    <div class="card-number">7&ndash;8</div>
+                    <div class="card-title">Verify &amp; guard</div>
+                    <div class="card-body">Empirically confirm rules fire (<code>paths:</code> is buggy &mdash; try <code>globs:</code>). Add a &lt;200-line guardrail.</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- === SLIDE 17: END === -->
+    <section class="slide end-slide" data-slide="16">
+        <div class="slide-content">
+            <img src="assets/logo-symbol-white.png" alt="Archon" class="end-logo reveal">
+            <h2 class="reveal">Load less, follow more</h2>
+            <p class="end-subtitle reveal">Eager ancestors, lazy descendants, concatenation over precedence &mdash; deferral via subdir files and scoped rules turns one 290-line monolith into memory Claude actually reads. Let's ship the 8 steps.</p>
+        </div>
+    </section>
+
+    </div><!-- /.slides-wrapper -->
+
+    <div class="slide-footer hidden" id="slideFooter">
+        <img src="assets/logo-hor-green-white.png" alt="Archon" class="footer-brand">
+        <span class="footer-page" id="footerPage"></span>
+    </div>
+
+    <script>
+        /* === SLIDE PRESENTATION CONTROLLER === */
+        class SlidePresentation {
+            constructor() {
+                this.slides = document.querySelectorAll('.slide');
+                this.currentSlide = 0;
+                this.totalSlides = this.slides.length;
+                this.isTransitioning = false;
+                this.init();
+            }
+            init() {
+                this.createNavDots();
+                this.setupKeyboardNav();
+                this.setupTouchNav();
+                this.setupWheelNav();
+                this.footer = document.getElementById('slideFooter');
+                this.footerPage = document.getElementById('footerPage');
+                const hashSlide = parseInt(location.hash.replace('#', ''), 10);
+                const startSlide = (hashSlide >= 1 && hashSlide <= this.totalSlides) ? hashSlide - 1 : 0;
+                this.slides[startSlide].classList.add('active', 'visible');
+                this.currentSlide = startSlide;
+                this.updateActiveDot();
+                this.updateProgress();
+                this.updateFooter();
+                window.addEventListener('hashchange', () => {
+                    const s = parseInt(location.hash.replace('#', ''), 10);
+                    if (s >= 1 && s <= this.totalSlides) this.goToSlide(s - 1);
+                });
+            }
+            createNavDots() {
+                const nav = document.getElementById('navDots');
+                let lastSection = null;
+                this.slides.forEach((slide, i) => {
+                    const section = slide.dataset.section;
+                    if (section && section !== lastSection && i > 0) {
+                        const sep = document.createElement('div');
+                        sep.className = 'nav-dot section-sep';
+                        nav.appendChild(sep);
+                        lastSection = section;
+                    }
+                    const dot = document.createElement('button');
+                    dot.className = 'nav-dot' + (i === 0 ? ' active' : '');
+                    dot.setAttribute('aria-label', `Go to slide ${i + 1}`);
+                    dot.addEventListener('click', () => this.goToSlide(i));
+                    nav.appendChild(dot);
+                });
+            }
+            setupKeyboardNav() {
+                document.addEventListener('keydown', (e) => {
+                    switch (e.key) {
+                        case 'ArrowDown': case 'ArrowRight': case ' ': case 'PageDown':
+                            e.preventDefault(); this.nextSlide(); break;
+                        case 'ArrowUp': case 'ArrowLeft': case 'PageUp':
+                            e.preventDefault(); this.prevSlide(); break;
+                        case 'Home': e.preventDefault(); this.goToSlide(0); break;
+                        case 'End': e.preventDefault(); this.goToSlide(this.totalSlides - 1); break;
+                    }
+                });
+            }
+            setupTouchNav() {
+                let startY = 0, startX = 0;
+                document.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; startX = e.touches[0].clientX; }, { passive: true });
+                document.addEventListener('touchend', (e) => {
+                    const deltaY = startY - e.changedTouches[0].clientY;
+                    const deltaX = startX - e.changedTouches[0].clientX;
+                    if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > 50) {
+                        if (deltaY > 0) this.nextSlide(); else this.prevSlide();
+                    }
+                }, { passive: true });
+            }
+            setupWheelNav() {
+                document.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    if (this.isTransitioning) return;
+                    if (e.deltaY > 30) this.nextSlide();
+                    else if (e.deltaY < -30) this.prevSlide();
+                }, { passive: false });
+            }
+            nextSlide() { if (this.currentSlide < this.totalSlides - 1) this.goToSlide(this.currentSlide + 1); }
+            prevSlide() { if (this.currentSlide > 0) this.goToSlide(this.currentSlide - 1); }
+            goToSlide(index) {
+                if (index === this.currentSlide || this.isTransitioning) return;
+                this.isTransitioning = true;
+                const direction = index > this.currentSlide ? 1 : -1;
+                const oldSlide = this.slides[this.currentSlide];
+                const newSlide = this.slides[index];
+                oldSlide.classList.remove('active');
+                oldSlide.style.transform = `translateY(${-12 * direction}px)`;
+                newSlide.style.transition = 'none';
+                newSlide.style.transform = `translateY(${12 * direction}px)`;
+                newSlide.offsetHeight;
+                newSlide.style.transition = '';
+                newSlide.style.transform = '';
+                newSlide.classList.add('active', 'visible');
+                this.currentSlide = index;
+                history.replaceState(null, '', `#${index + 1}`);
+                this.updateActiveDot();
+                this.updateProgress();
+                this.updateFooter();
+                setTimeout(() => { this.isTransitioning = false; oldSlide.style.transform = ''; }, 350);
+            }
+            updateActiveDot() {
+                const dots = document.querySelectorAll('.nav-dot:not(.section-sep)');
+                dots.forEach((dot, i) => dot.classList.toggle('active', i === this.currentSlide));
+            }
+            updateProgress() {
+                const progress = this.totalSlides > 1 ? (this.currentSlide / (this.totalSlides - 1)) * 100 : 100;
+                document.getElementById('progressBar').style.width = progress + '%';
+            }
+            updateFooter() {
+                this.footerPage.textContent = `${this.currentSlide + 1} / ${this.totalSlides}`;
+                this.footer.classList.toggle('hidden', this.currentSlide === 0);
+            }
+        }
+        document.addEventListener('DOMContentLoaded', () => { new SlidePresentation(); });
+    </script>
+</body>
+</html>
