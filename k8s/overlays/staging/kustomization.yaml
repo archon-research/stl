@@ -9,7 +9,9 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
-  - ../../base/uniswap-v3-indexer
+  # uniswap-v3-indexer (base kept) is deferred to VEC-329, which re-adds the
+  # staging/prod overlay wiring once the dex-indexer image + SQS queue + secret
+  # (ethereum_sqs_uniswap_v3_indexing_url) are provisioned in the infra repo.
   - ../../base/allocation-tracker
   - ../../base/avalanche-watcher
   - ../../base/avalanche-backup-worker
@@ -67,11 +69,7 @@ images:
   - name: morpho-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
     newTag: "8e551178955eb803ba2d03abfe9867d7ea322386"
-  - name: dex-indexer
-    # Unified DEX worker (VEC-261/VEC-329); DEX=uniswap-v3 selects the Uniswap V3
-    # factory at runtime. Curve's deployment onto this image is VEC-329.
-    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-dex-indexer
-    newTag: "2a954c7d6fc3743f77cca7d01ea9daa64519ce0b"
+  # dex-indexer image override deferred to VEC-329 (see resources note above).
   - name: allocation-tracker
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
     newTag: "8e551178955eb803ba2d03abfe9867d7ea322386"
