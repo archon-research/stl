@@ -244,7 +244,9 @@ func stateSnapshotReads(state *entity.UniswapV3PoolState, stateABI, erc20 *abi.A
 				return []outbound.Call{{Target: pool.Address, AllowFailure: true, CallData: data}}, nil
 			},
 			Decode: func(pool RegisteredPool, results []outbound.Result) error {
-				decodeTwap(stateABI, results[0], state)
+				if err := decodeTwap(stateABI, results[0], state); err != nil {
+					return fmt.Errorf("pool %s observe(): %w", pool.Address, err)
+				}
 				return nil
 			},
 		},
@@ -334,22 +336,31 @@ func decodeProtocolFees(pool RegisteredPool, a *abi.ABI, res outbound.Result, st
 // decodeTwap unpacks observe()'s two int56[]/uint160[] arrays into a single
 // TWAP tick over twapWindowSecs. observe reverts with `OLD` when the pool's
 // observation cardinality doesn't cover the window; that is a legitimate,
-// expected condition (not a data-quality error), so a revert here leaves
-// TwapTick/TwapWindowSecs nil instead of failing the whole snapshot.
-func decodeTwap(a *abi.ABI, res outbound.Result, state *entity.UniswapV3PoolState) {
+// expected condition (not a data-quality error), so a revert leaves
+// TwapTick/TwapWindowSecs nil and returns no error.
+//
+// A SUCCESSFUL call whose payload cannot be decoded (unpack failure, wrong
+// arity, wrong element type/length) is a different matter: it signals a
+// registry row pointing at a non-V3 contract or an RPC bug, and returning nil
+// there would produce fleet-wide NULL twap_tick indistinguishable from a
+// legitimate revert. Those paths return an error so the snapshot fails loud.
+func decodeTwap(a *abi.ABI, res outbound.Result, state *entity.UniswapV3PoolState) error {
 	if !res.Success {
-		return
+		return nil
 	}
 	out, err := a.Unpack("observe", res.ReturnData)
 	if err != nil {
-		return
+		return fmt.Errorf("unpacking observe(): %w", err)
 	}
 	if len(out) != 2 {
-		return
+		return fmt.Errorf("observe() returned %d values, want 2", len(out))
 	}
 	tickCumulatives, ok := out[0].([]*big.Int)
-	if !ok || len(tickCumulatives) != 2 {
-		return
+	if !ok {
+		return fmt.Errorf("observe() tickCumulatives type = %T, want []*big.Int", out[0])
+	}
+	if len(tickCumulatives) != 2 {
+		return fmt.Errorf("observe() tickCumulatives has %d elements, want 2", len(tickCumulatives))
 	}
 
 	delta := new(big.Int).Sub(tickCumulatives[1], tickCumulatives[0])
@@ -357,4 +368,5 @@ func decodeTwap(a *abi.ABI, res outbound.Result, state *entity.UniswapV3PoolStat
 	window := twapWindowSecs
 	state.TwapTick = &tick
 	state.TwapWindowSecs = &window
+	return nil
 }

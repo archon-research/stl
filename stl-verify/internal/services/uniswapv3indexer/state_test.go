@@ -378,6 +378,32 @@ func TestSnapshotState_ObserveRevertsLeavesTwapNil(t *testing.T) {
 	}
 }
 
+// TestSnapshotState_MalformedSuccessfulObserveReturnsError verifies that a
+// SUCCESSFUL observe() whose return data is undecodable does NOT degrade to a
+// silent NULL TWAP: a malformed success is a data-quality error (a registry row
+// pointing at a non-V3 contract, or an RPC bug) and must surface, unlike a
+// legitimate revert which correctly leaves TWAP nil.
+func TestSnapshotState_MalformedSuccessfulObserveReturnsError(t *testing.T) {
+	pool := stateTestPool()
+	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000008")
+
+	f := defaultStateFixtureValues()
+	results := buildStateResults(t, f)
+	// Successful observe(), but the return bytes cannot be unpacked as the
+	// (int56[], uint160[]) tuple — a malformed-success, not a revert.
+	results[7] = outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}
+	var gotHash common.Hash
+	mc := mockMulticallerReturning(results, &gotHash)
+
+	got, err := SnapshotState(context.Background(), mc, pool, blockHash, 19000000, 0, stateBlockTS)
+	if err == nil {
+		t.Fatal("SnapshotState: want error on a malformed successful observe(), got nil")
+	}
+	if got != nil {
+		t.Errorf("SnapshotState: want nil state on error, got %+v", got)
+	}
+}
+
 func TestSnapshotState_ObserveSucceedsComputesTwap(t *testing.T) {
 	pool := stateTestPool()
 	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000005")

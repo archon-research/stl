@@ -112,7 +112,10 @@ func TestUniswapV3Swap_Validate(t *testing.T) {
 		{"missing tx hash", func(s *UniswapV3Swap) { s.TxHash = common.Hash{} }, true},
 		{"negative log index", func(s *UniswapV3Swap) { s.LogIndex = -1 }, true},
 		{"missing sender", func(s *UniswapV3Swap) { s.Sender = common.Address{} }, true},
-		{"missing recipient", func(s *UniswapV3Swap) { s.Recipient = common.Address{} }, true},
+		// recipient is the caller-supplied output destination; v3-core has no
+		// zero-address guard and WETH permits transfer-to-zero, so a zero
+		// recipient is a legal on-chain sink that must validate.
+		{"zero recipient is a legal sink", func(s *UniswapV3Swap) { s.Recipient = common.Address{} }, false},
 		{"nil amount0", func(s *UniswapV3Swap) { s.Amount0 = nil }, true},
 		{"nil amount1", func(s *UniswapV3Swap) { s.Amount1 = nil }, true},
 		{"nil sqrt price", func(s *UniswapV3Swap) { s.SqrtPriceX96 = nil }, true},
@@ -189,7 +192,10 @@ func TestUniswapV3LiquidityEvent_Validate(t *testing.T) {
 		{"missing tx hash", validMint, func(e *UniswapV3LiquidityEvent) { e.TxHash = common.Hash{} }, true},
 		{"negative log index", validMint, func(e *UniswapV3LiquidityEvent) { e.LogIndex = -1 }, true},
 		{"bad kind", validMint, func(e *UniswapV3LiquidityEvent) { e.EventName = "sideways" }, true},
-		{"missing owner", validMint, func(e *UniswapV3LiquidityEvent) { e.Owner = common.Address{} }, true},
+		// mint owner is the caller-supplied position owner; v3-core lets mint
+		// target address(0), so a zero owner is a legal on-chain sink that must
+		// validate rather than poison-stalling the block.
+		{"zero mint owner is a legal sink", validMint, func(e *UniswapV3LiquidityEvent) { e.Owner = common.Address{} }, false},
 		{"tick_lower below int24 min", validMint, func(e *UniswapV3LiquidityEvent) { e.TickLower = -8388609 }, true},
 		{"tick_upper above int24 max", validMint, func(e *UniswapV3LiquidityEvent) { e.TickUpper = 8388608 }, true},
 		{"tick_lower equal tick_upper", validMint, func(e *UniswapV3LiquidityEvent) { e.TickUpper = e.TickLower }, true},

@@ -562,6 +562,96 @@ func TestBlockHandler_MixedEventsPersistsBlockWrites(t *testing.T) {
 	}
 }
 
+// secondUniswapTestPool returns a second fixture pool, distinct in ID and
+// address from uniswapTestPool, so tests can exercise a single receipt whose
+// logs touch two registered pools (e.g. an aggregator split route across two
+// fee tiers of the same token pair).
+func secondUniswapTestPool() RegisteredPool {
+	return RegisteredPool{
+		ID:             8,
+		Address:        common.HexToAddress("0x109830a1AAaD605BbF02a9dFA7B0B92EC2FB7dAa"),
+		Token0:         common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+		Token1:         common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+		Token0Decimals: 18,
+		Token1Decimals: 6,
+		Fee:            500,
+		TickSpacing:    10,
+		DeployBlock:    100,
+	}
+}
+
+// newTestServiceWithPools builds a UniswapV3Service registering every pool in
+// pools, wired to a recordingMulticaller pre-loaded with a successful state
+// batch. Mirrors newTestService but supports the multi-pool receipt case.
+func newTestServiceWithPools(t *testing.T, pools []RegisteredPool) (*UniswapV3Service, *fakeUniswapRepo, *recordingMulticaller, *countingTxManager) {
+	t.Helper()
+
+	mc := &recordingMulticaller{
+		stateResults: stateResultsFixture(t),
+		tickResults:  map[int32]outbound.Result{},
+	}
+	repo := &fakeUniswapRepo{}
+	txMgr := &countingTxManager{}
+	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
+
+	svc, err := NewUniswapV3Service(UniswapV3ServiceDeps{
+		Pools:       pools,
+		Multicaller: mc,
+		Repo:        repo,
+		EventWriter: writer,
+		TxManager:   txMgr,
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewUniswapV3Service: %v", err)
+	}
+	return svc, repo, mc, txMgr
+}
+
+// TestBlockHandler_MultiPoolReceiptDecodesEveryTouchedPool verifies that a
+// single receipt carrying logs from TWO registered pools (an aggregator split
+// route) decodes BOTH pools' swaps and snapshots BOTH pools' state — the
+// second pool must not be silently dropped.
+func TestBlockHandler_MultiPoolReceiptDecodesEveryTouchedPool(t *testing.T) {
+	poolA := uniswapTestPool()
+	poolB := secondUniswapTestPool()
+	svc, repo, _, txMgr := newTestServiceWithPools(t, []RegisteredPool{poolA, poolB})
+
+	receipt := shared.TransactionReceipt{
+		Logs: []shared.Log{
+			swapLog(t, poolA, "0x0"),
+			swapLog(t, poolB, "0x1"),
+		},
+	}
+
+	bh := svc.BlockHandler()
+	if err := bh(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if txMgr.calls != 1 {
+		t.Fatalf("WithTransaction calls = %d, want 1", txMgr.calls)
+	}
+	if len(repo.lastWrites.Swaps) != 2 {
+		t.Errorf("Swaps = %d, want 2 (one per touched pool)", len(repo.lastWrites.Swaps))
+	}
+	if len(repo.lastWrites.States) != 2 {
+		t.Errorf("States = %d, want 2 (both pools must be snapshotted)", len(repo.lastWrites.States))
+	}
+
+	gotPools := map[int64]bool{}
+	for _, s := range repo.lastWrites.Swaps {
+		gotPools[s.PoolID] = true
+	}
+	if !gotPools[poolA.ID] {
+		t.Errorf("swaps missing pool A (id=%d)", poolA.ID)
+	}
+	if !gotPools[poolB.ID] {
+		t.Errorf("swaps missing pool B (id=%d) — second pool silently dropped", poolB.ID)
+	}
+}
+
 // TestBlockHandler_QuietBlock_NoTransaction verifies a block whose receipts
 // touch no registered pool returns nil without opening a transaction or
 // issuing any multicall.
@@ -806,7 +896,7 @@ func TestBlockHandler_DecodeError_ReturnsNonNil(t *testing.T) {
 }
 
 // TestBlockHandler_InvalidLogAddress_ReturnsNonNil verifies a log whose
-// address is not valid hex surfaces poolTouchedByReceipt's error rather than
+// address is not valid hex surfaces poolsTouchedByReceipt's error rather than
 // being silently skipped.
 func TestBlockHandler_InvalidLogAddress_ReturnsNonNil(t *testing.T) {
 	pool := uniswapTestPool()

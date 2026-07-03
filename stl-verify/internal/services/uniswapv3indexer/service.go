@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -187,8 +188,8 @@ func (acc blockAccumulators) hasEvents() bool {
 	return len(acc.swaps) > 0 || len(acc.liquidity) > 0 || len(acc.poolEvts) > 0 || len(acc.captured) > 0
 }
 
-// decodeBlockEvents iterates every receipt, identifies the pool touched by
-// each receipt's logs (matched via poolsByAddr), decodes its events, and
+// decodeBlockEvents iterates every receipt, identifies every pool touched by
+// each receipt's logs (matched via poolsByAddr), decodes each one's events, and
 // accumulates them plus the touched-pool-ID set. ctx is checked at the start
 // of each receipt to honour cancellation without silently acking a
 // partially-decoded block.
@@ -203,42 +204,48 @@ func (s *UniswapV3Service) decodeBlockEvents(ctx context.Context, receipts []sha
 		if err := ctx.Err(); err != nil {
 			return blockAccumulators{}, err
 		}
-		pool, touched, err := s.poolTouchedByReceipt(receipt)
+		pools, err := s.poolsTouchedByReceipt(receipt)
 		if err != nil {
 			return blockAccumulators{}, err
 		}
-		if !touched {
-			continue
+		for _, pool := range pools {
+			decoded, err := DecodeEvents(receipt, pool, s.chainID, bn, ver, ts)
+			if err != nil {
+				return blockAccumulators{}, fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
+			}
+			acc.swaps = append(acc.swaps, decoded.Swaps...)
+			acc.liquidity = append(acc.liquidity, decoded.LiquidityEvents...)
+			acc.poolEvts = append(acc.poolEvts, decoded.PoolEvents...)
+			acc.captured = append(acc.captured, decoded.Captured...)
+			acc.liqByPool[pool.ID] = append(acc.liqByPool[pool.ID], decoded.LiquidityEvents...)
+			acc.touchedIDs[pool.ID] = true
 		}
-
-		decoded, err := DecodeEvents(receipt, pool, s.chainID, bn, ver, ts)
-		if err != nil {
-			return blockAccumulators{}, fmt.Errorf("decoding events for pool %s block %d: %w", pool.Address, bn, err)
-		}
-		acc.swaps = append(acc.swaps, decoded.Swaps...)
-		acc.liquidity = append(acc.liquidity, decoded.LiquidityEvents...)
-		acc.poolEvts = append(acc.poolEvts, decoded.PoolEvents...)
-		acc.captured = append(acc.captured, decoded.Captured...)
-		acc.liqByPool[pool.ID] = append(acc.liqByPool[pool.ID], decoded.LiquidityEvents...)
-		acc.touchedIDs[pool.ID] = true
 	}
 	return acc, nil
 }
 
-// poolTouchedByReceipt returns the single registered pool whose address
-// appears on any of the receipt's logs, and whether one was found. V3 pools
-// are reachable only by their own address (no LP-token indirection, unlike
-// Curve's pre-NG pools), so at most one pool can match a receipt.
-func (s *UniswapV3Service) poolTouchedByReceipt(receipt shared.TransactionReceipt) (RegisteredPool, bool, error) {
+// poolsTouchedByReceipt returns the deduplicated registered pools whose address
+// appears on any of the receipt's logs, in deterministic pool-ID order. A single
+// transaction can touch more than one seeded pool (e.g. an aggregator splitting a
+// route across two fee tiers of the same pair), so every matched pool must be
+// decoded; a pool touched by several logs is returned once (DecodeEvents scans
+// all logs and filters to the pool's own address).
+func (s *UniswapV3Service) poolsTouchedByReceipt(receipt shared.TransactionReceipt) ([]RegisteredPool, error) {
+	byID := make(map[int64]RegisteredPool)
 	for _, log := range receipt.Logs {
 		if !common.IsHexAddress(log.Address) {
-			return RegisteredPool{}, false, fmt.Errorf("invalid log address %q", log.Address)
+			return nil, fmt.Errorf("invalid log address %q", log.Address)
 		}
 		if pool, ok := s.poolsByAddr[common.HexToAddress(log.Address)]; ok {
-			return pool, true, nil
+			byID[pool.ID] = pool
 		}
 	}
-	return RegisteredPool{}, false, nil
+	pools := make([]RegisteredPool, 0, len(byID))
+	for _, pool := range byID {
+		pools = append(pools, pool)
+	}
+	sort.Slice(pools, func(i, j int) bool { return pools[i].ID < pools[j].ID })
+	return pools, nil
 }
 
 // snapshotDueSet reads each due pool's state and tick rows via multicall,

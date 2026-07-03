@@ -126,11 +126,12 @@ func (s *UniswapV3Swap) Validate() error {
 	if s.LogIndex < 0 {
 		return fmt.Errorf("logIndex must be non-negative, got %d", s.LogIndex)
 	}
+	// Sender is v3-core's msg.sender (the swap caller): genuinely never zero, so
+	// a zero sender signals a malformed decode. Recipient is caller-supplied and
+	// may legally be address(0) (WETH permits transfer-to-zero), so it is NOT
+	// rejected here — doing so would let a dust swap poison-stall the block.
 	if s.Sender == (common.Address{}) {
 		return fmt.Errorf("sender is required")
-	}
-	if s.Recipient == (common.Address{}) {
-		return fmt.Errorf("recipient is required")
 	}
 	if s.Amount0 == nil {
 		return fmt.Errorf("amount0 must not be nil")
@@ -206,9 +207,10 @@ func (e *UniswapV3LiquidityEvent) Validate() error {
 	if _, ok := validLiquidityEventKinds[e.EventName]; !ok {
 		return fmt.Errorf("event name %q is not allowed", e.EventName)
 	}
-	if e.Owner == (common.Address{}) {
-		return fmt.Errorf("owner is required")
-	}
+	// Owner is caller-supplied on Mint (a mint may target address(0)), so a zero
+	// owner is a legal on-chain sink and is NOT rejected — rejecting it would let
+	// a dust mint poison-stall the block. On Burn/Collect owner is msg.sender and
+	// so never zero on-chain anyway.
 	if err := validateTickRange("tickLower", e.TickLower); err != nil {
 		return err
 	}
