@@ -280,7 +280,7 @@ tables:
   borrower: {type: raw_pipeline, owner: lending}
   borrower_collateral: {type: raw_pipeline, owner: lending}
   build_registry: {type: infrastructure, owner: infra}
-  cex_orderbook_snapshots: {}
+  cex_orderbook_snapshots: {type: raw_pipeline, owner: pricing}
   chain: {type: dimension, owner: infra}
   debt_token: {type: config, owner: lending}
   fluid_vault: {type: config, owner: lending}
@@ -416,14 +416,14 @@ required_keys:
   - name: chain
     any_of: [chain_id]
     applies_to: [raw_pipeline]
-    # off-chain CEX prices + Anchorage custody have no chain
-    exempt: [anchorage_operation, anchorage_package_snapshot, offchain_token_price]
+    # off-chain CEX prices/orderbooks + Anchorage custody have no chain
+    exempt: [anchorage_operation, anchorage_package_snapshot, cex_orderbook_snapshots, offchain_token_price]
   - name: protocol
     any_of: [protocol_id]
     applies_to: [raw_pipeline]
     # not protocol-scoped (prices, token supply, custody) or pending a modeling decision
     # (prime_debt = Sky constant, allocation_position, maple_syrup_global_state, psm3_reserves)
-    exempt: [allocation_position, anchorage_operation, anchorage_package_snapshot, maple_syrup_global_state, offchain_token_price, onchain_token_price, prime_debt, psm3_reserves, token_total_supply]
+    exempt: [allocation_position, anchorage_operation, anchorage_package_snapshot, cex_orderbook_snapshots, maple_syrup_global_state, offchain_token_price, onchain_token_price, prime_debt, psm3_reserves, token_total_supply]
   - name: observation_time
     any_of: [block_timestamp, snapshot_time, event_time]
     applies_to: [raw_pipeline]
