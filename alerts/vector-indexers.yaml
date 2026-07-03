@@ -786,14 +786,22 @@ groups:
         # Counter `uniswap_v3.state.rows.written` (OTel) -> Prometheus
         # `uniswap_v3_state_rows_written_total`. Emitted by handleBlock after
         # each successful persistBlock that writes at least one state/tick row.
+        # `unless`, not `and … == 0`: state rows are written only for
+        # event-touched pools (no sweep), and RecordStateRows is a no-op for
+        # n<=0, so under the exact bug this targets (DueSet always empty, or on
+        # a fresh deploy) the state-rows counter series is never created. With
+        # `and … == 0` the empty right side yields no match and the alert can
+        # never fire. `A > 0 unless B > 0` keeps each (chain,cluster) that is
+        # processing blocks unless it is also writing state rows — so an absent
+        # OR zero state-rows series correctly fires. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
             rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
           ) > 0
-          and
+          unless
           sum by (chain, cluster) (
             rate(uniswap_v3_state_rows_written_total{k8s_namespace_name="vector"}[30m])
-          ) == 0
+          ) > 0
         for: 10m
         labels:
           team: vector

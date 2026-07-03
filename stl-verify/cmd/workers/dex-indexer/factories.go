@@ -106,6 +106,13 @@ func (uniswapV3Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 	}
 	pools := uniswapv3indexer.RegisteredPoolsFromRows(poolRows)
 
+	// The Uniswap V3 indexer snapshots only event-touched pools; it has no
+	// periodic sweep, so SWEEP_BLOCKS has no effect here. Warn rather than
+	// fail so a shared deploy config carrying the knob still starts.
+	if cfg.SweepBlocks != 0 {
+		deps.Logger.Warn("uniswap-v3 indexer has no sweep; SWEEP_BLOCKS is ignored", "sweepBlocks", cfg.SweepBlocks)
+	}
+
 	protocolID := poolRows[0].ProtocolID
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
