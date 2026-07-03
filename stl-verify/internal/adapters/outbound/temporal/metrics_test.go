@@ -36,8 +36,9 @@ func TestNewCronjobMetrics_SeedsBothStatusSeriesAtZero(t *testing.T) {
 
 // After seeding, the first successful run must land on the seeded success
 // series as 0->1 (not orphan it into a parallel series), which is the increment
-// increase() needs to see. This holds only while RecordRun and seedStatusSeries
-// derive the status label the same way (telemetry.StatusAttr); this guards that.
+// increase() needs to see. This holds only while RecordRun and the startup seed
+// (telemetry.SeedStatusCounter) derive the status label the same way
+// (telemetry.StatusAttr); this guards that.
 func TestRecordRun_LandsSuccessOnSeededSeriesAsOne(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
