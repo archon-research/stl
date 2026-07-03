@@ -1,19 +1,19 @@
 # =============================================================================
 # Vector — indexer alerts (ADR-008 / ORB-200)
 # =============================================================================
-# The morpho and oracle indexers consume blocks from the watcher pipeline and
-# derive product state (positions, prices) into TimescaleDB. They're the last
-# hop before downstream readers see data, so stalls / errors here translate
-# directly into stale customer views.
+# The morpho, oracle and fluid-vault indexers consume blocks from the watcher
+# pipeline and derive product state (positions, prices, vaults) into
+# TimescaleDB. They're the last hop before downstream readers see data, so
+# stalls / errors here translate directly into stale customer views.
 #
-# Two indexers in v1 (morpho, oracle). Each gets its own rules because the
-# Slack-thread spec uses distinct per-indexer metric prefixes
+# Three indexers (morpho, oracle, fluid-vault). Each gets its own rules because
+# the Slack-thread spec uses distinct per-indexer metric prefixes
 # (`morpho_blocks_processed_total`, `oracle_blocks_processed_total`). Once
 # the services are unified onto a single metric name with an `indexer` label,
 # these can collapse into a single rule per signal.
 #
 # Metric source: OTel SDK in each indexer. Series carry:
-#   - service_name="morpho-indexer" | "oracle-price-worker"
+#   - service_name="morpho-indexer" | "oracle-price-worker" | "fluid-vault-indexer"
 #   - k8s_namespace_name="vector"
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain (for multi-chain indexers)

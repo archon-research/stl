@@ -257,7 +257,8 @@ func run(ctx context.Context, args []string) error {
 		"redis", cfg.redisAddr,
 		"chainID", cfg.chainID,
 		"targetDebtToken", cfg.targetDebtToken.Hex(),
-		"commit", buildReg.GitHash())
+		"commit", buildReg.GitHash(),
+		"branch", GitBranch)
 
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    "fluid-vault-indexer",
