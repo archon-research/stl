@@ -470,7 +470,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 								big.NewInt(1640995200), // lastUpdateTimestamp
 							}
 						} else if proto.version == "sparklend" {
-							// Sparklend: 11 fields (no averageStableBorrowRate)
+							// Sparklend: 12 fields (same interface as Aave V3)
 							values = []any{
 								big.NewInt(1000),       // unbacked
 								big.NewInt(2000),       // accruedToTreasuryScaled
@@ -480,6 +480,7 @@ func TestBlockchainService_ParseReserveData(t *testing.T) {
 								big.NewInt(6000),       // liquidityRate
 								big.NewInt(7000),       // variableBorrowRate
 								big.NewInt(8000),       // stableBorrowRate
+								big.NewInt(0),          // averageStableBorrowRate (stable borrows deprecated)
 								big.NewInt(10000),      // liquidityIndex
 								big.NewInt(11000),      // variableBorrowIndex
 								big.NewInt(1640995200), // lastUpdateTimestamp
@@ -1033,6 +1034,89 @@ func TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure(t *testing.T) {
 	// The good token's metadata is still returned and cached.
 	if md, ok := result[tokenA]; !ok || md.Symbol != "AAA" || md.Decimals != 18 {
 		t.Errorf("tokenA metadata wrong: present=%v meta=%+v", ok, md)
+	}
+}
+
+// TestSparklendABIFieldShiftRegression is a regression test for V-13.
+//
+// Root cause (now fixed): GetSparklendPoolDataProviderReserveDataABI previously
+// defined 11 outputs, missing averageStableBorrowRate at slot 8. The SparkLend
+// Pool Data Provider at 0xFc21d6d146E6086B8359705C8b28512a983db0cb returns 12
+// fields (same Aave V3 interface). go-ethereum's UnpackValues reads exactly N*32
+// bytes where N is the number of ABI outputs, with no exact-length check. The old
+// 11-field ABI caused a one-slot shift for slots 8-10:
+//
+//	Old (broken) mapping of a 12-field contract response:
+//	  unpacked[8]  <- averageStableBorrowRate  -> stored as liquidityIndex (= 0)
+//	  unpacked[9]  <- liquidityIndex (~1e27)   -> stored as variableBorrowIndex
+//	  unpacked[10] <- variableBorrowIndex (~1e27) -> stored as lastUpdateTimestamp (OVERFLOWS int64)
+//	  bytes[352:384] = actual lastUpdateTimestamp -> never read
+//
+// This produced 54,153 corrupted rows in staging with liquidity_index=0 and
+// last_update_timestamp < 0 (or > 1.9B), all on protocol_id=1 (SparkLend Ethereum).
+//
+// Fix: added averageStableBorrowRate at slot 8 in GetSparklendPoolDataProviderReserveDataABI.
+func TestSparklendABIFieldShiftRegression(t *testing.T) {
+	// Realistic ray values for a SparkLend Ethereum reserve circa block 24M.
+	averageStableBorrowRate := big.NewInt(0) // stable borrows deprecated on SparkLend
+	liquidityIndex, _ := new(big.Int).SetString("1066430000000000000000000000", 10)
+	variableBorrowIndex, _ := new(big.Int).SetString("1166223427652354494963148039", 10)
+	realTimestamp := big.NewInt(1740000000)
+
+	// Pack using the AaveV3 ABI to simulate what the contract actually returns (12 fields).
+	aaveV3ABI, err := abis.GetPoolDataProviderReserveData()
+	if err != nil {
+		t.Fatalf("GetPoolDataProviderReserveData: %v", err)
+	}
+	packed, err := aaveV3ABI.Methods["getReserveData"].Outputs.Pack(
+		big.NewInt(0),           // unbacked
+		big.NewInt(500000),      // accruedToTreasuryScaled
+		big.NewInt(1_000_000),   // totalAToken
+		big.NewInt(200_000),     // totalStableDebt
+		big.NewInt(700_000),     // totalVariableDebt
+		big.NewInt(30000000),    // liquidityRate
+		big.NewInt(50000000),    // variableBorrowRate
+		big.NewInt(0),           // stableBorrowRate
+		averageStableBorrowRate, // slot 8
+		liquidityIndex,          // slot 9
+		variableBorrowIndex,     // slot 10
+		realTimestamp,           // slot 11
+	)
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("GetERC20ABI: %v", err)
+	}
+	service := &BlockchainService{
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		metadataCache:   make(map[common.Address]TokenMetadata),
+		protocolVersion: blockchain.ProtocolVersionSparkLend,
+		erc20ABI:        erc20ABI,
+	}
+	if err := service.loadABIs(blockchain.ProtocolVersionSparkLend); err != nil {
+		t.Fatalf("loadABIs: %v", err)
+	}
+
+	// The fixed ABI has 12 outputs, so the 12-field response decodes correctly.
+	result, err := service.parseReserveData(packed)
+	if err != nil {
+		t.Fatalf("parseReserveData() unexpected error: %v", err)
+	}
+
+	if result.LiquidityIndex.Cmp(liquidityIndex) != 0 {
+		t.Errorf("LiquidityIndex = %s, want %s", result.LiquidityIndex, liquidityIndex)
+	}
+	if result.VariableBorrowIndex.Cmp(variableBorrowIndex) != 0 {
+		t.Errorf("VariableBorrowIndex = %s, want %s", result.VariableBorrowIndex, variableBorrowIndex)
+	}
+	if result.AverageStableBorrowRate.Cmp(averageStableBorrowRate) != 0 {
+		t.Errorf("AverageStableBorrowRate = %s, want %s", result.AverageStableBorrowRate, averageStableBorrowRate)
+	}
+	if result.LastUpdateTimestamp != realTimestamp.Int64() {
+		t.Errorf("LastUpdateTimestamp = %d, want %d", result.LastUpdateTimestamp, realTimestamp.Int64())
 	}
 }
 

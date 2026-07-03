@@ -791,10 +791,8 @@ func (s *BlockchainService) parseReserveData(data []byte) (*ReserveData, error) 
 	switch s.protocolVersion {
 	case blockchain.ProtocolVersionAaveV2:
 		return parseReserveDataAaveV2(unpacked, fieldIndex)
-	case blockchain.ProtocolVersionAaveV3:
+	case blockchain.ProtocolVersionAaveV3, blockchain.ProtocolVersionSparkLend:
 		return parseReserveDataAaveV3(unpacked, fieldIndex)
-	case blockchain.ProtocolVersionSparkLend:
-		return parseReserveDataSparklend(unpacked, fieldIndex)
 	default:
 		return nil, fmt.Errorf("unknown protocol version: %s", s.protocolVersion)
 	}
@@ -924,75 +922,6 @@ func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*Reserve
 	if err != nil {
 		return nil, err
 	}
-
-	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
-	if err != nil {
-		return nil, err
-	}
-
-	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
-	if err != nil {
-		return nil, err
-	}
-
-	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
-	if err != nil {
-		return nil, err
-	}
-	result.LastUpdateTimestamp, err = bigIntToTimestamp(timestamp, "lastUpdateTimestamp")
-	if err != nil {
-		return nil, err
-	}
-
-	return result, nil
-}
-
-// parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
-func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
-	result := &ReserveData{}
-	var err error
-
-	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
-	if err != nil {
-		return nil, err
-	}
-
-	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
-	if err != nil {
-		return nil, err
-	}
-
-	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
-	if err != nil {
-		return nil, err
-	}
-
-	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
-	if err != nil {
-		return nil, err
-	}
-
-	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
-	if err != nil {
-		return nil, err
-	}
-
-	result.AverageStableBorrowRate = big.NewInt(0) // Not available in Sparklend
 
 	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
 	if err != nil {

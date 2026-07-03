@@ -1831,6 +1831,7 @@ func packSparklendReserveDataResponse(t *testing.T, reserveDataABI *abi.ABI) []b
 	return mustPackOutput(t, reserveDataABI, "getReserveData",
 		zero, zero, zero, zero, zero, // unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt, totalVariableDebt
 		zero, zero, zero, // liquidityRate, variableBorrowRate, stableBorrowRate
+		zero,             // averageStableBorrowRate (stable borrows deprecated on SparkLend)
 		zero, zero, // liquidityIndex, variableBorrowIndex
 		zero, // lastUpdateTimestamp (uint40)
 	)

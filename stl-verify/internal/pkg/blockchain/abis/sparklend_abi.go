@@ -45,6 +45,7 @@ func GetSparklendPoolDataProviderReserveDataABI() (*abi.ABI, error) {
              {"name": "liquidityRate", "type": "uint256"},
              {"name": "variableBorrowRate", "type": "uint256"},
              {"name": "stableBorrowRate", "type": "uint256"},
+             {"name": "averageStableBorrowRate", "type": "uint256"},
              {"name": "liquidityIndex", "type": "uint256"},
              {"name": "variableBorrowIndex", "type": "uint256"},
              {"name": "lastUpdateTimestamp", "type": "uint40"}
