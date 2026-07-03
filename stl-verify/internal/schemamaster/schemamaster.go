@@ -10,6 +10,7 @@ package schemamaster
 import (
 	_ "embed"
 	"fmt"
+	"slices"
 	"sort"
 
 	"gopkg.in/yaml.v3"
@@ -19,10 +20,13 @@ import (
 var configBytes []byte
 
 // Canonical is one entry in the rulebook: the invariant type plus default class/semantics.
+// NotNull marks a column that must be declared NOT NULL wherever it appears (with sanctioned
+// exceptions in NullableExempt).
 type Canonical struct {
 	Type      string `yaml:"type"`
 	Class     string `yaml:"class"`
 	Semantics string `yaml:"semantics"`
+	NotNull   bool   `yaml:"not_null"`
 }
 
 // TableMeta is per-table governance (all optional for now).
@@ -52,13 +56,72 @@ type Override struct {
 	Reason       string `yaml:"reason"`
 }
 
+// Fill declares how a governed table obtains a canonical key it lacks natively (transform-layer
+// 6c/6d). The conformance check reads only Table+Column (a declared fill satisfies a required key);
+// the remaining fields describe the mechanism for the transform generator: a single-hop FK join
+// (Parent/Key/Ref), an optional second hop (ThenParent/ThenKey/ThenRef), a literal (Const), or the
+// block-time dimension (BlockTime).
+type Fill struct {
+	Table      string `yaml:"table"`
+	Column     string `yaml:"column"`
+	Parent     string `yaml:"parent"`
+	Key        string `yaml:"key"`
+	Ref        string `yaml:"ref"`
+	ThenParent string `yaml:"then_parent"`
+	ThenKey    string `yaml:"then_key"`
+	ThenRef    string `yaml:"then_ref"`
+	Const      *int   `yaml:"const"`
+	BlockTime  bool   `yaml:"block_time"`
+}
+
+// RequiredKey asserts that every governed table whose type is in AppliesTo resolves one of AnyOf
+// (as a native column, a transform target, or a fill), unless the table is listed in Exempt.
+type RequiredKey struct {
+	Name      string   `yaml:"name"`
+	AnyOf     []string `yaml:"any_of"`
+	AppliesTo []string `yaml:"applies_to"`
+	Exempt    []string `yaml:"exempt"`
+}
+
+// NullableExempt sanctions a specific column staying NULL-able despite a not_null canonical
+// (e.g. build_id on tables retrofitted before the auditability convention, which TigerData's
+// tiered-chunk restriction blocks from a SET NOT NULL).
+type NullableExempt struct {
+	Table  string `yaml:"table"`
+	Column string `yaml:"column"`
+	Reason string `yaml:"reason"`
+}
+
 // Register is the whole schema_master config.
 type Register struct {
-	IgnoreTables []string             `yaml:"ignore_tables"`
-	Canonical    map[string]Canonical `yaml:"canonical"`
-	Tables       map[string]TableMeta `yaml:"tables"`
-	Transforms   []Transform          `yaml:"transforms"`
-	Overrides    []Override           `yaml:"overrides"`
+	IgnoreTables   []string             `yaml:"ignore_tables"`
+	Canonical      map[string]Canonical `yaml:"canonical"`
+	Tables         map[string]TableMeta `yaml:"tables"`
+	Transforms     []Transform          `yaml:"transforms"`
+	Overrides      []Override           `yaml:"overrides"`
+	Fills          []Fill               `yaml:"fills"`
+	RequiredKeys   []RequiredKey        `yaml:"required_keys"`
+	NullableExempt []NullableExempt     `yaml:"nullable_exempt"`
+}
+
+// producesCanonical reports whether a transform for table renames or casts a column to canonicalCol.
+func (r *Register) producesCanonical(table, canonicalCol string) bool {
+	for _, t := range r.Transforms {
+		if t.Table == table && t.Canonical == canonicalCol {
+			return true
+		}
+	}
+	return false
+}
+
+// hasFill reports whether a fill declares canonicalCol for table.
+func (r *Register) hasFill(table, canonicalCol string) bool {
+	for _, f := range r.Fills {
+		if f.Table == table && f.Column == canonicalCol {
+			return true
+		}
+	}
+	return false
 }
 
 // Load parses the embedded schema_master.yaml.
@@ -75,6 +138,7 @@ type Column struct {
 	Table    string
 	Name     string
 	DataType string // raw information_schema.data_type
+	Nullable bool   // information_schema.is_nullable = 'YES'
 }
 
 // Verdict is the per-column classification.
@@ -221,6 +285,49 @@ func (r *Register) Check(live []Column) []Violation {
 	}
 	for _, o := range r.Overrides {
 		orphan(o.Table, o.Column, "orphan_override")
+	}
+
+	// 4. required keys: a governed table of an applicable type must resolve each requirement as a
+	// native column, a transform target, or a fill, unless exempt. Catches a table that lands
+	// without chain_id / protocol_id / an observation time and has no declared way to obtain it.
+	for t, meta := range r.Tables {
+		if ignore[t] || !liveTables[t] {
+			continue
+		}
+		for _, req := range r.RequiredKeys {
+			if !slices.Contains(req.AppliesTo, meta.Type) || slices.Contains(req.Exempt, t) {
+				continue
+			}
+			resolved := false
+			for _, col := range req.AnyOf {
+				if liveCols[[2]string{t, col}] || r.producesCanonical(t, col) || r.hasFill(t, col) {
+					resolved = true
+					break
+				}
+			}
+			if !resolved {
+				vs = append(vs, Violation{t, "", "missing_required_key",
+					fmt.Sprintf("%s: needs one of %v (native column, transform, or fill)", req.Name, req.AnyOf)})
+			}
+		}
+	}
+
+	// 5. nullability: a column whose canonical is not_null must not be NULL-able, unless sanctioned.
+	nullExempt := make(map[[2]string]bool, len(r.NullableExempt))
+	for _, e := range r.NullableExempt {
+		nullExempt[[2]string{e.Table, e.Column}] = true
+	}
+	for _, c := range live {
+		if ignore[c.Table] {
+			continue
+		}
+		if _, governed := r.Tables[c.Table]; !governed {
+			continue
+		}
+		if canon, known := r.Canonical[c.Name]; known && canon.NotNull && c.Nullable && !nullExempt[[2]string{c.Table, c.Name}] {
+			vs = append(vs, Violation{c.Table, c.Name, "unexpected_nullable",
+				fmt.Sprintf("%s is not_null in the register but the column is NULL-able", c.Name)})
+		}
 	}
 
 	sort.Slice(vs, func(i, j int) bool {

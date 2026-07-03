@@ -68,7 +68,7 @@ canonical:
   borrow_shares: {type: numeric, class: S}
   borrower_user_id: {type: int8, class: R}
   borrowing_enabled: {type: bool, class: S}
-  build_id: {type: int4, class: A}
+  build_id: {type: int4, class: A, not_null: true}
   built_at: {type: timestamptz, class: A, semantics: processing_time}
   chain_id: {type: int4, class: R}
   change: {type: numeric, class: S}
@@ -283,8 +283,8 @@ tables:
   cex_orderbook_snapshots: {}
   chain: {type: dimension, owner: infra}
   debt_token: {type: config, owner: lending}
-  fluid_vault: {}
-  fluid_vault_state: {}
+  fluid_vault: {type: config, owner: lending}
+  fluid_vault_state: {type: raw_pipeline, owner: lending}
   maple_ftl_loan: {}
   maple_ftl_loan_state: {}
   maple_loan: {type: config, owner: lending}
@@ -360,3 +360,94 @@ overrides:
     canonical: id
     accepted_type: int4
     reason: "Infra surrogate key paired with build_id (int4); deliberately int4, exempt from canonical id=int8. Not flagged by the conformance check."
+
+# FILLS: how a governed table obtains a canonical key it lacks natively (transform layer, guide 6c/6d).
+# The conformance check treats a required key as satisfied if it is a native column, produced by a
+# transform, OR produced by one of these fills. parent/key/ref = single-hop FK join to the config
+# parent; then_* = a second hop; const = a literal; block_time = the (chain_id, block_number,
+# block_version) block-time dimension. Every join below is verified 0-unresolved on the live schema.
+fills:
+  # chain_id inherited from the parent config/dimension row
+  - {table: morpho_market_state,      column: chain_id, parent: morpho_market,      key: morpho_market_id,      ref: id}
+  - {table: morpho_market_position,   column: chain_id, parent: morpho_market,      key: morpho_market_id,      ref: id}
+  - {table: morpho_vault_state,       column: chain_id, parent: morpho_vault,       key: morpho_vault_id,       ref: id}
+  - {table: morpho_vault_position,    column: chain_id, parent: morpho_vault,       key: morpho_vault_id,       ref: id}
+  - {table: maple_loan_state,         column: chain_id, parent: maple_loan,         key: maple_loan_id,         ref: id}
+  - {table: maple_loan_collateral,    column: chain_id, parent: maple_loan,         key: maple_loan_id,         ref: id}
+  - {table: maple_loan_meta,          column: chain_id, parent: maple_loan,         key: maple_loan_id,         ref: id}
+  - {table: maple_pool_state,         column: chain_id, parent: maple_pool,         key: maple_pool_id,         ref: id}
+  - {table: maple_pool_meta,          column: chain_id, parent: maple_pool,         key: maple_pool_id,         ref: id}
+  - {table: maple_sky_strategy_state, column: chain_id, parent: maple_sky_strategy, key: maple_sky_strategy_id, ref: id}
+  - {table: maple_sky_strategy_meta,  column: chain_id, parent: maple_sky_strategy, key: maple_sky_strategy_id, ref: id}
+  - {table: maple_ftl_loan_state,     column: chain_id, parent: maple_ftl_loan,     key: maple_ftl_loan_id,     ref: id}
+  - {table: fluid_vault_state,        column: chain_id, parent: fluid_vault,        key: fluid_vault_id,        ref: id}
+  - {table: onchain_token_price,      column: chain_id, parent: oracle,             key: oracle_id,             ref: id}
+  - {table: borrower,                 column: chain_id, parent: protocol,           key: protocol_id,           ref: id}
+  - {table: borrower_collateral,      column: chain_id, parent: protocol,           key: protocol_id,           ref: id}
+  - {table: sparklend_reserve_data,   column: chain_id, parent: protocol,           key: protocol_id,           ref: id}
+  - {table: prime_debt,               column: chain_id, const: 1}
+  # protocol_id inherited from the parent config row
+  - {table: morpho_market_state,      column: protocol_id, parent: morpho_market,   key: morpho_market_id,      ref: id}
+  - {table: morpho_market_position,   column: protocol_id, parent: morpho_market,   key: morpho_market_id,      ref: id}
+  - {table: morpho_vault_state,       column: protocol_id, parent: morpho_vault,    key: morpho_vault_id,       ref: id}
+  - {table: morpho_vault_position,    column: protocol_id, parent: morpho_vault,    key: morpho_vault_id,       ref: id}
+  - {table: maple_loan_state,         column: protocol_id, parent: maple_loan,      key: maple_loan_id,         ref: id}
+  - {table: maple_loan_collateral,    column: protocol_id, parent: maple_loan,      key: maple_loan_id,         ref: id}
+  - {table: maple_loan_meta,          column: protocol_id, parent: maple_loan,      key: maple_loan_id,         ref: id}
+  - {table: maple_pool_state,         column: protocol_id, parent: maple_pool,      key: maple_pool_id,         ref: id}
+  - {table: maple_pool_meta,          column: protocol_id, parent: maple_pool,      key: maple_pool_id,         ref: id}
+  - {table: maple_ftl_loan_state,     column: protocol_id, parent: maple_ftl_loan,  key: maple_ftl_loan_id,     ref: id}
+  - {table: fluid_vault_state,        column: protocol_id, parent: fluid_vault,     key: fluid_vault_id,        ref: id}
+  # protocol_id via two-hop (sky strategy -> pool -> protocol)
+  - {table: maple_sky_strategy_state, column: protocol_id, parent: maple_sky_strategy, key: maple_sky_strategy_id, ref: id, then_parent: maple_pool, then_key: maple_pool_id, then_ref: id}
+  - {table: maple_sky_strategy_meta,  column: protocol_id, parent: maple_sky_strategy, key: maple_sky_strategy_id, ref: id, then_parent: maple_pool, then_key: maple_pool_id, then_ref: id}
+  # block_timestamp filled from the block-time dimension keyed (chain_id, block_number, block_version) (6d)
+  - {table: borrower,                 column: block_timestamp, block_time: true}
+  - {table: borrower_collateral,      column: block_timestamp, block_time: true}
+  - {table: allocation_position,      column: block_timestamp, block_time: true}
+  - {table: protocol_event,           column: block_timestamp, block_time: true}
+  - {table: sparklend_reserve_data,   column: block_timestamp, block_time: true}
+
+# REQUIRED KEYS: a raw_pipeline (on-chain observation) table must resolve each requirement, either as
+# a native column, via a transform, or via a fill. any_of allows the canonical time to be
+# block_timestamp OR snapshot_time (API poll) OR event_time (CEX). exempt lists tables where the key
+# does not apply (off-chain / custody) or is a pending modeling decision (see notes).
+required_keys:
+  - name: chain
+    any_of: [chain_id]
+    applies_to: [raw_pipeline]
+    # off-chain CEX prices + Anchorage custody have no chain
+    exempt: [anchorage_operation, anchorage_package_snapshot, offchain_token_price]
+  - name: protocol
+    any_of: [protocol_id]
+    applies_to: [raw_pipeline]
+    # not protocol-scoped (prices, token supply, custody) or pending a modeling decision
+    # (prime_debt = Sky constant, allocation_position, maple_syrup_global_state, psm3_reserves)
+    exempt: [allocation_position, anchorage_operation, anchorage_package_snapshot, maple_syrup_global_state, offchain_token_price, onchain_token_price, prime_debt, psm3_reserves, token_total_supply]
+  - name: observation_time
+    any_of: [block_timestamp, snapshot_time, event_time]
+    applies_to: [raw_pipeline]
+    # Anchorage operations carry only processing time (created_at), no event/observation time
+    exempt: [anchorage_operation]
+
+# NULLABLE EXEMPTIONS: columns kept NULL-able despite a not_null canonical, sanctioned.
+# build_id was retrofitted onto pre-existing hypertables (ADR-0002, 2026-04-14). TigerData blocks the
+# validating full-table scan that SET NOT NULL needs on tiered chunks, so NOT NULL is enforced
+# implicitly via the PK/UNIQUE key + DEFAULT 0 + backfill; residual nullability is a harmless leftover.
+# Tables created after the convention (psm3_reserves, fluid/maple state, token_total_supply) declare
+# build_id NOT NULL inline and need no exemption.
+nullable_exempt:
+  - {table: allocation_position,        column: build_id}
+  - {table: anchorage_operation,        column: build_id}
+  - {table: anchorage_package_snapshot, column: build_id}
+  - {table: borrower,                   column: build_id}
+  - {table: borrower_collateral,        column: build_id}
+  - {table: morpho_market_position,     column: build_id}
+  - {table: morpho_market_state,        column: build_id}
+  - {table: morpho_vault_position,      column: build_id}
+  - {table: morpho_vault_state,         column: build_id}
+  - {table: offchain_token_price,       column: build_id}
+  - {table: onchain_token_price,        column: build_id}
+  - {table: prime_debt,                 column: build_id}
+  - {table: protocol_event,             column: build_id}
+  - {table: sparklend_reserve_data,     column: build_id}

@@ -24,7 +24,7 @@ func TestSchemaConformance(t *testing.T) {
 	}
 
 	rows, err := pool.Query(context.Background(), `
-		SELECT c.table_name, c.column_name, c.data_type
+		SELECT c.table_name, c.column_name, c.data_type, c.is_nullable
 		FROM information_schema.columns c
 		JOIN information_schema.tables t
 		  ON t.table_schema = c.table_schema AND t.table_name = c.table_name
@@ -37,9 +37,11 @@ func TestSchemaConformance(t *testing.T) {
 	var live []schemamaster.Column
 	for rows.Next() {
 		var col schemamaster.Column
-		if err := rows.Scan(&col.Table, &col.Name, &col.DataType); err != nil {
+		var isNullable string
+		if err := rows.Scan(&col.Table, &col.Name, &col.DataType, &isNullable); err != nil {
 			t.Fatalf("scan: %v", err)
 		}
+		col.Nullable = isNullable == "YES"
 		live = append(live, col)
 	}
 	if err := rows.Err(); err != nil {
