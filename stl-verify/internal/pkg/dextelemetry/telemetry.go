@@ -94,14 +94,21 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
 	}
 
-	return &Telemetry{
+	t := &Telemetry{
 		prefix:           prefix,
 		chainAttr:        attribute.String("chain", chainName),
 		blocksProcessed:  blocks,
 		errorsTotal:      errs,
 		blockDuration:    dur,
 		stateRowsWritten: stateRows,
-	}, nil
+	}
+	// The DEX Stalled/NoStateWritten alerts read these with rate()==0; seed so
+	// they are computable from process start (see telemetry.SeedCounter).
+	// errorsTotal is not seeded: its `operation` label set is open-ended.
+	ctx := context.Background()
+	telemetry.SeedStatusCounter(ctx, t.blocksProcessed, t.chainAttr)
+	telemetry.SeedCounter(ctx, t.stateRowsWritten, t.chainAttr)
+	return t, nil
 }
 
 // RecordBlockProcessed increments blocks_processed_total with
@@ -114,11 +121,7 @@ func (t *Telemetry) RecordBlockProcessed(ctx context.Context, dur time.Duration,
 	if t == nil {
 		return
 	}
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	attrs := metric.WithAttributes(attribute.String("status", status), t.chainAttr)
+	attrs := metric.WithAttributes(telemetry.StatusAttr(err), t.chainAttr)
 	t.blocksProcessed.Add(ctx, 1, attrs)
 	t.blockDuration.Record(ctx, dur.Seconds(), attrs)
 }

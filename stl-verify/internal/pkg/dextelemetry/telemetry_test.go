@@ -367,3 +367,63 @@ func readSingleSumCount(t *testing.T, rm *metricdata.ResourceMetrics, name strin
 	t.Fatalf("metric %s not found", name)
 	return 0
 }
+
+// Guards the startup seeds: VectorCurveIndexerStalled (blocks.processed,
+// rate(success)==0) and VectorCurveIndexerNoStateWritten (state.rows.written,
+// rate==0) must be computable from process start. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	if _, err := NewTelemetry("curve", 8453); err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	blockStatuses := map[string]int64{}
+	var stateRows *int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				switch m.Name {
+				case "curve.blocks.processed":
+					status, _ := dp.Attributes.Value("status")
+					blockStatuses[status.AsString()] = dp.Value
+				case "curve.state.rows.written":
+					v := dp.Value
+					stateRows = &v
+				}
+			}
+		}
+	}
+
+	for _, status := range []string{"success", "error"} {
+		v, ok := blockStatuses[status]
+		if !ok {
+			t.Errorf("curve.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("curve.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
+	if stateRows == nil {
+		t.Error("curve.state.rows.written missing its series before any write")
+	} else if *stateRows != 0 {
+		t.Errorf("curve.state.rows.written = %d, want 0", *stateRows)
+	}
+}
