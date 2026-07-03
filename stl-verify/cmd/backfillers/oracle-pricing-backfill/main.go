@@ -145,7 +145,7 @@ func run(args []string) error {
 	newMulticaller := func(oracleType entity.OracleType) (outbound.Multicaller, error) {
 		var mc outbound.Multicaller
 		var err error
-		if oracleType == entity.OracleTypeChronicle {
+		if oracleType.RequiresDirectCall() {
 			mc, err = multicall.NewDirectCaller(rpcClient)
 		} else {
 			mc, err = multicall.NewClient(ethClient, blockchain.Multicall3)
