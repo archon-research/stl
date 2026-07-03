@@ -210,6 +210,11 @@ func TestUniswapV3LiquidityEvent_Validate(t *testing.T) {
 		{"burn with recipient set", validBurn, func(e *UniswapV3LiquidityEvent) { e.Recipient = &e.Owner }, true},
 		{"collect with amount set", validCollect, func(e *UniswapV3LiquidityEvent) { e.Amount = big.NewInt(1) }, true},
 		{"collect missing recipient", validCollect, func(e *UniswapV3LiquidityEvent) { e.Recipient = nil }, true},
+		// collect recipient is the caller-supplied fee destination; v3-core has no
+		// zero-address guard on collect, so a zero recipient is a legal on-chain
+		// sink that must validate rather than poison-stalling the block (symmetric
+		// with the zero-swap-recipient / zero-mint-owner sinks above).
+		{"zero collect recipient is a legal sink", validCollect, func(e *UniswapV3LiquidityEvent) { e.Recipient = &common.Address{} }, false},
 		{"collect with sender set", validCollect, func(e *UniswapV3LiquidityEvent) { e.Sender = &e.Owner }, true},
 	}
 	for _, tc := range cases {
