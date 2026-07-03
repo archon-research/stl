@@ -93,6 +93,15 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		return nil, fmt.Errorf("creating phaseDuration histogram: %w", err)
 	}
 
+	// VectorMapleIndexerStalled (cycles) and VectorMaplePoolWritesZero
+	// (rows_written) read these with absence shapes; seed so they are
+	// computable from process start (see telemetry.SeedCounter). Only the
+	// pool-state table is seeded: it is the only table an alert reads, and it
+	// always writes when healthy (loan/FTL/strategy tables legitimately write 0).
+	ctx := context.Background()
+	telemetry.SeedStatusCounter(ctx, t.cyclesTotal, t.chainAttr)
+	telemetry.SeedCounter(ctx, t.rowsWritten, t.chainAttr, attribute.String("table", "maple_pool_state"))
+
 	return t, nil
 }
 

@@ -12,6 +12,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -368,5 +369,62 @@ func TestNewTelemetryWithProviders_InstrumentErrors(t *testing.T) {
 				t.Errorf("error = %q", err.Error())
 			}
 		})
+	}
+}
+
+// Guards the startup seeds: VectorMapleIndexerStalled (cycles, rate==0) and
+// VectorMaplePoolWritesZero (rows_written{table="maple_pool_state"}, increase==0)
+// must be computable from process start. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	if _, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp); err != nil {
+		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+
+	cycleStatuses := map[string]int64{}
+	var poolRows *int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				switch m.Name {
+				case "maple.sync.cycles.total":
+					status, _ := dp.Attributes.Value("status")
+					cycleStatuses[status.AsString()] = dp.Value
+				case "maple.sync.rows.written":
+					if table, _ := dp.Attributes.Value("table"); table.AsString() == "maple_pool_state" {
+						v := dp.Value
+						poolRows = &v
+					}
+				}
+			}
+		}
+	}
+
+	for _, status := range []string{"success", "error"} {
+		v, ok := cycleStatuses[status]
+		if !ok {
+			t.Errorf("maple.sync.cycles.total missing status=%q series before any cycle", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("maple.sync.cycles.total{status=%q} = %d, want 0", status, v)
+		}
+	}
+	if poolRows == nil {
+		t.Error("maple.sync.rows.written missing table=\"maple_pool_state\" series before any cycle")
+	} else if *poolRows != 0 {
+		t.Errorf("maple.sync.rows.written{table=\"maple_pool_state\"} = %d, want 0", *poolRows)
 	}
 }
