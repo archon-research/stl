@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/big"
 	"testing"
 	"time"
 
@@ -13,6 +14,61 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+// hugeUint256 is uint256 max — far beyond a float64's 2^53 lossless range, so a
+// bare-number JSON encoding would silently truncate it.
+func hugeUint256(t *testing.T) *big.Int {
+	t.Helper()
+	bi, ok := new(big.Int).SetString(
+		"115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
+	if !ok {
+		t.Fatal("parsing uint256 max")
+	}
+	return bi
+}
+
+// TestNewDecodedCapturedLog_StringifiesBigInts proves the shared decoded
+// capture-net helper encodes every *big.Int as a lossless JSON string — both at
+// the top level and nested inside a slice (Curve NG uint256[] arrays) — while
+// leaving non-big-int scalars in their natural JSON form (PR#519 review #5).
+func TestNewDecodedCapturedLog_StringifiesBigInts(t *testing.T) {
+	huge := hugeUint256(t)
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	txHash := common.HexToHash("0xabc")
+	eventData := map[string]any{
+		"amount":        huge,
+		"token_amounts": []*big.Int{huge, big.NewInt(200)},
+		"provider":      common.HexToAddress("0x2222222222222222222222222222222222222222"),
+	}
+
+	got, err := NewDecodedCapturedLog(addr, 7, txHash, "AddLiquidity", eventData)
+	if err != nil {
+		t.Fatalf("NewDecodedCapturedLog: %v", err)
+	}
+	if got.Address != addr || got.LogIndex != 7 || got.TxHash != txHash || got.EventName != "AddLiquidity" {
+		t.Errorf("metadata = {%s,%d,%s,%s}, want {%s,7,%s,AddLiquidity}",
+			got.Address, got.LogIndex, got.TxHash, got.EventName, addr, txHash)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(got.Payload, &payload); err != nil {
+		t.Fatalf("unmarshalling payload: %v", err)
+	}
+	if s, ok := payload["amount"].(string); !ok || s != huge.String() {
+		t.Errorf("amount = %v (%T), want string %q", payload["amount"], payload["amount"], huge.String())
+	}
+	arr, ok := payload["token_amounts"].([]any)
+	if !ok || len(arr) != 2 {
+		t.Fatalf("token_amounts = %v (%T), want 2-elem JSON array", payload["token_amounts"], payload["token_amounts"])
+	}
+	if s, ok := arr[0].(string); !ok || s != huge.String() {
+		t.Errorf("token_amounts[0] = %v (%T), want string %q", arr[0], arr[0], huge.String())
+	}
+	// Non-big-int scalars keep their natural JSON form (address as its String()).
+	if _, ok := payload["provider"].(string); !ok {
+		t.Errorf("provider = %v (%T), want its natural string form", payload["provider"], payload["provider"])
+	}
+}
 
 // runningTxManager runs fn with a nil pgx.Tx (the fake repos ignore it),
 // mirroring a committed transaction; a non-nil fn error propagates as a

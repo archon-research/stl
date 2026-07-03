@@ -387,6 +387,46 @@ func TestDecodeEvents_SwapNegativeAmount0(t *testing.T) {
 	}
 }
 
+// TestDecodeEvents_CapturedPayloadStringifiesBigInts proves the decoded
+// capture-net payload encodes a *big.Int above 2^53 as a lossless JSON string
+// (not a bare number), so a float-parsing consumer keeps full precision
+// (PR#519 review #5).
+func TestDecodeEvents_CapturedPayloadStringifiesBigInts(t *testing.T) {
+	a := poolABIForTest(t)
+	pool := testPool()
+	sender := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	recipient := common.HexToAddress("0x7777777777777777777777777777777777777777")
+	// liquidity is uint128; use a value far above float64's 2^53 lossless range.
+	huge, ok := new(big.Int).SetString("9007199254740993000000", 10)
+	if !ok {
+		t.Fatal("parsing large liquidity literal")
+	}
+	sqrtPriceX96, ok := new(big.Int).SetString("79228162514264337593543950336", 10)
+	if !ok {
+		t.Fatal("parsing sqrtPriceX96 literal")
+	}
+
+	log := buildLog(t, a, "Swap", pool.Address, "0x4",
+		[]common.Hash{addrTopic(sender), addrTopic(recipient)},
+		big.NewInt(1), big.NewInt(1), sqrtPriceX96, huge, big.NewInt(1),
+	)
+
+	got, err := DecodeEvents(receiptOf(log), pool, chainID, blockNumber, blockVer, blockTS)
+	if err != nil {
+		t.Fatalf("DecodeEvents: %v", err)
+	}
+	if len(got.Captured) != 1 {
+		t.Fatalf("Captured = %d, want 1", len(got.Captured))
+	}
+
+	payload := decodePayload(t, got.Captured[0].Payload)
+	if s, isStr := payload["liquidity"].(string); !isStr {
+		t.Errorf("liquidity encoded as %T (%v), want JSON string", payload["liquidity"], payload["liquidity"])
+	} else if s != huge.String() {
+		t.Errorf("liquidity = %q, want %q", s, huge.String())
+	}
+}
+
 func TestDecodeEvents_SwapPositiveAmounts(t *testing.T) {
 	a := poolABIForTest(t)
 	pool := testPool()

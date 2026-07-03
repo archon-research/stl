@@ -2,8 +2,11 @@ package dexconsumer
 
 import (
 	"context"
+	"encoding"
 	"encoding/json"
 	"fmt"
+	"math/big"
+	"reflect"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -45,6 +48,74 @@ func RawCapturedPayload(log shared.Log) (json.RawMessage, error) {
 		return nil, fmt.Errorf("marshalling captured log payload (log index %s): %w", log.LogIndex, err)
 	}
 	return payload, nil
+}
+
+// NewDecodedCapturedLog builds a CapturedLog for a log whose topic0 matched a
+// known event, mirroring its decoded named fields (eventData, a shared.DecodeLog
+// result) as the JSON payload. Every *big.Int — at the top level and nested
+// inside slices/arrays (e.g. Curve NG uint256[] token_amounts/fees) — is
+// stringified so uint256/int256 values keep full precision in JSONB rather than
+// degrading to a lossy float in any number-parsing consumer. addr is the log's
+// already-validated emitting contract; eventName must be non-empty.
+func NewDecodedCapturedLog(addr common.Address, logIndex uint, txHash common.Hash, eventName string, eventData map[string]any) (CapturedLog, error) {
+	payload, err := MarshalDecodedParams(eventData)
+	if err != nil {
+		return CapturedLog{}, fmt.Errorf("marshalling %s capture payload: %w", eventName, err)
+	}
+	return CapturedLog{
+		Address:   addr,
+		LogIndex:  logIndex,
+		TxHash:    txHash,
+		EventName: eventName,
+		Payload:   payload,
+	}, nil
+}
+
+// MarshalDecodedParams JSON-encodes a shared.DecodeLog result map, recursively
+// stringifying every *big.Int (addresses and other scalars marshal as their
+// natural JSON form) so uint256/int256/int24 values keep full precision in JSONB.
+// Exported for typed-entity params (e.g. UniswapV3PoolEvent.Params) that share
+// the capture net's lossless encoding.
+func MarshalDecodedParams(data map[string]any) (json.RawMessage, error) {
+	out := make(map[string]any, len(data))
+	for k, v := range data {
+		out[k] = stringifyBigInts(v)
+	}
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling event params: %w", err)
+	}
+	return payload, nil
+}
+
+// stringifyBigInts returns v with every *big.Int (v itself, or elements of a
+// slice/array however deeply nested) replaced by its decimal string; all other
+// values are returned unchanged. ABI-decoded event fields are scalars, addresses,
+// or fixed/dynamic uint256 arrays — no maps or structs — so slice/array recursion
+// covers every big.Int the decode path can produce.
+//
+// Values that carry their own JSON encoding (common.Address / common.Hash are
+// [N]byte arrays implementing encoding.TextMarshaler) are left intact so they
+// still marshal as their hex text, not decomposed into a byte slice.
+func stringifyBigInts(v any) any {
+	if bi, ok := v.(*big.Int); ok {
+		return bi.String()
+	}
+	if _, ok := v.(encoding.TextMarshaler); ok {
+		return v
+	}
+	if _, ok := v.(json.Marshaler); ok {
+		return v
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+		out := make([]any, rv.Len())
+		for i := range out {
+			out[i] = stringifyBigInts(rv.Index(i).Interface())
+		}
+		return out
+	}
+	return v
 }
 
 // NewRawCapturedLog builds a CapturedLog holding the raw {topics, data} of a log

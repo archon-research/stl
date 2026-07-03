@@ -151,10 +151,11 @@ func (h *CryptoswapHandler) DecodeEvents(
 		}
 
 		// Capture net: all known pool-address logs are also stored in Captured.
-		result.Captured, err = appendDecodedCaptured(result.Captured, addr, logIndex, txHash, ev.Name, eventData)
+		captured, err := dexconsumer.NewDecodedCapturedLog(addr, logIndex, txHash, ev.Name, eventData)
 		if err != nil {
 			return DecodedEvents{}, err
 		}
+		result.Captured = append(result.Captured, captured)
 	}
 
 	return result, nil

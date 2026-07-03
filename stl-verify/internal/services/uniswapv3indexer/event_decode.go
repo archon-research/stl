@@ -1,9 +1,7 @@
 package uniswapv3indexer
 
 import (
-	"encoding/json"
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 
@@ -96,7 +94,7 @@ func DecodeEvents(
 			return DecodedEvents{}, fmt.Errorf("extracting %s: %w", ev.Name, err)
 		}
 
-		captured, err := decodedCapturedLog(addr, logIndex, txHash, ev.Name, eventData)
+		captured, err := dexconsumer.NewDecodedCapturedLog(addr, logIndex, txHash, ev.Name, eventData)
 		if err != nil {
 			return DecodedEvents{}, err
 		}
@@ -321,7 +319,7 @@ func buildPoolEvent(
 		return nil, fmt.Errorf("unhandled pool event %s", abiEventName)
 	}
 
-	params, err := marshalEventParams(data)
+	params, err := dexconsumer.MarshalDecodedParams(data)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling %s params: %w", abiEventName, err)
 	}
@@ -340,39 +338,4 @@ func buildPoolEvent(
 		return nil, fmt.Errorf("validating %s: %w", abiEventName, err)
 	}
 	return ev, nil
-}
-
-// marshalEventParams JSON-encodes a DecodeLog result map, stringifying
-// *big.Int fields (addresses and other scalars marshal as their natural JSON
-// form) so uint256/int256/int24 values keep full precision in JSONB.
-func marshalEventParams(data map[string]any) (json.RawMessage, error) {
-	out := make(map[string]any, len(data))
-	for k, v := range data {
-		if bi, ok := v.(*big.Int); ok {
-			out[k] = bi.String()
-			continue
-		}
-		out[k] = v
-	}
-	payload, err := json.Marshal(out)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling event params: %w", err)
-	}
-	return payload, nil
-}
-
-// decodedCapturedLog builds a CapturedLog for a log whose topic0 matched a
-// known event, mirroring its decoded named fields as the payload.
-func decodedCapturedLog(addr common.Address, logIndex uint, txHash common.Hash, eventName string, eventData map[string]any) (dexconsumer.CapturedLog, error) {
-	payload, err := marshalEventParams(eventData)
-	if err != nil {
-		return dexconsumer.CapturedLog{}, fmt.Errorf("marshalling %s capture payload: %w", eventName, err)
-	}
-	return dexconsumer.CapturedLog{
-		Address:   addr,
-		LogIndex:  logIndex,
-		TxHash:    txHash,
-		EventName: eventName,
-		Payload:   payload,
-	}, nil
 }
