@@ -38,52 +38,36 @@ func happyEnv() map[string]string {
 	}
 }
 
-// TestRun_MissingQueueURL verifies that run returns a clear error when the
-// SQS queue URL is absent. No infra is touched: ParseConfig fails before any
-// connection is attempted.
-func TestRun_MissingQueueURL(t *testing.T) {
-	vars := happyEnv()
-	delete(vars, "AWS_SQS_QUEUE_URL")
-	envSet(t, vars)
-
-	err := run(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected error for missing queue URL, got nil")
+// TestRun_MissingRequiredEnv verifies run fails fast with a clear, var-naming
+// error when any single required env var is absent. No infra is touched:
+// ParseConfig fails before any connection is attempted. One row per required
+// var; the error must name the offending var so an operator can fix the deploy
+// config from the message alone.
+func TestRun_MissingRequiredEnv(t *testing.T) {
+	tests := []struct {
+		name    string
+		omit    string
+		wantSub string
+	}{
+		{name: "queue URL", omit: "AWS_SQS_QUEUE_URL", wantSub: "queue"},
+		{name: "database URL", omit: "DATABASE_URL", wantSub: "database"},
+		{name: "alchemy API key", omit: "ALCHEMY_API_KEY", wantSub: "ALCHEMY_API_KEY"},
+		{name: "DEX selector", omit: "DEX", wantSub: "DEX"},
 	}
-	if !strings.Contains(err.Error(), "queue") {
-		t.Errorf("expected error to mention 'queue', got: %v", err)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vars := happyEnv()
+			delete(vars, tt.omit)
+			envSet(t, vars)
 
-// TestRun_MissingDatabaseURL verifies that run returns a clear error when the
-// database URL is absent.
-func TestRun_MissingDatabaseURL(t *testing.T) {
-	vars := happyEnv()
-	delete(vars, "DATABASE_URL")
-	envSet(t, vars)
-
-	err := run(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected error for missing database URL, got nil")
-	}
-	if !strings.Contains(err.Error(), "database") {
-		t.Errorf("expected error to mention 'database', got: %v", err)
-	}
-}
-
-// TestRun_MissingAlchemyAPIKey verifies that run returns a clear error when
-// ALCHEMY_API_KEY is not set.
-func TestRun_MissingAlchemyAPIKey(t *testing.T) {
-	vars := happyEnv()
-	delete(vars, "ALCHEMY_API_KEY")
-	envSet(t, vars)
-
-	err := run(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected error for missing ALCHEMY_API_KEY, got nil")
-	}
-	if !strings.Contains(err.Error(), "ALCHEMY_API_KEY") {
-		t.Errorf("expected error to mention 'ALCHEMY_API_KEY', got: %v", err)
+			err := run(context.Background(), nil)
+			if err == nil {
+				t.Fatalf("expected error when %s is absent, got nil", tt.omit)
+			}
+			if !strings.Contains(err.Error(), tt.wantSub) {
+				t.Errorf("expected error to mention %q, got: %v", tt.wantSub, err)
+			}
+		})
 	}
 }
 
@@ -106,22 +90,6 @@ func TestRun_UnknownDex(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("expected error to list valid DEX %q, got: %v", want, err)
 		}
-	}
-}
-
-// TestRun_MissingDex verifies ParseConfig itself rejects an absent DEX
-// selector before the registry lookup ever runs.
-func TestRun_MissingDex(t *testing.T) {
-	vars := happyEnv()
-	delete(vars, "DEX")
-	envSet(t, vars)
-
-	err := run(context.Background(), nil)
-	if err == nil {
-		t.Fatal("expected error for missing DEX, got nil")
-	}
-	if !strings.Contains(err.Error(), "DEX") {
-		t.Errorf("expected error to mention 'DEX', got: %v", err)
 	}
 }
 
