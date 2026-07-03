@@ -3,17 +3,15 @@ package temporal
 import (
 	"context"
 	"testing"
+	"time"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// A freshly-created cronjob worker must export both terminal-status series of
-// cronjob.runs.total at 0 before it has run anything. Without this seed the
-// {status="success"} series only appears on the first success, so Prometheus
-// never observes the 0->1 transition and increase()/rate() report 0 successes
-// for up to a full window after a pod (re)start -- which trips
-// VectorCronjobAllRunsFailing spuriously on every rollover.
+// Guards the startup seed in seedStatusSeries: both terminal-status series must
+// exist at 0 before the first run, so increase() can see the first real
+// increment. See seedStatusSeries for the full rationale.
 func TestNewCronjobMetrics_SeedsBothStatusSeriesAtZero(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -33,6 +31,31 @@ func TestNewCronjobMetrics_SeedsBothStatusSeriesAtZero(t *testing.T) {
 		if v != 0 {
 			t.Errorf("cronjob.runs.total{status=%q} = %d, want 0", status, v)
 		}
+	}
+}
+
+// After seeding, the first successful run must land on the seeded success
+// series as 0->1 (not orphan it into a parallel series), which is the increment
+// increase() needs to see. This holds only while RecordRun and seedStatusSeries
+// derive the status label the same way (telemetry.StatusAttr); this guards that.
+func TestRecordRun_LandsSuccessOnSeededSeriesAsOne(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	m, err := newCronjobMetricsWithProvider(mp)
+	if err != nil {
+		t.Fatalf("newCronjobMetricsWithProvider() error: %v", err)
+	}
+
+	m.RecordRun(context.Background(), time.Second, nil)
+
+	got := collectCounterByStatus(t, reader, "cronjob.runs.total")
+	if got["success"] != 1 {
+		t.Errorf("cronjob.runs.total{status=\"success\"} = %d, want 1", got["success"])
+	}
+	if got["error"] != 0 {
+		t.Errorf("cronjob.runs.total{status=\"error\"} = %d, want 0", got["error"])
 	}
 }
 

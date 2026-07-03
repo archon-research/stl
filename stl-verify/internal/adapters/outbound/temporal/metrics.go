@@ -21,8 +21,9 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 // on service_name covers every cronjob, current and future, with no per-job
 // wiring.
 //
-// All methods are nil-receiver-safe so cronjobs run unchanged when telemetry
-// is not wired (unit tests, local runs without an OTLP endpoint).
+// RecordRun is nil-receiver-safe so cronjobs run unchanged when telemetry
+// is not wired (unit tests, local runs without an OTLP endpoint). seedStatusSeries
+// is construction-time only and always runs on a non-nil receiver.
 type cronjobMetrics struct {
 	runsTotal   metric.Int64Counter
 	runDuration metric.Float64Histogram
@@ -67,7 +68,7 @@ var errSeed = errors.New("seed")
 // the first success, so Prometheus never observes the 0->1 transition and
 // increase()/rate() report 0 successes for up to a full window after a pod
 // (re)start. That trips VectorCronjobAllRunsFailing on every rollover (see
-// alerts/vector-cronjobs.yaml). Seeding to 0 makes the first real increment
+// stl/alerts/vector-cronjobs.yaml). Seeding to 0 makes the first real increment
 // visible to increase().
 func (m *cronjobMetrics) seedStatusSeries() {
 	ctx := context.Background()
