@@ -188,3 +188,22 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1hostname
         value: python-api-staging
+  # Staging-only CPU headroom test: the kraken and coinbase order book pods peg
+  # the base 200m limit (CPU-throttled at ~99% of limit) while okx sits at ~7m.
+  # Bump their limit here to confirm the workload is genuinely CPU-bound before
+  # optimizing the per-message hot paths (kraken per-frame sorts, coinbase
+  # full-book clone). Base and prod stay at 200m.
+  - target:
+      kind: Deployment
+      name: cex-orderbook-indexer-kraken
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "500m"
+  - target:
+      kind: Deployment
+      name: cex-orderbook-indexer-coinbase
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "500m"
