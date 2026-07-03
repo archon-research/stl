@@ -283,7 +283,7 @@ func run(ctx context.Context, args []string) error {
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
 	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault")
 	if err != nil {
-		return err
+		return fmt.Errorf("bootstrapping SC call archiving: %w", err)
 	}
 	defer archiveDrain()
 	mc = archiveWrap(mc)

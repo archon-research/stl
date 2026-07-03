@@ -59,6 +59,9 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("S3_BUCKET", testBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
@@ -108,6 +111,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("S3_BUCKET", testBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("ARCHIVE_SC_CALLS", "false")
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
