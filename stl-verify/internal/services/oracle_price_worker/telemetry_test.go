@@ -166,6 +166,45 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
+// Guards the startup seed: VectorOracleIndexerStalled reads
+// oracle_blocks_processed_total with rate()==0 and must be computable from
+// process start (a worker dead before its first block emits no series at
+// all otherwise). See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsBlockStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	got := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "oracle.blocks.processed" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("oracle.blocks.processed is %T, want metricdata.Sum[int64]", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				status, _ := dp.Attributes.Value("status")
+				got[status.AsString()] = dp.Value
+			}
+		}
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("oracle.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("oracle.blocks.processed{status=%q} = %d, want 0", status, v)
+		}
+	}
+}
+
 func TestTelemetry_NilSafe(t *testing.T) {
 	var tel *Telemetry // nil pointer
 	ctx := context.Background()

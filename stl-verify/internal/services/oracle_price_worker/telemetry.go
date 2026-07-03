@@ -111,6 +111,10 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
 	}
 
+	// VectorOracleIndexerStalled reads blocks.processed with rate()==0; seed so
+	// it is computable from process start (see telemetry.SeedCounter).
+	telemetry.SeedStatusCounter(context.Background(), t.blocksProcessed, t.chainAttr)
+
 	return t, nil
 }
 
