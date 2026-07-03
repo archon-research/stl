@@ -37,6 +37,7 @@ _INACTIVE_LOAN = bytes.fromhex("3333333333333333333333333333333333333333")
 _BORROWER = bytes.fromhex("4444444444444444444444444444444444444444")
 _PENDING_LOAN = bytes.fromhex("5555555555555555555555555555555555555555")
 _STALE_LOAN = bytes.fromhex("6666666666666666666666666666666666666666")
+_REPAID_LOAN = bytes.fromhex("7777777777777777777777777777777777777777")
 _SYNCED = dt.datetime(2026, 6, 18, 12, 0, tzinfo=dt.timezone.utc)
 _SYNCED_OLD = dt.datetime(2026, 6, 17, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -152,6 +153,41 @@ async def _seed_data(db_url: str) -> None:
             decimals=8,
             value_usd=7000000000000,
         )
+
+        # Repaid loan whose WHOLE latest snapshot (state + collateral) is
+        # self-consistent but from an older cycle than the pool's current cycle
+        # (_SYNCED). The indexer only queries Active loans and never emits
+        # tombstones, so a repaid loan's last Active rows linger in
+        # maple_loan_current forever. The query is bounded to the pool's current
+        # cycle, so this $9,000,000 must NOT count as live backing (B1) — unlike
+        # _STALE_LOAN (fresh state, stale collateral), here even the latest state
+        # is from the old cycle.
+        repaid = await insert_maple_loan(
+            conn,
+            protocol_id=protocol_id,
+            pool_id=pool_id,
+            borrower_user_id=borrower_id,
+            address=_REPAID_LOAN,
+            synced_at=_SYNCED_OLD,
+            loan_meta_type=None,
+        )
+        await insert_maple_loan_state(
+            conn,
+            loan_id=repaid,
+            synced_at=_SYNCED_OLD,
+            state="Active",
+            principal_owed=90000000000,
+            acm_ratio=1656007,
+        )
+        await insert_maple_loan_collateral(
+            conn,
+            loan_id=repaid,
+            synced_at=_SYNCED_OLD,
+            symbol="REPAIDBTC",
+            amount=100000000,
+            decimals=8,
+            value_usd=9000000000000,
+        )
     finally:
         await conn.close()
 
@@ -210,6 +246,15 @@ async def test_null_valued_collateral_is_excluded(repository: MapleBackedBreakdo
 async def test_stale_collateral_snapshot_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
     result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
     assert "STALEBTC" not in {i.symbol for i in result.items}
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_loan_absent_from_current_cycle_is_excluded(repository: MapleBackedBreakdownRepository) -> None:
+    # A repaid loan lingers in maple_loan_current (no tombstones) with a stale
+    # but self-consistent Active snapshot; the current-cycle bound must drop it so
+    # it never counts as live backing forever (B1).
+    result = await repository.get_backed_breakdown(SYRUP_USDC, chain_id=1)
+    assert "REPAIDBTC" not in {i.symbol for i in result.items}
 
 
 @pytest.mark.asyncio(loop_scope="module")

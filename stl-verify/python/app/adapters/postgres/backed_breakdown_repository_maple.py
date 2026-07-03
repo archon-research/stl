@@ -24,12 +24,29 @@ SELECT id FROM maple_pool_current WHERE chain_id = :chain_id AND address = :addr
 # Active loan state so we never mix a stale collateral row with a fresh principal. The
 # Maple indexer writes loan_state and loan_collateral together per cron cycle/build, so
 # their processing_version stay in lockstep.
+#
+# loan_latest is ALSO bounded to the pool's current cycle (pool_cycle below). This is
+# load-bearing: the indexer only queries Active loans and never emits tombstones
+# (is_present stays TRUE — maple_satellite.go "no deletion-detection path exists"), so a
+# repaid/closed loan simply stops receiving new rows while its last Active state +
+# collateral linger in maple_loan_current forever. Without the cycle bound those stale
+# rows would inflate backing indefinitely as loans repay. Anchoring on the pool cycle
+# drops any loan absent from the newest cycle.
 _MAPLE_BACKED_BREAKDOWN_SQL = """
 WITH pool AS (
     SELECT mp.id AS pool_id, ut.symbol AS underlying_symbol, ut.decimals AS underlying_decimals
     FROM maple_pool_current mp
     JOIN token ut ON ut.id = mp.asset_token_id
     WHERE mp.chain_id = :chain_id AND mp.address = :addr AND mp.is_syrup
+),
+pool_cycle AS (
+    -- The pool's current sync cycle: the newest synced_at written for this pool.
+    -- maple_pool_state gets a fresh row every cycle for every syrup pool (independent
+    -- of loan activity), so its max synced_at is the authoritative cycle anchor even
+    -- when every loan repaid in one cycle. A loan-derived anchor would fail that case.
+    SELECT max(synced_at) AS synced_at
+    FROM maple_pool_state
+    WHERE maple_pool_id = (SELECT pool_id FROM pool)
 ),
 loan_latest AS (
     SELECT l.id AS loan_id, ls.synced_at, ls.processing_version
@@ -44,6 +61,7 @@ loan_latest AS (
     WHERE l.maple_pool_id = (SELECT pool_id FROM pool)
       AND NOT l.is_internal
       AND ls.state = 'Active'
+      AND ls.synced_at = (SELECT synced_at FROM pool_cycle)
 ),
 coll AS (
     SELECT c.asset_symbol AS symbol,
