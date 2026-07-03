@@ -364,6 +364,11 @@ export function RiskBreakdownTab({
     // rather than a misleading 0%/0x.
     let thresholdCount = 0;
     let bonusCount = 0;
+    // USD weight of only the rows that carry each param. Dividing by totalUsd
+    // instead would dilute the average toward 0 on a mixed dataset (rows without
+    // the param would count in the denominator but not the numerator).
+    let thresholdUsd = 0;
+    let bonusUsd = 0;
     let largestItem = breakdown.items[0] ?? null;
     let largestItemUsd = largestItem
       ? (parseNumericValue(largestItem.amount_usd) ?? 0)
@@ -383,11 +388,13 @@ export function RiskBreakdownTab({
 
       if (liquidationThreshold !== null) {
         weightedThreshold += liquidationThreshold * amountUsd;
+        thresholdUsd += amountUsd;
         thresholdCount += 1;
       }
 
       if (liquidationBonus !== null) {
         weightedBonus += liquidationBonus * amountUsd;
+        bonusUsd += amountUsd;
         bonusCount += 1;
       }
     }
@@ -396,10 +403,10 @@ export function RiskBreakdownTab({
       assetCount: breakdown.items.length,
       largestItem,
       weightedBonus:
-        totalUsd > 0 && bonusCount > 0 ? weightedBonus / totalUsd : null,
+        bonusUsd > 0 && bonusCount > 0 ? weightedBonus / bonusUsd : null,
       weightedThreshold:
-        totalUsd > 0 && thresholdCount > 0
-          ? weightedThreshold / totalUsd
+        thresholdUsd > 0 && thresholdCount > 0
+          ? weightedThreshold / thresholdUsd
           : null,
     };
   }, [breakdown, totalUsd]);
