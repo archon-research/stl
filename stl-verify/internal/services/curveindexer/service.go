@@ -145,7 +145,7 @@ type blockAccumulators struct {
 	liquidity []LiquidityRecord
 	paramEvts []ParameterEventRecord
 	lpEvts    []LpTokenEventRecord
-	captured  []CapturedEvent
+	captured  []dexconsumer.CapturedLog
 	touched   map[int64]RegisteredPool
 }
 
@@ -340,20 +340,7 @@ func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots snapsho
 		return outbound.BlockWrites{}, nil, err
 	}
 
-	capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(acc.captured))
-	for _, cap := range acc.captured {
-		capturedIns = append(capturedIns, dexconsumer.ProtocolEventInput{
-			ContractAddress: cap.Address,
-			ChainID:         c.chainID,
-			BlockNumber:     bn,
-			BlockVersion:    ver,
-			BlockTimestamp:  ts,
-			TxHash:          cap.TxHash,
-			LogIndex:        cap.LogIndex,
-			EventName:       cap.EventName,
-			Payload:         cap.Payload,
-		})
-	}
+	capturedIns := dexconsumer.ToProtocolEventInputs(acc.captured, c.chainID, bn, ver, ts)
 
 	writes := outbound.BlockWrites{
 		Swaps:             swapIns,
@@ -369,23 +356,16 @@ func (c *CurveService) buildBlockWrites(acc blockAccumulators, snapshots snapsho
 }
 
 // persistBlock saves the block writes and captured events in a single DB
-// transaction. SaveBlock and SaveBatch share one pgx.Tx so both commit or both
-// roll back together. Returns the number of state rows actually inserted (may be
-// zero on an idempotent ON CONFLICT DO NOTHING replay).
+// transaction via dexconsumer.PersistBlock. Returns the number of state rows
+// actually inserted (may be zero on an idempotent ON CONFLICT DO NOTHING replay).
 func (c *CurveService) persistBlock(ctx context.Context, writes outbound.BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
-	var stateRows int64
-	err := c.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-		var txErr error
-		stateRows, txErr = c.repo.SaveBlock(ctx, tx, writes)
-		if txErr != nil {
-			return fmt.Errorf("persisting curve block %d: %w", bn, txErr)
+	return dexconsumer.PersistBlock(ctx, c.txMgr, c.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+		rows, err := c.repo.SaveBlock(ctx, tx, writes)
+		if err != nil {
+			return 0, fmt.Errorf("persisting curve block %d: %w", bn, err)
 		}
-		if txErr := c.eventWriter.SaveBatch(ctx, tx, capturedIns); txErr != nil {
-			return fmt.Errorf("persisting captured events block %d: %w", bn, txErr)
-		}
-		return nil
-	})
-	return stateRows, err
+		return rows, nil
+	}, capturedIns, bn)
 }
 
 // indexPoolsByWatchedAddress builds the address -> pool index. Each pool is

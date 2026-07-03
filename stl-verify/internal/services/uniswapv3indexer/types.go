@@ -1,11 +1,10 @@
 package uniswapv3indexer
 
 import (
-	"encoding/json"
-
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 )
 
 // RegisteredPool is the static, registry-sourced identity of a watched
@@ -29,17 +28,6 @@ type RegisteredPool struct {
 func (p RegisteredPool) PoolID() int64         { return p.ID }
 func (p RegisteredPool) DeployBlockNum() int64 { return p.DeployBlock }
 
-// CapturedLog mirrors every log emitted by a watched pool, decoded when its
-// topic0 matches a known event and raw ({topics, data}) otherwise, so
-// protocol_event stays a complete mirror of the on-chain log surface.
-type CapturedLog struct {
-	Address   common.Address
-	LogIndex  uint
-	TxHash    common.Hash
-	EventName string // decoded event name, or topic0 hex (or a sentinel) when unrecognized — never empty
-	Payload   json.RawMessage
-}
-
 // DecodedEvents holds the typed entities and the capture-net mirror produced
 // by decoding a single transaction receipt for one pool. Captured is always
 // a superset of Swaps, LiquidityEvents, and PoolEvents.
@@ -47,5 +35,5 @@ type DecodedEvents struct {
 	Swaps           []*entity.UniswapV3Swap
 	LiquidityEvents []*entity.UniswapV3LiquidityEvent
 	PoolEvents      []*entity.UniswapV3PoolEvent
-	Captured        []CapturedLog
+	Captured        []dexconsumer.CapturedLog
 }

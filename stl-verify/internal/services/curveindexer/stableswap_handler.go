@@ -11,6 +11,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -51,8 +52,8 @@ func (h *StableswapHandler) Warm(nCoins int) { h.classicSigsFor(nCoins) }
 // DecodeEvents extracts typed records from a single transaction receipt.
 //
 // Capture-net design: every log on the pool address is also appended as a
-// CapturedEvent so protocol_event is a complete mirror of the on-chain log
-// surface. Typed events carry a JSON payload of their decoded fields; unknown
+// dexconsumer.CapturedLog so protocol_event is a complete mirror of the on-chain
+// log surface. Typed events carry a JSON payload of their decoded fields; unknown
 // topic0 events carry a JSON payload of {topics, data}. This means Captured
 // is always a superset of Swaps and Liquidity.
 func (h *StableswapHandler) DecodeEvents(
@@ -82,7 +83,7 @@ func (h *StableswapHandler) DecodeEvents(
 		txHash := common.HexToHash(log.TransactionHash)
 
 		if len(log.Topics) == 0 {
-			result.Captured, err = appendRawCaptured(result.Captured, addr, logIndex, txHash, "", log)
+			result.Captured, err = appendRawCaptured(result.Captured, addr, logIndex, txHash, dexconsumer.AnonymousLogEventName, log)
 			if err != nil {
 				return DecodedEvents{}, err
 			}

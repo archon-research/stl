@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -309,6 +310,52 @@ func TestStableswapHandler_UnknownTopicCaptured(t *testing.T) {
 	}
 	if len(got.Captured) != 1 {
 		t.Errorf("expected 1 captured event, got %d", len(got.Captured))
+	}
+}
+
+// TestStableswapHandler_ZeroTopicsLogUsesNonEmptySentinel guards the sanctioned
+// standardization onto dexconsumer.AnonymousLogEventName: a zero-topic log's
+// capture entry must carry a non-empty event_name, since entity.ProtocolEvent
+// rejects an empty one (an empty name would abort SaveBatch and poison-stall the
+// block on redelivery).
+func TestStableswapHandler_ZeroTopicsLogUsesNonEmptySentinel(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:      1,
+		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  2,
+	}
+
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          nil,
+		Data:            "0x0a0b0c",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Captured) != 1 {
+		t.Fatalf("expected 1 captured event, got %d", len(got.Captured))
+	}
+	if got.Captured[0].EventName == "" {
+		t.Fatal("zero-topics log captured with empty event_name; want non-empty sentinel")
+	}
+	if got.Captured[0].EventName != dexconsumer.AnonymousLogEventName {
+		t.Errorf("event_name = %q, want %q", got.Captured[0].EventName, dexconsumer.AnonymousLogEventName)
 	}
 }
 

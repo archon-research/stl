@@ -370,14 +370,6 @@ func mintLog(t *testing.T, pool RegisteredPool, logIndexHex string, tickLower, t
 // third, distinct decoded-event kind (a low-frequency PoolEvent, neither Swap
 // nor a liquidity event) so the mixed-events test exercises all three
 // DecodedEvents buckets routing into BlockWrites and the capture net.
-//
-// A genuinely-unknown-topic0 log is deliberately not used here: uniswapv3indexer's
-// rawCapturedLog always passes EventName="" for an unrecognized topic0 (unlike
-// curve, which forwards topic0's hex), which fails entity.ProtocolEvent's
-// non-empty EventName invariant the moment it reaches the event writer. That
-// gap predates this task (see event_decode.go and
-// TestDecodeEvents_UnknownTopic0IsCapturedRaw) and is out of scope here; see
-// the B9 report's nice-to-haves.
 func poolEventLog(t *testing.T, pool RegisteredPool, logIndexHex string) shared.Log {
 	t.Helper()
 	a := poolABIForTest(t)

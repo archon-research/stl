@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -105,24 +106,12 @@ type LiquidityRecord struct {
 	TokenSupply  *big.Int   // nil when absent
 }
 
-type CapturedEvent struct { // -> protocol_event capture net
-	// Address is the log's emitting contract: the pool itself for most logs, but
-	// the separate LP-token contract for pre-NG pools' Transfer/Approval. A captured
-	// event carries only its emitting address, not pool identity; protocol_event
-	// records this address verbatim.
-	Address   common.Address
-	LogIndex  uint
-	TxHash    common.Hash
-	EventName string
-	Payload   json.RawMessage
-}
-
 type DecodedEvents struct {
 	Swaps           []SwapRecord
 	Liquidity       []LiquidityRecord
 	ParameterEvents []ParameterEventRecord
 	LpTokenEvents   []LpTokenEventRecord
-	Captured        []CapturedEvent
+	Captured        []dexconsumer.CapturedLog
 }
 
 type PoolClassHandler interface {

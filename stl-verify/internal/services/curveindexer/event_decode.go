@@ -6,25 +6,26 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// appendDecodedCaptured json.Marshals eventData and appends a CapturedEvent for a
+// appendDecodedCaptured json.Marshals eventData and appends a CapturedLog for a
 // successfully ABI-decoded log. Used by both the stableswap and cryptoswap handlers
 // for their capture-net tail so the duplication lives in one place.
 func appendDecodedCaptured(
-	captured []CapturedEvent,
+	captured []dexconsumer.CapturedLog,
 	addr common.Address,
 	logIndex uint,
 	txHash common.Hash,
 	eventName string,
 	eventData any,
-) ([]CapturedEvent, error) {
+) ([]dexconsumer.CapturedLog, error) {
 	payload, err := json.Marshal(eventData)
 	if err != nil {
 		return nil, fmt.Errorf("marshalling %s capture payload: %w", eventName, err)
 	}
-	return append(captured, CapturedEvent{
+	return append(captured, dexconsumer.CapturedLog{
 		Address:   addr,
 		LogIndex:  logIndex,
 		TxHash:    txHash,
@@ -33,31 +34,26 @@ func appendDecodedCaptured(
 	}), nil
 }
 
-// appendRawCaptured appends a capture-net entry holding the raw {topics, data} of
-// a log. Used for logs that are not ABI-decoded into a typed payload (unknown
-// topic0, zero-topic logs, and word-sliced fixed-array liquidity events), so
-// protocol_event stays a complete mirror of the on-chain log surface. eventName
-// is the log's topic0 hex (or "" for a zero-topic log); addr is the log's
-// already-validated emitting contract (the pool, or the separate LP-token contract).
+// appendRawCaptured appends a raw {topics, data} capture-net entry (via
+// dexconsumer.NewRawCapturedLog) for a log not ABI-decoded into a typed payload
+// (unknown topic0, zero-topic logs, and word-sliced fixed-array liquidity
+// events), so protocol_event stays a complete mirror of the on-chain log
+// surface. eventName is the log's topic0 hex, or dexconsumer.AnonymousLogEventName
+// for a zero-topic log; addr is the log's already-validated emitting contract
+// (the pool, or the separate LP-token contract).
 func appendRawCaptured(
-	captured []CapturedEvent,
+	captured []dexconsumer.CapturedLog,
 	addr common.Address,
 	logIndex uint,
 	txHash common.Hash,
 	eventName string,
 	log shared.Log,
-) ([]CapturedEvent, error) {
-	payload, err := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+) ([]dexconsumer.CapturedLog, error) {
+	entry, err := dexconsumer.NewRawCapturedLog(addr, logIndex, txHash, eventName, log)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, err)
+		return nil, err
 	}
-	return append(captured, CapturedEvent{
-		Address:   addr,
-		LogIndex:  logIndex,
-		TxHash:    txHash,
-		EventName: eventName,
-		Payload:   payload,
-	}), nil
+	return append(captured, entry), nil
 }
 
 // ERC-20 LP-token event names as persisted on curve_lp_token_event.event_name.

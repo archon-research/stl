@@ -180,7 +180,7 @@ type blockAccumulators struct {
 	swaps      []*entity.UniswapV3Swap
 	liquidity  []*entity.UniswapV3LiquidityEvent
 	poolEvts   []*entity.UniswapV3PoolEvent
-	captured   []CapturedLog
+	captured   []dexconsumer.CapturedLog
 	touchedIDs map[int64]bool
 	liqByPool  map[int64][]*entity.UniswapV3LiquidityEvent
 }
@@ -390,41 +390,21 @@ func (s *UniswapV3Service) buildBlockWrites(acc blockAccumulators, states []*ent
 		PoolEvents:      acc.poolEvts,
 	}
 
-	capturedIns := make([]dexconsumer.ProtocolEventInput, 0, len(acc.captured))
-	for _, c := range acc.captured {
-		capturedIns = append(capturedIns, dexconsumer.ProtocolEventInput{
-			ContractAddress: c.Address,
-			ChainID:         s.chainID,
-			BlockNumber:     bn,
-			BlockVersion:    ver,
-			BlockTimestamp:  ts,
-			TxHash:          c.TxHash,
-			LogIndex:        c.LogIndex,
-			EventName:       c.EventName,
-			Payload:         c.Payload,
-		})
-	}
+	capturedIns := dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, bn, ver, ts)
 	return writes, capturedIns
 }
 
 // persistBlock saves the block writes and captured events in a single DB
-// transaction. SaveBlock and SaveBatch share one pgx.Tx so both commit or both
-// roll back together. Returns the number of state rows actually inserted (may
-// be zero on an idempotent ON CONFLICT DO NOTHING replay).
+// transaction via dexconsumer.PersistBlock. Returns the number of state rows
+// actually inserted (may be zero on an idempotent ON CONFLICT DO NOTHING replay).
 func (s *UniswapV3Service) persistBlock(ctx context.Context, writes outbound.UniswapV3BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
-	var stateRows int64
-	err := s.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-		var txErr error
-		stateRows, txErr = s.repo.SaveBlock(ctx, tx, writes)
-		if txErr != nil {
-			return fmt.Errorf("persisting uniswap v3 block %d: %w", bn, txErr)
+	return dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
+		rows, err := s.repo.SaveBlock(ctx, tx, writes)
+		if err != nil {
+			return 0, fmt.Errorf("persisting uniswap v3 block %d: %w", bn, err)
 		}
-		if txErr := s.eventWriter.SaveBatch(ctx, tx, capturedIns); txErr != nil {
-			return fmt.Errorf("persisting captured events block %d: %w", bn, txErr)
-		}
-		return nil
-	})
-	return stateRows, err
+		return rows, nil
+	}, capturedIns, bn)
 }
 
 // markSnapshotted records the tracker and baselineSeen bookkeeping AFTER a
