@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -130,25 +131,13 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 func TestNewTelemetry_SeedsBlockStatusSeriesAtZero(t *testing.T) {
 	_, reader := newRecordingTelemetry(t)
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
+	dps := testutil.CollectSumDataPoints(t, reader, "morpho.blocks.processed")
 	got := map[string]int64{}
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			if m.Name != "morpho.blocks.processed" {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("morpho.blocks.processed is %T, want metricdata.Sum[int64]", m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				status, _ := dp.Attributes.Value("status")
-				got[status.AsString()] = dp.Value
-			}
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "mainnet" {
+			t.Errorf("morpho.blocks.processed chain attr = %q, want %q", chain, "mainnet")
 		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
 	}
 	for _, status := range []string{"success", "error"} {
 		v, ok := got[status]

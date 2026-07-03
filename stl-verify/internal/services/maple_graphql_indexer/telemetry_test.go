@@ -384,34 +384,14 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collecting metrics: %v", err)
-	}
-
+	cycleDPs := testutil.CollectSumDataPoints(t, reader, "maple.sync.cycles.total")
 	cycleStatuses := map[string]int64{}
-	var poolRows *int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				continue
-			}
-			for _, dp := range sum.DataPoints {
-				switch m.Name {
-				case "maple.sync.cycles.total":
-					status, _ := dp.Attributes.Value("status")
-					cycleStatuses[status.AsString()] = dp.Value
-				case "maple.sync.rows.written":
-					if table, _ := dp.Attributes.Value("table"); table.AsString() == "maple_pool_state" {
-						v := dp.Value
-						poolRows = &v
-					}
-				}
-			}
+	for _, dp := range cycleDPs {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "ethereum" {
+			t.Errorf("maple.sync.cycles.total chain attr = %q, want %q", chain, "ethereum")
 		}
+		cycleStatuses[testutil.AttrValue(dp, "status")] = dp.Value
 	}
-
 	for _, status := range []string{"success", "error"} {
 		v, ok := cycleStatuses[status]
 		if !ok {
@@ -422,9 +402,22 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 			t.Errorf("maple.sync.cycles.total{status=%q} = %d, want 0", status, v)
 		}
 	}
+
+	var poolRows *metricdata.DataPoint[int64]
+	for _, dp := range testutil.CollectSumDataPoints(t, reader, "maple.sync.rows.written") {
+		if testutil.AttrValue(dp, "table") == maplePoolStateTable {
+			dp := dp
+			poolRows = &dp
+		}
+	}
 	if poolRows == nil {
-		t.Error("maple.sync.rows.written missing table=\"maple_pool_state\" series before any cycle")
-	} else if *poolRows != 0 {
-		t.Errorf("maple.sync.rows.written{table=\"maple_pool_state\"} = %d, want 0", *poolRows)
+		t.Errorf("maple.sync.rows.written missing table=%q series before any cycle", maplePoolStateTable)
+		return
+	}
+	if chain := testutil.AttrValue(*poolRows, "chain"); chain != "ethereum" {
+		t.Errorf("maple.sync.rows.written{table=%q} chain attr = %q, want %q", maplePoolStateTable, chain, "ethereum")
+	}
+	if poolRows.Value != 0 {
+		t.Errorf("maple.sync.rows.written{table=%q} = %d, want 0", maplePoolStateTable, poolRows.Value)
 	}
 }

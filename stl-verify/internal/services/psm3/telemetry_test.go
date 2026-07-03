@@ -10,6 +10,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -194,15 +195,13 @@ func exerciseAll(t *testing.T, tel *Telemetry) {
 func TestNewTelemetry_SeedsSweepStatusSeriesAtZero(t *testing.T) {
 	_, reader := newRecordingTelemetry(t)
 
-	m := collectMetric(t, reader, "psm3.sweeps.total")
-	sum, ok := m.Data.(metricdata.Sum[int64])
-	if !ok {
-		t.Fatalf("psm3.sweeps.total is %T, want metricdata.Sum[int64]", m.Data)
-	}
+	dps := testutil.CollectSumDataPoints(t, reader, "psm3.sweeps.total")
 	got := map[string]int64{}
-	for _, dp := range sum.DataPoints {
-		status, _ := dp.Attributes.Value("status")
-		got[status.AsString()] = dp.Value
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "base" {
+			t.Errorf("psm3.sweeps.total chain attr = %q, want %q", chain, "base")
+		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
 	}
 	for _, status := range []string{"success", "error"} {
 		v, ok := got[status]

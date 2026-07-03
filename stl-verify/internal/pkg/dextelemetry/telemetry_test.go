@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // Review-11 / A2: every datapoint must carry a `chain="<name>"` attribute (the
@@ -385,32 +386,14 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 		t.Fatalf("NewTelemetry: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("Collect: %v", err)
-	}
-
+	blockDPs := testutil.CollectSumDataPoints(t, reader, "curve.blocks.processed")
 	blockStatuses := map[string]int64{}
-	var stateRows *int64
-	for _, scope := range rm.ScopeMetrics {
-		for _, m := range scope.Metrics {
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				continue
-			}
-			for _, dp := range sum.DataPoints {
-				switch m.Name {
-				case "curve.blocks.processed":
-					status, _ := dp.Attributes.Value("status")
-					blockStatuses[status.AsString()] = dp.Value
-				case "curve.state.rows.written":
-					v := dp.Value
-					stateRows = &v
-				}
-			}
+	for _, dp := range blockDPs {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "base" {
+			t.Errorf("curve.blocks.processed chain attr = %q, want %q", chain, "base")
 		}
+		blockStatuses[testutil.AttrValue(dp, "status")] = dp.Value
 	}
-
 	for _, status := range []string{"success", "error"} {
 		v, ok := blockStatuses[status]
 		if !ok {
@@ -421,9 +404,15 @@ func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
 			t.Errorf("curve.blocks.processed{status=%q} = %d, want 0", status, v)
 		}
 	}
-	if stateRows == nil {
-		t.Error("curve.state.rows.written missing its series before any write")
-	} else if *stateRows != 0 {
-		t.Errorf("curve.state.rows.written = %d, want 0", *stateRows)
+
+	stateRowsDPs := testutil.CollectSumDataPoints(t, reader, "curve.state.rows.written")
+	if len(stateRowsDPs) != 1 {
+		t.Fatalf("curve.state.rows.written has %d data points, want 1", len(stateRowsDPs))
+	}
+	if chain := testutil.AttrValue(stateRowsDPs[0], "chain"); chain != "base" {
+		t.Errorf("curve.state.rows.written chain attr = %q, want %q", chain, "base")
+	}
+	if v := stateRowsDPs[0].Value; v != 0 {
+		t.Errorf("curve.state.rows.written = %d, want 0", v)
 	}
 }
