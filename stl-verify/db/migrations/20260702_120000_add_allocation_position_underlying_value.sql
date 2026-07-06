@@ -38,3 +38,7 @@ COMMENT ON COLUMN allocation_position.underlying_value IS
 
 COMMENT ON COLUMN allocation_position.underlying_token_id IS
   'FK to token: the asset underlying_value is denominated in. NULL iff underlying_value is NULL (enforced by allocation_position_underlying_pair_check).';
+
+INSERT INTO migrations (filename)
+VALUES ('20260702_120000_add_allocation_position_underlying_value.sql')
+ON CONFLICT (filename) DO NOTHING;
