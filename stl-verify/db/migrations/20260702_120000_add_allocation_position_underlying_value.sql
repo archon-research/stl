@@ -24,6 +24,14 @@ ALTER TABLE allocation_position
   ADD CONSTRAINT allocation_position_underlying_token_id_fkey
   FOREIGN KEY (underlying_token_id) REFERENCES token (id);
 
+-- Postgres does not auto-index the child side of an FK; index it so parent-side
+-- (token) changes and joins through underlying_token_id do not seq-scan
+-- allocation_position (mirrors idx_receipt_token_underlying). Plain CREATE INDEX
+-- (not CONCURRENTLY): hypertables reject CONCURRENTLY and build the index per
+-- chunk, new chunks inherit it (see 20260615_120000).
+CREATE INDEX IF NOT EXISTS idx_allocation_position_underlying_token_id
+  ON allocation_position (underlying_token_id);
+
 -- A value without its denomination is meaningless; a denomination without a
 -- value is noise. Enforce both-set-or-both-NULL at the DB so no writer
 -- (including future backfill scripts) can violate it silently.
