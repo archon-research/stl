@@ -30,6 +30,9 @@ func TestLoad(t *testing.T) {
 	if !r.Canonical["build_id"].NotNull {
 		t.Error("build_id should be not_null in the register")
 	}
+	if !r.Canonical["processing_version"].NotNull {
+		t.Error("processing_version should be not_null in the register")
+	}
 	if len(r.NullableExempt) == 0 {
 		t.Error("no nullable_exempt entries loaded")
 	}

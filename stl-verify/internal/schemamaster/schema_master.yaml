@@ -197,7 +197,7 @@ canonical:
   prime_id: {type: int8, class: R}
   principal_out: {type: numeric, class: S}
   principal_owed: {type: numeric, class: S}
-  processing_version: {type: int4, class: A}
+  processing_version: {type: int4, class: A, not_null: true}
   protocol_id: {type: int8, class: R}
   protocol_type: {type: text, class: S}
   proxy_address: {type: bytea, class: S}
@@ -436,6 +436,9 @@ required_keys:
 # implicitly via the PK/UNIQUE key + DEFAULT 0 + backfill; residual nullability is a harmless leftover.
 # Tables created after the convention (psm3_reserves, fluid/maple state, token_total_supply) declare
 # build_id NOT NULL inline and need no exemption.
+# processing_version (the audit sibling of build_id) is not_null too; the same 4 pre-convention
+# retrofit tables (anchorage x2, prime_debt, sparklend_reserve_data) carry a residual nullable
+# processing_version for the identical reason and are exempted alongside build_id.
 nullable_exempt:
   - {table: allocation_position,        column: build_id}
   - {table: anchorage_operation,        column: build_id}
@@ -451,3 +454,7 @@ nullable_exempt:
   - {table: prime_debt,                 column: build_id}
   - {table: protocol_event,             column: build_id}
   - {table: sparklend_reserve_data,     column: build_id}
+  - {table: anchorage_operation,        column: processing_version}
+  - {table: anchorage_package_snapshot, column: processing_version}
+  - {table: prime_debt,                 column: processing_version}
+  - {table: sparklend_reserve_data,     column: processing_version}
