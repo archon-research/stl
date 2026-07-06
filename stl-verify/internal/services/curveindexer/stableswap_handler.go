@@ -317,8 +317,27 @@ func (acc *stableswapSnapshotAcc) build(pool RegisteredPool, blockNumber int64, 
 // branch inside a shared decode loop.
 func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
 	var reads []shared.SnapshotRead[RegisteredPool]
+	reads = append(reads, h.stableSwapBalanceReads(pool, acc)...)
+	reads = append(reads, h.stableSwapVirtualPriceReads(acc)...)
+	reads = append(reads, h.stableSwapTotalSupplyReads(acc)...)
+	reads = append(reads, h.stableSwapAmpReads(acc)...)
+	reads = append(reads, h.stableSwapFeeReads(acc)...)
+	reads = append(reads, h.stableSwapGetDyReads(acc)...)
+	reads = append(reads, h.stableSwapOracleReads(pool, blockNumber, acc)...)
+	reads = append(reads, h.stableSwapAPreciseReads(pool, blockNumber, acc)...)
+	reads = append(reads, h.stableSwapAdminBalanceReads(blockNumber, acc)...)
+	reads = append(reads, h.stableSwapCalcTokenAmountReads(acc)...)
+	reads = append(reads, h.stableSwapCalcWithdrawReads(blockNumber, acc)...)
+	reads = append(reads, h.stableSwapNGStateReads(pool, blockNumber, acc)...)
+	reads = append(reads, h.stableSwapConfigGetterReads(blockNumber, acc)...)
+	reads = append(reads, h.stableSwapFutureAdminFeeReads(pool, blockNumber, acc)...)
+	reads = append(reads, h.stableSwapNGConfigReads(pool, blockNumber, acc)...)
+	return reads
+}
 
-	// 1. balances(i) for each coin.
+// balances(i) for each coin.
+func (h *StableswapHandler) stableSwapBalanceReads(pool RegisteredPool, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	for i := 0; i < pool.NCoins; i++ {
 		i := i
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
@@ -343,8 +362,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 2. get_virtual_price()
+// get_virtual_price()
+func (h *StableswapHandler) stableSwapVirtualPriceReads(acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "get_virtual_price",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -363,10 +386,14 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 3. totalSupply(). Lives on the LP token, which for pre-NG pools is a
-	// separate contract from the pool; falls back to the pool address for NG
-	// pools that are their own LP token.
+// totalSupply(). Lives on the LP token, which for pre-NG pools is a
+// separate contract from the pool; falls back to the pool address for NG
+// pools that are their own LP token.
+func (h *StableswapHandler) stableSwapTotalSupplyReads(acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "totalSupply",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -389,8 +416,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 4. A()
+// A()
+func (h *StableswapHandler) stableSwapAmpReads(acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "A",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -409,8 +440,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 5. fee()
+// fee()
+func (h *StableswapHandler) stableSwapFeeReads(acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "fee",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -429,10 +464,14 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 6. get_dy(i, j, 10^decimals[i]) for every ordered pair i!=j, packed and
-	// decoded together as one N*(N-1)-call read so the pair ordering lives in
-	// one place.
+// get_dy(i, j, 10^decimals[i]) for every ordered pair i!=j, packed and
+// decoded together as one N*(N-1)-call read so the pair ordering lives in
+// one place.
+func (h *StableswapHandler) stableSwapGetDyReads(acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "get_dy",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -476,17 +515,21 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 7. NG-only: price_oracle() and last_price() with AllowFailure=true.
-	//
-	// These no-arg oracle getters (and stored_rates/ema_price/get_p below) are
-	// gated by class, NOT by a per-pool capability like A_precise (curated in
-	// curve_pool.has_a_precise). Every stETH-ng-shaped plain_ng pool exposes them,
-	// but some plain_ng pools (e.g. GHO/crvUSD) expose only the indexed
-	// price_oracle(uint256) form and revert on the no-arg selector, which would
-	// poison-stall the block. Before seeding such a pool, add curated capability
-	// columns for these getters as we did for A_precise (deferred to the
-	// pool-expansion follow-up, VEC-330/331).
+// NG-only: price_oracle() and last_price() with AllowFailure=true.
+//
+// These no-arg oracle getters (and stored_rates/ema_price/get_p below) are
+// gated by class, NOT by a per-pool capability like A_precise (curated in
+// curve_pool.has_a_precise). Every stETH-ng-shaped plain_ng pool exposes them,
+// but some plain_ng pools (e.g. GHO/crvUSD) expose only the indexed
+// price_oracle(uint256) form and revert on the no-arg selector, which would
+// poison-stall the block. Before seeding such a pool, add curated capability
+// columns for these getters as we did for A_precise (deferred to the
+// pool-expansion follow-up, VEC-330/331).
+func (h *StableswapHandler) stableSwapOracleReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	if pool.Kind == KindStableswapNG {
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: "price_oracle",
@@ -525,8 +568,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 8. A_precise(), gated by pool.HasAPrecise (see the field doc on RegisteredPool).
+// A_precise(), gated by pool.HasAPrecise (see the field doc on RegisteredPool).
+func (h *StableswapHandler) stableSwapAPreciseReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	if pool.HasAPrecise {
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: "A_precise",
@@ -547,8 +594,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 9. admin_balances(i) for each coin.
+// admin_balances(i) for each coin.
+func (h *StableswapHandler) stableSwapAdminBalanceReads(blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "admin_balances",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -575,8 +626,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 10. calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
+// calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
+func (h *StableswapHandler) stableSwapCalcTokenAmountReads(acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "calc_token_amount",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -602,8 +657,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 11. calc_withdraw_one_coin(1e18, i) for each coin.
+// calc_withdraw_one_coin(1e18, i) for each coin.
+func (h *StableswapHandler) stableSwapCalcWithdrawReads(blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "calc_withdraw_one_coin",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -631,8 +690,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 12. NG-only: stored_rates(), ema_price(), get_p()
+// NG-only: stored_rates(), ema_price(), get_p()
+func (h *StableswapHandler) stableSwapNGStateReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	if pool.Kind == KindStableswapNG {
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: "stored_rates",
@@ -689,9 +752,13 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 13. config getters (both classes): initial_A, initial_A_time, future_A,
-	// future_A_time, admin_fee, future_fee.
+// config getters (both classes): initial_A, initial_A_time, future_A,
+// future_A_time, admin_fee, future_fee.
+func (h *StableswapHandler) stableSwapConfigGetterReads(blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	configGetters := []struct {
 		name string
 		dst  **big.Int
@@ -723,8 +790,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 14. pre-NG only: future_admin_fee()
+// pre-NG only: future_admin_fee()
+func (h *StableswapHandler) stableSwapFutureAdminFeeReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	if pool.Kind == KindStableswapPreNG {
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: "future_admin_fee",
@@ -745,8 +816,12 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 15. NG-only: ma_exp_time(), oracle_method()
+// NG-only: ma_exp_time(), oracle_method()
+func (h *StableswapHandler) stableSwapNGConfigReads(pool RegisteredPool, blockNumber int64, acc *stableswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	if pool.Kind == KindStableswapNG {
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 			Name: "ma_exp_time",
@@ -785,7 +860,6 @@ func (h *StableswapHandler) stableswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
-
 	return reads
 }
 

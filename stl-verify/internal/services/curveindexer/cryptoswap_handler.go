@@ -298,8 +298,31 @@ type cryptoswapConfigReads struct {
 // need its own capability check here.
 func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
 	var reads []shared.SnapshotRead[RegisteredPool]
+	reads = append(reads, h.cryptoSwapBalanceReads(pool, acc)...)
+	reads = append(reads, h.cryptoSwapVirtualPriceReads(acc)...)
+	reads = append(reads, h.cryptoSwapTotalSupplyReads(acc)...)
+	reads = append(reads, h.cryptoSwapAmpReads(acc)...)
+	reads = append(reads, h.cryptoSwapGammaReads(acc)...)
+	reads = append(reads, h.cryptoSwapFeeReads(acc)...)
+	reads = append(reads, h.cryptoSwapGetDyReads(acc)...)
+	reads = append(reads, h.cryptoSwapPriceScaleReads(acc)...)
+	reads = append(reads, h.cryptoSwapPriceOracleReads(acc)...)
+	reads = append(reads, h.cryptoSwapLastPricesReads(acc)...)
+	reads = append(reads, h.cryptoSwapDReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapXcpProfitReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapLpPriceReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapXcpProfitAReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapLastPricesTimestampReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapGetDxReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapCalcTokenAmountReads(acc)...)
+	reads = append(reads, h.cryptoSwapCalcWithdrawReads(blockNumber, acc)...)
+	reads = append(reads, h.cryptoSwapConfigGetterReads(blockNumber, acc)...)
+	return reads
+}
 
-	// 1. balances(i) for each coin.
+// balances(i) for each coin.
+func (h *CryptoswapHandler) cryptoSwapBalanceReads(pool RegisteredPool, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	for i := 0; i < pool.NCoins; i++ {
 		i := i
 		reads = append(reads, shared.SnapshotRead[RegisteredPool]{
@@ -324,8 +347,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			},
 		})
 	}
+	return reads
+}
 
-	// 2. get_virtual_price()
+// get_virtual_price()
+func (h *CryptoswapHandler) cryptoSwapVirtualPriceReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "get_virtual_price",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -344,10 +371,14 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 3. totalSupply(). Lives on the LP token, which for pre-NG pools is a
-	// separate contract from the pool; falls back to the pool address for NG
-	// pools that are their own LP token.
+// totalSupply(). Lives on the LP token, which for pre-NG pools is a
+// separate contract from the pool; falls back to the pool address for NG
+// pools that are their own LP token.
+func (h *CryptoswapHandler) cryptoSwapTotalSupplyReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "totalSupply",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -370,8 +401,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 4. A()
+// A()
+func (h *CryptoswapHandler) cryptoSwapAmpReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "A",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -390,8 +425,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 5. gamma()
+// gamma()
+func (h *CryptoswapHandler) cryptoSwapGammaReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "gamma",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -410,8 +449,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 6. fee()
+// fee()
+func (h *CryptoswapHandler) cryptoSwapFeeReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "fee",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -430,9 +473,13 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 7. get_dy(i, j, 10^decimals[i]) for every ordered pair i!=j. Cryptoswap
-	// get_dy takes uint256 args (not int128).
+// get_dy(i, j, 10^decimals[i]) for every ordered pair i!=j. Cryptoswap
+// get_dy takes uint256 args (not int128).
+func (h *CryptoswapHandler) cryptoSwapGetDyReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "get_dy",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -476,8 +523,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 8. price_scale(i) for i=0..n-2
+// price_scale(i) for i=0..n-2
+func (h *CryptoswapHandler) cryptoSwapPriceScaleReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "price_scale",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -504,8 +555,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 9. price_oracle(i) for i=0..n-2
+// price_oracle(i) for i=0..n-2
+func (h *CryptoswapHandler) cryptoSwapPriceOracleReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "price_oracle",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -532,8 +587,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 10. last_prices(i) for i=0..n-2
+// last_prices(i) for i=0..n-2
+func (h *CryptoswapHandler) cryptoSwapLastPricesReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "last_prices",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -560,9 +619,13 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 11. D() - AllowFailure=true so it does not abort the multicall, but a
-	// revert is still decoded as an error (no-swallowed-errors).
+// D() - AllowFailure=true so it does not abort the multicall, but a
+// revert is still decoded as an error (no-swallowed-errors).
+func (h *CryptoswapHandler) cryptoSwapDReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "D",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -581,8 +644,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 12. xcp_profit() - AllowFailure=true; a revert is decoded as an error.
+// xcp_profit() - AllowFailure=true; a revert is decoded as an error.
+func (h *CryptoswapHandler) cryptoSwapXcpProfitReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "xcp_profit",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -601,8 +668,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 13. lp_price()
+// lp_price()
+func (h *CryptoswapHandler) cryptoSwapLpPriceReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "lp_price",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -621,8 +692,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 14. xcp_profit_a()
+// xcp_profit_a()
+func (h *CryptoswapHandler) cryptoSwapXcpProfitAReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "xcp_profit_a",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -641,8 +716,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 15. last_prices_timestamp()
+// last_prices_timestamp()
+func (h *CryptoswapHandler) cryptoSwapLastPricesTimestampReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "last_prices_timestamp",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -670,9 +749,13 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 16. get_dx(i, j, 10^decimals[j]) for every ordered pair i!=j: one unit of
-	// the bought coin j, asking how much coin i it costs.
+// get_dx(i, j, 10^decimals[j]) for every ordered pair i!=j: one unit of
+// the bought coin j, asking how much coin i it costs.
+func (h *CryptoswapHandler) cryptoSwapGetDxReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "get_dx",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -716,8 +799,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 17. calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
+// calc_token_amount(unit deposit of 10^decimals[i] per coin, is_deposit=true)
+func (h *CryptoswapHandler) cryptoSwapCalcTokenAmountReads(acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "calc_token_amount",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -743,8 +830,12 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 18. calc_withdraw_one_coin(1e18, i) for each coin.
+// calc_withdraw_one_coin(1e18, i) for each coin.
+func (h *CryptoswapHandler) cryptoSwapCalcWithdrawReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "calc_withdraw_one_coin",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -772,10 +863,14 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
+	return reads
+}
 
-	// 19. config getters. Cryptoswap admin_fee is the ADMIN_FEE constant; the
-	// pool has no admin_fee() getter. All 11 getters are packed and decoded
-	// together so cryptoswapConfigGetters stays the single source of order.
+// config getters. Cryptoswap admin_fee is the ADMIN_FEE constant; the
+// pool has no admin_fee() getter. All 11 getters are packed and decoded
+// together so cryptoswapConfigGetters stays the single source of order.
+func (h *CryptoswapHandler) cryptoSwapConfigGetterReads(blockNumber int64, acc *cryptoswapSnapshotAcc) []shared.SnapshotRead[RegisteredPool] {
+	var reads []shared.SnapshotRead[RegisteredPool]
 	reads = append(reads, shared.SnapshotRead[RegisteredPool]{
 		Name: "cryptoswap config getters",
 		Pack: func(pool RegisteredPool) ([]outbound.Call, error) {
@@ -808,7 +903,6 @@ func (h *CryptoswapHandler) cryptoswapSnapshotReads(pool RegisteredPool, blockNu
 			return nil
 		},
 	})
-
 	return reads
 }
 
