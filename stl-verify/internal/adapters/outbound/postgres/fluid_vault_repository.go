@@ -49,10 +49,10 @@ func NewFluidVaultRepository(pool *pgxpool.Pool, logger *slog.Logger, buildID bu
 }
 
 // RecordVaults registers vault registry rows and returns address -> fluid_vault.id.
-// vault_type, collateral_token_id, and debt_token_id are immutable per vault, so
-// the INSERT ... ON CONFLICT refreshes nothing (the no-op DO UPDATE keeps
-// RETURNING yielding the stored row) and the scan fails the run if any stored
-// value differs from the incoming one.
+// protocol_id, vault_type, collateral_token_id, debt_token_id, and
+// created_at_block are immutable per vault, so the INSERT ... ON CONFLICT
+// refreshes nothing (the no-op DO UPDATE keeps RETURNING yielding the stored row)
+// and the scan fails the run if any stored value differs from the incoming one.
 func (r *FluidVaultRepository) RecordVaults(ctx context.Context, tx pgx.Tx, vaults []*entity.FluidVault) (map[common.Address]int64, error) {
 	if len(vaults) == 0 {
 		return make(map[common.Address]int64), nil
@@ -72,7 +72,7 @@ func (r *FluidVaultRepository) RecordVaults(ctx context.Context, tx pgx.Tx, vaul
 			`INSERT INTO fluid_vault (chain_id, protocol_id, address, vault_type, collateral_token_id, debt_token_id, created_at_block)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 ON CONFLICT (chain_id, address) DO UPDATE SET id = fluid_vault.id
-			 RETURNING id, vault_type, collateral_token_id, debt_token_id`,
+			 RETURNING id, protocol_id, vault_type, collateral_token_id, debt_token_id, created_at_block`,
 			v.ChainID, v.ProtocolID, v.Address, v.VaultType, v.CollateralTokenID, v.DebtTokenID, v.CreatedAtBlock,
 		)
 	}
@@ -80,12 +80,15 @@ func (r *FluidVaultRepository) RecordVaults(ctx context.Context, tx pgx.Tx, vaul
 	return collectBatchRows(ctx, tx, batch, sorted, "fluid vault",
 		func(row pgx.Row, v *entity.FluidVault) (common.Address, int64, error) {
 			addr := common.BytesToAddress(v.Address)
-			var id, storedCollTokenID, storedDebtTokenID int64
+			var id, storedProtocolID, storedCollTokenID, storedDebtTokenID, storedCreatedAtBlock int64
 			var storedVaultType string
-			if err := row.Scan(&id, &storedVaultType, &storedCollTokenID, &storedDebtTokenID); err != nil {
+			if err := row.Scan(&id, &storedProtocolID, &storedVaultType, &storedCollTokenID, &storedDebtTokenID, &storedCreatedAtBlock); err != nil {
 				return common.Address{}, 0, fmt.Errorf("recording fluid vault %s: %w", addr, err)
 			}
 			var mismatches []string
+			if storedProtocolID != v.ProtocolID {
+				mismatches = append(mismatches, fmt.Sprintf("protocol_id (stored %d, incoming %d)", storedProtocolID, v.ProtocolID))
+			}
 			if storedVaultType != v.VaultType {
 				mismatches = append(mismatches, fmt.Sprintf("vault_type (stored %q, incoming %q)", storedVaultType, v.VaultType))
 			}
@@ -94,6 +97,9 @@ func (r *FluidVaultRepository) RecordVaults(ctx context.Context, tx pgx.Tx, vaul
 			}
 			if storedDebtTokenID != v.DebtTokenID {
 				mismatches = append(mismatches, fmt.Sprintf("debt_token_id (stored %d, incoming %d)", storedDebtTokenID, v.DebtTokenID))
+			}
+			if storedCreatedAtBlock != v.CreatedAtBlock {
+				mismatches = append(mismatches, fmt.Sprintf("created_at_block (stored %d, incoming %d)", storedCreatedAtBlock, v.CreatedAtBlock))
 			}
 			if err := registryMismatchError("fluid vault", addr, mismatches); err != nil {
 				return common.Address{}, 0, err
