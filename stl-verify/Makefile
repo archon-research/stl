@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -23,6 +23,8 @@ include lint.mk
         \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
+        docker-build-fluid-vault-indexer docker-push-fluid-vault-indexer docker-release-fluid-vault-indexer \
+        docker-build-fluid-vault-indexer-staging docker-push-fluid-vault-indexer-staging docker-release-fluid-vault-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         docker-build-psm3-indexer docker-push-psm3-indexer docker-release-psm3-indexer \
@@ -928,6 +930,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
 	@echo ""
+	@$(MAKE) _docker-release-fluid-vault-indexer-internal ENV=$(ENV)
+	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
@@ -1253,6 +1257,60 @@ docker-push-morpho-indexer-staging:
 
 docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Fluid Vault Indexer
+# =============================================================================
+
+ECR_REPO_FLUID_VAULT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-fluid-vault-indexer
+
+# Build Docker image for fluid vault indexer (ARM64 for Fargate Graviton)
+docker-build-fluid-vault-indexer:
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/fluid-vault-indexer --build-arg BIN=fluid-vault-indexer -t stl-fluid-vault-indexer:local -f Dockerfile.common .
+else
+	@echo "==> Building Fluid Vault Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_FLUID_VAULT_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=cmd/workers/fluid-vault-indexer \
+		--build-arg BIN=fluid-vault-indexer \
+		-f Dockerfile.common \
+		-t $(ECR_REPO_FLUID_VAULT_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_FLUID_VAULT_INDEXER):latest \
+		--load .
+endif
+
+# Push fluid vault indexer Docker image to ECR
+docker-push-fluid-vault-indexer: ecr-login
+	@echo "==> Pushing Fluid Vault Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_FLUID_VAULT_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_FLUID_VAULT_INDEXER):latest
+
+# Build and push fluid vault indexer in one step (captures tag at start to ensure consistency)
+docker-release-fluid-vault-indexer: ecr-login _docker-release-fluid-vault-indexer-internal
+
+_docker-release-fluid-vault-indexer-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Fluid Vault Indexer" GO_REPO="$(ECR_REPO_FLUID_VAULT_INDEXER)" GO_CMD_PATH=cmd/workers/fluid-vault-indexer GO_BIN=fluid-vault-indexer GO_CACHE_KEY=fluid-vault-indexer
+
+# =============================================================================
+# Sentinelstaging Fluid Vault Indexer Docker Shortcuts
+# =============================================================================
+
+docker-build-fluid-vault-indexer-staging:
+	@$(MAKE) docker-build-fluid-vault-indexer ENV=sentinelstaging
+
+docker-push-fluid-vault-indexer-staging:
+	@$(MAKE) docker-push-fluid-vault-indexer ENV=sentinelstaging
+
+docker-release-fluid-vault-indexer-staging:
+	@$(MAKE) docker-release-fluid-vault-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Prime Debt Indexer

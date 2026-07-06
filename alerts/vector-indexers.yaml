@@ -1,19 +1,19 @@
 # =============================================================================
 # Vector — indexer alerts (ADR-008 / ORB-200)
 # =============================================================================
-# The morpho and oracle indexers consume blocks from the watcher pipeline and
-# derive product state (positions, prices) into TimescaleDB. They're the last
-# hop before downstream readers see data, so stalls / errors here translate
-# directly into stale customer views.
+# The morpho, oracle and fluid-vault indexers consume blocks from the watcher
+# pipeline and derive product state (positions, prices, vaults) into
+# TimescaleDB. They're the last hop before downstream readers see data, so
+# stalls / errors here translate directly into stale customer views.
 #
-# Two indexers in v1 (morpho, oracle). Each gets its own rules because the
-# Slack-thread spec uses distinct per-indexer metric prefixes
+# Three indexers (morpho, oracle, fluid-vault). Each gets its own rules because
+# the Slack-thread spec uses distinct per-indexer metric prefixes
 # (`morpho_blocks_processed_total`, `oracle_blocks_processed_total`). Once
 # the services are unified onto a single metric name with an `indexer` label,
 # these can collapse into a single rule per signal.
 #
 # Metric source: OTel SDK in each indexer. Series carry:
-#   - service_name="morpho-indexer" | "oracle-price-worker"
+#   - service_name="morpho-indexer" | "oracle-price-worker" | "fluid-vault-indexer"
 #   - k8s_namespace_name="vector"
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain (for multi-chain indexers)
@@ -599,6 +599,112 @@ groups:
             `{{ $value | printf "%.1fs" }}` over 15m. The Maple GraphQL API is
             likely degraded; expect lag and possible cycle timeouts.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
+
+
+      # =====================================================================
+      # fluid-vault-indexer (VEC-438)
+      # =====================================================================
+      # Consumes Ethereum BlockEvents, reads end-of-block Fluid vault state from
+      # the VaultResolver via Multicall3, appends fluid_vault_state snapshots into
+      # TimescaleDB. Mainnet (chain 1) only.
+      #
+      # Rules live in this shared file (not a vector-fluid-vault-indexer.yaml) so
+      # the mimir-rules-sync namespace allowlist
+      # `^vector-(watcher|backup-worker|indexers|postgres|cronjobs)$`
+      # (.github/workflows/alerts.yml) actually syncs them — a vector-fluid-*
+      # namespace would be silently dropped.
+      #
+      # Metric coverage: the B2 service emits NO service-level counters/histograms
+      # of its own (no fluid_blocks_processed_total / fluid_errors_total / RPC
+      # latency histogram). The only honest signals today are:
+      #   - kube_deployment_status_replicas_available (kube-state-metrics) —
+      #     process liveness, independent of the OTel pipeline (see MapleIndexerDown).
+      #   - multicall_batch_size_count{service_name="fluid-vault-indexer", chain} —
+      #     advances on startup reconcile and on every block touching a known vault.
+      #   - archive_writes_total / archive_object_size_bytes — already covered by
+      #     the VectorArchiving* rules above (keyed by service_name), which include
+      #     this worker once ARCHIVE_SC_CALLS=true. NOT duplicated here.
+      # Error-rate / silent-empty (rows-written==0) / RPC-latency alerts are
+      # DELIBERATELY OMITTED: no metric exists to make them fire honestly, and a
+      # rule that can never fire is worse than none. Grow this set with
+      # FluidVaultIndexerErrorsHigh / RowsZero / RPCLatencyHigh when the B2 service
+      # is instrumented (follow-up). See the runbook for the same note.
+
+      - alert: VectorFluidVaultIndexerDown
+        # Process liveness from kube-state-metrics (deployment/namespace labels,
+        # NOT the OTel k8s_namespace_name), so it fires even when the OTel pipeline
+        # is the thing that broke. <1 available replica = no pod running, so no
+        # Fluid vault snapshots are written. Keystone freshness signal for a
+        # service with no internal block-progress metric.
+        expr: |
+          max by (cluster) (
+            kube_deployment_status_replicas_available{
+              deployment="fluid-vault-indexer", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: fluid-vault-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector fluid-vault-indexer has no available replica"
+          description: |
+            `fluid-vault-indexer` Deployment has <1 available replica for >10m.
+            The worker is not running; no Fluid vault state is being written and
+            the SQS backlog is growing.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerdown
+
+      - alert: VectorFluidVaultIndexerStalled
+        # Alive-but-wedged / OTLP-broke signal that Down misses. No multicall
+        # Execute in 30m while the pod is up. A healthy worker on mainnet advances
+        # multicall_batch_size_count regularly (startup reconcile + every block
+        # touching a known vault). WARNING, not a page: a genuinely quiet period
+        # (no in-scope sUSDS vault touched, no restart) can legitimately leave
+        # multicalls at 0, so this is a soft signal paired with the critical Down.
+        # The `or (… * 0)` zero-fills a worker that has no sample in the window so
+        # `== 0` matches a true stall, not a missing series; gated on >=1 replica
+        # so it does not double-fire alongside Down on a dead process.
+        expr: |
+          (
+            (
+              sum by (cluster) (
+                increase(multicall_batch_size_count{
+                  service_name="fluid-vault-indexer", k8s_namespace_name="vector"
+                }[30m])
+              )
+              or
+              max by (cluster) (
+                kube_deployment_status_replicas_available{
+                  deployment="fluid-vault-indexer", namespace="vector"
+                }
+              ) * 0
+            ) == 0
+          )
+          and on (cluster)
+          (
+            max by (cluster) (
+              kube_deployment_status_replicas_available{
+                deployment="fluid-vault-indexer", namespace="vector"
+              }
+            ) >= 1
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: fluid-vault-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector fluid-vault-indexer stalled (no multicall activity >30m)"
+          description: |
+            `fluid-vault-indexer` is up but has executed no VaultResolver
+            multicalls for >30m. Either no Fluid vault was touched (benign quiet
+            period) or the worker is wedged / its SQS poll loop has stopped.
+            Check the pod logs and SQS backlog; if VectorFluidVaultIndexerDown is
+            not firing, suspect a wedged loop or a broken OTLP export.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerstalled
 
   # curve-indexer (VEC-260) — Curve DEX pool/swap/liquidity indexer.
   - name: vector-curve-indexer
