@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -155,6 +156,7 @@ type stateFixtureValues struct {
 	tickCumulatives     []*big.Int // len 2, [t0, t1]; used when observe succeeds
 	secondsPerLiquidity []*big.Int // len 2
 	observeSucceeds     bool
+	observeRevertData   []byte // ReturnData attached to the revert when observe fails
 }
 
 func defaultStateFixtureValues() stateFixtureValues {
@@ -191,9 +193,43 @@ func buildStateResults(t *testing.T, f stateFixtureValues) []outbound.Result {
 	if f.observeSucceeds {
 		results[7] = outbound.Result{Success: true, ReturnData: packObserveReturn(t, a, f.tickCumulatives, f.secondsPerLiquidity)}
 	} else {
-		results[7] = outbound.Result{Success: false}
+		results[7] = outbound.Result{Success: false, ReturnData: f.observeRevertData}
 	}
 	return results
+}
+
+// packRevertReason ABI-encodes a standard Solidity `Error(string)` revert:
+// the 4-byte selector keccak256("Error(string)")[:4] followed by the encoded
+// reason string. observe() reverts with reason "OLD" when the pool's
+// observation cardinality can't cover the window.
+func packRevertReason(t *testing.T, reason string) []byte {
+	t.Helper()
+	strTy, err := abi.NewType("string", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType string: %v", err)
+	}
+	encoded, err := (abi.Arguments{{Type: strTy}}).Pack(reason)
+	if err != nil {
+		t.Fatalf("packing revert reason: %v", err)
+	}
+	selector := crypto.Keccak256([]byte("Error(string)"))[:4]
+	return append(selector, encoded...)
+}
+
+// packPanicReason ABI-encodes a Solidity `Panic(uint256)` revert: the 4-byte
+// selector keccak256("Panic(uint256)")[:4] followed by the encoded panic code.
+func packPanicReason(t *testing.T, code uint64) []byte {
+	t.Helper()
+	uintTy, err := abi.NewType("uint256", "", nil)
+	if err != nil {
+		t.Fatalf("abi.NewType uint256: %v", err)
+	}
+	encoded, err := (abi.Arguments{{Type: uintTy}}).Pack(new(big.Int).SetUint64(code))
+	if err != nil {
+		t.Fatalf("packing panic code: %v", err)
+	}
+	selector := crypto.Keccak256([]byte("Panic(uint256)"))[:4]
+	return append(selector, encoded...)
 }
 
 // mockMulticallerReturning wires a MockMulticaller whose ExecuteAtHash
@@ -353,28 +389,81 @@ func TestSnapshotState_CoreCallRevertsReturnsError(t *testing.T) {
 	}
 }
 
-func TestSnapshotState_ObserveRevertsLeavesTwapNil(t *testing.T) {
+// TestSnapshotState_ObserveRevertsWithOLDLeavesTwapNil verifies the ONE
+// legitimate observe() revert — reason "OLD" (observation cardinality can't
+// cover the window on a young pool) — degrades to a nil TWAP without failing
+// the snapshot. Every other revert is a data-quality signal (see below).
+func TestSnapshotState_ObserveRevertsWithOLDLeavesTwapNil(t *testing.T) {
 	pool := stateTestPool()
 	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000004")
 
 	f := defaultStateFixtureValues()
 	f.observeSucceeds = false
+	f.observeRevertData = packRevertReason(t, "OLD")
 	results := buildStateResults(t, f)
 	var gotHash common.Hash
 	mc := mockMulticallerReturning(results, &gotHash)
 
 	got, err := SnapshotState(context.Background(), mc, pool, blockHash, 19000000, 0, stateBlockTS)
 	if err != nil {
-		t.Fatalf("SnapshotState: want no error when observe reverts (legitimately optional), got %v", err)
+		t.Fatalf("SnapshotState: want no error when observe reverts with OLD (legitimately optional), got %v", err)
 	}
 	if got.TwapTick != nil {
-		t.Errorf("TwapTick = %v, want nil when observe reverts", *got.TwapTick)
+		t.Errorf("TwapTick = %v, want nil when observe reverts with OLD", *got.TwapTick)
 	}
 	if got.TwapWindowSecs != nil {
-		t.Errorf("TwapWindowSecs = %v, want nil when observe reverts", *got.TwapWindowSecs)
+		t.Errorf("TwapWindowSecs = %v, want nil when observe reverts with OLD", *got.TwapWindowSecs)
 	}
 	if err := got.Validate(); err != nil {
 		t.Errorf("Validate: %v", err)
+	}
+}
+
+// TestSnapshotState_ObserveNonOLDRevertReturnsError verifies that any observe()
+// revert other than "OLD" fails the snapshot loud instead of being swallowed
+// into a silent NULL TWAP. The migration COMMENT documents twap_tick NULL to
+// mean specifically the OLD (insufficient-cardinality) revert; a different
+// reason, an opaque/empty revert, or a Panic all signal a bug (registry row
+// pointing at a non-V3 contract, RPC fault) and must bubble up.
+func TestSnapshotState_ObserveNonOLDRevertReturnsError(t *testing.T) {
+	tests := []struct {
+		name       string
+		revertData []byte
+	}{
+		{"different Error(string) reason", nil}, // filled below (needs t)
+		{"empty revert data", []byte{}},
+		{"opaque short bytes", []byte{0x01, 0x02, 0x03}},
+		{"solidity panic", nil}, // filled below (needs t)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := stateTestPool()
+			blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000009")
+
+			revertData := tt.revertData
+			switch tt.name {
+			case "different Error(string) reason":
+				revertData = packRevertReason(t, "SOMETHINGELSE")
+			case "solidity panic":
+				revertData = packPanicReason(t, 0x11)
+			}
+
+			f := defaultStateFixtureValues()
+			f.observeSucceeds = false
+			f.observeRevertData = revertData
+			results := buildStateResults(t, f)
+			var gotHash common.Hash
+			mc := mockMulticallerReturning(results, &gotHash)
+
+			got, err := SnapshotState(context.Background(), mc, pool, blockHash, 19000000, 0, stateBlockTS)
+			if err == nil {
+				t.Fatal("SnapshotState: want error on a non-OLD observe() revert, got nil")
+			}
+			if got != nil {
+				t.Errorf("SnapshotState: want nil state on error, got %+v", got)
+			}
+		})
 	}
 }
 

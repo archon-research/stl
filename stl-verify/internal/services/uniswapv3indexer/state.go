@@ -326,19 +326,36 @@ func decodeProtocolFees(pool RegisteredPool, a *abi.ABI, res outbound.Result, st
 }
 
 // decodeTwap unpacks observe()'s two int56[]/uint160[] arrays into a single
-// TWAP tick over twapWindowSecs. observe reverts with `OLD` when the pool's
-// observation cardinality doesn't cover the window; that is a legitimate,
-// expected condition (not a data-quality error), so a revert leaves
+// TWAP tick over twapWindowSecs. observe reverts with reason `OLD` when the
+// pool's observation cardinality doesn't cover the window; that is the only
+// legitimate, expected revert (not a data-quality error), so it alone leaves
 // TwapTick/TwapWindowSecs nil and returns no error.
 //
+// Any other revert — a different reason, an opaque/empty payload, or a Panic —
+// is a data-quality signal (registry row pointing at a non-V3 contract, or an
+// RPC bug) and returns an error: mapping it to a nil TWAP would produce a NULL
+// twap_tick indistinguishable from a legitimate OLD, and the migration COMMENT
+// documents twap_tick NULL to mean specifically OLD.
+//
 // A SUCCESSFUL call whose payload cannot be decoded (unpack failure, wrong
-// arity, wrong element type/length) is a different matter: it signals a
-// registry row pointing at a non-V3 contract or an RPC bug, and returning nil
-// there would produce fleet-wide NULL twap_tick indistinguishable from a
-// legitimate revert. Those paths return an error so the snapshot fails loud.
+// arity, wrong element type/length) is treated the same way: it also returns an
+// error so the snapshot fails loud.
 func decodeTwap(a *abi.ABI, res outbound.Result, state *entity.UniswapV3PoolState) error {
 	if !res.Success {
-		return nil
+		// observe() is packed AllowFailure=true, so a revert lands here rather
+		// than failing the multicall. Only the documented `OLD` reason (young pool
+		// whose observation cardinality can't cover the window) is a legitimate
+		// nil-TWAP; any other reason, an opaque/empty revert, or a Panic is a
+		// data-quality signal that must fail the snapshot instead of silently
+		// becoming a NULL twap_tick.
+		reason, err := abi.UnpackRevert(res.ReturnData)
+		if err != nil {
+			return fmt.Errorf("observe() reverted with undecodable revert data (len %d): %w", len(res.ReturnData), err)
+		}
+		if reason == "OLD" {
+			return nil
+		}
+		return fmt.Errorf("observe() reverted with unexpected reason %q, want OLD", reason)
 	}
 	out, err := a.Unpack("observe", res.ReturnData)
 	if err != nil {

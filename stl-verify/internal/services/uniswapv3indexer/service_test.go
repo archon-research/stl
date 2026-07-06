@@ -260,8 +260,8 @@ func blockEvent(bn int64) outbound.BlockEvent {
 
 // stateResultsFixture builds a full successful 8-result state-call batch,
 // reusing state.go's own ABI helpers to stay in lockstep with SnapshotState's
-// call ordering. observe() is left reverted (TWAP is optional) to keep the
-// fixture simple.
+// call ordering. observe() reverts with the legitimate `OLD` reason (young-pool
+// TWAP is optional and degrades to nil), keeping the fixture simple.
 func stateResultsFixture(t *testing.T) []outbound.Result {
 	t.Helper()
 	stateABI, err := poolStateABI()
@@ -312,7 +312,7 @@ func stateResultsFixture(t *testing.T) []outbound.Result {
 	results[testCallProtocolFees] = outbound.Result{Success: true, ReturnData: protocolFees}
 	results[testCallBalance0] = outbound.Result{Success: true, ReturnData: bal0}
 	results[testCallBalance1] = outbound.Result{Success: true, ReturnData: bal1}
-	results[testCallObserve] = outbound.Result{Success: false}
+	results[testCallObserve] = outbound.Result{Success: false, ReturnData: packRevertReason(t, "OLD")}
 	return results
 }
 

@@ -22,6 +22,22 @@ func validateTickRange(field string, tick int) error {
 	return nil
 }
 
+// validateTicks enforces the ordered, in-range tick pair that a real Mint/Burn
+// position must have. It is intentionally NOT applied to Collect (see
+// LiquidityEvent.Validate).
+func validateTicks(tickLower, tickUpper int) error {
+	if err := validateTickRange("tickLower", tickLower); err != nil {
+		return err
+	}
+	if err := validateTickRange("tickUpper", tickUpper); err != nil {
+		return err
+	}
+	if tickLower >= tickUpper {
+		return fmt.Errorf("tickLower (%d) must be less than tickUpper (%d)", tickLower, tickUpper)
+	}
+	return nil
+}
+
 // UniswapV3PoolState is a periodic per-touched-block snapshot of pool slot0 /
 // liquidity / fee-growth / protocol-fee / balance state.
 type UniswapV3PoolState struct {
@@ -211,15 +227,6 @@ func (e *UniswapV3LiquidityEvent) Validate() error {
 	// owner is a legal on-chain sink and is NOT rejected — rejecting it would let
 	// a dust mint poison-stall the block. On Burn/Collect owner is msg.sender and
 	// so never zero on-chain anyway.
-	if err := validateTickRange("tickLower", e.TickLower); err != nil {
-		return err
-	}
-	if err := validateTickRange("tickUpper", e.TickUpper); err != nil {
-		return err
-	}
-	if e.TickLower >= e.TickUpper {
-		return fmt.Errorf("tickLower (%d) must be less than tickUpper (%d)", e.TickLower, e.TickUpper)
-	}
 	if e.Amount0 == nil {
 		return fmt.Errorf("amount0 must not be nil")
 	}
@@ -231,8 +238,18 @@ func (e *UniswapV3LiquidityEvent) Validate() error {
 	// sender (the position manager) and a liquidity delta; Burn carries only the delta
 	// (msg.sender is implicitly the owner); Collect carries a payout recipient and no
 	// delta (amount0/amount1 are the withdrawn fees, not a liquidity change).
+	//
+	// The tick range/ordering checks apply to Mint and Burn ONLY: both route
+	// through v3-core's checkTicks/_updatePosition, which reverts on-chain for a
+	// bad tick pair, so a bad Mint/Burn log cannot exist. collect() deliberately
+	// omits checkTicks (invalid positions can only ever carry zero tokensOwed),
+	// so a permissionless collect(recipient, tickLower, tickUpper, 0, 0) with ANY
+	// int24 pair emits a valid log; rejecting it here would poison-stall the block.
 	switch e.EventName {
 	case LiquidityEventMint:
+		if err := validateTicks(e.TickLower, e.TickUpper); err != nil {
+			return err
+		}
 		if e.Amount == nil {
 			return fmt.Errorf("amount must not be nil for mint")
 		}
@@ -243,6 +260,9 @@ func (e *UniswapV3LiquidityEvent) Validate() error {
 			return fmt.Errorf("recipient must be nil for mint")
 		}
 	case LiquidityEventBurn:
+		if err := validateTicks(e.TickLower, e.TickUpper); err != nil {
+			return err
+		}
 		if e.Amount == nil {
 			return fmt.Errorf("amount must not be nil for burn")
 		}

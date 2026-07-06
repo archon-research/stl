@@ -216,6 +216,17 @@ func TestUniswapV3LiquidityEvent_Validate(t *testing.T) {
 		// with the zero-swap-recipient / zero-mint-owner sinks above).
 		{"zero collect recipient is a legal sink", validCollect, func(e *UniswapV3LiquidityEvent) { e.Recipient = &common.Address{} }, false},
 		{"collect with sender set", validCollect, func(e *UniswapV3LiquidityEvent) { e.Sender = &e.Owner }, true},
+		// v3-core's collect() deliberately omits checkTicks (invalid positions can
+		// only ever carry zero tokensOwed), so a permissionless
+		// collect(recipient, tickLower, tickUpper, 0, 0) with ANY int24 tick pair
+		// emits a valid Collect log. The tick ordering and range checks must NOT
+		// apply to collect, or such a log would fail Validate and poison-stall the
+		// block. Mint/Burn keep both checks (they revert on-chain for bad ticks).
+		{"collect allows tick_lower equal tick_upper", validCollect, func(e *UniswapV3LiquidityEvent) { e.TickLower, e.TickUpper = 0, 0 }, false},
+		{"collect allows tick_lower greater than tick_upper", validCollect, func(e *UniswapV3LiquidityEvent) { e.TickLower, e.TickUpper = 100, -100 }, false},
+		{"collect allows ticks outside int24 range", validCollect, func(e *UniswapV3LiquidityEvent) { e.TickLower, e.TickUpper = -8388609, 8388608 }, false},
+		{"burn tick_lower below int24 min", validBurn, func(e *UniswapV3LiquidityEvent) { e.TickLower = -8388609 }, true},
+		{"burn tick_lower equal tick_upper", validBurn, func(e *UniswapV3LiquidityEvent) { e.TickUpper = e.TickLower }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
