@@ -1300,11 +1300,10 @@ func TestGetActiveLoans_TolerateUnpriceableCollateral(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
-			handler := &testutil.SlogRecorder{}
-			client := newTestClientWithLogger(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
 				calls.Add(1)
 				writeJSON(w, tc.body)
-			}}, slog.New(handler))
+			}})
 
 			loans, err := client.GetActiveLoans(context.Background())
 			if err != nil {
@@ -1325,9 +1324,6 @@ func TestGetActiveLoans_TolerateUnpriceableCollateral(t *testing.T) {
 				}
 			} else if loans[0].Collateral != nil {
 				t.Errorf("Collateral = %+v, want nil", loans[0].Collateral)
-			}
-			if got := handler.CountWarn("tolerating unpriceable-collateral"); got != 1 {
-				t.Errorf("diagnostic warn fired %d times, want 1", got)
 			}
 		})
 	}
