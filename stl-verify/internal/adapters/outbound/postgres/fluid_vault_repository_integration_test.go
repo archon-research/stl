@@ -249,6 +249,67 @@ func TestFluidRecordVaults_ImmutableFieldChangeFails(t *testing.T) {
 	}
 }
 
+func TestFluidRecordVaults_ProtocolIDChangeFails(t *testing.T) {
+	f := setupFluidTest(t)
+	ctx := context.Background()
+
+	f.createVault(t, ctx, f.newTestVault(0xc1))
+
+	// Seed a second protocol so the incoming protocol_id is a real, distinct id.
+	var otherProtocolID int64
+	if err := f.pool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\x000000000000000000000000000000000000c1c1'::bytea, 'fluid-other', 'lending', 19239106, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`,
+	).Scan(&otherProtocolID); err != nil {
+		t.Fatalf("failed to seed second protocol: %v", err)
+	}
+
+	// Same address, different protocol_id — must fail rather than overwrite.
+	changed := f.newTestVault(0xc1)
+	changed.ProtocolID = otherProtocolID
+
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = f.repo.RecordVaults(ctx, tx, []*entity.FluidVault{changed})
+	if err == nil {
+		t.Fatal("expected error on protocol_id change, got nil")
+	}
+	if !strings.Contains(err.Error(), "protocol_id") {
+		t.Errorf("error %q should mention protocol_id", err.Error())
+	}
+}
+
+func TestFluidRecordVaults_CreatedAtBlockChangeFails(t *testing.T) {
+	f := setupFluidTest(t)
+	ctx := context.Background()
+
+	f.createVault(t, ctx, f.newTestVault(0xc2))
+
+	// Same address, different created_at_block — must fail rather than overwrite.
+	changed := f.newTestVault(0xc2)
+	changed.CreatedAtBlock = 19500001
+
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = f.repo.RecordVaults(ctx, tx, []*entity.FluidVault{changed})
+	if err == nil {
+		t.Fatal("expected error on created_at_block change, got nil")
+	}
+	if !strings.Contains(err.Error(), "created_at_block") {
+		t.Errorf("error %q should mention created_at_block", err.Error())
+	}
+}
+
 // --- State tests ---
 
 func newFluidState(vaultID, block int64, version int, ts time.Time) *entity.FluidVaultState {
