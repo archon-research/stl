@@ -546,6 +546,33 @@ groups:
             upstream Maple pricing gap.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
 
+      - alert: VectorAllocationUnderlyingValueFailures
+        # Silent data-quality hole for VEC-307: the prime-allocation-indexer
+        # wrote allocation_position rows whose underlying_value should be
+        # computable but persisted as NULL. The write path succeeds, so no
+        # error alert fires; this is the only signal for that gap.
+        # `reason` distinguishes the failure mode: convert_failed,
+        # missing_asset_address, asset_metadata_missing.
+        expr: |
+          sum by (chain, cluster, token_type, reason) (
+            increase(allocation_underlying_value_failures_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: prime-allocation-indexer
+          namespace: vector
+        annotations:
+          summary: "Allocation positions persisted with NULL underlying_value ({{ $labels.token_type }}, {{ $labels.reason }}, chain {{ $labels.chain }})"
+          description: >-
+            The prime-allocation-indexer wrote positions whose underlying_value
+            should be computable but persisted as NULL for 30+ minutes. The
+            write path succeeds, so nothing else alerts -- this is the
+            silent-data-quality-hole signal for VEC-307. USD exposure derived
+            from these rows undercounts until resolved.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationunderlyingvaluefailures
+
       - alert: VectorMaplePhaseLatencyHigh
         # Phase p95 duration. Normal p95 is seconds (loans ~4s, others <1s).
         # >30s means the Maple API is degraded; alert well before a phase
