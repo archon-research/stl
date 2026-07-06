@@ -38,6 +38,11 @@ type Config struct {
 	// snapshots even on blocks with no pool event. 0 disables the sweep
 	// (event-driven snapshots only).
 	SweepBlocks int64
+	// SweepBlocksSet reports whether SweepBlocks came from an explicit
+	// -sweep-blocks flag or SWEEP_BLOCKS env var rather than the default. A DEX
+	// factory that does not support sweeping uses this to warn only when an
+	// operator actually set the knob, not on every default boot.
+	SweepBlocksSet bool
 	// Dex selects which DEX factory dex-indexer runs (e.g. "curve",
 	// "uniswap-v3"). Validating the value against the registry's known keys
 	// is the caller's job; ParseConfig only requires it be present.
@@ -141,6 +146,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 		}
 	}
 
+	cfg.SweepBlocksSet = explicit["sweep-blocks"]
 	if !explicit["sweep-blocks"] {
 		if sweepStr := env.Get("SWEEP_BLOCKS", ""); sweepStr != "" {
 			v, err := strconv.ParseInt(sweepStr, 10, 64)
@@ -148,6 +154,7 @@ func ParseConfig(flagSetName string, args []string) (Config, error) {
 				return Config{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepStr, err)
 			}
 			cfg.SweepBlocks = v
+			cfg.SweepBlocksSet = true
 		}
 	}
 	if cfg.SweepBlocks < 0 {

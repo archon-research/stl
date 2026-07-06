@@ -84,15 +84,21 @@ func DueSet[P SnapshotPool](t *SnapshotTracker, all []P, touched map[int64]bool,
 		return nil, fmt.Errorf("touched pool IDs %v not found in registry: registry bug", sortedKeys(remainingTouched))
 	}
 
-	if t.sweepBlocks > 0 {
-		for _, p := range all {
-			if p.DeployBlockNum() > bn {
-				continue
-			}
-			last, seen := t.lastSnapshot[p.PoolID()]
-			if !seen || bn-last.bn >= t.sweepBlocks || (bn == last.bn && ver != last.ver) {
-				byID[p.PoolID()] = p
-			}
+	// The reorg re-snapshot rule (same block, new version) must run even when
+	// sweeping is disabled. A reorg redelivers block N at a higher version; a
+	// pool snapshotted on the orphaned fork (N, v0) but not touched by the new
+	// fork's receipts would otherwise never get an (N, v1) row, so the canonical
+	// read keeps serving abandoned-fork state as latest. Sweep-due selection
+	// (unseen / interval elapsed) stays gated on sweepBlocks > 0.
+	for _, p := range all {
+		if p.DeployBlockNum() > bn {
+			continue
+		}
+		last, seen := t.lastSnapshot[p.PoolID()]
+		reorgResnapshot := seen && bn == last.bn && ver != last.ver
+		sweepDue := t.sweepBlocks > 0 && (!seen || bn-last.bn >= t.sweepBlocks)
+		if reorgResnapshot || sweepDue {
+			byID[p.PoolID()] = p
 		}
 	}
 

@@ -38,6 +38,39 @@ func happyEnv() map[string]string {
 	}
 }
 
+// TestParseConfig_SweepBlocksSet: SweepBlocksSet is true only when an operator
+// explicitly provided the knob (flag or env), not for the shared default, so a
+// no-sweep DEX factory can warn without tripping on every default boot.
+func TestParseConfig_SweepBlocksSet(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		args    []string
+		wantSet bool
+		wantVal int64
+	}{
+		{name: "default is not marked set", env: "", args: nil, wantSet: false, wantVal: 50},
+		{name: "env var marks set", env: "300", args: nil, wantSet: true, wantVal: 300},
+		{name: "explicit flag marks set even at zero", env: "", args: []string{"-sweep-blocks", "0"}, wantSet: true, wantVal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envSet(t, happyEnv())
+			t.Setenv("SWEEP_BLOCKS", tt.env)
+			cfg, err := ParseConfig("test", tt.args)
+			if err != nil {
+				t.Fatalf("ParseConfig: %v", err)
+			}
+			if cfg.SweepBlocksSet != tt.wantSet {
+				t.Errorf("SweepBlocksSet = %v, want %v", cfg.SweepBlocksSet, tt.wantSet)
+			}
+			if cfg.SweepBlocks != tt.wantVal {
+				t.Errorf("SweepBlocks = %d, want %d", cfg.SweepBlocks, tt.wantVal)
+			}
+		})
+	}
+}
+
 func TestParseConfig_HappyPath(t *testing.T) {
 	envSet(t, happyEnv())
 	cfg, err := ParseConfig("test-worker", nil)

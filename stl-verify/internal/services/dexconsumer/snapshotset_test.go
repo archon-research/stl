@@ -163,6 +163,26 @@ func TestDueSet_SortedByPoolIDAscending(t *testing.T) {
 	}
 }
 
+// TestDueSet_ReorgResnapshotWhenSweepDisabled: even with sweeping disabled
+// (uniswap-v3 builds NewSnapshotTracker(0)), a reorg that redelivers a block at
+// a new version must re-snapshot a pool snapshotted on the now-orphaned fork,
+// even when the new fork's receipts no longer touch it. Otherwise the canonical
+// read (block_number DESC, block_version DESC) keeps serving the abandoned-fork
+// state as latest until the pool is next organically touched.
+func TestDueSet_ReorgResnapshotWhenSweepDisabled(t *testing.T) {
+	tracker := NewSnapshotTracker(0)
+	p := pool(1, 0)
+	tracker.MarkSnapshotted([]int64{p.PoolID()}, 100, 0)
+
+	got, err := DueSet(tracker, []testPool{p}, map[int64]bool{}, 100, 1)
+	if err != nil {
+		t.Fatalf("DueSet: %v", err)
+	}
+	if len(got) != 1 || got[0].PoolID() != 1 {
+		t.Errorf("result = %v, want pool 1 re-snapshotted on reorg with sweep disabled", got)
+	}
+}
+
 // TestDueSet_SweepDisabledOnlyTouched: sweepBlocks == 0 disables sweep
 // entirely; only touched pools are returned, still deploy-gated.
 func TestDueSet_SweepDisabledOnlyTouched(t *testing.T) {
