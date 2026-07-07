@@ -911,6 +911,10 @@
       "type": "int8",
       "class": "R"
     },
+    "underlying_value": {
+      "type": "numeric",
+      "class": "D"
+    },
     "updated_at": {
       "type": "timestamptz",
       "class": "A",
