@@ -271,6 +271,11 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer shutdownOTEL(context.Background())
 
+	metrics, err := telemetry.NewMetrics("fluid-vault-indexer", cfg.chainName)
+	if err != nil {
+		return fmt.Errorf("creating metrics: %w", err)
+	}
+
 	mcTel, err := multicall.NewTelemetry(cfg.chainName)
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
@@ -316,6 +321,7 @@ func run(ctx context.Context, args []string) error {
 				ChainID:     cfg.chainID,
 			},
 			TargetDebtToken: cfg.targetDebtToken,
+			Metrics:         metrics,
 		},
 		sqsConsumer,
 		cacheReader,
