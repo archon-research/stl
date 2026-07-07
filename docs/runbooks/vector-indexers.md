@@ -453,21 +453,25 @@ and the pod logs show `fluid vault indexer started, waiting for messages...`.
 
 ### What it means
 
-The worker has consumed **no block for 15 minutes**
-(`rate(blocks_processed_total{service_name="fluid-vault-indexer"}[5m]) == 0`).
-The worker consumes ~1 `BlockEvent` per mainnet block (~12s) and records one
-`blocks_processed_total` sample per consumed block regardless of whether a vault
-was touched, so a flat counter is **not** a quiet vault period — it means the SQS
-consume loop is wedged (process alive but not processing) or the OTLP metric
-export broke (worker fine, metrics stopped). Either way no Fluid vault state is
+The worker is **up** (≥1 replica) but has consumed **no block for 15 minutes**:
+`rate(blocks_processed_total{service_name="fluid-vault-indexer"}[5m])` is zero —
+or the series has **vanished entirely** (the expression zero-fills from
+kube-state-metrics, so a dead OTLP export with a live pod still fires; other
+OTel series from the pod will be flat/absent too). The worker consumes ~1
+`BlockEvent` per mainnet block (~12s) and records one `blocks_processed_total`
+sample per consumed block regardless of whether a vault was touched, so this is
+**not** a quiet vault period — it means the SQS consume loop is wedged (process
+alive but not processing) or the OTLP metric export broke (worker fine, metrics
+stopped). Either way the counter is blind and possibly no Fluid vault state is
 being written. This replaced the old multicall-activity expression, which could
 not distinguish a genuinely quiet vault from a wedged loop.
 
 ### First checks (≤5 min)
 
 1. **Distinguish the cases** — is `VectorFluidVaultIndexerDown` also firing? If
-   so the process is down (treat as Down; the counter series simply vanished). If
-   not, the pod is alive — suspect a wedged loop or a broken metrics pipeline.
+   so the process is down (treat as Down; this rule is replica-gated and should
+   resolve). If not, the pod is alive — it is a wedged loop or a dead metrics
+   export, both of which need action.
 2. **Recent logs** — `kubectl -n vector logs -l app=fluid-vault-indexer --tail=200`.
    Look for a repeating error on one message, `context deadline exceeded` against
    the Alchemy RPC, or silence (poll loop stopped).
