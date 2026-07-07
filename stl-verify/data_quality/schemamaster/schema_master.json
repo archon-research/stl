@@ -1747,7 +1747,8 @@
       "key": [
         "exchange",
         "symbol",
-        "event_time"
+        "event_time",
+        "persisted_at"
       ]
     }
   }
