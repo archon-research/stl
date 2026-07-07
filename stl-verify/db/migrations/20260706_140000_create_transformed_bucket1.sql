@@ -5,9 +5,15 @@
 -- that a worker calls (block_number watermark for block-indexed tables, poll-time for API tables).
 -- Verified live: run1 = raw count, run2 = 0 (incremental idempotent), 1:1 parity per table.
 -- Buckets 2 (block-time-dimension) and 3 (no-PK, keyed via transform_config) follow separately.
--- NOTE (dev only): drop the prototype transformed.* tables before applying; CI/staging/prod are clean.
+--
+-- This migration owns the `transformed` schema and rebuilds it from scratch: the migrator applies
+-- each migration exactly once (tracked in public.migrations), so the DROP is a no-op on the single
+-- real apply in staging/prod. It makes the migration re-runnable in test harnesses that reset the
+-- public schema between cases while the separate `transformed` schema survives (which otherwise
+-- fails re-application on CREATE TABLE / ADD PRIMARY KEY).
 
-CREATE SCHEMA IF NOT EXISTS transformed;
+DROP SCHEMA IF EXISTS transformed CASCADE;
+CREATE SCHEMA transformed;
 
 CREATE TABLE IF NOT EXISTS transformed._watermark(source text PRIMARY KEY, block_wm bigint NOT NULL DEFAULT -1, ts_wm timestamptz NOT NULL DEFAULT '-infinity');
 
