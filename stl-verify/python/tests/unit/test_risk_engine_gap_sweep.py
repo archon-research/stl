@@ -79,3 +79,27 @@ class TestTotalBadDebt:
         items = [_item("1000000", "0.825", "1.05")]
         result = total_bad_debt(items, Decimal("0.50"))
         assert result < Decimal("-200000")  # meaningful bad debt
+
+
+def _maple_item(amount_usd: str) -> RiskEnrichedCollateral:
+    # Symbol-keyed collateral with no per-asset liquidation params (Maple).
+    return RiskEnrichedCollateral(
+        token_id=None,
+        symbol="BTC",
+        amount=Decimal("1"),
+        backing_pct=Decimal("100"),
+        amount_usd=Decimal(amount_usd),
+        price_usd=Decimal(amount_usd),
+        liquidation_threshold=None,
+        liquidation_bonus=None,
+    )
+
+
+class TestNoLiquidationParams:
+    def test_item_without_params_contributes_zero(self) -> None:
+        assert bad_debt_at_gap(_maple_item("130000"), Decimal("0.40")) == Decimal("0")
+
+    def test_total_skips_paramless_items(self) -> None:
+        items = [_item("1000", "0.825", "1.05"), _maple_item("130000")]
+        # Only the param-bearing item contributes; the maple item adds 0.
+        assert total_bad_debt(items, Decimal("0.40")) == bad_debt_at_gap(items[0], Decimal("0.40"))

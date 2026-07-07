@@ -18,6 +18,17 @@ class CryptoLendingReader(Protocol):
         """Return receipt-token routing metadata, or ``None`` if unknown."""
         ...
 
+    def requires_liquidation_enrichment(self, info: ReceiptTokenInfo) -> bool:
+        """Return whether this protocol's breakdown needs per-asset liquidation params.
+
+        ``True`` for protocols with a quantitative risk model (Aave-like, Morpho):
+        their items are enriched with per-asset liquidation params. ``False`` for
+        protocols whose breakdown is already pool-level, USD-valued and symbol-keyed
+        (e.g. Maple Syrup), which carry no liquidation params. Prime-share scaling is
+        orthogonal: both branches scale by ``get_share`` when a ``prime_id`` is given.
+        """
+        ...
+
     async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
         """Return the resolved backed breakdown for the receipt token's protocol."""
         ...

@@ -187,10 +187,10 @@ func (s *BlockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion)
 	switch protocolVersion {
 	case blockchain.ProtocolVersionAaveV2:
 		s.getPoolDataProviderReserveDataABI, err = abis.GetAaveV2PoolDataProviderReserveDataABI()
-	case blockchain.ProtocolVersionAaveV3:
+	case blockchain.ProtocolVersionAaveV3, blockchain.ProtocolVersionSparkLend:
+		// SparkLend's ProtocolDataProvider returns the same 12-field getReserveData
+		// as Aave V3 (verified on-chain at 0xFc21d6d146E6086B8359705C8b28512a983db0cb).
 		s.getPoolDataProviderReserveDataABI, err = abis.GetPoolDataProviderReserveData()
-	case blockchain.ProtocolVersionSparkLend:
-		s.getPoolDataProviderReserveDataABI, err = abis.GetSparklendPoolDataProviderReserveDataABI()
 	default:
 		return fmt.Errorf("unknown protocol version: %s", protocolVersion)
 	}
@@ -444,6 +444,10 @@ func (s *BlockchainService) decodeUserReserveDataResult(asset common.Address, re
 	if !ok || bi == nil {
 		return ActualUserReserveData{}, fmt.Errorf("unexpected type for stableRateLastUpdated: %T", unpacked[7])
 	}
+	stableRateLastUpdated, err := bigIntToTimestamp(bi, "stableRateLastUpdated")
+	if err != nil {
+		return ActualUserReserveData{}, err
+	}
 
 	return ActualUserReserveData{
 		Asset:                    asset,
@@ -454,7 +458,7 @@ func (s *BlockchainService) decodeUserReserveDataResult(asset common.Address, re
 		ScaledVariableDebt:       unpacked[4].(*big.Int),
 		StableBorrowRate:         unpacked[5].(*big.Int),
 		LiquidityRate:            unpacked[6].(*big.Int),
-		StableRateLastUpdated:    bi.Uint64(),
+		StableRateLastUpdated:    uint64(stableRateLastUpdated),
 		UsageAsCollateralEnabled: unpacked[8].(bool),
 	}, nil
 }
@@ -791,10 +795,8 @@ func (s *BlockchainService) parseReserveData(data []byte) (*ReserveData, error) 
 	switch s.protocolVersion {
 	case blockchain.ProtocolVersionAaveV2:
 		return parseReserveDataAaveV2(unpacked, fieldIndex)
-	case blockchain.ProtocolVersionAaveV3:
+	case blockchain.ProtocolVersionAaveV3, blockchain.ProtocolVersionSparkLend:
 		return parseReserveDataAaveV3(unpacked, fieldIndex)
-	case blockchain.ProtocolVersionSparkLend:
-		return parseReserveDataSparklend(unpacked, fieldIndex)
 	default:
 		return nil, fmt.Errorf("unknown protocol version: %s", s.protocolVersion)
 	}
@@ -863,7 +865,10 @@ func parseReserveDataAaveV2(unpacked []any, fieldIndex map[string]int) (*Reserve
 	if err != nil {
 		return nil, err
 	}
-	result.LastUpdateTimestamp = timestamp.Int64()
+	result.LastUpdateTimestamp, err = bigIntToTimestamp(timestamp, "lastUpdateTimestamp")
+	if err != nil {
+		return nil, err
+	}
 
 	return result, nil
 }
@@ -936,73 +941,10 @@ func parseReserveDataAaveV3(unpacked []any, fieldIndex map[string]int) (*Reserve
 	if err != nil {
 		return nil, err
 	}
-	result.LastUpdateTimestamp = timestamp.Int64()
-
-	return result, nil
-}
-
-// parseReserveDataSparklend parses Sparklend reserve data (11 fields, no averageStableBorrowRate).
-func parseReserveDataSparklend(unpacked []any, fieldIndex map[string]int) (*ReserveData, error) {
-	result := &ReserveData{}
-	var err error
-
-	result.Unbacked, err = getBigIntByName(unpacked, fieldIndex, "unbacked")
+	result.LastUpdateTimestamp, err = bigIntToTimestamp(timestamp, "lastUpdateTimestamp")
 	if err != nil {
 		return nil, err
 	}
-
-	result.AccruedToTreasuryScaled, err = getBigIntByName(unpacked, fieldIndex, "accruedToTreasuryScaled")
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalAToken, err = getBigIntByName(unpacked, fieldIndex, "totalAToken")
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalStableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalStableDebt")
-	if err != nil {
-		return nil, err
-	}
-
-	result.TotalVariableDebt, err = getBigIntByName(unpacked, fieldIndex, "totalVariableDebt")
-	if err != nil {
-		return nil, err
-	}
-
-	result.LiquidityRate, err = getBigIntByName(unpacked, fieldIndex, "liquidityRate")
-	if err != nil {
-		return nil, err
-	}
-
-	result.VariableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowRate")
-	if err != nil {
-		return nil, err
-	}
-
-	result.StableBorrowRate, err = getBigIntByName(unpacked, fieldIndex, "stableBorrowRate")
-	if err != nil {
-		return nil, err
-	}
-
-	result.AverageStableBorrowRate = big.NewInt(0) // Not available in Sparklend
-
-	result.LiquidityIndex, err = getBigIntByName(unpacked, fieldIndex, "liquidityIndex")
-	if err != nil {
-		return nil, err
-	}
-
-	result.VariableBorrowIndex, err = getBigIntByName(unpacked, fieldIndex, "variableBorrowIndex")
-	if err != nil {
-		return nil, err
-	}
-
-	timestamp, err := getBigIntByName(unpacked, fieldIndex, "lastUpdateTimestamp")
-	if err != nil {
-		return nil, err
-	}
-	result.LastUpdateTimestamp = timestamp.Int64()
 
 	return result, nil
 }
@@ -1104,6 +1046,20 @@ func getBigIntByName(unpacked []any, fieldIndex map[string]int, fieldName string
 	}
 
 	return v, nil
+}
+
+// maxUint40 is the largest value an on-chain uint40 timestamp can hold.
+var maxUint40 = new(big.Int).SetUint64(1<<40 - 1)
+
+// bigIntToTimestamp converts a *big.Int ABI field to an int64 Unix timestamp.
+// The ABI decoder returns non-standard integer widths (like the on-chain uint40
+// timestamps) as unbounded *big.Int with no range check, so a misaligned ABI or
+// unexpected contract value would silently truncate without this guard.
+func bigIntToTimestamp(v *big.Int, fieldName string) (int64, error) {
+	if v.Sign() < 0 || v.Cmp(maxUint40) > 0 {
+		return 0, fmt.Errorf("field %s value %s outside uint40 range", fieldName, v.String())
+	}
+	return v.Int64(), nil
 }
 
 // getBoolByName extracts a boolean value identified by fieldName from an unpacked ABI output using fieldIndex.
