@@ -15,13 +15,11 @@ stl-verify/
 │   │   ├── inbound/        # Use case interfaces
 │   │   └── outbound/       # Infrastructure interfaces
 │   ├── adapters/
-│   │   ├── inbound/        # HTTP, gRPC, CLI handlers
+│   │   ├── inbound/        # HTTP handlers
 │   │   └── outbound/       # Implementations: alchemy, postgres, redis, sns, sqs, s3, telemetry
 │   └── services/           # Use case implementations (live_data, backfill_gaps, raw_data_backup)
 └── db/migrations/          # SQL migrations (auto-applied)
 ```
-
-**Dependency Rule**: Dependencies flow inward only. Domain has no dependencies; adapters depend on ports; ports depend on domain.
 
 **Interface Segregation**: Define ports as small, focused interfaces. Prefer multiple small interfaces over one large one.
 
@@ -141,7 +139,7 @@ See [Makefile](Makefile) for the complete list of targets.
     - For services, create both unit and integration tests.
     - Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
     - **No test-order dependencies in integration tests sharing a schema**: never rely on migration-seeded rows or on rows another test created — sibling tests TRUNCATE/DELETE shared tables (e.g. `TRUNCATE protocol CASCADE`), so seed everything your test needs yourself via idempotent upserts. Verify by running the whole test file/package, not just your tests filtered with `-run` (a filtered run hides the wipe that breaks you).
-- **Binaries/Building**: When building binaries using `go build`, output to `stl/dist`
+- **Binaries/Building**: When building binaries using `go build`, output to `stl-verify/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition** (read code like a book):
     - A function body should read like prose: a short, linear sequence of named steps. Each step is a call to a well-named helper whose name says *what* it does, so the reader understands the flow without reading the helper's internals.
@@ -190,8 +188,5 @@ Database and SQL-migration rules load from [../.claude/rules/go-database.md](../
 
 ## Do NOT
 
-- Import adapters in domain or application layer
 - Add business logic to adapters
 - Use global state or singletons
-- Skip error handling
-- Commit generated files or binaries
