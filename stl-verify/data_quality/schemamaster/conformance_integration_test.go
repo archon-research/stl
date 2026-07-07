@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/internal/schemamaster"
+	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
