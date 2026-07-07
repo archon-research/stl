@@ -1,5 +1,6 @@
 """Test-data seeding helpers for the integration suite."""
 
+import datetime as dt
 from decimal import Decimal
 from typing import cast
 
@@ -90,6 +91,204 @@ async def insert_receipt_token(
         )
     finally:
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Maple Syrup vault seed
+#
+# Shared by the Maple backed-breakdown repository tests and the Maple risk-API
+# tests. The ``maple`` protocol, the ``USDC`` token and the ``syrupUSDC``
+# receipt_token are migration-seeded; these helpers insert the pool / loan /
+# collateral / state snapshot rows a scenario needs. ``synced_at`` is passed
+# explicitly so all snapshot rows can be pinned to one processing cycle — the
+# breakdown query joins collateral to loan_state on (synced_at, processing_version).
+#
+# maple_pool / maple_loan are Data-Vault hubs: editorial attributes (name,
+# is_syrup, loan_meta_type) live in the maple_pool_meta / maple_loan_meta SCD2
+# satellites and are exposed through the maple_pool_current / maple_loan_current
+# views. So insert_maple_pool / insert_maple_loan write a hub row AND its latest
+# satellite row — without a live satellite row the entity never appears in the
+# *_current view the breakdown query reads.
+# ---------------------------------------------------------------------------
+
+
+async def maple_seed_ids(conn: asyncpg.Connection) -> tuple[int, int]:
+    """Return the migration-seeded (maple protocol_id, USDC token_id) for chain_id=1."""
+    protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE chain_id = 1 AND name = 'maple'")
+    usdc_id = await conn.fetchval("SELECT id FROM token WHERE chain_id = 1 AND symbol = 'USDC'")
+    if protocol_id is None or usdc_id is None:
+        raise RuntimeError("maple protocol / USDC token not seeded by migrations")
+    return cast(int, protocol_id), cast(int, usdc_id)
+
+
+async def insert_maple_pool(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    address: bytes,
+    asset_token_id: int,
+    synced_at: dt.datetime,
+    name: str = "Syrup USDC",
+    is_syrup: bool = True,
+) -> int:
+    """Insert a maple_pool hub row plus its current maple_pool_meta satellite row."""
+    pool_id = cast(
+        int,
+        await conn.fetchval(
+            """
+            INSERT INTO maple_pool (chain_id, protocol_id, address, asset_token_id)
+            VALUES (1, $1, $2, $3)
+            RETURNING id
+            """,
+            protocol_id,
+            address,
+            asset_token_id,
+        ),
+    )
+    await conn.execute(
+        """
+        INSERT INTO maple_pool_meta (maple_pool_id, synced_at, name, is_syrup, hashdiff)
+        VALUES (
+            $1, $2, $3::text, $4,
+            decode(md5($3::text || E'\\x1f' || CASE WHEN $4 THEN 'true' ELSE 'false' END), 'hex')
+        )
+        """,
+        pool_id,
+        synced_at,
+        name,
+        is_syrup,
+    )
+    return pool_id
+
+
+async def insert_maple_pool_state(
+    conn: asyncpg.Connection,
+    *,
+    pool_id: int,
+    synced_at: dt.datetime,
+    liquid_assets: int,
+    principal_out: int = 0,
+) -> None:
+    """Insert a maple_pool_state snapshot (nullable metrics left NULL/zero)."""
+    await conn.execute(
+        """
+        INSERT INTO maple_pool_state
+            (maple_pool_id, synced_at, liquid_assets, principal_out, utilization, monthly_apy, spot_apy)
+        VALUES ($1, $2, $3, $4, 0, 0, 0)
+        """,
+        pool_id,
+        synced_at,
+        Decimal(liquid_assets),
+        Decimal(principal_out),
+    )
+
+
+async def insert_maple_loan(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    pool_id: int,
+    borrower_user_id: int,
+    address: bytes,
+    synced_at: dt.datetime,
+    loan_meta_type: str | None = None,
+) -> int:
+    """Insert a maple_loan hub row plus its current maple_loan_meta satellite row.
+
+    ``loan_meta_type`` drives ``maple_loan_current.is_internal`` (True for
+    'amm'/'strategy'), which the breakdown query filters on.
+    """
+    loan_id = cast(
+        int,
+        await conn.fetchval(
+            """
+            INSERT INTO maple_loan (chain_id, protocol_id, loan_address, maple_pool_id, borrower_user_id)
+            VALUES (1, $1, $2, $3, $4)
+            RETURNING id
+            """,
+            protocol_id,
+            address,
+            pool_id,
+            borrower_user_id,
+        ),
+    )
+    await conn.execute(
+        """
+        INSERT INTO maple_loan_meta (maple_loan_id, synced_at, loan_type, loan_meta_type, hashdiff)
+        VALUES ($1, $2, 'OTL', $3::text, decode(md5('OTL' || E'\\x1f' || COALESCE($3::text, E'\\x1e')), 'hex'))
+        """,
+        loan_id,
+        synced_at,
+        loan_meta_type,
+    )
+    return loan_id
+
+
+async def insert_maple_loan_state(
+    conn: asyncpg.Connection,
+    *,
+    loan_id: int,
+    synced_at: dt.datetime,
+    state: str,
+    principal_owed: int,
+    acm_ratio: int | None = None,
+    build_id: int = 0,
+) -> None:
+    """Insert a maple_loan_state snapshot.
+
+    ``processing_version`` is trigger-assigned per (loan, synced_at): a distinct
+    ``build_id`` for the same key gets ``MAX(processing_version) + 1``, so pass
+    successive build_ids to model a reprocess (pv 0, then pv 1) of one cycle.
+    """
+    await conn.execute(
+        """
+        INSERT INTO maple_loan_state (maple_loan_id, synced_at, state, principal_owed, acm_ratio, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        """,
+        loan_id,
+        synced_at,
+        state,
+        Decimal(principal_owed),
+        Decimal(acm_ratio) if acm_ratio is not None else None,
+        build_id,
+    )
+
+
+async def insert_maple_loan_collateral(
+    conn: asyncpg.Connection,
+    *,
+    loan_id: int,
+    synced_at: dt.datetime,
+    symbol: str,
+    amount: int | None,
+    decimals: int,
+    value_usd: int | None,
+    state: str = "Deposited",
+    build_id: int = 0,
+) -> None:
+    """Insert a maple_loan_collateral snapshot row.
+
+    ``amount`` / ``value_usd`` accept ``None`` to model the API reporting null
+    (e.g. a DepositPending asset), which the breakdown query filters out.
+    ``build_id`` drives trigger-assigned ``processing_version`` as in
+    ``insert_maple_loan_state``; pin a collateral row to the same build as its
+    loan_state so they share a processing_version.
+    """
+    await conn.execute(
+        """
+        INSERT INTO maple_loan_collateral
+            (maple_loan_id, synced_at, asset_symbol, asset_amount, asset_decimals, asset_value_usd, state, build_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        """,
+        loan_id,
+        synced_at,
+        symbol,
+        Decimal(amount) if amount is not None else None,
+        decimals,
+        Decimal(value_usd) if value_usd is not None else None,
+        state,
+        build_id,
+    )
 
 
 async def store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:

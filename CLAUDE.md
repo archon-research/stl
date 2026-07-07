@@ -154,6 +154,8 @@ Quality is enforced at three levels:
 - Hooks: oxlint, oxfmt
 - CI: `npm run lint`, `npm run format:check`, `npm run build`
 - Tools: `npm ci` (includes oxlint, oxfmt, etc.)
+- `npm run type:check`/`build` need `npm run prepare` (panda codegen) first on a
+  fresh `npm ci`, else `#styled-system/*` imports fail.
 
 #### Running Manually
 
@@ -236,7 +238,9 @@ git commit  # Hooks auto-fix, may stage changes
     - Role admin vs object grants: role-level ops (`CREATE ROLE`, `ALTER ROLE … SET`, role-to-role membership grants) require superuser and belong in the infra repo's `bootstrap-db.sh`. Migrations run as `stl_migrator` (CREATEROLE only) and hold object-level grants only (`GRANT … ON <object> TO <role>`, `ALTER DEFAULT PRIVILEGES`). Rule: a role named on the left of ALTER/GRANT/DROP = bootstrap; object on left, role on right = migration.
 - **System-wide registries** (`chain`, `token`, `user`, `protocol`, `prime`, `oracle` + mapping tables): FK these instead of duplicating address/symbol/decimals/name columns.
     - FK by natural key only (`token`/`user`/`protocol`: `(chain_id, address)`; `oracle`/`prime`: `name`). Never resolve FKs by display label (e.g. token symbol) — labels are not unique or authoritative.
-    - Assets with no on-chain address (custodied BTC/SOL, off-chain API symbols) get no `token` row: store raw symbol or curated nullable `token_id` (see `offchain_price_asset`). Never invent addresses.
+    - Assets with no on-chain address (custodied BTC/SOL, off-chain API symbols) get no `token` row: store raw symbol or curated nullable `token_id` (see `offchain_price_asset`).
+    - Seed fixed on-chain sets statically: for a known, finite set (specific vaults/tokens), hardcode the verified addresses in the migration and resolve FK ids by natural key, to ensure fresh-DB determinism.
+    - Never invent addresses: every on-chain address (token, contract, vault, oracle) must come from a verified authoritative source (live API/explorer/contract), never guessed or assumed.
 - **External API adapters**:
     - Verify response shapes against the live API during development, not just against fixtures — a temporary live smoke test caught three schema drifts in the Maple GraphQL API (null `acmRatio` on active loans, `loanMeta` with null `type`, JSON-number fields among string-encoded integers) that fixture-only tests would have shipped broken.
     - Encoding can vary *across rows of the same field*. The Maple FTL `interestRate` is 18-decimal on V1-era loans (`fundingPoolV1` set, `fundingPool` null) but 6-decimal on live PoolV2 loans; a live smoke test surfaced this. When a field's scale depends on a row's lineage, scope the query to the lineage you index (here: live, non-terminal states, which are all PoolV2), re-check the discriminator in the parser (state + non-null pool), and store raw — never assume one global scale from one sample.
