@@ -204,7 +204,7 @@ func (s *Service) processBlock(
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			blockHash, err := blockHashFromEvent(event)
+			blockHash, err := event.ParsedBlockHash()
 			if err != nil {
 				return err
 			}
@@ -238,7 +238,7 @@ func (s *Service) processBlock(
 	// TestProcessBlock_SweepFetchFailure_ReturnsError.
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
-		blockHash, err := blockHashFromEvent(event)
+		blockHash, err := event.ParsedBlockHash()
 		if err != nil {
 			return err
 		}
@@ -249,18 +249,6 @@ func (s *Service) processBlock(
 	}
 
 	return nil
-}
-
-// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
-// on an empty string rather than letting common.HexToHash silently produce the
-// zero hash: that would pin every state read to block 0's hash and get a hard
-// eth_call error, but only after burning an RPC round trip and looking like an
-// RPC failure instead of a malformed event.
-func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
-	if event.BlockHash == "" {
-		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
-	}
-	return common.HexToHash(event.BlockHash), nil
 }
 
 func (s *Service) matchTransfers(

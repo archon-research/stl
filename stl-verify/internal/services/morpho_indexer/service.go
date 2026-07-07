@@ -279,7 +279,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return fmt.Errorf("receipts not found in cache for block %d (chain=%d, version=%d)", event.BlockNumber, event.ChainID, event.Version)
 	}
 
-	blockHash, err := blockHashFromEvent(event)
+	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
 		return err
 	}
@@ -315,18 +315,6 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 		return errors.Join(errs...)
 	}
 	return nil
-}
-
-// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
-// on an empty string rather than letting common.HexToHash silently produce the
-// zero hash: state reads must be pinned to the exact block being processed
-// (see outbound.Multicaller.ExecuteAtHash) — a malformed event must not sail
-// through as an eth_call pinned to block 0's hash.
-func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
-	if event.BlockHash == "" {
-		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
-	}
-	return common.HexToHash(event.BlockHash), nil
 }
 
 // hasRelevantEvents returns true if the receipt contains at least one

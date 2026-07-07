@@ -206,13 +206,13 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) e
 func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 	// Pin the read to the exact block hash, not the number: after a reorg an
 	// archive node would answer eth_call-by-number with the new fork's reserves
-	// (see outbound.Multicaller.ExecuteAtHash / VEC-471). Fail loud on an empty
-	// hash rather than letting common.HexToHash produce the zero hash.
-	if event.BlockHash == "" {
-		return fmt.Errorf("psm3 sweep block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
+	// (see outbound.Multicaller.ExecuteAtHash / VEC-471).
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return err
 	}
 
-	state, err := s.caller.ReadState(ctx, common.HexToHash(event.BlockHash))
+	state, err := s.caller.ReadState(ctx, blockHash)
 	if err != nil {
 		return fmt.Errorf("read psm3 state at block %d: %w", event.BlockNumber, err)
 	}

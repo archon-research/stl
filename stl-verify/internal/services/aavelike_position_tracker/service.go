@@ -207,23 +207,11 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	}
 
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
-	blockHash, err := blockHashFromEvent(event)
+	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
 		return err
 	}
 	return s.processReceipts(ctx, event.ChainID, event.BlockNumber, blockHash, event.Version, receipts, blockTimestamp)
-}
-
-// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
-// on an empty string rather than letting common.HexToHash silently produce the
-// zero hash: that would be indistinguishable from processReceipts' backfill
-// sentinel (see processReceipts doc) and pin state reads to block 0's hash
-// instead of failing loudly on a malformed event.
-func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
-	if event.BlockHash == "" {
-		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
-	}
-	return common.HexToHash(event.BlockHash), nil
 }
 
 // ProcessReceipts processes a slice of transaction receipts for a given block.

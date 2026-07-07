@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -367,20 +366,8 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 	}
 }
 
-// blockHashFromEvent parses event.BlockHash into a common.Hash, failing hard
-// on an empty string rather than letting common.HexToHash silently produce the
-// zero hash: state (price) reads must be pinned to the exact block being
-// processed (see blockchain.executeOracleState / VEC-471) — a malformed live
-// event must not sail through as the backfill number-pinned fallback.
-func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
-	if event.BlockHash == "" {
-		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
-	}
-	return common.HexToHash(event.BlockHash), nil
-}
-
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
-	blockHash, err := blockHashFromEvent(event)
+	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
 		return err
 	}
@@ -446,7 +433,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
-	blockHash, err := blockHashFromEvent(event)
+	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
 		return err
 	}
@@ -472,7 +459,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
-	blockHash, err := blockHashFromEvent(event)
+	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
 		return err
 	}

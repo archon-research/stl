@@ -196,13 +196,13 @@ func (s *VaultDebtService) processBlock(
 
 	// Pin state reads to the exact block hash, not the number: after a reorg an
 	// archive node would answer eth_call-by-number with the new fork's debt
-	// (see outbound.Multicaller.ExecuteAtHash / VEC-471). Fail loud on an empty
-	// hash rather than letting common.HexToHash produce the zero hash.
-	if event.BlockHash == "" {
-		return fmt.Errorf("prime-debt sweep block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
+	// (see outbound.Multicaller.ExecuteAtHash / VEC-471).
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return err
 	}
 
-	if err := s.syncAll(ctx, event.BlockNumber, common.HexToHash(event.BlockHash), event.Version); err != nil {
+	if err := s.syncAll(ctx, event.BlockNumber, blockHash, event.Version); err != nil {
 		return err
 	}
 
