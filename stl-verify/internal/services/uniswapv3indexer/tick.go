@@ -59,11 +59,18 @@ func tickViewABI() (*abi.ABI, error) {
 }
 
 // TouchedTicks returns the deduplicated, ascending-sorted union of every
-// TickLower/TickUpper bound touched by evs.LiquidityEvents. Mint, Burn, and
-// Collect all carry a tick range, so no event-kind switch is needed here.
+// TickLower/TickUpper bound touched by the block's Mint and Burn events.
+// Collect is excluded: v3-core's collect() only withdraws owed fees and never
+// mutates tick state (liquidityGross/Net, feeGrowthOutside), and (since it
+// omits checkTicks) its tick range is caller-supplied and unvalidated. Reading
+// those ticks is wasted work, and including them would let a permissionless
+// collect() with arbitrary ticks amplify into junk uninitialized-tick reads/rows.
 func TouchedTicks(evs DecodedEvents) []int32 {
 	seen := make(map[int32]struct{}, len(evs.LiquidityEvents)*2)
 	for _, e := range evs.LiquidityEvents {
+		if e.EventName == entity.LiquidityEventCollect {
+			continue
+		}
 		seen[int32(e.TickLower)] = struct{}{}
 		seen[int32(e.TickUpper)] = struct{}{}
 	}

@@ -108,6 +108,28 @@ func packTicksReturn(t *testing.T, a *abi.ABI, liquidityGross, liquidityNet, fee
 // TouchedTicks
 // ---------------------------------------------------------------------------
 
+// TestTouchedTicks_ExcludesCollect: collect() never mutates tick state and
+// carries a caller-supplied, unvalidated tick range, so its bounds must not
+// drive tick reads (else a permissionless collect with arbitrary ticks
+// amplifies into junk tick rows). Only Mint/Burn bounds are read.
+func TestTouchedTicks_ExcludesCollect(t *testing.T) {
+	mint := liquidityEvent(-120, 180)
+	collect := liquidityEvent(-887272, 887272) // arbitrary caller-supplied ticks
+	collect.EventName = entity.LiquidityEventCollect
+
+	got := TouchedTicks(DecodedEvents{LiquidityEvents: []*entity.UniswapV3LiquidityEvent{mint, collect}})
+
+	want := []int32{-120, 180}
+	if len(got) != len(want) {
+		t.Fatalf("TouchedTicks() = %v, want %v (collect bounds must be excluded)", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("TouchedTicks()[%d] = %d, want %d (full: got=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 func TestTouchedTicks(t *testing.T) {
 	tests := []struct {
 		name string
