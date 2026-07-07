@@ -526,6 +526,7 @@ export function BottomPanel({
                 isEnabled={isDrawerOpen && activeTab === 'risk'}
                 searchQuery={riskSearchValue}
                 selectedReceiptToken={focusedAllocation}
+                selectedPrime={selectedPrime}
               />
             ) : activeTab === 'rrc' ? (
               <RrcTab

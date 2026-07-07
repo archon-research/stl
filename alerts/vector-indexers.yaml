@@ -516,21 +516,28 @@ groups:
         # canary watches contractually-populated fields, this watches a
         # data-quality hole the error path deliberately swallows.
         #
-        # Pre-baseline: fires on ANY occurrence (>0) because this shape has
-        # never been seen live. FIRST fire has a second job — the runbook uses
-        # it to capture the raw errors[] shape from the client's temporary
-        # `tolerating unpriceable-collateral` warn and then delete that warn.
-        # Once the shape is confirmed and the warn removed, re-baseline this to
-        # a sustained threshold (>N/1h) so only a chronic gap pages.
+        # Baselined off the first live occurrences (staging, 2026-07): the shape
+        # is confirmed — path [openTermLoans collateral assetValueUsd],
+        # extensions.code=INTERNAL_SERVER_ERROR, partial data present — and the
+        # client's temporary diagnostic warn has been removed.
+        #
+        # Persistence, not volume: the counter increments once per unpriceable
+        # loan per cycle, so a rate/count threshold conflates a many-loan single
+        # cycle (a blip on a token backing several loans) with a genuinely chronic
+        # gap. Instead detect persistence — a [20m] window spans ~2 sync cycles
+        # (interval 10m): a lone gap self-heals, so its increase falls back to 0
+        # within 20m (< the 30m `for`) and never fires; a gap recurring every
+        # cycle keeps increase[20m] > 0 continuously and fires after 30m. This is
+        # loan-count-independent. Per-token so one bad token does not mask others.
         expr: |
           sum by (chain, cluster, token) (
             increase(maple_sync_null_downgrades_total{
               field="collateral_asset_value_usd",
               reason="unpriceable",
               k8s_namespace_name="vector"
-            }[1h])
+            }[20m])
           ) > 0
-        for: 0m
+        for: 30m
         labels:
           team: vector
           severity: warning
@@ -539,11 +546,12 @@ groups:
         annotations:
           summary: "Vector maple-graphql-indexer collateral unpriceable: `{{ $labels.token }}`"
           description: |
-            Collateral token `{{ $labels.token }}` was null-downgraded as
-            unpriceable `{{ $value | printf "%.0f" }}` time(s) in 1h: Maple's
-            oracle had no fiat feed, so its USD value persisted as NULL. A
-            transient blip self-heals next cycle; a sustained count is an
-            upstream Maple pricing gap.
+            Collateral token `{{ $labels.token }}` has stayed unpriceable across
+            consecutive cycles for >30m (`{{ $value | printf "%.0f" }}`
+            null-downgrade(s) in the trailing 20m): Maple's oracle had no fiat
+            feed, so its USD value persisted as NULL. A single-cycle blip
+            self-heals and does not fire; a sustained gap is an upstream Maple
+            pricing gap.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
 
       - alert: VectorAllocationUnderlyingValueFailures

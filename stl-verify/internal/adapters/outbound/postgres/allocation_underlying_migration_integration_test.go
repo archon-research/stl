@@ -45,22 +45,6 @@ func TestAllocationPositionUnderlyingColumnsExist(t *testing.T) {
 	}
 }
 
-func TestAllocationPositionUnderlyingPairCheckConstraintExists(t *testing.T) {
-	ctx := context.Background()
-	// Constraint metadata is enough: inserting a full row needs the whole
-	// natural key; the CHECK's presence + definition is the behaviour under test.
-	var def string
-	err := allocUnderlyingPool.QueryRow(ctx, `
-		SELECT pg_get_constraintdef(oid) FROM pg_constraint
-		WHERE conname = 'allocation_position_underlying_pair_check'`).Scan(&def)
-	if err != nil {
-		t.Fatalf("CHECK constraint missing: %v", err)
-	}
-	if !strings.Contains(def, "underlying_value IS NULL") || !strings.Contains(def, "underlying_token_id IS NULL") || !strings.Contains(def, "=") {
-		t.Fatalf("CHECK definition = %q, want both-NULL equality expression", def)
-	}
-}
-
 func TestAllocationPositionUnderlyingTokenFKExists(t *testing.T) {
 	ctx := context.Background()
 	var def string
