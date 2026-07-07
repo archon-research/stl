@@ -1,8 +1,9 @@
 # CLAUDE.md
 
 Guidance for Claude Code (claude.ai/code) in this repo. This root stays small and loads on
-every session; per-directory files and `.claude/rules/*` load on demand only when you touch
-that code, so most guidance is paid for only when it is relevant.
+every session; per-directory files and `.claude/rules/*` are designed to load on demand when
+you read files in that subtree, so most guidance is paid for only when it is relevant.
+(Lazy-load fires in interactive sessions; see the maintainer note below for the caveat.)
 
 ## Repository map
 
