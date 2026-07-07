@@ -208,7 +208,7 @@ func (s *Service) processBlock(
 			if err != nil {
 				return err
 			}
-			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber, blockHash)
+			fetch, err := s.registry.FetchAll(ctx, affected, blockHash)
 			if err != nil {
 				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 			}
@@ -357,7 +357,7 @@ func buildSupplySnapshots(
 func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	start := time.Now()
 
-	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber, blockHash)
+	fetch, err := s.registry.FetchAll(ctx, s.entries, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}

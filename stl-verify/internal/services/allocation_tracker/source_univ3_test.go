@@ -83,7 +83,7 @@ func TestUniV3Source_FetchBalances_EmptyEntries(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	result, err := src.FetchBalances(context.Background(), nil, 100, testBlockHash)
+	result, err := src.FetchBalances(context.Background(), nil, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestUniV3Source_FetchBalances_UnknownChain(t *testing.T) {
 		},
 	}
 
-	result, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	result, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestUniV3Source_FetchBalances_PinsToBlockHash(t *testing.T) {
 		},
 	}
 
-	if _, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash); err != nil {
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 

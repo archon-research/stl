@@ -43,7 +43,6 @@ func (s *CurveSource) Supports(tokenType string, protocol string) bool {
 func (s *CurveSource) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
-	blockNumber int64,
 	blockHash common.Hash,
 ) (*FetchResult, error) {
 	result := NewFetchResult()

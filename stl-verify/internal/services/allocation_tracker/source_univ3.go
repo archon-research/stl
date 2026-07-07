@@ -45,7 +45,6 @@ func (s *UniV3Source) Supports(tokenType, protocol string) bool {
 func (s *UniV3Source) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
-	blockNumber int64,
 	blockHash common.Hash,
 ) (*FetchResult, error) {
 	result := NewFetchResult()

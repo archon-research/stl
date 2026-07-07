@@ -69,7 +69,7 @@ type callContext struct {
 	contract common.Address // for supply calls (entry is nil)
 }
 
-func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error) {
+func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil

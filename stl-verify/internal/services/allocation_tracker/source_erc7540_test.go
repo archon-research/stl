@@ -115,7 +115,7 @@ func TestERC7540Source_FetchBalances_ResolvesShareAndStoresBalance(t *testing.T)
 		TokenType:       "centrifuge",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestERC7540Source_FetchBalances_ZeroBalance(t *testing.T) {
 		TokenType:       "centrifuge",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestERC7540Source_FetchBalances_SharedVaultResolvedOnce(t *testing.T) {
 		{ContractAddress: vault, WalletAddress: walletB, TokenType: "centrifuge"},
 	}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestERC7540Source_FetchBalances_DuplicateShareForWalletFails(t *testing.T) 
 		{ContractAddress: vaultB, WalletAddress: wallet, TokenType: "centrifuge"},
 	}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected double-count error for two vaults resolving to the same share")
 	}
@@ -279,7 +279,7 @@ func TestERC7540Source_FetchBalances_SameShareDifferentWalletsSucceeds(t *testin
 		{ContractAddress: vaultB, WalletAddress: walletB, TokenType: "centrifuge"},
 	}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("same share for different wallets must not be a double count: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 				TokenType:       "centrifuge",
 			}}
 
-			results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+			results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -435,10 +435,9 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 	}
 }
 
-// TestERC7540Source_FetchBalances_ZeroBlockNumberStillPinsHash asserts that a
-// zero blockNumber (used only for logging/labelling) does not affect the
-// hash-pinned read: the multicall must still be pinned to blockHash.
-func TestERC7540Source_FetchBalances_ZeroBlockNumberStillPinsHash(t *testing.T) {
+// TestERC7540Source_FetchBalances_PinsToBlockHash asserts the share-resolution
+// and balance reads are pinned to blockHash (VEC-471).
+func TestERC7540Source_FetchBalances_PinsToBlockHash(t *testing.T) {
 	share := common.HexToAddress("0xcccc")
 
 	mc := testutil.NewMockMulticaller()
@@ -460,7 +459,7 @@ func TestERC7540Source_FetchBalances_ZeroBlockNumberStillPinsHash(t *testing.T) 
 		TokenType:       "centrifuge",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 0, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -473,7 +472,7 @@ func TestERC7540Source_FetchBalances_EmptyEntries(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	src := newTestERC7540Source(t, mc)
 
-	results, err := src.FetchBalances(context.Background(), nil, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), nil, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}

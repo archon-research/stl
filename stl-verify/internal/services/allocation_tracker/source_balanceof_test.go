@@ -102,7 +102,7 @@ func TestBalanceOfSource_FetchBalances(t *testing.T) {
 		},
 	}
 
-	result, err := src.FetchBalances(context.Background(), entries, 24720000, testBlockHash)
+	result, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestBalanceOfSource_FetchBalances_Empty(t *testing.T) {
 
 	src := NewBalanceOfSource(nil, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	result, err := src.FetchBalances(context.Background(), nil, 0, testBlockHash)
+	result, err := src.FetchBalances(context.Background(), nil, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestBalanceOfSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		},
 	}
 
-	result, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	result, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}
@@ -228,7 +228,7 @@ func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
 		TokenType:       "atoken",
 	}}
 
-	got, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
 		{ContractAddress: atoken, WalletAddress: wallet1, TokenType: "atoken"},
 		{ContractAddress: atoken, WalletAddress: wallet2, TokenType: "atoken"},
 	}
-	got, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
 
 	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: atoken, WalletAddress: wallet, TokenType: "atoken"}}
-	got, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 
 	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: atoken, WalletAddress: wallet, TokenType: "atoken"}}
-	got, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestBalanceOfSource_FetchBalances_PinsToBlockHash(t *testing.T) {
 		TokenType:       "erc20",
 	}}
 
-	if _, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash); err != nil {
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
 	if mc.CallCount != 1 {
@@ -471,7 +471,7 @@ func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
 
 	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: usdc, WalletAddress: wallet, TokenType: "erc20"}}
-	if _, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash); err != nil {
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
 }

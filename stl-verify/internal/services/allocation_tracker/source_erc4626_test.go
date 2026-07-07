@@ -65,7 +65,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 		TokenType:       "erc4626",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		TokenType:       "erc4626",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}
@@ -158,7 +158,7 @@ func TestERC4626Source_FetchBalances_SetsUnderlyingValueFromConvertToAssets(t *t
 	mc.ExecuteAtHashFn = respondTwoRounds(t, src, shares, &outbound.Result{Success: true, ReturnData: ret})
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestERC4626Source_FetchBalances_ConvertRevertLeavesUnderlyingNil(t *testing
 	mc.ExecuteAtHashFn = respondTwoRounds(t, src, big.NewInt(5), &outbound.Result{Success: false})
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("a reverting convertToAssets must not fail the fetch: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestERC4626Source_FetchBalances_ZeroSharesSkipConvertAndWriteZero(t *testin
 	}
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestERC4626Source_FetchBalances_TruncatedResultReturnsError(t *testing.T) {
 	}
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	_, err = src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	_, err = src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for truncated round-2 result")
 	}
@@ -274,7 +274,7 @@ func TestERC4626Source_FetchBalances_ConvertTransportErrorFailsFetch(t *testing.
 	}
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	if _, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash); err == nil {
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err == nil {
 		t.Fatal("a transport-level round-2 failure must propagate so SQS retries the block")
 	}
 }

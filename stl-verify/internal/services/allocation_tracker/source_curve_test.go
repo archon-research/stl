@@ -75,7 +75,7 @@ func TestCurveSource_FetchBalances_StoresLPBalance(t *testing.T) {
 		TokenType:       "curve",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCurveSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		TokenType:       "curve",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}

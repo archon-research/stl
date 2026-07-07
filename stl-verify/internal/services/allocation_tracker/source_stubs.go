@@ -35,7 +35,7 @@ func (s *SkipSource) Supports(tokenType, protocol string) bool {
 	return s.protocols[protocol]
 }
 
-func (s *SkipSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error) {
+func (s *SkipSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	s.logger.Debug("skipping — handled by existing worker", "source", s.name, "count", len(entries))
 	return NewFetchResult(), nil
 }
@@ -67,7 +67,7 @@ func (s *StubSource) Supports(tokenType, protocol string) bool {
 	return tokenType == s.tokenType
 }
 
-func (s *StubSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error) {
+func (s *StubSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	s.logger.Debug("stub — not yet implemented", "source", s.name, "count", len(entries))
 	return NewFetchResult(), nil
 }

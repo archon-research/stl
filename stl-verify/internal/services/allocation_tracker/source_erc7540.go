@@ -67,7 +67,7 @@ func (s *ERC7540Source) Supports(tokenType string, protocol string) bool {
 	return tokenType == "centrifuge"
 }
 
-func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64, blockHash common.Hash) (*FetchResult, error) {
+func (s *ERC7540Source) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
