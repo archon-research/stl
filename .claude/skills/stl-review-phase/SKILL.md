@@ -1,5 +1,5 @@
 ---
-name: review-phase
+name: stl-review-phase
 description: Spawn the standard parallel reviewer subagents after a substantive code change (new feature, refactor, or multi-file bug fix) and before declaring work done. Use when you finish implementing a change in this repo and need the project's mandated review pass.
 ---
 

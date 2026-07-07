@@ -25,6 +25,7 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 - **Never commit generated files or binaries.**
 - **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests. The `stl-verify/Makefile` is the source of truth for workflows — grep it before inventing a command.
 - **Git**: branch `VEC-123-short-slug`; PR title `VEC-123: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
+- **Skill naming**: repo-committed skills (`.claude/skills/`) are prefixed `stl-` (e.g. `stl-review-phase`) so they're distinguishable from personal/global skills when both are in scope.
 
 ## Where the rest lives (loads on demand)
 
@@ -34,7 +35,7 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 - **[.claude/rules/go-style.md](.claude/rules/go-style.md)** — Go-specific conventions: interfaces, constructors, `big.Int`, error handling, `main.go` testing, comments, build output. Auto-loads on `stl-verify/**/*.go`.
 - **[.claude/rules/go-database.md](.claude/rules/go-database.md)** — DB schema, migrations, snapshot reads, advisory locks. Auto-loads on `stl-verify/db/migrations/**` and repository adapters.
 - **[.claude/rules/observability.md](.claude/rules/observability.md)** — alerts + runbooks definition-of-done for new indexers. Auto-loads on `alerts/**`, `docs/runbooks/**`.
-- **`review-phase` skill** — spawn the standard parallel reviewer subagents after a substantive change, before declaring work done.
+- **`stl-review-phase` skill** — spawn the standard parallel reviewer subagents after a substantive change, before declaring work done.
 
 <!--
 Maintainer notes (stripped from context — free):
