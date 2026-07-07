@@ -293,6 +293,13 @@ groups:
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
 
+  # Own rule GROUP but same file, so it keeps the filename-derived Mimir
+  # namespace `vector-indexers`. Splitting the group (not the file) keeps each
+  # group under Mimir's 20-rules-per-group limit without tripping the
+  # mimir-rules-sync namespace allowlist.
+  - name: vector-maple-indexer
+    interval: 1m
+    rules:
       # =====================================================================
       # maple-graphql-indexer (VEC-320)
       # =====================================================================
@@ -608,7 +615,9 @@ groups:
             likely degraded; expect lag and possible cycle timeouts.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
 
-
+  - name: vector-fluid-vault-indexer
+    interval: 1m
+    rules:
       # =====================================================================
       # fluid-vault-indexer (VEC-438)
       # =====================================================================
@@ -616,11 +625,14 @@ groups:
       # the VaultResolver via Multicall3, appends fluid_vault_state snapshots into
       # TimescaleDB. Mainnet (chain 1) only.
       #
-      # Rules live in this shared file (not a vector-fluid-vault-indexer.yaml) so
-      # the mimir-rules-sync namespace allowlist
+      # This is its own rule GROUP but stays in this file, so it keeps the
+      # filename-derived Mimir namespace `vector-indexers`, which the
+      # mimir-rules-sync allowlist
       # `^vector-(watcher|backup-worker|indexers|postgres|cronjobs)$`
-      # (.github/workflows/alerts.yml) actually syncs them — a vector-fluid-*
-      # namespace would be silently dropped.
+      # (.github/workflows/alerts.yml) syncs. A separate vector-fluid-*.yaml would
+      # become a vector-fluid-* namespace and be silently dropped. Splitting the
+      # group (not the file) also keeps each group under Mimir's
+      # 20-rules-per-group limit.
       #
       # Metric coverage: the B2 service emits NO service-level counters/histograms
       # of its own (no fluid_blocks_processed_total / fluid_errors_total / RPC
