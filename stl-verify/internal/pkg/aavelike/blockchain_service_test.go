@@ -1039,7 +1039,7 @@ func TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure(t *testing.T) {
 
 // TestSparklendABIFieldShiftRegression is a regression test for V-13.
 //
-// Root cause (now fixed): GetSparklendPoolDataProviderReserveDataABI previously
+// Root cause (now fixed): the SparkLend-specific getReserveData ABI previously
 // defined 11 outputs, missing averageStableBorrowRate at slot 8. The SparkLend
 // Pool Data Provider at 0xFc21d6d146E6086B8359705C8b28512a983db0cb returns 12
 // fields (same Aave V3 interface). go-ethereum's UnpackValues reads exactly N*32
@@ -1055,7 +1055,7 @@ func TestBatchGetTokenMetadata_DoesNotCacheOnUnpackFailure(t *testing.T) {
 // This produced 54,153 corrupted rows in staging with liquidity_index=0 and
 // last_update_timestamp < 0 (or > 1.9B), all on protocol_id=1 (SparkLend Ethereum).
 //
-// Fix: added averageStableBorrowRate at slot 8 in GetSparklendPoolDataProviderReserveDataABI.
+// Fix: SparkLend now loads the shared 12-field Aave V3 ABI (GetPoolDataProviderReserveData).
 func TestSparklendABIFieldShiftRegression(t *testing.T) {
 	// Realistic ray values for a SparkLend Ethereum reserve circa block 24M.
 	averageStableBorrowRate := big.NewInt(0) // stable borrows deprecated on SparkLend
@@ -1141,16 +1141,27 @@ func TestBigIntToTimestamp(t *testing.T) {
 			want:  0,
 		},
 		{
+			name:  "uint40 max",
+			input: big.NewInt(1<<40 - 1),
+			want:  1<<40 - 1,
+		},
+		{
 			name:        "negative value",
 			input:       big.NewInt(-1),
 			wantErr:     true,
-			errContains: "negative",
+			errContains: "outside uint40 range",
+		},
+		{
+			name:        "exceeds uint40",
+			input:       big.NewInt(1 << 40),
+			wantErr:     true,
+			errContains: "outside uint40 range",
 		},
 		{
 			name:        "overflows int64",
 			input:       maxInt64PlusOne,
 			wantErr:     true,
-			errContains: "overflows int64",
+			errContains: "outside uint40 range",
 		},
 	}
 
@@ -1171,6 +1182,65 @@ func TestBigIntToTimestamp(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("bigIntToTimestamp() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeUserReserveDataResult_StableRateLastUpdated(t *testing.T) {
+	ray, _ := new(big.Int).SetString("1064891278515701234736047435", 10)
+
+	tests := []struct {
+		name                  string
+		stableRateLastUpdated *big.Int
+		want                  uint64
+		wantErr               bool
+	}{
+		{
+			name:                  "valid uint40 timestamp",
+			stableRateLastUpdated: big.NewInt(1783413743),
+			want:                  1783413743,
+		},
+		{
+			name:                  "ray-scale garbage rejected instead of truncated",
+			stableRateLastUpdated: ray,
+			wantErr:               true,
+		},
+	}
+
+	userReserveDataABI, err := abis.GetPoolDataProviderUserReserveDataABI()
+	if err != nil {
+		t.Fatalf("GetPoolDataProviderUserReserveDataABI: %v", err)
+	}
+	service := &BlockchainService{
+		logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		getUserReserveDataABI: userReserveDataABI,
+	}
+	asset := common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			returnData, err := userReserveDataABI.Methods["getUserReserveData"].Outputs.Pack(
+				big.NewInt(1), big.NewInt(2), big.NewInt(3), big.NewInt(4),
+				big.NewInt(5), big.NewInt(6), big.NewInt(7),
+				tt.stableRateLastUpdated, true,
+			)
+			if err != nil {
+				t.Fatalf("Pack: %v", err)
+			}
+
+			got, err := service.decodeUserReserveDataResult(asset, returnData)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("decodeUserReserveDataResult() expected error, got StableRateLastUpdated=%d", got.StableRateLastUpdated)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeUserReserveDataResult() unexpected error: %v", err)
+			}
+			if got.StableRateLastUpdated != tt.want {
+				t.Errorf("StableRateLastUpdated = %d, want %d", got.StableRateLastUpdated, tt.want)
 			}
 		})
 	}

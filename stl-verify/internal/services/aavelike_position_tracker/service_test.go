@@ -1800,7 +1800,7 @@ func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 
 func mustSparklendReserveDataABI(t *testing.T) *abi.ABI {
 	t.Helper()
-	parsedABI, err := abis.GetSparklendPoolDataProviderReserveDataABI()
+	parsedABI, err := abis.GetPoolDataProviderReserveData()
 	if err != nil {
 		t.Fatalf("load sparklend reserve data ABI: %v", err)
 	}
