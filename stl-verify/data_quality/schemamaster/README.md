@@ -45,3 +45,8 @@ A `raw_pipeline` (on-chain observation) table must resolve each requirement, as 
 Columns kept NULL-able despite a `not_null` canonical, sanctioned.
 - `build_id` was retrofitted onto pre-existing hypertables (ADR-0002, 2026-04-14). TigerData blocks the validating full-table scan that `SET NOT NULL` needs on tiered chunks, so NOT NULL is enforced implicitly via the PK/UNIQUE key + `DEFAULT 0` + backfill; residual nullability is a harmless leftover. Tables created after the convention (`psm3_reserves`, fluid/maple state, `token_total_supply`) declare `build_id NOT NULL` inline and need no exemption.
 - `processing_version` (the audit sibling of `build_id`) is `not_null` too; the same four pre-convention retrofit tables (anchorage ×2, `prime_debt`, `sparklend_reserve_data`) carry a residual nullable `processing_version` for the identical reason and are exempted alongside `build_id`.
+
+### `transform_config`
+Upsert key for tables the transform generator can't key from a raw primary key (no usable PK, or a PK that doesn't survive canonicalisation). Each entry gives the column list the generator upserts on. Read by the generator, not by the conformance check.
+- `prime_debt`: `(prime_id, ilk_name, block_number, block_version, processing_version)` — verified unique on live (726 rows, 726 distinct keys, max 1 row per key).
+- `anchorage_operation`, `anchorage_package_snapshot`, `cex_orderbook_snapshots`: **uniqueness unverified** (0 rows in the dev slice), confirm on live before the generator uses them. `cex_orderbook_snapshots` has no `processing_version`, so its key omits it.
