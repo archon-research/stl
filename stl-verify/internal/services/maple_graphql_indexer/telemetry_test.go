@@ -12,6 +12,7 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -368,5 +369,55 @@ func TestNewTelemetryWithProviders_InstrumentErrors(t *testing.T) {
 				t.Errorf("error = %q", err.Error())
 			}
 		})
+	}
+}
+
+// Guards the startup seeds: VectorMapleIndexerStalled (cycles, rate==0) and
+// VectorMaplePoolWritesZero (rows_written{table="maple_pool_state"}, increase==0)
+// must be computable from process start. See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsAlertedSeriesAtZero(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+
+	if _, err := NewTelemetryWithProviders(tracenoop.NewTracerProvider(), mp); err != nil {
+		t.Fatalf("NewTelemetryWithProviders() error: %v", err)
+	}
+
+	cycleDPs := testutil.CollectSumDataPoints(t, reader, "maple.sync.cycles.total")
+	cycleStatuses := map[string]int64{}
+	for _, dp := range cycleDPs {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "ethereum" {
+			t.Errorf("maple.sync.cycles.total chain attr = %q, want %q", chain, "ethereum")
+		}
+		cycleStatuses[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := cycleStatuses[status]
+		if !ok {
+			t.Errorf("maple.sync.cycles.total missing status=%q series before any cycle", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("maple.sync.cycles.total{status=%q} = %d, want 0", status, v)
+		}
+	}
+
+	var poolRows *metricdata.DataPoint[int64]
+	for _, dp := range testutil.CollectSumDataPoints(t, reader, "maple.sync.rows.written") {
+		if testutil.AttrValue(dp, "table") == maplePoolStateTable {
+			dp := dp
+			poolRows = &dp
+		}
+	}
+	if poolRows == nil {
+		t.Errorf("maple.sync.rows.written missing table=%q series before any cycle", maplePoolStateTable)
+		return
+	}
+	if chain := testutil.AttrValue(*poolRows, "chain"); chain != "ethereum" {
+		t.Errorf("maple.sync.rows.written{table=%q} chain attr = %q, want %q", maplePoolStateTable, chain, "ethereum")
+	}
+	if poolRows.Value != 0 {
+		t.Errorf("maple.sync.rows.written{table=%q} = %d, want 0", maplePoolStateTable, poolRows.Value)
 	}
 }

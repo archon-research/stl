@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -162,6 +163,33 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	} {
 		if bounds := collectHistogramBounds(t, reader, name); !slices.Equal(bounds, telemetry.SecondsDurationBuckets) {
 			t.Errorf("%s bounds = %v, want %v", name, bounds, telemetry.SecondsDurationBuckets)
+		}
+	}
+}
+
+// Guards the startup seed: VectorOracleIndexerStalled reads
+// oracle_blocks_processed_total with rate()==0 and must be computable from
+// process start (a worker dead before its first block emits no series at
+// all otherwise). See telemetry.SeedCounter.
+func TestNewTelemetry_SeedsBlockStatusSeriesAtZero(t *testing.T) {
+	_, reader := newRecordingTelemetry(t)
+
+	dps := testutil.CollectSumDataPoints(t, reader, "oracle.blocks.processed")
+	got := map[string]int64{}
+	for _, dp := range dps {
+		if chain := testutil.AttrValue(dp, "chain"); chain != "mainnet" {
+			t.Errorf("oracle.blocks.processed chain attr = %q, want %q", chain, "mainnet")
+		}
+		got[testutil.AttrValue(dp, "status")] = dp.Value
+	}
+	for _, status := range []string{"success", "error"} {
+		v, ok := got[status]
+		if !ok {
+			t.Errorf("oracle.blocks.processed missing status=%q series before any block", status)
+			continue
+		}
+		if v != 0 {
+			t.Errorf("oracle.blocks.processed{status=%q} = %d, want 0", status, v)
 		}
 	}
 }

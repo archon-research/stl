@@ -68,3 +68,14 @@ func TestSetSpanError(t *testing.T) {
 		}
 	}
 }
+
+// The seed helpers and StatusAttr must derive the status label from one source,
+// or seeded series and recorded series could drift into parallel series.
+func TestStatusAttrAccessors_MatchStatusAttr(t *testing.T) {
+	if got := SuccessStatusAttr(); got != StatusAttr(nil) {
+		t.Errorf("SuccessStatusAttr() = %v, want StatusAttr(nil) = %v", got, StatusAttr(nil))
+	}
+	if got := ErrorStatusAttr(); got != StatusAttr(errors.New("x")) {
+		t.Errorf("ErrorStatusAttr() = %v, want StatusAttr(non-nil) = %v", got, StatusAttr(errors.New("x")))
+	}
+}

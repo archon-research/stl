@@ -252,6 +252,14 @@ runbook sections in the same PR — same definition-of-done as tests.
   the label, severity→routing, and window conventions; follow them.
 - Cover at minimum: liveness/stall, error rate, silent-empty / data-quality
   holes the error path won't catch, and latency.
+- Any counter an alert reads with an absence shape (`increase()`/`rate()`
+  `== 0`) MUST be seeded to 0 at construction via `telemetry.SeedStatusCounter`
+  (status-labelled) or `telemetry.SeedCounter` (fixed labels). An unseeded OTel
+  counter series first appears at 1, so `increase()` misses the 0->1 after every
+  pod rollover (false page on error+success pairs, see PR #529) and a
+  dead-from-birth worker emits no series at all (the stalled alert can never
+  fire). Open-ended label sets (per-operation error counters) cannot be seeded —
+  pair those alerts with a kube-state `Down` companion instead.
 - `critical` must have a `runbook_url` + runbook section; `warning`/`info` must
   have a runbook section.
 

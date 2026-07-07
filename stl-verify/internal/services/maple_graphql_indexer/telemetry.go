@@ -15,6 +15,11 @@ import (
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/maple_graphql_indexer"
 
+// maplePoolStateTable is the rows-written table label that VectorMaplePoolWritesZero
+// alerts on; the seed in NewTelemetryWithProviders and the write in syncPools must
+// agree on it or real increments orphan off the seeded series.
+const maplePoolStateTable = "maple_pool_state"
+
 // Telemetry provides OpenTelemetry metrics and tracing for the Maple GraphQL
 // indexer. All methods are nil-receiver-safe so the service can run without
 // telemetry wired (tests, local runs).
@@ -92,6 +97,15 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 	if err != nil {
 		return nil, fmt.Errorf("creating phaseDuration histogram: %w", err)
 	}
+
+	// VectorMapleIndexerStalled (cycles) and VectorMaplePoolWritesZero
+	// (rows_written) read these with absence shapes; seed so they are
+	// computable from process start (see telemetry.SeedCounter). Only the
+	// pool-state table is seeded: it is the only table an alert reads, and it
+	// always writes when healthy (loan/FTL/strategy tables legitimately write 0).
+	ctx := context.Background()
+	telemetry.SeedStatusCounter(ctx, t.cyclesTotal, t.chainAttr)
+	telemetry.SeedCounter(ctx, t.rowsWritten, t.chainAttr, attribute.String("table", maplePoolStateTable))
 
 	return t, nil
 }
