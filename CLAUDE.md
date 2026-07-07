@@ -28,9 +28,10 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 
 ## Where the rest lives (loads on demand)
 
-- **[stl-verify/CLAUDE.md](stl-verify/CLAUDE.md)** — Go service: architecture, errors, testing, function composition, comments, libraries, registries, external-API lore, build/run, Go linting.
+- **[stl-verify/CLAUDE.md](stl-verify/CLAUDE.md)** — Go service: architecture, language-agnostic conventions (testing, function composition, comments, registries, external-API lore), build/run, Go linting. Go-specific rules → go-style.md below.
 - **[stl-verify/python/CLAUDE.md](stl-verify/python/CLAUDE.md)** and **[stl-verify/ts/CLAUDE.md](stl-verify/ts/CLAUDE.md)** — per-language tooling/CI.
 - **[k8s/CLAUDE.md](k8s/CLAUDE.md)** — Kustomize base/overlays/dev-infra conventions.
+- **[.claude/rules/go-style.md](.claude/rules/go-style.md)** — Go-specific conventions: interfaces, constructors, `big.Int`, error handling, `main.go` testing, comments, build output. Auto-loads on `stl-verify/**/*.go`.
 - **[.claude/rules/go-database.md](.claude/rules/go-database.md)** — DB schema, migrations, snapshot reads, advisory locks. Auto-loads on `stl-verify/db/migrations/**` and repository adapters.
 - **[.claude/rules/observability.md](.claude/rules/observability.md)** — alerts + runbooks definition-of-done for new indexers. Auto-loads on `alerts/**`, `docs/runbooks/**`.
 - **`review-phase` skill** — spawn the standard parallel reviewer subagents after a substantive change, before declaring work done.
