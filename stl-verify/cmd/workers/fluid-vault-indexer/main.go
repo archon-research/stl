@@ -1,3 +1,6 @@
+// Package main consumes Ethereum block events from SQS, reads end-of-block Fluid
+// vault state from the VaultResolver for vaults touched in each block, and writes
+// append-only snapshots to Postgres (see internal/services/fluid_vault_indexer).
 package main
 
 import (
@@ -13,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -22,16 +26,16 @@ import (
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
-	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
+	"github.com/archon-research/stl/stl-verify/internal/services/fluid_vault_indexer"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 var (
@@ -64,22 +68,26 @@ type cliConfig struct {
 	maxMessages       int
 	waitTime          int
 	visibilityTimeout int
-	sweepBlocks       int
 	chainID           int64
+	chainName         string
+	targetDebtToken   common.Address
 }
 
 func parseConfig(args []string) (cliConfig, error) {
-	fs := flag.NewFlagSet("allocation-tracker", flag.ContinueOnError)
+	fs := flag.NewFlagSet("fluid-vault-indexer", flag.ContinueOnError)
 	queueURL := fs.String("queue", "", "SQS Queue URL")
 	redisAddr := fs.String("redis", "", "Redis address")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	maxMessages := fs.Int("max", 10, "Max messages per poll")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
 	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
-	sweepBlocks := fs.Int("sweep-blocks", 75, "Sweep every N blocks")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, err
 	}
+
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	cfg := cliConfig{
 		queueURL:          *queueURL,
@@ -88,7 +96,6 @@ func parseConfig(args []string) (cliConfig, error) {
 		maxMessages:       *maxMessages,
 		waitTime:          *waitTime,
 		visibilityTimeout: *visibilityTimeout,
-		sweepBlocks:       *sweepBlocks,
 	}
 
 	if cfg.queueURL == "" {
@@ -119,14 +126,14 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
 		v, err := strconv.Atoi(waitTimeStr)
 		if err != nil {
 			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
 		}
 		cfg.waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
 		v, err := strconv.Atoi(visTimeStr)
 		if err != nil {
 			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
@@ -140,6 +147,10 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 	cfg.chainID = chainID
+	cfg.chainName, err = entity.ChainName(chainID)
+	if err != nil {
+		return cliConfig{}, fmt.Errorf("resolving chain name: %w", err)
+	}
 
 	cfg.s3Bucket = env.Get("S3_BUCKET", "")
 	if cfg.s3Bucket == "" {
@@ -149,6 +160,16 @@ func parseConfig(args []string) (cliConfig, error) {
 	cfg.deployEnv = env.Get("DEPLOY_ENV", "")
 	if cfg.deployEnv == "" {
 		return cliConfig{}, fmt.Errorf("DEPLOY_ENV environment variable is required")
+	}
+
+	// TargetDebtToken defaults to sUSDS; an explicit override must be a valid
+	// hex address so a typo fails fast rather than silently scoping to address(0).
+	cfg.targetDebtToken = fluid_vault_indexer.SUSDSAddress
+	if tokenStr := env.Get("TARGET_DEBT_TOKEN", ""); tokenStr != "" {
+		if !common.IsHexAddress(tokenStr) {
+			return cliConfig{}, fmt.Errorf("invalid TARGET_DEBT_TOKEN %q: not a hex address", tokenStr)
+		}
+		cfg.targetDebtToken = common.HexToAddress(tokenStr)
 	}
 
 	return cfg, nil
@@ -172,7 +193,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
 
-	// SQS
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
 		QueueURL:          cfg.queueURL,
 		WaitTimeSeconds:   int32(cfg.waitTime),
@@ -184,21 +204,22 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer sqsConsumer.Close()
 
-	// Redis (block cache)
-	cacheCfg := redisAdapter.ConfigDefaults()
-	cacheCfg.Addr = cfg.redisAddr
-	cacheCfg.Password = env.Get("REDIS_PASSWORD", "")
-	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, logger)
+	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
+		Addr:      cfg.redisAddr,
+		Password:  env.Get("REDIS_PASSWORD", ""),
+		DB:        0,
+		TTL:       2 * 24 * time.Hour,
+		KeyPrefix: "stl",
+	}, logger)
 	if err != nil {
-		return fmt.Errorf("creating block cache: %w", err)
+		return fmt.Errorf("creating Redis cache: %w", err)
 	}
+	defer blockCache.Close()
 	if err := blockCache.Ping(ctx); err != nil {
 		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
 	}
-	defer blockCache.Close()
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
-	// S3 + cache reader with fallback
 	s3Opts := []func(*awss3.Options){}
 	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
 		s3Opts = append(s3Opts, func(o *awss3.Options) {
@@ -212,39 +233,35 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating cache reader: %w", err)
 	}
 
-	// Ethereum
-	rawClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
+	ethClient, err := rpchttp.DialEthereum(ctx, cfg.alchemyURL)
 	if err != nil {
-		return fmt.Errorf("eth dial: %w", err)
+		return fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
-	defer rawClient.Close()
+	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
-	// Database
-	dbPool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
-	defer dbPool.Close()
-	if err := dbPool.Ping(ctx); err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
+	defer pool.Close()
 	logger.Info("PostgreSQL connected")
 
-	buildReg, err := buildregistry.New(ctx, dbPool)
+	buildReg, err := buildregistry.New(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("registering build: %w", err)
 	}
 
-	logger.Info("starting allocation tracker",
+	logger.Info("starting fluid vault indexer",
 		"queue", cfg.queueURL,
 		"redis", cfg.redisAddr,
 		"chainID", cfg.chainID,
-		"commit", buildReg.GitHash())
+		"targetDebtToken", cfg.targetDebtToken.Hex(),
+		"commit", buildReg.GitHash(),
+		"branch", GitBranch)
 
-	// OpenTelemetry
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    "prime-allocation-indexer",
+		ServiceName:    "fluid-vault-indexer",
 		ServiceVersion: buildReg.GitHash(),
 		BuildTime:      BuildTime,
 		Logger:         logger,
@@ -254,147 +271,66 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer shutdownOTEL(context.Background())
 
-	chainName, err := entity.ChainName(cfg.chainID)
-	if err != nil {
-		return fmt.Errorf("resolving chain name: %w", err)
-	}
-	mcTel, err := multicall.NewTelemetry(chainName)
+	mcTel, err := multicall.NewTelemetry(cfg.chainName)
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
 	}
-	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
 	if err != nil {
-		return fmt.Errorf("multicall client: %w", err)
-	}
-
-	atTel, err := at.NewTelemetry(chainName)
-	if err != nil {
-		return fmt.Errorf("allocation tracker telemetry: %w", err)
+		return fmt.Errorf("creating multicall client: %w", err)
 	}
 
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault")
 	if err != nil {
-		return err
+		return fmt.Errorf("bootstrapping SC call archiving: %w", err)
 	}
 	defer archiveDrain()
 	mc = archiveWrap(mc)
 
-	erc20ABI, err := abis.GetERC20ABI()
+	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
-		return fmt.Errorf("erc20 abi: %w", err)
+		return fmt.Errorf("creating transaction manager: %w", err)
 	}
 
-	// Build source registry. Assembly lives in the allocation_tracker package so the
-	// routing guardrail test and the worker share one definition (see registry_build.go).
-	registry, err := at.BuildSourceRegistry(mc, logger)
+	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
-		return fmt.Errorf("build source registry: %w", err)
+		return fmt.Errorf("creating protocol repository: %w", err)
 	}
 
-	// Load the contract once and derive both entries and proxies for this chain from
-	// the same read.
-	contract, err := axis_synome_contract.LoadDefaultContract()
+	tokenRepo, err := postgres.NewTokenRepository(pool, logger, 0)
 	if err != nil {
-		return fmt.Errorf("load axis-synome contract: %w", err)
+		return fmt.Errorf("creating token repository: %w", err)
 	}
 
-	entries, proxies, err := at.EntriesAndProxiesForChainID(contract, cfg.chainID)
+	vaultRepo, err := postgres.NewFluidVaultRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
-		return fmt.Errorf("derive entries/proxies for contract %s chain %d: %w", contract.Version, cfg.chainID, err)
+		return fmt.Errorf("creating fluid vault repository: %w", err)
 	}
 
-	txm, err := postgres.NewTxManager(dbPool, logger)
-	if err != nil {
-		return fmt.Errorf("tx manager: %w", err)
-	}
-
-	// Load primes from DB to build star → prime_id lookup
-	primeRepo := postgres.NewPrimeDebtRepository(dbPool, txm, logger, buildReg.BuildID())
-	primes, err := primeRepo.GetPrimes(ctx)
-	if err != nil {
-		return fmt.Errorf("load primes: %w", err)
-	}
-	if len(primes) == 0 {
-		return fmt.Errorf("no primes found in database")
-	}
-	primeLookup := make(map[string]int64, len(primes))
-	for _, p := range primes {
-		primeLookup[p.Name] = p.ID
-	}
-	logger.Info("primes loaded", "count", len(primes))
-
-	tokenRepo, err := postgres.NewTokenRepository(dbPool, logger, 1)
-	if err != nil {
-		return fmt.Errorf("token repo: %w", err)
-	}
-	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, atTel)
-
-	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
-
-	svc, err := at.NewService(
-		at.Config{
-			MaxMessages:       cfg.maxMessages,
-			SweepEveryNBlocks: cfg.sweepBlocks,
-			ChainID:           cfg.chainID,
-			Logger:            logger,
+	service, err := fluid_vault_indexer.NewService(
+		fluid_vault_indexer.Config{
+			SQSConsumerConfig: shared.SQSConsumerConfig{
+				MaxMessages: cfg.maxMessages,
+				Logger:      logger,
+				ChainID:     cfg.chainID,
+			},
+			TargetDebtToken: cfg.targetDebtToken,
 		},
 		sqsConsumer,
 		cacheReader,
-		registry,
-		entries,
-		handler,
-		proxies,
+		ethClient,
+		mc,
+		txManager,
+		vaultRepo,
+		tokenRepo,
+		protocolRepo,
 	)
 	if err != nil {
-		return fmt.Errorf("create service: %w", err)
+		return fmt.Errorf("creating service: %w", err)
 	}
 
-	// Start
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	logger.Info("fluid vault indexer started, waiting for messages...")
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	if err := svc.Start(runCtx); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-
-	logger.Info("running",
-		"chainID", cfg.chainID,
-		"entries", len(entries),
-		"sweepEveryNBlocks", cfg.sweepBlocks)
-
-	select {
-	case sig := <-sigChan:
-		logger.Info("shutting down", "signal", sig)
-	case <-ctx.Done():
-		logger.Info("shutting down", "reason", "context cancelled")
-	}
-	cancel()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	done := make(chan struct{})
-	var stopErr error
-	go func() {
-		defer close(done)
-		stopErr = svc.Stop()
-	}()
-
-	select {
-	case <-done:
-		if stopErr != nil {
-			return fmt.Errorf("stop: %w", stopErr)
-		}
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timeout")
-	}
-
-	return nil
+	return lifecycle.Run(ctx, logger, service)
 }
