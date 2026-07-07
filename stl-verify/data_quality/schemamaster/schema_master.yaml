@@ -352,7 +352,7 @@ transforms:
   - {table: sparklend_reserve_data, column: last_update_timestamp, canonical: last_update_at, action: cast, from: int8, guard_min: 1500000000, guard_max: 4100000000}
 
 # OVERRIDES: sanctioned TYPE exemptions the conformance check honours (accepted_type).
-# Semantics/class overrides + derived-column formulas are deferred to the L3 / semantic checks
+# Semantics/class overrides + derived-column formulas are deferred to the semantic-layer checks
 # that consume them; the conformance check reads only canonical + tables + transforms + these.
 overrides:
   - table: build_registry
@@ -361,7 +361,7 @@ overrides:
     accepted_type: int4
     reason: "Infra surrogate key paired with build_id (int4); deliberately int4, exempt from canonical id=int8. Not flagged by the conformance check."
 
-# FILLS: how a governed table obtains a canonical key it lacks natively (transform layer, guide 6c/6d).
+# FILLS: how a governed table obtains a canonical key it lacks natively (the transform layer derives it).
 # The conformance check treats a required key as satisfied if it is a native column, produced by a
 # transform, OR produced by one of these fills. parent/key/ref = single-hop FK join to the config
 # parent; then_* = a second hop; const = a literal; block_time = the (chain_id, block_number,
@@ -401,7 +401,7 @@ fills:
   # protocol_id via two-hop (sky strategy -> pool -> protocol)
   - {table: maple_sky_strategy_state, column: protocol_id, parent: maple_sky_strategy, key: maple_sky_strategy_id, ref: id, then_parent: maple_pool, then_key: maple_pool_id, then_ref: id}
   - {table: maple_sky_strategy_meta,  column: protocol_id, parent: maple_sky_strategy, key: maple_sky_strategy_id, ref: id, then_parent: maple_pool, then_key: maple_pool_id, then_ref: id}
-  # block_timestamp filled from the block-time dimension keyed (chain_id, block_number, block_version) (6d)
+  # block_timestamp filled from the block-time dimension keyed (chain_id, block_number, block_version)
   - {table: borrower,                 column: block_timestamp, block_time: true}
   - {table: borrower_collateral,      column: block_timestamp, block_time: true}
   - {table: allocation_position,      column: block_timestamp, block_time: true}

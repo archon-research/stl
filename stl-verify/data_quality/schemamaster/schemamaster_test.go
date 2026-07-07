@@ -108,6 +108,7 @@ func TestClassify(t *testing.T) {
 	}{
 		{"conforming type", Column{"chain", "chain_id", "integer", false}, Conforms},
 		{"varchar equals text", Column{"token", "symbol", "character varying", false}, Conforms},
+		{"parameterized varchar conforms", Column{"token", "symbol", "character varying(256)", false}, Conforms},
 		{"registered rename", Column{"morpho_market_state", "timestamp", "timestamp with time zone", false}, ConformsTransform},
 		{"registered cast", Column{"sparklend_reserve_data", "last_update_timestamp", "bigint", false}, ConformsTransform},
 		{"accepted type deviation", Column{"build_registry", "id", "integer", false}, ConformsAccepted},
@@ -137,6 +138,10 @@ func TestNormalizeType(t *testing.T) {
 		"double precision":         "float8",
 		"numeric":                  "numeric",
 		"bytea":                    "bytea",
+		// parameterized forms: information_schema emits the base type (the length/precision lives
+		// in a separate column), but NormalizeType strips a trailing modifier defensively.
+		"character varying(256)": "text",
+		"numeric(10,2)":          "numeric",
 	} {
 		if got := NormalizeType(in); got != want {
 			t.Errorf("NormalizeType(%q) = %q, want %q", in, got, want)

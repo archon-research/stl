@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,8 +38,8 @@ type TableMeta struct {
 
 // Transform is a column the transformation layer rewrites: rename / cast / fill.
 // GuardMin/GuardMax are the plausibility bounds for an epoch (int8 -> timestamptz) cast: values
-// outside the range are NULLed rather than cast. They are policy read by the materializer and the
-// runtime check (VEC-472); the conformance check here does not use them.
+// outside the range are NULLed rather than cast. They are policy read by the transform materializer
+// and the runtime cast check; the conformance check here does not use them.
 type Transform struct {
 	Table     string `yaml:"table"`
 	Column    string `yaml:"column"`
@@ -51,7 +52,7 @@ type Transform struct {
 
 // Override is a sanctioned TYPE exemption: a column deliberately kept at accepted_type rather
 // than its canonical type (e.g. an infra surrogate key). Semantics/class overrides and derived-
-// column formulas are not part of the conformance check; they live with the L3 / semantic checks
+// column formulas are not part of the conformance check; they live with the semantic-layer checks
 // that consume them.
 type Override struct {
 	Table        string `yaml:"table"`
@@ -61,8 +62,9 @@ type Override struct {
 	Reason       string `yaml:"reason"`
 }
 
-// Fill declares how a governed table obtains a canonical key it lacks natively (transform-layer
-// 6c/6d). The conformance check reads only Table+Column (a declared fill satisfies a required key);
+// Fill declares how a governed table obtains a canonical key it lacks natively: the transform layer
+// derives the key from another table rather than the column existing in the raw row. The conformance
+// check reads only Table+Column (a declared fill satisfies a required key);
 // the remaining fields describe the mechanism for the transform generator: a single-hop FK join
 // (Parent/Key/Ref), an optional second hop (ThenParent/ThenKey/ThenRef), a literal (Const), or the
 // block-time dimension (BlockTime).
@@ -168,7 +170,16 @@ type Violation struct {
 // NormalizeType folds information_schema data_type names to the canonical short tokens
 // used in the register. text and varchar (no length) are treated as identical, as they
 // are in Postgres.
+//
+// information_schema.data_type reports the base type without a length/precision modifier
+// (e.g. "character varying", "numeric"); the modifier lives in separate columns
+// (character_maximum_length, numeric_precision). A trailing modifier is stripped defensively
+// so that a value like "character varying(256)" or "numeric(10,2)" from any other caller
+// still folds to its base token.
 func NormalizeType(dataType string) string {
+	if i := strings.IndexByte(dataType, '('); i >= 0 && strings.HasSuffix(dataType, ")") {
+		dataType = strings.TrimSpace(dataType[:i])
+	}
 	switch dataType {
 	case "timestamp with time zone":
 		return "timestamptz"
