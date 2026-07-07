@@ -763,6 +763,56 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}
 	})
 
+	t.Run("zero price from oracle is skipped, not persisted as $0", func(t *testing.T) {
+		repo := &mockRepo{}
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+			return map[int64]float64{}, nil
+		}
+
+		price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
+		// Second asset unpriceable: Aave's getAssetsPrices returns 0 for an unlisted
+		// asset (e.g. a Maple syrup share bound to aave_v3). It must be skipped, not
+		// persisted as a bogus $0 that reads as a real quote.
+		mc := newOracleMulticallerWithT(t, []*big.Int{price1, big.NewInt(0)})
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() {
+			if stopErr := svc.Stop(); stopErr != nil {
+				t.Errorf("Stop: %v", stopErr)
+			}
+		}()
+
+		event := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp,
+		}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		if len(repo.lastUpserted) != 1 {
+			t.Fatalf("lastUpserted length = %d, want 1 (zero price skipped)", len(repo.lastUpserted))
+		}
+		if repo.lastUpserted[0].PriceUSD != 2000 {
+			t.Errorf("persisted price = %v, want 2000 (the non-zero asset)", repo.lastUpserted[0].PriceUSD)
+		}
+	})
+
 	t.Run("SQS receive error", func(t *testing.T) {
 		repo := &mockRepo{}
 		defaultRepoSetup(repo)
