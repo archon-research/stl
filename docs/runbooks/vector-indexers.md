@@ -312,8 +312,12 @@ snapshot. `reason="pending"` (collateral still `DepositPending`, no price yet)
 is normal and is **not** alerted.
 
 This is expected to self-heal — Maple's pricing layer restores the feed and the
-next 10m cycle writes a real value. A **sustained** count is an upstream Maple
-pricing gap, not our bug.
+next 10m cycle writes a real value. The alert detects **persistence, not
+volume**: it fires only when a token's collateral stays unpriceable across
+consecutive cycles for **>30m** (`increase[20m] > 0` held for `30m`, per token).
+A lone gap self-heals within a cycle and never fires; a sustained gap is an
+upstream Maple pricing problem, not our bug. The client no longer emits a
+per-occurrence warn; the metric is the signal.
 
 ### First checks
 
@@ -332,26 +336,33 @@ pricing gap, not our bug.
   with Maple; decide whether downstream consumers tolerate the NULL. Not a code
   bug.
 
-### One-time task on the FIRST-EVER fire
+### Confirmed shape (baseline)
 
-This shape has never been observed live, so the client carries a temporary
-diagnostic warn. On the first fire:
+First observed live in staging, 2026-07, on open-term-loan collateral
+(HYPE, PYUSD, USDG, cbBTC). The captured `errors[]` matched the client's
+assumptions exactly:
 
-1. Pull the client log `tolerating unpriceable-collateral GraphQL error` from
-   Loki (service `maple-graphql-indexer`). It captures the raw `errors[]`:
-   `path`, `extensions`, and `data_present`.
-2. Confirm the null granularity matches what the client assumes — the price
-   field (`collateral.assetValueUsd`) or the whole `collateral` node went null,
-   and the `path` passes through a `collateral` segment (or is absent).
-3. If the client classified it correctly (the alert firing over persisted NULLs
-   proves it did): **delete the TEMPORARY warn in
-   `stl-verify/internal/adapters/outbound/maple/client.go` in a follow-up PR**,
-   and re-baseline this alert's `>0` threshold to a sustained `>N/1h` so only a
-   chronic gap pages.
-4. If the shape does **not** match (path outside collateral, extensions reveal a
-   different failure): the tolerance classifier
-   (`tolerableUnpriceableCollateral` / `pathThroughCollateral`) needs
-   tightening — fix it so that shape stays fatal.
+- `message`: `No fiat value for <TOKEN>`
+- `path`: `[openTermLoans collateral assetValueUsd]` (through a `collateral` segment)
+- `extensions.code`: `INTERNAL_SERVER_ERROR`
+- partial `data` present
+
+So the classifier (`tolerableUnpriceableCollateral` / `pathThroughCollateral`)
+classified it correctly; the temporary diagnostic warn has been removed and the
+alert re-baselined from a raw `>0` to a persistence signal
+(`increase[20m] > 0` for `30m`, per token).
+
+> Known gap (follow-up): the metric is only recorded when `collateral` is
+> non-null (service.go). If a "No fiat value" error nulls the **whole**
+> `collateral` node (not just `assetValueUsd`), the loan is kept with no
+> collateral row and no downgrade metric — so this alert cannot see it. Not
+> observed live (the live path is field-level `...collateral assetValueUsd`), but
+> track it separately if Maple's SDL ever makes `assetValueUsd` non-nullable.
+
+If a future occurrence does **not** match this shape (path outside collateral,
+or extensions reveal a different failure), the classifier needs tightening — fix
+it in `stl-verify/internal/adapters/outbound/maple/client.go` so that shape
+stays fatal rather than being swallowed as a price gap.
 
 ---
 
