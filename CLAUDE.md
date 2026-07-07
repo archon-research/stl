@@ -21,17 +21,17 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 - **Dependencies flow inward** (hexagonal): domain has no dependencies; adapters depend on ports; ports depend on domain. Detailed port/adapter conventions live in `stl-verify/CLAUDE.md`.
 - **On-chain data comes from chain RPC or the cached block payload, never third-party indexers.** Off-chain feeds need maintainer approval, justified in the PR description.
 - **Data pipelines and model pipelines stay separate**: ingest writes "what happened" to Postgres; models read from Postgres and write "what it means" to their own tables. Separate entry points, usually separate PRs.
-- **Language policy**: APIs and risk models are Python; workers/cronjobs/backfillers are Go (preferred) or Python; `stl-verify/ts/` is frontend only; `experiments/` is scratch, not shipped.
+- **Language policy**: APIs and risk models are Python; workers/cronjobs/backfillers are Go (preferred) or Python; `stl-verify/ts/` is frontend only.
 - **Never commit generated files or binaries.**
 - **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests. The `stl-verify/Makefile` is the source of truth for workflows — grep it before inventing a command.
-- **Git**: branch `VEC-123-short-slug`; PR title `TICKET-1234: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
+- **Git**: branch `VEC-123-short-slug`; PR title `VEC-123: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
 
 ## Where the rest lives (loads on demand)
 
 - **[stl-verify/CLAUDE.md](stl-verify/CLAUDE.md)** — Go service: architecture, errors, testing, function composition, comments, libraries, registries, external-API lore, build/run, Go linting.
 - **[stl-verify/python/CLAUDE.md](stl-verify/python/CLAUDE.md)** and **[stl-verify/ts/CLAUDE.md](stl-verify/ts/CLAUDE.md)** — per-language tooling/CI.
 - **[k8s/CLAUDE.md](k8s/CLAUDE.md)** — Kustomize base/overlays/dev-infra conventions.
-- **[.claude/rules/go-database.md](.claude/rules/go-database.md)** — DB schema, migrations, snapshot reads, advisory locks. Auto-loads on `db/migrations/**` and repository adapters.
+- **[.claude/rules/go-database.md](.claude/rules/go-database.md)** — DB schema, migrations, snapshot reads, advisory locks. Auto-loads on `stl-verify/db/migrations/**` and repository adapters.
 - **[.claude/rules/observability.md](.claude/rules/observability.md)** — alerts + runbooks definition-of-done for new indexers. Auto-loads on `alerts/**`, `docs/runbooks/**`.
 - **`review-phase` skill** — spawn the standard parallel reviewer subagents after a substantive change, before declaring work done.
 
