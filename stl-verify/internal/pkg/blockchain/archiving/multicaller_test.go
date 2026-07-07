@@ -1,11 +1,13 @@
 package archiving
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 
@@ -300,10 +302,17 @@ func TestExecuteAtHash(t *testing.T) {
 		}
 	})
 
-	t.Run("stamps BlockNumber 0 when the context carries no number", func(t *testing.T) {
+	t.Run("stamps BlockNumber 0 and warns when the context carries no number", func(t *testing.T) {
+		var logBuf bytes.Buffer
 		rec := &recordingArchiver{}
 		var wg sync.WaitGroup
-		d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, &wg)
+		d := NewMulticaller(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, Config{
+			Source:  "oracle-price",
+			ChainID: 1,
+			BuildID: 47,
+			Wait:    &wg,
+			Logger:  slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		})
 
 		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
 		if err != nil {
@@ -320,7 +329,35 @@ func TestExecuteAtHash(t *testing.T) {
 		if got := rec.batches[0].BlockNumber; got != 0 {
 			t.Fatalf("BlockNumber = %d, want 0 when no block number on context", got)
 		}
+		// A block-0 archive is always a bug (genesis holds no indexer read), so it
+		// must not pass silently; the warning is what surfaces a future regression.
+		if !strings.Contains(logBuf.String(), "no resolvable block number") {
+			t.Fatalf("expected a warning about the unresolvable block number, got logs: %q", logBuf.String())
+		}
 	})
+}
+
+// TestExecutePositionalBlockNumberWinsOverContext pins that the number-pinned
+// Execute path uses its positional argument even when the context also carries
+// a different block number: the context is only a fallback for the
+// argument-less ExecuteAtHash path, never an override of an explicit number.
+func TestExecutePositionalBlockNumberWinsOverContext(t *testing.T) {
+	rec := &recordingArchiver{}
+	var wg sync.WaitGroup
+	d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, &wg)
+
+	ctx := WithBlockNumber(context.Background(), 999)
+	if _, err := d.Execute(ctx, []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(10)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	d.Close()
+
+	if len(rec.batches) != 1 {
+		t.Fatalf("archived %d batches, want 1", len(rec.batches))
+	}
+	if got := rec.batches[0].BlockNumber; got != 10 {
+		t.Fatalf("BlockNumber = %d, want 10 (positional arg must win over context)", got)
+	}
 }
 
 // TestExecuteSucceedsWhenArchiveErrors asserts the fire-and-forget guarantee:

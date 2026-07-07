@@ -89,11 +89,8 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 }
 
 // ExecuteAtHash forwards to the inner multicaller's hash-pinned path, then
-// archives the batch the same way Execute does. ExecuteAtHash carries no
-// blockNumber argument, so archiveBatch recovers it from the context
-// (WithBlockNumber) — live workers stamp it there alongside the block version.
-// It falls back to block 0 only when the context carries no number (e.g. a
-// caller that pins by hash without a known height).
+// archives the batch the same way Execute does. It passes a nil blockNumber;
+// archiveBatch recovers the real number from the context (see there).
 func (m *Multicaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 	results, err := m.inner.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
@@ -108,6 +105,15 @@ func (m *Multicaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, 
 // in lockstep on truncation handling, metrics, and the fire-and-forget
 // contract.
 func (m *Multicaller) archiveBatch(ctx context.Context, calls []outbound.Call, results []outbound.Result, blockNumber *big.Int) {
+	if blockNumber == nil {
+		// The hash-pinned ExecuteAtHash path has no blockNumber argument; recover
+		// it from the context, where live workers stamp it via WithBlockNumber.
+		// Number-pinned Execute callers pass it positionally and it is unchanged.
+		if bn, ok := BlockNumberFromContext(ctx); ok {
+			blockNumber = big.NewInt(bn)
+		}
+	}
+
 	n := len(calls)
 	if len(results) != n {
 		// The inner multicaller returned a different number of results than
@@ -129,16 +135,20 @@ func (m *Multicaller) archiveBatch(ctx context.Context, calls []outbound.Call, r
 		return
 	}
 
-	blockVersion, _ := BlockVersionFromContext(ctx)
-	if blockNumber == nil {
-		// The hash-pinned ExecuteAtHash path has no blockNumber argument; recover
-		// it from the context so the archive keys to the real block rather than
-		// colliding every hash-pinned batch under block 0 (VEC-471).
-		if bn, ok := BlockNumberFromContext(ctx); ok {
-			blockNumber = big.NewInt(bn)
-		}
-	}
 	mcAddr := m.inner.Address().Hex()
+	if blockNumber == nil {
+		// rawsckey keys objects by block, so archiving at block 0 collides every
+		// such batch under one key (the VEC-471 bug this fix pays down). No caller
+		// legitimately archives without a height, so surface a regression rather
+		// than silently writing genesis. Warn, not error: archiving stays
+		// fire-and-forget and must not break the caller.
+		m.cfg.Logger.Warn("archiving hash-pinned SC call batch with no resolvable block number; keying at block 0",
+			"source", m.cfg.Source,
+			"multicaller", mcAddr,
+		)
+	}
+
+	blockVersion, _ := BlockVersionFromContext(ctx)
 	detached := context.WithoutCancel(ctx)
 	record := m.buildBatchRecord(calls[:n], results[:n], blockNumber, blockVersion, mcAddr)
 	m.scheduleArchive(detached, record)
