@@ -3,7 +3,8 @@
 -- Each transformed.<table> is a hypertable (partitioned on the observation time) with a PK
 -- derived from the raw PK, plus an incremental watermark upsert function transformed._run_<t>()
 -- that a worker calls (block_number watermark for block-indexed tables, poll-time for API tables).
--- Verified live: run1 = raw count, run2 = 0 (incremental idempotent), 1:1 parity per table.
+-- Idempotent by construction: the watermark bounds each read and the upsert keys on the PK, so a
+-- re-run with no new raw rows adds 0. On-data 1:1 parity with raw is verified on full data at rollout.
 -- Buckets 2 (block-time-dimension) and 3 (no-PK, keyed via transform_config) follow separately.
 --
 -- This migration owns the `transformed` schema and rebuilds it from scratch: the migrator applies
