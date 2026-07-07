@@ -66,7 +66,7 @@ KUBE_NS      ?= vector
 # Run the application
 run:
 	@echo "==> Running..."
-	go run ./cmd/server
+	go run ./cmd/base/watcher
 
 # Run the Ethereum watcher (requires dev-up first)
 run-watcher:
@@ -710,7 +710,7 @@ dev-ips:
 # Generate ER diagram from database schema (requires dev-up)
 generate-er:
 	@echo "==> Generating ER diagram..."
-	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/generate-er --output ../docs/entity_relation.md
+	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/util/generate-er --output ../docs/entity_relation.md
 	@echo "==> Generated: docs/entity_relation.md"
 
 # =============================================================================
@@ -1656,7 +1656,7 @@ run-cronjob-%:
 build-oracle-pricing-backfill-arm64:
 	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
 	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/oracle-pricing-backfill-linux-arm64 ./cmd/oracle-pricing-backfill
+	GOOS=linux GOARCH=arm64 go build -o dist/oracle-pricing-backfill-linux-arm64 ./cmd/backfillers/oracle-pricing-backfill
 	@echo "==> Built: dist/oracle-pricing-backfill-linux-arm64"
 
 # Deploy oracle-pricing-backfill to Erigon node
@@ -1679,7 +1679,7 @@ deploy-oracle-pricing-backfill-worker: build-oracle-pricing-backfill-arm64
 build-bulk-download-arm64:
 	@echo "==> Building bulk-download for ARM64 Linux..."
 	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/bulk-download-linux-arm64 ./cmd/bulk-download
+	GOOS=linux GOARCH=arm64 go build -o dist/bulk-download-linux-arm64 ./cmd/backfillers/raw-block-bulk-downloader
 	@echo "==> Built: dist/bulk-download-linux-arm64"
 
 # Deploy bulk-download to Erigon node
@@ -1711,7 +1711,7 @@ erigon-bulk-download:
 build-sparklend-backfill-arm64:
 	@echo "==> Building sparklend-backfill for ARM64 Linux..."
 	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/sparklend-backfill-linux-arm64 ./cmd/sparklend-backfill
+	GOOS=linux GOARCH=arm64 go build -o dist/sparklend-backfill-linux-arm64 ./cmd/backfillers/sparklend-backfill
 	@echo "==> Built: dist/sparklend-backfill-linux-arm64"
 
 # Deploy sparklend-backfill to Erigon node
@@ -2123,7 +2123,7 @@ ifeq ($(TARGET),staging)
 	  echo "==> Block data up-to-date ($$WANT), skipping export"; \
 	else \
 	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to staging S3 (requires staging creds)..."; \
-	  go run ./cmd/stress-test/data-export \
+	  go run ./cmd/util/stress-test/data-export \
 	    --env staging \
 	    --src-bucket $(STRESS_TEST_SRC_BUCKET) \
 	    --dest-bucket $(STRESS_TEST_STAGING_BUCKET) \
