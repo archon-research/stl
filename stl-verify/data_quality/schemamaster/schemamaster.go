@@ -1,39 +1,38 @@
-// Package schemamaster loads the canonical column register (schema_master.yaml) and
+// Package schemamaster loads the canonical column register (schema_master.json) and
 // checks a live schema, read from information_schema, against it.
 //
 // The register is CONFIG, not database state. It records what columns SHOULD be
 // (canonical names, types, semantics) and which deviations are sanctioned. A column
 // that already conforms appears nowhere here: conformance is verified against
-// information_schema at check time. See docs/schema-framework.md.
+// information_schema at check time. See README.md for the section-by-section intent.
 package schemamaster
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
-//go:embed schema_master.yaml
+//go:embed schema_master.json
 var configBytes []byte
 
 // Canonical is one entry in the rulebook: the invariant type plus default class/semantics.
 // NotNull marks a column that must be declared NOT NULL wherever it appears (with sanctioned
 // exceptions in NullableExempt).
 type Canonical struct {
-	Type      string `yaml:"type"`
-	Class     string `yaml:"class"`
-	Semantics string `yaml:"semantics"`
-	NotNull   bool   `yaml:"not_null"`
+	Type      string `json:"type"`
+	Class     string `json:"class"`
+	Semantics string `json:"semantics"`
+	NotNull   bool   `json:"not_null"`
 }
 
 // TableMeta is per-table governance (all optional for now).
 type TableMeta struct {
-	Type  string `yaml:"type"`
-	Owner string `yaml:"owner"`
+	Type  string `json:"type"`
+	Owner string `json:"owner"`
 }
 
 // Transform is a column the transformation layer rewrites: rename / cast / fill.
@@ -41,13 +40,13 @@ type TableMeta struct {
 // outside the range are NULLed rather than cast. They are policy read by the transform materializer
 // and the runtime cast check; the conformance check here does not use them.
 type Transform struct {
-	Table     string `yaml:"table"`
-	Column    string `yaml:"column"`
-	Canonical string `yaml:"canonical"`
-	Action    string `yaml:"action"`
-	From      string `yaml:"from"`
-	GuardMin  *int   `yaml:"guard_min"`
-	GuardMax  *int   `yaml:"guard_max"`
+	Table     string `json:"table"`
+	Column    string `json:"column"`
+	Canonical string `json:"canonical"`
+	Action    string `json:"action"`
+	From      string `json:"from"`
+	GuardMin  *int   `json:"guard_min"`
+	GuardMax  *int   `json:"guard_max"`
 }
 
 // Override is a sanctioned TYPE exemption: a column deliberately kept at accepted_type rather
@@ -55,11 +54,11 @@ type Transform struct {
 // column formulas are not part of the conformance check; they live with the semantic-layer checks
 // that consume them.
 type Override struct {
-	Table        string `yaml:"table"`
-	Column       string `yaml:"column"`
-	Canonical    string `yaml:"canonical"`
-	AcceptedType string `yaml:"accepted_type"`
-	Reason       string `yaml:"reason"`
+	Table        string `json:"table"`
+	Column       string `json:"column"`
+	Canonical    string `json:"canonical"`
+	AcceptedType string `json:"accepted_type"`
+	Reason       string `json:"reason"`
 }
 
 // Fill declares how a governed table obtains a canonical key it lacks natively: the transform layer
@@ -69,46 +68,46 @@ type Override struct {
 // (Parent/Key/Ref), an optional second hop (ThenParent/ThenKey/ThenRef), a literal (Const), or the
 // block-time dimension (BlockTime).
 type Fill struct {
-	Table      string `yaml:"table"`
-	Column     string `yaml:"column"`
-	Parent     string `yaml:"parent"`
-	Key        string `yaml:"key"`
-	Ref        string `yaml:"ref"`
-	ThenParent string `yaml:"then_parent"`
-	ThenKey    string `yaml:"then_key"`
-	ThenRef    string `yaml:"then_ref"`
-	Const      *int   `yaml:"const"`
-	BlockTime  bool   `yaml:"block_time"`
+	Table      string `json:"table"`
+	Column     string `json:"column"`
+	Parent     string `json:"parent"`
+	Key        string `json:"key"`
+	Ref        string `json:"ref"`
+	ThenParent string `json:"then_parent"`
+	ThenKey    string `json:"then_key"`
+	ThenRef    string `json:"then_ref"`
+	Const      *int   `json:"const"`
+	BlockTime  bool   `json:"block_time"`
 }
 
 // RequiredKey asserts that every governed table whose type is in AppliesTo resolves one of AnyOf
 // (as a native column, a transform target, or a fill), unless the table is listed in Exempt.
 type RequiredKey struct {
-	Name      string   `yaml:"name"`
-	AnyOf     []string `yaml:"any_of"`
-	AppliesTo []string `yaml:"applies_to"`
-	Exempt    []string `yaml:"exempt"`
+	Name      string   `json:"name"`
+	AnyOf     []string `json:"any_of"`
+	AppliesTo []string `json:"applies_to"`
+	Exempt    []string `json:"exempt"`
 }
 
 // NullableExempt sanctions a specific column staying NULL-able despite a not_null canonical
 // (e.g. build_id on tables retrofitted before the auditability convention, which TigerData's
 // tiered-chunk restriction blocks from a SET NOT NULL).
 type NullableExempt struct {
-	Table  string `yaml:"table"`
-	Column string `yaml:"column"`
-	Reason string `yaml:"reason"`
+	Table  string `json:"table"`
+	Column string `json:"column"`
+	Reason string `json:"reason"`
 }
 
 // Register is the whole schema_master config.
 type Register struct {
-	IgnoreTables   []string             `yaml:"ignore_tables"`
-	Canonical      map[string]Canonical `yaml:"canonical"`
-	Tables         map[string]TableMeta `yaml:"tables"`
-	Transforms     []Transform          `yaml:"transforms"`
-	Overrides      []Override           `yaml:"overrides"`
-	Fills          []Fill               `yaml:"fills"`
-	RequiredKeys   []RequiredKey        `yaml:"required_keys"`
-	NullableExempt []NullableExempt     `yaml:"nullable_exempt"`
+	IgnoreTables   []string             `json:"ignore_tables"`
+	Canonical      map[string]Canonical `json:"canonical"`
+	Tables         map[string]TableMeta `json:"tables"`
+	Transforms     []Transform          `json:"transforms"`
+	Overrides      []Override           `json:"overrides"`
+	Fills          []Fill               `json:"fills"`
+	RequiredKeys   []RequiredKey        `json:"required_keys"`
+	NullableExempt []NullableExempt     `json:"nullable_exempt"`
 }
 
 // producesCanonical reports whether a transform for table renames or casts a column to canonicalCol.
@@ -131,11 +130,11 @@ func (r *Register) hasFill(table, canonicalCol string) bool {
 	return false
 }
 
-// Load parses the embedded schema_master.yaml.
+// Load parses the embedded schema_master.json.
 func Load() (*Register, error) {
 	var r Register
-	if err := yaml.Unmarshal(configBytes, &r); err != nil {
-		return nil, fmt.Errorf("parsing schema_master.yaml: %w", err)
+	if err := json.Unmarshal(configBytes, &r); err != nil {
+		return nil, fmt.Errorf("parsing schema_master.json: %w", err)
 	}
 	return &r, nil
 }

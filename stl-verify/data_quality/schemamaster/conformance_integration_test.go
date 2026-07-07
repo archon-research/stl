@@ -56,7 +56,7 @@ func TestSchemaConformance(t *testing.T) {
 		t.Errorf("%s.%s: %s — %s", v.Table, v.Column, v.Kind, v.Detail)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("%d schema conformance violation(s); register (schema_master.yaml) and the live schema disagree", len(violations))
+		t.Fatalf("%d schema conformance violation(s); register (schema_master.json) and the live schema disagree", len(violations))
 	}
 	t.Logf("schema conformance: %d live columns checked, all conform or registered", len(live))
 }
