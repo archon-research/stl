@@ -172,7 +172,10 @@ CREATE TABLE IF NOT EXISTS curve_liquidity_event
     tx_hash            BYTEA       NOT NULL,
     log_index          INT         NOT NULL,
     provider           BYTEA       NOT NULL,
-    kind               VARCHAR(20) NOT NULL CHECK (kind IN ('add','remove','remove_one','remove_imbalance')),
+    -- TEXT, not VARCHAR: OSM tiering fails to mirror a varchar CHECK onto the
+    -- osm_chunk child (42804 "different definition for check constraint");
+    -- TEXT checks attach cleanly (cf. allocation_position.direction).
+    kind               TEXT        NOT NULL CHECK (kind IN ('add','remove','remove_one','remove_imbalance')),
     token_amounts      NUMERIC[]   NOT NULL,
     coin_index         INT,
     fees               NUMERIC[],

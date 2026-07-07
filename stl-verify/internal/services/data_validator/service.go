@@ -6,6 +6,7 @@ package data_validator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -132,6 +133,7 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 		"passed", report.Passed,
 		"failed", report.Failed,
 		"errors", report.Errors,
+		"skipped", report.Skipped,
 		"duration", report.Duration,
 	)
 
@@ -254,7 +256,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 	if err != nil {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusError,
+			Status:   canonicalCheckStatus(err),
 			Message:  fmt.Sprintf("Failed to fetch block: %v", err),
 			Duration: duration,
 			Details: map[string]any{
@@ -364,7 +366,7 @@ func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResul
 	if err != nil {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusError,
+			Status:   canonicalCheckStatus(err),
 			Message:  fmt.Sprintf("Failed to fetch from %s: %v", s.blockVerifier.Name(), err),
 			Duration: duration,
 		}
@@ -428,6 +430,17 @@ func selectRandomBlocks(fromBlock, toBlock int64, n int) []int64 {
 		blocks = append(blocks, block)
 	}
 	return blocks
+}
+
+// canonicalCheckStatus chooses the status for a failed canonical-source fetch.
+// A transient outage (rate-limit, timeout, 5xx) is inconclusive, not a data
+// discrepancy, so it is skipped rather than failing the whole run. A permanent
+// error (bad key, parse failure) stays a hard error.
+func canonicalCheckStatus(err error) string {
+	if errors.Is(err, outbound.ErrCanonicalSourceUnavailable) {
+		return StatusSkipped
+	}
+	return StatusError
 }
 
 // hashesMatch compares two block hashes (case-insensitive, handles 0x prefix).

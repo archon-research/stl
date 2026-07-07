@@ -21,6 +21,7 @@ export const DIRECT_PROTOCOL_FILTER_VALUE = '__direct__';
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
   spark: 'SparkLend',
+  maple: 'Maple',
 };
 
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {

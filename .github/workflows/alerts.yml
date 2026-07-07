@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: archon-research/github-actions
-          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
+          ref: e95614e79659587be249fbbc9fd22d5dabe884ed  # github-actions PR #43 merge SHA
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
@@ -114,7 +114,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           repository: archon-research/github-actions
-          ref: 532cad6ab3c982201364fa4526103b54696fb1eb  # github-actions PR #17 merge SHA
+          ref: e95614e79659587be249fbbc9fd22d5dabe884ed  # github-actions PR #43 merge SHA
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false

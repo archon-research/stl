@@ -92,7 +92,7 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	})
 
 	primeLookup := map[string]int64{"spark": sparkID}
-	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
 
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))
@@ -236,7 +236,7 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 	})
 
 	primeLookup := map[string]int64{"spark": sparkID}
-	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
 
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))
@@ -370,7 +370,7 @@ func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 	}
 
 	primeLookup := map[string]int64{"spark": sparkID}
-	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
 
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))

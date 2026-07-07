@@ -12,7 +12,7 @@ type CheckResult struct {
 	// Name is the check name (e.g., "Chain Integrity", "Reorg 142").
 	Name string `json:"name"`
 
-	// Status is the check result: "passed", "failed", or "error".
+	// Status is the check result: "passed", "failed", "error", or "skipped".
 	Status string `json:"status"`
 
 	// Message is the status message (empty for passed checks).
@@ -46,9 +46,10 @@ type Report struct {
 	Checks []CheckResult `json:"checks"`
 
 	// Summary statistics.
-	Passed int `json:"passed"`
-	Failed int `json:"failed"`
-	Errors int `json:"errors"`
+	Passed  int `json:"passed"`
+	Failed  int `json:"failed"`
+	Errors  int `json:"errors"`
+	Skipped int `json:"skipped"`
 }
 
 // NewReport creates a new empty report.
@@ -71,6 +72,8 @@ func (r *Report) AddCheck(result CheckResult) {
 		r.Failed++
 	case StatusError:
 		r.Errors++
+	case StatusSkipped:
+		r.Skipped++
 	}
 }
 
@@ -87,9 +90,10 @@ func (r *Report) Success() bool {
 
 // Status constants for check results.
 const (
-	StatusPassed = "passed"
-	StatusFailed = "failed"
-	StatusError  = "error"
+	StatusPassed  = "passed"
+	StatusFailed  = "failed"
+	StatusError   = "error"
+	StatusSkipped = "skipped"
 )
 
 // FormatText returns the report as human-readable text.
@@ -112,6 +116,8 @@ func (r *Report) FormatText() string {
 			statusIcon = "[FAILED]"
 		case StatusError:
 			statusIcon = "[ERROR]"
+		case StatusSkipped:
+			statusIcon = "[SKIPPED]"
 		}
 
 		sb.WriteString(fmt.Sprintf("%s %s", statusIcon, check.Name))
@@ -130,8 +136,8 @@ func (r *Report) FormatText() string {
 	}
 
 	// Summary
-	sb.WriteString(fmt.Sprintf("\nSUMMARY: %d passed, %d failed, %d errors\n",
-		r.Passed, r.Failed, r.Errors))
+	sb.WriteString(fmt.Sprintf("\nSUMMARY: %d passed, %d failed, %d errors, %d skipped\n",
+		r.Passed, r.Failed, r.Errors, r.Skipped))
 
 	if r.Success() {
 		sb.WriteString("RESULT: PASSED (exit code 0)\n")
