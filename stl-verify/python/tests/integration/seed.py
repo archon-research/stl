@@ -319,19 +319,26 @@ async def insert_allocation_position(
     token_id: int,
     prime_id: int,
     proxy_hex: str,
-    balance: int,
+    balance: int | Decimal,
     block: int,
     tx: str,
     direction: str,
     log_index: int = 0,
     block_version: int = 0,
+    underlying_value: Decimal | None = None,
+    underlying_token_id: int | None = None,
 ) -> None:
-    """Insert one allocation_position row (chain_id=1, tx_amount=balance)."""
+    """Insert one allocation_position row (chain_id=1, tx_amount=balance).
+
+    ``underlying_value``/``underlying_token_id`` default to NULL (both-or-neither,
+    matching the tracker's domain invariant) so existing callers are unaffected.
+    """
     await conn.execute(
         "INSERT INTO allocation_position "
         "(chain_id, token_id, prime_id, proxy_address, balance, "
-        "block_number, block_version, tx_hash, log_index, tx_amount, direction) "
-        "VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $4, $9)",
+        "block_number, block_version, tx_hash, log_index, tx_amount, direction, "
+        "underlying_value, underlying_token_id) "
+        "VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $4, $9, $10, $11)",
         token_id,
         prime_id,
         bytes.fromhex(proxy_hex),
@@ -341,6 +348,8 @@ async def insert_allocation_position(
         bytes.fromhex(tx),
         log_index,
         direction,
+        underlying_value,
+        underlying_token_id,
     )
 
 
@@ -533,6 +542,151 @@ async def _ghost_seed_tiebreak_proxy(conn: asyncpg.Connection, prime_id: int, as
             direction=direction,
             log_index=log_index,
         )
+
+
+# ---------------------------------------------------------------------------
+# Underlying-value direct-holdings seed (VEC-450 / B4)
+#
+# One prime holding the same allowlisted vault (sparkPrimeUSDC1) plus control
+# tokens across several proxies, one proxy per pricing branch of
+# ``_DIRECT_ASSET_HOLDINGS_SQL``. sparkPrimeUSDC1 is given its OWN oracle price
+# here (it has none on mainnet) so the tests can prove allowlisted tokens ignore
+# it — the underlying-value path must win, never the legacy balance x own-price.
+#   * UV_PROXY_PRICED           allowlisted, underlying_value + USDC price   -> underlying_value x USDC price
+#   * UV_PROXY_UNDERLYING_UNPRICED allowlisted, underlying has no oracle     -> NULL (surfaced, not legacy)
+#   * UV_PROXY_NULL_VALUE       allowlisted, underlying_value NULL           -> NULL (surfaced, not legacy)
+#   * UV_PROXY_NON_ALLOWLISTED  unlisted vault, same shape but not allowlisted -> legacy path (no own oracle -> NULL)
+#   * UV_PROXY_PLAIN            plain USDC with own oracle                    -> legacy balance x own price
+# ---------------------------------------------------------------------------
+
+UV_PROXY_PRICED = "17" * 20
+UV_PROXY_UNDERLYING_UNPRICED = "27" * 20
+UV_PROXY_NULL_VALUE = "37" * 20
+UV_PROXY_NON_ALLOWLISTED = "47" * 20
+UV_PROXY_PLAIN = "57" * 20
+
+# Real mainnet address: must match the pricing allowlist in the repository.
+_UV_SPARK_PRIME_USDC1_HEX = "38464507e02c983f20428a6e8566693fe9e422a9"
+# Synthetic vault, deliberately NOT in the allowlist. A synthetic (not real)
+# address is used on purpose: a real non-allowlisted vault (e.g. syrupUSDC) can
+# be registered as a receipt_token by a migration, which would route it through
+# the receipt-token path instead of direct holdings and break this control.
+_UV_UNLISTED_VAULT_HEX = "67" * 20
+_UV_USDC_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+# Synthetic underlying with no oracle row, to exercise the missing-price branch.
+_UV_UNPRICED_UNDERLYING_HEX = "0e" * 20
+_UV_VAULT_HEX = "88" * 20
+
+UV_USDC_PRICE = Decimal("1.00")
+# sparkPrimeUSDC1's own (share) price. Distinct from the USDC price so that
+# "balance x own price" is a different number than "underlying_value x USDC
+# price": the double-count guard test asserts the code never uses this.
+UV_SPARK_OWN_PRICE = Decimal("0.90")
+UV_SPARKPRIME_BALANCE = Decimal("19647500.616754")
+UV_SPARKPRIME_UNDERLYING_VALUE = Decimal("20138132.383754")
+UV_UNLISTED_UNDERLYING_VALUE = Decimal("105303042.633792")
+UV_UNLISTED_BALANCE = Decimal("89822198.110408")
+UV_USDC_BALANCE = Decimal("1000")
+
+
+async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:
+    await conn.execute(
+        "INSERT INTO onchain_token_price "
+        "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+        "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+        token_id,
+        oracle_id,
+        price,
+    )
+
+
+async def seed_underlying_value_direct_holdings(db_url: str) -> None:
+    """Seed the underlying-value direct-holdings scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('uv_direct_holdings', $1) RETURNING id",
+                bytes.fromhex(_UV_VAULT_HEX),
+            )
+            # Any oracle satisfies the onchain_token_price FK; it never drives an
+            # assertion (one price row per token, so the oracle_id tie-break is inert).
+            oracle_id = await conn.fetchval("SELECT id FROM oracle ORDER BY id LIMIT 1")
+            if oracle_id is None:
+                raise RuntimeError("no oracle seed found")
+
+            usdc_id = await insert_token(conn, "USDC", 6, bytes.fromhex(_UV_USDC_HEX))
+            spark_id = await insert_token(conn, "sparkPrimeUSDC1", 6, bytes.fromhex(_UV_SPARK_PRIME_USDC1_HEX))
+            unlisted_id = await insert_token(conn, "unlistedVault", 6, bytes.fromhex(_UV_UNLISTED_VAULT_HEX))
+            unpriced_id = await insert_token(conn, "NOPRICEUND", 18, bytes.fromhex(_UV_UNPRICED_UNDERLYING_HEX))
+
+            await _insert_price(conn, usdc_id, oracle_id, UV_USDC_PRICE)
+            await _insert_price(conn, spark_id, oracle_id, UV_SPARK_OWN_PRICE)
+
+            # Allowlisted + underlying_value + priced underlying -> underlying_value x USDC price.
+            # (spark also has its own price above: the result must ignore it.)
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_PRICED,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="a1" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
+            )
+            # Allowlisted + underlying_value present but underlying has no oracle -> NULL.
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_UNDERLYING_UNPRICED,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="b1" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=unpriced_id,
+            )
+            # Allowlisted + underlying_value NULL (both-NULL) -> NULL, not balance x own price.
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_NULL_VALUE,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="c1" * 32,
+                direction="sweep",
+            )
+            # Not allowlisted, same shape as the priced case -> legacy path (no own oracle -> NULL).
+            await insert_allocation_position(
+                conn,
+                token_id=unlisted_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_NON_ALLOWLISTED,
+                balance=UV_UNLISTED_BALANCE,
+                block=1000,
+                tx="d1" * 32,
+                direction="sweep",
+                underlying_value=UV_UNLISTED_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
+            )
+            # Plain USDC held directly, own oracle -> legacy balance x own price.
+            await insert_allocation_position(
+                conn,
+                token_id=usdc_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_PLAIN,
+                balance=UV_USDC_BALANCE,
+                block=1000,
+                tx="e1" * 32,
+                direction="sweep",
+            )
+    finally:
+        await conn.close()
 
 
 async def seed_ghost_balance(db_url: str) -> None:
