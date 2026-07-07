@@ -33,6 +33,18 @@ from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
 # total capital; this isolates that token from any other SubProxy holding.
 _USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 
+# Vault share tokens priced from allocation_position.underlying_value (the
+# on-chain redeemable value, e.g. convertToAssets) x the underlying's oracle
+# price, rather than the legacy balance x own-oracle price that leaves them
+# unpriced. Deliberately scoped to one token (VEC-450): the general widening to
+# every vault, and syrupUSDC, are owned separately. Add addresses here to widen.
+_UNDERLYING_VALUE_TOKEN_HEXES = frozenset(
+    {
+        "38464507e02c983f20428a6e8566693fe9e422a9",  # sparkPrimeUSDC1
+    }
+)
+_UNDERLYING_VALUE_TOKEN_ADDRS = [bytes.fromhex(h) for h in _UNDERLYING_VALUE_TOKEN_HEXES]
+
 logger = logging.getLogger(__name__)
 
 _ALLOCATION_ACTIVITY_LIMIT = 1000
@@ -261,7 +273,7 @@ class AllocationRepository:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
                     _DIRECT_ASSET_HOLDINGS_SQL,
-                    {"proxy_hex": prime_id.hex},
+                    {"proxy_hex": prime_id.hex, "uv_token_addrs": _UNDERLYING_VALUE_TOKEN_ADDRS},
                 )
                 holdings = [
                     DirectAssetHolding(
@@ -307,6 +319,12 @@ class AllocationRepository:
         (oracle disabled, reorg, backfill gap). Recording the unpriced count as
         a span attribute lets that be alerted on in the tracing backend instead
         of being discovered by a user noticing a missing USD value.
+
+        An allowlisted vault (``_UNDERLYING_VALUE_TOKEN_HEXES``) is priced only by
+        its ``underlying_value`` and is expected to price, so a null there is not
+        routine — it means the underlying oracle dropped out. It is surfaced
+        separately (warning + own span attribute) rather than folded into the
+        LP/curve nulls, so it can be alerted on distinctly.
         """
         unpriced = [h for h in holdings if h.amount_usd is None]
         if not unpriced:
@@ -319,6 +337,19 @@ class AllocationRepository:
                 "unpriced_count": len(unpriced),
                 "total_count": len(holdings),
                 "unpriced_symbols": [h.symbol for h in unpriced],
+            },
+        )
+        allowlisted_unpriced = [h for h in unpriced if h.token_address[2:].lower() in _UNDERLYING_VALUE_TOKEN_HEXES]
+        if not allowlisted_unpriced:
+            return
+        trace.get_current_span().set_attribute(
+            "allocations.direct_holdings.allowlisted_unpriced", len(allowlisted_unpriced)
+        )
+        logger.warning(
+            "Allowlisted vault resolved to no USD value (underlying oracle price missing)",
+            extra={
+                "prime_id": str(prime_id),
+                "allowlisted_unpriced_symbols": [h.symbol for h in allowlisted_unpriced],
             },
         )
 
@@ -855,12 +886,21 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # protocol-bound oracle that ``_RECEIPT_TOKEN_POSITIONS_SQL`` resolves through
 # ``protocol_oracle``. Tokens with no oracle price (e.g. LP/curve shares) yield
 # a null ``amount_usd`` rather than being dropped.
+# An allowlisted vault share token (``_UNDERLYING_VALUE_TOKEN_HEXES``) is priced
+# ONLY by its redeemable ``underlying_value`` x the UNDERLYING asset's oracle
+# price (``up``); if either is absent the result is NULL (a surfaced coverage
+# gap, see ``_record_unpriced_holdings``), never the legacy ``balance x own
+# price``. For these tokens ``balance`` is a share count, so the legacy basis
+# would be a silent methodology flip to a wrong value. Every non-allowlisted
+# token keeps the legacy ``balance x px`` valuation, byte-identical to before.
 _DIRECT_ASSET_HOLDINGS_SQL = text("""
     WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
             ap.chain_id,
             ap.token_id,
             ap.balance,
+            ap.underlying_value,
+            ap.underlying_token_id,
             ap.created_at AS latest_activity_at
         FROM allocation_position ap
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
@@ -874,7 +914,11 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         encode(t.address, 'hex') AS token_address,
         t.symbol                 AS symbol,
         lp.balance,
-        (lp.balance * px.price_usd) AS amount_usd,
+        CASE
+            WHEN t.address IN :uv_token_addrs
+            THEN lp.underlying_value * up.price_usd
+            ELSE lp.balance * px.price_usd
+        END AS amount_usd,
         lp.latest_activity_at
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
@@ -890,9 +934,17 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
                  otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
     ) px ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT otp.price_usd
+        FROM onchain_token_price otp
+        WHERE otp.token_id = lp.underlying_token_id
+        ORDER BY otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
+        LIMIT 1
+    ) up ON TRUE
     WHERE rt.id IS NULL AND lp.balance > 0
     ORDER BY lp.balance DESC
-""")
+""").bindparams(bindparam("uv_token_addrs", expanding=True))
 
 
 _USD_EXPOSURE_SQL = text("""

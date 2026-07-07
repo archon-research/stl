@@ -176,6 +176,28 @@ func (q stubBlockQuerier) BlockNumber(_ context.Context) (uint64, error) {
 	return q.head, q.err
 }
 
+// mockMetrics records the status labels passed to RecordBlockProcessed.
+type mockMetrics struct {
+	mu        sync.Mutex
+	processed []string
+}
+
+var _ outbound.BackupMetricsRecorder = (*mockMetrics)(nil)
+
+func (m *mockMetrics) RecordProcessingLatency(context.Context, time.Duration, string) {}
+
+func (m *mockMetrics) RecordBlockProcessed(_ context.Context, status string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.processed = append(m.processed, status)
+}
+
+func (m *mockMetrics) ProcessedStatuses() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.processed...)
+}
+
 // stubConsumer is a minimal SQSConsumer; the service tests drive processBlockEvent
 // directly rather than through the poll loop, so receive/delete are no-ops.
 type stubConsumer struct{}
