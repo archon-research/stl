@@ -111,7 +111,7 @@ See [Makefile](Makefile) for the complete list of targets.
 
 ## Code Conventions
 
-These apply to every language in the service (Go, Python, TS). Go-specific rules are grouped under [### Go](#go) below.
+These apply to every language in the service (Go, Python, TS). Go-specific rules live in [../.claude/rules/go-style.md](../.claude/rules/go-style.md) (auto-loads on `stl-verify/**/*.go`).
 
 - **Keep an eye out for deduplicate possibilities**: Try to consolidate lots of duplicated code. Create shareable libraries instead of duplicating code everywhere.
 - **Files**: snake_case
