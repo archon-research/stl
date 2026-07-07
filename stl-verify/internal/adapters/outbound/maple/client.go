@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1123,29 +1124,100 @@ func (c *Client) doSingleRequest(ctx context.Context, body []byte, result any) e
 			fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody)))
 	}
 
-	// Apollo can return HTTP 200 with a GraphQL errors[] envelope — check it
-	// before decoding data.
+	// Apollo can return HTTP 200 with a GraphQL errors[] envelope. Decode data
+	// and errors together so a tolerable per-asset pricing gap can keep its
+	// partial data (see tolerableUnpriceableCollateral); every other error, and
+	// a null data, stays fatal and unretried as before.
 	var envelope struct {
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+		Data   json.RawMessage `json:"data"`
+		Errors []graphqlError  `json:"errors"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
 		return httpclient.WrapNonRetryable(fmt.Errorf("decoding GraphQL response: %w", err))
 	}
 	if len(envelope.Errors) > 0 {
-		messages := make([]string, 0, len(envelope.Errors))
-		for _, e := range envelope.Errors {
-			messages = append(messages, e.Message)
+		dataPresent := len(envelope.Data) > 0 && !bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null"))
+		if !tolerableUnpriceableCollateral(envelope.Errors, dataPresent) {
+			messages := make([]string, 0, len(envelope.Errors))
+			for _, e := range envelope.Errors {
+				messages = append(messages, e.Message)
+			}
+			return httpclient.WrapNonRetryable(
+				fmt.Errorf("graphql error: %s", strings.Join(messages, "; ")))
 		}
-		return httpclient.WrapNonRetryable(
-			fmt.Errorf("graphql error: %s", strings.Join(messages, "; ")))
+		// A tolerable unpriceable-collateral gap: the offending price is already
+		// nulled in data, so decoding drops one loan's collateral price rather
+		// than the whole snapshot. The service records it as a null-downgrade
+		// (reason="unpriceable") and VectorMapleCollateralUnpriceable alerts on a
+		// sustained count; no per-occurrence log here — the shape was confirmed
+		// on the first fire (path [openTermLoans collateral assetValueUsd],
+		// extensions.code=INTERNAL_SERVER_ERROR, partial data present).
 	}
 
 	if err := json.Unmarshal(respBody, result); err != nil {
 		return httpclient.WrapNonRetryable(fmt.Errorf("decoding response: %w", err))
 	}
 	return nil
+}
+
+// graphqlError is one entry of a GraphQL errors[] envelope. Path and Extensions
+// are captured beyond Message so a "No fiat value" error can be classified as a
+// tolerable pricing gap scoped to a loan's collateral.
+type graphqlError struct {
+	Message    string         `json:"message"`
+	Path       []any          `json:"path"`
+	Extensions map[string]any `json:"extensions"`
+}
+
+// noFiatValuePattern matches Maple's transient per-asset pricing-gap error,
+// e.g. "No fiat value for PYUSD". The pricing layer (Chainlink oracle wrappers
+// with a manual-price fallback) had no feed for that asset at query time; it
+// self-heals the next cycle. Anchored to the start so an embedded or wrapped
+// occurrence fails closed (stays fatal) rather than widening the allowlist.
+var noFiatValuePattern = regexp.MustCompile(`(?i)^no fiat value for `)
+
+// tolerableUnpriceableCollateral reports whether the errors[] envelope is safe
+// to swallow: partial data must be present AND every error must be a
+// "No fiat value" error scoped to a collateral node. Only then is the offending
+// value already nulled in data, so decoding it drops one loan's collateral
+// price rather than the whole snapshot. Any other shape — null data, a
+// non-pricing error, or a pricing error not scoped to collateral — is fatal,
+// preserving the pre-existing all-or-nothing behaviour.
+func tolerableUnpriceableCollateral(errs []graphqlError, dataPresent bool) bool {
+	if !dataPresent || len(errs) == 0 {
+		return false
+	}
+	for _, e := range errs {
+		if !noFiatValuePattern.MatchString(e.Message) {
+			return false
+		}
+		if !pathThroughCollateral(e.Path) {
+			return false
+		}
+	}
+	return true
+}
+
+// pathThroughCollateral reports whether a GraphQL error path is either absent
+// (Maple omits path on some errors) or passes through a "collateral" node. A
+// path present but not touching collateral means the error nulls something
+// other than a loan's collateral, which is not safe to swallow.
+//
+// This runs in the generic transport for every query and matches the exact
+// segment name "collateral" (case-insensitive) — not a prefix, so scalar fields
+// like "collateralAsset"/"collateralAmount" on other queries do not match. Its
+// blast radius is any query whose only collateral-scoped node is named exactly
+// "collateral"; today only the OTL loans query qualifies.
+func pathThroughCollateral(path []any) bool {
+	if len(path) == 0 {
+		return true
+	}
+	for _, seg := range path {
+		if s, ok := seg.(string); ok && strings.EqualFold(s, "collateral") {
+			return true
+		}
+	}
+	return false
 }
 
 // maxErrorBodyBytes bounds how much of an error response body is included in

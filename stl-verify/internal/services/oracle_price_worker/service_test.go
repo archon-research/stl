@@ -121,7 +121,7 @@ type mockRepo struct {
 	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenInfosFn                func(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -163,11 +163,11 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
-	if m.getTokenAddressesFn != nil {
-		return m.getTokenAddressesFn(ctx, oracleID)
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+	if m.getTokenInfosFn != nil {
+		return m.getTokenInfosFn(ctx, oracleID)
 	}
-	return nil, errors.New("GetTokenAddresses not mocked")
+	return nil, errors.New("GetTokenInfos not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
@@ -261,10 +261,10 @@ func defaultAssets() []*entity.OracleAsset {
 	}
 }
 
-func defaultTokenAddressBytes() map[int64][]byte {
-	return map[int64][]byte{
-		1: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes(), // WETH
-		2: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F").Bytes(), // DAI
+func defaultTokenInfos() map[int64]outbound.TokenInfo {
+	return map[int64]outbound.TokenInfo{
+		1: {Address: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes()}, // WETH
+		2: {Address: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F").Bytes()}, // DAI
 	}
 }
 
@@ -276,8 +276,8 @@ func defaultRepoSetup(r *mockRepo) {
 	r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 		return defaultAssets(), nil
 	}
-	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return defaultTokenAddressBytes(), nil
+	r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return defaultTokenInfos(), nil
 	}
 	r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 		return map[int64]float64{1: 2000.0, 2: 1.0}, nil
@@ -512,8 +512,8 @@ func TestStart(t *testing.T) {
 						{ID: 1, OracleID: 1, TokenID: 999, Enabled: true}, // 999 not in tokenAddresses
 					}, nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil // has 1, 2 but not 999
+				r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil // has 1, 2 but not 999
 				}
 			},
 			wantErr:     true,
@@ -528,8 +528,8 @@ func TestStart(t *testing.T) {
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil
+				r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil
 				}
 				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 					return nil, fmt.Errorf("redis unavailable")
@@ -548,8 +548,8 @@ func TestStart(t *testing.T) {
 				r.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil
+				r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil
 				}
 				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 					return map[int64]float64{}, nil
@@ -582,12 +582,12 @@ func TestStart(t *testing.T) {
 						{ID: 3, OracleID: 2, TokenID: 3, Enabled: true},
 					}, nil
 				}
-				r.getTokenAddressesFn = func(_ context.Context, oracleID int64) (map[int64][]byte, error) {
+				r.getTokenInfosFn = func(_ context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
 					if oracleID == 1 {
-						return defaultTokenAddressBytes(), nil
+						return defaultTokenInfos(), nil
 					}
-					return map[int64][]byte{
-						3: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").Bytes(),
+					return map[int64]outbound.TokenInfo{
+						3: {Address: common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").Bytes()},
 					}, nil
 				}
 				r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
@@ -760,6 +760,56 @@ func TestStartAndProcessMessages(t *testing.T) {
 
 		if stopErr := svc.Stop(); stopErr != nil {
 			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	t.Run("zero price from oracle is skipped, not persisted as $0", func(t *testing.T) {
+		repo := &mockRepo{}
+		defaultRepoSetup(repo)
+		repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+			return map[int64]float64{}, nil
+		}
+
+		price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
+		// Second asset unpriceable: Aave's getAssetsPrices returns 0 for an unlisted
+		// asset (e.g. a Maple syrup share bound to aave_v3). It must be skipped, not
+		// persisted as a bogus $0 that reads as a real quote.
+		mc := newOracleMulticallerWithT(t, []*big.Int{price1, big.NewInt(0)})
+
+		consumer := &mockConsumer{
+			receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
+
+		svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+		if err != nil {
+			t.Fatalf("NewService: %v", err)
+		}
+		if err := svc.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() {
+			if stopErr := svc.Stop(); stopErr != nil {
+				t.Errorf("Stop: %v", stopErr)
+			}
+		}()
+
+		event := outbound.BlockEvent{
+			ChainID: 1, BlockNumber: 18000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp,
+		}
+		if err := svc.processBlock(context.Background(), event); err != nil {
+			t.Fatalf("processBlock: %v", err)
+		}
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		if len(repo.lastUpserted) != 1 {
+			t.Fatalf("lastUpserted length = %d, want 1 (zero price skipped)", len(repo.lastUpserted))
+		}
+		if repo.lastUpserted[0].PriceUSD != 2000 {
+			t.Errorf("persisted price = %v, want 2000 (the non-zero asset)", repo.lastUpserted[0].PriceUSD)
 		}
 	})
 
@@ -1283,8 +1333,8 @@ func feedOracleSetup(r *mockRepo) {
 			FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 		}}, nil
 	}
-	r.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return map[int64][]byte{1: wethAddr.Bytes()}, nil
+	r.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 	}
 	r.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 		return map[int64]float64{}, nil
@@ -1383,8 +1433,8 @@ func TestStart_ChronicleOracle(t *testing.T) {
 			FeedAddress: feedAddr, FeedDecimals: 18, QuoteCurrency: "USD",
 		}}, nil
 	}
-	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return map[int64][]byte{1: wethAddr.Bytes()}, nil
+	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{1: {Address: wethAddr.Bytes()}}, nil
 	}
 	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
 		return map[int64]float64{}, nil
@@ -1615,10 +1665,10 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 			},
 		}, nil
 	}
-	repo.getTokenAddressesFn = func(_ context.Context, _ int64) (map[int64][]byte, error) {
-		return map[int64][]byte{
-			1: wethAddr.Bytes(),  // Token 1 = WETH → matches quoteCurrencyTokenAddr["ETH"]
-			2: weethAddr.Bytes(), // Token 2 = weETH
+	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{
+			1: {Address: wethAddr.Bytes()},  // Token 1 = WETH → matches quoteCurrencyTokenAddr["ETH"]
+			2: {Address: weethAddr.Bytes()}, // Token 2 = weETH
 		}, nil
 	}
 	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {

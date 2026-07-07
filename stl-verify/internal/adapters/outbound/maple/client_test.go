@@ -1225,6 +1225,149 @@ func TestExecute_GraphQLErrorsEnvelope(t *testing.T) {
 	}
 }
 
+func TestTolerableUnpriceableCollateral(t *testing.T) {
+	collateralPath := []any{"openTermLoans", float64(0), "collateral", "assetValueUsd"}
+	for _, tc := range []struct {
+		name        string
+		errs        []graphqlError
+		dataPresent bool
+		want        bool
+	}{
+		{name: "no errors", errs: nil, dataPresent: true, want: false},
+		{name: "data absent", errs: []graphqlError{{Message: "No fiat value for PYUSD"}}, dataPresent: false, want: false},
+		{name: "message only, no path", errs: []graphqlError{{Message: "No fiat value for PYUSD"}}, dataPresent: true, want: true},
+		{name: "path through collateral", errs: []graphqlError{{Message: "No fiat value for USDG", Path: collateralPath}}, dataPresent: true, want: true},
+		{name: "case-insensitive message and node", errs: []graphqlError{{Message: "no FIAT value for HYPE", Path: []any{"openTermLoans", float64(0), "Collateral"}}}, dataPresent: true, want: true},
+		{name: "path outside collateral", errs: []graphqlError{{Message: "No fiat value for PYUSD", Path: []any{"openTermLoans", float64(0), "principalOwed"}}}, dataPresent: true, want: false},
+		{name: "unrelated message", errs: []graphqlError{{Message: "UNAUTHORIZED"}}, dataPresent: true, want: false},
+		{name: "mixed tolerable and unrelated", errs: []graphqlError{{Message: "No fiat value for PYUSD", Path: collateralPath}, {Message: "boom"}}, dataPresent: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tolerableUnpriceableCollateral(tc.errs, tc.dataPresent); got != tc.want {
+				t.Errorf("tolerableUnpriceableCollateral = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetActiveLoans_TolerateUnpriceableCollateral(t *testing.T) {
+	// Maple returns HTTP 200 with a "No fiat value" error scoped to a loan's
+	// collateral plus partial data; the client keeps the book and persists the
+	// offending price as NULL rather than discarding the whole snapshot.
+	for _, tc := range []struct {
+		name         string
+		body         string
+		wantCollat   bool
+		wantPriceNil bool
+	}{
+		{
+			name: "field null with path through collateral",
+			body: fmt.Sprintf(`{
+				"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "collateral", "assetValueUsd"]}],
+				"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "100", "acmRatio": "1445731",
+					"collateral": {"asset": "PYUSD", "assetAmount": "5", "assetValueUsd": null,
+						"decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+					"loanMeta": null, "fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, poolAddr),
+			wantCollat: true, wantPriceNil: true,
+		},
+		{
+			name: "whole collateral null with path at collateral node",
+			body: fmt.Sprintf(`{
+				"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "collateral"]}],
+				"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "100", "acmRatio": null,
+					"collateral": null, "loanMeta": null, "fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, poolAddr),
+			wantCollat: false,
+		},
+		{
+			name: "message only, no path",
+			body: fmt.Sprintf(`{
+				"errors": [{"message": "No fiat value for USDG"}],
+				"data": {"openTermLoans": [{
+					"id": %q, "borrower": {"id": %q}, "state": "Active",
+					"principalOwed": "100", "acmRatio": "1445731",
+					"collateral": {"asset": "USDG", "assetAmount": "5", "assetValueUsd": null,
+						"decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+					"loanMeta": null, "fundingPool": {"id": %q}
+				}]}}`, loanAddr, borrowerAddr, poolAddr),
+			wantCollat: true, wantPriceNil: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				calls.Add(1)
+				writeJSON(w, tc.body)
+			}})
+
+			loans, err := client.GetActiveLoans(context.Background())
+			if err != nil {
+				t.Fatalf("GetActiveLoans: %v", err)
+			}
+			if len(loans) != 1 {
+				t.Fatalf("len(loans) = %d, want 1 (tolerated error keeps the book)", len(loans))
+			}
+			if calls.Load() != 1 {
+				t.Errorf("calls = %d, want 1 (tolerated errors decode partial data, no retry)", calls.Load())
+			}
+			if tc.wantCollat {
+				if loans[0].Collateral == nil {
+					t.Fatal("Collateral = nil, want value with null price")
+				}
+				if tc.wantPriceNil && loans[0].Collateral.AssetValueUSD != nil {
+					t.Errorf("AssetValueUSD = %v, want nil", loans[0].Collateral.AssetValueUSD)
+				}
+			} else if loans[0].Collateral != nil {
+				t.Errorf("Collateral = %+v, want nil", loans[0].Collateral)
+			}
+		})
+	}
+}
+
+func TestGetActiveLoans_UntolerableErrorsFatal(t *testing.T) {
+	// Every case that is not a collateral-scoped "No fiat value" over partial
+	// data must stay fatal and unretried, exactly as before the tolerance rule.
+	oneLoan := fmt.Sprintf(`{
+		"id": %q, "borrower": {"id": %q}, "state": "Active",
+		"principalOwed": "100", "acmRatio": "1445731",
+		"collateral": {"asset": "PYUSD", "assetAmount": "5", "assetValueUsd": null,
+			"decimals": 6, "state": "Deposited", "custodian": "ANCHORAGE", "liquidationLevel": 1020000},
+		"loanMeta": null, "fundingPool": {"id": %q}
+	}`, loanAddr, borrowerAddr, poolAddr)
+	for _, tc := range []struct {
+		name, body, wantSub string
+	}{
+		{name: "unrelated error with data null", body: `{"errors": [{"message": "UNAUTHORIZED"}], "data": null}`, wantSub: "UNAUTHORIZED"},
+		{name: "no fiat value but data null", body: `{"errors": [{"message": "No fiat value for PYUSD"}], "data": null}`, wantSub: "No fiat value"},
+		{name: "no fiat value path outside collateral", body: `{"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "principalOwed"]}], "data": {"openTermLoans": []}}`, wantSub: "No fiat value"},
+		{name: "mixed tolerable and unrelated", body: fmt.Sprintf(`{"errors": [{"message": "No fiat value for PYUSD", "path": ["openTermLoans", 0, "collateral"]}, {"message": "boom"}], "data": {"openTermLoans": [%s]}}`, oneLoan), wantSub: "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			client := newTestClient(t, graphqlHandler{t: t, handleFunc: func(w http.ResponseWriter, _ string, _ map[string]any) {
+				calls.Add(1)
+				writeJSON(w, tc.body)
+			}})
+
+			_, err := client.GetActiveLoans(context.Background())
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q should contain %q", err.Error(), tc.wantSub)
+			}
+			if calls.Load() != 1 {
+				t.Errorf("calls = %d, want 1 (GraphQL errors must not be retried)", calls.Load())
+			}
+		})
+	}
+}
+
 func TestExecute_HTTP500RetryThenFail(t *testing.T) {
 	var calls atomic.Int32
 	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

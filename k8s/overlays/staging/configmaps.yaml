@@ -98,6 +98,21 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: fluid-vault-indexer-config
+data:
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-watcher-config
 data:
   CHAIN_ID: "43114"
@@ -227,6 +242,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "0s"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -236,6 +252,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "10"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "15m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -245,6 +262,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "130"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "5m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -254,6 +272,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "8453"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "20m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -263,6 +282,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "42161"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "10m"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -272,6 +292,7 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "43114"
+  DATA_VALIDATION_SCHEDULE_OFFSET: "25m"
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -44,6 +44,14 @@ func (e *TokenEntry) Key() EntryKey {
 type PositionBalance struct {
 	Balance       *big.Int // primary tracked balance in the entry's tracked unit (token units for ERC20-like entries; underlying-asset units for pool-style entries like UniV3)
 	ScaledBalance *big.Int // optional auxiliary balance (typically raw shares)
+	// UnderlyingValue is the position's value in underlying-asset raw units,
+	// set only by sources that must read it on-chain (erc4626 convertToAssets).
+	// nil = unknown/not applicable; the handler owns the per-token-type
+	// denomination policy and derives balanceOf-type values itself.
+	// Only ERC4626Source sets this; every other source leaves it nil, and the
+	// handler silently ignores a value set for a token type whose policy does
+	// not read it.
+	UnderlyingValue *big.Int
 }
 
 // PoolSupply holds the totalSupply and (optionally) scaledTotalSupply of a pool
@@ -73,9 +81,10 @@ func NewFetchResult() *FetchResult {
 
 // PositionSnapshot is the final output: entry + balance + trigger context.
 type PositionSnapshot struct {
-	Entry         *TokenEntry
-	Balance       *big.Int
-	ScaledBalance *big.Int
+	Entry           *TokenEntry
+	Balance         *big.Int
+	ScaledBalance   *big.Int
+	UnderlyingValue *big.Int
 
 	ChainID      int64
 	BlockNumber  int64

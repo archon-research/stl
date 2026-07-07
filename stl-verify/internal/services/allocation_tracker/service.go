@@ -309,13 +309,14 @@ func (s *Service) buildSnapshots(
 		}
 
 		snap := &PositionSnapshot{
-			Entry:          entry,
-			Balance:        bal.Balance,
-			ScaledBalance:  bal.ScaledBalance,
-			ChainID:        event.ChainID,
-			BlockNumber:    event.BlockNumber,
-			BlockVersion:   event.Version,
-			BlockTimestamp: blockTimestamp,
+			Entry:           entry,
+			Balance:         bal.Balance,
+			ScaledBalance:   bal.ScaledBalance,
+			UnderlyingValue: bal.UnderlyingValue,
+			ChainID:         event.ChainID,
+			BlockNumber:     event.BlockNumber,
+			BlockVersion:    event.Version,
+			BlockTimestamp:  blockTimestamp,
 		}
 		if t, ok := tLookup[entry.Key()]; ok {
 			snap.TxHash = t.TxHash
@@ -379,15 +380,16 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common
 			continue
 		}
 		snapshots = append(snapshots, &PositionSnapshot{
-			Entry:          entry,
-			Balance:        bal.Balance,
-			ScaledBalance:  bal.ScaledBalance,
-			ChainID:        s.config.ChainID,
-			BlockNumber:    blockNumber,
-			BlockVersion:   blockVersion,
-			TxAmount:       big.NewInt(0),
-			Direction:      DirectionSweep,
-			BlockTimestamp: blockTimestamp,
+			Entry:           entry,
+			Balance:         bal.Balance,
+			ScaledBalance:   bal.ScaledBalance,
+			UnderlyingValue: bal.UnderlyingValue,
+			ChainID:         s.config.ChainID,
+			BlockNumber:     blockNumber,
+			BlockVersion:    blockVersion,
+			TxAmount:        big.NewInt(0),
+			Direction:       DirectionSweep,
+			BlockTimestamp:  blockTimestamp,
 		})
 	}
 

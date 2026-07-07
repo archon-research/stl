@@ -28,7 +28,7 @@ type mockRepo struct {
 	getEnabledAssetsFn             func(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
 	getLatestPricesFn              func(ctx context.Context, oracleID int64) (map[int64]float64, error)
 	getLatestBlockFn               func(ctx context.Context, oracleID int64) (int64, error)
-	getTokenAddressesFn            func(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	getTokenInfosFn                func(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error)
 	upsertPricesFn                 func(ctx context.Context, prices []*entity.OnchainTokenPrice) error
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
@@ -71,11 +71,11 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
-	if m.getTokenAddressesFn != nil {
-		return m.getTokenAddressesFn(ctx, oracleID)
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+	if m.getTokenInfosFn != nil {
+		return m.getTokenInfosFn(ctx, oracleID)
 	}
-	return nil, errors.New("GetTokenAddresses not mocked")
+	return nil, errors.New("GetTokenInfos not mocked")
 }
 
 func (m *mockRepo) UpsertPrices(ctx context.Context, prices []*entity.OnchainTokenPrice) error {
@@ -184,11 +184,11 @@ func defaultAssets() []*entity.OracleAsset {
 	}
 }
 
-// defaultTokenAddressBytes returns a token ID -> address bytes map matching defaultAssets.
-func defaultTokenAddressBytes() map[int64][]byte {
-	return map[int64][]byte{
-		10: common.HexToAddress("0x0000000000000000000000000000000000000010").Bytes(),
-		20: common.HexToAddress("0x0000000000000000000000000000000000000020").Bytes(),
+// defaultTokenInfos returns a token ID -> TokenInfo map matching defaultAssets.
+func defaultTokenInfos() map[int64]outbound.TokenInfo {
+	return map[int64]outbound.TokenInfo{
+		10: {Address: common.HexToAddress("0x0000000000000000000000000000000000000010").Bytes()},
+		20: {Address: common.HexToAddress("0x0000000000000000000000000000000000000020").Bytes()},
 	}
 }
 
@@ -240,7 +240,7 @@ func blockDependentPrices(t *testing.T) func(ctx context.Context, calls []outbou
 }
 
 // defaultRepoSetup returns a mockRepo preconfigured for common test scenarios.
-// It mocks GetEnabledOraclesByChain, GetEnabledAssets, and GetTokenAddresses.
+// It mocks GetEnabledOraclesByChain, GetEnabledAssets, and GetTokenInfos.
 func defaultRepoSetup() *mockRepo {
 	return &mockRepo{
 		getEnabledOraclesByChainFn: func(_ context.Context, chainID int64) ([]*entity.Oracle, error) {
@@ -249,8 +249,33 @@ func defaultRepoSetup() *mockRepo {
 		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 			return defaultAssets(), nil
 		},
-		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-			return defaultTokenAddressBytes(), nil
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return defaultTokenInfos(), nil
+		},
+	}
+}
+
+// erc4626RepoSetup returns a mockRepo preconfigured for a single erc4626_share oracle
+// (fluid_fsusds, oracle ID 5) with token 10 (fsUSDS vault, 18 decimals) and the
+// sUSDS/USD feed at 8 decimals.
+func erc4626RepoSetup() *mockRepo {
+	fsusds := common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11")
+	usdsFeed := common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1")
+	return &mockRepo{
+		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{{
+				ID: 5, Name: "fluid_fsusds", Enabled: true,
+				OracleType: entity.OracleTypeERC4626Share,
+			}}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return []*entity.OracleAsset{{
+				ID: 1, OracleID: 5, TokenID: 10, Enabled: true,
+				FeedAddress: usdsFeed, FeedDecimals: 8, QuoteCurrency: "USD",
+			}}, nil
+		},
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{10: {Address: fsusds.Bytes(), Decimals: 18}}, nil
 		},
 	}
 }
@@ -271,8 +296,8 @@ func feedOracleRepoSetup() *mockRepo {
 				FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 			}}, nil
 		},
-		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-			return map[int64][]byte{10: wethAddr.Bytes()}, nil
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{10: {Address: wethAddr.Bytes()}}, nil
 		},
 	}
 }
@@ -703,8 +728,8 @@ func TestRun(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return []*entity.OracleAsset{}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return defaultTokenAddressBytes(), nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return defaultTokenInfos(), nil
 					},
 				}
 			},
@@ -786,8 +811,8 @@ func TestRun(t *testing.T) {
 							{ID: 1, OracleID: 1, TokenID: 999, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{}, nil // no addresses
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{}, nil // no addresses
 					},
 				}
 			},
@@ -1221,8 +1246,8 @@ func TestRun(t *testing.T) {
 					getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 						return defaultAssets(), nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return defaultTokenAddressBytes(), nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return defaultTokenInfos(), nil
 					},
 				}
 			},
@@ -1354,10 +1379,10 @@ func TestRun(t *testing.T) {
 							},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{
-							10: wethAddr.Bytes(),
-							20: weETHAddr.Bytes(),
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{
+							10: {Address: wethAddr.Bytes()},
+							20: {Address: weETHAddr.Bytes()},
 						}, nil
 					},
 				}
@@ -1471,8 +1496,8 @@ func TestRun(t *testing.T) {
 							FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 						}}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-						return map[int64][]byte{10: tokenAddr.Bytes()}, nil
+					getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+						return map[int64]outbound.TokenInfo{10: {Address: tokenAddr.Bytes()}}, nil
 					},
 				}
 			},
@@ -1532,12 +1557,12 @@ func TestRun(t *testing.T) {
 							{ID: 3, OracleID: 2, TokenID: 30, Enabled: true},
 						}, nil
 					},
-					getTokenAddressesFn: func(_ context.Context, oracleID int64) (map[int64][]byte, error) {
+					getTokenInfosFn: func(_ context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
 						if oracleID == 1 {
-							return defaultTokenAddressBytes(), nil
+							return defaultTokenInfos(), nil
 						}
-						return map[int64][]byte{
-							30: common.HexToAddress("0x0000000000000000000000000000000000000030").Bytes(),
+						return map[int64]outbound.TokenInfo{
+							30: {Address: common.HexToAddress("0x0000000000000000000000000000000000000030").Bytes()},
 						}, nil
 					},
 				}
@@ -2171,8 +2196,8 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 				getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
 					return defaultAssets(), nil
 				},
-				getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-					return defaultTokenAddressBytes(), nil
+				getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+					return defaultTokenInfos(), nil
 				},
 				getAllProtocolOracleBindingsFn: func(_ context.Context) ([]*entity.ProtocolOracle, error) {
 					return tt.bindings, nil
@@ -2252,8 +2277,8 @@ func TestRun_FeedOracle_ChangeDetection(t *testing.T) {
 				FeedAddress: feedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
 			}}, nil
 		},
-		getTokenAddressesFn: func(_ context.Context, _ int64) (map[int64][]byte, error) {
-			return map[int64][]byte{10: wethAddr.Bytes()}, nil
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{10: {Address: wethAddr.Bytes()}}, nil
 		},
 	}
 
@@ -2439,4 +2464,222 @@ func TestRun_FeedDecimalsValidation(t *testing.T) {
 			t.Error("expected prices to be stored after successful decimals validation")
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626Oracle — backfill stores fsUSDS share prices
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626Oracle(t *testing.T) {
+	oneE18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	// Block 100: assets 1.05e18, USDS 1.0 -> $1.05 (stored)
+	// Block 101: same -> NOT stored
+	// Block 102: assets 1.06e18, USDS 1.0 -> $1.06 (stored)
+	assetsByBlock := map[int64]*big.Int{
+		100: new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20))),
+		101: new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20))),
+		102: new(big.Int).Add(oneE18, new(big.Int).Mul(big.NewInt(6), new(big.Int).Div(oneE18, big.NewInt(100)))),
+	}
+
+	repo := erc4626RepoSetup()
+
+	header := &mockHeaderFetcher{
+		headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+			return &ethtypes.Header{Time: uint64(1700000000 + number.Int64())}, nil
+		},
+	}
+
+	// Stable underlying address returned by the asset() validation call.
+	underlyingAddr := common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F")
+	assetData := testutil.PackAsset(t, underlyingAddr)
+
+	callCount := 0
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		callCount++
+		switch callCount {
+		case 1:
+			// First multicaller: feed decimals validation (returns 8, matches config).
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				},
+			}, nil
+		case 2:
+			// Second multicaller: used for both asset() and underlying decimals() calls
+			// inside ValidateERC4626UnderlyingDecimals (two Execute calls on the same instance).
+			var execCount int
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					execCount++
+					if execCount == 1 {
+						return []outbound.Result{{Success: true, ReturnData: assetData}}, nil
+					}
+					return []outbound.Result{{Success: true, ReturnData: testutil.PackDecimals(t, 18)}}, nil
+				},
+			}, nil
+		default:
+			// Worker multiCallers: return per-block price data.
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+					if len(calls) != 2 {
+						return nil, fmt.Errorf("expected 2 calls, got %d", len(calls))
+					}
+					assets := assetsByBlock[blockNumber.Int64()]
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackConvertToAssets(t, assets)},
+						{Success: true, ReturnData: testutil.PackLatestRoundData(t,
+							big.NewInt(1), big.NewInt(100_000_000), big.NewInt(1000), big.NewInt(1000), big.NewInt(1))},
+					}, nil
+				},
+			}, nil
+		}
+	}
+
+	svc, err := NewService(Config{
+		ChainID:     1,
+		Concurrency: 1,
+		BatchSize:   100,
+		Logger:      testutil.DiscardLogger(),
+	}, header, mcFactory, repo)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Run(context.Background(), 100, 102); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	upserted := repo.getUpserted()
+	if len(upserted) != 2 {
+		t.Fatalf("upserted count = %d, want 2 (blocks 100 and 102)", len(upserted))
+	}
+
+	byBlock := make(map[int64]float64)
+	for _, p := range upserted {
+		if p.TokenID != 10 {
+			t.Errorf("TokenID = %d, want 10", p.TokenID)
+		}
+		byBlock[p.BlockNumber] = p.PriceUSD
+	}
+	if byBlock[100] != 1.05 {
+		t.Errorf("block 100 price = %f, want 1.05", byBlock[100])
+	}
+	if byBlock[102] != 1.06 {
+		t.Errorf("block 102 price = %f, want 1.06", byBlock[102])
+	}
+	if _, ok := byBlock[101]; ok {
+		t.Errorf("block 101 should be skipped (unchanged price)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626FeedDecimalsValidation — the underlying feed's on-chain decimals
+// contradict the seeded feed_decimals, so backfill halts before writing any
+// mis-scaled historical prices.
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626FeedDecimalsValidation(t *testing.T) {
+	repo := erc4626RepoSetup()
+
+	// decimals() returns 18 on-chain, contradicting the seeded 8.
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return &testutil.MockMulticaller{
+			ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
+				}, nil
+			},
+		}, nil
+	}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		&mockHeaderFetcher{},
+		mcFactory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Run(context.Background(), 100, 105)
+	if err == nil {
+		t.Fatal("expected decimals mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "feed decimals") {
+		t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
+	}
+
+	if upserted := repo.getUpserted(); len(upserted) != 0 {
+		t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRun_ERC4626UnderlyingDecimalsMismatch — on-chain underlying token decimals
+// (6) contradict the configured UnderlyingDecimals (18), so Run halts before
+// writing any mis-scaled historical prices.
+// ---------------------------------------------------------------------------
+
+func TestRun_ERC4626UnderlyingDecimalsMismatch(t *testing.T) {
+	underlyingAddr := common.HexToAddress("0xdC035D45d973E3EC169d2276DDab16f1e407384F")
+
+	repo := erc4626RepoSetup()
+
+	// Validation multicaller sequence (two multicaller instances from the factory):
+	//  callCount 1: feed decimals() returns 8 (matches FeedDecimals=8, passes)
+	//  callCount 2: ValidateERC4626UnderlyingDecimals uses this single instance for
+	//               both its Execute calls: first asset(), then underlying decimals().
+	assetData := testutil.PackAsset(t, underlyingAddr)
+	callCount := 0
+	mcFactory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		callCount++
+		switch callCount {
+		case 1:
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
+					}, nil
+				},
+			}, nil
+		default:
+			// Handles both Execute calls inside ValidateERC4626UnderlyingDecimals:
+			// first returns asset address, second returns decimals=6 (mismatch).
+			var execCount int
+			return &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					execCount++
+					if execCount == 1 {
+						return []outbound.Result{{Success: true, ReturnData: assetData}}, nil
+					}
+					return []outbound.Result{{Success: true, ReturnData: testutil.PackDecimals(t, 6)}}, nil
+				},
+			}, nil
+		}
+	}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		&mockHeaderFetcher{},
+		mcFactory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Run(context.Background(), 100, 105)
+	if err == nil {
+		t.Fatal("expected underlying decimals mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "underlying decimals mismatch") {
+		t.Errorf("error = %q, expected it to contain 'underlying decimals mismatch'", err)
+	}
+
+	if upserted := repo.getUpserted(); len(upserted) != 0 {
+		t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
+	}
 }

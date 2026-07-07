@@ -296,6 +296,76 @@ decide whether downstream consumers tolerate the gap. The allowlist and the
 
 ---
 
+## VectorMapleCollateralUnpriceable
+
+**Severity:** warning · **For:** 0m (1h window debounces)
+
+### What it means
+
+A loan's collateral USD price came back null in a non-pending state. Maple's
+oracle layer had no fiat feed for the token at query time, so its API returned
+HTTP 200 with a top-level `errors[]` entry `No fiat value for <TOKEN>` scoped to
+the collateral node. The client tolerates that specific case: it keeps the rest
+of the loan book and persists the offending `asset_value_usd` as SQL NULL
+(metric `reason="unpriceable"`), rather than discarding the whole cycle's
+snapshot. `reason="pending"` (collateral still `DepositPending`, no price yet)
+is normal and is **not** alerted.
+
+This is expected to self-heal — Maple's pricing layer restores the feed and the
+next 10m cycle writes a real value. The alert detects **persistence, not
+volume**: it fires only when a token's collateral stays unpriceable across
+consecutive cycles for **>30m** (`increase[20m] > 0` held for `30m`, per token).
+A lone gap self-heals within a cycle and never fires; a sustained gap is an
+upstream Maple pricing problem, not our bug. The client no longer emits a
+per-occurrence warn; the metric is the signal.
+
+### First checks
+
+- `sum by (token) (increase(maple_sync_null_downgrades_total{reason="unpriceable"}[1h]))`
+  — which token(s), and whether it's a single blip or sustained.
+- Inspect rows: `SELECT l.loan_address, c.asset, c.state, c.synced_at FROM
+  maple_loan_collateral c JOIN maple_loan l ON l.id = c.maple_loan_id WHERE
+  c.asset_value_usd IS NULL AND c.state <> 'DepositPending' ORDER BY c.synced_at
+  DESC LIMIT 20;` — confirm the price, not the whole loan, is what dropped.
+
+### Action
+
+- **Transient (fires once, resolves within ~1h):** expected self-heal. No
+  action beyond the one-time task below.
+- **Sustained (fires across many cycles):** upstream Maple pricing gap. Raise
+  with Maple; decide whether downstream consumers tolerate the NULL. Not a code
+  bug.
+
+### Confirmed shape (baseline)
+
+First observed live in staging, 2026-07, on open-term-loan collateral
+(HYPE, PYUSD, USDG, cbBTC). The captured `errors[]` matched the client's
+assumptions exactly:
+
+- `message`: `No fiat value for <TOKEN>`
+- `path`: `[openTermLoans collateral assetValueUsd]` (through a `collateral` segment)
+- `extensions.code`: `INTERNAL_SERVER_ERROR`
+- partial `data` present
+
+So the classifier (`tolerableUnpriceableCollateral` / `pathThroughCollateral`)
+classified it correctly; the temporary diagnostic warn has been removed and the
+alert re-baselined from a raw `>0` to a persistence signal
+(`increase[20m] > 0` for `30m`, per token).
+
+> Known gap (follow-up): the metric is only recorded when `collateral` is
+> non-null (service.go). If a "No fiat value" error nulls the **whole**
+> `collateral` node (not just `assetValueUsd`), the loan is kept with no
+> collateral row and no downgrade metric — so this alert cannot see it. Not
+> observed live (the live path is field-level `...collateral assetValueUsd`), but
+> track it separately if Maple's SDL ever makes `assetValueUsd` non-nullable.
+
+If a future occurrence does **not** match this shape (path outside collateral,
+or extensions reveal a different failure), the classifier needs tightening — fix
+it in `stl-verify/internal/adapters/outbound/maple/client.go` so that shape
+stays fatal rather than being swallowed as a price gap.
+
+---
+
 ## VectorMaplePhaseLatencyHigh
 
 **Severity:** warning · **For:** 15m
@@ -314,6 +384,111 @@ Maple API is degraded and a phase risks overrunning the 10m interval.
 - Maple API status / response times (curl a representative query).
 - If it's the `loans` phase, pagination volume may have grown; check
   `total_rows` in the client logs.
+
+---
+
+## fluid-vault-indexer (VEC-438)
+
+`fluid-vault-indexer` consumes Ethereum BlockEvents, reads end-of-block Fluid
+(Instadapp) vault state from the VaultResolver via Multicall3, and appends
+`fluid_vault_state` snapshots into TimescaleDB. Mainnet (chain 1) only.
+
+**Metric coverage:** the service emits **no service-level counters/histograms of
+its own** today. These alerts use the signals that genuinely exist:
+`kube_deployment_status_replicas_available` (process liveness, independent of the
+OTel pipeline), `multicall_batch_size_count{service_name="fluid-vault-indexer"}`
+(advances on startup reconcile + every block touching a known vault), and the
+shared `VectorArchiving*` rules (raw-SC-call archive health, keyed by
+`service_name`). Error-rate, silent-empty (rows-written == 0), and RPC-latency
+alerts are intentionally absent — no metric would make them fire honestly, so
+they are omitted rather than shipped as rules that can never fire. Adding
+`fluid_blocks_processed_total` / `fluid_errors_total` / a rows-written counter /
+an RPC-latency histogram to the B2 service is a follow-up instrumentation task;
+grow the rules + these sections when those land.
+
+---
+
+## VectorFluidVaultIndexerDown
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The `fluid-vault-indexer` Deployment has <1 available replica for 10 minutes. No
+pod is running, so no Fluid vault snapshots are written and the SQS backlog is
+growing. This is the keystone freshness signal for a service with no internal
+block-progress metric.
+
+### First checks (≤5 min)
+
+1. **Pod status** — `kubectl -n vector get pods -l app=fluid-vault-indexer`.
+2. **Why it's not ready** — `kubectl -n vector describe deployment/fluid-vault-indexer`
+   and `kubectl -n vector logs -l app=fluid-vault-indexer --previous` for a crash
+   loop (missing queue URL, DB/Redis/RPC dial failure, bad ABI load).
+3. **Secrets/config present** — the worker requires `AWS_SQS_QUEUE_URL`,
+   `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET`. A missing key
+   from the `fluid-vault-indexer` ExternalSecret crashes it on startup. The queue
+   URL is the `ethereum_sqs_fluid_vault_url` property of `stl-<env>-infra-config`
+   (created by infra VEC-439).
+4. **Node/scheduling** — pending pod => check node capacity / taints.
+
+### Common causes
+
+- ExternalSecret not yet synced (queue URL / DB URL missing) — the deploy ran
+  before the infra apply. Verify VEC-439 applied; re-sync the ExternalSecret.
+- Crash loop on a startup error (DB/Redis/RPC unreachable) — fix the dependency;
+  the worker is fail-fast by design.
+- OOMKilled — check memory limits.
+
+### Verify recovery
+
+`kube_deployment_status_replicas_available{deployment="fluid-vault-indexer"} >= 1`
+and the pod logs show `fluid vault indexer started, waiting for messages...`.
+
+---
+
+## VectorFluidVaultIndexerStalled
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+The worker is **up** (≥1 replica) but has executed **no VaultResolver multicalls
+for 30 minutes**. A healthy worker on mainnet advances
+`multicall_batch_size_count` regularly (startup reconcile + every block touching
+a known vault), so a sustained zero means one of: a benign quiet period (no
+in-scope sUSDS-debt vault touched, no restart), a wedged poll loop (process alive
+but not processing), or a broken OTLP export (worker fine, metrics stopped — in
+which case `VectorFluidVaultIndexerDown` is **not** firing and other OTel series
+from the pod also go flat).
+
+### First checks (≤5 min)
+
+1. **Distinguish the cases** — is `VectorFluidVaultIndexerDown` also firing? If
+   so the process is down (treat as Down). If not, the pod is alive — suspect a
+   wedged loop or a metrics-pipeline issue.
+2. **Recent logs** — `kubectl -n vector logs -l app=fluid-vault-indexer --tail=200`.
+   Look for a repeating error on one message, `context deadline exceeded` against
+   the Alchemy RPC, or silence (poll loop stopped).
+3. **SQS backlog** — check the `stl-<env>-ethereum-fluid_vault.fifo` queue depth.
+   Growing `ApproximateNumberOfMessages` + zero multicalls = wedged (not
+   draining); near-empty queue + zero multicalls = genuine quiet period (benign).
+4. **Upstream** — confirm the ethereum watcher is still producing blocks; if not,
+   that's the root cause (`VectorWatcherNoBlocks`).
+
+### Common causes
+
+- Poison message wedging the poll loop — inspect the DLQ; redrive or purge the
+  offending message.
+- Alchemy RPC degraded / rate-limited — multicalls time out; check logs and the
+  Alchemy status.
+- Genuine quiet period on a low-activity target debt token — no action; clears
+  once a vault is next touched.
+
+### Verify recovery
+
+`increase(multicall_batch_size_count{service_name="fluid-vault-indexer"}[30m]) > 0`,
+or confirm the SQS backlog is draining and recent logs show snapshots written.
 
 ---
 
@@ -505,3 +680,208 @@ accompanies a `Vector*IndexerRPCLatencyHigh` warning on the same chain.
 
 - Watcher runbook: [vector-watcher.md](vector-watcher.md)
 - Backup worker runbook: [vector-backup-worker.md](vector-backup-worker.md)
+
+## curve-indexer (VEC-260)
+
+## VectorCurveIndexerStalled
+
+**Severity:** critical · **For:** 15m
+
+### What it means
+
+`curve_blocks_processed_total` has not incremented for 15 minutes on the
+labelled `chain`. The Curve pool state in TimescaleDB is going stale; no swap
+or liquidity events are being recorded.
+
+### First checks (<=5 min)
+
+1. **Pod status**
+   `kubectl -n vector get pods -l app=curve-indexer`
+2. **Recent logs** — look for decode panics, DB connection errors,
+   `context deadline exceeded`, or SQS poll failures:
+   `kubectl -n vector logs -l app=curve-indexer --tail=100`
+3. **Upstream lag** — confirm the watcher is producing blocks for this chain
+   (if not, the root cause is upstream — see `VectorWatcherNoBlocks`).
+4. **SQS queue depth** — check the curve-indexer SQS queue. A depth of 0 with
+   no processing means the consumer lost its connection or the queue is empty.
+5. **TimescaleDB health** — connection pool exhaustion or replication lag can
+   stall writes; check the Postgres dashboard.
+
+### Common causes
+
+- Indexer stuck on a malformed event after a contract upgrade -> add the new
+  ABI / decoder and redeploy.
+- DB connection pool saturated -> restart the pod; longer-term raise the pool
+  limit.
+- SQS consumer lost connection -> pod restart reconnects.
+- Block latency high enough that the worker is processing but not completing
+  within the 5m rate window (see `VectorCurveIndexerBlockLatencyHigh`).
+
+### Verify recovery
+
+`rate(curve_blocks_processed_total[5m]) > 0` for the affected chain.
+
+---
+
+## VectorCurveIndexerErrorsHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+`curve_errors_total` is above 0.1 errors/sec sustained for 15 minutes. Errors
+are counted per operation (attribute `operation`); the indexer continues
+processing but errors at this rate often precede a full stall.
+
+### First checks
+
+1. **Dominant error class** — `sum by (operation)(rate(curve_errors_total[10m]))`
+   to see which operation is failing most.
+2. **Pod logs** — `kubectl -n vector logs -l app=curve-indexer | grep "ERROR"`
+3. **Recent deploys** — `kubectl rollout history deploy/curve-indexer -n vector`.
+   A failed ABI decode after a contract change is a common trigger.
+4. **Chain reorgs** — check watcher logs; a reorg delivers blocks the indexer
+   may reject until the version advances.
+
+### Common causes
+
+- ABI decode failure after a Curve contract upgrade -> update the ABI/decoder.
+- DB write error (FK constraint, duplicate key) -> inspect the failing pool and
+  block number.
+- Transient RPC timeout -> usually self-clears; investigate if sustained.
+
+### Verify recovery
+
+`rate(curve_errors_total[10m]) == 0` for the affected chain.
+
+---
+
+## VectorCurveIndexerBlockLatencyHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+p99 block processing duration (`curve_block_duration_seconds`) exceeds 3
+seconds sustained for 15 minutes. The indexer is degraded; expect downstream
+lag in Curve pool state.
+
+### First checks
+
+1. **Multicall/RPC latency** — the Coordinator's `SnapshotState` calls issue
+   batched multicalls to the archive RPC. High latency there dominates block
+   duration. Check the archive RPC pod health and CPU.
+2. **Pool count** — a large `snapshotSet` (many touched pools or sweep
+   firing on all pools) multiplies multicall round-trips. Check
+   `SweepBlocks` config and pool count.
+3. **DB write latency** — confirm TimescaleDB is not under I/O pressure.
+4. **Pod CPU/memory** — `kubectl top pod -n vector -l app=curve-indexer`.
+
+### Common causes
+
+- Archive RPC node degraded -> coordinate with infra; consider circuit-
+  breaker or fallback RPC.
+- Sweep interval too short for pool count -> raise `SWEEP_BLOCKS`.
+- TimescaleDB I/O contention -> investigate concurrent write patterns.
+
+### Verify recovery
+
+`histogram_quantile(0.99, sum by (le)(rate(curve_block_duration_seconds_bucket[10m]))) < 3`
+for the affected chain.
+
+---
+
+## VectorCurveIndexerNoStateWritten
+
+**Severity:** warning · **For:** 10m
+The 30m rate window must remain above the configured sweep interval (default 50 blocks, ~10min on mainnet).
+
+### What it means
+
+Blocks are advancing (`curve_blocks_processed_total{status="success"}` is
+non-zero) but no pool-state snapshot rows have been written
+(`curve_state_rows_written_total` is zero) for 30 minutes. The error path will
+NOT catch this: a quietly-empty snapshot loop (e.g. `buildSnapshotSet` always
+returns empty, sweep disabled and no touched pools, or all pools skipped)
+produces no errors, just no state rows.
+
+This is the data-quality / silent-empty check that `VectorCurveIndexerStalled`
+cannot see.
+
+### First checks
+
+1. **SweepBlocks config** — if `SWEEP_BLOCKS=0` (disabled) and no
+   blocks contain Curve events, `buildSnapshotSet` legitimately returns empty.
+   Confirm there is genuine pool activity on-chain or re-enable sweep.
+2. **Touched pools** — check whether any registered pool addresses match logs
+   in the processed blocks. `kubectl logs -l app=curve-indexer` should show
+   pool-touch debug entries (or absence thereof).
+3. **Pool registry** — if the pool list is empty (LoadPools returned 0 rows),
+   `buildSnapshotSet` can never produce entries. Confirm the DB has rows in
+   `curve_pool`.
+4. **snapshotSet size metric** is not separately emitted; use
+   `curve_state_rows_written_total` as the proxy. A sudden drop to zero after
+   previously non-zero is more urgent than a fresh deploy with no history.
+
+### Common causes
+
+- `SWEEP_BLOCKS=0` and no Curve events on this chain in 30m (legitimate
+  low-activity window) -> confirm on-chain before escalating.
+- Pool registry empty (migration not applied, wrong chain ID) -> verify
+  `SELECT count(*) FROM curve_pool WHERE chain_id = <id>`.
+- Contract address mismatch (new pool deployed at different address) -> update
+  the pool registry.
+- Sustained SQS replay / redrive, or a backfill re-run over an already-indexed
+  range under one `build_id`: every message is a block already persisted at this
+  build (same `build_id`, same `block_version`), so each state INSERT hits
+  ON CONFLICT DO NOTHING (0 rows) and `curve_state_rows_written_total` does not
+  advance even though processing succeeds. A redeploy (new `build_id`) or reorg
+  (new `block_version`) inserts fresh rows and clears the alert. Check the queue
+  for a redrive, and check whether a backfill is re-processing an already-indexed
+  range, before assuming a logic stall.
+
+### Verify recovery
+
+`rate(curve_state_rows_written_total[30m]) > 0` for the affected chain, or
+confirm on-chain that no Curve activity occurred (legitimate quiet window).
+
+---
+
+## VectorAllocationUnderlyingValueFailures
+
+**Severity:** warning · **For:** 30m
+
+### What it means
+
+The prime-allocation-indexer persisted `allocation_position` rows with
+`underlying_value = NULL` for a token type that should produce one
+(`erc4626` / `atoken` / `erc20`). Writes succeed, so no error alert fires;
+USD exposure computed from these rows silently undercounts (VEC-307).
+
+`reason` tells you where it broke:
+
+- `convert_failed` -- the vault's `convertToAssets(shares)` reverted or
+  returned undecodable data (known case: grove-bbqUSDC-V2). Check the
+  contract on Etherscan at the alerting block; if the vault genuinely has no
+  working `convertToAssets`, reclassify the entry's `token_type` in the
+  axis-synome export instead of leaving a permanent warning.
+- `missing_asset_address` -- the axis-synome entry for a vault/atoken has no
+  `asset_address`. Fix the entry in the axis-synome export; the indexer
+  cannot invent a denomination.
+- `asset_metadata_missing` -- should not occur: metadata for every denomination
+  address is prefetched, and a fetch failure hard-fails the batch before
+  persistence. If this fires, a code path built a valuation for an address the
+  handler did not prefetch -- treat as a bug, not as transient RPC trouble.
+
+### First checks
+
+1. `sum by (token, reason) (increase(allocation_underlying_value_failures_total[6h]))`
+   -- which contracts, which reason.
+2. Logs: `{app="allocation-tracker"} |= "underlying value not computable"`
+   -- carries token, wallet, block, reason.
+3. Rows stay NULL until the next successful sweep writes new rows (the table
+   is append-only; nothing backfills automatically). Consumers fall back to
+   balance-based pricing for NULL rows, so impact is undercounted yield, not
+   zeroed exposure.
+
+---

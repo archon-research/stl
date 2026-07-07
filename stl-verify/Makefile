@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -23,6 +23,8 @@ include lint.mk
         \
         docker-build-morpho-indexer docker-push-morpho-indexer docker-release-morpho-indexer \
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
+        docker-build-fluid-vault-indexer docker-push-fluid-vault-indexer docker-release-fluid-vault-indexer \
+        docker-build-fluid-vault-indexer-staging docker-push-fluid-vault-indexer-staging docker-release-fluid-vault-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         docker-build-psm3-indexer docker-push-psm3-indexer docker-release-psm3-indexer \
@@ -64,7 +66,7 @@ KUBE_NS      ?= vector
 # Run the application
 run:
 	@echo "==> Running..."
-	go run ./cmd/server
+	go run ./cmd/base/watcher
 
 # Run the Ethereum watcher (requires dev-up first)
 run-watcher:
@@ -708,7 +710,7 @@ dev-ips:
 # Generate ER diagram from database schema (requires dev-up)
 generate-er:
 	@echo "==> Generating ER diagram..."
-	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/generate-er --output ../docs/entity_relation.md
+	@DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" go run ./cmd/util/generate-er --output ../docs/entity_relation.md
 	@echo "==> Generated: docs/entity_relation.md"
 
 # =============================================================================
@@ -927,6 +929,8 @@ docker-release-all:
 	@$(MAKE) _docker-release-sparklend-position-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-morpho-indexer-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-fluid-vault-indexer-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
@@ -1253,6 +1257,60 @@ docker-push-morpho-indexer-staging:
 
 docker-release-morpho-indexer-staging:
 	@$(MAKE) docker-release-morpho-indexer ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - Fluid Vault Indexer
+# =============================================================================
+
+ECR_REPO_FLUID_VAULT_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-fluid-vault-indexer
+
+# Build Docker image for fluid vault indexer (ARM64 for Fargate Graviton)
+docker-build-fluid-vault-indexer:
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/fluid-vault-indexer --build-arg BIN=fluid-vault-indexer -t stl-fluid-vault-indexer:local -f Dockerfile.common .
+else
+	@echo "==> Building Fluid Vault Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_FLUID_VAULT_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=cmd/workers/fluid-vault-indexer \
+		--build-arg BIN=fluid-vault-indexer \
+		-f Dockerfile.common \
+		-t $(ECR_REPO_FLUID_VAULT_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_FLUID_VAULT_INDEXER):latest \
+		--load .
+endif
+
+# Push fluid vault indexer Docker image to ECR
+docker-push-fluid-vault-indexer: ecr-login
+	@echo "==> Pushing Fluid Vault Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_FLUID_VAULT_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_FLUID_VAULT_INDEXER):latest
+
+# Build and push fluid vault indexer in one step (captures tag at start to ensure consistency)
+docker-release-fluid-vault-indexer: ecr-login _docker-release-fluid-vault-indexer-internal
+
+_docker-release-fluid-vault-indexer-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Fluid Vault Indexer" GO_REPO="$(ECR_REPO_FLUID_VAULT_INDEXER)" GO_CMD_PATH=cmd/workers/fluid-vault-indexer GO_BIN=fluid-vault-indexer GO_CACHE_KEY=fluid-vault-indexer
+
+# =============================================================================
+# Sentinelstaging Fluid Vault Indexer Docker Shortcuts
+# =============================================================================
+
+docker-build-fluid-vault-indexer-staging:
+	@$(MAKE) docker-build-fluid-vault-indexer ENV=sentinelstaging
+
+docker-push-fluid-vault-indexer-staging:
+	@$(MAKE) docker-push-fluid-vault-indexer ENV=sentinelstaging
+
+docker-release-fluid-vault-indexer-staging:
+	@$(MAKE) docker-release-fluid-vault-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Prime Debt Indexer
@@ -1598,7 +1656,7 @@ run-cronjob-%:
 build-oracle-pricing-backfill-arm64:
 	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
 	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/oracle-pricing-backfill-linux-arm64 ./cmd/oracle-pricing-backfill
+	GOOS=linux GOARCH=arm64 go build -o dist/oracle-pricing-backfill-linux-arm64 ./cmd/backfillers/oracle-pricing-backfill
 	@echo "==> Built: dist/oracle-pricing-backfill-linux-arm64"
 
 # Deploy oracle-pricing-backfill to Erigon node
@@ -1621,7 +1679,7 @@ deploy-oracle-pricing-backfill-worker: build-oracle-pricing-backfill-arm64
 build-bulk-download-arm64:
 	@echo "==> Building bulk-download for ARM64 Linux..."
 	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/bulk-download-linux-arm64 ./cmd/bulk-download
+	GOOS=linux GOARCH=arm64 go build -o dist/bulk-download-linux-arm64 ./cmd/backfillers/raw-block-bulk-downloader
 	@echo "==> Built: dist/bulk-download-linux-arm64"
 
 # Deploy bulk-download to Erigon node
@@ -1653,7 +1711,7 @@ erigon-bulk-download:
 build-sparklend-backfill-arm64:
 	@echo "==> Building sparklend-backfill for ARM64 Linux..."
 	mkdir -p dist
-	GOOS=linux GOARCH=arm64 go build -o dist/sparklend-backfill-linux-arm64 ./cmd/sparklend-backfill
+	GOOS=linux GOARCH=arm64 go build -o dist/sparklend-backfill-linux-arm64 ./cmd/backfillers/sparklend-backfill
 	@echo "==> Built: dist/sparklend-backfill-linux-arm64"
 
 # Deploy sparklend-backfill to Erigon node
@@ -2065,7 +2123,7 @@ ifeq ($(TARGET),staging)
 	  echo "==> Block data up-to-date ($$WANT), skipping export"; \
 	else \
 	  echo "==> Exporting $(STRESS_TEST_BLOCK_COUNT) blocks to staging S3 (requires staging creds)..."; \
-	  go run ./cmd/stress-test/data-export \
+	  go run ./cmd/util/stress-test/data-export \
 	    --env staging \
 	    --src-bucket $(STRESS_TEST_SRC_BUCKET) \
 	    --dest-bucket $(STRESS_TEST_STAGING_BUCKET) \
