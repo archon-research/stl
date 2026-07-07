@@ -219,10 +219,24 @@ func (s *BlockchainService) executeState(ctx context.Context, calls []outbound.C
 	return s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
 }
 
+// callContractState is executeState's single-eth_call analogue: pinned to
+// blockHash via CallContractAtHash when blockHash is non-zero, else number-pinned
+// for callers with no live hash (backfill/CLI). The UiPoolDataProvider read is
+// reached only through this path, so it must pin the same way the balance
+// multicall does, or a reorg could enumerate a different fork's reserve set. See
+// VEC-471.
+func (s *BlockchainService) callContractState(ctx context.Context, msg ethereum.CallMsg, blockNumber int64, blockHash common.Hash) ([]byte, error) {
+	if blockHash != (common.Hash{}) {
+		return s.ethClient.CallContractAtHash(ctx, msg, blockHash)
+	}
+	return s.ethClient.CallContract(ctx, msg, big.NewInt(blockNumber))
+}
+
 func (s *BlockchainService) getUserReservesData(
 	ctx context.Context,
 	user common.Address,
 	blockNumber int64,
+	blockHash common.Hash,
 ) ([]UserReserveData, error) {
 	data, err := s.getUserReservesABI.Pack(
 		"getUserReservesData",
@@ -238,7 +252,7 @@ func (s *BlockchainService) getUserReservesData(
 		Data: data,
 	}
 
-	result, err := s.ethClient.CallContract(ctx, msg, big.NewInt(blockNumber))
+	result, err := s.callContractState(ctx, msg, blockNumber, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call UiPoolDataProvider: %w", err)
 	}

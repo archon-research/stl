@@ -25,12 +25,14 @@ type ERC4626VaultConfig struct {
 	FeedDecimals       int            // decimals of the underlying USD feed
 }
 
-// FetchERC4626SharePrices prices each vault share in USD via a single multicall.
-// Per vault it batches convertToAssets(10^ShareDecimals) on the vault and
-// latestRoundData() on the underlying USD feed. Both calls use AllowFailure so
-// vaults fail independently; a vault whose vault call or underlying feed fails
-// (or returns a non-positive value) is reported Success: false rather than
-// producing a wrong price. If every vault fails it returns an error.
+// FetchERC4626SharePrices prices each vault share in USD via a single multicall,
+// pinned to blockHash (see executeOracleState). Per vault it batches
+// convertToAssets(10^ShareDecimals) on the vault and latestRoundData() on the
+// underlying USD feed — both per-block state, so a reorg must not answer from
+// the wrong fork. Both calls use AllowFailure so vaults fail independently; a
+// vault whose vault call or underlying feed fails (or returns a non-positive
+// value) is reported Success: false rather than producing a wrong price. If
+// every vault fails it returns an error.
 func FetchERC4626SharePrices(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
@@ -38,6 +40,7 @@ func FetchERC4626SharePrices(
 	feedABI *abi.ABI,
 	vaults []ERC4626VaultConfig,
 	blockNum int64,
+	blockHash common.Hash,
 	logger *slog.Logger,
 ) ([]FeedPriceResult, error) {
 	if len(vaults) == 0 {
@@ -49,8 +52,7 @@ func FetchERC4626SharePrices(
 		return nil, err
 	}
 
-	block := new(big.Int).SetInt64(blockNum)
-	results, err := multicaller.Execute(ctx, calls, block)
+	results, err := executeOracleState(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("executing multicall at block %d: %w", blockNum, err)
 	}

@@ -102,7 +102,7 @@ func (r *PositionReader) GetUserPositionData(ctx context.Context, user common.Ad
 		return nil, nil, fmt.Errorf("failed to get blockchain service: %w", err)
 	}
 
-	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber)
+	reserves, err := blockchainSvc.getUserReservesData(ctx, user, blockNumber, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get user reserves data: %w", err)
 	}

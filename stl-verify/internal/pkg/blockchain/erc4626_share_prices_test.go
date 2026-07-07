@@ -213,6 +213,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 				fABI,
 				tt.vaults,
 				blockNum,
+				oracleTestBlockHash,
 				testutil.DiscardLogger(),
 			)
 
@@ -244,5 +245,48 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFetchERC4626SharePrices_PinsToBlockHash(t *testing.T) {
+	shareABI := erc4626ABI(t)
+	fABI := feedABI(t)
+
+	vault := ERC4626VaultConfig{
+		TokenID:            10,
+		VaultAddress:       common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11"),
+		ShareDecimals:      18,
+		UnderlyingFeed:     common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1"),
+		UnderlyingDecimals: 18,
+		FeedDecimals:       8,
+	}
+
+	// convertToAssets (share ratio) and latestRoundData are per-block state, so a
+	// reorg must not answer eth_call-by-number from the wrong fork (VEC-471).
+	mock := &mockMulticaller{
+		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			t.Fatal("FetchERC4626SharePrices must call ExecuteAtHash for a non-zero block hash, not Execute")
+			return nil, nil
+		},
+		executeAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+			if blockHash != oracleTestBlockHash {
+				t.Errorf("blockHash = %s, want %s", blockHash, oracleTestBlockHash)
+			}
+			return []outbound.Result{
+				{Success: true, ReturnData: testutil.PackConvertToAssets(t, testutil.E18(1))},
+				{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
+			}, nil
+		},
+	}
+
+	results, err := FetchERC4626SharePrices(
+		context.Background(), mock, shareABI, fABI,
+		[]ERC4626VaultConfig{vault}, 22_000_000, oracleTestBlockHash, testutil.DiscardLogger(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 || !results[0].Success {
+		t.Fatalf("expected 1 successful result, got %+v", results)
 	}
 }
