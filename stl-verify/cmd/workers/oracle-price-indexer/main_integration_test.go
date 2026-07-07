@@ -195,6 +195,18 @@ func (e *integrationEnv) waitForPrices(t *testing.T) {
 	}, "prices to be stored in DB")
 }
 
+// waitForDelete blocks until the processed message has been deleted from SQS.
+// DeleteMessage is the final step of the poll loop, after the DB write that
+// waitForPrices observes; without gating shutdown on it, cancelling the context
+// can abort the in-flight DeleteMessage (context canceled) and the delete never
+// registers.
+func (e *integrationEnv) waitForDelete(t *testing.T) {
+	t.Helper()
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
+		return e.sqsState.Deletes() >= 1
+	}, "message to be deleted from SQS")
+}
+
 // waitForShutdown cancels run()'s context and asserts it returns cleanly.
 func (e *integrationEnv) waitForShutdown(t *testing.T) {
 	t.Helper()
@@ -213,6 +225,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	env := setupIntegrationTest(t)
 
 	env.waitForPrices(t)
+	env.waitForDelete(t)
 	env.waitForShutdown(t)
 
 	// Verify prices
@@ -220,11 +233,6 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	env.pool.QueryRow(env.bgCtx, `SELECT COUNT(*) FROM onchain_token_price`).Scan(&priceCount)
 	if priceCount < env.tokenCount {
 		t.Errorf("expected at least %d prices, got %d", env.tokenCount, priceCount)
-	}
-
-	// Verify DeleteMessage was called
-	if deletes := env.sqsState.Deletes(); deletes < 1 {
-		t.Errorf("expected at least 1 DeleteMessage call, got %d", deletes)
 	}
 }
 

@@ -376,6 +376,111 @@ Maple API is degraded and a phase risks overrunning the 10m interval.
 
 ---
 
+## fluid-vault-indexer (VEC-438)
+
+`fluid-vault-indexer` consumes Ethereum BlockEvents, reads end-of-block Fluid
+(Instadapp) vault state from the VaultResolver via Multicall3, and appends
+`fluid_vault_state` snapshots into TimescaleDB. Mainnet (chain 1) only.
+
+**Metric coverage:** the service emits **no service-level counters/histograms of
+its own** today. These alerts use the signals that genuinely exist:
+`kube_deployment_status_replicas_available` (process liveness, independent of the
+OTel pipeline), `multicall_batch_size_count{service_name="fluid-vault-indexer"}`
+(advances on startup reconcile + every block touching a known vault), and the
+shared `VectorArchiving*` rules (raw-SC-call archive health, keyed by
+`service_name`). Error-rate, silent-empty (rows-written == 0), and RPC-latency
+alerts are intentionally absent — no metric would make them fire honestly, so
+they are omitted rather than shipped as rules that can never fire. Adding
+`fluid_blocks_processed_total` / `fluid_errors_total` / a rows-written counter /
+an RPC-latency histogram to the B2 service is a follow-up instrumentation task;
+grow the rules + these sections when those land.
+
+---
+
+## VectorFluidVaultIndexerDown
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The `fluid-vault-indexer` Deployment has <1 available replica for 10 minutes. No
+pod is running, so no Fluid vault snapshots are written and the SQS backlog is
+growing. This is the keystone freshness signal for a service with no internal
+block-progress metric.
+
+### First checks (≤5 min)
+
+1. **Pod status** — `kubectl -n vector get pods -l app=fluid-vault-indexer`.
+2. **Why it's not ready** — `kubectl -n vector describe deployment/fluid-vault-indexer`
+   and `kubectl -n vector logs -l app=fluid-vault-indexer --previous` for a crash
+   loop (missing queue URL, DB/Redis/RPC dial failure, bad ABI load).
+3. **Secrets/config present** — the worker requires `AWS_SQS_QUEUE_URL`,
+   `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET`. A missing key
+   from the `fluid-vault-indexer` ExternalSecret crashes it on startup. The queue
+   URL is the `ethereum_sqs_fluid_vault_url` property of `stl-<env>-infra-config`
+   (created by infra VEC-439).
+4. **Node/scheduling** — pending pod => check node capacity / taints.
+
+### Common causes
+
+- ExternalSecret not yet synced (queue URL / DB URL missing) — the deploy ran
+  before the infra apply. Verify VEC-439 applied; re-sync the ExternalSecret.
+- Crash loop on a startup error (DB/Redis/RPC unreachable) — fix the dependency;
+  the worker is fail-fast by design.
+- OOMKilled — check memory limits.
+
+### Verify recovery
+
+`kube_deployment_status_replicas_available{deployment="fluid-vault-indexer"} >= 1`
+and the pod logs show `fluid vault indexer started, waiting for messages...`.
+
+---
+
+## VectorFluidVaultIndexerStalled
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+The worker is **up** (≥1 replica) but has executed **no VaultResolver multicalls
+for 30 minutes**. A healthy worker on mainnet advances
+`multicall_batch_size_count` regularly (startup reconcile + every block touching
+a known vault), so a sustained zero means one of: a benign quiet period (no
+in-scope sUSDS-debt vault touched, no restart), a wedged poll loop (process alive
+but not processing), or a broken OTLP export (worker fine, metrics stopped — in
+which case `VectorFluidVaultIndexerDown` is **not** firing and other OTel series
+from the pod also go flat).
+
+### First checks (≤5 min)
+
+1. **Distinguish the cases** — is `VectorFluidVaultIndexerDown` also firing? If
+   so the process is down (treat as Down). If not, the pod is alive — suspect a
+   wedged loop or a metrics-pipeline issue.
+2. **Recent logs** — `kubectl -n vector logs -l app=fluid-vault-indexer --tail=200`.
+   Look for a repeating error on one message, `context deadline exceeded` against
+   the Alchemy RPC, or silence (poll loop stopped).
+3. **SQS backlog** — check the `stl-<env>-ethereum-fluid_vault.fifo` queue depth.
+   Growing `ApproximateNumberOfMessages` + zero multicalls = wedged (not
+   draining); near-empty queue + zero multicalls = genuine quiet period (benign).
+4. **Upstream** — confirm the ethereum watcher is still producing blocks; if not,
+   that's the root cause (`VectorWatcherNoBlocks`).
+
+### Common causes
+
+- Poison message wedging the poll loop — inspect the DLQ; redrive or purge the
+  offending message.
+- Alchemy RPC degraded / rate-limited — multicalls time out; check logs and the
+  Alchemy status.
+- Genuine quiet period on a low-activity target debt token — no action; clears
+  once a vault is next touched.
+
+### Verify recovery
+
+`increase(multicall_batch_size_count{service_name="fluid-vault-indexer"}[30m]) > 0`,
+or confirm the SQS backlog is draining and recent logs show snapshots written.
+
+---
+
 ## VectorCexOrderbookPersistFailing
 
 **Severity:** critical · **For:** 15m
@@ -728,5 +833,44 @@ cannot see.
 
 `rate(curve_state_rows_written_total[30m]) > 0` for the affected chain, or
 confirm on-chain that no Curve activity occurred (legitimate quiet window).
+
+---
+
+## VectorAllocationUnderlyingValueFailures
+
+**Severity:** warning · **For:** 30m
+
+### What it means
+
+The prime-allocation-indexer persisted `allocation_position` rows with
+`underlying_value = NULL` for a token type that should produce one
+(`erc4626` / `atoken` / `erc20`). Writes succeed, so no error alert fires;
+USD exposure computed from these rows silently undercounts (VEC-307).
+
+`reason` tells you where it broke:
+
+- `convert_failed` -- the vault's `convertToAssets(shares)` reverted or
+  returned undecodable data (known case: grove-bbqUSDC-V2). Check the
+  contract on Etherscan at the alerting block; if the vault genuinely has no
+  working `convertToAssets`, reclassify the entry's `token_type` in the
+  axis-synome export instead of leaving a permanent warning.
+- `missing_asset_address` -- the axis-synome entry for a vault/atoken has no
+  `asset_address`. Fix the entry in the axis-synome export; the indexer
+  cannot invent a denomination.
+- `asset_metadata_missing` -- should not occur: metadata for every denomination
+  address is prefetched, and a fetch failure hard-fails the batch before
+  persistence. If this fires, a code path built a valuation for an address the
+  handler did not prefetch -- treat as a bug, not as transient RPC trouble.
+
+### First checks
+
+1. `sum by (token, reason) (increase(allocation_underlying_value_failures_total[6h]))`
+   -- which contracts, which reason.
+2. Logs: `{app="allocation-tracker"} |= "underlying value not computable"`
+   -- carries token, wallet, block, reason.
+3. Rows stay NULL until the next successful sweep writes new rows (the table
+   is append-only; nothing backfills automatically). Consumers fall back to
+   balance-based pricing for NULL rows, so impact is undercounted yield, not
+   zeroed exposure.
 
 ---
