@@ -1145,19 +1145,13 @@ func (c *Client) doSingleRequest(ctx context.Context, body []byte, result any) e
 			return httpclient.WrapNonRetryable(
 				fmt.Errorf("graphql error: %s", strings.Join(messages, "; ")))
 		}
-		// TEMPORARY diagnostic — remove after the first confirmed occurrence.
-		// "No fiat value" is not reproducible on demand (all assets priceable
-		// today) and the SDL is not machine-fetchable, so we log the raw
-		// errors[] to confirm the null granularity (single field vs whole
-		// collateral) and the exact path shape.
-		//
-		// Removal is driven by the VectorMapleCollateralUnpriceable alert: its
-		// first-fire runbook task captures this log, confirms the shape, then
-		// deletes this branch. See docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
-		c.logger.Warn("tolerating unpriceable-collateral GraphQL error; decoding partial data",
-			"errors", envelope.Errors,
-			"data_present", dataPresent,
-		)
+		// A tolerable unpriceable-collateral gap: the offending price is already
+		// nulled in data, so decoding drops one loan's collateral price rather
+		// than the whole snapshot. The service records it as a null-downgrade
+		// (reason="unpriceable") and VectorMapleCollateralUnpriceable alerts on a
+		// sustained count; no per-occurrence log here — the shape was confirmed
+		// on the first fire (path [openTermLoans collateral assetValueUsd],
+		// extensions.code=INTERNAL_SERVER_ERROR, partial data present).
 	}
 
 	if err := json.Unmarshal(respBody, result); err != nil {

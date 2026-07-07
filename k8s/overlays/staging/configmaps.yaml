@@ -100,6 +100,21 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: fluid-vault-indexer-config
+data:
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: avalanche-watcher-config
 data:
   CHAIN_ID: "43114"
