@@ -49,6 +49,8 @@ type Multicaller struct {
 	writes   metric.Int64Counter
 }
 
+var _ outbound.Multicaller = (*Multicaller)(nil)
+
 // NewMulticaller wraps inner so its calls are archived via arch.
 func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
 	if cfg.Wait == nil {

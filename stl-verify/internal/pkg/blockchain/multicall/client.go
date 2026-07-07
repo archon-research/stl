@@ -21,6 +21,8 @@ type Client struct {
 	telemetry *Telemetry // optional; nil disables recording
 }
 
+var _ outbound.Multicaller = (*Client)(nil)
+
 // Option configures a Client at construction, letting callers add optional behaviour such as telemetry without changing NewClient's signature.
 type Option func(*Client)
 
