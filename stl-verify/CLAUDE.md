@@ -111,47 +111,31 @@ See [Makefile](Makefile) for the complete list of targets.
 
 ## Code Conventions
 
+These apply to every language in the service (Go, Python, TS). Go-specific rules are grouped under [### Go](#go) below.
+
 - **Keep an eye out for deduplicate possibilities**: Try to consolidate lots of duplicated code. Create shareable libraries instead of duplicating code everywhere.
-- **Interfaces**: Behavior interfaces use the `-er` suffix (Reader, Publisher, BlockSubscriber). Ports follow the established noun patterns instead: persistence ports are `XxxRepository`, external-system ports are `XxxClient`/`XxxCache`/`XxxProvider`. Do not rename Repository/Client ports to `-er` forms.
-- **Constructors**: Use `New` prefix
 - **Files**: snake_case
-- **Amounts**: Wei / token amounts are `big.Int`, never `float64`.
-- **Errors**:
-    - Wrap with context: `fmt.Errorf("doing X: %w", err)`.
-    - Never ignore errors.
-    - Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
-    - **Fail hard and early on unexpected errors.**
-    - **Never swallow a failure into partial success.** A sub-result that fails (a multicall sub-call, a batch row, one item in a loop) must propagate and stop the whole unit of work; do not default it to nil/zero/empty and keep going. Silent partial data is the worst outcome: it looks healthy, and repairing the holes later forces a backfiller rerun.
-    - **A partial failure stops the whole event/block.** Do not ack, commit, or persist a partially-processed event. Stopping and retrying is correct; continuing with a hole is not.
-    - **Poison pills get fixed or explicitly discarded, never silently skipped.** When an event persistently fails, the only acceptable responses are to make the code handle it, or to make a deliberate, explicit decision to discard that specific event. Silently dropping or defaulting it is forbidden.
-    - **"Best effort" / `AllowFailure` reads still bubble up.** A call you issue is expected to succeed, so treat a failed result as an error and propagate it. If a value is genuinely optional for some inputs (e.g. a getter that does not exist on a particular contract/pool variant), do not issue the call for those inputs; gate it structurally. A NULL or absent value must be a documented structural fact, never the residue of a swallowed failure.
-    - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`.
 - **Testing**:
-    - Table-driven tests, mock outbound ports for unit tests.
-    - One scenario per test, named for the single behavior it covers. Never chain independent scenarios in one function — a failure must point at one thing. Table-driven varies *inputs* of the *same* behavior (each case under `t.Run`); distinct behaviors get distinct functions. Tempted to join with "and" in a test name → write two tests.
-    - Parametrize, don't copy-paste. When two tests differ only in inputs and expected outputs, fold them into one table-driven test (a row per case) rather than near-duplicate functions. The split rule above wins on conflict: a distinct *behavior* stays its own function even if its body looks similar.
+    - Mock outbound ports for unit tests.
+    - One scenario per test, named for the single behavior it covers. Never chain independent scenarios in one function — a failure must point at one thing. A parametrized/table-driven test varies *inputs* of the *same* behavior (one case per row); distinct behaviors get distinct functions. Tempted to join with "and" in a test name → write two tests.
+    - Parametrize, don't copy-paste. When two tests differ only in inputs and expected outputs, fold them into one parametrized test (a case per row) rather than near-duplicate functions. The split rule above wins on conflict: a distinct *behavior* stays its own function even if its body looks similar.
     - Share setup, don't repeat it. Spot a setup pattern recurring across tests — especially in the same file — and hoist it into a common fixture/helper.
     - Use fixture factories for varying data. When setups build the same shape of data but differ in a few values, write a fixture factory (a constructor taking the varying values, sensible defaults for the rest) instead of one helper per variant.
-    - Services and main.go files should have 100% coverage. Think very hard about edge cases, it is mission-critical that code is correct and robust.
+    - Services should have 100% coverage. Think very hard about edge cases, it is mission-critical that code is correct and robust.
     - In services, ONLY test the public api. Don't test internals if you can avoid it.
-    - You can move the main.go code into a function and only call that from main() so that you can test it properly.
-    - For main.go files, only create integration tests.
     - For services, create both unit and integration tests.
     - Integration tests are only allowed to mock our data sources that we cannot control, e.g. Alchemy
     - **No test-order dependencies in integration tests sharing a schema**: never rely on migration-seeded rows or on rows another test created — sibling tests TRUNCATE/DELETE shared tables (e.g. `TRUNCATE protocol CASCADE`), so seed everything your test needs yourself via idempotent upserts. Verify by running the whole test file/package, not just your tests filtered with `-run` (a filtered run hides the wipe that breaks you).
-- **Binaries/Building**: When building binaries using `go build`, output to `stl-verify/dist`
-- **Code structure**: In main.go files, keep main() at the top of the file.
 - **Function composition** (read code like a book):
     - A function body should read like prose: a short, linear sequence of named steps. Each step is a call to a well-named helper whose name says *what* it does, so the reader understands the flow without reading the helper's internals.
     - Compose large functions from smaller ones. Treat these as signals to extract: a body longer than roughly one screen; comment-delimited "sections" inside a function (each section becomes a named helper, and the helper name replaces the comment); a `for`/`if` block more than a few lines deep; or any step you would describe with "and then".
     - Name helpers for the outcome, not the mechanics (`decodeSwaps`, `snapshotTouchedPools`, `persistBlock`), not (`processLoop`, `handleStuff`).
     - This is strongest for orchestration functions (block/event handlers, coordinators, `main` flows, batch builders): the top-level function must be a readable outline, with detail pushed down into helpers. A single sprawling handler that inlines decode + snapshot + persist is a defect, not a style preference.
-    - Enforced in the Review phase: the code-quality reviewer rejects any new or modified function that violates this. Audit EVERY changed function, not a named subset (scoping the review to specific files creates blind spots, which is how a 254-line function once slipped through). Pre-existing functions the PR does not touch are out of scope: refactor them in a separate follow-up PR, not the feature PR that happened to sit next to them. A function-length / complexity linter (golangci-lint `funlen`/`gocognit`) is the planned deterministic backstop so an over-long function fails CI automatically rather than relying on a reviewer noticing.
+    - Enforced in the Review phase: the code-quality reviewer rejects any new or modified function that violates this. Audit EVERY changed function, not a named subset (scoping the review to specific files creates blind spots, which is how a 254-line function once slipped through). Pre-existing functions the PR does not touch are out of scope: refactor them in a separate follow-up PR, not the feature PR that happened to sit next to them.
 - **Comments**: Explain *why*, not *what*; default to none.
-    - Never restate the code or the language: no comments on signatures, field names, or standard Go behavior (zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc.). The reader knows Go.
+    - Never restate the code or the language: no comments on signatures, field names, or standard-library behavior the reader already knows.
     - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
     - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
-    - Keep package and exported-API doc comments, but make each say something the signature doesn't.
     - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
     - When unsure, leave it out: a stale or redundant comment is worse than none.
     - No history in comments: don't duplicate what git tracks. Describe current code, not what it replaced or why something was removed.
@@ -168,6 +152,34 @@ See [Makefile](Makefile) for the complete list of targets.
     - Encoding can vary *across rows of the same field*. The Maple FTL `interestRate` is 18-decimal on V1-era loans (`fundingPoolV1` set, `fundingPool` null) but 6-decimal on live PoolV2 loans; a live smoke test surfaced this. When a field's scale depends on a row's lineage, scope the query to the lineage you index (here: live, non-terminal states, which are all PoolV2), re-check the discriminator in the parser (state + non-null pool), and store raw — never assume one global scale from one sample.
 
 Database and SQL-migration rules load from [../.claude/rules/go-database.md](../.claude/rules/go-database.md) when you touch `db/migrations/**` or repository adapters.
+
+### Go
+
+Go-only conventions. (Slated to move to a scoped `.claude/rules/go-style.md` that auto-loads on `stl-verify/**/*.go`.)
+
+- **Interfaces**: Behavior interfaces use the `-er` suffix (Reader, Publisher, BlockSubscriber). Ports follow the established noun patterns instead: persistence ports are `XxxRepository`, external-system ports are `XxxClient`/`XxxCache`/`XxxProvider`. Do not rename Repository/Client ports to `-er` forms.
+- **Constructors**: Use `New` prefix
+- **Amounts**: Wei / token amounts are `big.Int`, never `float64`.
+- **Errors**:
+    - Wrap with context: `fmt.Errorf("doing X: %w", err)`.
+    - Never ignore errors.
+    - Lean towards returning errors instead of continuing, unless there is an extremely good reason to continue instead.
+    - **Fail hard and early on unexpected errors.**
+    - **Never swallow a failure into partial success.** A sub-result that fails (a multicall sub-call, a batch row, one item in a loop) must propagate and stop the whole unit of work; do not default it to nil/zero/empty and keep going. Silent partial data is the worst outcome: it looks healthy, and repairing the holes later forces a backfiller rerun.
+    - **A partial failure stops the whole event/block.** Do not ack, commit, or persist a partially-processed event. Stopping and retrying is correct; continuing with a hole is not.
+    - **Poison pills get fixed or explicitly discarded, never silently skipped.** When an event persistently fails, the only acceptable responses are to make the code handle it, or to make a deliberate, explicit decision to discard that specific event. Silently dropping or defaulting it is forbidden.
+    - **"Best effort" / `AllowFailure` reads still bubble up.** A call you issue is expected to succeed, so treat a failed result as an error and propagate it. If a value is genuinely optional for some inputs (e.g. a getter that does not exist on a particular contract/pool variant), do not issue the call for those inputs; gate it structurally. A NULL or absent value must be a documented structural fact, never the residue of a swallowed failure.
+    - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`.
+- **Testing**:
+    - Prefer table-driven tests (each case under `t.Run`).
+    - `main.go` entry points should also have 100% coverage. Move the `main.go` body into a `run(ctx, args) error` function and call only that from `main()` so you can test it.
+    - For `main.go` files, only create integration tests.
+- **Comments**:
+    - The "standard-library behavior" the reader already knows includes Go zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc. — don't comment them.
+    - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+- **Function composition**: a function-length / complexity linter (golangci-lint `funlen`/`gocognit`) is the planned deterministic backstop so an over-long function fails CI automatically rather than relying on a reviewer noticing.
+- **Binaries/Building**: When building binaries using `go build`, output to `stl-verify/dist`
+- **Code structure**: In main.go files, keep main() at the top of the file.
 
 ## Adding New Features
 
