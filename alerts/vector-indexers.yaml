@@ -609,9 +609,13 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
 
 
-      # =====================================================================
-      # fluid-vault-indexer (VEC-438)
-      # =====================================================================
+  # fluid-vault-indexer (VEC-438) — separate group, NOT more rules in
+  # vector-indexers above: Mimir caps rules per rule group at 20 and
+  # vector-indexers already carries 19. Namespace comes from the file, groups
+  # within it are free, so this still matches the sync allowlist.
+  - name: vector-fluid-vault-indexer
+    interval: 1m
+    rules:
       # Consumes Ethereum BlockEvents, reads end-of-block Fluid vault state from
       # the VaultResolver via Multicall3, appends fluid_vault_state snapshots into
       # TimescaleDB. Mainnet (chain 1) only.
