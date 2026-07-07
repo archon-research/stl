@@ -79,6 +79,11 @@ make cover              # Generate coverage report
 # CI (runs all checks)
 make ci                 # test-race, vet, fmt-check, tidy-check, staticcheck, vulncheck, golangci-lint
 
+# Formatting & linting (all languages, run from stl-verify/)
+make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
+make format             # Auto-format all code locally (Go, Python, TS)
+make lint               # Run linters locally (delegates to language pipelines)
+
 # Docker (ARM64 for Fargate Graviton)
 make docker-release ENV=sentinelstaging          # Build and push watcher image
 make docker-release-backup ENV=sentinelstaging   # Build and push backup worker image
@@ -94,7 +99,7 @@ See [Makefile](Makefile) for the complete list of targets.
 
 - Pre-commit hooks: gofmt, goimports (staged files only)
 - Pre-push hooks: go vet (full module)
-- CI (`make ci-checks`): vet, staticcheck, golangci-lint, vulncheck, tidy — **source of truth**
+- CI (`go-ci.yml` → `make ci-checks && make test-race`): vet, staticcheck, golangci-lint, vulncheck, tidy — **source of truth**
 - Install tools with `make tools`. Don't bypass hooks.
 
 ## Code Conventions
