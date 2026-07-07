@@ -267,6 +267,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 
 func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (retErr error) {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 

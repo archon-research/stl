@@ -262,7 +262,7 @@ func TestExecuteAtHash(t *testing.T) {
 		}
 	})
 
-	t.Run("archives the whole batch, stamping BlockNumber 0 (hash-pinned callers carry no number)", func(t *testing.T) {
+	t.Run("stamps BlockNumber from the context on the hash-pinned path", func(t *testing.T) {
 		rec := &recordingArchiver{}
 		var wg sync.WaitGroup
 		d := newTestDecorator(&stubInner{results: []outbound.Result{
@@ -274,7 +274,11 @@ func TestExecuteAtHash(t *testing.T) {
 			{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
 			{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
 		}
-		ctx := WithBlockVersion(context.Background(), 3)
+		// A live block event carries both the number and the hash, so the worker
+		// stamps both on the context. ExecuteAtHash has no blockNumber argument;
+		// the archive record must still key to the real block, not block 0
+		// (VEC-471: block 0 would collide every hash-pinned archive under one key).
+		ctx := WithBlockNumber(WithBlockVersion(context.Background(), 3), 21500042)
 		res, err := d.ExecuteAtHash(ctx, calls, common.HexToHash("0xabc"))
 		if err != nil {
 			t.Fatalf("ExecuteAtHash: %v", err)
@@ -288,11 +292,33 @@ func TestExecuteAtHash(t *testing.T) {
 			t.Fatalf("archived %d batches, want 1", len(rec.batches))
 		}
 		b := rec.batches[0]
-		if b.BlockNumber != 0 || b.BlockVersion != 3 || b.ChainID != 1 || b.BuildID != 47 {
+		if b.BlockNumber != 21500042 || b.BlockVersion != 3 || b.ChainID != 1 || b.BuildID != 47 {
 			t.Fatalf("batch metadata wrong: %+v", b)
 		}
 		if len(b.Calls) != 2 {
 			t.Fatalf("archived %d calls, want 2", len(b.Calls))
+		}
+	})
+
+	t.Run("stamps BlockNumber 0 when the context carries no number", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		var wg sync.WaitGroup
+		d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, &wg)
+
+		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
+		if err != nil {
+			t.Fatalf("ExecuteAtHash: %v", err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("results = %d, want 1", len(res))
+		}
+		d.Close()
+
+		if len(rec.batches) != 1 {
+			t.Fatalf("archived %d batches, want 1", len(rec.batches))
+		}
+		if got := rec.batches[0].BlockNumber; got != 0 {
+			t.Fatalf("BlockNumber = %d, want 0 when no block number on context", got)
 		}
 	})
 }

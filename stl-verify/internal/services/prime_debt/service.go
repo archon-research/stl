@@ -188,6 +188,7 @@ func (s *VaultDebtService) processBlock(
 	event outbound.BlockEvent,
 ) error {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep < s.config.SweepEveryNBlocks {
 		return nil

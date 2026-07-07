@@ -188,6 +188,7 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 	// block's actual version. Setting it only inside fetchAndProcessReceipts would
 	// leave reconcilePendingSymbols' multicalls keyed as version 0.
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	if err := s.fetchAndProcessReceipts(ctx, event); err != nil {
 		return err
 	}

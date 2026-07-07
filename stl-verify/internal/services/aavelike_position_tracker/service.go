@@ -247,6 +247,7 @@ func (s *Service) processReceipts(ctx context.Context, chainID, blockNumber int6
 	// downstream key correctly. This is the single chokepoint for both the live SQS
 	// path and the backfill path, so both archive under their actual block version.
 	ctx = archiving.WithBlockVersion(ctx, version)
+	ctx = archiving.WithBlockNumber(ctx, blockNumber)
 
 	var errs []error
 	for _, receipt := range receipts {

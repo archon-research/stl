@@ -89,10 +89,11 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 }
 
 // ExecuteAtHash forwards to the inner multicaller's hash-pinned path, then
-// archives the batch the same way Execute does. The archived record's
-// BlockNumber is stamped 0 (the same "unknown" convention Execute uses for a
-// nil blockNumber) since a hash-pinned caller does not necessarily carry the
-// number.
+// archives the batch the same way Execute does. ExecuteAtHash carries no
+// blockNumber argument, so archiveBatch recovers it from the context
+// (WithBlockNumber) — live workers stamp it there alongside the block version.
+// It falls back to block 0 only when the context carries no number (e.g. a
+// caller that pins by hash without a known height).
 func (m *Multicaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 	results, err := m.inner.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
@@ -129,6 +130,14 @@ func (m *Multicaller) archiveBatch(ctx context.Context, calls []outbound.Call, r
 	}
 
 	blockVersion, _ := BlockVersionFromContext(ctx)
+	if blockNumber == nil {
+		// The hash-pinned ExecuteAtHash path has no blockNumber argument; recover
+		// it from the context so the archive keys to the real block rather than
+		// colliding every hash-pinned batch under block 0 (VEC-471).
+		if bn, ok := BlockNumberFromContext(ctx); ok {
+			blockNumber = big.NewInt(bn)
+		}
+	}
 	mcAddr := m.inner.Address().Hex()
 	detached := context.WithoutCancel(ctx)
 	record := m.buildBatchRecord(calls[:n], results[:n], blockNumber, blockVersion, mcAddr)

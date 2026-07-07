@@ -175,6 +175,7 @@ func (s *Service) processBlock(
 	event outbound.BlockEvent,
 ) error {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	start := time.Now()
 
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
