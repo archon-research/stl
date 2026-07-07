@@ -482,7 +482,7 @@ func newLiveEventWriter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, b
 	return dexconsumer.NewProtocolEventWriter(protocolID, eventRepo)
 }
 
-func toProtocolEventInputs(captured []CapturedLog, bn int64, ver int, ts time.Time) []dexconsumer.ProtocolEventInput {
+func toProtocolEventInputs(captured []dexconsumer.CapturedLog, bn int64, ver int, ts time.Time) []dexconsumer.ProtocolEventInput {
 	out := make([]dexconsumer.ProtocolEventInput, 0, len(captured))
 	for _, c := range captured {
 		out = append(out, dexconsumer.ProtocolEventInput{
