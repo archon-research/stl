@@ -405,6 +405,44 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 	}
 }
 
+// TestBalanceOfSource_FetchBalances_PinsToBlockHash asserts the balanceOf read
+// is pinned to the block hash, not the block number: after a reorg an archive
+// node answers eth_call-by-number with the new canonical state, which can
+// silently disagree with the reorged (older-version) data this fetch is for.
+func TestBalanceOfSource_FetchBalances_PinsToBlockHash(t *testing.T) {
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("balanceOf must read via ExecuteAtHash (block-hash pinned), not Execute (block-number pinned)")
+		return nil, nil
+	}
+	mc.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if blockHash != testBlockHash {
+			t.Fatalf("blockHash = %v, want %v (state read must pin to the block hash, not the number, so a reorg can't return the wrong fork's state)", blockHash, testBlockHash)
+		}
+		rd, err := erc20ABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(1))
+		if err != nil {
+			t.Fatalf("pack balanceOf output: %v", err)
+		}
+		return []outbound.Result{{Success: true, ReturnData: rd}}, nil
+	}
+
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0xaaaa"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}}
+
+	if _, err := src.FetchBalances(context.Background(), entries, 100, testBlockHash); err != nil {
+		t.Fatalf("FetchBalances: %v", err)
+	}
+	if mc.CallCount != 1 {
+		t.Fatalf("expected exactly one multicall, got %d", mc.CallCount)
+	}
+}
+
 // TestBalanceOfSource_NoExtraCallsForNonAtoken verifies that erc20 entries do
 // NOT pull scaledBalanceOf or the totalSupply pair.
 func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
