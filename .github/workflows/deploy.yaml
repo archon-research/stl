@@ -519,15 +519,38 @@ jobs:
           ARGOCD_SERVER="$IP"
           export ARGOCD_SERVER
 
-          # Baseline = the revision ArgoCD currently has synced. Computing the
-          # changelog from this (not from main) keeps changes that were merged
-          # but rejected / not-yet-synced visible — they batch into this deploy.
-          BASELINE=$(argocd app get "$APP_NAME" -o json | jq -r '.status.sync.revision // ""')
+          # Baseline = the app revision currently LIVE in prod, taken from the
+          # running image tags — NOT .status.sync.revision. stl-prod tracks
+          # main/HEAD, so sync.revision advances to ~HEAD on every refresh and
+          # yields an empty changelog range (only this deploy's own tag commit).
+          # The running image tag is the true "what's in prod" and correctly
+          # batches any rejected deploys (prod keeps the last-approved tag).
+          # Match only bare deploy-tag refs (`repo:<hex>`); the `$`-anchored
+          # 7-40 hex window can't match a 64-char `@sha256:` digest suffix.
+          LIVE_TAGS=$(argocd app get "$APP_NAME" -o json 2>/dev/null \
+            | jq -r '[.status.summary.images[]? | capture(":(?<t>[0-9a-f]{7,40})$")? | .t] | unique | .[]' 2>/dev/null || true)
+          N_TAGS=$(printf '%s' "$LIVE_TAGS" | grep -c . || true); N_TAGS=${N_TAGS:-0}
+          # Only anchor when there's exactly one distinct live tag. Multiple tags
+          # (mid-rollout, or a workload pinned elsewhere) have no single "what's
+          # in prod", so fall back to the no-range message rather than guessing.
+          if [ "$N_TAGS" -eq 1 ]; then
+            BASELINE="$LIVE_TAGS"
+          else
+            BASELINE=""
+            [ "$N_TAGS" -gt 1 ] && echo "::warning::stl-prod reports ${N_TAGS} distinct live image tags; cannot anchor changelog baseline"
+          fi
           echo "baseline=${BASELINE}" >> "$GITHUB_OUTPUT"
 
+          # Refresh first so ArgoCD fetches the just-pushed deploy commit into
+          # its repo cache; otherwise `diff --revision <new-sha>` races the fetch
+          # and errors, leaving an empty summary. Best-effort.
+          argocd app get "$APP_NAME" --refresh -o json >/dev/null 2>&1 || true
           # `argocd app diff` exits non-zero when there IS a diff — expected.
           # Best-effort: a diff hiccup must not block the approval request.
-          DIFF=$(argocd app diff "$APP_NAME" --revision "$DEPLOY_SHA" 2>&1 || true)
+          # Keep stderr out of the diff body so a benign CLI warning can't be
+          # mistaken for diff content (or trigger a false "unavailable" note).
+          DIFF=$(argocd app diff "$APP_NAME" --revision "$DEPLOY_SHA" 2>/tmp/argocd_diff.err || true)
+          DIFF_ERR=$(cat /tmp/argocd_diff.err 2>/dev/null || true)
           # A prod deploy only bumps image tags, so the raw diff is one near
           # identical 6-line block per workload — a huge wall in Slack. Collapse
           # it to the count + changed resource names (the tag is the deploy SHA,
@@ -539,8 +562,15 @@ jobs:
           COUNT=$(printf '%s' "$RESOURCES" | grep -c . || true); COUNT=${COUNT:-0}
           LIST=$(printf '%s\n' "$RESOURCES" | sed '/^$/d' | head -20 | paste -sd ', ' - || true)
           if [ "$COUNT" -gt 20 ]; then LIST="${LIST}, …and $((COUNT - 20)) more"; fi
+          # Distinguish "no diff" from "diff produced unparseable output" (a
+          # transient CLI/fetch error) so the summary is never silently dropped.
+          DIFF_NOTE=""
+          if [ "$COUNT" -eq 0 ] && [ -n "$(printf '%s' "$DIFF_ERR" | tr -d '[:space:]')" ]; then
+            DIFF_NOTE="diff unavailable (see run logs)"
+          fi
           {
             echo "diff_count=${COUNT}"
+            echo "diff_note=${DIFF_NOTE}"
             echo "diff_list<<ARGOCD_DIFF_EOF"
             printf '%s\n' "$LIST"
             echo "ARGOCD_DIFF_EOF"
@@ -567,6 +597,7 @@ jobs:
           DEPLOY_SHA: ${{ needs.update-prod.outputs.deploy_sha }}
           ARGOCD_DIFF_COUNT: ${{ steps.argocd.outputs.diff_count }}
           ARGOCD_DIFF_LIST: ${{ steps.argocd.outputs.diff_list }}
+          ARGOCD_DIFF_NOTE: ${{ steps.argocd.outputs.diff_note }}
         run: |
           set -euo pipefail
           DEPLOY_SHORT=${DEPLOY_SHA:0:7}
@@ -605,6 +636,8 @@ jobs:
 
           if [ "${ARGOCD_DIFF_COUNT:-0}" -gt 0 ]; then
             CHANGELOG="${CHANGELOG}"$'\n\n'"*ArgoCD (\`stl-prod\`):* ${ARGOCD_DIFF_COUNT} workloads → \`${DEPLOY_SHORT}\`"$'\n'"${ARGOCD_DIFF_LIST}"
+          elif [ -n "${ARGOCD_DIFF_NOTE:-}" ]; then
+            CHANGELOG="${CHANGELOG}"$'\n\n'"*ArgoCD (\`stl-prod\`):* ${ARGOCD_DIFF_NOTE}"
           fi
 
           {
