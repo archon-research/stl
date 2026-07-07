@@ -24,7 +24,7 @@ Governed tables, with optional per-table governance (`type`, `owner`). A live ta
 Columns the transformation layer rewrites: `rename` / `cast` / `fill`. A `rename` must already be the canonical type; a `cast` declares its source type in `from`. `guard_min` / `guard_max` are plausibility bounds for an epoch (`int8` → `timestamptz`) cast — values outside the range are NULLed rather than cast. Those bounds are policy read by the transform materializer and the runtime cast check; the conformance check does not use them.
 
 ### `overrides`
-Sanctioned TYPE exemptions the conformance check honours (`accepted_type`): a column deliberately kept at `accepted_type` rather than its canonical type (e.g. an infra surrogate key). Semantics/class overrides and derived-column formulas are deferred to the semantic-layer checks that consume them; the conformance check reads only `canonical` + `tables` + `transforms` + these.
+Sanctioned TYPE exemptions the conformance check honours (`accepted_type`): a column deliberately kept at `accepted_type` rather than its canonical type (e.g. an infra surrogate key). Semantics/class overrides and derived-column formulas are deferred to the DQ3 (semantic/enrichment) checks that consume them; the conformance check reads only `canonical` + `tables` + `transforms` + these.
 
 ### `fills`
 How a governed table obtains a canonical key it lacks natively (the transform layer derives it). The conformance check treats a required key as satisfied if it is a native column, produced by a transform, OR produced by one of these fills.

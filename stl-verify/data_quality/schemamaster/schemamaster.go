@@ -51,8 +51,8 @@ type Transform struct {
 
 // Override is a sanctioned TYPE exemption: a column deliberately kept at accepted_type rather
 // than its canonical type (e.g. an infra surrogate key). Semantics/class overrides and derived-
-// column formulas are not part of the conformance check; they live with the semantic-layer checks
-// that consume them.
+// column formulas are not part of the conformance check; they live with the DQ3 (semantic/enrichment)
+// checks that consume them.
 type Override struct {
 	Table        string `json:"table"`
 	Column       string `json:"column"`
