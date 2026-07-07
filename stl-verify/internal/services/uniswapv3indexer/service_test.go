@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,15 +26,37 @@ import (
 // fakeUniswapRepo records the writes SaveBlock received; ignores the pgx.Tx
 // (nil is fine). err, when set, makes SaveBlock fail so tests can exercise
 // the failed-persist path (baseline/tracker must not be marked).
+//
+// priorTicks is the canned result for TicksForPoolAtBlock, keyed by
+// (poolID, blockNumber); ticksForPoolCalls records every call so tests can
+// assert the reorg re-read fires only on ver>0.
 type fakeUniswapRepo struct {
 	lastWrites      outbound.UniswapV3BlockWrites
 	saveBlockCalls  int
 	stateRowsReturn int64
 	err             error
+
+	priorTicks        map[fakePoolBlockKey][]int32
+	ticksForPoolCalls []fakePoolBlockKey
+	ticksForPoolErr   error
+}
+
+type fakePoolBlockKey struct {
+	poolID      int64
+	blockNumber int64
 }
 
 func (r *fakeUniswapRepo) LoadPools(_ context.Context, _ int64) ([]outbound.UniswapV3PoolRow, error) {
 	return nil, nil
+}
+
+func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, blockNumber int64) ([]int32, error) {
+	key := fakePoolBlockKey{poolID: poolID, blockNumber: blockNumber}
+	r.ticksForPoolCalls = append(r.ticksForPoolCalls, key)
+	if r.ticksForPoolErr != nil {
+		return nil, r.ticksForPoolErr
+	}
+	return r.priorTicks[key], nil
 }
 
 func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV3BlockWrites) (int64, error) {
@@ -1123,6 +1146,71 @@ func TestBlockHandler_EventBatchPersistError_NoMark(t *testing.T) {
 	}
 	if mc.baselineCalls <= firstBaselineCalls {
 		t.Errorf("baseline tickBitmap scans after retry = %d, want more than %d (must re-enumerate after a failed persist)", mc.baselineCalls, firstBaselineCalls)
+	}
+}
+
+// TestBlockHandler_NormalBlock_DoesNotReadPriorTicks verifies a first-delivery
+// block (ver==0) never calls TicksForPoolAtBlock: there are no prior-version
+// rows at this height to reconcile, and the extra query must not run on every
+// normal block.
+func TestBlockHandler_NormalBlock_DoesNotReadPriorTicks(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, repo, mc, _ := newTestService(t, pool)
+	mc.tickResults[-120] = goodTickResult(t)
+	mc.tickResults[180] = goodTickResult(t)
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{mintLog(t, pool, "0x0", -120, 180)}}
+	bh := svc.BlockHandler()
+	if err := bh(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler (ver==0): %v", err)
+	}
+
+	if len(repo.ticksForPoolCalls) != 0 {
+		t.Errorf("TicksForPoolAtBlock calls = %v, want none on a normal (ver==0) block", repo.ticksForPoolCalls)
+	}
+}
+
+// TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks verifies that on a
+// reorg redelivery (ver>0) of a pool the new fork's receipts do NOT touch, the
+// service re-reads the ticks that already have a row at this block height and
+// includes them in the tick write set — even though TouchedTicks is empty and
+// the pool's baseline was already enumerated on the prior version. This is the
+// VEC-487 reconciliation: without it a tick initialized only on the orphaned
+// fork would keep its stale row forever.
+func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, repo, mc, _ := newTestService(t, pool)
+	mc.tickResults[-120] = goodTickResult(t)
+	mc.tickResults[180] = goodTickResult(t)
+
+	// v0 delivery touches the pool (a mint), marking it snapshotted at (200,0)
+	// and enumerating its baseline, so the v1 redelivery is a not-first-seen
+	// reorg re-snapshot.
+	bh := svc.BlockHandler()
+	mintReceipt := shared.TransactionReceipt{Logs: []shared.Log{mintLog(t, pool, "0x0", -120, 180)}}
+	if err := bh(context.Background(), blockEvent(200), []shared.TransactionReceipt{mintReceipt}); err != nil {
+		t.Fatalf("BlockHandler (v0): %v", err)
+	}
+
+	// v1 redelivery: empty receipts (pool untouched), but due via the DueSet
+	// reorg rule. The prior version wrote tick 300 at this height; the mock repo
+	// reports it so the service must re-read it.
+	const priorTick = int32(300)
+	mc.tickResults[priorTick] = goodTickResult(t)
+	repo.priorTicks = map[fakePoolBlockKey][]int32{{poolID: pool.ID, blockNumber: 200}: {priorTick}}
+
+	event := blockEvent(200)
+	event.Version = 1
+	if err := bh(context.Background(), event, nil); err != nil {
+		t.Fatalf("BlockHandler (v1 reorg redelivery): %v", err)
+	}
+
+	wantCall := fakePoolBlockKey{poolID: pool.ID, blockNumber: 200}
+	if !slices.Contains(repo.ticksForPoolCalls, wantCall) {
+		t.Fatalf("TicksForPoolAtBlock calls = %v, want to include %v", repo.ticksForPoolCalls, wantCall)
+	}
+	if len(repo.lastWrites.Ticks) != 1 || repo.lastWrites.Ticks[0].Tick != int(priorTick) {
+		t.Errorf("v1 tick writes = %+v, want exactly the re-read prior tick %d (empty TouchedTicks, not first-seen)", repo.lastWrites.Ticks, priorTick)
 	}
 }
 

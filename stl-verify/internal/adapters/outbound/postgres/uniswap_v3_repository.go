@@ -165,6 +165,37 @@ func (r *UniswapV3Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	return stateRows, nil
 }
 
+// TicksForPoolAtBlock returns the distinct tick positions with a row for pool at
+// blockNumber, ascending. A reorg redelivery uses this to re-read exactly the
+// ticks a prior version wrote at this height and supersede them at the new
+// version (VEC-487). Queries the connection pool directly (committed rows), not
+// a write transaction.
+func (r *UniswapV3Repository) TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT DISTINCT tick FROM uniswap_v3_tick
+		 WHERE pool_id = $1 AND block_number = $2
+		 ORDER BY tick`,
+		poolID, blockNumber,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying ticks for pool %d at block %d: %w", poolID, blockNumber, err)
+	}
+	defer rows.Close()
+
+	var ticks []int32
+	for rows.Next() {
+		var tick int32
+		if err := rows.Scan(&tick); err != nil {
+			return nil, fmt.Errorf("scanning tick for pool %d at block %d: %w", poolID, blockNumber, err)
+		}
+		ticks = append(ticks, tick)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating ticks for pool %d at block %d: %w", poolID, blockNumber, err)
+	}
+	return ticks, nil
+}
+
 func convertStates(states []*entity.UniswapV3PoolState) ([]stateConverted, error) {
 	out := make([]stateConverted, 0, len(states))
 	for i, s := range states {

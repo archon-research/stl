@@ -284,6 +284,18 @@ func (s *UniswapV3Service) snapshotDueSet(ctx context.Context, dueSet []Register
 // caller defer marking baselineSeen until after a successful persist, so a
 // failed block re-enumerates the baseline on redelivery instead of silently
 // skipping it forever.
+//
+// On a reorg redelivery (ver > 0) it additionally re-reads every tick that
+// already has a row at this block height (VEC-487). The DueSet reorg rule
+// re-snapshots a pool at (N, v_new) even when the new fork's receipts don't
+// touch it, but TouchedTicks is then empty and the baseline (bitmap scan) only
+// enumerates ticks still initialized on v_new — so a tick initialized only on
+// the orphaned fork would never be re-read and its stale (N, v0) row would stay
+// canonical-latest forever. Re-reading the prior version's ticks at blockHash
+// produces a superseding (N, v_new) row for each: a now-uninitialized tick
+// reads back zeroed (the ticks() getter never reverts), a still-initialized one
+// gets its v_new value. The read runs before the write tx opens (see
+// handleBlock doc), reading the prior delivery's committed rows.
 func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, liqEvents []*entity.UniswapV3LiquidityEvent) ([]*entity.UniswapV3Tick, bool, error) {
 	touched := TouchedTicks(DecodedEvents{LiquidityEvents: liqEvents})
 
@@ -295,6 +307,14 @@ func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool Registere
 			return nil, false, fmt.Errorf("enumerating baseline ticks for pool %s block %d: %w", pool.Address, bn, err)
 		}
 		ticksToRead = mergeTickSets(touched, baseline)
+	}
+
+	if ver > 0 {
+		prior, err := s.repo.TicksForPoolAtBlock(ctx, pool.ID, bn)
+		if err != nil {
+			return nil, false, fmt.Errorf("reading prior-version ticks for pool %s block %d: %w", pool.Address, bn, err)
+		}
+		ticksToRead = mergeTickSets(ticksToRead, prior)
 	}
 
 	rows, err := s.readTicks(ctx, pool, blockHash, bn, ver, ts, ticksToRead)

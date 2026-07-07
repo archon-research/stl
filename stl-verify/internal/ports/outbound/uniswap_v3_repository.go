@@ -40,4 +40,9 @@ type UniswapV3Repository interface {
 	// tx and returns the number of state rows actually inserted (ON CONFLICT DO
 	// NOTHING means a redelivery returns 0), for the uniswap_v3_state_rows_written_total metric.
 	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV3BlockWrites) (stateRows int64, err error)
+	// TicksForPoolAtBlock returns the distinct tick positions that already have a
+	// row for pool at blockNumber, so a reorg redelivery can re-read exactly the
+	// ticks a prior version wrote at this height (VEC-487). Reads committed rows
+	// outside any transaction; safe to call before the write tx opens.
+	TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error)
 }

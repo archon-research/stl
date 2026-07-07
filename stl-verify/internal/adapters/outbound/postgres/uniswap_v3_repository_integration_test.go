@@ -1014,6 +1014,59 @@ func TestUniswapV3Repository_SaveBlock_State_BlockVersionStamping(t *testing.T) 
 	}
 }
 
+// TestUniswapV3Repository_TicksForPoolAtBlock verifies the reorg-reconciliation
+// read returns the distinct ticks that have a row at a given block (ascending),
+// scoped to the pool and block, deduplicating multiple versions of the same
+// tick and excluding ticks written only at other blocks.
+func TestUniswapV3Repository_TicksForPoolAtBlock(t *testing.T) {
+	ctx := context.Background()
+	truncateUniswapV3FactTables(t, ctx)
+
+	token0ID, token1ID := seedUniswapV3TokenPair(t, ctx,
+		common.HexToAddress("0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a"),
+		common.HexToAddress("0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"),
+		18, 18, "FTOKA", "FTOKB")
+	poolID := seedUniswapV3Pool(t, ctx, common.HexToAddress("0x2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"), token0ID, token1ID, 3000, 60, ptrInt64(100))
+
+	repo := newUniswapV3Repo(t)
+	saveTicks := func(ticks []*entity.UniswapV3Tick) {
+		withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
+			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{Ticks: ticks}); err != nil {
+				t.Fatalf("SaveBlock: %v", err)
+			}
+		})
+	}
+
+	const targetBlock = int64(5000)
+	// Two ticks at the target block, plus a second version of one of them (a
+	// changed value at the same block) to prove DISTINCT dedups it.
+	saveTicks([]*entity.UniswapV3Tick{
+		newUniswapV3TestTick(poolID, -60, targetBlock, 0, big.NewInt(100)),
+		newUniswapV3TestTick(poolID, 120, targetBlock, 0, big.NewInt(200)),
+	})
+	saveTicks([]*entity.UniswapV3Tick{
+		newUniswapV3TestTick(poolID, -60, targetBlock, 1, big.NewInt(999)),
+	})
+	// A tick at a different block must not appear.
+	saveTicks([]*entity.UniswapV3Tick{
+		newUniswapV3TestTick(poolID, 300, targetBlock+1, 0, big.NewInt(300)),
+	})
+
+	got, err := repo.TicksForPoolAtBlock(ctx, poolID, targetBlock)
+	if err != nil {
+		t.Fatalf("TicksForPoolAtBlock: %v", err)
+	}
+	want := []int32{-60, 120}
+	if len(got) != len(want) {
+		t.Fatalf("TicksForPoolAtBlock = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("TicksForPoolAtBlock[%d] = %d, want %d (full: got=%v want=%v)", i, got[i], want[i], got, want)
+		}
+	}
+}
+
 func ptrInt64(v int64) *int64 { return &v }
 
 // bigFromString parses a decimal string too large for an int64 literal (e.g.
