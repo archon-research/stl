@@ -293,6 +293,13 @@ groups:
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
 
+  # Own rule GROUP but same file, so it keeps the filename-derived Mimir
+  # namespace `vector-indexers`. Splitting the group (not the file) keeps each
+  # group under Mimir's 20-rules-per-group limit without tripping the
+  # mimir-rules-sync namespace allowlist.
+  - name: vector-maple-indexer
+    interval: 1m
+    rules:
       # =====================================================================
       # maple-graphql-indexer (VEC-320)
       # =====================================================================
