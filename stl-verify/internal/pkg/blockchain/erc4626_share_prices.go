@@ -26,7 +26,7 @@ type ERC4626VaultConfig struct {
 }
 
 // FetchERC4626SharePrices prices each vault share in USD via a single multicall,
-// pinned to blockHash (see executeOracleState). Per vault it batches
+// pinned to blockHash (see ExecutePinned). Per vault it batches
 // convertToAssets(10^ShareDecimals) on the vault and latestRoundData() on the
 // underlying USD feed — both per-block state, so a reorg must not answer from
 // the wrong fork. Both calls use AllowFailure so vaults fail independently; a
@@ -52,7 +52,7 @@ func FetchERC4626SharePrices(
 		return nil, err
 	}
 
-	results, err := executeOracleState(ctx, multicaller, calls, blockNum, blockHash)
+	results, err := ExecutePinned(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("executing multicall at block %d: %w", blockNum, err)
 	}

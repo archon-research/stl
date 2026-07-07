@@ -50,7 +50,7 @@ type FeedPriceResult struct {
 // feedABI is passed as a parameter rather than stored in FeedConfig because
 // all feeds share the same ABI (AggregatorV3Interface).
 // blockHash pins each latestRoundData()/latestAnswer() read to the exact block
-// via ExecuteAtHash (see executeOracleState in oracle.go). Pass common.Hash{}
+// via ExecuteAtHash (see ExecutePinned in oracle.go). Pass common.Hash{}
 // from the oracle backfill service (no live BlockEvent, settled blocks) to fall
 // back to number-pinning — the reorg-correctness concern doesn't apply there.
 func FetchFeedPrices(
@@ -131,7 +131,7 @@ func fetchWithLatestRoundData(
 		}
 	}
 
-	results, err := executeOracleState(ctx, multicaller, calls, blockNum, blockHash)
+	results, err := ExecutePinned(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("executing multicall at block %d: %w", blockNum, err)
 	}
@@ -203,7 +203,7 @@ func retryWithLatestAnswer(
 		}
 	}
 
-	results, err := executeOracleState(ctx, multicaller, calls, blockNum, blockHash)
+	results, err := ExecutePinned(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return fmt.Errorf("executing latestAnswer multicall at block %d: %w", blockNum, err)
 	}

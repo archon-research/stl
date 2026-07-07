@@ -13,15 +13,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// executeOracleState runs calls pinned to blockHash via ExecuteAtHash when
-// blockHash is non-zero, otherwise falls back to Execute pinned to blockNum.
-// Oracle/feed prices are versioned per-block state: after a reorg an archive
-// node answers eth_call-by-number with the new canonical price, which can
-// silently disagree with the reorged (older-version) block being processed.
-// The zero-hash fallback exists for the oracle backfill service, which replays
-// already-settled historical blocks with no live fork ambiguity and has no
-// BlockEvent to source a hash from. See VEC-471.
-func executeOracleState(ctx context.Context, multicaller outbound.Multicaller, calls []outbound.Call, blockNum int64, blockHash common.Hash) ([]outbound.Result, error) {
+// ExecutePinned runs calls pinned to blockHash via ExecuteAtHash when blockHash
+// is non-zero, otherwise falls back to Execute pinned to blockNum. It is the
+// single home for the hash-vs-number dispatch convention every live indexer
+// uses: on-chain state read by number lets an archive node answer with the
+// current canonical value, which after a reorg can silently disagree with the
+// reorged (older-version) block being processed; pinning to the hash reads that
+// exact block. The zero-hash fallback is for callers replaying already-settled
+// blocks with no live fork ambiguity and no BlockEvent to source a hash from
+// (backfill, CLI snapshot tools). See VEC-471.
+func ExecutePinned(ctx context.Context, multicaller outbound.Multicaller, calls []outbound.Call, blockNum int64, blockHash common.Hash) ([]outbound.Result, error) {
 	if blockHash != (common.Hash{}) {
 		return multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	}
@@ -29,7 +30,7 @@ func executeOracleState(ctx context.Context, multicaller outbound.Multicaller, c
 }
 
 // FetchOraclePrices fetches asset prices from an oracle contract via a single
-// multicall, pinned to blockHash (see executeOracleState).
+// multicall, pinned to blockHash (see ExecutePinned).
 // Returns raw prices (one per asset) directly.
 func FetchOraclePrices(
 	ctx context.Context,
@@ -50,7 +51,7 @@ func FetchOraclePrices(
 		{Target: oracleAddr, AllowFailure: false, CallData: getAssetsPricesData},
 	}
 
-	results, err := executeOracleState(ctx, multicaller, calls, blockNum, blockHash)
+	results, err := ExecutePinned(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("executing multicall at block %d: %w", blockNum, err)
 	}

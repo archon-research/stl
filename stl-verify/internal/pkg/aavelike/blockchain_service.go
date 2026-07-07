@@ -206,17 +206,11 @@ func (s *BlockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion)
 	return nil
 }
 
-// executeState runs calls pinned to blockHash via ExecuteAtHash when blockHash
-// is non-zero, otherwise falls back to Execute pinned to blockNumber. The
-// fallback exists for callers with no live block-hash source (backfill, CLI
-// snapshot tools — see GetUserPositionData/GetBatchUserPositionData), which
-// read already-settled historical blocks with no fork ambiguity to guard
-// against; live SQS callers always supply a non-zero blockHash. See VEC-471.
+// executeState pins this service's multicall reads via the shared
+// blockchain.ExecutePinned convention (hash when non-zero, else number-pinned
+// fallback for backfill/CLI callers — see GetUserPositionData). See VEC-471.
 func (s *BlockchainService) executeState(ctx context.Context, calls []outbound.Call, blockNumber int64, blockHash common.Hash) ([]outbound.Result, error) {
-	if blockHash != (common.Hash{}) {
-		return s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
-	}
-	return s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	return blockchain.ExecutePinned(ctx, s.multicallClient, calls, blockNumber, blockHash)
 }
 
 // callContractState is executeState's single-eth_call analogue: pinned to
