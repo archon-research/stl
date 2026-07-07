@@ -43,10 +43,18 @@ func NewService(runner outbound.TransformRunner, logger *slog.Logger, telemetry 
 // a periodic job should still advance the tables it can rather than let one bad
 // table starve the others. The failures are joined and returned so the run is
 // still marked failed and retried on the next tick.
+//
+// An empty source list is treated as a failure, not a clean no-op: the migration
+// seeds one transformed._watermark row per table, so zero sources means the
+// migration has not been applied or the worker is pointed at the wrong database.
+// Returning an error surfaces that instead of silently reporting success.
 func (s *Service) RunOnce(ctx context.Context) error {
 	sources, err := s.runner.ListSources(ctx)
 	if err != nil {
 		return fmt.Errorf("listing transform sources: %w", err)
+	}
+	if len(sources) == 0 {
+		return fmt.Errorf("no transform sources in transformed._watermark (migration not applied or wrong database?)")
 	}
 
 	var (

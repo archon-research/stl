@@ -545,3 +545,15 @@ BEGIN
   UPDATE transformed._watermark SET ts_wm=COALESCE((SELECT max("snapshot_time") FROM transformed."offchain_token_price"),'-infinity') WHERE source='offchain_token_price';
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
+
+-- Grants: the worker connects as stl_readwrite and runs the _run_<t>() functions
+-- (SECURITY INVOKER), so it needs schema usage, table read/write, and EXECUTE.
+-- stl_readonly gets read access for downstream consumers of the transformed layer.
+GRANT USAGE ON SCHEMA transformed TO stl_readonly, stl_readwrite;
+GRANT SELECT ON ALL TABLES IN SCHEMA transformed TO stl_readonly;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA transformed TO stl_readwrite;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA transformed TO stl_readwrite;
+
+INSERT INTO migrations (filename)
+VALUES ('20260706_140000_create_transformed_bucket1.sql')
+ON CONFLICT (filename) DO NOTHING;

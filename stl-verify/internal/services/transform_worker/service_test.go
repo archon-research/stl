@@ -53,9 +53,9 @@ func TestRunOnce(t *testing.T) {
 			wantErr: "listing transform sources",
 		},
 		{
-			name:      "no sources is a no-op",
-			runner:    &mockRunner{sources: nil},
-			wantCalls: nil,
+			name:    "empty source list is an error",
+			runner:  &mockRunner{sources: nil},
+			wantErr: "no transform sources",
 		},
 		{
 			name: "all sources succeed",

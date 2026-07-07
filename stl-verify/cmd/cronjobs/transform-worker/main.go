@@ -61,7 +61,5 @@ func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner
 		return nil, fmt.Errorf("creating transform worker service: %w", err)
 	}
 
-	return temporal.RunnerFunc(func(ctx context.Context) error {
-		return service.RunOnce(ctx)
-	}), nil
+	return temporal.RunnerFunc(service.RunOnce), nil
 }
