@@ -13,11 +13,17 @@ that code, so most guidance is paid for only when it is relevant.
 
 Infrastructure code (Terraform/OpenTofu) lives in a separate repository for security reasons.
 
+`CONTRIBUTING.md` is the canonical onboarding doc (repo layout; how to add a worker / cronjob / backfiller / risk model; PR workflow). Read it before adding a new pipeline or model. Protocol specs and ADRs are in `docs/`.
+
 ## Cross-cutting rules
 
 - **Dependencies flow inward** (hexagonal): domain has no dependencies; adapters depend on ports; ports depend on domain. Detailed port/adapter conventions live in `stl-verify/CLAUDE.md`.
+- **On-chain data comes from chain RPC or the cached block payload, never third-party indexers.** Off-chain feeds need maintainer approval, justified in the PR description.
+- **Data pipelines and model pipelines stay separate**: ingest writes "what happened" to Postgres; models read from Postgres and write "what it means" to their own tables. Separate entry points, usually separate PRs.
+- **Language policy**: APIs and risk models are Python; workers/cronjobs/backfillers are Go (preferred) or Python; `stl-verify/ts/` is frontend only; `experiments/` is scratch, not shipped.
 - **Never commit generated files or binaries.**
-- **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests.
+- **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests. The `stl-verify/Makefile` is the source of truth for workflows — grep it before inventing a command.
+- **Git**: branch `VEC-123-short-slug`; PR title `TICKET-1234: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
 
 ## Where the rest lives (loads on demand)
 

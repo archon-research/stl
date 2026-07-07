@@ -1,11 +1,29 @@
 # stl-verify/python
 
-Python sub-service. Go service conventions: [../CLAUDE.md](../CLAUDE.md). Root: [../../CLAUDE.md](../../CLAUDE.md).
+FastAPI service that serves data out and hosts quantitative risk models. Go service
+conventions: [../CLAUDE.md](../CLAUDE.md). Root: [../../CLAUDE.md](../../CLAUDE.md).
 
-## Linting & tooling
+## Architecture (mirrors the Go hexagonal layout)
 
-- Hooks (lefthook): ruff lint, ruff format
-- CI (`python-ci.yml`): `make lint` + `make test-unit` + `make test-integration` — **source of truth**
-- Tools: `uv sync --all-extras` (ruff, pytest, ty, etc.)
-- Type checking: `ty check`. Fix the root cause; don't paper over with `# ty: ignore`.
-- Don't bypass hooks.
+- `app/domain/`, `app/ports/`, `app/services/`, `app/adapters/` — same dependency-inward rule as Go.
+- Risk models are **pure math** in `app/risk_engine/<model>/` with no I/O.
+- `app/api/v1/*.py` never imports `risk_engine/` directly — it goes through services and a registry.
+
+## Tooling & commands
+
+- **Dependencies: `uv` only** — never pip/poetry. `uv add <pkg>`, `uv run <cmd>`. Tools: `uv sync --all-extras`.
+- Hooks (lefthook): ruff lint, ruff format.
+- Type checking: `make typecheck` (`ty`). Fix the root cause; don't paper over with `# ty: ignore`.
+- CI (`python-ci.yml`): `make lint` + `make test-unit` + `make test-integration` — **source of truth**.
+
+```bash
+cd stl-verify/python
+make lint             # ruff (lint-fix to autofix)
+make typecheck
+make test-unit        # uv run pytest tests/unit
+make test-integration # needs Docker
+make run              # FastAPI server locally
+uv run pytest tests/unit/path/test_file.py::test_name   # single test
+```
+
+Don't bypass hooks.

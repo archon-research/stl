@@ -8,7 +8,7 @@ Python and TS sub-services have their own files: [python/CLAUDE.md](python/CLAUD
 
 ```text
 stl-verify/
-├── cmd/                    # Entry points (watcher, bulk-download, raw_data_backup, event-persister, migrate)
+├── cmd/                    # Entry points, grouped by lifecycle (see below)
 ├── internal/
 │   ├── domain/entity/      # Core business entities (no external dependencies)
 │   ├── ports/
@@ -29,17 +29,23 @@ stl-verify/
 
 Follow [Effective Go](https://go.dev/doc/effective_go).
 
-### Core Services
+### `cmd/` tree, grouped by lifecycle
 
-1. **Live Data Service** - WebSocket subscription to Alchemy for new blocks, handles chain reorgs, publishes to SNS FIFO
-2. **Backfill Service** - Fills gaps in block data via HTTP polling
-3. **Raw Data Backup** - Backs up block data to S3
+- `cmd/base/watcher` — source of block events: WebSocket subscribe, reorg handling, Redis cache write, SNS publish.
+- `cmd/workers/` — long-running SQS FIFO consumers, one message per block (sparklend, morpho, curve, oracle-price, psm3, prime-*, raw-data-backup, ...).
+- `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; changing an interval env var requires deleting the schedule in Temporal and restarting. Ticks must be idempotent (Temporal retries).
+- `cmd/backfillers/` — one-shot historical gap fillers (sparklend, morpho-vault, oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader).
+- `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
-### Data Flow
+Every binary extracts a `run(ctx, args) error` from `main()` and runs under `lifecycle.Run` (workers) or `temporal.RunCronjob` (cronjobs) for graceful SIGINT/SIGTERM shutdown (~25s).
+
+### Data flow
 
 ```text
-Alchemy WebSocket → Live Data Service → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS consumers
+Alchemy WebSocket → watcher → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS workers
 ```
+
+Chains: Ethereum plus Avalanche / Arbitrum / Base / Optimism / Unichain (per-chain `run-*-avax` etc. targets). Workers read the block payload from **Redis, not Alchemy**, via the cache key below; SNS/SQS messages carry only a block pointer.
 
 ### Cache Key Convention
 
@@ -65,9 +71,11 @@ All commands run from `stl-verify/`:
 make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
 make dev-suspend         # Suspend local kind nodes (local dev only; do not use in CI/prod)
 make dev-resume          # Resume suspended local kind nodes (local dev only; do not use in CI/prod)
-make dev-down            # Delete local kind cluster
+make dev-down            # Delete local kind cluster (dev-wipe also nukes volumes)
 make dev-env             # Generate .env files for all services (fetches secrets from AWS)
-make run-watcher         # Run watcher (loads .env from cmd/watcher/)
+make run-watcher         # Run one service on the host against the cluster
+make run-<worker>        # grep '^run-' in the Makefile for the full list (incl. per-chain *-avax)
+make kind-use-alchemy    # Switch watcher from the mock chain to real Alchemy (key in .env.secrets)
 
 # Testing
 make test               # Unit tests only
@@ -75,6 +83,7 @@ make test-race          # Unit tests with race detector (CI default)
 make test-integration   # Integration tests (requires Docker, 5m timeout)
 make e2e                # End-to-end tests with testcontainers
 make cover              # Generate coverage report
+go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
 # CI (runs all checks)
 make ci                 # test-race, vet, fmt-check, tidy-check, staticcheck, vulncheck, golangci-lint
@@ -108,6 +117,7 @@ See [Makefile](Makefile) for the complete list of targets.
 - **Interfaces**: Behavior interfaces use the `-er` suffix (Reader, Publisher, BlockSubscriber). Ports follow the established noun patterns instead: persistence ports are `XxxRepository`, external-system ports are `XxxClient`/`XxxCache`/`XxxProvider`. Do not rename Repository/Client ports to `-er` forms.
 - **Constructors**: Use `New` prefix
 - **Files**: snake_case
+- **Amounts**: Wei / token amounts are `big.Int`, never `float64`.
 - **Errors**:
     - Wrap with context: `fmt.Errorf("doing X: %w", err)`.
     - Never ignore errors.
