@@ -45,7 +45,7 @@ Every binary extracts a `run(ctx, args) error` from `main()` and runs under `lif
 Alchemy WebSocket → watcher → PostgreSQL (TimescaleDB) + Redis (cache) + SNS FIFO → SQS workers
 ```
 
-Chains: Ethereum plus Avalanche / Arbitrum / Base / Optimism / Unichain (per-chain `run-*-avax` etc. targets). Workers read the block payload from **Redis, not Alchemy**, via the cache key below; SNS/SQS messages carry only a block pointer.
+Chains: Ethereum plus Avalanche / Arbitrum / Base / Optimism / Unichain (per-chain `run-*-avax` etc. targets). Only the **Ethereum** watcher fetches execution traces; every other chain has no `trace_block`, so its watcher runs `--enable-traces=false`. Workers read the block payload from **Redis, not Alchemy**, via the cache key below; SNS/SQS messages carry only a block pointer.
 
 ### Cache Key Convention
 
