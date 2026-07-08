@@ -54,17 +54,61 @@ func (r *TransformRunnerRepository) ListSources(ctx context.Context) ([]string, 
 	return sources, nil
 }
 
-// RunTable invokes transformed._run_<source>() and returns the rows upserted.
-// The function name is built from source and quoted as an identifier; source
-// originates from transformed._sources (our own controlled table), so this is
-// not attacker-controlled, but it is quoted regardless.
+// drainBatch is the max rows transformed._run_<t>() consumes per call (its
+// LIMIT). Must match the LIMIT in the generated migration: RunTable loops until a
+// call consumes fewer than this, i.e. the queue is drained, so each call's DELETE
+// stays a bounded transaction even after a long backlog.
+const drainBatch = 10000
+
+// maxDrainIterations caps the drain loop so a source being written faster than it
+// drains cannot spin forever within one tick; the remainder is picked up next tick.
+const maxDrainIterations = 1000
+
+// RunTable drains source's queue by calling transformed._run_<source>() until a
+// call consumes fewer than drainBatch rows, and returns the total consumed. The
+// function name is built from source and quoted as an identifier; source
+// originates from transformed._sources (our own controlled table), so this is not
+// attacker-controlled, but it is quoted regardless.
 func (r *TransformRunnerRepository) RunTable(ctx context.Context, source string) (int64, error) {
 	fn := pgx.Identifier{"transformed", "_run_" + source}.Sanitize()
-	var rows int64
-	if err := r.pool.QueryRow(ctx, "SELECT "+fn+"()").Scan(&rows); err != nil {
-		return 0, fmt.Errorf("running transform %q: %w", source, err)
+	var total int64
+	for i := 0; i < maxDrainIterations; i++ {
+		var consumed int64
+		if err := r.pool.QueryRow(ctx, "SELECT "+fn+"()").Scan(&consumed); err != nil {
+			return total, fmt.Errorf("running transform %q: %w", source, err)
+		}
+		total += consumed
+		if consumed < drainBatch {
+			return total, nil
+		}
 	}
-	return rows, nil
+	r.logger.Warn("transform drain hit iteration cap; remaining queue picked up next tick",
+		"source", source, "consumed", total, "cap", maxDrainIterations)
+	return total, nil
+}
+
+// QueueStatus reads the per-source backlog from transformed._queue_status.
+func (r *TransformRunnerRepository) QueueStatus(ctx context.Context) ([]outbound.QueueDepth, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT source, pending, COALESCE(EXTRACT(EPOCH FROM (now() - oldest_enqueued_at)), 0)
+		FROM transformed._queue_status ORDER BY source`)
+	if err != nil {
+		return nil, fmt.Errorf("reading transform queue status: %w", err)
+	}
+	defer rows.Close()
+
+	var out []outbound.QueueDepth
+	for rows.Next() {
+		var d outbound.QueueDepth
+		if err := rows.Scan(&d.Source, &d.Pending, &d.OldestAgeSecs); err != nil {
+			return nil, fmt.Errorf("scanning transform queue status: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating transform queue status: %w", err)
+	}
+	return out, nil
 }
 
 // BootstrapTable invokes transformed._bootstrap_<source>(from, to), copying the

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // mockRunner is a hand-written outbound.TransformRunner for unit tests.
@@ -15,6 +17,8 @@ type mockRunner struct {
 	runErrs  map[string]error // source -> error returned by RunTable
 	runRows  map[string]int64 // source -> rows returned by RunTable
 	runCalls []string         // sources RunTable was invoked with, in order
+	queue    []outbound.QueueDepth
+	queueErr error
 }
 
 func (m *mockRunner) ListSources(context.Context) ([]string, error) {
@@ -29,12 +33,51 @@ func (m *mockRunner) RunTable(_ context.Context, source string) (int64, error) {
 	return m.runRows[source], nil
 }
 
-func TestNewService(t *testing.T) {
+func (m *mockRunner) QueueStatus(context.Context) ([]outbound.QueueDepth, error) {
+	return m.queue, m.queueErr
+}
+
+func TestNewService_NilRunnerErrors(t *testing.T) {
 	if _, err := NewService(nil, nil, nil); err == nil {
 		t.Fatal("expected error for nil runner")
 	}
+}
+
+func TestNewService_DefaultsWhenLoggerAndTelemetryNil(t *testing.T) {
 	if _, err := NewService(&mockRunner{}, nil, nil); err != nil {
 		t.Fatalf("unexpected error with nil logger/telemetry: %v", err)
+	}
+}
+
+// TestRunOnce_QueueStatusErrorTolerated: a QueueStatus read failure is logged,
+// not fatal — materialization has already succeeded by that point.
+func TestRunOnce_QueueStatusErrorTolerated(t *testing.T) {
+	svc, err := NewService(&mockRunner{
+		sources:  []string{"a"},
+		runRows:  map[string]int64{"a": 1},
+		queueErr: errors.New("queue read boom"),
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce should tolerate a QueueStatus error, got: %v", err)
+	}
+}
+
+// TestRunOnce_RecordsQueueDepth exercises the queue-depth recording path (with a
+// nil Telemetry, so it also covers the nil-safe record loop).
+func TestRunOnce_RecordsQueueDepth(t *testing.T) {
+	svc, err := NewService(&mockRunner{
+		sources: []string{"a"},
+		runRows: map[string]int64{"a": 0},
+		queue:   []outbound.QueueDepth{{Source: "a", Pending: 3, OldestAgeSecs: 12}},
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
 	}
 }
 

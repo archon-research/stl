@@ -98,16 +98,25 @@ type NullableExempt struct {
 	Reason string `json:"reason"`
 }
 
+// TransformConfigEntry is the upsert key for a table the transform generator cannot
+// key from a raw primary key (no usable PK, or a PK that does not survive
+// canonicalisation): Key is the column list the generator upserts on. Read by the
+// generator, not by the conformance check.
+type TransformConfigEntry struct {
+	Key []string `json:"key"`
+}
+
 // Register is the whole schema_master config.
 type Register struct {
-	IgnoreTables   []string             `json:"ignore_tables"`
-	Canonical      map[string]Canonical `json:"canonical"`
-	Tables         map[string]TableMeta `json:"tables"`
-	Transforms     []Transform          `json:"transforms"`
-	Overrides      []Override           `json:"overrides"`
-	Fills          []Fill               `json:"fills"`
-	RequiredKeys   []RequiredKey        `json:"required_keys"`
-	NullableExempt []NullableExempt     `json:"nullable_exempt"`
+	IgnoreTables    []string                        `json:"ignore_tables"`
+	Canonical       map[string]Canonical            `json:"canonical"`
+	Tables          map[string]TableMeta            `json:"tables"`
+	Transforms      []Transform                     `json:"transforms"`
+	Overrides       []Override                      `json:"overrides"`
+	Fills           []Fill                          `json:"fills"`
+	RequiredKeys    []RequiredKey                   `json:"required_keys"`
+	NullableExempt  []NullableExempt                `json:"nullable_exempt"`
+	TransformConfig map[string]TransformConfigEntry `json:"transform_config"`
 }
 
 // producesCanonical reports whether a transform for table renames or casts a column to canonicalCol.

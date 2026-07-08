@@ -81,6 +81,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		s.telemetry.RecordTableSuccess(ctx, source, rows)
 	}
 
+	s.recordQueueDepth(ctx)
+
 	s.logger.Info("transform cycle complete",
 		"tables", len(sources), "failed", len(errs), "rows", total)
 
@@ -89,4 +91,18 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			len(errs), len(sources), errors.Join(errs...))
 	}
 	return nil
+}
+
+// recordQueueDepth emits the per-source backlog gauges that back the
+// stalled-transform alert. A read failure is logged but does not fail the run:
+// materialization already succeeded, and the alert also fires on missing metrics.
+func (s *Service) recordQueueDepth(ctx context.Context) {
+	depths, err := s.runner.QueueStatus(ctx)
+	if err != nil {
+		s.logger.Warn("reading transform queue status failed; queue-depth metrics skipped this tick", "error", err)
+		return
+	}
+	for _, d := range depths {
+		s.telemetry.RecordQueueDepth(ctx, d.Source, d.Pending, d.OldestAgeSecs)
+	}
 }

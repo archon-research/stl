@@ -7,11 +7,13 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-func TestTelemetry(t *testing.T) {
+func TestNewTelemetry(t *testing.T) {
 	if _, err := NewTelemetry(); err != nil {
 		t.Fatalf("NewTelemetry: %v", err)
 	}
+}
 
+func TestTelemetry_Record(t *testing.T) {
 	tel, err := NewTelemetryWithProvider(noop.NewMeterProvider())
 	if err != nil {
 		t.Fatalf("NewTelemetryWithProvider: %v", err)
@@ -20,9 +22,13 @@ func TestTelemetry(t *testing.T) {
 	ctx := context.Background()
 	tel.RecordTableSuccess(ctx, "morpho_market_state", 5)
 	tel.RecordTableFailure(ctx, "morpho_market_state")
+	tel.RecordQueueDepth(ctx, "morpho_market_state", 3, 12)
+}
 
-	// nil receiver is a no-op, not a panic.
+func TestTelemetry_NilReceiverIsNoOp(t *testing.T) {
+	ctx := context.Background()
 	var nilTel *Telemetry
 	nilTel.RecordTableSuccess(ctx, "morpho_market_state", 1)
 	nilTel.RecordTableFailure(ctx, "morpho_market_state")
+	nilTel.RecordQueueDepth(ctx, "morpho_market_state", 1, 1)
 }

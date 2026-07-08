@@ -100,9 +100,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_market_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_morpho_market_state" RETURNING "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
+    DELETE FROM transformed."_pending_morpho_market_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_state" LIMIT 10000)
+    RETURNING "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_market_state"
+  INSERT INTO transformed."morpho_market_state" ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_market_id",
@@ -122,16 +124,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_market_state" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id"
   WHERE (s."morpho_market_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
+    AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
+    AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
   ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_market_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_market_state"
+  INSERT INTO transformed."morpho_market_state" ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_market_id",
@@ -214,9 +218,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_market_position', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_morpho_market_position" RETURNING "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
+    DELETE FROM transformed."_pending_morpho_market_position"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_position" LIMIT 10000)
+    RETURNING "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_market_position"
+  INSERT INTO transformed."morpho_market_position" ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -233,16 +239,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_market_position" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id"
   WHERE (s."user_id", s."morpho_market_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
+    AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
+    AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
   ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_market_position(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_market_position"
+  INSERT INTO transformed."morpho_market_position" ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -322,9 +330,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_vault_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_morpho_vault_state" RETURNING "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
+    DELETE FROM transformed."_pending_morpho_vault_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_state" LIMIT 10000)
+    RETURNING "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_vault_state"
+  INSERT INTO transformed."morpho_vault_state" ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_vault_id",
@@ -341,16 +351,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_vault_state" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id"
   WHERE (s."morpho_vault_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
+    AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
+    AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
   ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_vault_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_vault_state"
+  INSERT INTO transformed."morpho_vault_state" ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_vault_id",
@@ -424,9 +436,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_vault_position', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_morpho_vault_position" RETURNING "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
+    DELETE FROM transformed."_pending_morpho_vault_position"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_position" LIMIT 10000)
+    RETURNING "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_vault_position"
+  INSERT INTO transformed."morpho_vault_position" ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -440,16 +454,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_vault_position" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id"
   WHERE (s."user_id", s."morpho_vault_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
+    AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
+    AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
   ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_vault_position(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_vault_position"
+  INSERT INTO transformed."morpho_vault_position" ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -526,9 +542,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_fluid_vault_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_fluid_vault_state" RETURNING "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version"
+    DELETE FROM transformed."_pending_fluid_vault_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_fluid_vault_state" LIMIT 10000)
+    RETURNING "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."fluid_vault_state"
+  INSERT INTO transformed."fluid_vault_state" ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."fluid_vault_id",
@@ -545,16 +563,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."fluid_vault_state" s LEFT JOIN public."fluid_vault" p ON p."id"=s."fluid_vault_id"
   WHERE (s."fluid_vault_id", s."block_number", s."block_version", s."block_timestamp", s."processing_version") IN (SELECT DISTINCT "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version" FROM batch)
+    AND s."block_timestamp" >= (SELECT min("block_timestamp") FROM batch)
+    AND s."block_timestamp" <= (SELECT max("block_timestamp") FROM batch)
   ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_fluid_vault_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."fluid_vault_state"
+  INSERT INTO transformed."fluid_vault_state" ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."fluid_vault_id",
@@ -628,9 +648,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_token_total_supply', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_token_total_supply" RETURNING "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp"
+    DELETE FROM transformed."_pending_token_total_supply"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_token_total_supply" LIMIT 10000)
+    RETURNING "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp"
   ), ins AS (
-  INSERT INTO transformed."token_total_supply"
+  INSERT INTO transformed."token_total_supply" ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
 SELECT "chain_id",
        "token_id",
        "total_supply",
@@ -644,16 +666,18 @@ SELECT "chain_id",
        "created_at"
   FROM public."token_total_supply"
   WHERE ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") IN (SELECT DISTINCT "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp" FROM batch)
+    AND "block_timestamp" >= (SELECT min("block_timestamp") FROM batch)
+    AND "block_timestamp" <= (SELECT max("block_timestamp") FROM batch)
   ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_token_total_supply(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."token_total_supply"
+  INSERT INTO transformed."token_total_supply" ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
 SELECT "chain_id",
        "token_id",
        "total_supply",
@@ -720,9 +744,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_onchain_token_price', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_onchain_token_price" RETURNING "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp"
+    DELETE FROM transformed."_pending_onchain_token_price"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_onchain_token_price" LIMIT 10000)
+    RETURNING "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."onchain_token_price"
+  INSERT INTO transformed."onchain_token_price" ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
 SELECT p."chain_id",
        s."token_id",
        CAST(s."oracle_id" AS bigint) AS "oracle_id",
@@ -734,16 +760,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."onchain_token_price" s LEFT JOIN public."oracle" p ON p."id"=s."oracle_id"
   WHERE (s."token_id", s."oracle_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
+    AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
+    AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
   ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_onchain_token_price(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."onchain_token_price"
+  INSERT INTO transformed."onchain_token_price" ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
 SELECT p."chain_id",
        s."token_id",
        CAST(s."oracle_id" AS bigint) AS "oracle_id",
@@ -808,9 +836,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_loan_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_maple_loan_state" RETURNING "maple_loan_id", "synced_at", "processing_version"
+    DELETE FROM transformed."_pending_maple_loan_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_state" LIMIT 10000)
+    RETURNING "maple_loan_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_loan_state"
+  INSERT INTO transformed."maple_loan_state" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -822,16 +852,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_loan_state" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id"
   WHERE (s."maple_loan_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_loan_id", "synced_at", "processing_version" FROM batch)
+    AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
+    AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
   ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_loan_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_loan_state"
+  INSERT INTO transformed."maple_loan_state" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -904,9 +936,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_loan_collateral', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_maple_loan_collateral" RETURNING "maple_loan_id", "synced_at", "processing_version"
+    DELETE FROM transformed."_pending_maple_loan_collateral"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_collateral" LIMIT 10000)
+    RETURNING "maple_loan_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_loan_collateral"
+  INSERT INTO transformed."maple_loan_collateral" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -922,16 +956,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_loan_collateral" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id"
   WHERE (s."maple_loan_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_loan_id", "synced_at", "processing_version" FROM batch)
+    AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
+    AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
   ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_loan_collateral(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_loan_collateral"
+  INSERT INTO transformed."maple_loan_collateral" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -1008,9 +1044,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_pool_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_maple_pool_state" RETURNING "maple_pool_id", "synced_at", "processing_version"
+    DELETE FROM transformed."_pending_maple_pool_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_pool_state" LIMIT 10000)
+    RETURNING "maple_pool_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_pool_state"
+  INSERT INTO transformed."maple_pool_state" ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_pool_id",
@@ -1026,16 +1064,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_pool_state" s LEFT JOIN public."maple_pool" p ON p."id"=s."maple_pool_id"
   WHERE (s."maple_pool_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_pool_id", "synced_at", "processing_version" FROM batch)
+    AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
+    AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
   ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_pool_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_pool_state"
+  INSERT INTO transformed."maple_pool_state" ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_pool_id",
@@ -1110,9 +1150,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_sky_strategy_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_maple_sky_strategy_state" RETURNING "maple_sky_strategy_id", "synced_at", "processing_version"
+    DELETE FROM transformed."_pending_maple_sky_strategy_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_sky_strategy_state" LIMIT 10000)
+    RETURNING "maple_sky_strategy_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_sky_strategy_state"
+  INSERT INTO transformed."maple_sky_strategy_state" ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
 SELECT p."chain_id",
        (SELECT l."protocol_id" FROM public."maple_pool" l WHERE l."id"=p."maple_pool_id") AS "protocol_id",
        s."maple_sky_strategy_id",
@@ -1127,16 +1169,18 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_sky_strategy_state" s LEFT JOIN public."maple_sky_strategy" p ON p."id"=s."maple_sky_strategy_id"
   WHERE (s."maple_sky_strategy_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_sky_strategy_id", "synced_at", "processing_version" FROM batch)
+    AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
+    AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
   ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_sky_strategy_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_sky_strategy_state"
+  INSERT INTO transformed."maple_sky_strategy_state" ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
 SELECT p."chain_id",
        (SELECT l."protocol_id" FROM public."maple_pool" l WHERE l."id"=p."maple_pool_id") AS "protocol_id",
        s."maple_sky_strategy_id",
@@ -1204,9 +1248,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_syrup_global_state', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_maple_syrup_global_state" RETURNING "chain_id", "synced_at", "processing_version"
+    DELETE FROM transformed."_pending_maple_syrup_global_state"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_syrup_global_state" LIMIT 10000)
+    RETURNING "chain_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_syrup_global_state"
+  INSERT INTO transformed."maple_syrup_global_state" ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
 SELECT "chain_id",
        "synced_at" AS "snapshot_time",
        "tvl",
@@ -1218,16 +1264,18 @@ SELECT "chain_id",
        "build_id"
   FROM public."maple_syrup_global_state"
   WHERE ("chain_id", "synced_at", "processing_version") IN (SELECT DISTINCT "chain_id", "synced_at", "processing_version" FROM batch)
+    AND "synced_at" >= (SELECT min("synced_at") FROM batch)
+    AND "synced_at" <= (SELECT max("synced_at") FROM batch)
   ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_syrup_global_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_syrup_global_state"
+  INSERT INTO transformed."maple_syrup_global_state" ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
 SELECT "chain_id",
        "synced_at" AS "snapshot_time",
        "tvl",
@@ -1290,9 +1338,11 @@ DECLARE n bigint;
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_offchain_token_price', 0));
   WITH batch AS (
-    DELETE FROM transformed."_pending_offchain_token_price" RETURNING "token_id", "source_id", "processing_version", "timestamp"
+    DELETE FROM transformed."_pending_offchain_token_price"
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_offchain_token_price" LIMIT 10000)
+    RETURNING "token_id", "source_id", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."offchain_token_price"
+  INSERT INTO transformed."offchain_token_price" ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
 SELECT "token_id",
        CAST("source_id" AS bigint) AS "source_id",
        "timestamp" AS "snapshot_time",
@@ -1303,16 +1353,18 @@ SELECT "token_id",
        "build_id"
   FROM public."offchain_token_price"
   WHERE ("token_id", "source_id", "processing_version", "timestamp") IN (SELECT DISTINCT "token_id", "source_id", "processing_version", "timestamp" FROM batch)
+    AND "timestamp" >= (SELECT min("timestamp") FROM batch)
+    AND "timestamp" <= (SELECT max("timestamp") FROM batch)
   ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO NOTHING
   RETURNING 1)
-  SELECT count(*) INTO n FROM ins;
+  SELECT count(*) INTO n FROM batch;
   RETURN n;
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_offchain_token_price(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."offchain_token_price"
+  INSERT INTO transformed."offchain_token_price" ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
 SELECT "token_id",
        CAST("source_id" AS bigint) AS "source_id",
        "timestamp" AS "snapshot_time",

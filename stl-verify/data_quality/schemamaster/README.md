@@ -47,8 +47,8 @@ Columns kept NULL-able despite a `not_null` canonical, sanctioned.
 - `processing_version` (the audit sibling of `build_id`) is `not_null` too; the same four pre-convention retrofit tables (anchorage ×2, `prime_debt`, `sparklend_reserve_data`) carry a residual nullable `processing_version` for the identical reason and are exempted alongside `build_id`.
 
 ### `transform_config`
-Upsert key for tables the transform generator can't key from a raw primary key (no usable PK, or a PK that doesn't survive canonicalisation). Each entry gives the column list the generator upserts on. Read by the generator, not by the conformance check. All keys verified unique against live data:
-- `prime_debt`: `(prime_id, ilk_name, block_number, block_version, processing_version)` — 726/726 distinct.
-- `anchorage_operation`: `(prime_id, operation_id, processing_version)` — 67/67 distinct.
-- `anchorage_package_snapshot`: `(prime_id, package_id, snapshot_time, processing_version)` — 24403/24403 distinct.
-- `cex_orderbook_snapshots`: `(exchange, symbol, event_time, persisted_at)` — unique. `event_time` alone repeats (up to 6 rows per exchange/symbol/event_time across re-polls) and `ingested_at` doesn't fully disambiguate; `persisted_at` (write time) does. No `processing_version` on this table.
+Upsert key for tables the transform generator can't key from a raw primary key (no usable PK, or a PK that doesn't survive canonicalisation). Each entry gives the column list the generator upserts on. Read by the generator, not by the conformance check. Each key was verified unique against live data (counts omitted as they drift):
+- `prime_debt`: `(prime_id, ilk_name, block_number, block_version, processing_version)`.
+- `anchorage_operation`: `(prime_id, operation_id, processing_version)`.
+- `anchorage_package_snapshot`: `(prime_id, package_id, snapshot_time, processing_version)`.
+- `cex_orderbook_snapshots`: `(exchange, symbol, event_time, persisted_at)`. `event_time` alone repeats (multiple rows per exchange/symbol/event_time across re-polls) and `ingested_at` doesn't fully disambiguate; `persisted_at` (write time) does. No `processing_version` on this table.

@@ -13,8 +13,10 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 
 // Telemetry provides OpenTelemetry metrics for the transform worker.
 type Telemetry struct {
-	tableRuns    metric.Int64Counter
-	rowsUpserted metric.Int64Counter
+	tableRuns      metric.Int64Counter
+	rowsUpserted   metric.Int64Counter
+	queuePending   metric.Int64Gauge
+	queueOldestAge metric.Float64Gauge
 }
 
 // NewTelemetry creates a Telemetry using the global meter provider.
@@ -40,6 +42,18 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	); err != nil {
 		return nil, fmt.Errorf("creating rowsUpserted counter: %w", err)
 	}
+	if t.queuePending, err = meter.Int64Gauge(
+		"transform.queue.pending",
+		metric.WithDescription("Un-drained rows in each source's change queue"),
+	); err != nil {
+		return nil, fmt.Errorf("creating queuePending gauge: %w", err)
+	}
+	if t.queueOldestAge, err = meter.Float64Gauge(
+		"transform.queue.oldest_age_seconds",
+		metric.WithDescription("Age of the oldest un-drained queue row, by source; the stalled-transform signal"),
+	); err != nil {
+		return nil, fmt.Errorf("creating queueOldestAge gauge: %w", err)
+	}
 	return t, nil
 }
 
@@ -63,4 +77,14 @@ func (t *Telemetry) RecordTableFailure(ctx context.Context, source string) {
 		attribute.String("table", source),
 		attribute.String("status", "failure"),
 	))
+}
+
+// RecordQueueDepth records one source's change-queue backlog. Nil-safe.
+func (t *Telemetry) RecordQueueDepth(ctx context.Context, source string, pending int64, oldestAgeSecs float64) {
+	if t == nil {
+		return
+	}
+	table := attribute.String("table", source)
+	t.queuePending.Record(ctx, pending, metric.WithAttributes(table))
+	t.queueOldestAge.Record(ctx, oldestAgeSecs, metric.WithAttributes(table))
 }

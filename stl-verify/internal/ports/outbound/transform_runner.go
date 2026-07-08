@@ -17,7 +17,22 @@ type TransformRunner interface {
 	// transformed._sources (seeded by the migration).
 	ListSources(ctx context.Context) ([]string, error)
 
-	// RunTable invokes transformed._run_<source>() and returns the number of
-	// rows upserted in this pass.
+	// RunTable drains a source's queue to empty and returns the number of queue
+	// rows consumed in this pass.
 	RunTable(ctx context.Context, source string) (int64, error)
+
+	// QueueStatus returns the per-source change-queue backlog, for the
+	// stalled-transform signal (a source whose oldest enqueue keeps ageing is
+	// not draining).
+	QueueStatus(ctx context.Context) ([]QueueDepth, error)
+}
+
+// QueueDepth is one source's change-queue backlog at a point in time.
+type QueueDepth struct {
+	Source string
+	// Pending is the number of un-drained rows in transformed._pending_<source>.
+	Pending int64
+	// OldestAgeSecs is seconds since the oldest un-drained row was enqueued; 0
+	// when the queue is empty.
+	OldestAgeSecs float64
 }
