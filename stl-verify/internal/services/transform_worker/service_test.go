@@ -12,11 +12,11 @@ import (
 
 // mockRunner is a hand-written outbound.TransformRunner for unit tests.
 type mockRunner struct {
-	sources  []string
-	listErr  error
-	runErrs  map[string]error // source -> error returned by RunTable
-	runRows  map[string]int64 // source -> rows returned by RunTable
-	runCalls  []string        // sources RunTable was invoked with, in order
+	sources   []string
+	listErr   error
+	runErrs   map[string]error // source -> error returned by RunTable
+	runRows   map[string]int64 // source -> rows returned by RunTable
+	runCalls  []string         // sources RunTable was invoked with, in order
 	queue     []outbound.QueueDepth
 	queueErr  error
 	parity    []outbound.ParityRow

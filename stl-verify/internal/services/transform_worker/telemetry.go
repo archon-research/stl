@@ -13,13 +13,13 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 
 // Telemetry provides OpenTelemetry metrics for the transform worker.
 type Telemetry struct {
-	tableRuns        metric.Int64Counter
-	rowsUpserted     metric.Int64Counter
-	queuePending     metric.Int64Gauge
-	queueOldestAge   metric.Float64Gauge
-	parityDrift      metric.Int64Gauge
-	parityRaw        metric.Int64Gauge
-	parityTransform  metric.Int64Gauge
+	tableRuns       metric.Int64Counter
+	rowsUpserted    metric.Int64Counter
+	queuePending    metric.Int64Gauge
+	queueOldestAge  metric.Float64Gauge
+	parityDrift     metric.Int64Gauge
+	parityRaw       metric.Int64Gauge
+	parityTransform metric.Int64Gauge
 }
 
 // NewTelemetry creates a Telemetry using the global meter provider.
