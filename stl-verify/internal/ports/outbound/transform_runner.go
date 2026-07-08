@@ -26,6 +26,23 @@ type TransformRunner interface {
 	// stalled-transform signal (a source whose oldest enqueue keeps ageing is
 	// not draining).
 	QueueStatus(ctx context.Context) ([]QueueDepth, error)
+
+	// ParityStatus returns the per-source raw-vs-transformed parity, the backstop
+	// that catches a silent queue-mechanism failure (a trigger gap, a bootstrap
+	// miss, or an append-only violation) that QueueStatus cannot see.
+	ParityStatus(ctx context.Context) ([]ParityRow, error)
+}
+
+// ParityRow is one source's raw-vs-transformed row-count parity at a point in
+// time. In a consistent snapshot after bootstrap every raw row is either in the
+// transformed table or still in its pending queue, so Drift (= RawRows -
+// TransformedRows - PendingRows) is 0; any nonzero value is a real divergence.
+type ParityRow struct {
+	Source          string
+	RawRows         int64
+	TransformedRows int64
+	PendingRows     int64
+	Drift           int64
 }
 
 // QueueDepth is one source's change-queue backlog at a point in time.

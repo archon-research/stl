@@ -111,6 +111,31 @@ func (r *TransformRunnerRepository) QueueStatus(ctx context.Context) ([]outbound
 	return out, nil
 }
 
+// ParityStatus reads the per-source raw-vs-transformed parity from
+// transformed._parity_status.
+func (r *TransformRunnerRepository) ParityStatus(ctx context.Context) ([]outbound.ParityRow, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT source, raw_rows, transformed_rows, pending_rows, drift
+		FROM transformed._parity_status ORDER BY source`)
+	if err != nil {
+		return nil, fmt.Errorf("reading transform parity status: %w", err)
+	}
+	defer rows.Close()
+
+	var out []outbound.ParityRow
+	for rows.Next() {
+		var p outbound.ParityRow
+		if err := rows.Scan(&p.Source, &p.RawRows, &p.TransformedRows, &p.PendingRows, &p.Drift); err != nil {
+			return nil, fmt.Errorf("scanning transform parity status: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating transform parity status: %w", err)
+	}
+	return out, nil
+}
+
 // BootstrapTable invokes transformed._bootstrap_<source>(from, to), copying the
 // pre-existing raw rows in the [from, to) window of the source's observation-time
 // column into the transformed table (ON CONFLICT DO UPDATE, IS DISTINCT FROM

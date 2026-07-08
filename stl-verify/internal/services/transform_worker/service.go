@@ -82,6 +82,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	}
 
 	s.recordQueueDepth(ctx)
+	s.recordParity(ctx)
 
 	s.logger.Info("transform cycle complete",
 		"tables", len(sources), "failed", len(errs), "rows", total)
@@ -104,5 +105,24 @@ func (s *Service) recordQueueDepth(ctx context.Context) {
 	}
 	for _, d := range depths {
 		s.telemetry.RecordQueueDepth(ctx, d.Source, d.Pending, d.OldestAgeSecs)
+	}
+}
+
+// recordParity emits the raw-vs-transformed parity gauges that back the parity
+// alert, and logs any source whose drift is nonzero (a row that reached neither
+// the transformed table nor the queue). A read failure is logged, not fatal.
+func (s *Service) recordParity(ctx context.Context) {
+	rows, err := s.runner.ParityStatus(ctx)
+	if err != nil {
+		s.logger.Warn("reading transform parity status failed; parity metrics skipped this tick", "error", err)
+		return
+	}
+	for _, p := range rows {
+		s.telemetry.RecordParity(ctx, p.Source, p.RawRows, p.TransformedRows, p.Drift)
+		if p.Drift != 0 {
+			s.logger.Warn("transform parity drift",
+				"source", p.Source, "raw", p.RawRows, "transformed", p.TransformedRows,
+				"pending", p.PendingRows, "drift", p.Drift)
+		}
 	}
 }

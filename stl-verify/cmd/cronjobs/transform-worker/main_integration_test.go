@@ -117,6 +117,19 @@ func TestTransformWorker_QueueCapturesBackfill(t *testing.T) {
 		t.Fatalf("after backfill run: transformed.morpho_market_state count = %d, want 2 "+
 			"(the backfilled lower-block row was dropped — a watermark cursor regressed the queue)", got)
 	}
+
+	// Parity backstop: with both rows drained, raw == transformed + pending, so
+	// drift must be 0. A nonzero drift here would mean the view or the queue
+	// invariant is broken.
+	var drift int64
+	if err := pool.QueryRow(ctx,
+		`SELECT drift FROM transformed._parity_status WHERE source = 'morpho_market_state'`,
+	).Scan(&drift); err != nil {
+		t.Fatalf("reading parity status: %v", err)
+	}
+	if drift != 0 {
+		t.Fatalf("transformed._parity_status drift = %d, want 0 (raw != transformed + pending)", drift)
+	}
 }
 
 // morphoStateRow is the minimal set of raw fields the test varies per row; the

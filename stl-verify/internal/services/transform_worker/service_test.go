@@ -16,9 +16,11 @@ type mockRunner struct {
 	listErr  error
 	runErrs  map[string]error // source -> error returned by RunTable
 	runRows  map[string]int64 // source -> rows returned by RunTable
-	runCalls []string         // sources RunTable was invoked with, in order
-	queue    []outbound.QueueDepth
-	queueErr error
+	runCalls  []string        // sources RunTable was invoked with, in order
+	queue     []outbound.QueueDepth
+	queueErr  error
+	parity    []outbound.ParityRow
+	parityErr error
 }
 
 func (m *mockRunner) ListSources(context.Context) ([]string, error) {
@@ -35,6 +37,10 @@ func (m *mockRunner) RunTable(_ context.Context, source string) (int64, error) {
 
 func (m *mockRunner) QueueStatus(context.Context) ([]outbound.QueueDepth, error) {
 	return m.queue, m.queueErr
+}
+
+func (m *mockRunner) ParityStatus(context.Context) ([]outbound.ParityRow, error) {
+	return m.parity, m.parityErr
 }
 
 func TestNewService_NilRunnerErrors(t *testing.T) {
@@ -65,19 +71,37 @@ func TestRunOnce_QueueStatusErrorTolerated(t *testing.T) {
 	}
 }
 
-// TestRunOnce_RecordsQueueDepth exercises the queue-depth recording path (with a
-// nil Telemetry, so it also covers the nil-safe record loop).
-func TestRunOnce_RecordsQueueDepth(t *testing.T) {
+// TestRunOnce_RecordsQueueDepthAndParity exercises the queue-depth and parity
+// recording paths (with a nil Telemetry, so it also covers the nil-safe record
+// loops and the drift-logging branch).
+func TestRunOnce_RecordsQueueDepthAndParity(t *testing.T) {
 	svc, err := NewService(&mockRunner{
 		sources: []string{"a"},
 		runRows: map[string]int64{"a": 0},
 		queue:   []outbound.QueueDepth{{Source: "a", Pending: 3, OldestAgeSecs: 12}},
+		parity:  []outbound.ParityRow{{Source: "a", RawRows: 10, TransformedRows: 9, PendingRows: 0, Drift: 1}},
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	if err := svc.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
+	}
+}
+
+// TestRunOnce_ParityStatusErrorTolerated: a ParityStatus read failure is logged,
+// not fatal.
+func TestRunOnce_ParityStatusErrorTolerated(t *testing.T) {
+	svc, err := NewService(&mockRunner{
+		sources:   []string{"a"},
+		runRows:   map[string]int64{"a": 1},
+		parityErr: errors.New("parity read boom"),
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce should tolerate a ParityStatus error, got: %v", err)
 	}
 }
 

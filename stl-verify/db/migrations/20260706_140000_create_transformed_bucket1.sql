@@ -1441,6 +1441,80 @@ UNION ALL
 SELECT 'offchain_token_price'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_offchain_token_price";
 COMMENT ON VIEW transformed._queue_status IS '[Operational] Per-source pending-row count and oldest enqueue time across the transform change queues. oldest_enqueued_at lagging wall-clock = a stalled transform.';
 
+-- Raw-vs-transformed parity backstop (review 5.A). drift = raw - transformed - pending;
+-- 0 in a consistent snapshot once bootstrapped, nonzero = a row that never made it into
+-- the queue or the transformed table (the failure mode the stall alert cannot see).
+CREATE OR REPLACE VIEW transformed._parity_status AS
+SELECT source, raw_rows, transformed_rows, pending_rows,
+       raw_rows - transformed_rows - pending_rows AS drift
+FROM (
+  SELECT 'morpho_market_state'::text AS source,
+    (SELECT count(*) FROM public."morpho_market_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."morpho_market_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_morpho_market_state") AS pending_rows
+UNION ALL
+  SELECT 'morpho_market_position'::text AS source,
+    (SELECT count(*) FROM public."morpho_market_position") AS raw_rows,
+    (SELECT count(*) FROM transformed."morpho_market_position") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_morpho_market_position") AS pending_rows
+UNION ALL
+  SELECT 'morpho_vault_state'::text AS source,
+    (SELECT count(*) FROM public."morpho_vault_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."morpho_vault_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_morpho_vault_state") AS pending_rows
+UNION ALL
+  SELECT 'morpho_vault_position'::text AS source,
+    (SELECT count(*) FROM public."morpho_vault_position") AS raw_rows,
+    (SELECT count(*) FROM transformed."morpho_vault_position") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_morpho_vault_position") AS pending_rows
+UNION ALL
+  SELECT 'fluid_vault_state'::text AS source,
+    (SELECT count(*) FROM public."fluid_vault_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."fluid_vault_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_fluid_vault_state") AS pending_rows
+UNION ALL
+  SELECT 'token_total_supply'::text AS source,
+    (SELECT count(*) FROM public."token_total_supply") AS raw_rows,
+    (SELECT count(*) FROM transformed."token_total_supply") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_token_total_supply") AS pending_rows
+UNION ALL
+  SELECT 'onchain_token_price'::text AS source,
+    (SELECT count(*) FROM public."onchain_token_price") AS raw_rows,
+    (SELECT count(*) FROM transformed."onchain_token_price") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_onchain_token_price") AS pending_rows
+UNION ALL
+  SELECT 'maple_loan_state'::text AS source,
+    (SELECT count(*) FROM public."maple_loan_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."maple_loan_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_maple_loan_state") AS pending_rows
+UNION ALL
+  SELECT 'maple_loan_collateral'::text AS source,
+    (SELECT count(*) FROM public."maple_loan_collateral") AS raw_rows,
+    (SELECT count(*) FROM transformed."maple_loan_collateral") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_maple_loan_collateral") AS pending_rows
+UNION ALL
+  SELECT 'maple_pool_state'::text AS source,
+    (SELECT count(*) FROM public."maple_pool_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."maple_pool_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_maple_pool_state") AS pending_rows
+UNION ALL
+  SELECT 'maple_sky_strategy_state'::text AS source,
+    (SELECT count(*) FROM public."maple_sky_strategy_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."maple_sky_strategy_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_maple_sky_strategy_state") AS pending_rows
+UNION ALL
+  SELECT 'maple_syrup_global_state'::text AS source,
+    (SELECT count(*) FROM public."maple_syrup_global_state") AS raw_rows,
+    (SELECT count(*) FROM transformed."maple_syrup_global_state") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_maple_syrup_global_state") AS pending_rows
+UNION ALL
+  SELECT 'offchain_token_price'::text AS source,
+    (SELECT count(*) FROM public."offchain_token_price") AS raw_rows,
+    (SELECT count(*) FROM transformed."offchain_token_price") AS transformed_rows,
+    (SELECT count(*) FROM transformed."_pending_offchain_token_price") AS pending_rows
+) s;
+COMMENT ON VIEW transformed._parity_status IS '[Operational] Per-source raw vs transformed vs pending row counts and their drift (raw - transformed - pending). drift should be 0 in a consistent snapshot after bootstrap; nonzero = a silent queue/trigger/bootstrap gap.';
+
 -- Grants: the worker connects as stl_readwrite and drains the queues via _run_<t>()
 -- (SECURITY INVOKER), so it needs schema usage, table read/write, and EXECUTE. The enqueue
 -- triggers are SECURITY DEFINER, so raw writers need no grant on the queue tables to insert.

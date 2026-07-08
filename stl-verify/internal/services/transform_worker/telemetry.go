@@ -13,10 +13,13 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 
 // Telemetry provides OpenTelemetry metrics for the transform worker.
 type Telemetry struct {
-	tableRuns      metric.Int64Counter
-	rowsUpserted   metric.Int64Counter
-	queuePending   metric.Int64Gauge
-	queueOldestAge metric.Float64Gauge
+	tableRuns        metric.Int64Counter
+	rowsUpserted     metric.Int64Counter
+	queuePending     metric.Int64Gauge
+	queueOldestAge   metric.Float64Gauge
+	parityDrift      metric.Int64Gauge
+	parityRaw        metric.Int64Gauge
+	parityTransform  metric.Int64Gauge
 }
 
 // NewTelemetry creates a Telemetry using the global meter provider.
@@ -54,6 +57,24 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	); err != nil {
 		return nil, fmt.Errorf("creating queueOldestAge gauge: %w", err)
 	}
+	if t.parityDrift, err = meter.Int64Gauge(
+		"transform.parity.drift",
+		metric.WithDescription("raw - transformed - pending row count, by source; nonzero = a silent parity gap"),
+	); err != nil {
+		return nil, fmt.Errorf("creating parityDrift gauge: %w", err)
+	}
+	if t.parityRaw, err = meter.Int64Gauge(
+		"transform.parity.raw_rows",
+		metric.WithDescription("Raw source row count, by source (parity context)"),
+	); err != nil {
+		return nil, fmt.Errorf("creating parityRaw gauge: %w", err)
+	}
+	if t.parityTransform, err = meter.Int64Gauge(
+		"transform.parity.transformed_rows",
+		metric.WithDescription("Transformed table row count, by source (parity context)"),
+	); err != nil {
+		return nil, fmt.Errorf("creating parityTransform gauge: %w", err)
+	}
 	return t, nil
 }
 
@@ -87,4 +108,15 @@ func (t *Telemetry) RecordQueueDepth(ctx context.Context, source string, pending
 	table := attribute.String("table", source)
 	t.queuePending.Record(ctx, pending, metric.WithAttributes(table))
 	t.queueOldestAge.Record(ctx, oldestAgeSecs, metric.WithAttributes(table))
+}
+
+// RecordParity records one source's raw-vs-transformed parity. Nil-safe.
+func (t *Telemetry) RecordParity(ctx context.Context, source string, rawRows, transformedRows, drift int64) {
+	if t == nil {
+		return
+	}
+	table := attribute.String("table", source)
+	t.parityDrift.Record(ctx, drift, metric.WithAttributes(table))
+	t.parityRaw.Record(ctx, rawRows, metric.WithAttributes(table))
+	t.parityTransform.Record(ctx, transformedRows, metric.WithAttributes(table))
 }

@@ -23,6 +23,7 @@ func TestTelemetry_Record(t *testing.T) {
 	tel.RecordTableSuccess(ctx, "morpho_market_state", 5)
 	tel.RecordTableFailure(ctx, "morpho_market_state")
 	tel.RecordQueueDepth(ctx, "morpho_market_state", 3, 12)
+	tel.RecordParity(ctx, "morpho_market_state", 10, 9, 1)
 }
 
 func TestTelemetry_NilReceiverIsNoOp(t *testing.T) {
@@ -31,4 +32,5 @@ func TestTelemetry_NilReceiverIsNoOp(t *testing.T) {
 	nilTel.RecordTableSuccess(ctx, "morpho_market_state", 1)
 	nilTel.RecordTableFailure(ctx, "morpho_market_state")
 	nilTel.RecordQueueDepth(ctx, "morpho_market_state", 1, 1)
+	nilTel.RecordParity(ctx, "morpho_market_state", 1, 1, 0)
 }
