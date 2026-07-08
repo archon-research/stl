@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -119,10 +120,8 @@ func selectSources(ctx context.Context, repo *postgres.TransformRunnerRepository
 	if only == "" {
 		return all, nil
 	}
-	for _, s := range all {
-		if s == only {
-			return []string{only}, nil
-		}
+	if slices.Contains(all, only) {
+		return []string{only}, nil
 	}
 	return nil, fmt.Errorf("source %q not found in transformed._sources", only)
 }

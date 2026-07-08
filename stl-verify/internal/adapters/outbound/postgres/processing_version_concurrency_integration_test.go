@@ -538,10 +538,15 @@ func TestProcessingVersionTrigger_NegativeControl_LocklessFunction(t *testing.T)
 func swapInLocklessTrigger(t *testing.T, ctx context.Context, table string) {
 	t.Helper()
 
+	// Target the processing_version trigger explicitly. These raw tables also
+	// carry the transformation layer's AFTER INSERT enqueue trigger
+	// (transformed._enqueue_<t>), so an unfiltered LIMIT 1 could swap the wrong
+	// trigger and leave the lock under test in place.
 	var originalDDL string
 	if err := concurrencyPool.QueryRow(ctx, `
 		SELECT pg_get_functiondef(tgfoid) FROM pg_trigger
 		WHERE tgrelid = $1::regclass AND NOT tgisinternal
+		  AND tgname = 'trigger_assign_processing_version'
 		LIMIT 1`, table).Scan(&originalDDL); err != nil {
 		t.Fatalf("capture original trigger function ddl for %s: %v", table, err)
 	}
@@ -564,6 +569,7 @@ func swapInLocklessTrigger(t *testing.T, ctx context.Context, table string) {
 		SELECT prosrc FROM pg_proc
 		WHERE oid = (SELECT tgfoid FROM pg_trigger
 		             WHERE tgrelid = $1::regclass AND NOT tgisinternal
+		               AND tgname = 'trigger_assign_processing_version'
 		             LIMIT 1)`, table).Scan(&src); err != nil {
 		t.Fatalf("read trigger function source for %s: %v", table, err)
 	}
