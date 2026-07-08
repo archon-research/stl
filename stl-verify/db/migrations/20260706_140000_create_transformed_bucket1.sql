@@ -11,16 +11,19 @@
 --     the raw row, so overlap / rollback / backfill / multi-writer are all non-issues, and nothing
 --     that inserts into raw can bypass it. Raw is append-only (corrections arrive as a new
 --     processing_version row -> a new PK), so an INSERT trigger is sufficient.
---   * transformed._run_<t>() drains its queue in one transaction (DELETE ... RETURNING), re-reads
---     just those raw rows by PK (recent, uncompressed, untiered -- no full scan, no S3 read),
---     applies the transform, and upserts ON CONFLICT DO NOTHING (the raw row for a given PK is
---     immutable, so DO NOTHING is idempotent and never churns). RETURNING counts real new rows.
+--   * transformed._run_<t>() drains its queue in bounded batches (DELETE ... RETURNING under an
+--     advisory lock), re-reads just those raw rows by PK (recent, uncompressed, untiered -- no
+--     full scan, no S3 read), applies the transform, and upserts ON CONFLICT DO UPDATE ... WHERE
+--     IS DISTINCT FROM. The upsert keeps the layer re-runnable -- a re-enqueue or a re-bootstrap
+--     after a transform-logic fix or a late-arriving dimension refreshes the row -- while the
+--     IS DISTINCT FROM guard skips the write when nothing changed, so there is no churn. It
+--     returns the queue rows consumed; the worker loops until the queue is drained.
 --   * The trigger functions are SECURITY DEFINER (owned by the migration role) so enqueue never
 --     depends on the raw writer holding a grant on the queue -- a grant gap can never halt ingest.
 --   * Bootstrap of pre-existing history is out-of-band (transformed._bootstrap_<t>(_from,_to) run
 --     in time windows by a one-off job with tiered reads enabled), NOT through the 10-minute
 --     Temporal activity. The trigger is live before bootstrap starts, so the overlap window is
---     closed by DO NOTHING idempotency.
+--     closed by the upsert's idempotency (re-inserting an identical row is a guarded no-op).
 --
 -- Idempotent / non-destructive: schema, tables, queues, triggers and functions are all created
 -- IF NOT EXISTS / OR REPLACE and PK ALTERs are guarded, so re-applying is a no-op.
@@ -104,7 +107,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_state" LIMIT 10000)
     RETURNING "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_market_state" ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_market_state" AS t ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_market_id",
@@ -126,7 +129,8 @@ SELECT p."chain_id",
   WHERE (s."morpho_market_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
     AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
     AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
-  ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_supply_assets"=EXCLUDED."total_supply_assets", "total_supply_shares"=EXCLUDED."total_supply_shares", "total_borrow_assets"=EXCLUDED."total_borrow_assets", "total_borrow_shares"=EXCLUDED."total_borrow_shares", "last_update_at"=EXCLUDED."last_update_at", "fee"=EXCLUDED."fee", "prev_borrow_rate"=EXCLUDED."prev_borrow_rate", "interest_accrued"=EXCLUDED."interest_accrued", "fee_shares"=EXCLUDED."fee_shares", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."total_supply_assets", t."total_supply_shares", t."total_borrow_assets", t."total_borrow_shares", t."last_update_at", t."fee", t."prev_borrow_rate", t."interest_accrued", t."fee_shares", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_supply_assets", EXCLUDED."total_supply_shares", EXCLUDED."total_borrow_assets", EXCLUDED."total_borrow_shares", EXCLUDED."last_update_at", EXCLUDED."fee", EXCLUDED."prev_borrow_rate", EXCLUDED."interest_accrued", EXCLUDED."fee_shares", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -135,7 +139,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_market_state(_from time
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_market_state" ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_market_state" AS t ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_market_id",
@@ -155,7 +159,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_market_state" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id"
   WHERE s."timestamp" >= _from AND s."timestamp" < _to
-  ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_supply_assets"=EXCLUDED."total_supply_assets", "total_supply_shares"=EXCLUDED."total_supply_shares", "total_borrow_assets"=EXCLUDED."total_borrow_assets", "total_borrow_shares"=EXCLUDED."total_borrow_shares", "last_update_at"=EXCLUDED."last_update_at", "fee"=EXCLUDED."fee", "prev_borrow_rate"=EXCLUDED."prev_borrow_rate", "interest_accrued"=EXCLUDED."interest_accrued", "fee_shares"=EXCLUDED."fee_shares", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."total_supply_assets", t."total_supply_shares", t."total_borrow_assets", t."total_borrow_shares", t."last_update_at", t."fee", t."prev_borrow_rate", t."interest_accrued", t."fee_shares", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_supply_assets", EXCLUDED."total_supply_shares", EXCLUDED."total_borrow_assets", EXCLUDED."total_borrow_shares", EXCLUDED."last_update_at", EXCLUDED."fee", EXCLUDED."prev_borrow_rate", EXCLUDED."interest_accrued", EXCLUDED."fee_shares", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -222,7 +227,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_position" LIMIT 10000)
     RETURNING "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_market_position" ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_market_position" AS t ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -241,7 +246,8 @@ SELECT p."chain_id",
   WHERE (s."user_id", s."morpho_market_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
     AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
     AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
-  ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "supply_shares"=EXCLUDED."supply_shares", "borrow_shares"=EXCLUDED."borrow_shares", "collateral"=EXCLUDED."collateral", "supply_assets"=EXCLUDED."supply_assets", "borrow_assets"=EXCLUDED."borrow_assets", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."supply_shares", t."borrow_shares", t."collateral", t."supply_assets", t."borrow_assets", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."supply_shares", EXCLUDED."borrow_shares", EXCLUDED."collateral", EXCLUDED."supply_assets", EXCLUDED."borrow_assets", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -250,7 +256,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_market_position(_from t
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_market_position" ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_market_position" AS t ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -267,7 +273,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_market_position" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id"
   WHERE s."timestamp" >= _from AND s."timestamp" < _to
-  ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "supply_shares"=EXCLUDED."supply_shares", "borrow_shares"=EXCLUDED."borrow_shares", "collateral"=EXCLUDED."collateral", "supply_assets"=EXCLUDED."supply_assets", "borrow_assets"=EXCLUDED."borrow_assets", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."supply_shares", t."borrow_shares", t."collateral", t."supply_assets", t."borrow_assets", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."supply_shares", EXCLUDED."borrow_shares", EXCLUDED."collateral", EXCLUDED."supply_assets", EXCLUDED."borrow_assets", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -334,7 +341,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_state" LIMIT 10000)
     RETURNING "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_vault_state" ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_vault_state" AS t ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_vault_id",
@@ -353,7 +360,8 @@ SELECT p."chain_id",
   WHERE (s."morpho_vault_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
     AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
     AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
-  ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_assets"=EXCLUDED."total_assets", "total_shares"=EXCLUDED."total_shares", "fee_shares"=EXCLUDED."fee_shares", "new_total_assets"=EXCLUDED."new_total_assets", "previous_total_assets"=EXCLUDED."previous_total_assets", "management_fee_shares"=EXCLUDED."management_fee_shares", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."total_assets", t."total_shares", t."fee_shares", t."new_total_assets", t."previous_total_assets", t."management_fee_shares", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_assets", EXCLUDED."total_shares", EXCLUDED."fee_shares", EXCLUDED."new_total_assets", EXCLUDED."previous_total_assets", EXCLUDED."management_fee_shares", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -362,7 +370,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_vault_state(_from times
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_vault_state" ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_vault_state" AS t ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."morpho_vault_id",
@@ -379,7 +387,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_vault_state" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id"
   WHERE s."timestamp" >= _from AND s."timestamp" < _to
-  ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_assets"=EXCLUDED."total_assets", "total_shares"=EXCLUDED."total_shares", "fee_shares"=EXCLUDED."fee_shares", "new_total_assets"=EXCLUDED."new_total_assets", "previous_total_assets"=EXCLUDED."previous_total_assets", "management_fee_shares"=EXCLUDED."management_fee_shares", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."total_assets", t."total_shares", t."fee_shares", t."new_total_assets", t."previous_total_assets", t."management_fee_shares", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_assets", EXCLUDED."total_shares", EXCLUDED."fee_shares", EXCLUDED."new_total_assets", EXCLUDED."previous_total_assets", EXCLUDED."management_fee_shares", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -440,7 +449,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_position" LIMIT 10000)
     RETURNING "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."morpho_vault_position" ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_vault_position" AS t ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -456,7 +465,8 @@ SELECT p."chain_id",
   WHERE (s."user_id", s."morpho_vault_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
     AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
     AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
-  ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "shares"=EXCLUDED."shares", "assets"=EXCLUDED."assets", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."shares", t."assets", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."shares", EXCLUDED."assets", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -465,7 +475,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_vault_position(_from ti
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."morpho_vault_position" ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
+  INSERT INTO transformed."morpho_vault_position" AS t ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."user_id",
@@ -479,7 +489,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."morpho_vault_position" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id"
   WHERE s."timestamp" >= _from AND s."timestamp" < _to
-  ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "shares"=EXCLUDED."shares", "assets"=EXCLUDED."assets", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."shares", t."assets", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."shares", EXCLUDED."assets", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -546,7 +557,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_fluid_vault_state" LIMIT 10000)
     RETURNING "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."fluid_vault_state" ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
+  INSERT INTO transformed."fluid_vault_state" AS t ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."fluid_vault_id",
@@ -565,7 +576,8 @@ SELECT p."chain_id",
   WHERE (s."fluid_vault_id", s."block_number", s."block_version", s."block_timestamp", s."processing_version") IN (SELECT DISTINCT "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version" FROM batch)
     AND s."block_timestamp" >= (SELECT min("block_timestamp") FROM batch)
     AND s."block_timestamp" <= (SELECT max("block_timestamp") FROM batch)
-  ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO NOTHING
+  ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_collateral"=EXCLUDED."total_collateral", "total_debt"=EXCLUDED."total_debt", "supply_exchange_price"=EXCLUDED."supply_exchange_price", "borrow_exchange_price"=EXCLUDED."borrow_exchange_price", "supply_rate"=EXCLUDED."supply_rate", "borrow_rate"=EXCLUDED."borrow_rate", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."total_collateral", t."total_debt", t."supply_exchange_price", t."borrow_exchange_price", t."supply_rate", t."borrow_rate", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_collateral", EXCLUDED."total_debt", EXCLUDED."supply_exchange_price", EXCLUDED."borrow_exchange_price", EXCLUDED."supply_rate", EXCLUDED."borrow_rate", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -574,7 +586,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_fluid_vault_state(_from timest
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."fluid_vault_state" ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
+  INSERT INTO transformed."fluid_vault_state" AS t ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."fluid_vault_id",
@@ -591,7 +603,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."fluid_vault_state" s LEFT JOIN public."fluid_vault" p ON p."id"=s."fluid_vault_id"
   WHERE s."block_timestamp" >= _from AND s."block_timestamp" < _to
-  ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO NOTHING
+  ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_collateral"=EXCLUDED."total_collateral", "total_debt"=EXCLUDED."total_debt", "supply_exchange_price"=EXCLUDED."supply_exchange_price", "borrow_exchange_price"=EXCLUDED."borrow_exchange_price", "supply_rate"=EXCLUDED."supply_rate", "borrow_rate"=EXCLUDED."borrow_rate", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."total_collateral", t."total_debt", t."supply_exchange_price", t."borrow_exchange_price", t."supply_rate", t."borrow_rate", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_collateral", EXCLUDED."total_debt", EXCLUDED."supply_exchange_price", EXCLUDED."borrow_exchange_price", EXCLUDED."supply_rate", EXCLUDED."borrow_rate", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -652,7 +665,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_token_total_supply" LIMIT 10000)
     RETURNING "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp"
   ), ins AS (
-  INSERT INTO transformed."token_total_supply" ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
+  INSERT INTO transformed."token_total_supply" AS t ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
 SELECT "chain_id",
        "token_id",
        "total_supply",
@@ -668,7 +681,8 @@ SELECT "chain_id",
   WHERE ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") IN (SELECT DISTINCT "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp" FROM batch)
     AND "block_timestamp" >= (SELECT min("block_timestamp") FROM batch)
     AND "block_timestamp" <= (SELECT max("block_timestamp") FROM batch)
-  ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "total_supply"=EXCLUDED."total_supply", "scaled_total_supply"=EXCLUDED."scaled_total_supply", "source"=EXCLUDED."source", "build_id"=EXCLUDED."build_id", "created_at"=EXCLUDED."created_at"
+    WHERE (t."total_supply", t."scaled_total_supply", t."source", t."build_id", t."created_at") IS DISTINCT FROM (EXCLUDED."total_supply", EXCLUDED."scaled_total_supply", EXCLUDED."source", EXCLUDED."build_id", EXCLUDED."created_at")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -677,7 +691,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_token_total_supply(_from times
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."token_total_supply" ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
+  INSERT INTO transformed."token_total_supply" AS t ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
 SELECT "chain_id",
        "token_id",
        "total_supply",
@@ -691,7 +705,8 @@ SELECT "chain_id",
        "created_at"
   FROM public."token_total_supply"
   WHERE "block_timestamp" >= _from AND "block_timestamp" < _to
-  ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "total_supply"=EXCLUDED."total_supply", "scaled_total_supply"=EXCLUDED."scaled_total_supply", "source"=EXCLUDED."source", "build_id"=EXCLUDED."build_id", "created_at"=EXCLUDED."created_at"
+    WHERE (t."total_supply", t."scaled_total_supply", t."source", t."build_id", t."created_at") IS DISTINCT FROM (EXCLUDED."total_supply", EXCLUDED."scaled_total_supply", EXCLUDED."source", EXCLUDED."build_id", EXCLUDED."created_at")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -748,7 +763,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_onchain_token_price" LIMIT 10000)
     RETURNING "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."onchain_token_price" ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
+  INSERT INTO transformed."onchain_token_price" AS t ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
 SELECT p."chain_id",
        s."token_id",
        CAST(s."oracle_id" AS bigint) AS "oracle_id",
@@ -762,7 +777,8 @@ SELECT p."chain_id",
   WHERE (s."token_id", s."oracle_id", s."block_number", s."block_version", s."processing_version", s."timestamp") IN (SELECT DISTINCT "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp" FROM batch)
     AND s."timestamp" >= (SELECT min("timestamp") FROM batch)
     AND s."timestamp" <= (SELECT max("timestamp") FROM batch)
-  ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "price_usd"=EXCLUDED."price_usd", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."price_usd", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."price_usd", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -771,7 +787,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_onchain_token_price(_from time
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."onchain_token_price" ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
+  INSERT INTO transformed."onchain_token_price" AS t ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
 SELECT p."chain_id",
        s."token_id",
        CAST(s."oracle_id" AS bigint) AS "oracle_id",
@@ -783,7 +799,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."onchain_token_price" s LEFT JOIN public."oracle" p ON p."id"=s."oracle_id"
   WHERE s."timestamp" >= _from AND s."timestamp" < _to
-  ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO NOTHING
+  ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "price_usd"=EXCLUDED."price_usd", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."price_usd", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."price_usd", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -840,7 +857,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_state" LIMIT 10000)
     RETURNING "maple_loan_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_loan_state" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
+  INSERT INTO transformed."maple_loan_state" AS t ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -854,7 +871,8 @@ SELECT p."chain_id",
   WHERE (s."maple_loan_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_loan_id", "synced_at", "processing_version" FROM batch)
     AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
     AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
-  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "state"=EXCLUDED."state", "principal_owed"=EXCLUDED."principal_owed", "acm_ratio"=EXCLUDED."acm_ratio", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."state", t."principal_owed", t."acm_ratio", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."state", EXCLUDED."principal_owed", EXCLUDED."acm_ratio", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -863,7 +881,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_loan_state(_from timesta
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_loan_state" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
+  INSERT INTO transformed."maple_loan_state" AS t ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -875,7 +893,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_loan_state" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id"
   WHERE s."synced_at" >= _from AND s."synced_at" < _to
-  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "state"=EXCLUDED."state", "principal_owed"=EXCLUDED."principal_owed", "acm_ratio"=EXCLUDED."acm_ratio", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."state", t."principal_owed", t."acm_ratio", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."state", EXCLUDED."principal_owed", EXCLUDED."acm_ratio", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -940,7 +959,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_collateral" LIMIT 10000)
     RETURNING "maple_loan_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_loan_collateral" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
+  INSERT INTO transformed."maple_loan_collateral" AS t ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -958,7 +977,8 @@ SELECT p."chain_id",
   WHERE (s."maple_loan_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_loan_id", "synced_at", "processing_version" FROM batch)
     AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
     AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
-  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "asset_symbol"=EXCLUDED."asset_symbol", "asset_amount"=EXCLUDED."asset_amount", "asset_decimals"=EXCLUDED."asset_decimals", "asset_value_usd"=EXCLUDED."asset_value_usd", "state"=EXCLUDED."state", "custodian"=EXCLUDED."custodian", "liquidation_level"=EXCLUDED."liquidation_level", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."asset_symbol", t."asset_amount", t."asset_decimals", t."asset_value_usd", t."state", t."custodian", t."liquidation_level", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."asset_symbol", EXCLUDED."asset_amount", EXCLUDED."asset_decimals", EXCLUDED."asset_value_usd", EXCLUDED."state", EXCLUDED."custodian", EXCLUDED."liquidation_level", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -967,7 +987,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_loan_collateral(_from ti
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_loan_collateral" ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
+  INSERT INTO transformed."maple_loan_collateral" AS t ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_loan_id",
@@ -983,7 +1003,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_loan_collateral" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id"
   WHERE s."synced_at" >= _from AND s."synced_at" < _to
-  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "asset_symbol"=EXCLUDED."asset_symbol", "asset_amount"=EXCLUDED."asset_amount", "asset_decimals"=EXCLUDED."asset_decimals", "asset_value_usd"=EXCLUDED."asset_value_usd", "state"=EXCLUDED."state", "custodian"=EXCLUDED."custodian", "liquidation_level"=EXCLUDED."liquidation_level", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."asset_symbol", t."asset_amount", t."asset_decimals", t."asset_value_usd", t."state", t."custodian", t."liquidation_level", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."asset_symbol", EXCLUDED."asset_amount", EXCLUDED."asset_decimals", EXCLUDED."asset_value_usd", EXCLUDED."state", EXCLUDED."custodian", EXCLUDED."liquidation_level", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -1048,7 +1069,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_pool_state" LIMIT 10000)
     RETURNING "maple_pool_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_pool_state" ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
+  INSERT INTO transformed."maple_pool_state" AS t ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_pool_id",
@@ -1066,7 +1087,8 @@ SELECT p."chain_id",
   WHERE (s."maple_pool_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_pool_id", "synced_at", "processing_version" FROM batch)
     AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
     AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
-  ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "tvl"=EXCLUDED."tvl", "liquid_assets"=EXCLUDED."liquid_assets", "collateral_value_usd"=EXCLUDED."collateral_value_usd", "principal_out"=EXCLUDED."principal_out", "utilization"=EXCLUDED."utilization", "monthly_apy"=EXCLUDED."monthly_apy", "spot_apy"=EXCLUDED."spot_apy", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."tvl", t."liquid_assets", t."collateral_value_usd", t."principal_out", t."utilization", t."monthly_apy", t."spot_apy", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."tvl", EXCLUDED."liquid_assets", EXCLUDED."collateral_value_usd", EXCLUDED."principal_out", EXCLUDED."utilization", EXCLUDED."monthly_apy", EXCLUDED."spot_apy", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -1075,7 +1097,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_pool_state(_from timesta
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_pool_state" ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
+  INSERT INTO transformed."maple_pool_state" AS t ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
 SELECT p."chain_id",
        p."protocol_id",
        s."maple_pool_id",
@@ -1091,7 +1113,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_pool_state" s LEFT JOIN public."maple_pool" p ON p."id"=s."maple_pool_id"
   WHERE s."synced_at" >= _from AND s."synced_at" < _to
-  ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "tvl"=EXCLUDED."tvl", "liquid_assets"=EXCLUDED."liquid_assets", "collateral_value_usd"=EXCLUDED."collateral_value_usd", "principal_out"=EXCLUDED."principal_out", "utilization"=EXCLUDED."utilization", "monthly_apy"=EXCLUDED."monthly_apy", "spot_apy"=EXCLUDED."spot_apy", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."tvl", t."liquid_assets", t."collateral_value_usd", t."principal_out", t."utilization", t."monthly_apy", t."spot_apy", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."tvl", EXCLUDED."liquid_assets", EXCLUDED."collateral_value_usd", EXCLUDED."principal_out", EXCLUDED."utilization", EXCLUDED."monthly_apy", EXCLUDED."spot_apy", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -1154,7 +1177,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_sky_strategy_state" LIMIT 10000)
     RETURNING "maple_sky_strategy_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_sky_strategy_state" ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
+  INSERT INTO transformed."maple_sky_strategy_state" AS t ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
 SELECT p."chain_id",
        (SELECT l."protocol_id" FROM public."maple_pool" l WHERE l."id"=p."maple_pool_id") AS "protocol_id",
        s."maple_sky_strategy_id",
@@ -1171,7 +1194,8 @@ SELECT p."chain_id",
   WHERE (s."maple_sky_strategy_id", s."synced_at", s."processing_version") IN (SELECT DISTINCT "maple_sky_strategy_id", "synced_at", "processing_version" FROM batch)
     AND s."synced_at" >= (SELECT min("synced_at") FROM batch)
     AND s."synced_at" <= (SELECT max("synced_at") FROM batch)
-  ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "state"=EXCLUDED."state", "currently_deployed"=EXCLUDED."currently_deployed", "deposited_assets"=EXCLUDED."deposited_assets", "withdrawn_assets"=EXCLUDED."withdrawn_assets", "strategy_fee_rate"=EXCLUDED."strategy_fee_rate", "total_fees_collected"=EXCLUDED."total_fees_collected", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."state", t."currently_deployed", t."deposited_assets", t."withdrawn_assets", t."strategy_fee_rate", t."total_fees_collected", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."state", EXCLUDED."currently_deployed", EXCLUDED."deposited_assets", EXCLUDED."withdrawn_assets", EXCLUDED."strategy_fee_rate", EXCLUDED."total_fees_collected", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -1180,7 +1204,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_sky_strategy_state(_from
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_sky_strategy_state" ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
+  INSERT INTO transformed."maple_sky_strategy_state" AS t ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
 SELECT p."chain_id",
        (SELECT l."protocol_id" FROM public."maple_pool" l WHERE l."id"=p."maple_pool_id") AS "protocol_id",
        s."maple_sky_strategy_id",
@@ -1195,7 +1219,8 @@ SELECT p."chain_id",
        s."build_id"
   FROM public."maple_sky_strategy_state" s LEFT JOIN public."maple_sky_strategy" p ON p."id"=s."maple_sky_strategy_id"
   WHERE s."synced_at" >= _from AND s."synced_at" < _to
-  ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "state"=EXCLUDED."state", "currently_deployed"=EXCLUDED."currently_deployed", "deposited_assets"=EXCLUDED."deposited_assets", "withdrawn_assets"=EXCLUDED."withdrawn_assets", "strategy_fee_rate"=EXCLUDED."strategy_fee_rate", "total_fees_collected"=EXCLUDED."total_fees_collected", "build_id"=EXCLUDED."build_id"
+    WHERE (t."chain_id", t."protocol_id", t."state", t."currently_deployed", t."deposited_assets", t."withdrawn_assets", t."strategy_fee_rate", t."total_fees_collected", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."state", EXCLUDED."currently_deployed", EXCLUDED."deposited_assets", EXCLUDED."withdrawn_assets", EXCLUDED."strategy_fee_rate", EXCLUDED."total_fees_collected", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -1252,7 +1277,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_syrup_global_state" LIMIT 10000)
     RETURNING "chain_id", "synced_at", "processing_version"
   ), ins AS (
-  INSERT INTO transformed."maple_syrup_global_state" ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
+  INSERT INTO transformed."maple_syrup_global_state" AS t ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
 SELECT "chain_id",
        "synced_at" AS "snapshot_time",
        "tvl",
@@ -1266,7 +1291,8 @@ SELECT "chain_id",
   WHERE ("chain_id", "synced_at", "processing_version") IN (SELECT DISTINCT "chain_id", "synced_at", "processing_version" FROM batch)
     AND "synced_at" >= (SELECT min("synced_at") FROM batch)
     AND "synced_at" <= (SELECT max("synced_at") FROM batch)
-  ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO UPDATE SET "tvl"=EXCLUDED."tvl", "apy"=EXCLUDED."apy", "collateral_apy"=EXCLUDED."collateral_apy", "pool_apy"=EXCLUDED."pool_apy", "drips_yield_boost"=EXCLUDED."drips_yield_boost", "build_id"=EXCLUDED."build_id"
+    WHERE (t."tvl", t."apy", t."collateral_apy", t."pool_apy", t."drips_yield_boost", t."build_id") IS DISTINCT FROM (EXCLUDED."tvl", EXCLUDED."apy", EXCLUDED."collateral_apy", EXCLUDED."pool_apy", EXCLUDED."drips_yield_boost", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -1275,7 +1301,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_syrup_global_state(_from
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."maple_syrup_global_state" ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
+  INSERT INTO transformed."maple_syrup_global_state" AS t ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
 SELECT "chain_id",
        "synced_at" AS "snapshot_time",
        "tvl",
@@ -1287,7 +1313,8 @@ SELECT "chain_id",
        "build_id"
   FROM public."maple_syrup_global_state"
   WHERE "synced_at" >= _from AND "synced_at" < _to
-  ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO NOTHING
+  ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO UPDATE SET "tvl"=EXCLUDED."tvl", "apy"=EXCLUDED."apy", "collateral_apy"=EXCLUDED."collateral_apy", "pool_apy"=EXCLUDED."pool_apy", "drips_yield_boost"=EXCLUDED."drips_yield_boost", "build_id"=EXCLUDED."build_id"
+    WHERE (t."tvl", t."apy", t."collateral_apy", t."pool_apy", t."drips_yield_boost", t."build_id") IS DISTINCT FROM (EXCLUDED."tvl", EXCLUDED."apy", EXCLUDED."collateral_apy", EXCLUDED."pool_apy", EXCLUDED."drips_yield_boost", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;
@@ -1342,7 +1369,7 @@ BEGIN
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_offchain_token_price" LIMIT 10000)
     RETURNING "token_id", "source_id", "processing_version", "timestamp"
   ), ins AS (
-  INSERT INTO transformed."offchain_token_price" ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
+  INSERT INTO transformed."offchain_token_price" AS t ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
 SELECT "token_id",
        CAST("source_id" AS bigint) AS "source_id",
        "timestamp" AS "snapshot_time",
@@ -1355,7 +1382,8 @@ SELECT "token_id",
   WHERE ("token_id", "source_id", "processing_version", "timestamp") IN (SELECT DISTINCT "token_id", "source_id", "processing_version", "timestamp" FROM batch)
     AND "timestamp" >= (SELECT min("timestamp") FROM batch)
     AND "timestamp" <= (SELECT max("timestamp") FROM batch)
-  ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO NOTHING
+  ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO UPDATE SET "price_usd"=EXCLUDED."price_usd", "market_cap_usd"=EXCLUDED."market_cap_usd", "volume_usd"=EXCLUDED."volume_usd", "build_id"=EXCLUDED."build_id"
+    WHERE (t."price_usd", t."market_cap_usd", t."volume_usd", t."build_id") IS DISTINCT FROM (EXCLUDED."price_usd", EXCLUDED."market_cap_usd", EXCLUDED."volume_usd", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM batch;
   RETURN n;
@@ -1364,7 +1392,7 @@ CREATE OR REPLACE FUNCTION transformed._bootstrap_offchain_token_price(_from tim
 DECLARE n bigint;
 BEGIN
   WITH ins AS (
-  INSERT INTO transformed."offchain_token_price" ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
+  INSERT INTO transformed."offchain_token_price" AS t ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
 SELECT "token_id",
        CAST("source_id" AS bigint) AS "source_id",
        "timestamp" AS "snapshot_time",
@@ -1375,7 +1403,8 @@ SELECT "token_id",
        "build_id"
   FROM public."offchain_token_price"
   WHERE "timestamp" >= _from AND "timestamp" < _to
-  ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO NOTHING
+  ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO UPDATE SET "price_usd"=EXCLUDED."price_usd", "market_cap_usd"=EXCLUDED."market_cap_usd", "volume_usd"=EXCLUDED."volume_usd", "build_id"=EXCLUDED."build_id"
+    WHERE (t."price_usd", t."market_cap_usd", t."volume_usd", t."build_id") IS DISTINCT FROM (EXCLUDED."price_usd", EXCLUDED."market_cap_usd", EXCLUDED."volume_usd", EXCLUDED."build_id")
   RETURNING 1)
   SELECT count(*) INTO n FROM ins;
   RETURN n;

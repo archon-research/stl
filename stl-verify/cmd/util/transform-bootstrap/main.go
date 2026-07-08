@@ -4,13 +4,14 @@
 // the queues), but that only covers rows written after the trigger exists. This
 // job copies everything older, by walking each source's observation-time column
 // in windows and calling transformed._bootstrap_<source>(from, to), which upserts
-// ON CONFLICT DO NOTHING.
+// ON CONFLICT DO UPDATE guarded by IS DISTINCT FROM.
 //
 // Run it once after the migration is applied, out of band from the worker's
 // 10-minute Temporal activity. It enables tiered reads and disables the statement
 // timeout for its own session so S3-tiered history is included and large windows
 // are not cut off. The enqueue triggers are already live, so any rows written
-// while this runs are captured by the queue and de-duplicated by DO NOTHING.
+// while this runs are captured by the queue; the guarded upsert makes the overlap
+// (and re-running the whole job) idempotent.
 //
 // Usage:
 //

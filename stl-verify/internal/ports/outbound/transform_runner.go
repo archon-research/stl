@@ -9,9 +9,10 @@ import "context"
 // queue (transformed._pending_<table>, populated by an AFTER INSERT trigger on
 // the raw table), re-reads just the queued raw rows by primary key, applies the
 // canonical rename/cast/fill, and upserts into the transformed hypertable
-// (ON CONFLICT DO NOTHING; the raw row for a given PK is immutable). The
-// incremental logic lives in those database functions; TransformRunner lists the
-// tables and invokes their run functions.
+// (ON CONFLICT DO UPDATE guarded by IS DISTINCT FROM, so a re-run refreshes a
+// changed row but skips the write when nothing changed). The incremental logic
+// lives in those database functions; TransformRunner lists the tables and
+// invokes their run functions.
 type TransformRunner interface {
 	// ListSources returns the transformed tables to run, one per row in
 	// transformed._sources (seeded by the migration).

@@ -113,7 +113,8 @@ func (r *TransformRunnerRepository) QueueStatus(ctx context.Context) ([]outbound
 
 // BootstrapTable invokes transformed._bootstrap_<source>(from, to), copying the
 // pre-existing raw rows in the [from, to) window of the source's observation-time
-// column into the transformed table (ON CONFLICT DO NOTHING). It is the one-off
+// column into the transformed table (ON CONFLICT DO UPDATE, IS DISTINCT FROM
+// guarded, so re-running is idempotent). It is the one-off
 // history backfill run outside the worker, not part of steady-state refresh; the
 // worker's enqueue triggers cover everything written from bootstrap onward. Same
 // controlled-identifier reasoning as RunTable.
