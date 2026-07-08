@@ -5,14 +5,16 @@ import "context"
 // TransformRunner drives the transformation layer's incremental materialization.
 //
 // Each transformed.<table> has a generated transformed._run_<table>() function
-// (emitted from the schema_master register) that reads raw rows at or past its
-// build_id watermark, applies the canonical rename/cast/fill, upserts into the
-// transformed hypertable, and advances the watermark. The incremental logic
-// lives in those database functions; TransformRunner lists the tables and
-// invokes their run functions.
+// (emitted from the schema_master register) that drains that table's change
+// queue (transformed._pending_<table>, populated by an AFTER INSERT trigger on
+// the raw table), re-reads just the queued raw rows by primary key, applies the
+// canonical rename/cast/fill, and upserts into the transformed hypertable
+// (ON CONFLICT DO NOTHING; the raw row for a given PK is immutable). The
+// incremental logic lives in those database functions; TransformRunner lists the
+// tables and invokes their run functions.
 type TransformRunner interface {
 	// ListSources returns the transformed tables to run, one per row in
-	// transformed._watermark (seeded by the migration).
+	// transformed._sources (seeded by the migration).
 	ListSources(ctx context.Context) ([]string, error)
 
 	// RunTable invokes transformed._run_<source>() and returns the number of

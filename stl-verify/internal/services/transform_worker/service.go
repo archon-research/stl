@@ -1,8 +1,8 @@
 // Package transform_worker runs the transformation layer's incremental
 // materialization on a schedule. Each invocation lists the transformed tables
 // and calls each one's generated run function; the per-table
-// read/transform/upsert/watermark logic lives in the database functions, so
-// this service is the scheduler around them.
+// queue-drain/transform/upsert logic lives in the database functions, so this
+// service is the scheduler around them.
 package transform_worker
 
 import (
@@ -45,7 +45,7 @@ func NewService(runner outbound.TransformRunner, logger *slog.Logger, telemetry 
 // still marked failed and retried on the next tick.
 //
 // An empty source list is treated as a failure, not a clean no-op: the migration
-// seeds one transformed._watermark row per table, so zero sources means the
+// seeds one transformed._sources row per table, so zero sources means the
 // migration has not been applied or the worker is pointed at the wrong database.
 // Returning an error surfaces that instead of silently reporting success.
 func (s *Service) RunOnce(ctx context.Context) error {
@@ -54,7 +54,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("listing transform sources: %w", err)
 	}
 	if len(sources) == 0 {
-		return fmt.Errorf("no transform sources in transformed._watermark (migration not applied or wrong database?)")
+		return fmt.Errorf("no transform sources in transformed._sources (migration not applied or wrong database?)")
 	}
 
 	var (
@@ -62,6 +62,13 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		total int64
 	)
 	for _, source := range sources {
+		// Stop cleanly on shutdown rather than running (and failing) every
+		// remaining table against a cancelled context, which would inflate the
+		// failure count. The already-joined errs still mark the run failed.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errs = append(errs, ctxErr)
+			break
+		}
 		rows, err := s.runner.RunTable(ctx, source)
 		if err != nil {
 			s.logger.Error("transform run failed", "source", source, "error", err)

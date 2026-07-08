@@ -15,13 +15,14 @@ import (
 )
 
 // TestTransformWorker_RunOnce migrates a fresh DB (which creates the transformed
-// schema, its _watermark rows, the _run functions, and the grants), then wires
-// the worker exactly as main() does via setupRunner and runs it end to end. It
-// verifies the wiring: the worker lists sources from transformed._watermark and
-// invokes every _run_<t>() through the real adapter without error, and a second
-// run is still clean. On freshly-migrated tables the raw sources are empty, so
-// the runs upsert 0 rows; the incremental upsert's idempotency is proven at the
-// SQL-function level (VEC-484) and the RunOnce control flow by service_test.go.
+// schema, its _sources rows, the change queues, the enqueue triggers, the _run
+// functions, and the grants), then wires the worker exactly as main() does via
+// setupRunner and runs it end to end. It verifies the wiring: the worker lists
+// sources from transformed._sources and invokes every _run_<t>() through the real
+// adapter without error, and a second run is still clean. On freshly-migrated
+// tables the raw sources are empty, so the runs upsert 0 rows; the queue-drain
+// idempotency is proven at the SQL-function level (VEC-484) and the RunOnce
+// control flow by service_test.go.
 func TestTransformWorker_RunOnce(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	defer cleanup()
@@ -40,41 +41,41 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 
-	// The migration seeds one watermark row per transformed table. Assert a lower
+	// The migration seeds one _sources row per transformed table. Assert a lower
 	// bound plus a known source rather than an exact count, so adding tables in a
 	// later bucket does not break this test.
-	var watermarks int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transformed._watermark`).Scan(&watermarks); err != nil {
-		t.Fatalf("counting watermark rows: %v", err)
+	var sources int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transformed._sources`).Scan(&sources); err != nil {
+		t.Fatalf("counting _sources rows: %v", err)
 	}
-	if watermarks < 1 {
-		t.Fatalf("transformed._watermark rows = %d, want at least 1 (migration not applied?)", watermarks)
+	if sources < 1 {
+		t.Fatalf("transformed._sources rows = %d, want at least 1 (migration not applied?)", sources)
 	}
 
 	var present bool
 	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM transformed._watermark WHERE source = 'morpho_market_state')`,
+		`SELECT EXISTS (SELECT 1 FROM transformed._sources WHERE source = 'morpho_market_state')`,
 	).Scan(&present); err != nil {
 		t.Fatalf("checking known source: %v", err)
 	}
 	if !present {
-		t.Fatal("expected transformed._watermark to contain source 'morpho_market_state'")
+		t.Fatal("expected transformed._sources to contain source 'morpho_market_state'")
 	}
 }
 
-// TestTransformWorker_BackfillHigherBuildLowerBlock is the regression guard for
-// the VEC-484 silent-data-hole (Tore). The transform watermark advances on
-// build_id (a globally monotonic pipeline-run cursor), NOT on block_number. A
-// backfill writes a row with an OLDER block_number under a NEWER (higher)
-// build_id; the old block_number-based watermark permanently skipped such rows.
+// TestTransformWorker_QueueCapturesBackfill is the regression guard for the
+// VEC-484 silent-data-hole. Refresh is queue-driven: an AFTER INSERT trigger on
+// each raw table enqueues the new row's PK into transformed._pending_<t>, and the
+// worker's _run_<t>() drains it. This is immune to the build_id-cursor bug (PR
+// #545 review §1.1): a backfill or reorg row written with a LOWER block_number or
+// an out-of-order build_id is enqueued like any other insert, so it cannot be
+// skipped.
 //
-// The test seeds one raw morpho_market_state row (build_id 100, block 2000),
-// runs the worker, then seeds a backfill row (build_id 101, block 1000 — lower
-// block, higher build) and runs again. Both rows must land in
-// transformed.morpho_market_state. Under the fixed build_id ">=" watermark the
-// count is 2; under the old "block_number > watermark" watermark the backfill
-// row (block 1000 <= 2000) would be dropped and the count would be 1.
-func TestTransformWorker_BackfillHigherBuildLowerBlock(t *testing.T) {
+// The test seeds one live row (build 100, block 2000), runs the worker, then
+// seeds a backfill row (build 101, block 1000 — lower block) and runs again. Both
+// must land in transformed.morpho_market_state (count 2). A block_number or
+// build_id ">=" watermark would have dropped the backfill row (count 1).
+func TestTransformWorker_QueueCapturesBackfill(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	defer cleanup()
 
@@ -101,8 +102,8 @@ func TestTransformWorker_BackfillHigherBuildLowerBlock(t *testing.T) {
 		t.Fatalf("after first run: transformed.morpho_market_state count = %d, want 1", got)
 	}
 
-	// Backfill row: LOWER block (1000) but HIGHER build (101). A block_number
-	// watermark would skip this (1000 <= 2000); the build_id watermark catches it.
+	// Backfill row: LOWER block (1000), out-of-order build (101). The AFTER INSERT
+	// trigger enqueues it like any other insert, so the queue drain must pick it up.
 	seedMorphoMarketState(ctx, t, pool, marketID, morphoStateRow{
 		blockNumber: 1000,
 		buildID:     101,
@@ -114,7 +115,7 @@ func TestTransformWorker_BackfillHigherBuildLowerBlock(t *testing.T) {
 	}
 	if got := countTransformedMarketState(ctx, t, pool); got != 2 {
 		t.Fatalf("after backfill run: transformed.morpho_market_state count = %d, want 2 "+
-			"(the backfilled lower-block/higher-build row was dropped — build_id watermark regression)", got)
+			"(the backfilled lower-block row was dropped — a watermark cursor regressed the queue)", got)
 	}
 }
 
