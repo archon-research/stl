@@ -60,6 +60,9 @@ SELECT p."chain_id",
 FROM public."morpho_market_state" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."morpho_market_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."morpho_market_state" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp"); END IF; END $$;
 SELECT create_hypertable('transformed."morpho_market_state"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."morpho_market_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'morpho_market_id', timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."morpho_market_state"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."morpho_market_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.morpho_market_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('morpho_market_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_morpho_market_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -129,6 +132,9 @@ SELECT p."chain_id",
 FROM public."morpho_market_position" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."morpho_market_position"'::regclass AND contype='p') THEN ALTER TABLE transformed."morpho_market_position" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp"); END IF; END $$;
 SELECT create_hypertable('transformed."morpho_market_position"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."morpho_market_position" SET (timescaledb.compress, timescaledb.compress_segmentby = 'morpho_market_id, user_id', timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."morpho_market_position"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."morpho_market_position"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.morpho_market_position'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('morpho_market_position') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_morpho_market_position() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -192,6 +198,9 @@ SELECT p."chain_id",
 FROM public."morpho_vault_state" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."morpho_vault_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."morpho_vault_state" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp"); END IF; END $$;
 SELECT create_hypertable('transformed."morpho_vault_state"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."morpho_vault_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'morpho_vault_id', timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."morpho_vault_state"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."morpho_vault_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.morpho_vault_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('morpho_vault_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_morpho_vault_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -252,6 +261,9 @@ SELECT p."chain_id",
 FROM public."morpho_vault_position" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."morpho_vault_position"'::regclass AND contype='p') THEN ALTER TABLE transformed."morpho_vault_position" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp"); END IF; END $$;
 SELECT create_hypertable('transformed."morpho_vault_position"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."morpho_vault_position" SET (timescaledb.compress, timescaledb.compress_segmentby = 'morpho_vault_id, user_id', timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."morpho_vault_position"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."morpho_vault_position"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.morpho_vault_position'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('morpho_vault_position') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_morpho_vault_position() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -309,6 +321,9 @@ SELECT p."chain_id",
 FROM public."fluid_vault_state" s LEFT JOIN public."fluid_vault" p ON p."id"=s."fluid_vault_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."fluid_vault_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."fluid_vault_state" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version"); END IF; END $$;
 SELECT create_hypertable('transformed."fluid_vault_state"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."fluid_vault_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'fluid_vault_id', timescaledb.compress_orderby = 'block_timestamp DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."fluid_vault_state"', INTERVAL '14 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."fluid_vault_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.fluid_vault_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('fluid_vault_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_fluid_vault_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -369,6 +384,9 @@ SELECT "chain_id",
 FROM public."token_total_supply" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."token_total_supply"'::regclass AND contype='p') THEN ALTER TABLE transformed."token_total_supply" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp"); END IF; END $$;
 SELECT create_hypertable('transformed."token_total_supply"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."token_total_supply" SET (timescaledb.compress, timescaledb.compress_segmentby = 'chain_id, token_id', timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."token_total_supply"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."token_total_supply"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.token_total_supply'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('token_total_supply') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_token_total_supply() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -421,6 +439,9 @@ SELECT p."chain_id",
 FROM public."onchain_token_price" s LEFT JOIN public."oracle" p ON p."id"=s."oracle_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."onchain_token_price"'::regclass AND contype='p') THEN ALTER TABLE transformed."onchain_token_price" ALTER COLUMN "block_timestamp" SET NOT NULL, ADD PRIMARY KEY ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp"); END IF; END $$;
 SELECT create_hypertable('transformed."onchain_token_price"','block_timestamp',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."onchain_token_price" SET (timescaledb.compress, timescaledb.compress_segmentby = 'oracle_id, token_id', timescaledb.compress_orderby = 'block_number DESC, block_version DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."onchain_token_price"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."onchain_token_price"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.onchain_token_price'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('onchain_token_price') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_onchain_token_price() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -469,6 +490,9 @@ SELECT p."chain_id",
 FROM public."maple_loan_state" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."maple_loan_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."maple_loan_state" ALTER COLUMN "snapshot_time" SET NOT NULL, ADD PRIMARY KEY ("maple_loan_id", "snapshot_time", "processing_version"); END IF; END $$;
 SELECT create_hypertable('transformed."maple_loan_state"','snapshot_time',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."maple_loan_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'maple_loan_id', timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."maple_loan_state"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."maple_loan_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.maple_loan_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('maple_loan_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_maple_loan_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -521,6 +545,9 @@ SELECT p."chain_id",
 FROM public."maple_loan_collateral" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."maple_loan_collateral"'::regclass AND contype='p') THEN ALTER TABLE transformed."maple_loan_collateral" ALTER COLUMN "snapshot_time" SET NOT NULL, ADD PRIMARY KEY ("maple_loan_id", "snapshot_time", "processing_version"); END IF; END $$;
 SELECT create_hypertable('transformed."maple_loan_collateral"','snapshot_time',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."maple_loan_collateral" SET (timescaledb.compress, timescaledb.compress_segmentby = 'maple_loan_id', timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."maple_loan_collateral"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."maple_loan_collateral"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.maple_loan_collateral'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('maple_loan_collateral') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_maple_loan_collateral() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -581,6 +608,9 @@ SELECT p."chain_id",
 FROM public."maple_pool_state" s LEFT JOIN public."maple_pool" p ON p."id"=s."maple_pool_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."maple_pool_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."maple_pool_state" ALTER COLUMN "snapshot_time" SET NOT NULL, ADD PRIMARY KEY ("maple_pool_id", "snapshot_time", "processing_version"); END IF; END $$;
 SELECT create_hypertable('transformed."maple_pool_state"','snapshot_time',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."maple_pool_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'maple_pool_id', timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."maple_pool_state"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."maple_pool_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.maple_pool_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('maple_pool_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_maple_pool_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -640,6 +670,9 @@ SELECT p."chain_id",
 FROM public."maple_sky_strategy_state" s LEFT JOIN public."maple_sky_strategy" p ON p."id"=s."maple_sky_strategy_id" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."maple_sky_strategy_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."maple_sky_strategy_state" ALTER COLUMN "snapshot_time" SET NOT NULL, ADD PRIMARY KEY ("maple_sky_strategy_id", "snapshot_time", "processing_version"); END IF; END $$;
 SELECT create_hypertable('transformed."maple_sky_strategy_state"','snapshot_time',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."maple_sky_strategy_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'maple_sky_strategy_id', timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."maple_sky_strategy_state"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."maple_sky_strategy_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.maple_sky_strategy_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('maple_sky_strategy_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_maple_sky_strategy_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -694,6 +727,9 @@ SELECT "chain_id",
 FROM public."maple_syrup_global_state" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."maple_syrup_global_state"'::regclass AND contype='p') THEN ALTER TABLE transformed."maple_syrup_global_state" ALTER COLUMN "snapshot_time" SET NOT NULL, ADD PRIMARY KEY ("chain_id", "snapshot_time", "processing_version"); END IF; END $$;
 SELECT create_hypertable('transformed."maple_syrup_global_state"','snapshot_time',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."maple_syrup_global_state" SET (timescaledb.compress, timescaledb.compress_segmentby = 'chain_id', timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."maple_syrup_global_state"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."maple_syrup_global_state"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.maple_syrup_global_state'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('maple_syrup_global_state') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_maple_syrup_global_state() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
@@ -741,6 +777,9 @@ SELECT "token_id",
 FROM public."offchain_token_price" WHERE false;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='transformed."offchain_token_price"'::regclass AND contype='p') THEN ALTER TABLE transformed."offchain_token_price" ALTER COLUMN "snapshot_time" SET NOT NULL, ADD PRIMARY KEY ("token_id", "source_id", "processing_version", "snapshot_time"); END IF; END $$;
 SELECT create_hypertable('transformed."offchain_token_price"','snapshot_time',chunk_time_interval=>INTERVAL '30 days',if_not_exists=>TRUE);
+ALTER TABLE transformed."offchain_token_price" SET (timescaledb.compress, timescaledb.compress_segmentby = 'token_id', timescaledb.compress_orderby = 'snapshot_time DESC, processing_version DESC');
+SELECT add_compression_policy('transformed."offchain_token_price"', INTERVAL '2 days', if_not_exists => TRUE);
+DO $$ BEGIN PERFORM add_tiering_policy('transformed."offchain_token_price"', INTERVAL '1 year', if_not_exists => TRUE); EXCEPTION WHEN undefined_function THEN RAISE NOTICE 'add_tiering_policy not available, skipping tiering for transformed.offchain_token_price'; END $$;
 INSERT INTO transformed._watermark(source) VALUES ('offchain_token_price') ON CONFLICT DO NOTHING;
 CREATE OR REPLACE FUNCTION transformed._run_offchain_token_price() RETURNS bigint AS $fn$
 DECLARE bw int; n bigint; mx int;
