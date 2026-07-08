@@ -1,8 +1,8 @@
 // Package main implements a Temporal cronjob worker that materializes the
 // transformation layer incrementally. On each scheduled run it invokes every
-// transformed._run_<table>() function, each of which reads raw rows past its
-// watermark, applies the canonical rename/cast/fill, upserts into the
-// transformed hypertable, and advances the watermark.
+// transformed._run_<table>() function, each of which reads raw rows at or past
+// its build_id watermark, applies the canonical rename/cast/fill, upserts into
+// the transformed hypertable, and advances the watermark.
 package main
 
 import (

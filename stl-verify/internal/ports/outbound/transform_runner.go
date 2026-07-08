@@ -5,8 +5,8 @@ import "context"
 // TransformRunner drives the transformation layer's incremental materialization.
 //
 // Each transformed.<table> has a generated transformed._run_<table>() function
-// (emitted from the schema_master register) that reads raw rows past its
-// watermark, applies the canonical rename/cast/fill, upserts into the
+// (emitted from the schema_master register) that reads raw rows at or past its
+// build_id watermark, applies the canonical rename/cast/fill, upserts into the
 // transformed hypertable, and advances the watermark. The incremental logic
 // lives in those database functions; TransformRunner lists the tables and
 // invokes their run functions.
