@@ -72,7 +72,7 @@ const maxDrainIterations = 1000
 func (r *TransformRunnerRepository) RunTable(ctx context.Context, source string) (int64, error) {
 	fn := pgx.Identifier{"transformed", "_run_" + source}.Sanitize()
 	var total int64
-	for i := 0; i < maxDrainIterations; i++ {
+	for range maxDrainIterations {
 		var consumed int64
 		if err := r.pool.QueryRow(ctx, "SELECT "+fn+"()").Scan(&consumed); err != nil {
 			return total, fmt.Errorf("running transform %q: %w", source, err)
