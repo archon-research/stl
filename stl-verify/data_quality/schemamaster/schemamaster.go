@@ -45,8 +45,8 @@ type Transform struct {
 	Canonical string `json:"canonical"`
 	Action    string `json:"action"`
 	From      string `json:"from"`
-	GuardMin  *int   `json:"guard_min"`
-	GuardMax  *int   `json:"guard_max"`
+	GuardMin  *int64 `json:"guard_min"`
+	GuardMax  *int64 `json:"guard_max"`
 }
 
 // Override is a sanctioned TYPE exemption: a column deliberately kept at accepted_type rather

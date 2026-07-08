@@ -20,6 +20,8 @@ The rulebook: one entry per canonical concept, keyed by column name. `type` is t
 ### `tables`
 Governed tables, with optional per-table governance (`type`, `owner`). A live table not listed here is flagged `unregistered_table`. `type` (`raw_pipeline` / `config` / `dimension`) drives which required-key rules apply.
 
+A few `maple_*` entries (`maple_ftl_loan`, `maple_ftl_loan_state`, `maple_loan_meta`, `maple_pool_meta`, `maple_sky_strategy_meta`) are intentionally left untyped for now, so the required-key pass (gated on `type`) skips them; they still get the per-column, table-coverage, and nullability checks. Typing them is pending per-table classification.
+
 ### `transforms`
 Columns the transformation layer rewrites: `rename` / `cast` / `fill`. A `rename` must already be the canonical type; a `cast` declares its source type in `from`. `guard_min` / `guard_max` are plausibility bounds for an epoch (`int8` → `timestamptz`) cast — values outside the range are NULLed rather than cast. Those bounds are policy read by the transform materializer and the runtime cast check; the conformance check does not use them.
 
