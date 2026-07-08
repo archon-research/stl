@@ -18,8 +18,9 @@
 --
 -- This migration is idempotent and non-destructive: it creates the `transformed` schema and its
 -- tables only if absent, guards the primary-key ALTERs, and passes if_not_exists to
--- create_hypertable. Re-application (e.g. in test harnesses that reset the public schema between
--- cases while the separate `transformed` schema survives) is a no-op and never drops data.
+-- create_hypertable, so re-applying it is a no-op and never drops data. (build_id is assumed
+-- non-decreasing per write: a raw row written with a build_id below the current high-water would
+-- be skipped, so the source tables carry build_id NOT NULL / DEFAULT 0.)
 
 CREATE SCHEMA IF NOT EXISTS transformed;
 
@@ -69,7 +70,7 @@ BEGIN
        s."fee_shares",
        s."processing_version",
        s."build_id"
-  FROM public."morpho_market_state" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id" WHERE s."build_id" >= bw
+  FROM public."morpho_market_state" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "total_supply_assets"=EXCLUDED."total_supply_assets", "total_supply_shares"=EXCLUDED."total_supply_shares", "total_borrow_assets"=EXCLUDED."total_borrow_assets", "total_borrow_shares"=EXCLUDED."total_borrow_shares", "last_update_at"=EXCLUDED."last_update_at", "fee"=EXCLUDED."fee", "prev_borrow_rate"=EXCLUDED."prev_borrow_rate", "interest_accrued"=EXCLUDED."interest_accrued", "fee_shares"=EXCLUDED."fee_shares", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."morpho_market_state"),-1) WHERE source='morpho_market_state';
@@ -114,7 +115,7 @@ BEGIN
        s."borrow_assets",
        s."processing_version",
        s."build_id"
-  FROM public."morpho_market_position" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id" WHERE s."build_id" >= bw
+  FROM public."morpho_market_position" s LEFT JOIN public."morpho_market" p ON p."id"=s."morpho_market_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "supply_shares"=EXCLUDED."supply_shares", "borrow_shares"=EXCLUDED."borrow_shares", "collateral"=EXCLUDED."collateral", "supply_assets"=EXCLUDED."supply_assets", "borrow_assets"=EXCLUDED."borrow_assets", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."morpho_market_position"),-1) WHERE source='morpho_market_position';
@@ -159,7 +160,7 @@ BEGIN
        s."management_fee_shares",
        s."processing_version",
        s."build_id"
-  FROM public."morpho_vault_state" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id" WHERE s."build_id" >= bw
+  FROM public."morpho_vault_state" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "total_assets"=EXCLUDED."total_assets", "total_shares"=EXCLUDED."total_shares", "fee_shares"=EXCLUDED."fee_shares", "new_total_assets"=EXCLUDED."new_total_assets", "previous_total_assets"=EXCLUDED."previous_total_assets", "management_fee_shares"=EXCLUDED."management_fee_shares", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."morpho_vault_state"),-1) WHERE source='morpho_vault_state';
@@ -198,7 +199,7 @@ BEGIN
        s."assets",
        s."processing_version",
        s."build_id"
-  FROM public."morpho_vault_position" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id" WHERE s."build_id" >= bw
+  FROM public."morpho_vault_position" s LEFT JOIN public."morpho_vault" p ON p."id"=s."morpho_vault_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "shares"=EXCLUDED."shares", "assets"=EXCLUDED."assets", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."morpho_vault_position"),-1) WHERE source='morpho_vault_position';
@@ -243,7 +244,7 @@ BEGIN
        s."borrow_rate",
        s."processing_version",
        s."build_id"
-  FROM public."fluid_vault_state" s LEFT JOIN public."fluid_vault" p ON p."id"=s."fluid_vault_id" WHERE s."build_id" >= bw
+  FROM public."fluid_vault_state" s LEFT JOIN public."fluid_vault" p ON p."id"=s."fluid_vault_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO UPDATE SET "total_collateral"=EXCLUDED."total_collateral", "total_debt"=EXCLUDED."total_debt", "supply_exchange_price"=EXCLUDED."supply_exchange_price", "borrow_exchange_price"=EXCLUDED."borrow_exchange_price", "supply_rate"=EXCLUDED."supply_rate", "borrow_rate"=EXCLUDED."borrow_rate", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."fluid_vault_state"),-1) WHERE source='fluid_vault_state';
@@ -282,7 +283,7 @@ BEGIN
        "processing_version",
        "build_id",
        "created_at"
-  FROM public."token_total_supply" WHERE "build_id" >= bw
+  FROM public."token_total_supply" WHERE ("build_id" >= bw OR "build_id" IS NULL)
   ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "total_supply"=EXCLUDED."total_supply", "scaled_total_supply"=EXCLUDED."scaled_total_supply", "source"=EXCLUDED."source", "build_id"=EXCLUDED."build_id", "created_at"=EXCLUDED."created_at";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."token_total_supply"),-1) WHERE source='token_total_supply';
@@ -317,7 +318,7 @@ BEGIN
        s."price_usd",
        s."processing_version",
        s."build_id"
-  FROM public."onchain_token_price" s LEFT JOIN public."oracle" p ON p."id"=s."oracle_id" WHERE s."build_id" >= bw
+  FROM public."onchain_token_price" s LEFT JOIN public."oracle" p ON p."id"=s."oracle_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "price_usd"=EXCLUDED."price_usd", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."onchain_token_price"),-1) WHERE source='onchain_token_price';
@@ -352,7 +353,7 @@ BEGIN
        s."acm_ratio",
        s."processing_version",
        s."build_id"
-  FROM public."maple_loan_state" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id" WHERE s."build_id" >= bw
+  FROM public."maple_loan_state" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "state"=EXCLUDED."state", "principal_owed"=EXCLUDED."principal_owed", "acm_ratio"=EXCLUDED."acm_ratio", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."maple_loan_state"),-1) WHERE source='maple_loan_state';
@@ -395,7 +396,7 @@ BEGIN
        s."liquidation_level",
        s."processing_version",
        s."build_id"
-  FROM public."maple_loan_collateral" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id" WHERE s."build_id" >= bw
+  FROM public."maple_loan_collateral" s LEFT JOIN public."maple_loan" p ON p."id"=s."maple_loan_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "asset_symbol"=EXCLUDED."asset_symbol", "asset_amount"=EXCLUDED."asset_amount", "asset_decimals"=EXCLUDED."asset_decimals", "asset_value_usd"=EXCLUDED."asset_value_usd", "state"=EXCLUDED."state", "custodian"=EXCLUDED."custodian", "liquidation_level"=EXCLUDED."liquidation_level", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."maple_loan_collateral"),-1) WHERE source='maple_loan_collateral';
@@ -438,7 +439,7 @@ BEGIN
        s."spot_apy",
        s."processing_version",
        s."build_id"
-  FROM public."maple_pool_state" s LEFT JOIN public."maple_pool" p ON p."id"=s."maple_pool_id" WHERE s."build_id" >= bw
+  FROM public."maple_pool_state" s LEFT JOIN public."maple_pool" p ON p."id"=s."maple_pool_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO UPDATE SET "tvl"=EXCLUDED."tvl", "liquid_assets"=EXCLUDED."liquid_assets", "collateral_value_usd"=EXCLUDED."collateral_value_usd", "principal_out"=EXCLUDED."principal_out", "utilization"=EXCLUDED."utilization", "monthly_apy"=EXCLUDED."monthly_apy", "spot_apy"=EXCLUDED."spot_apy", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."maple_pool_state"),-1) WHERE source='maple_pool_state';
@@ -479,7 +480,7 @@ BEGIN
        s."total_fees_collected",
        s."processing_version",
        s."build_id"
-  FROM public."maple_sky_strategy_state" s LEFT JOIN public."maple_sky_strategy" p ON p."id"=s."maple_sky_strategy_id" WHERE s."build_id" >= bw
+  FROM public."maple_sky_strategy_state" s LEFT JOIN public."maple_sky_strategy" p ON p."id"=s."maple_sky_strategy_id" WHERE (s."build_id" >= bw OR s."build_id" IS NULL)
   ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO UPDATE SET "state"=EXCLUDED."state", "currently_deployed"=EXCLUDED."currently_deployed", "deposited_assets"=EXCLUDED."deposited_assets", "withdrawn_assets"=EXCLUDED."withdrawn_assets", "strategy_fee_rate"=EXCLUDED."strategy_fee_rate", "total_fees_collected"=EXCLUDED."total_fees_collected", "build_id"=EXCLUDED."build_id", "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."maple_sky_strategy_state"),-1) WHERE source='maple_sky_strategy_state';
@@ -514,7 +515,7 @@ BEGIN
        "drips_yield_boost",
        "processing_version",
        "build_id"
-  FROM public."maple_syrup_global_state" WHERE "build_id" >= bw
+  FROM public."maple_syrup_global_state" WHERE ("build_id" >= bw OR "build_id" IS NULL)
   ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO UPDATE SET "tvl"=EXCLUDED."tvl", "apy"=EXCLUDED."apy", "collateral_apy"=EXCLUDED."collateral_apy", "pool_apy"=EXCLUDED."pool_apy", "drips_yield_boost"=EXCLUDED."drips_yield_boost", "build_id"=EXCLUDED."build_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."maple_syrup_global_state"),-1) WHERE source='maple_syrup_global_state';
@@ -547,7 +548,7 @@ BEGIN
        "volume_usd",
        "processing_version",
        "build_id"
-  FROM public."offchain_token_price" WHERE "build_id" >= bw
+  FROM public."offchain_token_price" WHERE ("build_id" >= bw OR "build_id" IS NULL)
   ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO UPDATE SET "price_usd"=EXCLUDED."price_usd", "market_cap_usd"=EXCLUDED."market_cap_usd", "volume_usd"=EXCLUDED."volume_usd", "build_id"=EXCLUDED."build_id";
   GET DIAGNOSTICS n=ROW_COUNT;
   UPDATE transformed._watermark SET build_wm=COALESCE((SELECT max("build_id") FROM transformed."offchain_token_price"),-1) WHERE source='offchain_token_price';
