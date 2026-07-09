@@ -214,6 +214,16 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
+		// curve_lp_ng is live-forward only by design (migration
+		// 20260709_120000_add_er_missing_price_feeds.sql): the backfill has no
+		// curve dispatch path, so skipping here is a structural decision, not
+		// a per-block failure.
+		if su.Oracle.OracleType.IsCurveLPNGOracle() {
+			s.logger.Info("skipping curve_lp_ng oracle: live-forward only by design, not backfilled",
+				"oracle", su.Oracle.Name)
+			continue
+		}
+
 		wu := &oracleWorkUnit{
 			OracleUnit: su,
 			validFrom:  su.Oracle.DeploymentBlock,

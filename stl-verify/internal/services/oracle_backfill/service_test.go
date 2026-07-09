@@ -2683,3 +2683,67 @@ func TestRun_ERC4626UnderlyingDecimalsMismatch(t *testing.T) {
 		t.Errorf("upserted = %d, want 0 (backfill should have halted)", len(upserted))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// TestRun_SkipsCurveLPNGOracles: curve_lp_ng prices are live-forward only by
+// design (migration 20260709_120000_add_er_missing_price_feeds.sql), so the
+// backfill must skip curve units structurally instead of failing every block
+// on the unsupported oracle type.
+// ---------------------------------------------------------------------------
+
+func TestRun_SkipsCurveLPNGOracles(t *testing.T) {
+	curvePool := common.HexToAddress("0xE79c1C7E24755574438A26D5e062AD2626c04662")
+	usdcFeed := common.HexToAddress("0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6")
+	ausdFeed := common.HexToAddress("0xB00341502DfEA6Ced8A5786b4059d29dA5E4D1FD")
+
+	repo := &mockRepo{
+		getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+			return []*entity.Oracle{{
+				ID: 7, Name: "curve_ausdusdc_lp", Enabled: true,
+				OracleType: entity.OracleTypeCurveLPNG, Address: curvePool,
+				DeploymentBlock: 100, PriceDecimals: 8,
+			}}, nil
+		},
+		getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+			return []*entity.OracleAsset{
+				{ID: 1, OracleID: 7, TokenID: 42, Enabled: true, FeedAddress: usdcFeed, FeedDecimals: 8, QuoteCurrency: "USD"},
+				{ID: 2, OracleID: 7, TokenID: 42, Enabled: true, FeedAddress: ausdFeed, FeedDecimals: 18, QuoteCurrency: "USD"},
+			}, nil
+		},
+		getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+			return map[int64]outbound.TokenInfo{42: {Address: curvePool.Bytes(), Decimals: 18}}, nil
+		},
+	}
+
+	var mu sync.Mutex
+	var factoryCalls []entity.OracleType
+	factory := func(ot entity.OracleType) (outbound.Multicaller, error) {
+		mu.Lock()
+		factoryCalls = append(factoryCalls, ot)
+		mu.Unlock()
+		return &testutil.MockMulticaller{}, nil
+	}
+
+	svc, err := NewService(
+		Config{ChainID: 1, Concurrency: 1, BatchSize: 10, Logger: testutil.DiscardLogger()},
+		&mockHeaderFetcher{},
+		factory,
+		repo,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Run(context.Background(), 100, 102); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(factoryCalls) != 0 {
+		t.Errorf("multicaller factory called %d times (%v), want 0 (curve units skipped before work-unit construction)", len(factoryCalls), factoryCalls)
+	}
+	if upserted := repo.getUpserted(); len(upserted) != 0 {
+		t.Errorf("upserted = %d, want 0", len(upserted))
+	}
+}

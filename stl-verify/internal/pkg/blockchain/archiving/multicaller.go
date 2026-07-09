@@ -2,6 +2,7 @@ package archiving
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"runtime/debug"
@@ -84,6 +85,42 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 	if err != nil {
 		return results, err
 	}
+	m.archiveBatch(ctx, calls, results, blockNumber)
+	return results, nil
+}
+
+// ExecuteAtHash forwards to the inner multicaller's hash-pinned path, then
+// archives the batch the same way Execute does. It passes a nil blockNumber;
+// archiveBatch recovers the real number from the context (see there). An inner
+// multicaller without hash support is a hard error rather than a fallback to
+// Execute: silently downgrading to number-pinning would defeat the reorg
+// correctness the caller asked for.
+func (m *Multicaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	hashInner, ok := m.inner.(outbound.HashPinnedMulticaller)
+	if !ok {
+		return nil, fmt.Errorf("inner multicaller %T does not support hash-pinned reads", m.inner)
+	}
+	results, err := hashInner.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return results, err
+	}
+	m.archiveBatch(ctx, calls, results, nil)
+	return results, nil
+}
+
+// archiveBatch validates the call/result counts and schedules the detached
+// background archive write. Shared by Execute and ExecuteAtHash so both stay
+// in lockstep on truncation handling, metrics, and the fire-and-forget
+// contract.
+func (m *Multicaller) archiveBatch(ctx context.Context, calls []outbound.Call, results []outbound.Result, blockNumber *big.Int) {
+	if blockNumber == nil {
+		// The hash-pinned ExecuteAtHash path has no blockNumber argument; recover
+		// it from the context, where live workers stamp it via WithBlockNumber.
+		// Number-pinned Execute callers pass it positionally and it is unchanged.
+		if bn, ok := BlockNumberFromContext(ctx); ok {
+			blockNumber = big.NewInt(bn)
+		}
+	}
 
 	n := len(calls)
 	if len(results) != n {
@@ -103,17 +140,26 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 	if n == 0 {
 		// Nothing to archive — don't schedule a goroutine that would write a
 		// phantom empty object.
-		return results, nil
+		return
+	}
+
+	mcAddr := m.inner.Address().Hex()
+	if blockNumber == nil {
+		// rawsckey keys objects by block, so archiving at block 0 collides every
+		// such batch under one key (the VEC-471 bug this fix pays down). No caller
+		// legitimately archives without a height, so surface a regression rather
+		// than silently writing genesis. Warn, not error: archiving stays
+		// fire-and-forget and must not break the caller.
+		m.cfg.Logger.Warn("archiving hash-pinned SC call batch with no resolvable block number; keying at block 0",
+			"source", m.cfg.Source,
+			"multicaller", mcAddr,
+		)
 	}
 
 	blockVersion, _ := BlockVersionFromContext(ctx)
-	mcAddr := m.inner.Address().Hex()
 	detached := context.WithoutCancel(ctx)
 	record := m.buildBatchRecord(calls[:n], results[:n], blockNumber, blockVersion, mcAddr)
 	m.scheduleArchive(detached, record)
-	// err is provably nil here (the err != nil path returned above); archiving
-	// never affects the returned error.
-	return results, nil
 }
 
 // Address forwards to the inner multicaller.
