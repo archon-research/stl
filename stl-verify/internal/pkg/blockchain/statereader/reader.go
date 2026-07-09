@@ -42,7 +42,7 @@ func (r *Reader) Read(ctx context.Context, pin outbound.BlockPin, calls []outbou
 		results, err = r.mc.Execute(ctx, calls, big.NewInt(pin.Number()))
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("state read at block %d: %w", pin.Number(), err)
 	}
 	if len(results) != len(calls) {
 		return nil, fmt.Errorf("state read at block %d: %d calls returned %d results", pin.Number(), len(calls), len(results))
