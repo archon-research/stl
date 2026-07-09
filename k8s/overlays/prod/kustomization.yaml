@@ -9,6 +9,7 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
+  - ../../base/fluid-vault-indexer
   - ../../base/allocation-tracker
   - ../../base/avalanche-watcher
   - ../../base/avalanche-backup-worker
@@ -59,6 +60,9 @@ images:
     newTag: "c92be2379ea1a366a5825a7c79b7efba91e7dfe0"
   - name: morpho-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-morpho-indexer
+    newTag: "c92be2379ea1a366a5825a7c79b7efba91e7dfe0"
+  - name: fluid-vault-indexer
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-fluid-vault-indexer
     newTag: "c92be2379ea1a366a5825a7c79b7efba91e7dfe0"
   - name: allocation-tracker
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-allocation-tracker
