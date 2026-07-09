@@ -1,15 +1,19 @@
--- Price feeds for the grove/spark RWA and vault tokens whose allocations amount_usd is
--- NULL today (ER calculation), Ethereum mainnet (chain_id = 1).
--- LIVE-FORWARD ONLY, no backfill (design decision 2026-07-08): rows start producing
--- onchain_token_price after the next oracle-price-worker restart/redeploy (units load
--- once at startup); history stays empty.
+-- Price feeds and registry rows for the grove/spark RWA and vault tokens whose allocations
+-- amount_usd is NULL today (ER calculation), Ethereum mainnet (chain_id = 1).
+-- No backfill is run as part of this rollout: the enabled rows start pricing at the next
+-- oracle-price-worker restart/redeploy (units load once at startup; the curve oracle ships
+-- disabled, see step 4), and oracle-pricing-backfill supports curve_lp_ng if history is
+-- ever needed.
 -- All token contracts (symbol/decimals), feed contracts (decimals/description/answer) and
 -- the Curve pool (coins, get_virtual_price) re-verified live via cast on 2026-07-09.
--- Four steps, ordered by dependency:
+-- Seven steps, ordered by dependency:
 --   1. Seed the priced tokens (fresh-DB determinism; prod rows already exist, no-ops).
 --   2. oracle_asset feed rows under the existing chainlink/redstone oracles.
 --   3. protocol_oracle binding Morpho Blue -> chainlink.
 --   4. curve_lp_ng oracle registry rows for the AUSD/USDC pool (shipped disabled).
+--   5. protocol_oracle binding maple -> chainlink (syrupUSDC/syrupUSDT pricing).
+--   6. RLUSD as an aave-style asset under aave_v3_rwa (Horizon prices it directly).
+--   7. sparkUSDCbc morpho_vault + receipt_token rows (deterministic receipt-path home).
 
 -- ============================================================================
 -- 1. Token seeds. Same precedent as 20260702_120000_maple_syrup_allocation_exposure.sql:
@@ -171,6 +175,69 @@ COMMENT ON COLUMN public.oracle_asset.feed_address IS
   'worker prices the LP token as get_virtual_price() x min(coin feed prices).';
 
 -- ============================================================================
+-- 5. Bind maple -> chainlink. maple binds only aave_v3 (20260702), and aave_v3 carries no
+--    USDC/USDT oracle_asset rows (verified live 2026-07-09), so syrupUSDC (~$105M) and
+--    syrupUSDT price to NULL in the receipt path. chainlink has enabled USDC and USDT
+--    feed rows (20260212, re-verified live). from_block = maple protocol deploy block
+--    (MapleGlobals 11964925, seeded in 20260610): later-of-deploys convention, chainlink
+--    (10606501) predates maple — same as the Morpho Blue binding in step 3.
+-- ============================================================================
+INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+SELECT p.id, o.id, 11964925
+FROM protocol p, oracle o
+WHERE p.chain_id = 1 AND p.name = 'maple' AND o.name = 'chainlink'
+ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
+
+-- ============================================================================
+-- 6. RLUSD as an aave-style asset (no feed_address) under aave_v3_rwa (Horizon). Same
+--    deferred-VEC-210 class as JTRSY/JAAA, but unlike those two RLUSD is priced by the
+--    protocol's own oracle — cast-verified 2026-07-09: Horizon getAssetPrice(RLUSD) =
+--    99990177 (0.9999, 8 decimals), so it cannot revert-stall the getAssetsPrices batch
+--    the way an unpriceable asset would (the syrupUSDC lesson, step 2). The aHorRwaRLUSD
+--    receipt position (~$122.8M, NULL today) resolves via the existing
+--    Aave V3 RWA -> aave_v3_rwa binding (20260505).
+--    RLUSD contract cast-verified 2026-07-09: symbol RLUSD, decimals 18.
+-- ============================================================================
+INSERT INTO token (chain_id, address, symbol, decimals)
+VALUES (1, '\x8292Bb45bf1Ee4d140127049757C2E0fF06317eD'::bytea, 'RLUSD', 18)
+ON CONFLICT (chain_id, address) DO NOTHING;
+
+INSERT INTO oracle_asset (oracle_id, token_id, enabled)
+SELECT o.id, t.id, true
+FROM oracle o, token t
+WHERE o.name = 'aave_v3_rwa' AND t.chain_id = 1
+  AND t.address = '\x8292Bb45bf1Ee4d140127049757C2E0fF06317eD'::bytea
+ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING;
+
+-- ============================================================================
+-- 7. Register sparkUSDCbc (Spark Blue Chip USDC Vault, MetaMorpho v1.1) under Morpho Blue
+--    with USDC underlying, mirroring exactly what morpho_indexer's
+--    discoverAndRegisterVault upserts (morpho_vault + receipt_token together; values match
+--    the live morpho_vault row and the contract, cast-verified 2026-07-09: name, symbol,
+--    asset() = USDC). The vault is one Morpho event away from auto-registration, which
+--    would silently evict it from the direct-holdings path; registering it here makes the
+--    receipt path (with its COALESCE pricing) its permanent home deterministically.
+--    vault_version 2 = MetaMorpho V1.1 (entity.MorphoVaultV1_1); created_at_block
+--    24584948 = the discovery block on the live morpho_vault row, so the indexer's
+--    LEAST(created_at_block) receipt upsert and DO UPDATE vault upsert both no-op.
+-- ============================================================================
+INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
+SELECT 1, p.id, '\x56A76B428244a50513ec81e225a293d128fd581D'::bytea,
+       'Spark Blue Chip USDC Vault', 'sparkUSDCbc', t.id, 2, 24584948
+FROM protocol p, token t
+WHERE p.chain_id = 1 AND p.name = 'Morpho Blue'
+  AND t.chain_id = 1 AND t.address = '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea
+ON CONFLICT (chain_id, address) DO NOTHING;
+
+INSERT INTO receipt_token (chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol, created_at_block, metadata, updated_at)
+SELECT 1, p.id, t.id, '\x56A76B428244a50513ec81e225a293d128fd581D'::bytea,
+       'sparkUSDCbc', 24584948, '{}'::jsonb, NOW()
+FROM protocol p, token t
+WHERE p.chain_id = 1 AND p.name = 'Morpho Blue'
+  AND t.chain_id = 1 AND t.address = '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea
+ON CONFLICT (chain_id, receipt_token_address) DO NOTHING;
+
+-- ============================================================================
 -- Resolution assertions (precedent: 20260610_120000_create_maple_graphql_tables.sql).
 -- Every INSERT above resolves FKs by natural key with ON CONFLICT DO NOTHING, so a
 -- typoed address or missing registry row would silently insert nothing. Fail the
@@ -220,6 +287,61 @@ BEGIN
      AND oa.enabled AND oa.feed_decimals = f.feed_decimals;
     IF cnt <> 2 THEN
         RAISE EXCEPTION 'expected 2 enabled curve_ausdusdc_lp oracle_asset rows with expected feed_decimals, found %', cnt;
+    END IF;
+
+    SELECT COUNT(*) INTO cnt
+    FROM protocol_oracle po
+    JOIN protocol p ON p.id = po.protocol_id AND p.chain_id = 1 AND p.name = 'maple'
+    JOIN oracle o ON o.id = po.oracle_id AND o.name = 'chainlink';
+    IF cnt < 1 THEN
+        RAISE EXCEPTION 'maple -> chainlink protocol_oracle binding missing';
+    END IF;
+
+    -- The maple binding only helps if chainlink actually prices USDC and USDT:
+    -- enabled oracle_asset rows must exist for both, resolved by token ADDRESS
+    -- (labels are not authoritative).
+    SELECT COUNT(*) INTO cnt
+    FROM (VALUES
+        ('\xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'::bytea),
+        ('\xdac17f958d2ee523a2206206994597c13d831ec7'::bytea)
+    ) AS x(token_address)
+    JOIN token t ON t.chain_id = 1 AND t.address = x.token_address
+    JOIN oracle o ON o.name = 'chainlink'
+    JOIN oracle_asset oa ON oa.oracle_id = o.id AND oa.token_id = t.id AND oa.enabled;
+    IF cnt <> 2 THEN
+        RAISE EXCEPTION 'expected enabled chainlink oracle_asset rows for both USDC and USDT, found %', cnt;
+    END IF;
+
+    -- RLUSD under aave_v3_rwa: enabled, aave-style (no feed_address), decimals 18.
+    SELECT COUNT(*) INTO cnt
+    FROM oracle_asset oa
+    JOIN oracle o ON o.id = oa.oracle_id AND o.name = 'aave_v3_rwa'
+    JOIN token t ON t.id = oa.token_id AND t.chain_id = 1
+     AND t.address = '\x8292Bb45bf1Ee4d140127049757C2E0fF06317eD'::bytea
+    WHERE oa.enabled AND oa.feed_address IS NULL AND t.decimals = 18;
+    IF cnt <> 1 THEN
+        RAISE EXCEPTION 'expected 1 enabled feedless aave_v3_rwa RLUSD oracle_asset row (token decimals 18), found %', cnt;
+    END IF;
+
+    -- sparkUSDCbc: both registry rows must resolve with the USDC underlying.
+    SELECT COUNT(*) INTO cnt
+    FROM morpho_vault mv
+    JOIN protocol p ON p.id = mv.protocol_id AND p.chain_id = 1 AND p.name = 'Morpho Blue'
+    JOIN token t ON t.id = mv.asset_token_id
+     AND t.address = '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea
+    WHERE mv.chain_id = 1 AND mv.address = '\x56A76B428244a50513ec81e225a293d128fd581D'::bytea;
+    IF cnt <> 1 THEN
+        RAISE EXCEPTION 'sparkUSDCbc morpho_vault row missing or mis-linked, found %', cnt;
+    END IF;
+
+    SELECT COUNT(*) INTO cnt
+    FROM receipt_token rt
+    JOIN protocol p ON p.id = rt.protocol_id AND p.chain_id = 1 AND p.name = 'Morpho Blue'
+    JOIN token t ON t.id = rt.underlying_token_id
+     AND t.address = '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea
+    WHERE rt.chain_id = 1 AND rt.receipt_token_address = '\x56A76B428244a50513ec81e225a293d128fd581D'::bytea;
+    IF cnt <> 1 THEN
+        RAISE EXCEPTION 'sparkUSDCbc receipt_token row missing or mis-linked, found %', cnt;
     END IF;
 END $$;
 
