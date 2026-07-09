@@ -199,7 +199,7 @@ func (s *VaultDebtService) processBlock(
 	// (see outbound.Multicaller.ExecuteAtHash / VEC-471).
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	if err := s.syncAll(ctx, event.BlockNumber, blockHash, event.Version); err != nil {

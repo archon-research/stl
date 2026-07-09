@@ -209,7 +209,7 @@ func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 	// (see outbound.Multicaller.ExecuteAtHash / VEC-471).
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	state, err := s.caller.ReadState(ctx, blockHash)

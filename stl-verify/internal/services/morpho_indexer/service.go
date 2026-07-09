@@ -281,7 +281,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	var receipts []shared.TransactionReceipt

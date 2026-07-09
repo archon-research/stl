@@ -206,7 +206,7 @@ func (s *Service) processBlock(
 		if len(affected) > 0 {
 			blockHash, err := event.ParsedBlockHash()
 			if err != nil {
-				return err
+				return fmt.Errorf("parse block hash: %w", err)
 			}
 			fetch, err := s.registry.FetchAll(ctx, affected, blockHash)
 			if err != nil {
@@ -240,7 +240,7 @@ func (s *Service) processBlock(
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
 		blockHash, err := event.ParsedBlockHash()
 		if err != nil {
-			return err
+			return fmt.Errorf("parse block hash: %w", err)
 		}
 		if err := s.sweep(ctx, event.BlockNumber, blockHash, event.Version, blockTimestamp); err != nil {
 			return fmt.Errorf("sweep block %d: %w", event.BlockNumber, err)

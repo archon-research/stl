@@ -369,7 +369,7 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	// Fetch prices (RPC span)
@@ -435,7 +435,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	// Fetch prices (RPC span)
@@ -461,7 +461,7 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "convertToAssets"))

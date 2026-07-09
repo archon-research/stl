@@ -209,7 +209,7 @@ func (s *Service) fetchAndProcessReceipts(ctx context.Context, event outbound.Bl
 	blockTimestamp := time.Unix(event.BlockTimestamp, 0).UTC()
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 	return s.processReceipts(ctx, event.ChainID, event.BlockNumber, blockHash, event.Version, receipts, blockTimestamp)
 }
