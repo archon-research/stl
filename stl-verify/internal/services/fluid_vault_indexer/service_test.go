@@ -141,6 +141,7 @@ type serviceFixture struct {
 	cache     *stubCache
 	txm       *stubTxManager
 	querier   *stubBlockQuerier
+	metrics   *mockMetrics
 }
 
 func newServiceForTest(t *testing.T) *serviceFixture {
@@ -151,15 +152,16 @@ func newServiceForTest(t *testing.T) *serviceFixture {
 	cache := &stubCache{receipts: map[int64]json.RawMessage{}}
 	txm := &stubTxManager{}
 	querier := &stubBlockQuerier{head: 19_000_000}
+	metrics := &mockMetrics{}
 
 	svc, err := NewService(
-		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}},
+		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}, Metrics: metrics},
 		stubConsumer{}, cache, querier, chain, txm, repo, tokenRepo, &stubProtocolRepo{},
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return &serviceFixture{svc: svc, chain: chain, repo: repo, tokenRepo: tokenRepo, cache: cache, txm: txm, querier: querier}
+	return &serviceFixture{svc: svc, chain: chain, repo: repo, tokenRepo: tokenRepo, cache: cache, txm: txm, querier: querier, metrics: metrics}
 }
 
 // logOperateTopic returns the topic0 the service treats as a position-change
@@ -295,6 +297,36 @@ func TestProcessBlockEvent_KnownVaultLogWritesSnapshot(t *testing.T) {
 	}
 	if got.BlockNumber != 10 {
 		t.Errorf("blockNumber = %d, want 10", got.BlockNumber)
+	}
+}
+
+// TestProcessBlockEvent_RecordsSuccess: a block that processes cleanly (even one
+// touching no in-scope vault) records exactly one success sample, so the counter
+// is an honest per-block liveness signal through quiet periods.
+func TestProcessBlockEvent_RecordsSuccess(t *testing.T) {
+	f := newServiceForTest(t)
+	f.cache.receipts[10] = receiptsWithLog(t,
+		common.HexToAddress("0x9999999999999999999999999999999999999999"),
+		common.HexToHash("0xabc"))
+
+	if err := f.svc.processBlockEvent(context.Background(), blockEvent(10)); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+	if got := f.metrics.ProcessedStatuses(); len(got) != 1 || got[0] != "success" {
+		t.Errorf("processed statuses = %v, want [success]", got)
+	}
+}
+
+// TestProcessBlockEvent_RecordsError: a block whose processing fails records one
+// error sample and still propagates the error.
+func TestProcessBlockEvent_RecordsError(t *testing.T) {
+	f := newServiceForTest(t) // no receipts cached for block 10 → fetchReceipts errors
+
+	if err := f.svc.processBlockEvent(context.Background(), blockEvent(10)); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if got := f.metrics.ProcessedStatuses(); len(got) != 1 || got[0] != "error" {
+		t.Errorf("processed statuses = %v, want [error]", got)
 	}
 }
 
