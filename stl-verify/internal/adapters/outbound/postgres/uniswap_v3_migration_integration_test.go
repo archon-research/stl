@@ -361,7 +361,7 @@ func TestUniswapV3ColumnComments(t *testing.T) {
 // (WETH/USDC/USDT/wstETH/weETH/rsETH/ezETH via 20260204_110000_seed_sparklend_
 // tokens.sql, stETH via 20260521_105000_seed_steth_token.sql). Upserted here
 // (idempotent ON CONFLICT DO NOTHING) so this test is self-sufficient even
-// though 20260701_100200_seed_uniswap_v3_pools.sql itself is what seeds them
+// though 20260701_100000_create_uniswap_v3_tables.sql itself is what seeds them
 // on a real DB: sibling integration test files in this package TRUNCATE
 // shared tables between runs, so this test must not depend on migration-seeded
 // rows surviving to when it runs (see insertTestUniswapV3Pool below).
@@ -388,7 +388,7 @@ var uniswapV3SeedTokens = []struct {
 }
 
 // uniswapV3MaxLiquidityPerTick mirrors the tickSpacingToMaxLiquidityPerTick()
-// constants used in 20260701_100200_seed_uniswap_v3_pools.sql, keyed by
+// constants used in 20260701_100000_create_uniswap_v3_tables.sql, keyed by
 // tick_spacing. Same four values for every pool sharing that spacing.
 var uniswapV3MaxLiquidityPerTick = map[int]string{
 	1:   "191757530477355301479181766273477",
@@ -430,7 +430,7 @@ var uniswapV3ExpectedPools = []uniswapV3ExpectedPool{
 }
 
 // TestUniswapV3PoolSeed verifies that
-// 20260701_100200_seed_uniswap_v3_pools.sql inserts exactly the 18 real
+// 20260701_100000_create_uniswap_v3_tables.sql inserts exactly the 18 real
 // wstETH/stETH pools from the VEC-261 design spec (§4), with correct
 // fee/tick_spacing pairing, non-null deploy_block, and byte-for-byte
 // token0/token1 addresses -- including the 3 pools where wstETH is token1
@@ -462,7 +462,7 @@ func TestUniswapV3PoolSeed(t *testing.T) {
 	}
 
 	// Self-seed the 18 pool rows too (mirroring, not re-running,
-	// 20260701_100200_seed_uniswap_v3_pools.sql): protocol_repository_
+	// 20260701_100000_create_uniswap_v3_tables.sql): protocol_repository_
 	// integration_test.go and token_repository_integration_test.go TRUNCATE
 	// protocol/token CASCADE, which wipes uniswap_v3_pool's FK rows, so a
 	// migration-only seed does not survive to whichever test runs last in

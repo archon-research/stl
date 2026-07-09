@@ -14,5 +14,5 @@ COMMENT ON COLUMN curve_pool.deploy_block IS
   'Configuration (load-bearing). On-chain deployment block, used to gate snapshot reads. If non-NULL it MUST be a lower bound of the true deploy block (<= actual deploy height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling for not-yet-deployed pools. NULL is permitted and disables the gate (treated as 0 / genesis). Never set it above the true deploy block.';
 
 INSERT INTO migrations (filename)
-VALUES ('20260703_120000_deploy_block_loadbearing_comments.sql')
+VALUES ('20260703_120000_curve_deploy_block_loadbearing_comment.sql')
 ON CONFLICT (filename) DO NOTHING;

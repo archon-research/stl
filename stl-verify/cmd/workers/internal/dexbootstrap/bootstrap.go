@@ -44,6 +44,9 @@ type BootstrapOptions struct {
 	// BuildTime is the compile-time-baked build timestamp the worker exposes
 	// via the buildinfo package.
 	BuildTime string
+	// GitBranch is the ldflags-injected build branch, logged at startup so an
+	// image built from a stray branch is spottable (mirrors the other indexers).
+	GitBranch string
 }
 
 // Deps is the bundle of long-lived clients + repositories created by
@@ -224,10 +227,12 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	d.BuildRegistry = buildReg
 
 	logger.Info("starting "+opts.ServiceName,
+		"dex", cfg.Dex,
 		"queue", cfg.QueueURL,
 		"redis", cfg.RedisAddr,
 		"chainID", cfg.ChainID,
-		"commit", buildReg.GitHash())
+		"commit", buildReg.GitHash(),
+		"branch", opts.GitBranch)
 
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
 		ServiceName:    opts.ServiceName,

@@ -92,7 +92,7 @@ func TestRawCapturedPayload_MirrorsTopicsAndData(t *testing.T) {
 		Data:   "0xdeadbeef",
 	}
 
-	payload, err := RawCapturedPayload(log)
+	payload, err := rawCapturedPayload(log)
 	if err != nil {
 		t.Fatalf("RawCapturedPayload: %v", err)
 	}

@@ -38,11 +38,11 @@ type CapturedLog struct {
 	Payload   json.RawMessage
 }
 
-// RawCapturedPayload builds the {topics, data} JSON payload for a log that is not
+// rawCapturedPayload builds the {topics, data} JSON payload for a log that is not
 // ABI-decoded into a typed payload (unknown topic0, zero-topic logs, or
 // word-sliced fixed-array events), so protocol_event stays a complete mirror of
 // the on-chain log surface.
-func RawCapturedPayload(log shared.Log) (json.RawMessage, error) {
+func rawCapturedPayload(log shared.Log) (json.RawMessage, error) {
 	payload, err := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
 	if err != nil {
 		return nil, fmt.Errorf("marshalling captured log payload (log index %s): %w", log.LogIndex, err)
@@ -124,7 +124,7 @@ func stringifyBigInts(v any) any {
 // AnonymousLogEventName for a zero-topic log); addr is the log's
 // already-validated emitting contract.
 func NewRawCapturedLog(addr common.Address, logIndex uint, txHash common.Hash, eventName string, log shared.Log) (CapturedLog, error) {
-	payload, err := RawCapturedPayload(log)
+	payload, err := rawCapturedPayload(log)
 	if err != nil {
 		return CapturedLog{}, err
 	}

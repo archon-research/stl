@@ -81,7 +81,7 @@ func TestLiveValidation(t *testing.T) {
 	defer cleanupDB()
 
 	// testutil.SetupTimescaleDB applies every db/migrations/*.sql file,
-	// including 20260701_100200_seed_uniswap_v3_pools.sql, so the 18 real
+	// including 20260701_100000_create_uniswap_v3_tables.sql, so the 18 real
 	// pools + counterparty tokens already exist -- no self-seed needed.
 
 	buildID := buildregistry.BuildID(1)

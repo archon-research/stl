@@ -69,6 +69,7 @@ func run(ctx context.Context, args []string) error {
 		ServiceName:  f.ServiceName(),
 		MetricPrefix: f.MetricPrefix(),
 		BuildTime:    BuildTime,
+		GitBranch:    GitBranch,
 	})
 	if err != nil {
 		return err

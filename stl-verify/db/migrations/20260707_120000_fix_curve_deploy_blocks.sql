@@ -2,7 +2,7 @@
 -- on-chain deployment block (PR#519 review finding #4).
 --
 -- deploy_block is load-bearing (see the column COMMENT set in
--- 20260703_120000_deploy_block_loadbearing_comments.sql): dexconsumer.DueSet
+-- 20260703_120000_curve_deploy_block_loadbearing_comment.sql): dexconsumer.DueSet
 -- gates snapshot scheduling on it and HARD-ERRORS ("registry bug" -> the SQS
 -- message is never acked -> the whole chain poison-stalls) when a touched pool
 -- reports deploy_block greater than the block being processed. A value set
@@ -33,6 +33,23 @@ UPDATE curve_pool
 SET    deploy_block = 17272519
 WHERE  chain_id = 1
   AND  pool_address = '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea;
+
+-- Self-verify the final state rather than the UPDATE's row count: if the WHERE
+-- ever fails to match (address stored differently than this bytea literal, wrong
+-- chain_id), the UPDATE silently no-ops and the latent poison-stall this
+-- migration exists to remove would survive a green migration run. Asserting the
+-- end state (not affected-row count) keeps this idempotent on re-run.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM curve_pool
+        WHERE chain_id = 1
+          AND pool_address = '\x21E27a5E5513D6e65C4f830167390997aA84843a'::bytea
+          AND deploy_block = 17272519
+    ) THEN
+        RAISE EXCEPTION 'stETH-ng deploy_block correction did not apply (pool row missing or deploy_block != 17272519)';
+    END IF;
+END $$;
 
 INSERT INTO migrations (filename)
 VALUES ('20260707_120000_fix_curve_deploy_blocks.sql')

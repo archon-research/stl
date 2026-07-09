@@ -18,7 +18,8 @@ spec:
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           # Runs the shared dex-indexer binary (cmd/workers/dex-indexer) with
-          # DEX=uniswap-v3 set via the ConfigMap below.
+          # DEX=uniswap-v3 from uniswap-v3-indexer-config, defined per overlay (VEC-329).
+          # Not defined in this base, so this base is not overlay-wired until then.
           image: dex-indexer
           envFrom:
             - configMapRef:
