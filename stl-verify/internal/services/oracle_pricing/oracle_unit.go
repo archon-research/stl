@@ -77,6 +77,25 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 	return units, nil
 }
 
+// ValidationFeeds returns the feed configs whose on-chain decimals() must be
+// checked against the registry for the unit's oracle type, and whether the
+// type has any. Single source of truth for the live worker and the backfiller:
+// callers silently skip types with no feeds, so per-service copies of this
+// selection would let a new oracle type validate in one service and silently
+// go unvalidated in the other.
+func ValidationFeeds(unit *OracleUnit) ([]blockchain.FeedConfig, bool) {
+	switch {
+	case unit.Oracle.OracleType.IsERC4626Oracle():
+		return blockchain.ERC4626UnderlyingFeeds(unit.ERC4626Vaults), true
+	case unit.Oracle.OracleType.IsCurveLPNGOracle():
+		return unit.CurveLPNGPool.CoinFeeds, true
+	case unit.Oracle.OracleType.IsFeedOracle():
+		return unit.Feeds, true
+	default:
+		return nil, false
+	}
+}
+
 // ConvertNonUSDPrices converts non-USD feed prices to USD using reference feeds.
 // Returns a new slice with converted prices. Feeds without available reference
 // prices are marked as failed in the returned slice.
