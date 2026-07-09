@@ -14,7 +14,7 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 // Telemetry provides OpenTelemetry metrics for the transform worker.
 type Telemetry struct {
 	tableRuns       metric.Int64Counter
-	rowsUpserted    metric.Int64Counter
+	rowsConsumed    metric.Int64Counter
 	queuePending    metric.Int64Gauge
 	queueOldestAge  metric.Float64Gauge
 	parityDrift     metric.Int64Gauge
@@ -39,11 +39,11 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	); err != nil {
 		return nil, fmt.Errorf("creating tableRuns counter: %w", err)
 	}
-	if t.rowsUpserted, err = meter.Int64Counter(
-		"transform.rows_upserted.total",
-		metric.WithDescription("Rows upserted into transformed tables, by table"),
+	if t.rowsConsumed, err = meter.Int64Counter(
+		"transform.queue.rows_consumed.total",
+		metric.WithDescription("Queue rows consumed (drained) per table; the guard/DISTINCT make actual upserts <= this"),
 	); err != nil {
-		return nil, fmt.Errorf("creating rowsUpserted counter: %w", err)
+		return nil, fmt.Errorf("creating rowsConsumed counter: %w", err)
 	}
 	if t.queuePending, err = meter.Int64Gauge(
 		"transform.queue.pending",
@@ -78,15 +78,15 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	return t, nil
 }
 
-// RecordTableSuccess counts one successful run and the rows it upserted.
-// Nil-safe so unit tests may pass a nil Telemetry.
-func (t *Telemetry) RecordTableSuccess(ctx context.Context, source string, rows int64) {
+// RecordTableSuccess counts one successful run and the queue rows it consumed
+// (drained). Nil-safe so unit tests may pass a nil Telemetry.
+func (t *Telemetry) RecordTableSuccess(ctx context.Context, source string, rowsConsumed int64) {
 	if t == nil {
 		return
 	}
 	table := attribute.String("table", source)
 	t.tableRuns.Add(ctx, 1, metric.WithAttributes(table, attribute.String("status", "success")))
-	t.rowsUpserted.Add(ctx, rows, metric.WithAttributes(table))
+	t.rowsConsumed.Add(ctx, rowsConsumed, metric.WithAttributes(table))
 }
 
 // RecordTableFailure counts one failed run. Nil-safe.

@@ -66,10 +66,10 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 // TestTransformWorker_QueueCapturesBackfill is the regression guard for the
 // VEC-484 silent-data-hole. Refresh is queue-driven: an AFTER INSERT trigger on
 // each raw table enqueues the new row's PK into transformed._pending_<t>, and the
-// worker's _run_<t>() drains it. This is immune to the build_id-cursor bug (PR
-// #545 review §1.1): a backfill or reorg row written with a LOWER block_number or
-// an out-of-order build_id is enqueued like any other insert, so it cannot be
-// skipped.
+// worker's _run_<t>() drains it. Because enqueue is driven by the insert itself,
+// a backfill or reorg row written with a LOWER block_number or an out-of-order
+// build_id is enqueued like any other insert, so it cannot be skipped by an
+// ordering cursor.
 //
 // The test seeds one live row (build 100, block 2000), runs the worker, then
 // seeds a backfill row (build 101, block 1000 — lower block) and runs again. Both

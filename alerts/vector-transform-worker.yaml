@@ -89,7 +89,7 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformqueuestalled
 
       # -----------------------------------------------------------------------
-      # WARNING — raw-vs-transformed parity drift (the backstop, review 5.A)
+      # WARNING — raw-vs-transformed parity drift (the correctness backstop)
       # -----------------------------------------------------------------------
       - alert: VectorTransformParityDrift
         # drift = raw - transformed - pending, recorded per source each tick from

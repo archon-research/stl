@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -134,20 +133,4 @@ func (r *TransformRunnerRepository) ParityStatus(ctx context.Context) ([]outboun
 		return nil, fmt.Errorf("iterating transform parity status: %w", err)
 	}
 	return out, nil
-}
-
-// BootstrapTable invokes transformed._bootstrap_<source>(from, to), copying the
-// pre-existing raw rows in the [from, to) window of the source's observation-time
-// column into the transformed table (ON CONFLICT DO UPDATE, IS DISTINCT FROM
-// guarded, so re-running is idempotent). It is the one-off
-// history backfill run outside the worker, not part of steady-state refresh; the
-// worker's enqueue triggers cover everything written from bootstrap onward. Same
-// controlled-identifier reasoning as RunTable.
-func (r *TransformRunnerRepository) BootstrapTable(ctx context.Context, source string, from, to time.Time) (int64, error) {
-	fn := pgx.Identifier{"transformed", "_bootstrap_" + source}.Sanitize()
-	var rows int64
-	if err := r.pool.QueryRow(ctx, "SELECT "+fn+"($1, $2)", from, to).Scan(&rows); err != nil {
-		return 0, fmt.Errorf("bootstrapping transform %q [%s, %s): %w", source, from, to, err)
-	}
-	return rows, nil
 }

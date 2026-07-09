@@ -96,7 +96,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 
 // recordQueueDepth emits the per-source backlog gauges that back the
 // stalled-transform alert. A read failure is logged but does not fail the run:
-// materialization already succeeded, and the alert also fires on missing metrics.
+// materialization already succeeded, so a metrics-read hiccup should not mark the
+// cycle failed; the next tick re-emits.
 func (s *Service) recordQueueDepth(ctx context.Context) {
 	depths, err := s.runner.QueueStatus(ctx)
 	if err != nil {

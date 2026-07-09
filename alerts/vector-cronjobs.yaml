@@ -135,7 +135,7 @@ groups:
           max by (cluster, deployment) (
             kube_deployment_status_replicas_available{
               namespace="vector",
-              deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator"
+              deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
             }
           ) < 1
         for: 10m

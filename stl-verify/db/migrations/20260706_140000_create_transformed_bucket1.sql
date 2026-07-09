@@ -5,7 +5,7 @@
 -- unsound: build_id identifies a git build, not a commit position, so it is reused on rollback
 -- and differs across the multiple binaries that write one raw table; a build_id >= watermark
 -- cursor silently drops rows from a concurrent lower-build writer, a rollback, or an older-image
--- backfill -- see PR #545 review §1.1). Instead:
+-- backfill. Instead:
 --   * Each raw table gets an AFTER INSERT row trigger that appends the new row's raw PK to a
 --     per-table queue transformed._pending_<t>. The queue row commits in the same transaction as
 --     the raw row, so overlap / rollback / backfill / multi-writer are all non-issues, and nothing
@@ -1441,7 +1441,7 @@ UNION ALL
 SELECT 'offchain_token_price'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_offchain_token_price";
 COMMENT ON VIEW transformed._queue_status IS '[Operational] Per-source pending-row count and oldest enqueue time across the transform change queues. oldest_enqueued_at lagging wall-clock = a stalled transform.';
 
--- Raw-vs-transformed parity backstop (review 5.A). drift = raw - transformed - pending;
+-- Raw-vs-transformed parity backstop. drift = raw - transformed - pending;
 -- 0 in a consistent snapshot once bootstrapped, nonzero = a row that never made it into
 -- the queue or the transformed table (the failure mode the stall alert cannot see).
 CREATE OR REPLACE VIEW transformed._parity_status AS

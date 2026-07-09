@@ -27,6 +27,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -58,19 +59,29 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
-	if err := prepareSession(ctx, pool, logger); err != nil {
+	// Run the entire job on ONE connection so the session GUCs below apply to
+	// every query. Setting them via pool.Exec would land each SET on an arbitrary
+	// pooled connection and leave the window queries on others with defaults --
+	// enable_tiered_reads defaults off, so those queries would silently skip
+	// S3-tiered history (and parity cannot catch it: both sides undercount alike).
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Release()
+
+	if err := prepareConn(ctx, conn, logger); err != nil {
 		return err
 	}
 
-	repo := postgres.NewTransformRunnerRepository(pool, logger)
-	sources, err := selectSources(ctx, repo, *only)
+	sources, err := selectSources(ctx, conn, *only)
 	if err != nil {
 		return err
 	}
 
 	end := time.Now().UTC().Add(*step) // one step past now so the live tail is included
 	for _, source := range sources {
-		total, err := bootstrapSource(ctx, repo, source, from, end, *step, logger)
+		total, err := bootstrapSource(ctx, conn, source, from, end, *step, logger)
 		if err != nil {
 			return fmt.Errorf("bootstrapping %q: %w", source, err)
 		}
@@ -81,16 +92,19 @@ func run(ctx context.Context) error {
 }
 
 // bootstrapSource walks [from, end) in step-sized windows, copying each window in
-// its own transaction so WAL and replication lag stay bounded on large tables.
-func bootstrapSource(ctx context.Context, repo *postgres.TransformRunnerRepository, source string, from, end time.Time, step time.Duration, logger *slog.Logger) (int64, error) {
+// its own autocommit statement so WAL and replication lag stay bounded on large
+// tables. source comes from transformed._sources (our controlled table); it is
+// quoted as an identifier regardless (same reasoning as the adapter's RunTable).
+func bootstrapSource(ctx context.Context, conn *pgxpool.Conn, source string, from, end time.Time, step time.Duration, logger *slog.Logger) (int64, error) {
+	fn := pgx.Identifier{"transformed", "_bootstrap_" + source}.Sanitize()
 	var total int64
 	for w := from; w.Before(end); w = w.Add(step) {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		rows, err := repo.BootstrapTable(ctx, source, w, w.Add(step))
-		if err != nil {
-			return total, err
+		var rows int64
+		if err := conn.QueryRow(ctx, "SELECT "+fn+"($1, $2)", w, w.Add(step)).Scan(&rows); err != nil {
+			return total, fmt.Errorf("bootstrapping %q [%s, %s): %w", source, w, w.Add(step), err)
 		}
 		if rows > 0 {
 			logger.Info("bootstrap window", "source", source, "from", w, "to", w.Add(step), "rows", rows)
@@ -100,23 +114,36 @@ func bootstrapSource(ctx context.Context, repo *postgres.TransformRunnerReposito
 	return total, nil
 }
 
-// prepareSession includes S3-tiered history and lifts the statement timeout for
-// this bootstrap connection. enable_tiered_reads is best-effort: it is absent on
-// environments without tiering, which is not an error for the bootstrap.
-func prepareSession(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
-	if _, err := pool.Exec(ctx, "SET statement_timeout = 0"); err != nil {
+// prepareConn includes S3-tiered history and lifts the statement timeout on the
+// bootstrap's single connection. statement_timeout must be lifted (full-history
+// windows can exceed any default) so a failure is fatal; enable_tiered_reads is
+// best-effort because the GUC is absent on environments without tiering.
+func prepareConn(ctx context.Context, conn *pgxpool.Conn, logger *slog.Logger) error {
+	if _, err := conn.Exec(ctx, "SET statement_timeout = 0"); err != nil {
 		return fmt.Errorf("disabling statement timeout: %w", err)
 	}
-	if _, err := pool.Exec(ctx, "SET timescaledb.enable_tiered_reads = on"); err != nil {
+	if _, err := conn.Exec(ctx, "SET timescaledb.enable_tiered_reads = on"); err != nil {
 		logger.Warn("could not enable tiered reads (tiering may be unavailable); bootstrapping untiered data only", "error", err)
 	}
 	return nil
 }
 
-func selectSources(ctx context.Context, repo *postgres.TransformRunnerRepository, only string) ([]string, error) {
-	all, err := repo.ListSources(ctx)
+func selectSources(ctx context.Context, conn *pgxpool.Conn, only string) ([]string, error) {
+	rows, err := conn.Query(ctx, `SELECT source FROM transformed._sources ORDER BY source`)
 	if err != nil {
 		return nil, fmt.Errorf("listing sources: %w", err)
+	}
+	defer rows.Close()
+	var all []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("scanning source: %w", err)
+		}
+		all = append(all, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating sources: %w", err)
 	}
 	if only == "" {
 		return all, nil
