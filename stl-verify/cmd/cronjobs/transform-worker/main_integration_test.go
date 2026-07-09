@@ -219,3 +219,130 @@ func countTransformedMarketState(ctx context.Context, t *testing.T, pool *pgxpoo
 	}
 	return n
 }
+
+// TestTransformWorker_CorrectionReEnqueue verifies a reprocessing correction --
+// the same natural key rewritten under a new build, so the processing_version
+// trigger bumps the version -- lands as a distinct transformed row via the enqueue
+// trigger (not overwriting the original).
+func TestTransformWorker_CorrectionReEnqueue(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("setupRunner: %v", err)
+	}
+
+	marketID := seedMorphoMarket(ctx, t, pool)
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Original write (processing_version 0).
+	seedMorphoMarketState(ctx, t, pool, marketID, morphoStateRow{blockNumber: 1000, buildID: 100, timestamp: ts})
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if got := countTransformedMarketState(ctx, t, pool); got != 1 {
+		t.Fatalf("after original: count = %d, want 1", got)
+	}
+
+	// Correction: same (market, block, block_version, timestamp), new build, so the
+	// processing_version trigger assigns version 1 -> a new PK -> re-enqueued.
+	seedMorphoMarketState(ctx, t, pool, marketID, morphoStateRow{blockNumber: 1000, buildID: 101, timestamp: ts})
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("correction run: %v", err)
+	}
+	if got := countTransformedMarketState(ctx, t, pool); got != 2 {
+		t.Fatalf("after correction: count = %d, want 2 (original + bumped processing_version)", got)
+	}
+
+	var maxPV int
+	if err := pool.QueryRow(ctx,
+		`SELECT max(processing_version) FROM transformed."morpho_market_state"`).Scan(&maxPV); err != nil {
+		t.Fatalf("reading processing_version: %v", err)
+	}
+	if maxPV != 1 {
+		t.Fatalf("max processing_version = %d, want 1 (the correction landed)", maxPV)
+	}
+}
+
+// TestTransformWorker_BootstrapIdempotent verifies transformed._bootstrap_<t>()
+// copies pre-existing history (written while the enqueue trigger was absent) and
+// that re-running it is a guarded no-op.
+func TestTransformWorker_BootstrapIdempotent(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	marketID := seedMorphoMarket(ctx, t, pool)
+
+	// Pre-existing row: insert with the enqueue trigger disabled, so only bootstrap
+	// (not the queue) can pick it up.
+	if _, err := pool.Exec(ctx, `ALTER TABLE public."morpho_market_state" DISABLE TRIGGER "_transform_enqueue"`); err != nil {
+		t.Fatalf("disabling enqueue trigger: %v", err)
+	}
+	seedMorphoMarketState(ctx, t, pool, marketID, morphoStateRow{
+		blockNumber: 500, buildID: 40, timestamp: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if _, err := pool.Exec(ctx, `ALTER TABLE public."morpho_market_state" ENABLE TRIGGER "_transform_enqueue"`); err != nil {
+		t.Fatalf("enabling enqueue trigger: %v", err)
+	}
+
+	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	to := from.AddDate(0, 0, 1)
+
+	var inserted int64
+	if err := pool.QueryRow(ctx,
+		`SELECT transformed._bootstrap_morpho_market_state($1, $2)`, from, to).Scan(&inserted); err != nil {
+		t.Fatalf("bootstrap run 1: %v", err)
+	}
+	if inserted != 1 {
+		t.Fatalf("bootstrap run 1 inserted = %d, want 1", inserted)
+	}
+
+	var rerun int64
+	if err := pool.QueryRow(ctx,
+		`SELECT transformed._bootstrap_morpho_market_state($1, $2)`, from, to).Scan(&rerun); err != nil {
+		t.Fatalf("bootstrap run 2: %v", err)
+	}
+	if rerun != 0 {
+		t.Fatalf("bootstrap run 2 (idempotent) affected = %d, want 0", rerun)
+	}
+	if got := countTransformedMarketState(ctx, t, pool); got != 1 {
+		t.Fatalf("after bootstrap: count = %d, want 1", got)
+	}
+}
+
+// TestTransformWorker_MultiIterationDrain seeds more than one drain batch (>10k
+// rows), so RunTable must loop: the bounded _run consumes drainBatch rows, then
+// the remainder, until the queue is empty and every row is materialized.
+func TestTransformWorker_MultiIterationDrain(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()})
+	if err != nil {
+		t.Fatalf("setupRunner: %v", err)
+	}
+
+	marketID := seedMorphoMarket(ctx, t, pool)
+	const n = 10_001 // one past the 10k drain batch, so the drain needs two iterations
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO public."morpho_market_state"
+		    (morpho_market_id, block_number, block_version, timestamp,
+		     total_supply_assets, total_supply_shares, total_borrow_assets, total_borrow_shares,
+		     last_update, fee, build_id)
+		SELECT $1, gs, 0, timestamptz '2026-01-01 00:00:00+00' + (gs * interval '1 second'),
+		       0, 0, 0, 0, 0, 0, 100
+		FROM generate_series(1, $2) gs`, marketID, n); err != nil {
+		t.Fatalf("bulk seeding %d rows: %v", n, err)
+	}
+
+	if err := runner.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := countTransformedMarketState(ctx, t, pool); got != n {
+		t.Fatalf("after multi-iteration drain: count = %d, want %d", got, n)
+	}
+}

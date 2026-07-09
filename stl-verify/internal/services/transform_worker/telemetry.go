@@ -15,6 +15,7 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 type Telemetry struct {
 	tableRuns       metric.Int64Counter
 	rowsConsumed    metric.Int64Counter
+	drainBudgetHit  metric.Int64Counter
 	queuePending    metric.Int64Gauge
 	queueOldestAge  metric.Float64Gauge
 	parityDrift     metric.Int64Gauge
@@ -44,6 +45,12 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 		metric.WithDescription("Queue rows consumed (drained) per table; the guard/DISTINCT make actual upserts <= this"),
 	); err != nil {
 		return nil, fmt.Errorf("creating rowsConsumed counter: %w", err)
+	}
+	if t.drainBudgetHit, err = meter.Int64Counter(
+		"transform.drain.budget_exceeded.total",
+		metric.WithDescription("Ticks whose drain budget was spent before all queues were drained (backlog carried to next tick)"),
+	); err != nil {
+		return nil, fmt.Errorf("creating drainBudgetHit counter: %w", err)
 	}
 	if t.queuePending, err = meter.Int64Gauge(
 		"transform.queue.pending",
@@ -98,6 +105,15 @@ func (t *Telemetry) RecordTableFailure(ctx context.Context, source string) {
 		attribute.String("table", source),
 		attribute.String("status", "failure"),
 	))
+}
+
+// RecordDrainBudgetExceeded counts one tick whose drain budget was spent before
+// all queues were drained. Nil-safe.
+func (t *Telemetry) RecordDrainBudgetExceeded(ctx context.Context) {
+	if t == nil {
+		return
+	}
+	t.drainBudgetHit.Add(ctx, 1)
 }
 
 // RecordQueueDepth records one source's change-queue backlog. Nil-safe.

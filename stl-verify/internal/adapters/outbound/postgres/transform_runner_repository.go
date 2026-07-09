@@ -64,16 +64,28 @@ const drainBatch = 10000
 const maxDrainIterations = 1000
 
 // RunTable drains source's queue by calling transformed._run_<source>() until a
-// call consumes fewer than drainBatch rows, and returns the total consumed. The
-// function name is built from source and quoted as an identifier; source
-// originates from transformed._sources (our own controlled table), so this is not
-// attacker-controlled, but it is quoted regardless.
+// call consumes fewer than drainBatch rows, and returns the total consumed. It
+// stops early (cleanly, not an error) when ctx is done, so the caller's per-tick
+// drain budget bounds the work and a large backlog degrades to "picked up next
+// tick" rather than overrunning the Temporal activity: each _run call autocommits,
+// so progress persists. The function name is built from source and quoted as an
+// identifier; source originates from transformed._sources (our own controlled
+// table), so this is not attacker-controlled, but it is quoted regardless.
 func (r *TransformRunnerRepository) RunTable(ctx context.Context, source string) (int64, error) {
 	fn := pgx.Identifier{"transformed", "_run_" + source}.Sanitize()
 	var total int64
 	for range maxDrainIterations {
+		// Between-iteration budget check: stop before starting another batch.
+		if ctx.Err() != nil {
+			return total, nil
+		}
 		var consumed int64
 		if err := r.pool.QueryRow(ctx, "SELECT "+fn+"()").Scan(&consumed); err != nil {
+			// Budget expired mid-call: the batch rolled back (queue restored) and
+			// earlier batches committed, so this is a clean stop, not a failure.
+			if ctx.Err() != nil {
+				return total, nil
+			}
 			return total, fmt.Errorf("running transform %q: %w", source, err)
 		}
 		total += consumed

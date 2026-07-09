@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -86,6 +87,27 @@ func TestRunOnce_RecordsQueueDepthAndParity(t *testing.T) {
 	}
 	if err := svc.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
+	}
+}
+
+// TestRunOnce_DrainBudgetStopsCleanly: when the per-tick drain budget is already
+// spent, RunOnce stops before running any source and does NOT mark the run failed
+// (the backlog is carried to the next tick).
+func TestRunOnce_DrainBudgetStopsCleanly(t *testing.T) {
+	orig := drainBudget
+	drainBudget = -time.Second // deadline in the past: budget immediately exhausted
+	t.Cleanup(func() { drainBudget = orig })
+
+	m := &mockRunner{sources: []string{"a", "b"}, runRows: map[string]int64{"a": 1, "b": 1}}
+	svc, err := NewService(m, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("drain budget expiry should not fail the run, got: %v", err)
+	}
+	if len(m.runCalls) != 0 {
+		t.Errorf("expected no RunTable calls once the budget is spent, got %v", m.runCalls)
 	}
 }
 

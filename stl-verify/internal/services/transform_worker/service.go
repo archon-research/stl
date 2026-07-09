@@ -10,9 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
+
+// drainBudget bounds the total time RunOnce spends draining queues in one tick, so
+// a large backlog is worked off across ticks instead of overrunning the Temporal
+// activity (StartToCloseTimeout 10m) and degrading to timeout + retry noise. Left
+// as a var so tests can shrink it. Kept comfortably under the activity timeout to
+// leave headroom for the queue-depth and parity reads afterwards.
+var drainBudget = 8 * time.Minute
 
 // Service materializes the transformed layer incrementally, once per RunOnce.
 type Service struct {
@@ -57,19 +65,30 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("no transform sources in transformed._sources (migration not applied or wrong database?)")
 	}
 
+	// Bound the whole drain phase to a per-tick budget shared across sources, so the
+	// tick fits inside the Temporal activity. Budget expiry is a clean stop (the rest
+	// is picked up next tick), distinct from parent-context cancellation (shutdown),
+	// which is a real abort.
+	drainCtx, cancel := context.WithTimeout(ctx, drainBudget)
+	defer cancel()
+
 	var (
-		errs  []error
-		total int64
+		errs           []error
+		total          int64
+		budgetExceeded bool
 	)
 	for _, source := range sources {
-		// Stop cleanly on shutdown rather than running (and failing) every
-		// remaining table against a cancelled context, which would inflate the
-		// failure count. The already-joined errs still mark the run failed.
+		// Parent cancellation (shutdown): abort and mark the run failed so it retries.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			errs = append(errs, ctxErr)
 			break
 		}
-		rows, err := s.runner.RunTable(ctx, source)
+		// Drain budget spent: stop cleanly without failing the run.
+		if drainCtx.Err() != nil {
+			budgetExceeded = true
+			break
+		}
+		rows, err := s.runner.RunTable(drainCtx, source)
 		if err != nil {
 			s.logger.Error("transform run failed", "source", source, "error", err)
 			s.telemetry.RecordTableFailure(ctx, source)
@@ -79,6 +98,11 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		total += rows
 		s.logger.Info("transform run complete", "source", source, "rows", rows)
 		s.telemetry.RecordTableSuccess(ctx, source, rows)
+	}
+
+	if budgetExceeded {
+		s.logger.Warn("transform drain budget exceeded; remaining queues picked up next tick", "budget", drainBudget)
+		s.telemetry.RecordDrainBudgetExceeded(ctx)
 	}
 
 	s.recordQueueDepth(ctx)
