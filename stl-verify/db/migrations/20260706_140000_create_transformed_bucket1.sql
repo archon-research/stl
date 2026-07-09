@@ -1429,15 +1429,18 @@ SELECT 'offchain_token_price'::text AS source, count(*) AS pending, min(enqueued
 COMMENT ON VIEW transformed._queue_status IS '[Operational] Per-source pending-row count and oldest enqueue time across the transform change queues. oldest_enqueued_at lagging wall-clock = a stalled transform.';
 
 -- Raw-vs-transformed parity backstop (checkpointed incremental).
--- A ledger holds a verified (raw, transformed, pending) count per source per
--- raw-chunk time-range plus that chunk's pg_stat_all_tables activity baseline, so
--- the worker does not full-count every table each tick. _parity_refresh re-counts
--- only the head chunk and any local chunk whose activity moved (an insert signal
--- the enqueue trigger does NOT own, so a broken trigger still surfaces) or reset;
--- tiered chunks are verified once at bootstrap (_parity_verify_all, tiered reads
--- on) and frozen. drift = sum(raw - transformed - pending) over the ledger; 0 in a
--- consistent snapshot, nonzero = a row that reached neither the transformed table
--- nor its queue.
+-- A ledger holds a verified (raw, transformed, pending) count per source per UTC
+-- DAY-bucket -- a stable time boundary, so raw and transformed (whose chunk
+-- intervals differ, e.g. on maple) are compared over the same window, never a
+-- chunk boundary. A companion table (_parity_chunk_activity) holds each raw chunk's
+-- pg_stat_all_tables insert/delete baseline, so the worker does not full-count every
+-- table each tick: _parity_refresh re-counts only the day-buckets overlapping the
+-- head chunk plus any local chunk whose insert/delete stats moved (a signal the
+-- enqueue trigger does NOT own, so a broken trigger still surfaces) or reset. Tiered
+-- chunks' day-buckets are verified once at bootstrap (_parity_verify_all, tiered
+-- reads on) and frozen. drift = sum(raw - transformed - pending) over the ledger; 0
+-- in a consistent snapshot, nonzero = a row that reached neither the transformed
+-- table nor its queue.
 CREATE TABLE IF NOT EXISTS transformed._parity_ledger(
   source        text        NOT NULL,
   bucket_start  timestamptz NOT NULL,
@@ -1445,16 +1448,27 @@ CREATE TABLE IF NOT EXISTS transformed._parity_ledger(
   raw_count     bigint      NOT NULL,
   xform_count   bigint      NOT NULL,
   pending_count bigint      NOT NULL,
-  activity      bigint,
   frozen        boolean     NOT NULL DEFAULT false,
   verified_at   timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (source, bucket_start)
 );
-COMMENT ON TABLE transformed._parity_ledger IS '[Operational] Checkpointed parity: verified raw/transformed/pending counts per source per raw-chunk time-range, with the chunk pg_stat activity baseline that decides when to re-verify. Tiered buckets are frozen (verified once at bootstrap).';
+COMMENT ON TABLE transformed._parity_ledger IS '[Operational] Checkpointed parity: verified raw/transformed/pending counts per source per UTC day-bucket. Tiered day-buckets are frozen (verified once at bootstrap).';
 COMMENT ON COLUMN transformed._parity_ledger.source IS 'PK. Transformed table name this bucket belongs to.';
-COMMENT ON COLUMN transformed._parity_ledger.bucket_start IS 'PK. Start of the raw-chunk time-range this bucket covers (a time boundary, so raw and transformed -- which have different chunk intervals -- are compared over the same window).';
-COMMENT ON COLUMN transformed._parity_ledger.activity IS 'Raw chunk n_tup_ins+n_tup_del at last verify; a change/reset re-verifies the bucket. NULL for frozen (tiered) buckets.';
-COMMENT ON COLUMN transformed._parity_ledger.frozen IS 'Tiered bucket verified once at bootstrap; never re-counted by the per-tick refresh (would re-read S3).';
+COMMENT ON COLUMN transformed._parity_ledger.bucket_start IS 'PK. Start of the UTC day this bucket covers (date_trunc(''day'')). A time boundary, not a chunk boundary, so raw and transformed -- which have different chunk intervals -- are compared over the same window.';
+COMMENT ON COLUMN transformed._parity_ledger.frozen IS 'Tiered day-bucket verified once at bootstrap; never re-counted by the per-tick refresh (would re-read S3).';
+
+-- Per-chunk insert/delete baseline (n_tup_ins + n_tup_del at last verify). The
+-- per-tick refresh recounts a day-bucket only when a raw chunk overlapping it has an
+-- activity value different from the one stored here (moved or reset). Kept per chunk,
+-- not per day, so a reset in one chunk is never masked by another chunk in the same
+-- day.
+CREATE TABLE IF NOT EXISTS transformed._parity_chunk_activity(
+  source     text   NOT NULL,
+  chunk_name text   NOT NULL,
+  activity   bigint NOT NULL,
+  PRIMARY KEY (source, chunk_name)
+);
+COMMENT ON TABLE transformed._parity_chunk_activity IS '[Operational] Per raw-chunk n_tup_ins+n_tup_del baseline that decides when _parity_refresh re-counts the day-buckets a chunk overlaps.';
 
 -- _parity_count: count rows of _tbl whose time column _col is in [_lo, _hi).
 CREATE OR REPLACE FUNCTION transformed._parity_count(_tbl text, _col text, _lo timestamptz, _hi timestamptz) RETURNS bigint AS $fn$
@@ -1466,11 +1480,12 @@ END $fn$ LANGUAGE plpgsql;
 
 -- _parity_refresh: steady-state incremental refresh for one source. Iterates only
 -- LOCAL chunks (never references the tiered/OSM catalog, so it is safe where OSM is
--- absent, e.g. the OSS test image). Re-counts the head chunk plus any chunk whose
--- activity changed, reset, or is new; skips unchanged non-head local buckets.
+-- absent, e.g. the OSS test image). Re-counts the day-buckets overlapping the head
+-- chunk plus any local chunk whose activity moved, reset, or is new; skips days
+-- already frozen (tiered). Compares on day boundaries, not chunk boundaries.
 CREATE OR REPLACE FUNCTION transformed._parity_refresh(_source text) RETURNS void AS $fn$
 DECLARE
-  raw_col text; xf_col text; head_start timestamptz;
+  raw_col text; xf_col text; head_chunk text; day_ts timestamptz; prev_activity bigint;
   raw_tbl  text := format('public.%I', _source);
   xf_tbl   text := format('transformed.%I', _source);
   pend_tbl text := format('transformed.%I', '_pending_' || _source);
@@ -1484,50 +1499,70 @@ BEGIN
     RAISE EXCEPTION 'parity_refresh: no time dimension for %', _source;
   END IF;
 
-  SELECT max(range_start) INTO head_start FROM timescaledb_information.chunks
-    WHERE hypertable_schema='public' AND hypertable_name=_source;
+  SELECT chunk_name INTO head_chunk FROM timescaledb_information.chunks
+    WHERE hypertable_schema='public' AND hypertable_name=_source
+    ORDER BY range_start DESC LIMIT 1;
 
+  -- One pass over local chunks. Read each chunk's activity ONCE and use that same
+  -- value both to decide whether to recount and to advance the baseline, so a chunk
+  -- can never be marked clean against a newer baseline than its recount used (a
+  -- second pg_stat read could differ, since pg_stat_all_tables is not transactional).
   FOR c IN
-    SELECT ch.range_start AS rs, ch.range_end AS re,
+    SELECT ch.chunk_name AS name, ch.range_start AS rs, ch.range_end AS re,
            COALESCE(st.n_tup_ins,0) + COALESCE(st.n_tup_del,0) AS activity
     FROM timescaledb_information.chunks ch
     LEFT JOIN pg_stat_all_tables st
       ON st.schemaname = ch.chunk_schema AND st.relname = ch.chunk_name
     WHERE ch.hypertable_schema='public' AND ch.hypertable_name=_source
   LOOP
-    IF c.rs IS DISTINCT FROM head_start
-       AND EXISTS (SELECT 1 FROM transformed._parity_ledger l
-                   WHERE l.source=_source AND l.bucket_start=c.rs
-                     AND NOT l.frozen AND l.activity = c.activity)
-    THEN
-      CONTINUE;  -- unchanged non-head local bucket
+    SELECT b.activity INTO prev_activity FROM transformed._parity_chunk_activity b
+      WHERE b.source=_source AND b.chunk_name=c.name;
+
+    -- Recount the head chunk always, plus any chunk that is new (no baseline) or whose
+    -- activity moved or reset. Recount each non-frozen day the chunk overlaps: a day is
+    -- a stable time boundary, so raw and transformed (different chunk intervals) compare
+    -- over the same window.
+    IF c.name IS NOT DISTINCT FROM head_chunk OR prev_activity IS DISTINCT FROM c.activity THEN
+      FOR day_ts IN
+        SELECT gs FROM generate_series(date_trunc('day', c.rs),
+                                       date_trunc('day', c.re - interval '1 microsecond'),
+                                       interval '1 day') gs
+        WHERE NOT EXISTS (SELECT 1 FROM transformed._parity_ledger l
+                           WHERE l.source=_source AND l.bucket_start=gs AND l.frozen)
+      LOOP
+        INSERT INTO transformed._parity_ledger
+          (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, frozen, verified_at)
+        VALUES (_source, day_ts, day_ts + interval '1 day',
+                transformed._parity_count(raw_tbl,  raw_col, day_ts, day_ts + interval '1 day'),
+                transformed._parity_count(xf_tbl,   xf_col,  day_ts, day_ts + interval '1 day'),
+                transformed._parity_count(pend_tbl, raw_col, day_ts, day_ts + interval '1 day'),
+                false, now())
+        ON CONFLICT (source, bucket_start) DO UPDATE SET
+          bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
+          xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,
+          frozen=false, verified_at=now();
+      END LOOP;
     END IF;
-    INSERT INTO transformed._parity_ledger
-      (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, activity, frozen, verified_at)
-    VALUES (_source, c.rs, c.re,
-            transformed._parity_count(raw_tbl,  raw_col, c.rs, c.re),
-            transformed._parity_count(xf_tbl,   xf_col,  c.rs, c.re),
-            transformed._parity_count(pend_tbl, raw_col, c.rs, c.re),
-            c.activity, false, now())
-    ON CONFLICT (source, bucket_start) DO UPDATE SET
-      bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
-      xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,
-      activity=EXCLUDED.activity, frozen=false, verified_at=now();
+
+    -- Advance the baseline to the value just observed (the same read the decision used).
+    INSERT INTO transformed._parity_chunk_activity (source, chunk_name, activity)
+    VALUES (_source, c.name, c.activity)
+    ON CONFLICT (source, chunk_name) DO UPDATE SET activity=EXCLUDED.activity;
   END LOOP;
 END $fn$ LANGUAGE plpgsql;
 
 -- _parity_verify_all: full verify for one source, for bootstrap (run with tiered
--- reads ON). Re-counts every local chunk and every tiered chunk, freezing tiered
--- buckets so the per-tick refresh never re-reads S3. The tiered/OSM catalog is
--- referenced only through a guarded dynamic query, so the tiered pass is a no-op
--- where OSM is absent.
+-- reads ON). Re-counts every day-bucket spanned by local chunks (frozen=false) and
+-- every day-bucket spanned by tiered chunks (frozen=true, so the per-tick refresh
+-- never re-reads S3), and seeds the per-chunk activity baseline. The tiered/OSM
+-- catalog is referenced only through a guarded dynamic query, so the tiered pass is
+-- a no-op where OSM is absent.
 CREATE OR REPLACE FUNCTION transformed._parity_verify_all(_source text) RETURNS void AS $fn$
 DECLARE
-  raw_col text; xf_col text;
+  raw_col text; xf_col text; day_ts timestamptz;
   raw_tbl  text := format('public.%I', _source);
   xf_tbl   text := format('transformed.%I', _source);
   pend_tbl text := format('transformed.%I', '_pending_' || _source);
-  c record;
 BEGIN
   SELECT column_name INTO raw_col FROM timescaledb_information.dimensions
     WHERE hypertable_schema='public' AND hypertable_name=_source;
@@ -1537,43 +1572,60 @@ BEGIN
     RAISE EXCEPTION 'parity_verify_all: no time dimension for %', _source;
   END IF;
 
-  FOR c IN
-    SELECT ch.range_start AS rs, ch.range_end AS re,
-           COALESCE(st.n_tup_ins,0) + COALESCE(st.n_tup_del,0) AS activity
-    FROM timescaledb_information.chunks ch
-    LEFT JOIN pg_stat_all_tables st
-      ON st.schemaname = ch.chunk_schema AND st.relname = ch.chunk_name
+  -- Local day-buckets (frozen=false).
+  FOR day_ts IN
+    SELECT DISTINCT gs
+    FROM timescaledb_information.chunks ch,
+         LATERAL generate_series(date_trunc('day', ch.range_start),
+                                 date_trunc('day', ch.range_end - interval '1 microsecond'),
+                                 interval '1 day') gs
     WHERE ch.hypertable_schema='public' AND ch.hypertable_name=_source
+    ORDER BY gs
   LOOP
     INSERT INTO transformed._parity_ledger
-      (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, activity, frozen, verified_at)
-    VALUES (_source, c.rs, c.re,
-            transformed._parity_count(raw_tbl,  raw_col, c.rs, c.re),
-            transformed._parity_count(xf_tbl,   xf_col,  c.rs, c.re),
-            transformed._parity_count(pend_tbl, raw_col, c.rs, c.re),
-            c.activity, false, now())
+      (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, frozen, verified_at)
+    VALUES (_source, day_ts, day_ts + interval '1 day',
+            transformed._parity_count(raw_tbl,  raw_col, day_ts, day_ts + interval '1 day'),
+            transformed._parity_count(xf_tbl,   xf_col,  day_ts, day_ts + interval '1 day'),
+            transformed._parity_count(pend_tbl, raw_col, day_ts, day_ts + interval '1 day'),
+            false, now())
     ON CONFLICT (source, bucket_start) DO UPDATE SET
       bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
       xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,
-      activity=EXCLUDED.activity, frozen=false, verified_at=now();
+      frozen=false, verified_at=now();
   END LOOP;
 
+  -- Seed the per-chunk activity baseline for all local chunks.
+  INSERT INTO transformed._parity_chunk_activity (source, chunk_name, activity)
+  SELECT _source, ch.chunk_name,
+         COALESCE(st.n_tup_ins,0) + COALESCE(st.n_tup_del,0)
+  FROM timescaledb_information.chunks ch
+  LEFT JOIN pg_stat_all_tables st
+    ON st.schemaname = ch.chunk_schema AND st.relname = ch.chunk_name
+  WHERE ch.hypertable_schema='public' AND ch.hypertable_name=_source
+  ON CONFLICT (source, chunk_name) DO UPDATE SET activity=EXCLUDED.activity;
+
+  -- Tiered day-buckets (frozen=true), guarded so this is a no-op without OSM.
   IF to_regclass('timescaledb_osm.tiered_chunks') IS NOT NULL THEN
-    FOR c IN EXECUTE format(
-      'SELECT range_start AS rs, range_end AS re FROM timescaledb_osm.tiered_chunks WHERE hypertable_schema=%L AND hypertable_name=%L',
+    FOR day_ts IN EXECUTE format(
+      'SELECT DISTINCT gs FROM timescaledb_osm.tiered_chunks t,
+         LATERAL generate_series(date_trunc(''day'', t.range_start),
+                                 date_trunc(''day'', t.range_end - interval ''1 microsecond''),
+                                 interval ''1 day'') gs
+       WHERE t.hypertable_schema=%L AND t.hypertable_name=%L ORDER BY gs',
       'public', _source)
     LOOP
       INSERT INTO transformed._parity_ledger
-        (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, activity, frozen, verified_at)
-      VALUES (_source, c.rs, c.re,
-              transformed._parity_count(raw_tbl,  raw_col, c.rs, c.re),
-              transformed._parity_count(xf_tbl,   xf_col,  c.rs, c.re),
-              transformed._parity_count(pend_tbl, raw_col, c.rs, c.re),
-              NULL, true, now())
+        (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, frozen, verified_at)
+      VALUES (_source, day_ts, day_ts + interval '1 day',
+              transformed._parity_count(raw_tbl,  raw_col, day_ts, day_ts + interval '1 day'),
+              transformed._parity_count(xf_tbl,   xf_col,  day_ts, day_ts + interval '1 day'),
+              transformed._parity_count(pend_tbl, raw_col, day_ts, day_ts + interval '1 day'),
+              true, now())
       ON CONFLICT (source, bucket_start) DO UPDATE SET
         bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
         xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,
-        activity=NULL, frozen=true, verified_at=now();
+        frozen=true, verified_at=now();
     END LOOP;
   END IF;
 END $fn$ LANGUAGE plpgsql;
