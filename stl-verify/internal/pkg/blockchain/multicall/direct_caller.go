@@ -55,6 +55,9 @@ func (c *DirectCaller) Execute(ctx context.Context, calls []outbound.Call, block
 // outbound.Multicaller doc comment for why hash-pinning matters for reorg
 // correctness.
 func (c *DirectCaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	if blockHash == (common.Hash{}) {
+		return nil, fmt.Errorf("block hash is required")
+	}
 	return c.executeAt(ctx, calls, toBlockHashArg(blockHash))
 }
 

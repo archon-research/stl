@@ -1820,6 +1820,63 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	}
 }
 
+// TestProcessBlock_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	answer := big.NewInt(200_000_000_000) // $2000 with 8 decimals
+	mc := newFeedMulticaller(t, []*big.Int{answer})
+
+	cfg := validConfig()
+	cfg.PollInterval = 1 * time.Millisecond
+
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	svc.decimalsValidated = true // skip decimals validation so it doesn't consume multicaller calls
+
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000000,
+		Version:        1,
+		BlockHash:      "",
+		BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected non-nil error from processBlock when event.BlockHash is empty")
+	}
+
+	if mc.CallCount != 0 {
+		t.Errorf("multicaller invoked %d times, want 0", mc.CallCount)
+	}
+	repo.mu.Lock()
+	if repo.upsertPricesCalls != 0 {
+		t.Errorf("UpsertPrices call count = %d, want 0 (block must not be persisted)", repo.upsertPricesCalls)
+	}
+	repo.mu.Unlock()
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestProcessBlock_FeedDecimalsValidation — lazy validation tests
 // ---------------------------------------------------------------------------

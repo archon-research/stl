@@ -487,12 +487,28 @@ func TestDirectCaller_ExecuteAtHash_EmptyCallsReturnsEmpty(t *testing.T) {
 	defer srv.Close()
 
 	dc := newTestDirectCaller(t, srv.URL)
-	results, err := dc.ExecuteAtHash(context.Background(), nil, common.Hash{})
+	results, err := dc.ExecuteAtHash(context.Background(), nil, common.HexToHash("0x1"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(results) != 0 {
 		t.Errorf("results len = %d, want 0", len(results))
+	}
+}
+
+// TestDirectCaller_ExecuteAtHash_RejectsZeroHash guards the hash-pinning
+// contract: a zero block hash is rejected before any RPC round trip, mirroring
+// Execute rejecting a nil block number.
+func TestDirectCaller_ExecuteAtHash_RejectsZeroHash(t *testing.T) {
+	srv := startBatchRPCServer(t, func(req rpcutil.Request) (json.RawMessage, *rpcError) {
+		t.Fatal("no RPC call expected for a zero block hash")
+		return nil, nil
+	})
+	defer srv.Close()
+
+	dc := newTestDirectCaller(t, srv.URL)
+	if _, err := dc.ExecuteAtHash(context.Background(), nil, common.Hash{}); err == nil {
+		t.Fatal("expected error for zero block hash, got nil")
 	}
 }
 

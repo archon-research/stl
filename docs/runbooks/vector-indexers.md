@@ -449,46 +449,55 @@ and the pod logs show `fluid vault indexer started, waiting for messages...`.
 
 ## VectorFluidVaultIndexerStalled
 
-**Severity:** warning · **For:** 15m
+**Severity:** critical · **For:** 15m
 
 ### What it means
 
-The worker is **up** (≥1 replica) but has executed **no VaultResolver multicalls
-for 30 minutes**. A healthy worker on mainnet advances
-`multicall_batch_size_count` regularly (startup reconcile + every block touching
-a known vault), so a sustained zero means one of: a benign quiet period (no
-in-scope sUSDS-debt vault touched, no restart), a wedged poll loop (process alive
-but not processing), or a broken OTLP export (worker fine, metrics stopped — in
-which case `VectorFluidVaultIndexerDown` is **not** firing and other OTel series
-from the pod also go flat).
+The worker is **up** (≥1 replica) but has consumed **no block for 15 minutes**:
+`rate(blocks_processed_total{service_name="fluid-vault-indexer"}[5m])` is zero —
+or the series has **vanished entirely** (the expression zero-fills from
+kube-state-metrics, so a dead OTLP export with a live pod still fires; other
+OTel series from the pod will be flat/absent too). The worker consumes ~1
+`BlockEvent` per mainnet block (~12s) and records one `blocks_processed_total`
+sample per consumed block regardless of whether a vault was touched, so this is
+**not** a quiet vault period — it means the SQS consume loop is wedged (process
+alive but not processing) or the OTLP metric export broke (worker fine, metrics
+stopped). Either way the counter is blind and possibly no Fluid vault state is
+being written. This replaced the old multicall-activity expression, which could
+not distinguish a genuinely quiet vault from a wedged loop.
 
 ### First checks (≤5 min)
 
 1. **Distinguish the cases** — is `VectorFluidVaultIndexerDown` also firing? If
-   so the process is down (treat as Down). If not, the pod is alive — suspect a
-   wedged loop or a metrics-pipeline issue.
+   so the process is down (treat as Down; this rule is replica-gated and should
+   resolve). If not, the pod is alive — it is a wedged loop or a dead metrics
+   export, both of which need action.
 2. **Recent logs** — `kubectl -n vector logs -l app=fluid-vault-indexer --tail=200`.
    Look for a repeating error on one message, `context deadline exceeded` against
    the Alchemy RPC, or silence (poll loop stopped).
 3. **SQS backlog** — check the `stl-<env>-ethereum-fluid_vault.fifo` queue depth.
-   Growing `ApproximateNumberOfMessages` + zero multicalls = wedged (not
-   draining); near-empty queue + zero multicalls = genuine quiet period (benign).
-4. **Upstream** — confirm the ethereum watcher is still producing blocks; if not,
-   that's the root cause (`VectorWatcherNoBlocks`).
+   Growing `ApproximateNumberOfMessages` while the counter is flat confirms the
+   loop is wedged (not draining).
+4. **OTLP export** — if logs show blocks still being processed but the counter is
+   flat, the metrics pipeline is the problem, not the worker; check the OTel
+   collector and other series from the pod (they will be flat too).
+5. **Upstream** — confirm the ethereum watcher is still producing blocks; if not,
+   that's the root cause (`VectorWatcherNoBlocks`) and the queue is legitimately
+   empty.
 
 ### Common causes
 
 - Poison message wedging the poll loop — inspect the DLQ; redrive or purge the
   offending message.
-- Alchemy RPC degraded / rate-limited — multicalls time out; check logs and the
-  Alchemy status.
-- Genuine quiet period on a low-activity target debt token — no action; clears
-  once a vault is next touched.
+- Alchemy RPC degraded / rate-limited — per-block reads time out; check logs and
+  the Alchemy status.
+- Broken OTLP export — worker is processing but metrics stopped flowing; restart
+  the pod or fix the collector.
 
 ### Verify recovery
 
-`increase(multicall_batch_size_count{service_name="fluid-vault-indexer"}[30m]) > 0`,
-or confirm the SQS backlog is draining and recent logs show snapshots written.
+`rate(blocks_processed_total{service_name="fluid-vault-indexer"}[5m]) > 0`, or
+confirm the SQS backlog is draining and recent logs show blocks being processed.
 
 ---
 

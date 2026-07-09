@@ -43,6 +43,15 @@ func (m *MockMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Ca
 	if m.ExecuteAtHashFn != nil {
 		return m.ExecuteAtHashFn(ctx, calls, blockHash)
 	}
+	// VEC-471 moved many indexers' state reads from Execute to ExecuteAtHash.
+	// Their existing tests configure ExecuteFn with shape-based dispatchers keyed
+	// on calls alone (never the block arg), so forwarding an unset ExecuteAtHashFn
+	// to ExecuteFn keeps those tests valid for both entry points without
+	// per-test rewiring. Tests that assert the hash-pinned path was actually used
+	// set ExecuteAtHashFn explicitly, which takes precedence over this fallback.
+	if m.ExecuteFn != nil {
+		return m.ExecuteFn(ctx, calls, nil)
+	}
 	return nil, errors.New("ExecuteAtHash not mocked")
 }
 

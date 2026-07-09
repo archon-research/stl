@@ -85,14 +85,18 @@ func (f *fakePSM3Caller) ResolveImmutables(_ context.Context, blockNumber *big.I
 	return nil
 }
 
-func (f *fakePSM3Caller) ReadState(_ context.Context, blockNumber *big.Int) (*entity.PSM3State, error) {
+// ReadState is now hash-pinned (VEC-471). makeBlockEvents encodes the block
+// number into BlockHash as 0x%064x, so decoding the hash back to an int64 lets
+// the existing block-number assertions keep working unchanged while proving the
+// service threaded the block hash through, not the number.
+func (f *fakePSM3Caller) ReadState(_ context.Context, blockHash common.Hash) (*entity.PSM3State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readAttempts++
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
-	f.readBlocks = append(f.readBlocks, blockNumber.Int64())
+	f.readBlocks = append(f.readBlocks, blockHash.Big().Int64())
 	state := f.state
 	return &state, nil
 }
@@ -560,6 +564,45 @@ func TestSweep_ReadStateError_NoSaveACKsAndSkips(t *testing.T) {
 
 	if got := repo.savedCount(); got != 0 {
 		t.Errorf("expected 0 saved snapshots on read failure, got %d", got)
+	}
+}
+
+// TestSweep_MissingBlockHash_NoCallerReadACKsAndSkips: an event with an empty
+// BlockHash must fail loud before ever reaching the PSM3 caller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors). Like
+// every other sweep failure, this is logged and ACKed rather than NACKed (see
+// processBlock's cadence-clock rationale), so the observable signal is "no
+// chain read, no snapshot saved" rather than a returned error.
+func TestSweep_MissingBlockHash_NoCallerReadACKsAndSkips(t *testing.T) {
+	caller := newFakePSM3Caller()
+	repo := &fakePSM3Repo{}
+	events := []outbound.BlockEvent{{
+		ChainID:        testChainID,
+		BlockNumber:    testBlockNum,
+		Version:        0,
+		BlockHash:      "",
+		ParentHash:     fmt.Sprintf("0x%064x", testBlockNum-1),
+		BlockTimestamp: 1700000000 + testBlockNum,
+		ReceivedAt:     time.Now(),
+	}}
+	consumer := newFakeSQSConsumer(events)
+	svc := newService(t, defaultConfig(1), caller, repo, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not ACKed after missing block hash")
+	cancel()
+	_ = svc.Stop()
+
+	if got := caller.attemptCount(); got != 0 {
+		t.Errorf("expected 0 ReadState attempts (guard must fire before the caller), got %d", got)
+	}
+	if got := repo.savedCount(); got != 0 {
+		t.Errorf("expected 0 saved snapshots on missing block hash, got %d", got)
 	}
 }
 

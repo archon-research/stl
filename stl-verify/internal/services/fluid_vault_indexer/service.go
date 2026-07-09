@@ -57,6 +57,11 @@ type Config struct {
 	// TargetDebtToken is the debt token a vault must use to be in scope. Zero
 	// value defaults to sUSDS.
 	TargetDebtToken common.Address
+
+	// Metrics records one blocks_processed_total sample per consumed block so
+	// liveness is observable even through periods where no in-scope vault is
+	// touched (the multicall metric stays flat then). Optional; nil disables it.
+	Metrics outbound.BackupMetricsRecorder
 }
 
 // Service is the Fluid vault indexer SQS consumer.
@@ -69,6 +74,8 @@ type Service struct {
 	vaultRepo    outbound.FluidVaultRepository
 	tokenRepo    outbound.TokenRepository
 	protocolRepo outbound.ProtocolRepository
+
+	metrics outbound.BackupMetricsRecorder
 
 	blockchain    *blockchainService
 	registry      *VaultRegistry
@@ -137,6 +144,7 @@ func NewService(
 		vaultRepo:     vaultRepo,
 		tokenRepo:     tokenRepo,
 		protocolRepo:  protocolRepo,
+		metrics:       config.Metrics,
 		blockchain:    blockchain,
 		registry:      NewVaultRegistry(logger),
 		deployedTopic: deployed.ID,
@@ -272,7 +280,13 @@ func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error 
 	return nil
 }
 
-func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) error {
+// processBlockEvent handles one consumed block. It records a blocks_processed_total
+// sample for every block — including blocks that touch no in-scope vault — so the
+// counter is the honest per-block liveness signal (the multicall metric only moves
+// when a tracked vault is touched, which can be quiet for days).
+func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) (retErr error) {
+	defer func() { s.recordBlockProcessed(ctx, retErr) }()
+
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
 
 	receipts, err := s.fetchReceipts(ctx, event)
@@ -289,6 +303,17 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 	}
 
 	return s.snapshotVaults(ctx, touched, event)
+}
+
+func (s *Service) recordBlockProcessed(ctx context.Context, err error) {
+	if s.metrics == nil {
+		return
+	}
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	s.metrics.RecordBlockProcessed(ctx, status)
 }
 
 func (s *Service) fetchReceipts(ctx context.Context, event outbound.BlockEvent) ([]shared.TransactionReceipt, error) {

@@ -633,21 +633,25 @@ groups:
       # (.github/workflows/alerts.yml) actually syncs them — a vector-fluid-*
       # namespace would be silently dropped.
       #
-      # Metric coverage: the B2 service emits NO service-level counters/histograms
-      # of its own (no fluid_blocks_processed_total / fluid_errors_total / RPC
-      # latency histogram). The only honest signals today are:
+      # Metric coverage: honest signals available today are:
       #   - kube_deployment_status_replicas_available (kube-state-metrics) —
       #     process liveness, independent of the OTel pipeline (see MapleIndexerDown).
+      #   - blocks_processed_total{service_name="fluid-vault-indexer", chain, status} —
+      #     one sample per consumed block (success/error), via the shared
+      #     telemetry.Metrics counter. This is the per-block liveness signal the
+      #     Stalled rule keys on: it advances every ~12s on mainnet regardless of
+      #     whether an in-scope vault was touched, so a flat counter means the
+      #     consume loop stopped (or OTLP broke), not a quiet vault period.
       #   - multicall_batch_size_count{service_name="fluid-vault-indexer", chain} —
-      #     advances on startup reconcile and on every block touching a known vault.
+      #     advances on startup reconcile and on every block touching a known vault
+      #     (vault-activity signal, NOT liveness; can be flat for days).
       #   - archive_writes_total / archive_object_size_bytes — already covered by
       #     the VectorArchiving* rules above (keyed by service_name), which include
       #     this worker once ARCHIVE_SC_CALLS=true. NOT duplicated here.
-      # Error-rate / silent-empty (rows-written==0) / RPC-latency alerts are
-      # DELIBERATELY OMITTED: no metric exists to make them fire honestly, and a
-      # rule that can never fire is worse than none. Grow this set with
-      # FluidVaultIndexerErrorsHigh / RowsZero / RPCLatencyHigh when the B2 service
-      # is instrumented (follow-up). See the runbook for the same note.
+      # Error-rate / silent-empty (rows-written==0) / RPC-latency alerts are still
+      # OMITTED: no dedicated metric exists to make them fire honestly yet. Grow this
+      # set with FluidVaultIndexerErrorsHigh / RowsZero / RPCLatencyHigh when the
+      # service is further instrumented (VEC-452 phase 2). See the runbook.
 
       - alert: VectorFluidVaultIndexerDown
         # Process liveness from kube-state-metrics (deployment/namespace labels,
@@ -676,22 +680,23 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerdown
 
       - alert: VectorFluidVaultIndexerStalled
-        # Alive-but-wedged / OTLP-broke signal that Down misses. No multicall
-        # Execute in 30m while the pod is up. A healthy worker on mainnet advances
-        # multicall_batch_size_count regularly (startup reconcile + every block
-        # touching a known vault). WARNING, not a page: a genuinely quiet period
-        # (no in-scope sUSDS vault touched, no restart) can legitimately leave
-        # multicalls at 0, so this is a soft signal paired with the critical Down.
-        # The `or (… * 0)` zero-fills a worker that has no sample in the window so
-        # `== 0` matches a true stall, not a missing series; gated on >=1 replica
-        # so it does not double-fire alongside Down on a dead process.
+        # No block consumed for 15m. The worker consumes ~1 BlockEvent per mainnet
+        # block (~12s), so blocks_processed_total advances continuously regardless
+        # of vault activity; the only zero states are a wedged consume loop or a
+        # dead OTLP export — both page-worthy, hence CRITICAL (the old multicall
+        # expression was warning because a quiet vault period could legitimately
+        # read zero). The `or (… * 0)` zero-fill keeps the alive-but-export-dead
+        # case firing: when OTLP breaks, the counter series staleness-expires and
+        # a bare `rate(...) == 0` returns no data (silent); zero-filling from
+        # kube-state (independent of the OTel pipeline) makes it fire. Gated on
+        # >=1 replica so it does not double-fire alongside Down on a dead process.
         expr: |
           (
             (
               sum by (cluster) (
-                increase(multicall_batch_size_count{
+                rate(blocks_processed_total{
                   service_name="fluid-vault-indexer", k8s_namespace_name="vector"
-                }[30m])
+                }[5m])
               )
               or
               max by (cluster) (
@@ -712,17 +717,16 @@ groups:
         for: 15m
         labels:
           team: vector
-          severity: warning
+          severity: critical
           component: fluid-vault-indexer
           namespace: vector
         annotations:
-          summary: "Vector fluid-vault-indexer stalled (no multicall activity >30m)"
+          summary: "Vector fluid-vault-indexer stalled (no block consumed >15m)"
           description: |
-            `fluid-vault-indexer` is up but has executed no VaultResolver
-            multicalls for >30m. Either no Fluid vault was touched (benign quiet
-            period) or the worker is wedged / its SQS poll loop has stopped.
-            Check the pod logs and SQS backlog; if VectorFluidVaultIndexerDown is
-            not firing, suspect a wedged loop or a broken OTLP export.
+            `fluid-vault-indexer` is up but has consumed no block for >15m (or its
+            blocks_processed_total series vanished). The SQS consume loop is wedged
+            or the OTLP metric export broke; possibly no Fluid vault state is being
+            written. Check the pod logs and SQS backlog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerstalled
 
   # curve-indexer (VEC-260) — Curve DEX pool/swap/liquidity indexer.

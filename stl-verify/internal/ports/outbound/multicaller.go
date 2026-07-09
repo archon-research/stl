@@ -13,8 +13,12 @@ type Multicaller interface {
 	// Required for state reads keyed by (blockNumber, version): after a reorg an
 	// archive node answers eth_call-by-number with the new canonical state, which
 	// can silently disagree with the reorged (older-version) data being processed.
-	// Pinning by hash makes the read unambiguous; the node errors if the hash is
-	// no longer canonical instead of silently answering from the wrong fork.
+	// Pinning by hash makes the read unambiguous: the node answers from that exact
+	// block even if it has since been reorged out, and errors only when it no
+	// longer has the block at all, rather than answering from a different fork.
+	// blockHash must be non-zero: implementations reject common.Hash{} rather than
+	// pinning a read to a nonexistent block (mirrors Execute rejecting a nil block
+	// number).
 	ExecuteAtHash(ctx context.Context, calls []Call, blockHash common.Hash) ([]Result, error)
 	Address() common.Address
 }

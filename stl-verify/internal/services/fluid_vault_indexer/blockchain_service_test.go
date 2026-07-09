@@ -86,19 +86,8 @@ func (m *stubMulticaller) Execute(_ context.Context, calls []outbound.Call, bloc
 	return m.responses[idx], nil
 }
 
-// ExecuteAtHash satisfies the outbound.Multicaller interface (widened for
-// reorg-safe hash-pinned reads); the stub answers from the same canned
-// responses as Execute since block identity is irrelevant to the fixture.
-func (m *stubMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	m.calls = append(m.calls, calls)
-	if m.err != nil {
-		return nil, m.err
-	}
-	idx := len(m.calls) - 1
-	if idx >= len(m.responses) {
-		return nil, nil
-	}
-	return m.responses[idx], nil
+func (m *stubMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.Execute(ctx, calls, nil)
 }
 
 func (m *stubMulticaller) Address() common.Address { return m.addr }

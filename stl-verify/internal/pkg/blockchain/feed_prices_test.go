@@ -210,6 +210,7 @@ func TestFetchFeedPrices(t *testing.T) {
 				fABI,
 				tt.feeds,
 				blockNum,
+				oracleTestBlockHash,
 				testutil.DiscardLogger(),
 			)
 
@@ -447,6 +448,7 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 				fABI,
 				tt.feeds,
 				blockNum,
+				oracleTestBlockHash,
 				testutil.DiscardLogger(),
 			)
 
@@ -491,18 +493,23 @@ type callCountMock struct {
 }
 
 func (m *callCountMock) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	return m.dispatch(ctx, calls, blockNumber)
+}
+
+// ExecuteAtHash routes through the same call-count sequence as Execute: VEC-471
+// moved FetchFeedPrices' latestRoundData/latestAnswer rounds to ExecuteAtHash,
+// and these multi-round tests key on call order, not the block arg.
+func (m *callCountMock) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.dispatch(ctx, calls, nil)
+}
+
+func (m *callCountMock) dispatch(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 	if m.callIdx >= len(m.executeFns) {
-		return nil, fmt.Errorf("unexpected Execute call #%d", m.callIdx)
+		return nil, fmt.Errorf("unexpected multicall #%d", m.callIdx)
 	}
 	fn := m.executeFns[m.callIdx]
 	m.callIdx++
 	return fn(ctx, calls, blockNumber)
-}
-
-// ExecuteAtHash is not exercised by feed-price tests (reads are number-pinned);
-// it is here only to satisfy outbound.Multicaller.
-func (m *callCountMock) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return nil, fmt.Errorf("ExecuteAtHash not mocked")
 }
 
 func (m *callCountMock) Address() common.Address {
@@ -520,8 +527,15 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 		{TokenID: 2, FeedAddress: feed2, FeedDecimals: 8, QuoteCurrency: "USD"},
 	}
 
+	// Reads must be pinned to the block hash, not the number: after a reorg an
+	// archive node answers eth_call-by-number with the new canonical feed value,
+	// which can silently disagree with the reorged block being processed (VEC-471).
 	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			t.Fatal("FetchFeedPrices must call ExecuteAtHash for a non-zero block hash, not Execute")
+			return nil, nil
+		},
+		executeAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 			if len(calls) != 2 {
 				t.Fatalf("expected 2 calls, got %d", len(calls))
 			}
@@ -537,8 +551,8 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 					t.Errorf("call[%d].AllowFailure = false, want true", i)
 				}
 			}
-			if blockNumber.Int64() != 99 {
-				t.Errorf("blockNumber = %d, want 99", blockNumber.Int64())
+			if blockHash != oracleTestBlockHash {
+				t.Errorf("blockHash = %s, want %s", blockHash, oracleTestBlockHash)
 			}
 			return []outbound.Result{
 				{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
@@ -547,7 +561,7 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 		},
 	}
 
-	results, err := FetchFeedPrices(context.Background(), mock, fABI, feeds, 99, testutil.DiscardLogger())
+	results, err := FetchFeedPrices(context.Background(), mock, fABI, feeds, 99, oracleTestBlockHash, testutil.DiscardLogger())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

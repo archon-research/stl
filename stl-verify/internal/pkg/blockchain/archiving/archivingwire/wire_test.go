@@ -14,11 +14,9 @@ type stubMulticaller struct{ addr common.Address }
 func (s stubMulticaller) Execute(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
 	return nil, nil
 }
-
 func (s stubMulticaller) ExecuteAtHash(context.Context, []outbound.Call, common.Hash) ([]outbound.Result, error) {
 	return nil, nil
 }
-
 func (s stubMulticaller) Address() common.Address { return s.addr }
 
 func TestEnabled(t *testing.T) {
