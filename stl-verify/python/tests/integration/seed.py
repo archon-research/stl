@@ -557,6 +557,8 @@ async def _ghost_seed_tiebreak_proxy(conn: asyncpg.Connection, prime_id: int, as
 #   * UV_PROXY_NULL_VALUE       allowlisted, underlying_value NULL           -> NULL (surfaced, not legacy)
 #   * UV_PROXY_NON_ALLOWLISTED  unlisted vault, same shape but not allowlisted -> legacy path (no own oracle -> NULL)
 #   * UV_PROXY_PLAIN            plain USDC with own oracle                    -> legacy balance x own price
+#   * UV_PROXY_SPARK_USDC_BC    allowlisted sparkUSDCbc (no own oracle, like  -> underlying_value x USDC price
+#                               mainnet), underlying_value + USDC price
 # ---------------------------------------------------------------------------
 
 UV_PROXY_PRICED = "17" * 20
@@ -564,9 +566,11 @@ UV_PROXY_UNDERLYING_UNPRICED = "27" * 20
 UV_PROXY_NULL_VALUE = "37" * 20
 UV_PROXY_NON_ALLOWLISTED = "47" * 20
 UV_PROXY_PLAIN = "57" * 20
+UV_PROXY_SPARK_USDC_BC = "77" * 20
 
-# Real mainnet address: must match the pricing allowlist in the repository.
+# Real mainnet addresses: must match the pricing allowlist in the repository.
 _UV_SPARK_PRIME_USDC1_HEX = "38464507e02c983f20428a6e8566693fe9e422a9"
+_UV_SPARK_USDC_BC_HEX = "56a76b428244a50513ec81e225a293d128fd581d"
 # Synthetic vault, deliberately NOT in the allowlist. A synthetic (not real)
 # address is used on purpose: a real non-allowlisted vault (e.g. syrupUSDC) can
 # be registered as a receipt_token by a migration, which would route it through
@@ -587,15 +591,28 @@ UV_SPARKPRIME_UNDERLYING_VALUE = Decimal("20138132.383754")
 UV_UNLISTED_UNDERLYING_VALUE = Decimal("105303042.633792")
 UV_UNLISTED_BALANCE = Decimal("89822198.110408")
 UV_USDC_BALANCE = Decimal("1000")
+UV_SPARK_USDC_BC_BALANCE = Decimal("23941576.031287")
+UV_SPARK_USDC_BC_UNDERLYING_VALUE = Decimal("24513997.294816")
 
 
-async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:
+async def _insert_price(
+    conn: asyncpg.Connection,
+    token_id: int,
+    oracle_id: int,
+    price: Decimal,
+    *,
+    block: int = 1000,
+    age: dt.timedelta | None = None,
+) -> None:
+    """Insert one onchain price row; ``age`` backdates the timestamp from NOW()."""
     await conn.execute(
         "INSERT INTO onchain_token_price "
         "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
-        "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+        "VALUES ($1, $2, $3, 0, NOW() - COALESCE($4, INTERVAL '0'), $5)",
         token_id,
         oracle_id,
+        block,
+        age,
         price,
     )
 
@@ -617,6 +634,7 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
 
             usdc_id = await insert_token(conn, "USDC", 6, bytes.fromhex(_UV_USDC_HEX))
             spark_id = await insert_token(conn, "sparkPrimeUSDC1", 6, bytes.fromhex(_UV_SPARK_PRIME_USDC1_HEX))
+            spark_bc_id = await insert_token(conn, "sparkUSDCbc", 18, bytes.fromhex(_UV_SPARK_USDC_BC_HEX))
             unlisted_id = await insert_token(conn, "unlistedVault", 6, bytes.fromhex(_UV_UNLISTED_VAULT_HEX))
             unpriced_id = await insert_token(conn, "NOPRICEUND", 18, bytes.fromhex(_UV_UNPRICED_UNDERLYING_HEX))
 
@@ -685,6 +703,20 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
                 tx="e1" * 32,
                 direction="sweep",
             )
+            # Allowlisted sparkUSDCbc, no own oracle (as on mainnet) -> priced
+            # by underlying_value x USDC price.
+            await insert_allocation_position(
+                conn,
+                token_id=spark_bc_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_SPARK_USDC_BC,
+                balance=UV_SPARK_USDC_BC_BALANCE,
+                block=1000,
+                tx="f1" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARK_USDC_BC_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
+            )
     finally:
         await conn.close()
 
@@ -700,5 +732,127 @@ async def seed_ghost_balance(db_url: str) -> None:
             await _ghost_seed_open_proxy(conn, prime_id, asyrup_id)
             await _ghost_seed_mixed_proxy(conn, prime_id, asyrup_id, usds_id)
             await _ghost_seed_tiebreak_proxy(conn, prime_id, asyrup_id, usds_id)
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Receipt-token redeemable-value seed (ER missing prices)
+#
+# One prime whose single proxy holds four receipt-token positions, one per
+# valuation basis of the receipt-token reads (positions list, per-token and
+# total USD exposure, exposure buckets):
+#   * syrupLike        underlying_value at a non-1:1 share ratio -> priced by it
+#   * legacyReceipt    NULL underlying_value (pre-2026-07-02 row) -> balance-based
+#   * aOneToOne        aToken shape, underlying_value == balance -> unchanged
+#   * divergentReceipt position's own underlying_token_id differs from the
+#                      receipt_token registry's -> registry wins (guard test)
+# All wrap underlyings priced through the migration-seeded 'Aave V3' protocol +
+# 'aave_v3' oracle protocol_oracle binding, which the receipt reads resolve
+# prices through.
+# ---------------------------------------------------------------------------
+
+RUV_PROXY_HEX = "a7" * 20
+
+_RUV_VAULT_HEX = "98" * 20
+_RUV_UNDERLYING_HEX = "b7" * 20
+_RUV_ALT_UNDERLYING_HEX = "b8" * 20
+_RUV_SYRUP_LIKE_RECEIPT_HEX = "c1" * 20
+_RUV_LEGACY_RECEIPT_HEX = "c2" * 20
+_RUV_ATOKEN_RECEIPT_HEX = "c3" * 20
+_RUV_DIVERGENT_RECEIPT_HEX = "c4" * 20
+
+RUV_UNDERLYING_PRICE = Decimal("1.00")
+# Priced but must never be used: the guard test asserts the divergent position
+# is valued by the registry underlying's price, not this one.
+RUV_ALT_UNDERLYING_PRICE = Decimal("5.00")
+
+RUV_SYRUP_LIKE_BALANCE = Decimal("100")
+RUV_SYRUP_LIKE_UNDERLYING_VALUE = Decimal("117.23")
+RUV_LEGACY_BALANCE = Decimal("250")
+RUV_ATOKEN_BALANCE = Decimal("300")
+RUV_DIVERGENT_BALANCE = Decimal("4")
+RUV_DIVERGENT_UNDERLYING_VALUE = Decimal("10")
+
+
+async def _ruv_insert_receipt_token(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    underlying_token_id: int,
+    address: bytes,
+    symbol: str,
+) -> None:
+    await conn.execute(
+        "INSERT INTO receipt_token "
+        "(chain_id, protocol_id, underlying_token_id, receipt_token_address, symbol) "
+        "VALUES (1, $1, $2, $3, $4)",
+        protocol_id,
+        underlying_token_id,
+        address,
+        symbol,
+    )
+
+
+async def seed_receipt_underlying_value_positions(db_url: str) -> None:
+    """Seed the receipt-token redeemable-value scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('receipt_uv', $1) RETURNING id",
+                bytes.fromhex(_RUV_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+            if protocol_id is None or oracle_id is None:
+                raise RuntimeError("Aave V3 protocol / aave_v3 oracle not seeded by migrations")
+
+            underlying_id = await insert_token(conn, "rUSDC", 6, bytes.fromhex(_RUV_UNDERLYING_HEX))
+            alt_underlying_id = await insert_token(conn, "rALT", 6, bytes.fromhex(_RUV_ALT_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, RUV_UNDERLYING_PRICE)
+            await _insert_price(conn, alt_underlying_id, oracle_id, RUV_ALT_UNDERLYING_PRICE)
+
+            receipts = [
+                ("syrupLike", _RUV_SYRUP_LIKE_RECEIPT_HEX),
+                ("legacyReceipt", _RUV_LEGACY_RECEIPT_HEX),
+                ("aOneToOne", _RUV_ATOKEN_RECEIPT_HEX),
+                ("divergentReceipt", _RUV_DIVERGENT_RECEIPT_HEX),
+            ]
+            receipt_token_ids: dict[str, int] = {}
+            for symbol, receipt_hex in receipts:
+                receipt_token_ids[symbol] = await insert_token(conn, symbol, 6, bytes.fromhex(receipt_hex))
+                await _ruv_insert_receipt_token(
+                    conn,
+                    protocol_id=protocol_id,
+                    underlying_token_id=underlying_id,
+                    address=bytes.fromhex(receipt_hex),
+                    symbol=symbol,
+                )
+
+            positions = [
+                # Non-1:1 share ratio: priced by underlying_value, not balance.
+                ("syrupLike", RUV_SYRUP_LIKE_BALANCE, RUV_SYRUP_LIKE_UNDERLYING_VALUE, underlying_id),
+                # Row written before underlying_value existed: balance-based fallback.
+                ("legacyReceipt", RUV_LEGACY_BALANCE, None, None),
+                # aToken: underlying_value == balance by construction, value unchanged.
+                ("aOneToOne", RUV_ATOKEN_BALANCE, RUV_ATOKEN_BALANCE, underlying_id),
+                # Position's own underlying_token_id diverges from the registry's:
+                # pricing must follow the registry (see the guard test).
+                ("divergentReceipt", RUV_DIVERGENT_BALANCE, RUV_DIVERGENT_UNDERLYING_VALUE, alt_underlying_id),
+            ]
+            for index, (symbol, balance, underlying_value, underlying_token_id) in enumerate(positions):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_token_ids[symbol],
+                    prime_id=prime_id,
+                    proxy_hex=RUV_PROXY_HEX,
+                    balance=balance,
+                    block=1000,
+                    tx=f"{index:02x}" * 32,
+                    direction="in",
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_token_id,
+                )
     finally:
         await conn.close()

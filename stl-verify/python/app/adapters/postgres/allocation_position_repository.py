@@ -41,6 +41,9 @@ _USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 _UNDERLYING_VALUE_TOKEN_HEXES = frozenset(
     {
         "38464507e02c983f20428a6e8566693fe9e422a9",  # sparkPrimeUSDC1
+        # sparkUSDCbc: Morpho vault share held bare, no own oracle; priced by
+        # its convertToAssets-derived underlying_value.
+        "56a76b428244a50513ec81e225a293d128fd581d",
     }
 )
 _UNDERLYING_VALUE_TOKEN_ADDRS = [bytes.fromhex(h) for h in _UNDERLYING_VALUE_TOKEN_HEXES]
@@ -378,7 +381,11 @@ class AllocationRepository:
         )
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
-        """Return ``balance × price_usd`` for the prime's holding of a receipt token."""
+        """Return the redeemable-value USD exposure of the prime's receipt-token holding.
+
+        ``COALESCE(underlying_value, balance) × underlying price``; rationale on
+        ``_RECEIPT_TOKEN_POSITIONS_SQL``.
+        """
         try:
             async with self._engine.connect() as conn:
                 result = await conn.execute(
@@ -392,9 +399,9 @@ class AllocationRepository:
                     f"no position or price found for receipt_token_id={receipt_token_id} prime_id={prime_id}"
                 )
 
-            balance = _safe_decimal(row.balance, "balance", f"receipt_token_id={receipt_token_id}")
+            units = _safe_decimal(row.valuation_units, "valuation_units", f"receipt_token_id={receipt_token_id}")
             price_usd = _safe_decimal(row.price_usd, "price_usd", f"receipt_token_id={receipt_token_id}")
-            return balance * price_usd
+            return units * price_usd
         except asyncio.CancelledError:
             raise
         except ValueError:
@@ -726,17 +733,19 @@ class AllocationRepository:
     ) -> list[ExposureBucket]:
         """Return priced receipt-token exposure per time bucket (LOCF gap-filled).
 
-        Per bucket and receipt-token position, the last observed balance is
-        carried forward and valued at the *latest* underlying oracle price (via
-        the protocol-bound oracle), then summed across positions. The balance is
-        the historical driver; the price is held at its latest value because
-        ``onchain_token_price`` is change-only, so a bucketed price-LOCF would
-        drop stable assets whose last price change predates the window. This is
-        exact for the dollar-pegged positions that dominate the book; for
-        volatile underlyings (e.g. WETH) historical buckets use the current
-        price (a bounded approximation). Leading buckets before the first
-        balance observation are ``None``. Direct holdings (no receipt token) are
-        excluded, matching the exposure basis of the risk-capital endpoint.
+        Per bucket and receipt-token position, the last observed redeemable
+        value (``COALESCE(underlying_value, balance)``; rationale on
+        ``_RECEIPT_TOKEN_POSITIONS_SQL``) is carried forward and valued at the
+        *latest* underlying oracle price (via the protocol-bound oracle), then
+        summed across positions. The position size is the historical driver;
+        the price is held at its latest value because ``onchain_token_price``
+        is change-only, so a bucketed price-LOCF would drop stable assets whose
+        last price change predates the window. This is exact for the
+        dollar-pegged positions that dominate the book; for volatile
+        underlyings (e.g. WETH) historical buckets use the current price (a
+        bounded approximation). Leading buckets before the first observation
+        are ``None``. Direct holdings (no receipt token) are excluded, matching
+        the exposure basis of the risk-capital endpoint.
         """
         query = text(
             """
@@ -751,7 +760,7 @@ class AllocationRepository:
                         CAST(:from_timestamp AS TIMESTAMPTZ),
                         CAST(:to_timestamp AS TIMESTAMPTZ)
                     ) AS bucket,
-                    locf(last(ap.balance, ap.created_at)) AS balance
+                    locf(last(COALESCE(ap.underlying_value, ap.balance), ap.created_at)) AS valuation_units
                 FROM allocation_position ap
                 JOIN token t ON t.id = ap.token_id
                 JOIN receipt_token rt
@@ -763,7 +772,7 @@ class AllocationRepository:
             )
             SELECT
                 b.bucket AS bucket_start,
-                SUM(b.balance * COALESCE(px.price_usd, 0)) AS exposure_usd
+                SUM(b.valuation_units * COALESCE(px.price_usd, 0)) AS exposure_usd
             FROM balance_buckets b
             LEFT JOIN LATERAL (
                 SELECT otp.price_usd
@@ -825,6 +834,23 @@ class AllocationRepository:
 # direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)
 # is not a position in any receipt token that wraps it, and attributing it to
 # every such receipt token double-counts and inflates per-token balances.
+#
+# Valuation basis (shared by every receipt position-valuation read: this query,
+# ``_USD_EXPOSURE_SQL``, ``_TOTAL_USD_EXPOSURE_SQL``, and the exposure-buckets
+# query): ``COALESCE(underlying_value, balance) x underlying price``.
+# ``underlying_value`` is the on-chain redeemable value (convertToAssets) in
+# underlying units, so non-1:1 vault shares (syrupUSDC-like) are no longer
+# priced as if one share redeemed one underlying unit; NULL (rows written
+# before the column existed) falls back to the balance basis, and 1:1 aTokens
+# are unchanged (their underlying_value equals balance by construction).
+# Flow-level reads (``net_flow_usd``) deliberately stay balance-based; see
+# ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``.
+#
+# The underlying is priced via the registry's ``receipt_token.underlying_token_id``,
+# not the position's own ``underlying_token_id``: verified identical on every
+# receipt row carrying one (warehouse, 2026-07-09: 5484 rows, 0 divergent), so
+# a divergence indicates an ingest bug and the curated registry stays
+# authoritative.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_receipt_positions AS (
         SELECT DISTINCT ON (rt.id)
@@ -838,6 +864,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             pr.name                                  AS protocol_name,
             ap.chain_id                              AS chain_id,
             ap.balance                               AS balance,
+            ap.underlying_value                      AS underlying_value,
             ap.created_at                            AS latest_activity_at
         FROM allocation_position ap
         JOIN token t          ON t.id = ap.token_id
@@ -859,7 +886,7 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         p.underlying_symbol,
         p.protocol_name,
         p.balance,
-        (p.balance * lp.price_usd) AS amount_usd,
+        (COALESCE(p.underlying_value, p.balance) * lp.price_usd) AS amount_usd,
         p.latest_activity_at
     FROM latest_receipt_positions p
     LEFT JOIN LATERAL (
@@ -947,9 +974,11 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
 """).bindparams(bindparam("uv_token_addrs", expanding=True))
 
 
+# Redeemable-value basis; rationale on _RECEIPT_TOKEN_POSITIONS_SQL. The open-
+# position filter stays on the raw share balance.
 _USD_EXPOSURE_SQL = text("""
 WITH latest_balance AS (
-    SELECT ap.balance
+    SELECT ap.balance, COALESCE(ap.underlying_value, ap.balance) AS valuation_units
     FROM allocation_position ap
     JOIN receipt_token rt ON rt.id = :receipt_token_id
     JOIN token t ON t.id = ap.token_id AND t.address = rt.receipt_token_address
@@ -968,20 +997,22 @@ latest_price AS (
     ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
     LIMIT 1
 )
-SELECT lb.balance, lp.price_usd
+SELECT lb.valuation_units, lp.price_usd
 FROM latest_balance lb
 CROSS JOIN latest_price lp
 WHERE lb.balance > 0
 """)
 
 
+# Redeemable-value basis; rationale on _RECEIPT_TOKEN_POSITIONS_SQL.
 _TOTAL_USD_EXPOSURE_SQL = text("""
 WITH latest_receipt_positions AS (
     SELECT DISTINCT ON (rt.id)
         rt.id                  AS receipt_token_id,
         rt.underlying_token_id AS underlying_token_id,
         rt.protocol_id         AS protocol_id,
-        ap.balance
+        ap.balance,
+        ap.underlying_value
     FROM allocation_position ap
     JOIN token t          ON t.id = ap.token_id
     JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
@@ -991,7 +1022,7 @@ WITH latest_receipt_positions AS (
              ap.block_number DESC, ap.block_version DESC,
              ap.processing_version DESC, ap.log_index DESC
 )
-SELECT COALESCE(SUM(p.balance * lp.price_usd), 0) AS total_usd_exposure
+SELECT COALESCE(SUM(COALESCE(p.underlying_value, p.balance) * lp.price_usd), 0) AS total_usd_exposure
 FROM latest_receipt_positions p
 LEFT JOIN LATERAL (
     SELECT otp.price_usd
@@ -1090,6 +1121,12 @@ LIMIT :limit
 # flows; direct-holding moves are not reflected until their in/out/sweep
 # classification is trustworthy. Flows with no receipt-token oracle price
 # contribute 0.
+#
+# Flows stay balance-based (share units x underlying price) even though the
+# position-valuation reads price by redeemable value: ``underlying_value``
+# describes the position's balance at one block, not individual tx amounts, so
+# converting a flow needs a per-tx share ratio that is not stored. Accepted
+# limitation.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH receipt_token_price AS (
     -- Latest underlying oracle price per receipt token, computed ONCE per token
