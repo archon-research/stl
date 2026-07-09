@@ -25,10 +25,8 @@ from tests.integration.seed import (
     UV_PROXY_NULL_VALUE,
     UV_PROXY_PLAIN,
     UV_PROXY_PRICED,
-    UV_PROXY_SPARK_USDC_BC,
     UV_PROXY_UNDERLYING_UNPRICED,
     UV_SPARK_OWN_PRICE,
-    UV_SPARK_USDC_BC_UNDERLYING_VALUE,
     UV_SPARKPRIME_BALANCE,
     UV_SPARKPRIME_UNDERLYING_VALUE,
     UV_USDC_BALANCE,
@@ -75,9 +73,6 @@ async def _holding(repo: AllocationRepository, proxy_hex: str, symbol: str):
         (UV_PROXY_NON_ALLOWLISTED, "unlistedVault", None),
         # Plain token held directly -> legacy balance x own price.
         (UV_PROXY_PLAIN, "USDC", UV_USDC_BALANCE * UV_USDC_PRICE),
-        # Allowlisted sparkUSDCbc (Morpho vault share held bare, no own oracle)
-        # -> underlying_value x USDC price.
-        (UV_PROXY_SPARK_USDC_BC, "sparkUSDCbc", UV_SPARK_USDC_BC_UNDERLYING_VALUE * UV_USDC_PRICE),
     ],
 )
 @pytest.mark.asyncio

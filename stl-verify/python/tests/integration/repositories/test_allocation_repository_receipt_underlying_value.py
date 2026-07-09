@@ -7,7 +7,10 @@ price``: ``underlying_value`` is the on-chain redeemable value (convertToAssets)
 so non-1:1 vault shares (syrupUSDC-like) stop being priced as if one share were
 one underlying unit. NULL ``underlying_value`` (rows written before the column
 existed) falls back to the balance basis; 1:1 aTokens are unchanged because
-their ``underlying_value`` equals ``balance`` by construction.
+their ``underlying_value`` equals ``balance`` by construction. A position whose
+own ``underlying_token_id`` diverges from the registry's is refused a price
+(NULL ``amount_usd``); that and the balance-basis fallback are surfaced via
+telemetry.
 
 Isolated database per module (``module_db`` from ``conftest.py``); seeded by
 ``seed_receipt_underlying_value_positions``.
@@ -15,6 +18,8 @@ Isolated database per module (``module_db`` from ``conftest.py``); seeded by
 
 import asyncio
 import datetime as dt
+import logging
+from decimal import Decimal
 
 import asyncpg
 import pytest
@@ -26,19 +31,32 @@ from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     RUV_ATOKEN_BALANCE,
     RUV_DIVERGENT_BALANCE,
-    RUV_DIVERGENT_UNDERLYING_VALUE,
     RUV_LEGACY_BALANCE,
+    RUV_LOCF_BASE_TS,
+    RUV_LOCF_LATER_VALUE,
+    RUV_LOCF_NEWER_VALUE,
+    RUV_LOCF_PROXY_HEX,
+    RUV_MORPHO_PROXY_HEX,
+    RUV_MORPHO_SHARE_BALANCE,
+    RUV_MORPHO_UNDERLYING_PRICE,
+    RUV_MORPHO_UNDERLYING_VALUE,
     RUV_PROXY_HEX,
     RUV_SYRUP_LIKE_BALANCE,
     RUV_SYRUP_LIKE_UNDERLYING_VALUE,
     RUV_UNDERLYING_PRICE,
+    RUV_ZERO_REDEEMED_BALANCE,
+    RUV_ZERO_REDEEMED_UNDERLYING_VALUE,
     seed_receipt_underlying_value_positions,
 )
 
 _PRIME = EthAddress(f"0x{RUV_PROXY_HEX}")
 
+_REPO_LOGGER = "app.adapters.postgres.allocation_position_repository"
+
+# The divergent position is refused a price and contributes nothing; the
+# fully-redeemed position contributes exactly 0, not its share balance.
 _EXPECTED_TOTAL = (
-    RUV_SYRUP_LIKE_UNDERLYING_VALUE + RUV_LEGACY_BALANCE + RUV_ATOKEN_BALANCE + RUV_DIVERGENT_UNDERLYING_VALUE
+    RUV_SYRUP_LIKE_UNDERLYING_VALUE + RUV_LEGACY_BALANCE + RUV_ATOKEN_BALANCE + RUV_ZERO_REDEEMED_UNDERLYING_VALUE
 ) * RUV_UNDERLYING_PRICE
 
 # One row per valuation basis: (symbol, expected share balance, expected USD).
@@ -49,6 +67,9 @@ _VALUATION_CASES = [
     ("legacyReceipt", RUV_LEGACY_BALANCE, RUV_LEGACY_BALANCE * RUV_UNDERLYING_PRICE),
     # 1:1 aToken (underlying_value == balance): value unchanged.
     ("aOneToOne", RUV_ATOKEN_BALANCE, RUV_ATOKEN_BALANCE * RUV_UNDERLYING_PRICE),
+    # Fully-redeemed vault (underlying_value = 0, balance > 0): worth exactly 0.
+    # COALESCE must fall back on NULL only, never on 0 (guards an ``or``-style refactor).
+    ("fullyRedeemed", RUV_ZERO_REDEEMED_BALANCE, RUV_ZERO_REDEEMED_UNDERLYING_VALUE * RUV_UNDERLYING_PRICE),
 ]
 
 
@@ -79,13 +100,17 @@ async def _fetch_receipt_token_ids(db_url: str) -> dict[str, int]:
 
 
 @pytest.fixture(scope="module")
-def receipt_token_ids(async_db_url: str) -> dict[str, int]:
-    """Map seeded receipt-token symbols to their receipt_token ids."""
-    return asyncio.run(_fetch_receipt_token_ids(async_db_url.replace("postgresql+asyncpg://", "postgresql://")))
+def receipt_token_ids(async_db_url: str, db_url: str) -> dict[str, int]:
+    """Map seeded receipt-token symbols to their receipt_token ids.
+
+    ``async_db_url`` is requested only for its seeding side effect; the read
+    itself goes through the plain ``db_url`` from ``conftest``.
+    """
+    return asyncio.run(_fetch_receipt_token_ids(db_url))
 
 
-async def _position(repo: AllocationRepository, symbol: str):
-    positions = await repo.list_receipt_token_positions(_PRIME)
+async def _position(repo: AllocationRepository, symbol: str, prime: EthAddress = _PRIME):
+    positions = await repo.list_receipt_token_positions(prime)
     return {p.symbol: p for p in positions}.get(symbol)
 
 
@@ -135,19 +160,125 @@ async def test_exposure_buckets_value_positions_at_redeemable_value(repo) -> Non
 
 
 @pytest.mark.asyncio
-async def test_receipt_pricing_follows_registry_underlying(repo) -> None:
-    """A receipt position is priced by the registry's underlying, not its own underlying_token_id.
+async def test_divergent_underlying_position_is_refused_a_price(repo) -> None:
+    """A position whose own underlying_token_id diverges from the registry's gets NULL amount_usd.
 
-    Guard for the redeemable-value change: pricing keeps joining
-    ``receipt_token.underlying_token_id`` (the curated registry) rather than
-    ``allocation_position.underlying_token_id``. Verified against the production
-    warehouse on 2026-07-09: of 5484 receipt-position rows carrying an
-    ``underlying_token_id``, zero diverged from the registry's, so a divergence
-    (as seeded here) indicates an ingest bug and the registry stays authoritative.
+    Pricing joins ``receipt_token.underlying_token_id`` (the curated registry).
+    Verified against the production warehouse on 2026-07-09 (5484 receipt rows
+    carrying an ``underlying_token_id``, 0 divergent), so a divergence indicates
+    an ingest bug: the registry price would multiply a position value
+    denominated in a different unit, so the read refuses to price it (surfaced
+    as unpriced via telemetry) rather than returning a plausible wrong number.
     """
     position = await _position(repo, "divergentReceipt")
     assert position is not None
-    # Registry underlying is priced at RUV_UNDERLYING_PRICE (1.00); the position's
-    # own (divergent) underlying is priced at 5.00 and must not be used.
-    assert position.amount_usd == RUV_DIVERGENT_UNDERLYING_VALUE * RUV_UNDERLYING_PRICE
     assert position.balance == RUV_DIVERGENT_BALANCE
+    assert position.amount_usd is None
+
+
+@pytest.mark.asyncio
+async def test_usd_exposure_raises_for_divergent_underlying(repo, receipt_token_ids) -> None:
+    """get_usd_exposure refuses to price a divergent position instead of returning a wrong figure."""
+    with pytest.raises(ValueError, match="diverges"):
+        await repo.get_usd_exposure(receipt_token_ids["divergentReceipt"], _PRIME)
+
+
+@pytest.mark.asyncio
+async def test_morpho_vault_receipt_like_spark_usdc_bc_priced_by_redeemable_value(repo) -> None:
+    """A Morpho-vault share registered as a receipt token prices at underlying_value x underlying price.
+
+    sparkUSDCbc semantics: the registry migration registers sparkUSDCbc as a
+    ``receipt_token`` (Morpho Blue, USDC underlying), so it is priced by the
+    receipt path at its convertToAssets-derived redeemable value (a non-1:1
+    share ratio) rather than by a direct-holdings allowlist. The whole binding
+    (protocol, oracle, protocol_oracle, registry row, underlying price) is
+    seeded by this module, independent of migration-seeded registry rows.
+    """
+    position = await _position(repo, "sparkUSDCbcLike", EthAddress(f"0x{RUV_MORPHO_PROXY_HEX}"))
+    assert position is not None
+    assert position.balance == RUV_MORPHO_SHARE_BALANCE
+    assert position.amount_usd == RUV_MORPHO_UNDERLYING_VALUE * RUV_MORPHO_UNDERLYING_PRICE
+
+
+# ---------------------------------------------------------------------------
+# Exposure-bucket LOCF behavior, observed mid-series via explicit created_at
+# timestamps: two observations inside the first hourly bucket, an empty bucket,
+# then a third observation two buckets in.
+# ---------------------------------------------------------------------------
+
+
+async def _locf_exposure_by_bucket(repo: AllocationRepository) -> dict[dt.datetime, Decimal | None]:
+    buckets = await repo.list_exposure_buckets(
+        EthAddress(f"0x{RUV_LOCF_PROXY_HEX}"),
+        from_timestamp=RUV_LOCF_BASE_TS,
+        to_timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+    return {b.bucket_start: b.exposure_usd for b in buckets}
+
+
+@pytest.mark.asyncio
+async def test_exposure_bucket_takes_newest_position_value_within_bucket(repo) -> None:
+    """With two observations in one bucket, last() picks the newer redeemable value, not the backdated one."""
+    by_start = await _locf_exposure_by_bucket(repo)
+    assert by_start[RUV_LOCF_BASE_TS] == RUV_LOCF_NEWER_VALUE * RUV_UNDERLYING_PRICE
+
+
+@pytest.mark.asyncio
+async def test_exposure_bucket_carries_value_until_next_observation(repo) -> None:
+    """LOCF carries the last redeemable value through an empty bucket, then steps at the next observation."""
+    by_start = await _locf_exposure_by_bucket(repo)
+    assert by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=1)] == RUV_LOCF_NEWER_VALUE * RUV_UNDERLYING_PRICE
+    assert by_start[RUV_LOCF_BASE_TS + dt.timedelta(hours=2)] == RUV_LOCF_LATER_VALUE * RUV_UNDERLYING_PRICE
+
+
+# ---------------------------------------------------------------------------
+# Valuation-gap telemetry: the receipt path mirrors the direct-holdings
+# unpriced signal — a NULL amount_usd and a balance-basis fallback each get a
+# warning so coverage regressions don't have to be discovered by a user.
+# ---------------------------------------------------------------------------
+
+
+class _CapturingHandler(logging.Handler):
+    """Collects emitted records; attached directly to the target logger so
+    capture does not depend on propagation (the app disables it), which would
+    otherwise make this test order-dependent."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+async def _warning_records(repo: AllocationRepository) -> list[logging.LogRecord]:
+    """Return the warnings emitted by a list_receipt_token_positions read of the main prime."""
+    handler = _CapturingHandler()
+    target = logging.getLogger(_REPO_LOGGER)
+    previous_level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.WARNING)
+    try:
+        await repo.list_receipt_token_positions(_PRIME)
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous_level)
+    return handler.records
+
+
+@pytest.mark.asyncio
+async def test_unpriced_receipt_position_is_surfaced(repo) -> None:
+    """A receipt position resolving to no USD value is warned about, not silently unpriced."""
+    records = await _warning_records(repo)
+    flagged = [r for r in records if "divergentReceipt" in getattr(r, "unpriced_symbols", [])]
+    assert flagged, "expected a warning flagging the receipt position that resolved to no USD value"
+
+
+@pytest.mark.asyncio
+async def test_balance_basis_receipt_position_is_surfaced(repo) -> None:
+    """A receipt position valued on the share-balance fallback is warned about (methodology signal)."""
+    records = await _warning_records(repo)
+    flagged = [r for r in records if "legacyReceipt" in getattr(r, "balance_basis_symbols", [])]
+    assert flagged, "expected a warning flagging the receipt position valued on the balance fallback"
