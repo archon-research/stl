@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/ethereum/go-ethereum/common"
 
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -79,28 +80,57 @@ func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64,
 	return wrap, drain, nil
 }
 
-// NewS3WrapFromEnv builds the archiving wrap from env config. The returned
-// drain func blocks until all in-flight archive writes finish; call it during
-// graceful shutdown. All decorators produced by the wrap share one WaitGroup,
-// so a single drain() covers them all.
-func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
+// ReaderWrap decorates a StateReader with archiving. Identity when archiving is off.
+type ReaderWrap func(outbound.StateReader) outbound.StateReader
+
+func identityReaderWrap(inner outbound.StateReader) outbound.StateReader { return inner }
+
+// BootstrapReader is Bootstrap's StateReader counterpart, for workers on the
+// pin-keyed read path. transportAddr is the Multicall3 address stamped on
+// archived records.
+func BootstrapReader(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string, transportAddr common.Address) (ReaderWrap, func(), error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if !Enabled() {
+		if raw := env.Get(EnvFlag, ""); raw != "" {
+			if _, err := strconv.ParseBool(raw); err != nil {
+				logger.Warn("ARCHIVE_SC_CALLS set to an unrecognised value; archiving stays off", EnvFlag, raw)
+			}
+		}
+		logger.Info("raw SC call archiving disabled")
+		return identityReaderWrap, func() {}, nil
+	}
+	archiver, chainName, err := newS3ArchiverFromEnv(ctx, logger, chainID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("wiring SC call archiver: %w", err)
+	}
+	logger.Info("raw SC call archiving enabled", "bucket", env.Get(EnvBucket, ""))
+	wg := &sync.WaitGroup{}
+	wrap := func(inner outbound.StateReader) outbound.StateReader {
+		return archiving.NewReader(inner, transportAddr, archiver, archiving.Config{
+			Source: source, ChainID: chainID, Chain: chainName, BuildID: buildID, Wait: wg, Logger: logger,
+		})
+	}
+	return wrap, func() { wg.Wait() }, nil
+}
 
+// newS3ArchiverFromEnv builds the S3-backed call archiver from env config,
+// shared by NewS3WrapFromEnv and BootstrapReader so the S3 wiring exists once.
+func newS3ArchiverFromEnv(ctx context.Context, logger *slog.Logger, chainID int64) (outbound.CallArchiver, string, error) {
 	bucket := env.Get(EnvBucket, "")
 	if bucket == "" {
-		return nil, nil, fmt.Errorf("%s is required when %s=true", EnvBucket, EnvFlag)
+		return nil, "", fmt.Errorf("%s is required when %s=true", EnvBucket, EnvFlag)
 	}
 
 	chainName, err := entity.ChainName(chainID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolving chain name for archiving metrics: %w", err)
+		return nil, "", fmt.Errorf("resolving chain name for archiving metrics: %w", err)
 	}
 
 	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
 	if err != nil {
-		return nil, nil, fmt.Errorf("loading AWS config: %w", err)
+		return nil, "", fmt.Errorf("loading AWS config: %w", err)
 	}
 
 	var writer outbound.S3Writer
@@ -115,7 +145,24 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 
 	archiver, err := s3adapter.NewCallArchiver(writer, bucket, chainName, logger, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating call archiver: %w", err)
+		return nil, "", fmt.Errorf("creating call archiver: %w", err)
+	}
+
+	return archiver, chainName, nil
+}
+
+// NewS3WrapFromEnv builds the archiving wrap from env config. The returned
+// drain func blocks until all in-flight archive writes finish; call it during
+// graceful shutdown. All decorators produced by the wrap share one WaitGroup,
+// so a single drain() covers them all.
+func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	archiver, chainName, err := newS3ArchiverFromEnv(ctx, logger, chainID)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	wg := &sync.WaitGroup{}
