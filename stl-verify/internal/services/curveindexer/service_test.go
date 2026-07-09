@@ -21,6 +21,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -81,28 +82,6 @@ func (m *inTxTrackingTxManager) WithTransaction(_ context.Context, fn func(pgx.T
 	m.inTx = true
 	defer func() { m.inTx = false }()
 	return fn(nil)
-}
-
-// txCheckingMulticaller fails if Execute runs while the tracked tx manager is
-// inside a transaction, proving snapshot reads happen before the tx opens.
-type txCheckingMulticaller struct {
-	tracker *inTxTrackingTxManager
-	results []outbound.Result
-}
-
-func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	if m.tracker.inTx {
-		return nil, fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
-	}
-	return m.results, nil
-}
-
-func (m *txCheckingMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return m.Execute(ctx, calls, nil)
-}
-
-func (m *txCheckingMulticaller) Address() common.Address {
-	return common.Address{}
 }
 
 // fakeEventRepo swallows saves silently.
@@ -182,9 +161,8 @@ func newTestPoolWithLpToken() RegisteredPool {
 }
 
 // newTestCurveService constructs a CurveService with one stableswap pool, a
-// fakeMulticaller returning pre-NG canned results, and the given sweep
-// interval. Returns the coordinator and the repo fake so callers can inspect
-// call counts.
+// multicaller returning pre-NG canned results, and the given sweep interval.
+// Returns the coordinator and the repo fake so callers can inspect call counts.
 func newTestCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *fakeCurveRepo) {
 	t.Helper()
 
@@ -204,7 +182,7 @@ func newTestCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *fakeC
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
 
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{newTestPool()},
@@ -370,7 +348,7 @@ func TestCurveService_NilNilSnapshotErrors(t *testing.T) {
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{newTestPool()},
 		Handlers:    handlers,
-		Multicaller: &fakeMulticaller{},
+		Multicaller: curveMC(nil),
 		Repo:        repo,
 		EventWriter: writer,
 		TxManager:   &fakeTxManager{},
@@ -421,7 +399,7 @@ func TestCurveService_CaptureNetReachesEventWriter(t *testing.T) {
 	pool := newTestPool()
 
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{pool},
@@ -475,7 +453,16 @@ func TestCurveService_SnapshotMulticallRunsOutsideTransaction(t *testing.T) {
 	}
 
 	tracker := &inTxTrackingTxManager{}
-	mc := &txCheckingMulticaller{tracker: tracker, results: stableswapPreNGResults(t, a)}
+	results := stableswapPreNGResults(t, a)
+	mc := testutil.NewMockMulticaller()
+	// Fail if the snapshot read runs inside the transaction: an archive-RPC
+	// latency spike there would pin a pgx connection for the whole read.
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if tracker.inTx {
+			return nil, fmt.Errorf("multicall executed inside the transaction (archive-RPC latency would pin a pgx connection)")
+		}
+		return results, nil
+	}
 
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &fakeEventRepo{}
@@ -537,7 +524,7 @@ func TestCurveService_RecordsActualStateRowsNotSnapshotCount(t *testing.T) {
 	repo := &fakeCurveRepo{stateRowsReturn: 0}
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{newTestPool()},
@@ -601,7 +588,7 @@ func TestCurveService_HandlerError_RecordsErrorMetric(t *testing.T) {
 
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{newTestPool()},
@@ -661,7 +648,7 @@ func TestCurveService_DecodeError_ReturnsNonNil(t *testing.T) {
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 
 	c, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{newTestPool()},
@@ -743,7 +730,7 @@ func TestCurveService_RoutesParameterAndLpEventsIntoBlockWrites(t *testing.T) {
 	}
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	writer := dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{})
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 	pool := newTestPool()
 
 	c, err := NewCurveService(CurveServiceDeps{
@@ -809,7 +796,7 @@ func TestCurveService_RoutesLpTokenLogOnSeparateAddressToPool(t *testing.T) {
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &capturingEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 	pool := newTestPoolWithLpToken()
 
 	c, err := NewCurveService(CurveServiceDeps{
@@ -941,7 +928,7 @@ func TestNewCurveService_WarmsHandlersForRegisteredPoolCoinCounts(t *testing.T) 
 	_, err := NewCurveService(CurveServiceDeps{
 		Pools:       []RegisteredPool{pool2, pool3},
 		Handlers:    map[PoolKind]PoolClassHandler{KindStableswapPreNG: h},
-		Multicaller: &fakeMulticaller{},
+		Multicaller: curveMC(nil),
 		Repo:        &fakeCurveRepo{},
 		EventWriter: dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
 		TxManager:   &fakeTxManager{},
@@ -1022,7 +1009,7 @@ func TestCurveService_QuietBlock_NoTransaction(t *testing.T) {
 	repo := &fakeCurveRepo{stateRowsReturn: 1}
 	eventRepo := &fakeEventRepo{}
 	writer := dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 	txMgr := &countingTxManager{}
 
 	c, err := NewCurveService(CurveServiceDeps{
