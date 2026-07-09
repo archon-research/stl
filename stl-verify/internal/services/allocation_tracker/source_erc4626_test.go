@@ -54,7 +54,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pack convertToAssets output: %v", err)
 	}
-	mc.ExecuteFn = respondTwoRounds(t, src, expectedShares, &outbound.Result{Success: true, ReturnData: assetsData})
+	mc.ExecuteAtHashFn = respondTwoRounds(t, src, expectedShares, &outbound.Result{Success: true, ReturnData: assetsData})
 
 	entries := []*TokenEntry{{
 		ContractAddress: contract,
@@ -65,7 +65,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 		TokenType:       "erc4626",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 24584100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestERC4626Source_FetchBalances_StoresShareBalance(t *testing.T) {
 
 func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
 	}
 
@@ -105,7 +105,7 @@ func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		TokenType:       "erc4626",
 	}}
 
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}
@@ -114,30 +114,27 @@ func TestERC4626Source_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	}
 }
 
-// respondTwoRounds returns an ExecuteFn serving round 1 (balanceOf) then
+// respondTwoRounds returns an ExecuteAtHashFn serving round 1 (balanceOf) then
 // round 2 (convertToAssets); pass &outbound.Result{Success: false} to simulate a revert.
-// It asserts that round 2 pins the exact same block number as round 1.
-func respondTwoRounds(t *testing.T, src *ERC4626Source, shares *big.Int, convertResult *outbound.Result) func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
+// It asserts both rounds pin the exact same block hash (testBlockHash) so the
+// two-round snapshot stays reorg-correct (VEC-471): a reorg between rounds must
+// never let round 2 read a different fork's state than round 1.
+func respondTwoRounds(t *testing.T, src *ERC4626Source, shares *big.Int, convertResult *outbound.Result) func(context.Context, []outbound.Call, common.Hash) ([]outbound.Result, error) {
 	t.Helper()
 	round := 0
-	var round1Block *big.Int
-	return func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	return func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		round++
+		if blockHash != testBlockHash {
+			t.Fatalf("round %d blockHash = %v, want %v (state reads must pin to the block hash, not the number, so a reorg can't return the wrong fork's state)", round, blockHash, testBlockHash)
+		}
 		switch round {
 		case 1:
-			round1Block = blockNumber
 			ret, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(shares)
 			if err != nil {
 				t.Fatalf("pack balanceOf output: %v", err)
 			}
 			return []outbound.Result{{Success: true, ReturnData: ret}}, nil
 		case 2:
-			if blockNumber == nil {
-				t.Fatal("round 2 must pin the same block")
-			}
-			if round1Block == nil || blockNumber.Cmp(round1Block) != 0 {
-				t.Fatalf("round 2 block %v != round 1 block %v: both rounds must pin the same block", blockNumber, round1Block)
-			}
 			return []outbound.Result{*convertResult}, nil
 		default:
 			t.Fatalf("unexpected round %d", round)
@@ -158,10 +155,10 @@ func TestERC4626Source_FetchBalances_SetsUnderlyingValueFromConvertToAssets(t *t
 	if err != nil {
 		t.Fatalf("pack convertToAssets output: %v", err)
 	}
-	mc.ExecuteFn = respondTwoRounds(t, src, shares, &outbound.Result{Success: true, ReturnData: ret})
+	mc.ExecuteAtHashFn = respondTwoRounds(t, src, shares, &outbound.Result{Success: true, ReturnData: ret})
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -183,10 +180,10 @@ func TestERC4626Source_FetchBalances_ConvertRevertLeavesUnderlyingNil(t *testing
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	mc.ExecuteFn = respondTwoRounds(t, src, big.NewInt(5), &outbound.Result{Success: false})
+	mc.ExecuteAtHashFn = respondTwoRounds(t, src, big.NewInt(5), &outbound.Result{Success: false})
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("a reverting convertToAssets must not fail the fetch: %v", err)
 	}
@@ -205,7 +202,7 @@ func TestERC4626Source_FetchBalances_ZeroSharesSkipConvertAndWriteZero(t *testin
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		ret, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(0))
 		if err != nil {
 			t.Fatalf("pack balanceOf output: %v", err)
@@ -214,7 +211,7 @@ func TestERC4626Source_FetchBalances_ZeroSharesSkipConvertAndWriteZero(t *testin
 	}
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	results, err := src.FetchBalances(context.Background(), entries, 100)
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -234,7 +231,7 @@ func TestERC4626Source_FetchBalances_TruncatedResultReturnsError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	round := 0
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		round++
 		if round == 1 {
 			ret, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(5))
@@ -248,7 +245,7 @@ func TestERC4626Source_FetchBalances_TruncatedResultReturnsError(t *testing.T) {
 	}
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	_, err = src.FetchBalances(context.Background(), entries, 100)
+	_, err = src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for truncated round-2 result")
 	}
@@ -264,7 +261,7 @@ func TestERC4626Source_FetchBalances_ConvertTransportErrorFailsFetch(t *testing.
 		t.Fatalf("unexpected error: %v", err)
 	}
 	round := 0
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		round++
 		if round == 1 {
 			ret, err := src.vaultABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(5))
@@ -277,7 +274,7 @@ func TestERC4626Source_FetchBalances_ConvertTransportErrorFailsFetch(t *testing.
 	}
 
 	entries := []*TokenEntry{{ContractAddress: common.HexToAddress("0xaaaa"), WalletAddress: common.HexToAddress("0xbbbb"), TokenType: "erc4626"}}
-	if _, err := src.FetchBalances(context.Background(), entries, 100); err == nil {
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err == nil {
 		t.Fatal("a transport-level round-2 failure must propagate so SQS retries the block")
 	}
 }

@@ -541,9 +541,12 @@ func (s *Service) processBlockFeed(
 	oracleID int16,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
+	// Zero block hash: backfill replays settled historical blocks with no live
+	// fork ambiguity and no BlockEvent to source a hash from, so FetchFeedPrices
+	// falls back to number-pinned reads (VEC-471).
 	results, err := blockchain.FetchFeedPrices(
 		ctx, mc, s.feedABI,
-		wu.Feeds, blockNum,
+		wu.Feeds, blockNum, common.Hash{},
 		s.logger,
 	)
 	if err != nil {
@@ -562,9 +565,12 @@ func (s *Service) processBlockERC4626(
 	oracleID int16,
 	blockNum int64,
 ) ([]*entity.OnchainTokenPrice, error) {
+	// Zero block hash: backfill replays settled historical blocks with no live
+	// fork ambiguity and no BlockEvent to source a hash from, so
+	// FetchERC4626SharePrices falls back to number-pinned reads (VEC-471).
 	results, err := blockchain.FetchERC4626SharePrices(
 		ctx, mc, s.shareABI, s.feedABI,
-		wu.ERC4626Vaults, blockNum,
+		wu.ERC4626Vaults, blockNum, common.Hash{},
 		s.logger,
 	)
 	if err != nil {

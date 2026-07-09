@@ -266,6 +266,7 @@ func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) erro
 
 func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (retErr error) {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	ctx, span := s.telemetry.StartBlockSpan(ctx, event.BlockNumber)
 	defer span.End()
 
@@ -366,11 +367,16 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 }
 
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "getAssetsPrices"))
 	rpcStart := time.Now()
-	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber)
+	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber, blockHash)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "getAssetsPrices", rpcDuration, err)
 	if err != nil {
@@ -427,11 +433,16 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "latestRoundData"))
 	rpcStart := time.Now()
-	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, s.logger)
+	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, blockHash, s.logger)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "latestRoundData", rpcDuration, err)
 	if err != nil {
@@ -448,10 +459,14 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "convertToAssets"))
 	rpcStart := time.Now()
-	results, err := blockchain.FetchERC4626SharePrices(ctx, unit.multicaller, s.shareABI, s.feedABI, unit.ERC4626Vaults, event.BlockNumber, s.logger)
+	results, err := blockchain.FetchERC4626SharePrices(ctx, unit.multicaller, s.shareABI, s.feedABI, unit.ERC4626Vaults, event.BlockNumber, blockHash, s.logger)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "convertToAssets", rpcDuration, err)
 	if err != nil {

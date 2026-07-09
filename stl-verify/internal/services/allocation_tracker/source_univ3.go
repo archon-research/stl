@@ -45,14 +45,12 @@ func (s *UniV3Source) Supports(tokenType, protocol string) bool {
 func (s *UniV3Source) FetchBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
-	blockNumber int64,
+	blockHash common.Hash,
 ) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
 	}
-
-	block := big.NewInt(blockNumber)
 
 	// Group entries by chain to use the correct NonfungiblePositionManager.
 	byChain := make(map[string][]*TokenEntry)
@@ -67,7 +65,7 @@ func (s *UniV3Source) FetchBalances(
 			continue
 		}
 
-		if err := s.fetchChainBalances(ctx, chainEntries, nftManager, block, result.Balances); err != nil {
+		if err := s.fetchChainBalances(ctx, chainEntries, nftManager, blockHash, result.Balances); err != nil {
 			return nil, fmt.Errorf("fetch V3 balances for chain %s: %w", chain, err)
 		}
 	}
@@ -80,7 +78,7 @@ func (s *UniV3Source) fetchChainBalances(
 	ctx context.Context,
 	entries []*TokenEntry,
 	nftManager common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 	result map[EntryKey]*PositionBalance,
 ) error {
 	// Deduplicate wallets — multiple entries may share the same proxy.
@@ -95,7 +93,7 @@ func (s *UniV3Source) fetchChainBalances(
 	}
 
 	// Get all NFT positions for these wallets via the reader.
-	walletPositions, err := s.reader.GetPositions(ctx, wallets, nftManager, block)
+	walletPositions, err := s.reader.GetPositions(ctx, wallets, nftManager, blockHash)
 	if err != nil {
 		return fmt.Errorf("get positions: %w", err)
 	}
@@ -111,7 +109,7 @@ func (s *UniV3Source) fetchChainBalances(
 		pools = append(pools, p)
 	}
 
-	poolStates, err := s.reader.GetPoolStates(ctx, pools, block)
+	poolStates, err := s.reader.GetPoolStates(ctx, pools, blockHash)
 	if err != nil {
 		return fmt.Errorf("get pool states: %w", err)
 	}

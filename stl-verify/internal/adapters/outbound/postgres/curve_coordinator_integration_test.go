@@ -48,6 +48,10 @@ func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound
 	}
 }
 
+func (m *stableswapCallCountResults) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.Execute(ctx, calls, nil)
+}
+
 func (m *stableswapCallCountResults) Address() common.Address { return common.Address{} }
 
 // coordPreNGResults mirrors the curveindexer unit-test canned results for a

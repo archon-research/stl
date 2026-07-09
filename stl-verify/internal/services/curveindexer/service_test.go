@@ -97,6 +97,10 @@ func (m *txCheckingMulticaller) Execute(_ context.Context, calls []outbound.Call
 	return m.results, nil
 }
 
+func (m *txCheckingMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.Execute(ctx, calls, nil)
+}
+
 func (m *txCheckingMulticaller) Address() common.Address {
 	return common.Address{}
 }
