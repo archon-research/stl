@@ -37,22 +37,15 @@ type Config struct {
 	Clock         func() time.Time // injectable for tests; defaults to time.Now
 }
 
-// Multicaller decorates an inner outbound.Multicaller. When the inner call
-// succeeds it archives the whole batch in the background (fire-and-forget),
-// recording each call regardless of its individual success flag. When the inner
-// call itself errors nothing is archived, since there is no result batch to
-// record.
-type Multicaller struct {
-	inner    outbound.Multicaller
+// core holds the archive-write machinery shared by the Multicaller decorator
+// (legacy, context-keyed) and the Reader decorator (pin-keyed).
+type core struct {
 	archiver outbound.CallArchiver
 	cfg      Config
 	writes   metric.Int64Counter
 }
 
-var _ outbound.Multicaller = (*Multicaller)(nil)
-
-// NewMulticaller wraps inner so its calls are archived via arch.
-func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
+func newCore(arch outbound.CallArchiver, cfg Config) core {
 	if cfg.Wait == nil {
 		cfg.Wait = &sync.WaitGroup{}
 	}
@@ -71,11 +64,28 @@ func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg 
 	if err != nil {
 		// Metrics must never break the archiving hot path, so a counter that
 		// fails to construct is logged and left nil (recordWrite no-ops on nil)
-		// rather than failing NewMulticaller. This intentionally differs from the
+		// rather than failing newCore. This intentionally differs from the
 		// fail-hard rule used for core dependencies.
 		cfg.Logger.Error("building archive.writes.total counter; archive metrics disabled", "error", err)
 	}
-	return &Multicaller{inner: inner, archiver: arch, cfg: cfg, writes: writes}
+	return core{archiver: arch, cfg: cfg, writes: writes}
+}
+
+// Multicaller decorates an inner outbound.Multicaller. When the inner call
+// succeeds it archives the whole batch in the background (fire-and-forget),
+// recording each call regardless of its individual success flag. When the inner
+// call itself errors nothing is archived, since there is no result batch to
+// record.
+type Multicaller struct {
+	inner outbound.Multicaller
+	core
+}
+
+var _ outbound.Multicaller = (*Multicaller)(nil)
+
+// NewMulticaller wraps inner so its calls are archived via arch.
+func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
+	return &Multicaller{inner: inner, core: newCore(arch, cfg)}
 }
 
 // Execute forwards to the inner multicaller, then archives the entire
@@ -169,22 +179,22 @@ func (m *Multicaller) Close() { m.cfg.Wait.Wait() }
 // counter (construction failed) is a no-op. It records against a background
 // context because the counter increment is independent of the archive
 // operation's timeout.
-func (m *Multicaller) recordWrite(err error) {
-	if m.writes == nil {
+func (c *core) recordWrite(err error) {
+	if c.writes == nil {
 		return
 	}
 	status := "success"
 	if err != nil {
 		status = "error"
 	}
-	m.writes.Add(context.Background(), 1, metric.WithAttributes(
-		attribute.String("chain", m.cfg.Chain),
-		attribute.String("source", m.cfg.Source),
+	c.writes.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("chain", c.cfg.Chain),
+		attribute.String("source", c.cfg.Source),
 		attribute.String("status", status),
 	))
 }
 
-func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallBatchRecord {
+func (c *core) buildBatchRecord(calls []outbound.Call, results []outbound.Result, blockNumber *big.Int, blockVersion int, mcAddr string) outbound.CallBatchRecord {
 	var bn int64
 	if blockNumber != nil {
 		bn = blockNumber.Int64()
@@ -200,27 +210,27 @@ func (m *Multicaller) buildBatchRecord(calls []outbound.Call, results []outbound
 		}
 	}
 	return outbound.CallBatchRecord{
-		ChainID:      m.cfg.ChainID,
+		ChainID:      c.cfg.ChainID,
 		BlockNumber:  bn,
 		BlockVersion: blockVersion,
-		BuildID:      m.cfg.BuildID,
-		Source:       m.cfg.Source,
+		BuildID:      c.cfg.BuildID,
+		Source:       c.cfg.Source,
 		Multicaller:  mcAddr,
-		Timestamp:    m.cfg.Clock().UTC(),
+		Timestamp:    c.cfg.Clock().UTC(),
 		Calls:        entries,
 	}
 }
 
-func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallBatchRecord) {
+func (c *core) scheduleArchive(ctx context.Context, record outbound.CallBatchRecord) {
 	// Tracked by the shared WaitGroup so graceful shutdown drains this write. No
 	// Add-after-Wait race: each service stops its message loop before draining,
 	// so Execute (hence this Go) can never run concurrently with the drain.
-	m.cfg.Wait.Go(func() {
+	c.cfg.Wait.Go(func() {
 		// Archiving is fire-and-forget: a panic here must never escape and crash
 		// the worker, since archiving must not affect the hot path.
 		defer func() {
 			if r := recover(); r != nil {
-				m.cfg.Logger.Error("panic while archiving SC call batch",
+				c.cfg.Logger.Error("panic while archiving SC call batch",
 					"panic", r,
 					"source", record.Source,
 					"block", record.BlockNumber,
@@ -233,13 +243,13 @@ func (m *Multicaller) scheduleArchive(ctx context.Context, record outbound.CallB
 
 		archiveCtx, cancel := context.WithTimeout(ctx, archiveTimeout)
 		defer cancel()
-		err := m.archiver.Archive(archiveCtx, record)
-		m.recordWrite(err)
+		err := c.archiver.Archive(archiveCtx, record)
+		c.recordWrite(err)
 		if err != nil {
 			// A failed write is a permanent, unretried loss of an archived
 			// batch, so surface it at error level rather than burying it in
 			// warnings.
-			m.cfg.Logger.Error("archiving SC call batch failed",
+			c.cfg.Logger.Error("archiving SC call batch failed",
 				"error", err,
 				"source", record.Source,
 				"block", record.BlockNumber,
