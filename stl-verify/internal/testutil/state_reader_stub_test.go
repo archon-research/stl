@@ -29,7 +29,16 @@ func TestStateReaderStub_RecordsEveryPin(t *testing.T) {
 
 func TestStateReaderStub_UnstubbedReadErrors(t *testing.T) {
 	stub := &testutil.StateReaderStub{}
-	if _, err := stub.Read(context.Background(), outbound.PinForStaticRead(1), nil); err == nil {
+	pin := outbound.PinForStaticRead(1)
+	if _, err := stub.Read(context.Background(), pin, nil); err == nil {
 		t.Fatal("expected error when ReadFn is unset")
+	}
+
+	if got := stub.CallCount(); got != 1 {
+		t.Fatalf("CallCount() = %d, want 1", got)
+	}
+	recorded := stub.Pins()[0]
+	if recorded.Mode() != pin.Mode() || recorded.Number() != pin.Number() {
+		t.Fatalf("recorded pin = %+v, want %+v", recorded, pin)
 	}
 }
