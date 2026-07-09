@@ -88,16 +88,16 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			budgetExceeded = true
 			break
 		}
-		rows, err := s.runner.RunTable(drainCtx, source)
+		consumed, upserted, err := s.runner.RunTable(drainCtx, source)
 		if err != nil {
 			s.logger.Error("transform run failed", "source", source, "error", err)
 			s.telemetry.RecordTableFailure(ctx, source)
 			errs = append(errs, err)
 			continue
 		}
-		total += rows
-		s.logger.Info("transform run complete", "source", source, "rows", rows)
-		s.telemetry.RecordTableSuccess(ctx, source, rows)
+		total += consumed
+		s.logger.Info("transform run complete", "source", source, "consumed", consumed, "upserted", upserted)
+		s.telemetry.RecordTableSuccess(ctx, source, consumed, upserted)
 	}
 
 	if budgetExceeded {

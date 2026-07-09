@@ -59,11 +59,18 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
-	// Run the entire job on ONE connection so the session GUCs below apply to
-	// every query. Setting them via pool.Exec would land each SET on an arbitrary
-	// pooled connection and leave the window queries on others with defaults --
-	// enable_tiered_reads defaults off, so those queries would silently skip
-	// S3-tiered history (and parity cannot catch it: both sides undercount alike).
+	return runBootstrap(ctx, pool, from, *step, *only, logger)
+}
+
+// runBootstrap copies each source's pre-existing history into the transformed
+// layer over step-sized windows and seeds the parity ledger, all on ONE acquired
+// connection so the session GUCs (statement_timeout, tiered reads) apply to every
+// query. Setting them via pool.Exec would land each SET on an arbitrary pooled
+// connection and leave the window queries on others with defaults -- and
+// enable_tiered_reads defaults off, so those queries would silently skip S3-tiered
+// history (parity cannot catch it: both sides undercount alike). Split out from
+// run so tests can drive it with a pool and explicit params (no flag parsing).
+func runBootstrap(ctx context.Context, pool *pgxpool.Pool, from time.Time, step time.Duration, only string, logger *slog.Logger) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -74,14 +81,14 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	sources, err := selectSources(ctx, conn, *only)
+	sources, err := selectSources(ctx, conn, only)
 	if err != nil {
 		return err
 	}
 
-	end := time.Now().UTC().Add(*step) // one step past now so the live tail is included
+	end := time.Now().UTC().Add(step) // one step past now so the live tail is included
 	for _, source := range sources {
-		total, err := bootstrapSource(ctx, conn, source, from, end, *step, logger)
+		total, err := bootstrapSource(ctx, conn, source, from, end, step, logger)
 		if err != nil {
 			return fmt.Errorf("bootstrapping %q: %w", source, err)
 		}

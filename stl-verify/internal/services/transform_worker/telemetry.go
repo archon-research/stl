@@ -15,6 +15,7 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 type Telemetry struct {
 	tableRuns       metric.Int64Counter
 	rowsConsumed    metric.Int64Counter
+	rowsUpserted    metric.Int64Counter
 	drainBudgetHit  metric.Int64Counter
 	queuePending    metric.Int64Gauge
 	queueOldestAge  metric.Float64Gauge
@@ -45,6 +46,12 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 		metric.WithDescription("Queue rows consumed (drained) per table; the guard/DISTINCT make actual upserts <= this"),
 	); err != nil {
 		return nil, fmt.Errorf("creating rowsConsumed counter: %w", err)
+	}
+	if t.rowsUpserted, err = meter.Int64Counter(
+		"transform.rows_upserted.total",
+		metric.WithDescription("Rows actually upserted into transformed tables per table (guarded; <= rows consumed)"),
+	); err != nil {
+		return nil, fmt.Errorf("creating rowsUpserted counter: %w", err)
 	}
 	if t.drainBudgetHit, err = meter.Int64Counter(
 		"transform.drain.budget_exceeded.total",
@@ -85,15 +92,17 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	return t, nil
 }
 
-// RecordTableSuccess counts one successful run and the queue rows it consumed
-// (drained). Nil-safe so unit tests may pass a nil Telemetry.
-func (t *Telemetry) RecordTableSuccess(ctx context.Context, source string, rowsConsumed int64) {
+// RecordTableSuccess counts one successful run, the queue rows it consumed
+// (drained), and the rows it actually upserted (<= consumed, after the guard).
+// Nil-safe so unit tests may pass a nil Telemetry.
+func (t *Telemetry) RecordTableSuccess(ctx context.Context, source string, rowsConsumed, rowsUpserted int64) {
 	if t == nil {
 		return
 	}
 	table := attribute.String("table", source)
 	t.tableRuns.Add(ctx, 1, metric.WithAttributes(table, attribute.String("status", "success")))
 	t.rowsConsumed.Add(ctx, rowsConsumed, metric.WithAttributes(table))
+	t.rowsUpserted.Add(ctx, rowsUpserted, metric.WithAttributes(table))
 }
 
 // RecordTableFailure counts one failed run. Nil-safe.

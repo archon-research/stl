@@ -20,7 +20,7 @@ func TestTelemetry_Record(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	tel.RecordTableSuccess(ctx, "morpho_market_state", 5)
+	tel.RecordTableSuccess(ctx, "morpho_market_state", 5, 4)
 	tel.RecordTableFailure(ctx, "morpho_market_state")
 	tel.RecordDrainBudgetExceeded(ctx)
 	tel.RecordQueueDepth(ctx, "morpho_market_state", 3, 12)
@@ -30,7 +30,7 @@ func TestTelemetry_Record(t *testing.T) {
 func TestTelemetry_NilReceiverIsNoOp(t *testing.T) {
 	ctx := context.Background()
 	var nilTel *Telemetry
-	nilTel.RecordTableSuccess(ctx, "morpho_market_state", 1)
+	nilTel.RecordTableSuccess(ctx, "morpho_market_state", 1, 1)
 	nilTel.RecordTableFailure(ctx, "morpho_market_state")
 	nilTel.RecordDrainBudgetExceeded(ctx)
 	nilTel.RecordQueueDepth(ctx, "morpho_market_state", 1, 1)

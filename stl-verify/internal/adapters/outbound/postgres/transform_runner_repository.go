@@ -64,38 +64,40 @@ const drainBatch = 10000
 const maxDrainIterations = 1000
 
 // RunTable drains source's queue by calling transformed._run_<source>() until a
-// call consumes fewer than drainBatch rows, and returns the total consumed. It
+// call consumes fewer than drainBatch rows, and returns the totals consumed
+// (queue rows drained) and upserted (rows actually written; <= consumed after the
+// IS DISTINCT FROM guard). It
 // stops early (cleanly, not an error) when ctx is done, so the caller's per-tick
 // drain budget bounds the work and a large backlog degrades to "picked up next
 // tick" rather than overrunning the Temporal activity: each _run call autocommits,
 // so progress persists. The function name is built from source and quoted as an
 // identifier; source originates from transformed._sources (our own controlled
 // table), so this is not attacker-controlled, but it is quoted regardless.
-func (r *TransformRunnerRepository) RunTable(ctx context.Context, source string) (int64, error) {
+func (r *TransformRunnerRepository) RunTable(ctx context.Context, source string) (consumed, upserted int64, err error) {
 	fn := pgx.Identifier{"transformed", "_run_" + source}.Sanitize()
-	var total int64
 	for range maxDrainIterations {
 		// Between-iteration budget check: stop before starting another batch.
 		if ctx.Err() != nil {
-			return total, nil
+			return consumed, upserted, nil
 		}
-		var consumed int64
-		if err := r.pool.QueryRow(ctx, "SELECT "+fn+"()").Scan(&consumed); err != nil {
+		var c, u int64
+		if scanErr := r.pool.QueryRow(ctx, "SELECT consumed, upserted FROM "+fn+"()").Scan(&c, &u); scanErr != nil {
 			// Budget expired mid-call: the batch rolled back (queue restored) and
 			// earlier batches committed, so this is a clean stop, not a failure.
 			if ctx.Err() != nil {
-				return total, nil
+				return consumed, upserted, nil
 			}
-			return total, fmt.Errorf("running transform %q: %w", source, err)
+			return consumed, upserted, fmt.Errorf("running transform %q: %w", source, scanErr)
 		}
-		total += consumed
-		if consumed < drainBatch {
-			return total, nil
+		consumed += c
+		upserted += u
+		if c < drainBatch {
+			return consumed, upserted, nil
 		}
 	}
 	r.logger.Warn("transform drain hit iteration cap; remaining queue picked up next tick",
-		"source", source, "consumed", total, "cap", maxDrainIterations)
-	return total, nil
+		"source", source, "consumed", consumed, "cap", maxDrainIterations)
+	return consumed, upserted, nil
 }
 
 // QueueStatus reads the per-source backlog from transformed._queue_status.

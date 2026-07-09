@@ -16,7 +16,8 @@ type mockRunner struct {
 	sources      []string
 	listErr      error
 	runErrs      map[string]error // source -> error returned by RunTable
-	runRows      map[string]int64 // source -> rows returned by RunTable
+	runRows      map[string]int64 // source -> consumed count returned by RunTable
+	runUpserts   map[string]int64 // source -> upserted count returned by RunTable
 	runCalls     []string         // sources RunTable was invoked with, in order
 	queue        []outbound.QueueDepth
 	queueErr     error
@@ -30,12 +31,12 @@ func (m *mockRunner) ListSources(context.Context) ([]string, error) {
 	return m.sources, m.listErr
 }
 
-func (m *mockRunner) RunTable(_ context.Context, source string) (int64, error) {
+func (m *mockRunner) RunTable(_ context.Context, source string) (int64, int64, error) {
 	m.runCalls = append(m.runCalls, source)
 	if err := m.runErrs[source]; err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return m.runRows[source], nil
+	return m.runRows[source], m.runUpserts[source], nil
 }
 
 func (m *mockRunner) QueueStatus(context.Context) ([]outbound.QueueDepth, error) {

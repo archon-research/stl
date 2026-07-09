@@ -19,8 +19,9 @@ type TransformRunner interface {
 	ListSources(ctx context.Context) ([]string, error)
 
 	// RunTable drains a source's queue to empty and returns the number of queue
-	// rows consumed in this pass.
-	RunTable(ctx context.Context, source string) (int64, error)
+	// rows consumed and the number actually upserted this pass (upserted <=
+	// consumed: the IS DISTINCT FROM guard skips rows whose values are unchanged).
+	RunTable(ctx context.Context, source string) (consumed, upserted int64, err error)
 
 	// QueueStatus returns the per-source change-queue backlog, for the
 	// stalled-transform signal (a source whose oldest enqueue keeps ageing is

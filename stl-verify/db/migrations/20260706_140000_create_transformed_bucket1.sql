@@ -98,10 +98,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."morpho_market_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."morpho_market_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_morpho_market_state"();
-CREATE OR REPLACE FUNCTION transformed._run_morpho_market_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_morpho_market_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_market_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_market_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_state" LIMIT 10000)
@@ -132,8 +132,7 @@ SELECT p."chain_id",
   ON CONFLICT ("morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_supply_assets"=EXCLUDED."total_supply_assets", "total_supply_shares"=EXCLUDED."total_supply_shares", "total_borrow_assets"=EXCLUDED."total_borrow_assets", "total_borrow_shares"=EXCLUDED."total_borrow_shares", "last_update_at"=EXCLUDED."last_update_at", "fee"=EXCLUDED."fee", "prev_borrow_rate"=EXCLUDED."prev_borrow_rate", "interest_accrued"=EXCLUDED."interest_accrued", "fee_shares"=EXCLUDED."fee_shares", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."total_supply_assets", t."total_supply_shares", t."total_borrow_assets", t."total_borrow_shares", t."last_update_at", t."fee", t."prev_borrow_rate", t."interest_accrued", t."fee_shares", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_supply_assets", EXCLUDED."total_supply_shares", EXCLUDED."total_borrow_assets", EXCLUDED."total_borrow_shares", EXCLUDED."last_update_at", EXCLUDED."fee", EXCLUDED."prev_borrow_rate", EXCLUDED."interest_accrued", EXCLUDED."fee_shares", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_market_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -218,10 +217,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."morpho_market_position";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."morpho_market_position" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_morpho_market_position"();
-CREATE OR REPLACE FUNCTION transformed._run_morpho_market_position() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_morpho_market_position() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_market_position', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_market_position"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_position" LIMIT 10000)
@@ -249,8 +248,7 @@ SELECT p."chain_id",
   ON CONFLICT ("user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "supply_shares"=EXCLUDED."supply_shares", "borrow_shares"=EXCLUDED."borrow_shares", "collateral"=EXCLUDED."collateral", "supply_assets"=EXCLUDED."supply_assets", "borrow_assets"=EXCLUDED."borrow_assets", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."supply_shares", t."borrow_shares", t."collateral", t."supply_assets", t."borrow_assets", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."supply_shares", EXCLUDED."borrow_shares", EXCLUDED."collateral", EXCLUDED."supply_assets", EXCLUDED."borrow_assets", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_market_position(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -332,10 +330,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."morpho_vault_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."morpho_vault_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_morpho_vault_state"();
-CREATE OR REPLACE FUNCTION transformed._run_morpho_vault_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_morpho_vault_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_vault_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_vault_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_state" LIMIT 10000)
@@ -363,8 +361,7 @@ SELECT p."chain_id",
   ON CONFLICT ("morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_assets"=EXCLUDED."total_assets", "total_shares"=EXCLUDED."total_shares", "fee_shares"=EXCLUDED."fee_shares", "new_total_assets"=EXCLUDED."new_total_assets", "previous_total_assets"=EXCLUDED."previous_total_assets", "management_fee_shares"=EXCLUDED."management_fee_shares", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."total_assets", t."total_shares", t."fee_shares", t."new_total_assets", t."previous_total_assets", t."management_fee_shares", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_assets", EXCLUDED."total_shares", EXCLUDED."fee_shares", EXCLUDED."new_total_assets", EXCLUDED."previous_total_assets", EXCLUDED."management_fee_shares", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_vault_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -440,10 +437,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."morpho_vault_position";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."morpho_vault_position" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_morpho_vault_position"();
-CREATE OR REPLACE FUNCTION transformed._run_morpho_vault_position() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_morpho_vault_position() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_morpho_vault_position', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_vault_position"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_position" LIMIT 10000)
@@ -468,8 +465,7 @@ SELECT p."chain_id",
   ON CONFLICT ("user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "shares"=EXCLUDED."shares", "assets"=EXCLUDED."assets", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."shares", t."assets", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."shares", EXCLUDED."assets", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_morpho_vault_position(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -548,10 +544,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."fluid_vault_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."fluid_vault_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_fluid_vault_state"();
-CREATE OR REPLACE FUNCTION transformed._run_fluid_vault_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_fluid_vault_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_fluid_vault_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_fluid_vault_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_fluid_vault_state" LIMIT 10000)
@@ -579,8 +575,7 @@ SELECT p."chain_id",
   ON CONFLICT ("fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "total_collateral"=EXCLUDED."total_collateral", "total_debt"=EXCLUDED."total_debt", "supply_exchange_price"=EXCLUDED."supply_exchange_price", "borrow_exchange_price"=EXCLUDED."borrow_exchange_price", "supply_rate"=EXCLUDED."supply_rate", "borrow_rate"=EXCLUDED."borrow_rate", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."total_collateral", t."total_debt", t."supply_exchange_price", t."borrow_exchange_price", t."supply_rate", t."borrow_rate", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."total_collateral", EXCLUDED."total_debt", EXCLUDED."supply_exchange_price", EXCLUDED."borrow_exchange_price", EXCLUDED."supply_rate", EXCLUDED."borrow_rate", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_fluid_vault_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -656,10 +651,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."token_total_supply";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."token_total_supply" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_token_total_supply"();
-CREATE OR REPLACE FUNCTION transformed._run_token_total_supply() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_token_total_supply() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_token_total_supply', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_token_total_supply"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_token_total_supply" LIMIT 10000)
@@ -684,8 +679,7 @@ SELECT "chain_id",
   ON CONFLICT ("chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "total_supply"=EXCLUDED."total_supply", "scaled_total_supply"=EXCLUDED."scaled_total_supply", "source"=EXCLUDED."source", "build_id"=EXCLUDED."build_id", "created_at"=EXCLUDED."created_at"
     WHERE (t."total_supply", t."scaled_total_supply", t."source", t."build_id", t."created_at") IS DISTINCT FROM (EXCLUDED."total_supply", EXCLUDED."scaled_total_supply", EXCLUDED."source", EXCLUDED."build_id", EXCLUDED."created_at")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_token_total_supply(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -754,10 +748,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."onchain_token_price";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."onchain_token_price" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_onchain_token_price"();
-CREATE OR REPLACE FUNCTION transformed._run_onchain_token_price() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_onchain_token_price() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_onchain_token_price', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_onchain_token_price"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_onchain_token_price" LIMIT 10000)
@@ -780,8 +774,7 @@ SELECT p."chain_id",
   ON CONFLICT ("token_id", "oracle_id", "block_number", "block_version", "processing_version", "block_timestamp") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "price_usd"=EXCLUDED."price_usd", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."price_usd", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."price_usd", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_onchain_token_price(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -848,10 +841,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."maple_loan_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."maple_loan_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_maple_loan_state"();
-CREATE OR REPLACE FUNCTION transformed._run_maple_loan_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_maple_loan_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_loan_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_loan_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_state" LIMIT 10000)
@@ -874,8 +867,7 @@ SELECT p."chain_id",
   ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "state"=EXCLUDED."state", "principal_owed"=EXCLUDED."principal_owed", "acm_ratio"=EXCLUDED."acm_ratio", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."state", t."principal_owed", t."acm_ratio", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."state", EXCLUDED."principal_owed", EXCLUDED."acm_ratio", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_loan_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -950,10 +942,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."maple_loan_collateral";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."maple_loan_collateral" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_maple_loan_collateral"();
-CREATE OR REPLACE FUNCTION transformed._run_maple_loan_collateral() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_maple_loan_collateral() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_loan_collateral', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_loan_collateral"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_collateral" LIMIT 10000)
@@ -980,8 +972,7 @@ SELECT p."chain_id",
   ON CONFLICT ("maple_loan_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "asset_symbol"=EXCLUDED."asset_symbol", "asset_amount"=EXCLUDED."asset_amount", "asset_decimals"=EXCLUDED."asset_decimals", "asset_value_usd"=EXCLUDED."asset_value_usd", "state"=EXCLUDED."state", "custodian"=EXCLUDED."custodian", "liquidation_level"=EXCLUDED."liquidation_level", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."asset_symbol", t."asset_amount", t."asset_decimals", t."asset_value_usd", t."state", t."custodian", t."liquidation_level", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."asset_symbol", EXCLUDED."asset_amount", EXCLUDED."asset_decimals", EXCLUDED."asset_value_usd", EXCLUDED."state", EXCLUDED."custodian", EXCLUDED."liquidation_level", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_loan_collateral(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -1060,10 +1051,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."maple_pool_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."maple_pool_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_maple_pool_state"();
-CREATE OR REPLACE FUNCTION transformed._run_maple_pool_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_maple_pool_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_pool_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_pool_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_pool_state" LIMIT 10000)
@@ -1090,8 +1081,7 @@ SELECT p."chain_id",
   ON CONFLICT ("maple_pool_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "tvl"=EXCLUDED."tvl", "liquid_assets"=EXCLUDED."liquid_assets", "collateral_value_usd"=EXCLUDED."collateral_value_usd", "principal_out"=EXCLUDED."principal_out", "utilization"=EXCLUDED."utilization", "monthly_apy"=EXCLUDED."monthly_apy", "spot_apy"=EXCLUDED."spot_apy", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."tvl", t."liquid_assets", t."collateral_value_usd", t."principal_out", t."utilization", t."monthly_apy", t."spot_apy", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."tvl", EXCLUDED."liquid_assets", EXCLUDED."collateral_value_usd", EXCLUDED."principal_out", EXCLUDED."utilization", EXCLUDED."monthly_apy", EXCLUDED."spot_apy", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_pool_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -1168,10 +1158,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."maple_sky_strategy_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."maple_sky_strategy_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_maple_sky_strategy_state"();
-CREATE OR REPLACE FUNCTION transformed._run_maple_sky_strategy_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_maple_sky_strategy_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_sky_strategy_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_sky_strategy_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_sky_strategy_state" LIMIT 10000)
@@ -1197,8 +1187,7 @@ SELECT p."chain_id",
   ON CONFLICT ("maple_sky_strategy_id", "snapshot_time", "processing_version") DO UPDATE SET "chain_id"=EXCLUDED."chain_id", "protocol_id"=EXCLUDED."protocol_id", "state"=EXCLUDED."state", "currently_deployed"=EXCLUDED."currently_deployed", "deposited_assets"=EXCLUDED."deposited_assets", "withdrawn_assets"=EXCLUDED."withdrawn_assets", "strategy_fee_rate"=EXCLUDED."strategy_fee_rate", "total_fees_collected"=EXCLUDED."total_fees_collected", "build_id"=EXCLUDED."build_id"
     WHERE (t."chain_id", t."protocol_id", t."state", t."currently_deployed", t."deposited_assets", t."withdrawn_assets", t."strategy_fee_rate", t."total_fees_collected", t."build_id") IS DISTINCT FROM (EXCLUDED."chain_id", EXCLUDED."protocol_id", EXCLUDED."state", EXCLUDED."currently_deployed", EXCLUDED."deposited_assets", EXCLUDED."withdrawn_assets", EXCLUDED."strategy_fee_rate", EXCLUDED."total_fees_collected", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_sky_strategy_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -1268,10 +1257,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."maple_syrup_global_state";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."maple_syrup_global_state" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_maple_syrup_global_state"();
-CREATE OR REPLACE FUNCTION transformed._run_maple_syrup_global_state() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_maple_syrup_global_state() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_maple_syrup_global_state', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_syrup_global_state"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_syrup_global_state" LIMIT 10000)
@@ -1294,8 +1283,7 @@ SELECT "chain_id",
   ON CONFLICT ("chain_id", "snapshot_time", "processing_version") DO UPDATE SET "tvl"=EXCLUDED."tvl", "apy"=EXCLUDED."apy", "collateral_apy"=EXCLUDED."collateral_apy", "pool_apy"=EXCLUDED."pool_apy", "drips_yield_boost"=EXCLUDED."drips_yield_boost", "build_id"=EXCLUDED."build_id"
     WHERE (t."tvl", t."apy", t."collateral_apy", t."pool_apy", t."drips_yield_boost", t."build_id") IS DISTINCT FROM (EXCLUDED."tvl", EXCLUDED."apy", EXCLUDED."collateral_apy", EXCLUDED."pool_apy", EXCLUDED."drips_yield_boost", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_maple_syrup_global_state(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -1360,10 +1348,10 @@ BEGIN
 END $tg$;
 DROP TRIGGER IF EXISTS "_transform_enqueue" ON public."offchain_token_price";
 CREATE TRIGGER "_transform_enqueue" AFTER INSERT ON public."offchain_token_price" FOR EACH ROW EXECUTE FUNCTION transformed."_enqueue_offchain_token_price"();
-CREATE OR REPLACE FUNCTION transformed._run_offchain_token_price() RETURNS bigint AS $fn$
-DECLARE n bigint;
+CREATE OR REPLACE FUNCTION transformed._run_offchain_token_price() RETURNS TABLE(consumed bigint, upserted bigint) AS $fn$
 BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('transformed._run_offchain_token_price', 0));
+  RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_offchain_token_price"
     WHERE ctid IN (SELECT ctid FROM transformed."_pending_offchain_token_price" LIMIT 10000)
@@ -1385,8 +1373,7 @@ SELECT "token_id",
   ON CONFLICT ("token_id", "source_id", "processing_version", "snapshot_time") DO UPDATE SET "price_usd"=EXCLUDED."price_usd", "market_cap_usd"=EXCLUDED."market_cap_usd", "volume_usd"=EXCLUDED."volume_usd", "build_id"=EXCLUDED."build_id"
     WHERE (t."price_usd", t."market_cap_usd", t."volume_usd", t."build_id") IS DISTINCT FROM (EXCLUDED."price_usd", EXCLUDED."market_cap_usd", EXCLUDED."volume_usd", EXCLUDED."build_id")
   RETURNING 1)
-  SELECT count(*) INTO n FROM batch;
-  RETURN n;
+  SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM ins);
 END $fn$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION transformed._bootstrap_offchain_token_price(_from timestamptz, _to timestamptz) RETURNS bigint AS $fn$
 DECLARE n bigint;
@@ -1441,7 +1428,7 @@ UNION ALL
 SELECT 'offchain_token_price'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_offchain_token_price";
 COMMENT ON VIEW transformed._queue_status IS '[Operational] Per-source pending-row count and oldest enqueue time across the transform change queues. oldest_enqueued_at lagging wall-clock = a stalled transform.';
 
--- Raw-vs-transformed parity backstop (checkpointed incremental, review N2).
+-- Raw-vs-transformed parity backstop (checkpointed incremental).
 -- A ledger holds a verified (raw, transformed, pending) count per source per
 -- raw-chunk time-range plus that chunk's pg_stat_all_tables activity baseline, so
 -- the worker does not full-count every table each tick. _parity_refresh re-counts
