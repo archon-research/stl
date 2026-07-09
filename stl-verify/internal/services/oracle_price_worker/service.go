@@ -283,15 +283,8 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 
 func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
 	for _, unit := range s.units {
-		var feeds []blockchain.FeedConfig
-		switch {
-		case unit.Oracle.OracleType.IsERC4626Oracle():
-			feeds = blockchain.ERC4626UnderlyingFeeds(unit.ERC4626Vaults)
-		case unit.Oracle.OracleType.IsCurveLPNGOracle():
-			feeds = unit.CurveLPNGPool.CoinFeeds
-		case unit.Oracle.OracleType.IsFeedOracle():
-			feeds = unit.Feeds
-		default:
+		feeds, ok := oracle_pricing.ValidationFeeds(unit.OracleUnit)
+		if !ok {
 			continue
 		}
 		if err := blockchain.ValidateFeedDecimals(
