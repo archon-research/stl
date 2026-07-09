@@ -56,7 +56,7 @@ func TestFetchFeedPrices(t *testing.T) {
 	tests := []struct {
 		name        string
 		feeds       []FeedConfig
-		mock        *mockMulticaller
+		mock        *testutil.MockMulticaller
 		wantErr     bool
 		errContains string
 		wantResults []FeedPriceResult
@@ -64,8 +64,8 @@ func TestFetchFeedPrices(t *testing.T) {
 		{
 			name:  "happy path - two feeds succeed",
 			feeds: feeds,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					if len(calls) != 2 {
 						t.Fatalf("expected 2 calls, got %d", len(calls))
 					}
@@ -83,8 +83,8 @@ func TestFetchFeedPrices(t *testing.T) {
 		{
 			name:  "feed reverts - AllowFailure skips it, latestAnswer also fails",
 			feeds: feeds,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					if len(calls) == 2 {
 						// 1st call: latestRoundData
 						return []outbound.Result{
@@ -106,8 +106,8 @@ func TestFetchFeedPrices(t *testing.T) {
 		{
 			name:  "unpack error on Success true returns error",
 			feeds: feeds[:1],
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: []byte{0xde, 0xad, 0xbe, 0xef}}, // bad data
 					}, nil
@@ -119,8 +119,8 @@ func TestFetchFeedPrices(t *testing.T) {
 		{
 			name:  "multicall error returns error",
 			feeds: feeds,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("RPC connection refused")
 				},
 			},
@@ -130,8 +130,8 @@ func TestFetchFeedPrices(t *testing.T) {
 		{
 			name:  "empty feeds returns nil",
 			feeds: []FeedConfig{},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					t.Fatal("Execute should not be called for empty feeds")
 					return nil, nil
 				},
@@ -141,8 +141,8 @@ func TestFetchFeedPrices(t *testing.T) {
 		{
 			name:  "result count mismatch returns error",
 			feeds: feeds,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100000000), big.NewInt(1000))},
 					}, nil // 1 result for 2 feeds
@@ -157,8 +157,8 @@ func TestFetchFeedPrices(t *testing.T) {
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
 				{TokenID: 2, FeedAddress: feed2, FeedDecimals: 18, QuoteCurrency: "USD"},
 			},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					// 100_000_000 with 8 decimals = $1.00
 					// 2500 * 10^18 with 18 decimals = $2500.00
 					price18 := new(big.Int).Mul(big.NewInt(2500), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
@@ -178,7 +178,7 @@ func TestFetchFeedPrices(t *testing.T) {
 			feeds: []FeedConfig{
 				{TokenID: 1, FeedAddress: common.Address{}, FeedDecimals: 8, QuoteCurrency: "USD"},
 			},
-			mock:        &mockMulticaller{},
+			mock:        &testutil.MockMulticaller{},
 			wantErr:     true,
 			errContains: "zero feed address",
 		},
@@ -187,7 +187,7 @@ func TestFetchFeedPrices(t *testing.T) {
 			feeds: []FeedConfig{
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 0, QuoteCurrency: "USD"},
 			},
-			mock:        &mockMulticaller{},
+			mock:        &testutil.MockMulticaller{},
 			wantErr:     true,
 			errContains: "invalid feed decimals",
 		},
@@ -196,7 +196,7 @@ func TestFetchFeedPrices(t *testing.T) {
 			feeds: []FeedConfig{
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: -1, QuoteCurrency: "USD"},
 			},
-			mock:        &mockMulticaller{},
+			mock:        &testutil.MockMulticaller{},
 			wantErr:     true,
 			errContains: "invalid feed decimals",
 		},
@@ -270,7 +270,7 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		name        string
 		feeds       []FeedConfig
 		callNum     int // tracks Execute invocations
-		mock        func(t *testing.T) *callCountMock
+		mock        func(t *testing.T) *testutil.MockMulticaller
 		wantErr     bool
 		errContains string
 		wantResults []FeedPriceResult
@@ -278,30 +278,28 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "latestRoundData fails, latestAnswer succeeds",
 			feeds: feeds,
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						// 1st call: latestRoundData — feed1 ok, feed2 reverts
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packRoundData(t, big.NewInt(200000000000), big.NewInt(1000))},
-								{Success: false},
-							}, nil
-						},
-						// 2nd call: latestAnswer for feed2 only
-						func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							if len(calls) != 1 {
-								t.Fatalf("latestAnswer retry: expected 1 call, got %d", len(calls))
-							}
-							if calls[0].Target != feed2 {
-								t.Errorf("latestAnswer target = %v, want %v", calls[0].Target, feed2)
-							}
-							return []outbound.Result{
-								{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(117000000))}, // $1.17
-							}, nil
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					// 1st call: latestRoundData — feed1 ok, feed2 reverts
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packRoundData(t, big.NewInt(200000000000), big.NewInt(1000))},
+							{Success: false},
+						}, nil
 					},
-				}
+					// 2nd call: latestAnswer for feed2 only
+					func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						if len(calls) != 1 {
+							t.Fatalf("latestAnswer retry: expected 1 call, got %d", len(calls))
+						}
+						if calls[0].Target != feed2 {
+							t.Errorf("latestAnswer target = %v, want %v", calls[0].Target, feed2)
+						}
+						return []outbound.Result{
+							{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(117000000))}, // $1.17
+						}, nil
+					},
+				)
 			},
 			wantResults: []FeedPriceResult{
 				{TokenID: 1, Price: 2000.0, Success: true},
@@ -311,17 +309,15 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "both latestRoundData and latestAnswer fail",
 			feeds: feeds[:1],
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{{Success: false}}, nil
-						},
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{{Success: false}}, nil
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{{Success: false}}, nil
 					},
-				}
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{{Success: false}}, nil
+					},
+				)
 			},
 			wantResults: []FeedPriceResult{
 				{TokenID: 1, Success: false},
@@ -330,19 +326,17 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "latestAnswer returns non-positive value",
 			feeds: feeds[:1],
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{{Success: false}}, nil
-						},
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(0))},
-							}, nil
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{{Success: false}}, nil
 					},
-				}
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(0))},
+						}, nil
+					},
+				)
 			},
 			wantResults: []FeedPriceResult{
 				{TokenID: 1, Success: false},
@@ -351,17 +345,15 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "latestAnswer multicall error returns error",
 			feeds: feeds[:1],
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{{Success: false}}, nil
-						},
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return nil, errors.New("RPC connection refused")
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{{Success: false}}, nil
 					},
-				}
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return nil, errors.New("RPC connection refused")
+					},
+				)
 			},
 			wantErr:     true,
 			errContains: "executing latestAnswer multicall",
@@ -369,21 +361,19 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "zero answer retries with latestAnswer, also fails",
 			feeds: feeds[:1],
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))},
-							}, nil
-						},
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(0))},
-							}, nil
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))},
+						}, nil
 					},
-				}
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(0))},
+						}, nil
+					},
+				)
 			},
 			wantResults: []FeedPriceResult{
 				{TokenID: 1, Success: false},
@@ -392,21 +382,19 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "negative answer retries with latestAnswer, recovers",
 			feeds: feeds[:1],
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packRoundData(t, big.NewInt(-100), big.NewInt(1000))},
-							}, nil
-						},
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(100_000_000))},
-							}, nil
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packRoundData(t, big.NewInt(-100), big.NewInt(1000))},
+						}, nil
 					},
-				}
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packLatestAnswer(t, big.NewInt(100_000_000))},
+						}, nil
+					},
+				)
 			},
 			wantResults: []FeedPriceResult{
 				{TokenID: 1, Price: 1.0, Success: true},
@@ -415,22 +403,20 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 		{
 			name:  "all feeds succeed on latestRoundData, no fallback needed",
 			feeds: feeds,
-			mock: func(t *testing.T) *callCountMock {
-				return &callCountMock{
-					executeFns: []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error){
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							return []outbound.Result{
-								{Success: true, ReturnData: packRoundData(t, big.NewInt(200000000000), big.NewInt(1000))},
-								{Success: true, ReturnData: packRoundData(t, big.NewInt(100000000), big.NewInt(1000))},
-							}, nil
-						},
-						// This should NOT be called
-						func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-							t.Fatal("latestAnswer should not be called when all feeds succeed")
-							return nil, nil
-						},
+			mock: func(t *testing.T) *testutil.MockMulticaller {
+				return newRoundDispatch(
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						return []outbound.Result{
+							{Success: true, ReturnData: packRoundData(t, big.NewInt(200000000000), big.NewInt(1000))},
+							{Success: true, ReturnData: packRoundData(t, big.NewInt(100000000), big.NewInt(1000))},
+						}, nil
 					},
-				}
+					// This should NOT be called
+					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+						t.Fatal("latestAnswer should not be called when all feeds succeed")
+						return nil, nil
+					},
+				)
 			},
 			wantResults: []FeedPriceResult{
 				{TokenID: 1, Price: 2000.0, Success: true},
@@ -485,35 +471,22 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 	}
 }
 
-// callCountMock is a mock multicaller that dispatches to different functions
-// based on the call count, for testing multi-round interactions.
-type callCountMock struct {
-	executeFns []func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error)
-	callIdx    int
-}
-
-func (m *callCountMock) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	return m.dispatch(ctx, calls, blockNumber)
-}
-
-// ExecuteAtHash routes through the same call-count sequence as Execute: VEC-471
-// moved FetchFeedPrices' latestRoundData/latestAnswer rounds to ExecuteAtHash,
-// and these multi-round tests key on call order, not the block arg.
-func (m *callCountMock) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return m.dispatch(ctx, calls, nil)
-}
-
-func (m *callCountMock) dispatch(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	if m.callIdx >= len(m.executeFns) {
-		return nil, fmt.Errorf("unexpected multicall #%d", m.callIdx)
+// newRoundDispatch returns a MockMulticaller that sends each successive
+// Execute/ExecuteAtHash call to the next function in fns, so a test can script a
+// multi-round interaction (e.g. latestRoundData then a latestAnswer retry). An
+// unexpected extra call errors rather than dispatching off the end.
+func newRoundDispatch(fns ...func(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error)) *testutil.MockMulticaller {
+	mc := testutil.NewMockMulticaller()
+	var idx int
+	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		if idx >= len(fns) {
+			return nil, fmt.Errorf("unexpected multicall #%d", idx)
+		}
+		fn := fns[idx]
+		idx++
+		return fn(ctx, calls, blockNumber)
 	}
-	fn := m.executeFns[m.callIdx]
-	m.callIdx++
-	return fn(ctx, calls, blockNumber)
-}
-
-func (m *callCountMock) Address() common.Address {
-	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
+	return mc
 }
 
 func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
@@ -530,12 +503,12 @@ func TestFetchFeedPrices_VerifiesCallTargets(t *testing.T) {
 	// Reads must be pinned to the block hash, not the number: after a reorg an
 	// archive node answers eth_call-by-number with the new canonical feed value,
 	// which can silently disagree with the reorged block being processed (VEC-471).
-	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	mock := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 			t.Fatal("FetchFeedPrices must call ExecuteAtHash for a non-zero block hash, not Execute")
 			return nil, nil
 		},
-		executeAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		ExecuteAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 			if len(calls) != 2 {
 				t.Fatalf("expected 2 calls, got %d", len(calls))
 			}
@@ -586,7 +559,7 @@ func TestValidateFeedDecimals(t *testing.T) {
 	tests := []struct {
 		name        string
 		feeds       []FeedConfig
-		mock        *mockMulticaller
+		mock        *testutil.MockMulticaller
 		wantErr     bool
 		errContains string
 	}{
@@ -596,8 +569,8 @@ func TestValidateFeedDecimals(t *testing.T) {
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
 				{TokenID: 2, FeedAddress: feed2, FeedDecimals: 18, QuoteCurrency: "USD"},
 			},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackDecimals(t, 8)},
 						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
@@ -610,8 +583,8 @@ func TestValidateFeedDecimals(t *testing.T) {
 			feeds: []FeedConfig{
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
 			},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackDecimals(t, 18)},
 					}, nil
@@ -625,8 +598,8 @@ func TestValidateFeedDecimals(t *testing.T) {
 			feeds: []FeedConfig{
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
 			},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: false},
 					}, nil
@@ -636,15 +609,15 @@ func TestValidateFeedDecimals(t *testing.T) {
 		{
 			name:  "empty feeds is no-op",
 			feeds: []FeedConfig{},
-			mock:  &mockMulticaller{},
+			mock:  &testutil.MockMulticaller{},
 		},
 		{
 			name: "multicall error propagates",
 			feeds: []FeedConfig{
 				{TokenID: 1, FeedAddress: feed1, FeedDecimals: 8, QuoteCurrency: "USD"},
 			},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("RPC connection refused")
 				},
 			},

@@ -17,7 +17,19 @@ type MockMulticaller struct {
 	ExecuteFn       func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
 	ExecuteAtHashFn func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error)
 	CallCount       int
-	Addr            common.Address
+	// Invocations records every Execute/ExecuteAtHash call in order, so a test can
+	// assert on the calls issued, the block a read was pinned to, and which entry
+	// point was used, without a bespoke recording double per package.
+	Invocations []Invocation
+	Addr        common.Address
+}
+
+// Invocation is one recorded Execute/ExecuteAtHash call.
+type Invocation struct {
+	Calls       []outbound.Call
+	BlockNumber *big.Int    // set by Execute; nil on the hash-pinned path
+	BlockHash   common.Hash // set by ExecuteAtHash; zero on the number path
+	ViaHash     bool        // true when the call arrived through ExecuteAtHash
 }
 
 func NewMockMulticaller() *MockMulticaller {
@@ -29,6 +41,7 @@ func NewMockMulticaller() *MockMulticaller {
 func (m *MockMulticaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 	m.mu.Lock()
 	m.CallCount++
+	m.Invocations = append(m.Invocations, Invocation{Calls: calls, BlockNumber: blockNumber})
 	m.mu.Unlock()
 	if m.ExecuteFn != nil {
 		return m.ExecuteFn(ctx, calls, blockNumber)
@@ -39,6 +52,7 @@ func (m *MockMulticaller) Execute(ctx context.Context, calls []outbound.Call, bl
 func (m *MockMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 	m.mu.Lock()
 	m.CallCount++
+	m.Invocations = append(m.Invocations, Invocation{Calls: calls, BlockHash: blockHash, ViaHash: true})
 	m.mu.Unlock()
 	if m.ExecuteAtHashFn != nil {
 		return m.ExecuteAtHashFn(ctx, calls, blockHash)
