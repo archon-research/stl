@@ -9,9 +9,10 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
-  # uniswap-v3-indexer (base kept) is deferred to VEC-329, which re-adds the
-  # staging/prod overlay wiring once the dex-indexer image + SQS queue + secret
-  # (ethereum_sqs_uniswap_v3_indexing_url) are provisioned in the infra repo.
+  # curve-indexer + uniswap-v3-indexer (bases kept) are deferred to VEC-329,
+  # which re-adds the staging/prod overlay wiring once the dex-indexer image +
+  # SQS queues + secrets (ethereum_sqs_curve_indexing_url,
+  # ethereum_sqs_uniswap_v3_indexing_url) are provisioned in the infra repo.
   - ../../base/fluid-vault-indexer
   - ../../base/allocation-tracker
   - ../../base/avalanche-watcher

@@ -15,9 +15,10 @@ resources:
   - ../../../base/prime-debt-indexer
   # Dev covers one representative chain (base); PSM3 does not exist on the mainnet chain dev runs.
   - ../../../base/base-psm3-indexer
-  # uniswap-v3-indexer (dex-indexer image) dev wiring is deferred to VEC-329,
-  # which adds the dex-indexer build + kind-load, the localstack queue, and the
-  # dev-up rollout-wait entry. Base kept; not run in dev until then.
+  # curve-indexer + uniswap-v3-indexer (dex-indexer image) dev wiring is
+  # deferred to VEC-329, which adds the dex-indexer build + kind-load, the
+  # localstack queues, and the dev-up rollout-wait entries. Bases kept; not run
+  # in dev until then.
 
 components:
   - ../components/runtime
