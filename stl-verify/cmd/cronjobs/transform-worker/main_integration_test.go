@@ -276,16 +276,15 @@ func TestTransformWorker_BootstrapIdempotent(t *testing.T) {
 	ctx := context.Background()
 	marketID := seedMorphoMarket(ctx, t, pool)
 
-	// Pre-existing row: insert with the enqueue trigger disabled, so only bootstrap
-	// (not the queue) can pick it up.
-	if _, err := pool.Exec(ctx, `ALTER TABLE public."morpho_market_state" DISABLE TRIGGER "_transform_enqueue"`); err != nil {
-		t.Fatalf("disabling enqueue trigger: %v", err)
-	}
+	// Simulate history the enqueue trigger never captured (pre-trigger rows): insert
+	// the raw row (which enqueues it), then drop the queue entry so only bootstrap
+	// can materialise it. DISABLE TRIGGER is unavailable on a compressed hypertable,
+	// so clearing the queue is the portable way to reach the same state.
 	seedMorphoMarketState(ctx, t, pool, marketID, morphoStateRow{
 		blockNumber: 500, buildID: 40, timestamp: time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 	})
-	if _, err := pool.Exec(ctx, `ALTER TABLE public."morpho_market_state" ENABLE TRIGGER "_transform_enqueue"`); err != nil {
-		t.Fatalf("enabling enqueue trigger: %v", err)
+	if _, err := pool.Exec(ctx, `DELETE FROM transformed."_pending_morpho_market_state"`); err != nil {
+		t.Fatalf("clearing queue to simulate pre-trigger history: %v", err)
 	}
 
 	from := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)

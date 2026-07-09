@@ -85,6 +85,13 @@ func run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("bootstrapping %q: %w", source, err)
 		}
+		// Seed + freeze the parity ledger for this source on the same tiered-reads-on
+		// connection, so historical (tiered) buckets are verified once here and the
+		// per-tick worker refresh never has to re-read S3.
+		fn := pgx.Identifier{"transformed", "_parity_verify_all"}.Sanitize()
+		if _, err := conn.Exec(ctx, "SELECT "+fn+"($1)", source); err != nil {
+			return fmt.Errorf("verifying parity for %q: %w", source, err)
+		}
 		logger.Info("bootstrap source complete", "source", source, "rows", total)
 	}
 	logger.Info("bootstrap complete", "sources", len(sources))

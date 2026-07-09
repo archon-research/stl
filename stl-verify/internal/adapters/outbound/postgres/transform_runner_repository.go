@@ -122,6 +122,16 @@ func (r *TransformRunnerRepository) QueueStatus(ctx context.Context) ([]outbound
 	return out, nil
 }
 
+// RefreshParity incrementally re-verifies source's parity ledger via
+// transformed._parity_refresh(source). source is passed as a value argument (not
+// an identifier), and originates from transformed._sources.
+func (r *TransformRunnerRepository) RefreshParity(ctx context.Context, source string) error {
+	if _, err := r.pool.Exec(ctx, "SELECT transformed._parity_refresh($1)", source); err != nil {
+		return fmt.Errorf("refreshing transform parity %q: %w", source, err)
+	}
+	return nil
+}
+
 // ParityStatus reads the per-source raw-vs-transformed parity from
 // transformed._parity_status.
 func (r *TransformRunnerRepository) ParityStatus(ctx context.Context) ([]outbound.ParityRow, error) {

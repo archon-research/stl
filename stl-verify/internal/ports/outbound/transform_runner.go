@@ -27,9 +27,14 @@ type TransformRunner interface {
 	// not draining).
 	QueueStatus(ctx context.Context) ([]QueueDepth, error)
 
-	// ParityStatus returns the per-source raw-vs-transformed parity, the backstop
-	// that catches a silent queue-mechanism failure (a trigger gap, a bootstrap
-	// miss, or an append-only violation) that QueueStatus cannot see.
+	// RefreshParity incrementally re-verifies one source's parity ledger (the head
+	// chunk plus any local chunk whose activity moved), so ParityStatus reflects
+	// current counts without full-scanning every table.
+	RefreshParity(ctx context.Context, source string) error
+
+	// ParityStatus returns the per-source raw-vs-transformed parity (summed from the
+	// ledger), the backstop that catches a silent queue-mechanism failure (a trigger
+	// gap, a bootstrap miss, or an append-only violation) that QueueStatus cannot see.
 	ParityStatus(ctx context.Context) ([]ParityRow, error)
 }
 

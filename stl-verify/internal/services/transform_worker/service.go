@@ -106,7 +106,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	}
 
 	s.recordQueueDepth(ctx)
-	s.recordParity(ctx)
+	s.recordParity(ctx, sources)
 
 	s.logger.Info("transform cycle complete",
 		"tables", len(sources), "failed", len(errs), "rows", total)
@@ -133,10 +133,17 @@ func (s *Service) recordQueueDepth(ctx context.Context) {
 	}
 }
 
-// recordParity emits the raw-vs-transformed parity gauges that back the parity
-// alert, and logs any source whose drift is nonzero (a row that reached neither
-// the transformed table nor the queue). A read failure is logged, not fatal.
-func (s *Service) recordParity(ctx context.Context) {
+// recordParity incrementally refreshes each source's parity ledger, then emits the
+// parity gauges and logs any source whose drift is nonzero (a row that reached
+// neither the transformed table nor the queue). A refresh or read failure is
+// logged, not fatal: materialization already succeeded, and a stale ledger still
+// reports the last-known drift.
+func (s *Service) recordParity(ctx context.Context, sources []string) {
+	for _, source := range sources {
+		if err := s.runner.RefreshParity(ctx, source); err != nil {
+			s.logger.Warn("transform parity refresh failed; ledger may be stale this tick", "source", source, "error", err)
+		}
+	}
 	rows, err := s.runner.ParityStatus(ctx)
 	if err != nil {
 		s.logger.Warn("reading transform parity status failed; parity metrics skipped this tick", "error", err)
