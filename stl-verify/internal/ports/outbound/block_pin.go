@@ -27,9 +27,9 @@ const (
 
 // BlockPin is the coordinate of one on-chain read: which block, and how the
 // read is pinned to it. Opaque and immutable — the constructors are the only
-// way to build one, so a reorg-safe pin always carries a non-zero hash and
-// every pin carries the (number, version) the archive key needs; an archived
-// record can never key at block 0 (the PR #520 regression).
+// way to build one. The reorg-safe path (PinForEvent) validates a non-zero
+// hash and positive block number; number-pinned paths accept the caller's
+// number as-is.
 type BlockPin struct {
 	number  int64
 	version int
@@ -43,7 +43,7 @@ type BlockPin struct {
 func PinForEvent(e BlockEvent) (BlockPin, error) {
 	h, err := e.ParsedBlockHash()
 	if err != nil {
-		return BlockPin{}, err
+		return BlockPin{}, fmt.Errorf("deriving block pin: %w", err)
 	}
 	if e.BlockNumber <= 0 {
 		return BlockPin{}, fmt.Errorf("block %d v%d: non-positive block number on event", e.BlockNumber, e.Version)
