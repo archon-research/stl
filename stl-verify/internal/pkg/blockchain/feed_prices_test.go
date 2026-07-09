@@ -280,7 +280,7 @@ func TestFetchFeedPrices_LatestAnswerFallback(t *testing.T) {
 			feeds: feeds,
 			mock: func(t *testing.T) *testutil.MockMulticaller {
 				return newRoundDispatch(
-					// 1st call: latestRoundData — feed1 ok, feed2 reverts
+					// 1st call: latestRoundData; feed1 ok, feed2 reverts
 					func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 						return []outbound.Result{
 							{Success: true, ReturnData: packRoundData(t, big.NewInt(200000000000), big.NewInt(1000))},
