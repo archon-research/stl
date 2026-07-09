@@ -917,8 +917,8 @@ async def _ruv_seed_locf_series(
 async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: int) -> None:
     """Seed a Morpho-vault-share receipt position (sparkUSDCbc semantics) with its own binding.
 
-    Everything the receipt reads price through — protocol, oracle,
-    protocol_oracle binding, registry row, underlying token and its price — is
+    Everything the receipt reads price through (protocol, oracle,
+    protocol_oracle binding, registry row, underlying token and its price) is
     seeded here, so the scenario does not lean on migration-seeded registry
     rows (which own the real sparkUSDCbc registration).
     """

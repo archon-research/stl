@@ -323,13 +323,13 @@ class AllocationRepository:
         Mirrors ``_record_unpriced_holdings`` for the receipt path, with two
         distinct signals:
 
-        * ``unpriced``: ``amount_usd`` resolved to NULL — a missing underlying
+        * ``unpriced``: ``amount_usd`` resolved to NULL, i.e. a missing underlying
           oracle price, or a position/registry underlying divergence refused by
           the valuation CASE. Receipt positions price through the curated
           registry and are expected to price, so a null is a coverage
           regression worth alerting on.
         * ``balance_basis``: ``underlying_value`` is NULL, so the read fell
-          back to the share-balance basis — a silent methodology fallback
+          back to the share-balance basis, a silent methodology fallback
           (expected only for rows written before the column existed) that gets
           its own signal so it cannot linger unnoticed.
         """
@@ -913,9 +913,11 @@ class AllocationRepository:
 # receipt row carrying one; warehouse, 2026-07-09: 5484 rows, 0 divergent). A
 # row whose own underlying diverges from the registry's indicates an ingest
 # bug: the registry price would multiply a position value denominated in a
-# different unit, so every valuation read refuses to price it (NULL, surfaced
-# as unpriced by ``_record_receipt_valuation_gaps``) rather than producing a
-# plausible wrong number.
+# different unit, so every valuation read refuses to price it (NULL) rather
+# than producing a plausible wrong number. The positions list surfaces the
+# refusal via ``_record_receipt_valuation_gaps``; the exposure-buckets read
+# nulls the divergent observation before ``last()``, so ``locf`` carries the
+# last pre-divergence value (stale but unit-correct) without telemetry.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_receipt_positions AS (
         SELECT DISTINCT ON (rt.id)

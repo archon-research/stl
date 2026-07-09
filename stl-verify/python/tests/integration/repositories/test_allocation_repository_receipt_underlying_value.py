@@ -235,7 +235,7 @@ async def test_exposure_bucket_carries_value_until_next_observation(repo) -> Non
 
 # ---------------------------------------------------------------------------
 # Valuation-gap telemetry: the receipt path mirrors the direct-holdings
-# unpriced signal — a NULL amount_usd and a balance-basis fallback each get a
+# unpriced signal: a NULL amount_usd and a balance-basis fallback each get a
 # warning so coverage regressions don't have to be discovered by a user.
 # ---------------------------------------------------------------------------
 
