@@ -275,8 +275,11 @@ BEGIN
         RAISE EXCEPTION 'Morpho Blue -> chainlink protocol_oracle binding missing';
     END IF;
 
-    -- Same enabled + exact-feed_decimals strictness as assertion 1.
-    SELECT COUNT(*) INTO cnt
+    -- Same enabled + exact-feed_decimals strictness as assertion 1. COUNT(DISTINCT):
+    -- unlike assertion 1 this join does not pin token_id, and (oracle_id, token_id,
+    -- feed_address) uniqueness allows the same feed under another token, so a raw
+    -- row count could hit 2 with one feed duplicated and the other missing.
+    SELECT COUNT(DISTINCT oa.feed_address) INTO cnt
     FROM (VALUES
         ('\x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6'::bytea, 8),
         ('\xB00341502DfEA6Ced8A5786b4059d29dA5E4D1FD'::bytea, 18)
@@ -286,7 +289,7 @@ BEGIN
       ON oa.oracle_id = o.id AND oa.feed_address = f.feed_address
      AND oa.enabled AND oa.feed_decimals = f.feed_decimals;
     IF cnt <> 2 THEN
-        RAISE EXCEPTION 'expected 2 enabled curve_ausdusdc_lp oracle_asset rows with expected feed_decimals, found %', cnt;
+        RAISE EXCEPTION 'expected 2 distinct enabled curve_ausdusdc_lp feed oracle_asset rows with expected feed_decimals, found %', cnt;
     END IF;
 
     SELECT COUNT(*) INTO cnt
@@ -299,8 +302,10 @@ BEGIN
 
     -- The maple binding only helps if chainlink actually prices USDC and USDT:
     -- enabled oracle_asset rows must exist for both, resolved by token ADDRESS
-    -- (labels are not authoritative).
-    SELECT COUNT(*) INTO cnt
+    -- (labels are not authoritative). COUNT(DISTINCT t.id): (oracle_id, token_id,
+    -- feed_address) uniqueness allows several enabled feed rows per token, so a raw
+    -- row count could hit 2 with one token duplicated and the other missing.
+    SELECT COUNT(DISTINCT t.id) INTO cnt
     FROM (VALUES
         ('\xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'::bytea),
         ('\xdac17f958d2ee523a2206206994597c13d831ec7'::bytea)
