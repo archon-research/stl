@@ -16,6 +16,9 @@ type Multicaller interface {
 	// Pinning by hash makes the read unambiguous: the node answers from that exact
 	// block even if it has since been reorged out, and errors only when it no
 	// longer has the block at all, rather than answering from a different fork.
+	// blockHash must be non-zero: implementations reject common.Hash{} rather than
+	// pinning a read to a nonexistent block (mirrors Execute rejecting a nil block
+	// number).
 	ExecuteAtHash(ctx context.Context, calls []Call, blockHash common.Hash) ([]Result, error)
 	Address() common.Address
 }

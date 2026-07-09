@@ -114,11 +114,22 @@ func TestExecuteAtHashRecordsBatchSizeThroughExecuteAtHash(t *testing.T) {
 // calls means no RPC round trip and an empty (not nil) result.
 func TestExecuteAtHashEmptyCallsReturnsEmpty(t *testing.T) {
 	c := &Client{}
-	results, err := c.ExecuteAtHash(context.Background(), nil, common.Hash{})
+	results, err := c.ExecuteAtHash(context.Background(), nil, common.HexToHash("0x1"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(results) != 0 {
 		t.Errorf("results len = %d, want 0", len(results))
+	}
+}
+
+// TestExecuteAtHashRejectsZeroHash guards the hash-pinning contract: the zero
+// hash is the zero value ("no hash provided"), so ExecuteAtHash rejects it up
+// front — before the empty-calls short-circuit — rather than pinning a read to
+// a nonexistent block (mirrors Execute rejecting a nil block number).
+func TestExecuteAtHashRejectsZeroHash(t *testing.T) {
+	c := &Client{}
+	if _, err := c.ExecuteAtHash(context.Background(), nil, common.Hash{}); err == nil {
+		t.Fatal("expected error for zero block hash, got nil")
 	}
 }
