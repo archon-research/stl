@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -29,10 +30,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// alchemyURL is the real mainnet Alchemy endpoint this harness dials. Real
-// network access is the point of this build-tagged live-validation test (see
-// task B13 brief): it is never compiled into normal `go test`/CI runs.
-const alchemyURL = "https://eth-mainnet.g.alchemy.com/v2/jVXUMPyy9Bp1S7b6h9nbI"
+// alchemyURL builds the real mainnet Alchemy endpoint this harness dials from
+// the ALCHEMY_API_KEY env var (same variable the workers use). Real network
+// access is the point of this build-tagged live-validation test (see task B13
+// brief): it is never compiled into normal `go test`/CI runs.
+func alchemyURL(t *testing.T) string {
+	t.Helper()
+	key := os.Getenv("ALCHEMY_API_KEY")
+	if key == "" {
+		t.Fatal("ALCHEMY_API_KEY must be set to run TestLiveValidation")
+	}
+	return "https://eth-mainnet.g.alchemy.com/v2/" + key
+}
 
 // multicall3Address is the canonical Multicall3 deployment address, identical
 // across every EVM chain including mainnet.
@@ -43,8 +52,14 @@ var multicall3Address = common.HexToAddress("0xcA11bde05977b3631167028862bE2a173
 var busyPoolAddress = common.HexToAddress("0x109830a1AAaD605BbF02a9dFA7B0B92EC2FB7dAa")
 
 // liveValidationReportPath is where the human-readable data report (the B13
-// deliverable) is written, in addition to t.Log output.
-const liveValidationReportPath = "/private/tmp/claude-501/-Users-knaekbroed-projects-worktrees-stl-368-next/de7d3027-bec8-42f7-9499-8c7d4e3bc3c5/scratchpad/sdd/task-B13-report.md"
+// deliverable) is written, in addition to t.Log output. Defaults to the
+// system temp dir; override with LIVE_VALIDATION_REPORT_PATH.
+func liveValidationReportPath() string {
+	if p := os.Getenv("LIVE_VALIDATION_REPORT_PATH"); p != "" {
+		return p
+	}
+	return filepath.Join(os.TempDir(), "uniswap-v3-live-validation-report.md")
+}
 
 // swapLogsScanDepth bounds how many recent blocks are scanned via
 // eth_getLogs to find a real Swap on the busy pool.
@@ -82,7 +97,7 @@ func TestLiveValidation(t *testing.T) {
 	regPools := toRegisteredPools(poolRows)
 	rep.poolsLoaded = len(regPools)
 
-	rpcClient, err := rpc.DialContext(ctx, alchemyURL)
+	rpcClient, err := rpc.DialContext(ctx, alchemyURL(t))
 	if err != nil {
 		t.Fatalf("BLOCKED: rpc.Dial(alchemy): %v", err)
 	}
@@ -602,8 +617,9 @@ func (r *liveReport) writeAndLog(t *testing.T) {
 	md := r.render()
 	t.Log(md)
 
-	if err := os.WriteFile(liveValidationReportPath, []byte(md), 0o644); err != nil {
-		t.Logf("warning: could not write report to %s: %v", liveValidationReportPath, err)
+	reportPath := liveValidationReportPath()
+	if err := os.WriteFile(reportPath, []byte(md), 0o644); err != nil {
+		t.Logf("warning: could not write report to %s: %v", reportPath, err)
 	}
 }
 

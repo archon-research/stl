@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS uniswap_v3_pool
 -- chain_id lookups (LoadPools) are served by the UNIQUE (chain_id, pool_address)
 -- index, so no separate chain_id index is needed.
 CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pool_protocol ON uniswap_v3_pool (protocol_id);
+CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pool_token0 ON uniswap_v3_pool (token0_id);
+CREATE INDEX IF NOT EXISTS idx_uniswap_v3_pool_token1 ON uniswap_v3_pool (token1_id);
 
 COMMENT ON TABLE uniswap_v3_pool IS
   '[Dimension] Registry of indexed Uniswap V3 pools, one row per deployed pool; FK target for every uniswap_v3_* fact table. Migration-seeded and read-only at runtime.';
