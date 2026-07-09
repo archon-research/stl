@@ -9,22 +9,18 @@ import (
 
 type Multicaller interface {
 	Execute(ctx context.Context, calls []Call, blockNumber *big.Int) ([]Result, error)
-	Address() common.Address
-}
-
-// HashPinnedMulticaller pins a read to a specific block hash rather than a
-// number. Required for state reads keyed by (blockNumber, version): after a
-// reorg an archive node answers eth_call-by-number with the new canonical
-// state, which can silently disagree with the reorged (older-version) data
-// being processed. Pinning by hash makes the read unambiguous: the node
-// answers from that exact block even if it has since been reorged out, and
-// errors only when it no longer has the block at all, rather than answering
-// from a different fork. Kept as a separate interface (not a Multicaller
-// method) until the VEC-471 interface widening lands, so existing Multicaller
-// implementations keep compiling; callers that require hash-pinning assert
-// for it and fail loudly instead of downgrading to number-pinning.
-type HashPinnedMulticaller interface {
+	// ExecuteAtHash pins the read to a specific block hash rather than a number.
+	// Required for state reads keyed by (blockNumber, version): after a reorg an
+	// archive node answers eth_call-by-number with the new canonical state, which
+	// can silently disagree with the reorged (older-version) data being processed.
+	// Pinning by hash makes the read unambiguous: the node answers from that exact
+	// block even if it has since been reorged out, and errors only when it no
+	// longer has the block at all, rather than answering from a different fork.
+	// blockHash must be non-zero: implementations reject common.Hash{} rather than
+	// pinning a read to a nonexistent block (mirrors Execute rejecting a nil block
+	// number).
 	ExecuteAtHash(ctx context.Context, calls []Call, blockHash common.Hash) ([]Result, error)
+	Address() common.Address
 }
 
 type Call struct {

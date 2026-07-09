@@ -206,10 +206,31 @@ func (s *BlockchainService) loadABIs(protocolVersion blockchain.ProtocolVersion)
 	return nil
 }
 
+// executeState pins this service's multicall reads via the shared
+// blockchain.ExecutePinned convention (hash when non-zero, else number-pinned
+// fallback for backfill/CLI callers — see GetUserPositionData). See VEC-471.
+func (s *BlockchainService) executeState(ctx context.Context, calls []outbound.Call, blockNumber int64, blockHash common.Hash) ([]outbound.Result, error) {
+	return blockchain.ExecutePinned(ctx, s.multicallClient, calls, blockNumber, blockHash)
+}
+
+// callContractState is executeState's single-eth_call analogue: pinned to
+// blockHash via CallContractAtHash when blockHash is non-zero, else number-pinned
+// for callers with no live hash (backfill/CLI). The UiPoolDataProvider read is
+// reached only through this path, so it must pin the same way the balance
+// multicall does, or a reorg could enumerate a different fork's reserve set. See
+// VEC-471.
+func (s *BlockchainService) callContractState(ctx context.Context, msg ethereum.CallMsg, blockNumber int64, blockHash common.Hash) ([]byte, error) {
+	if blockHash != (common.Hash{}) {
+		return s.ethClient.CallContractAtHash(ctx, msg, blockHash)
+	}
+	return s.ethClient.CallContract(ctx, msg, big.NewInt(blockNumber))
+}
+
 func (s *BlockchainService) getUserReservesData(
 	ctx context.Context,
 	user common.Address,
 	blockNumber int64,
+	blockHash common.Hash,
 ) ([]UserReserveData, error) {
 	data, err := s.getUserReservesABI.Pack(
 		"getUserReservesData",
@@ -225,7 +246,7 @@ func (s *BlockchainService) getUserReservesData(
 		Data: data,
 	}
 
-	result, err := s.ethClient.CallContract(ctx, msg, big.NewInt(blockNumber))
+	result, err := s.callContractState(ctx, msg, blockNumber, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call UiPoolDataProvider: %w", err)
 	}
@@ -323,10 +344,17 @@ func (s *BlockchainService) decodeUserReservesResult(result []byte) ([]UserReser
 // reserves. If an individual user's sub-call fails, that user's entry will
 // be absent from the results map and the error recorded in the errors map.
 // The top-level error is only for multicall-level failures (gas limit, network).
+//
+// Pinned to blockHash when non-zero: after a reorg an archive node answers
+// eth_call-by-number with the new canonical state, which can silently
+// disagree with the reorged (older-version) data this read is being made for.
+// A zero blockHash (no live block-hash source — backfill/CLI callers) falls
+// back to number-pinning, matching pre-VEC-471 behavior exactly.
 func (s *BlockchainService) getUserReservesDataBatch(
 	ctx context.Context,
 	users []common.Address,
 	blockNumber int64,
+	blockHash common.Hash,
 ) (map[common.Address][]UserReserveData, map[common.Address]error, error) {
 	if len(users) == 0 {
 		return make(map[common.Address][]UserReserveData), nil, nil
@@ -349,7 +377,7 @@ func (s *BlockchainService) getUserReservesDataBatch(
 		})
 	}
 
-	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	results, err := s.executeState(ctx, calls, blockNumber, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("multicall failed: %w", err)
 	}
@@ -376,7 +404,10 @@ func (s *BlockchainService) getUserReservesDataBatch(
 	return reservesMap, errorsMap, nil
 }
 
-func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets []common.Address, user common.Address, blockNumber int64) (map[common.Address]ActualUserReserveData, error) {
+// batchGetUserReserveData reads per-asset reserve data for a single user.
+// Pinned to blockHash when non-zero; see executeState for the fallback
+// contract (VEC-471).
+func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets []common.Address, user common.Address, blockNumber int64, blockHash common.Hash) (map[common.Address]ActualUserReserveData, error) {
 	if len(assets) == 0 {
 		return make(map[common.Address]ActualUserReserveData), nil
 	}
@@ -406,7 +437,7 @@ func (s *BlockchainService) batchGetUserReserveData(ctx context.Context, assets 
 		return make(map[common.Address]ActualUserReserveData), nil
 	}
 
-	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	results, err := s.executeState(ctx, calls, blockNumber, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall failed: %w", err)
 	}
@@ -473,11 +504,13 @@ type userAssetKey struct {
 // batchGetUserReserveDataMultiUser packs getUserReserveData calls for
 // multiple user×asset pairs into a single Multicall3 call. Returns a nested
 // map: user → asset → ActualUserReserveData. Per-call failures are silently
-// skipped (same behavior as batchGetUserReserveData).
+// skipped (same behavior as batchGetUserReserveData). Pinned to blockHash
+// when non-zero; see executeState for the fallback contract (VEC-471).
 func (s *BlockchainService) batchGetUserReserveDataMultiUser(
 	ctx context.Context,
 	userAssets map[common.Address][]common.Address,
 	blockNumber int64,
+	blockHash common.Hash,
 ) (map[common.Address]map[common.Address]ActualUserReserveData, error) {
 	if len(userAssets) == 0 {
 		return make(map[common.Address]map[common.Address]ActualUserReserveData), nil
@@ -524,7 +557,7 @@ func (s *BlockchainService) batchGetUserReserveDataMultiUser(
 	for start := 0; start < len(calls); start += maxCallsPerChunk {
 		end := min(start+maxCallsPerChunk, len(calls))
 
-		results, err := s.multicallClient.Execute(ctx, calls[start:end], big.NewInt(blockNumber))
+		results, err := s.executeState(ctx, calls[start:end], blockNumber, blockHash)
 		if err != nil {
 			return nil, fmt.Errorf("multicall failed (chunk %d-%d): %w", start, end, err)
 		}
@@ -550,6 +583,10 @@ func (s *BlockchainService) batchGetUserReserveDataMultiUser(
 	return dataMap, nil
 }
 
+// BatchGetTokenMetadata stays number-pinned intentionally: decimals/symbol/name
+// are structurally static identity data (immutable per token contract), not
+// versioned per-block state — the reorg-correctness concern behind
+// ExecuteAtHash (VEC-471) doesn't apply here.
 func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens map[common.Address]bool, blockNumber *big.Int) (map[common.Address]TokenMetadata, error) {
 	tokensToFetch := make([]common.Address, 0)
 	result := make(map[common.Address]TokenMetadata)
@@ -664,8 +701,12 @@ func (s *BlockchainService) BatchGetTokenMetadata(ctx context.Context, tokens ma
 	return result, nil
 }
 
-// GetFullReserveData fetches reserve data, configuration data, and token addresses from ProtocolDataProvider.
-func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common.Address, blockNumber int64) (*ReserveData, *ReserveConfigData, *ReserveTokenAddresses, error) {
+// GetFullReserveData fetches reserve data, configuration data, and token
+// addresses from ProtocolDataProvider, pinned to blockHash when non-zero; see
+// executeState for the fallback contract (VEC-471). Reserve data (rates,
+// indexes, totals) is versioned per-block state that changes on every
+// interest accrual, so a reorg-correctness guard applies here.
+func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common.Address, blockNumber int64, blockHash common.Hash) (*ReserveData, *ReserveConfigData, *ReserveTokenAddresses, error) {
 	// Get the correct PoolDataProvider for this block
 	poolDataProvider, err := s.getPoolDataProviderForBlock(uint64(blockNumber))
 	if err != nil {
@@ -706,7 +747,7 @@ func (s *BlockchainService) GetFullReserveData(ctx context.Context, asset common
 		},
 	}
 
-	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	results, err := s.executeState(ctx, calls, blockNumber, blockHash)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("multicall failed: %w", err)
 	}

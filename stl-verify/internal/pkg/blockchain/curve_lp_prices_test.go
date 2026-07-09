@@ -14,9 +14,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// mockHashMulticaller implements outbound.HashPinnedMulticaller for testing.
+// mockHashMulticaller implements outbound.Multicaller for testing. Execute is
+// a hard error: FetchCurveLPNGPrices must only ever issue hash-pinned reads.
 type mockHashMulticaller struct {
 	executeAtHashFn func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error)
+}
+
+func (m *mockHashMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return nil, errors.New("Execute must not be used for curve_lp_ng pricing; use ExecuteAtHash")
 }
 
 func (m *mockHashMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
@@ -24,6 +29,10 @@ func (m *mockHashMulticaller) ExecuteAtHash(ctx context.Context, calls []outboun
 		return m.executeAtHashFn(ctx, calls, blockHash)
 	}
 	return nil, errors.New("ExecuteAtHash not mocked")
+}
+
+func (m *mockHashMulticaller) Address() common.Address {
+	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
 }
 
 func curveNGPoolABI(t *testing.T) *abi.ABI {

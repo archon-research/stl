@@ -44,7 +44,7 @@ type CurveLPNGPoolConfig struct {
 // erroring (instead of persisting 0) leaves the block unacked for retry.
 func FetchCurveLPNGPrices(
 	ctx context.Context,
-	multicaller outbound.HashPinnedMulticaller,
+	multicaller outbound.Multicaller,
 	poolABI *abi.ABI,
 	feedABI *abi.ABI,
 	pool CurveLPNGPoolConfig,

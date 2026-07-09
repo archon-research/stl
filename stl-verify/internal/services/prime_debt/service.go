@@ -188,12 +188,21 @@ func (s *VaultDebtService) processBlock(
 	event outbound.BlockEvent,
 ) error {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep < s.config.SweepEveryNBlocks {
 		return nil
 	}
 
-	if err := s.syncAll(ctx, event.BlockNumber, event.Version); err != nil {
+	// Pin state reads to the exact block hash, not the number: after a reorg an
+	// archive node would answer eth_call-by-number with the new fork's debt
+	// (see outbound.Multicaller.ExecuteAtHash / VEC-471).
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+
+	if err := s.syncAll(ctx, event.BlockNumber, blockHash, event.Version); err != nil {
 		return err
 	}
 
@@ -244,9 +253,10 @@ func (s *VaultDebtService) resolveIlks(ctx context.Context, primes []entity.Prim
 	return resolved, nil
 }
 
-// syncAll batch-reads on-chain debt for all primes at the given block
-// and writes snapshots to Postgres.
-func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, blockVersion int) error {
+// syncAll batch-reads on-chain debt for all primes pinned to blockHash
+// and writes snapshots to Postgres. blockNumber is retained for the snapshot
+// rows and logging; the on-chain read pins by blockHash (see ReadDebts).
+func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, blockHash common.Hash, blockVersion int) error {
 	start := time.Now()
 	syncedAt := start.UTC()
 
@@ -259,8 +269,8 @@ func (s *VaultDebtService) syncAll(ctx context.Context, blockNumber int64, block
 		}
 	}
 
-	// Single multicall for all rate + art reads.
-	results, err := s.caller.ReadDebts(ctx, queries, big.NewInt(blockNumber))
+	// Single multicall for all rate + art reads, pinned to the block hash.
+	results, err := s.caller.ReadDebts(ctx, queries, blockHash)
 	if err != nil {
 		return fmt.Errorf("read debts at block %d: %w", blockNumber, err)
 	}

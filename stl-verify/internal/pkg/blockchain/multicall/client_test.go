@@ -77,7 +77,7 @@ func TestRecordBatchNilTelemetryIsNoOp(t *testing.T) {
 
 // TestExecuteAtHashRecordsBatchSizeThroughExecuteAtHash mirrors
 // TestExecuteRecordsBatchSizeThroughExecute for the hash-pinned path, so the
-// telemetry wiring is verified for both entry points.
+// telemetry wiring is verified for both outbound.Multicaller entry points.
 func TestExecuteAtHashRecordsBatchSizeThroughExecuteAtHash(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -106,7 +106,7 @@ func TestExecuteAtHashRecordsBatchSizeThroughExecuteAtHash(t *testing.T) {
 	}
 
 	calls := []outbound.Call{{Target: common.Address{}, CallData: []byte{0x01, 0x02, 0x03, 0x04}}}
-	_, execErr := mc.(*Client).ExecuteAtHash(context.Background(), calls, common.HexToHash("0xabc"))
+	_, execErr := mc.ExecuteAtHash(context.Background(), calls, common.HexToHash("0xabc"))
 	if execErr == nil {
 		t.Fatal("expected ExecuteAtHash to fail against a 500 endpoint")
 	}
@@ -191,7 +191,7 @@ func TestExecuteAtHashPinsEthCallToTheExactBlockHash(t *testing.T) {
 	}
 
 	calls := []outbound.Call{{Target: common.HexToAddress("0x00000000000000000000000000000000000000AA"), AllowFailure: true, CallData: []byte{0xde, 0xad, 0xbe, 0xef}}}
-	results, err := mc.(*Client).ExecuteAtHash(context.Background(), calls, blockHash)
+	results, err := mc.ExecuteAtHash(context.Background(), calls, blockHash)
 	if err != nil {
 		t.Fatalf("ExecuteAtHash: %v", err)
 	}
@@ -229,11 +229,22 @@ func TestExecuteAtHashPinsEthCallToTheExactBlockHash(t *testing.T) {
 // calls means no RPC round trip and an empty (not nil) result.
 func TestExecuteAtHashEmptyCallsReturnsEmpty(t *testing.T) {
 	c := &Client{}
-	results, err := c.ExecuteAtHash(context.Background(), nil, common.Hash{})
+	results, err := c.ExecuteAtHash(context.Background(), nil, common.HexToHash("0x1"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(results) != 0 {
 		t.Errorf("results len = %d, want 0", len(results))
+	}
+}
+
+// TestExecuteAtHashRejectsZeroHash guards the hash-pinning contract: the zero
+// hash is the zero value ("no hash provided"), so ExecuteAtHash rejects it up
+// front — before the empty-calls short-circuit — rather than pinning a read to
+// a nonexistent block (mirrors Execute rejecting a nil block number).
+func TestExecuteAtHashRejectsZeroHash(t *testing.T) {
+	c := &Client{}
+	if _, err := c.ExecuteAtHash(context.Background(), nil, common.Hash{}); err == nil {
+		t.Fatal("expected error for zero block hash, got nil")
 	}
 }

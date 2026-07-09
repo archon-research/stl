@@ -5,12 +5,11 @@
 -- once at startup); history stays empty.
 -- All token contracts (symbol/decimals), feed contracts (decimals/description/answer) and
 -- the Curve pool (coins, get_virtual_price) re-verified live via cast on 2026-07-09.
--- Five steps, ordered by dependency:
+-- Four steps, ordered by dependency:
 --   1. Seed the priced tokens (fresh-DB determinism; prod rows already exist, no-ops).
 --   2. oracle_asset feed rows under the existing chainlink/redstone oracles.
 --   3. protocol_oracle binding Morpho Blue -> chainlink.
---   4. offchain_price_asset CoinGecko rows (secondary/cross-check source).
---   5. curve_lp_ng oracle registry rows for the AUSD/USDC pool (shipped disabled).
+--   4. curve_lp_ng oracle registry rows for the AUSD/USDC pool (shipped disabled).
 
 -- ============================================================================
 -- 1. Token seeds. Same precedent as 20260702_120000_maple_syrup_allocation_exposure.sql:
@@ -117,29 +116,7 @@ WHERE p.chain_id = 1 AND p.name = 'Morpho Blue' AND o.name = 'chainlink'
 ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
 
 -- ============================================================================
--- 4. CoinGecko registration: secondary/cross-check price source only (the on-chain
---    feeds above stay primary). The coingecko cronjob is frozen as of 2026-07-09 pending
---    a subscription key replacement; these rows start flowing when the new key lands, with no further
---    migration. IDs verified against the listed contract addresses on 2026-07-09.
---    Tokens resolved by address, never symbol (the 20260507 impostor-symbol lesson).
--- ============================================================================
-INSERT INTO offchain_price_asset (source_id, source_asset_id, token_id, name, symbol, enabled)
-SELECT ps.id, pa.source_asset_id, t.id, pa.name, pa.symbol, true
-FROM offchain_price_source ps
-CROSS JOIN (VALUES
-    ('\x8c213ee79581Ff4984583C6a801e5263418C4b86', 'janus-henderson-anemoy-treasury-fund', 'Janus Henderson Anemoy Treasury Fund', 'JTRSY'),
-    ('\x5a0F93D040De44e78F251b03c43be9CF317Dcf64', 'janus-henderson-anemoy-aaa-clo-fund', 'Janus Henderson Anemoy AAA CLO Fund', 'JAAA'),
-    ('\x51C2d74017390CbBd30550179A16A1c28F7210fc', 'securitize-tokenized-aaa-clo-fund', 'Securitize Tokenized AAA CLO Fund', 'STAC'),
-    ('\x6a9DA2D710BB9B700acde7Cb81F10F1fF8C89041', 'blackrock-usd-institutional-digital-liquidity-fund-i-class', 'BlackRock USD Institutional Digital Liquidity Fund I', 'BUIDL-I'),
-    ('\x80ac24aA929eaF5013f6436cdA2a7ba190f5Cc0b', 'syrupusdc', 'Maple Syrup USDC', 'syrupUSDC'),
-    ('\x00000000eFE302BEAA2b3e6e1b18d08D69a9012a', 'agora-dollar', 'Agora Dollar', 'AUSD')
-) AS pa(token_address, source_asset_id, name, symbol)
-JOIN token t ON t.chain_id = 1 AND t.address = pa.token_address::bytea
-WHERE ps.name = 'coingecko'
-ON CONFLICT (source_id, source_asset_id) DO NOTHING;
-
--- ============================================================================
--- 5. AUSD/USDC Curve LP: new curve_lp_ng oracle type. StableSwap-NG pools are their own
+-- 4. AUSD/USDC Curve LP: new curve_lp_ng oracle type. StableSwap-NG pools are their own
 --    LP token, so oracle.address = the pool = the priced token. deployment_block 20457618
 --    found by bisecting eth_getCode over an archive node (empty at 20457617, code at
 --    20457618). Starts disabled, same sequencing as fsUSDS
@@ -229,21 +206,6 @@ BEGIN
     JOIN oracle o ON o.id = po.oracle_id AND o.name = 'chainlink';
     IF cnt < 1 THEN
         RAISE EXCEPTION 'Morpho Blue -> chainlink protocol_oracle binding missing';
-    END IF;
-
-    SELECT COUNT(*) INTO cnt
-    FROM offchain_price_asset opa
-    JOIN offchain_price_source ps ON ps.id = opa.source_id AND ps.name = 'coingecko'
-    WHERE opa.source_asset_id IN (
-        'janus-henderson-anemoy-treasury-fund',
-        'janus-henderson-anemoy-aaa-clo-fund',
-        'securitize-tokenized-aaa-clo-fund',
-        'blackrock-usd-institutional-digital-liquidity-fund-i-class',
-        'syrupusdc',
-        'agora-dollar')
-      AND opa.token_id IS NOT NULL;
-    IF cnt <> 6 THEN
-        RAISE EXCEPTION 'expected 6 coingecko offchain_price_asset rows with token_id, found %', cnt;
     END IF;
 
     -- Same enabled + exact-feed_decimals strictness as assertion 1.

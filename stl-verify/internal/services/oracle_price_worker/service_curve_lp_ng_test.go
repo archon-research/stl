@@ -48,10 +48,9 @@ func curveLPNGOracleSetup(r *mockRepo) {
 	}
 }
 
-// curveMockMulticaller implements both outbound.Multicaller and
-// outbound.HashPinnedMulticaller. Number-pinned Execute serves only the
-// one-time feed decimals validation; per-block pricing must arrive via
-// ExecuteAtHash.
+// curveMockMulticaller implements outbound.Multicaller. Number-pinned Execute
+// serves only the one-time feed decimals validation; per-block pricing must
+// arrive via ExecuteAtHash.
 type curveMockMulticaller struct {
 	mu              sync.Mutex
 	executeFn       func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
@@ -172,31 +171,6 @@ func TestStart_CurveLPNGOracle(t *testing.T) {
 	}
 	if len(unit.CurveLPNGPool.CoinFeeds) != 2 {
 		t.Errorf("CoinFeeds len = %d, want 2", len(unit.CurveLPNGPool.CoinFeeds))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestStart_CurveLPNGOracle_RequiresHashPinnedMulticaller: wiring a curve unit
-// to a multicaller without ExecuteAtHash is a static bug; it must fail startup
-// (orchestrator restarts) instead of becoming a per-block DLQ loop.
-// ---------------------------------------------------------------------------
-
-func TestStart_CurveLPNGOracle_RequiresHashPinnedMulticaller(t *testing.T) {
-	repo := &mockRepo{}
-	curveLPNGOracleSetup(repo)
-
-	// testutil.MockMulticaller implements only outbound.Multicaller.
-	svc, err := NewService(validConfig(), &mockConsumer{}, defaultBlockCacheReader(), repo, multicallFactoryFor(&testutil.MockMulticaller{}))
-	if err != nil {
-		t.Fatalf("NewService: %v", err)
-	}
-
-	err = svc.Start(context.Background())
-	if err == nil {
-		t.Fatal("expected Start to fail for a curve unit without hash-pinned multicaller support, got nil")
-	}
-	if !strings.Contains(err.Error(), "hash-pinned") {
-		t.Errorf("error = %q, expected it to mention hash-pinned reads", err)
 	}
 }
 
@@ -463,9 +437,9 @@ func TestProcessBlock_CurveLPNGOracle_MissingBlockHash(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // TestProcessBlock_CurveLPNGOracle_MalformedBlockHash: a malformed hash on the
-// event must fail hard as malformed. common.HexToHash would silently coerce it
-// into a zero-padded, plausible-looking hash and pin the read to a block that
-// does not exist.
+// event must fail hard as malformed (BlockEvent.ParsedBlockHash validates
+// strictly). common.HexToHash would silently coerce it into a zero-padded,
+// plausible-looking hash and pin the read to a block that does not exist.
 // ---------------------------------------------------------------------------
 
 func TestProcessBlock_CurveLPNGOracle_MalformedBlockHash(t *testing.T) {
@@ -594,50 +568,6 @@ func TestProcessBlock_CurveLPNGOracle_FeedDecimalsMismatch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "feed decimals") {
 		t.Errorf("error = %q, expected it to contain 'feed decimals'", err)
-	}
-
-	repo.mu.Lock()
-	defer repo.mu.Unlock()
-	if repo.upsertPricesCalls != 0 {
-		t.Errorf("UpsertPrices call count = %d, want 0", repo.upsertPricesCalls)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// TestProcessBlock_CurveLPNGOracle_MulticallerWithoutHashSupport: the
-// per-block hash-support assertion is defense in depth behind the identical
-// startup check, so exercising it requires swapping the multicaller after a
-// successful Start. A multicaller that cannot pin to a hash is a hard error,
-// never a silent fallback to number-pinned reads.
-// ---------------------------------------------------------------------------
-
-func TestProcessBlock_CurveLPNGOracle_MulticallerWithoutHashSupport(t *testing.T) {
-	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
-
-	repo := &mockRepo{}
-	curveLPNGOracleSetup(repo)
-
-	svc := startCurveLPNGService(t, repo, &curveMockMulticaller{})
-	svc.decimalsValidated = true // validation legitimately uses Execute; skip it here
-
-	// testutil.MockMulticaller implements only outbound.Multicaller.
-	svc.units[0].multicaller = &testutil.MockMulticaller{
-		ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-			t.Fatal("Execute must not be used for curve_lp_ng pricing")
-			return nil, nil
-		},
-	}
-
-	event := outbound.BlockEvent{
-		ChainID: 1, BlockNumber: 22800000, Version: 1,
-		BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000006", BlockTimestamp: blockTimestamp,
-	}
-	err := svc.processBlock(context.Background(), event)
-	if err == nil {
-		t.Fatal("expected error for a multicaller without hash support, got nil")
-	}
-	if !strings.Contains(err.Error(), "hash-pinned") {
-		t.Errorf("error = %q, expected it to mention hash-pinned reads", err)
 	}
 
 	repo.mu.Lock()
