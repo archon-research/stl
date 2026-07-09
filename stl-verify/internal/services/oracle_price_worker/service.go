@@ -5,18 +5,15 @@ package oracle_price_worker
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/common"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -36,9 +33,7 @@ import (
 // MulticallerFactory creates a new Multicaller for the given oracle type.
 // Types where entity.RequiresDirectCall is true (chronicle, erc4626_share)
 // get a DirectCaller because their feeds revert when read through Multicall3;
-// everything else gets the Multicall3 client. curve_lp_ng additionally
-// requires the Multicall3 path: its per-block reads are hash-pinned via
-// outbound.HashPinnedMulticaller, which DirectCaller does not implement.
+// everything else gets the Multicall3 client.
 type MulticallerFactory func(entity.OracleType) (outbound.Multicaller, error)
 
 // oracleUnit wraps a shared OracleUnit with a per-oracle price cache
@@ -216,15 +211,6 @@ func (s *Service) initialize(ctx context.Context) error {
 		mc, err := s.newMulticaller(su.Oracle.OracleType)
 		if err != nil {
 			return fmt.Errorf("oracle %s: creating multicaller: %w", su.Oracle.Name, err)
-		}
-
-		// Static wiring bug, not a per-block condition: catch it here instead
-		// of letting every block DLQ-loop on the per-block assertion (which
-		// stays as defense in depth).
-		if su.Oracle.OracleType.IsCurveLPNGOracle() {
-			if _, ok := mc.(outbound.HashPinnedMulticaller); !ok {
-				return fmt.Errorf("oracle %s: multicaller %T does not support the hash-pinned reads curve_lp_ng requires", su.Oracle.Name, mc)
-			}
 		}
 
 		s.logOracleUnit(su, cached)
@@ -431,11 +417,16 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 }
 
 func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "getAssetsPrices"))
 	rpcStart := time.Now()
-	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber)
+	prices, err := blockchain.FetchOraclePrices(ctx, unit.multicaller, s.oracleABI, unit.OracleAddr, unit.TokenAddrs, event.BlockNumber, blockHash)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "getAssetsPrices", rpcDuration, err)
 	if err != nil {
@@ -493,11 +484,16 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+
 	// Fetch prices (RPC span)
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "latestRoundData"))
 	rpcStart := time.Now()
-	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, s.logger)
+	results, err := blockchain.FetchFeedPrices(ctx, unit.multicaller, s.feedABI, unit.Feeds, event.BlockNumber, blockHash, s.logger)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "latestRoundData", rpcDuration, err)
 	if err != nil {
@@ -514,10 +510,14 @@ func (s *Service) processBlockForFeedOracle(ctx context.Context, event outbound.
 }
 
 func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "convertToAssets"))
 	rpcStart := time.Now()
-	results, err := blockchain.FetchERC4626SharePrices(ctx, unit.multicaller, s.shareABI, s.feedABI, unit.ERC4626Vaults, event.BlockNumber, s.logger)
+	results, err := blockchain.FetchERC4626SharePrices(ctx, unit.multicaller, s.shareABI, s.feedABI, unit.ERC4626Vaults, event.BlockNumber, blockHash, s.logger)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "convertToAssets", rpcDuration, err)
 	if err != nil {
@@ -532,19 +532,15 @@ func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbou
 }
 
 func (s *Service) processBlockForCurveLPNGOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
-	blockHash, err := blockHashFromEvent(event)
+	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
-		return err
-	}
-	hashCaller, ok := unit.multicaller.(outbound.HashPinnedMulticaller)
-	if !ok {
-		return fmt.Errorf("multicaller %T does not support the hash-pinned reads curve_lp_ng requires", unit.multicaller)
+		return fmt.Errorf("parse block hash: %w", err)
 	}
 
 	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
 		attribute.String("rpc.method", "get_virtual_price"))
 	rpcStart := time.Now()
-	results, err := blockchain.FetchCurveLPNGPrices(ctx, hashCaller, s.curvePoolABI, s.feedABI, *unit.CurveLPNGPool, event.BlockNumber, blockHash)
+	results, err := blockchain.FetchCurveLPNGPrices(ctx, unit.multicaller, s.curvePoolABI, s.feedABI, *unit.CurveLPNGPool, event.BlockNumber, blockHash)
 	rpcDuration := time.Since(rpcStart)
 	s.telemetry.RecordRPCCall(ctx, "get_virtual_price", rpcDuration, err)
 	if err != nil {
@@ -556,25 +552,6 @@ func (s *Service) processBlockForCurveLPNGOracle(ctx context.Context, event outb
 	}
 
 	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "curve lp changes", "stored curve lp prices", len(unit.CurveLPNGPool.CoinFeeds))
-}
-
-// blockHashFromEvent validates the event's hash strictly (0x plus 64 hex
-// chars) rather than letting common.HexToHash silently coerce a malformed
-// value into a zero-padded, plausible-looking hash that pins the read to a
-// block that does not exist; erroring here names the event and the value.
-func blockHashFromEvent(event outbound.BlockEvent) (common.Hash, error) {
-	if event.BlockHash == "" {
-		return common.Hash{}, fmt.Errorf("block %d v%d: missing block hash on event", event.BlockNumber, event.Version)
-	}
-	hexDigits, hasPrefix := strings.CutPrefix(event.BlockHash, "0x")
-	if !hasPrefix || len(hexDigits) != 64 {
-		return common.Hash{}, fmt.Errorf("block %d v%d: malformed block hash %q on event (want 0x followed by 64 hex chars)", event.BlockNumber, event.Version, event.BlockHash)
-	}
-	raw, err := hex.DecodeString(hexDigits)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("block %d v%d: malformed block hash %q on event: %w", event.BlockNumber, event.Version, event.BlockHash, err)
-	}
-	return common.BytesToHash(raw), nil
 }
 
 // storeFeedResults runs the detect-changes, upsert, and cache-commit tail

@@ -21,6 +21,8 @@ type Client struct {
 	telemetry *Telemetry // optional; nil disables recording
 }
 
+var _ outbound.Multicaller = (*Client)(nil)
+
 // Option configures a Client at construction, letting callers add optional behaviour such as telemetry without changing NewClient's signature.
 type Option func(*Client)
 
@@ -98,9 +100,12 @@ func (c *Client) Execute(ctx context.Context, calls []outbound.Call, blockNumber
 }
 
 // ExecuteAtHash pins the read to blockHash instead of a block number. See the
-// outbound.HashPinnedMulticaller doc comment for why hash-pinning matters for
-// reorg correctness.
+// outbound.Multicaller doc comment for why hash-pinning matters for reorg
+// correctness.
 func (c *Client) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	if blockHash == (common.Hash{}) {
+		return nil, fmt.Errorf("block hash is required")
+	}
 	if len(calls) == 0 {
 		return []outbound.Result{}, nil
 	}

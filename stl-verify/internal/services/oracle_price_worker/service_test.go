@@ -305,7 +305,7 @@ func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) st
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        version,
-		BlockHash:      "0xabc123",
+		BlockHash:      "0x0000000000000000000000000000000000000000000000000000000000abc123",
 		BlockTimestamp: blockTimestamp,
 	}
 	data, _ := json.Marshal(event)
@@ -772,7 +772,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			ChainID:        1,
 			BlockNumber:    18000001,
 			Version:        0,
-			BlockHash:      "0xdef456",
+			BlockHash:      "0x0000000000000000000000000000000000000000000000000000000000def456",
 			BlockTimestamp: blockTimestamp + 12,
 		}
 		err = svc.processBlock(ctx, event2)
@@ -827,7 +827,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}()
 
 		event := outbound.BlockEvent{
-			ChainID: 1, BlockNumber: 18000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp,
+			ChainID: 1, BlockNumber: 18000000, Version: 1, BlockHash: "0x0000000000000000000000000000000000000000000000000000000000000abc", BlockTimestamp: blockTimestamp,
 		}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
@@ -1321,7 +1321,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			ChainID:        1,
 			BlockNumber:    0, // will fail entity validation: "blockNumber must be positive"
 			Version:        1,
-			BlockHash:      "0xabc",
+			BlockHash:      "0x0000000000000000000000000000000000000000000000000000000000000abc",
 			BlockTimestamp: blockTimestamp,
 		}
 		err = svc.processBlock(context.Background(), event)
@@ -1697,7 +1697,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
-		BlockHash:      "0xfeedblock1",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000010",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
@@ -1769,7 +1769,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        0,
-		BlockHash:      "0xfeed1",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000000000000feed1",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event1); err != nil {
@@ -1787,7 +1787,7 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000001,
 		Version:        0,
-		BlockHash:      "0xfeed2",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000000000000feed2",
 		BlockTimestamp: blockTimestamp + 12,
 	}
 	if err := svc.processBlock(context.Background(), event2); err != nil {
@@ -1877,7 +1877,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
-		BlockHash:      "0xnonusd",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000011",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
@@ -1973,7 +1973,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
-		BlockHash:      "0xallfail",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000012",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
@@ -1984,6 +1984,63 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 	repo.mu.Lock()
 	if repo.upsertPricesCalls != 0 {
 		t.Errorf("UpsertPrices call count = %d, want 0 (all feeds failed)", repo.upsertPricesCalls)
+	}
+	repo.mu.Unlock()
+
+	if stopErr := svc.Stop(); stopErr != nil {
+		t.Errorf("Stop: %v", stopErr)
+	}
+}
+
+// TestProcessBlock_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	answer := big.NewInt(200_000_000_000) // $2000 with 8 decimals
+	mc := newFeedMulticaller(t, []*big.Int{answer})
+
+	cfg := validConfig()
+	cfg.PollInterval = 1 * time.Millisecond
+
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	svc.decimalsValidated = true // skip decimals validation so it doesn't consume multicaller calls
+
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    18000000,
+		Version:        1,
+		BlockHash:      "",
+		BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected non-nil error from processBlock when event.BlockHash is empty")
+	}
+
+	if mc.CallCount != 0 {
+		t.Errorf("multicaller invoked %d times, want 0", mc.CallCount)
+	}
+	repo.mu.Lock()
+	if repo.upsertPricesCalls != 0 {
+		t.Errorf("UpsertPrices call count = %d, want 0 (block must not be persisted)", repo.upsertPricesCalls)
 	}
 	repo.mu.Unlock()
 
@@ -2037,7 +2094,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xdecfail", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000013", BlockTimestamp: blockTimestamp,
 		}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
@@ -2097,7 +2154,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xdecok", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000014", BlockTimestamp: blockTimestamp,
 		}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
@@ -2162,7 +2219,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event1 := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xonce1", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000015", BlockTimestamp: blockTimestamp,
 		}
 		if err := svc.processBlock(context.Background(), event1); err != nil {
 			t.Fatalf("processBlock 1: %v", err)
@@ -2172,7 +2229,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event2 := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000001, Version: 1,
-			BlockHash: "0xonce2", BlockTimestamp: blockTimestamp + 12,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000016", BlockTimestamp: blockTimestamp + 12,
 		}
 		if err := svc.processBlock(context.Background(), event2); err != nil {
 			t.Fatalf("processBlock 2: %v", err)
@@ -2214,7 +2271,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xaave", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000017", BlockTimestamp: blockTimestamp,
 		}
 		// Should succeed because aave oracles skip decimals validation
 		if err := svc.processBlock(context.Background(), event); err != nil {
@@ -2332,7 +2389,7 @@ func runProcessBlockWithCache(t *testing.T, cache outbound.BlockCacheReader) (*S
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        2,
-		BlockHash:      "0xcache",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000018",
 		BlockTimestamp: 0,
 	}
 	procErr := svc.processBlock(context.Background(), event)

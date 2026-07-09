@@ -370,6 +370,10 @@ func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.I
 	return f.results, nil
 }
 
+func (f *fakeMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return f.Execute(ctx, calls, nil)
+}
+
 func (f *fakeMulticaller) Address() common.Address {
 	return common.Address{}
 }
@@ -618,6 +622,10 @@ type capturingMulticaller struct {
 func (c *capturingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 	c.captured = append(c.captured, calls...)
 	return c.results, nil
+}
+
+func (c *capturingMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return c.Execute(ctx, calls, nil)
 }
 
 func (c *capturingMulticaller) Address() common.Address {

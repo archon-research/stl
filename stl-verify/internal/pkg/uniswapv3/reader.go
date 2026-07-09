@@ -84,22 +84,24 @@ func NewReader(multicaller outbound.Multicaller, logger *slog.Logger) (*Reader, 
 }
 
 // GetPositions reads all NFT positions held by the given wallets from the
-// NonfungiblePositionManager at the specified block. Returns a map of
-// wallet → positions.
+// NonfungiblePositionManager, pinned to blockHash rather than a block number:
+// after a reorg an archive node answers eth_call-by-number with the new
+// canonical state, which can silently disagree with the reorged (older-version)
+// data this read is being made for. Returns a map of wallet → positions.
 func (m *Reader) GetPositions(
 	ctx context.Context,
 	wallets []common.Address,
 	nftManager common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[common.Address][]Position, error) {
 	// Round 1: Get NFT count per wallet.
-	counts, err := m.fetchNFTCounts(ctx, wallets, nftManager, block)
+	counts, err := m.fetchNFTCounts(ctx, wallets, nftManager, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch NFT counts: %w", err)
 	}
 
 	// Round 2: Get token IDs for each wallet.
-	tokenIDs, err := m.fetchTokenIDs(ctx, wallets, counts, nftManager, block)
+	tokenIDs, err := m.fetchTokenIDs(ctx, wallets, counts, nftManager, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch token IDs: %w", err)
 	}
@@ -119,7 +121,7 @@ func (m *Reader) GetPositions(
 	}
 
 	// Round 3: Get position details.
-	posMap, err := m.fetchPositions(ctx, allTokenIDs, nftManager, block)
+	posMap, err := m.fetchPositions(ctx, allTokenIDs, nftManager, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("fetch positions: %w", err)
 	}
@@ -135,13 +137,13 @@ func (m *Reader) GetPositions(
 }
 
 // GetPoolStates reads slot0, token0, and token1 for each pool in a single
-// multicall at the given block.
+// multicall pinned to blockHash (see GetPositions for why).
 func (m *Reader) GetPoolStates(
 	ctx context.Context,
 	pools []common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[common.Address]*PoolState, error) {
-	return m.fetchSlot0s(ctx, pools, block)
+	return m.fetchSlot0s(ctx, pools, blockHash)
 }
 
 // ── Multicall helpers ──
@@ -151,7 +153,7 @@ func (m *Reader) fetchNFTCounts(
 	ctx context.Context,
 	wallets []common.Address,
 	nftManager common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[common.Address]int, error) {
 	calls := make([]outbound.Call, len(wallets))
 	for i, w := range wallets {
@@ -166,7 +168,7 @@ func (m *Reader) fetchNFTCounts(
 		}
 	}
 
-	results, err := m.multicaller.Execute(ctx, calls, block)
+	results, err := m.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall balanceOf: %w", err)
 	}
@@ -202,7 +204,7 @@ func (m *Reader) fetchTokenIDs(
 	wallets []common.Address,
 	counts map[common.Address]int,
 	nftManager common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[common.Address][]*big.Int, error) {
 	type callRef struct {
 		wallet common.Address
@@ -231,7 +233,7 @@ func (m *Reader) fetchTokenIDs(
 		return make(map[common.Address][]*big.Int), nil
 	}
 
-	results, err := m.multicaller.Execute(ctx, calls, block)
+	results, err := m.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall tokenOfOwnerByIndex: %w", err)
 	}
@@ -263,7 +265,7 @@ func (m *Reader) fetchPositions(
 	ctx context.Context,
 	tokenIDs []*big.Int,
 	nftManager common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[string]*Position, error) {
 	calls := make([]outbound.Call, len(tokenIDs))
 	for i, id := range tokenIDs {
@@ -278,7 +280,7 @@ func (m *Reader) fetchPositions(
 		}
 	}
 
-	results, err := m.multicaller.Execute(ctx, calls, block)
+	results, err := m.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall positions: %w", err)
 	}
@@ -326,7 +328,7 @@ func (m *Reader) fetchPositions(
 func (m *Reader) fetchSlot0s(
 	ctx context.Context,
 	pools []common.Address,
-	block *big.Int,
+	blockHash common.Hash,
 ) (map[common.Address]*PoolState, error) {
 	// 3 calls per pool: slot0, token0, token1.
 	calls := make([]outbound.Call, 0, len(pools)*3)
@@ -351,7 +353,7 @@ func (m *Reader) fetchSlot0s(
 		)
 	}
 
-	results, err := m.multicaller.Execute(ctx, calls, block)
+	results, err := m.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall slot0: %w", err)
 	}

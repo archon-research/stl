@@ -86,6 +86,10 @@ func (m *stubMulticaller) Execute(_ context.Context, calls []outbound.Call, bloc
 	return m.responses[idx], nil
 }
 
+func (m *stubMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.Execute(ctx, calls, nil)
+}
+
 func (m *stubMulticaller) Address() common.Address { return m.addr }
 
 func newBlockchainServiceForTest(t *testing.T, mc outbound.Multicaller) *blockchainService {

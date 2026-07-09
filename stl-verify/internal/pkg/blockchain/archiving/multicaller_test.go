@@ -32,16 +32,6 @@ func (s *stubInner) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common
 }
 func (s *stubInner) Address() common.Address { return s.addr }
 
-// numberOnlyInner implements outbound.Multicaller but not
-// outbound.HashPinnedMulticaller, standing in for a multicaller that predates
-// hash-pinning.
-type numberOnlyInner struct{}
-
-func (numberOnlyInner) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	return nil, nil
-}
-func (numberOnlyInner) Address() common.Address { return common.Address{} }
-
 type recordingArchiver struct {
 	mu      sync.Mutex
 	batches []outbound.CallBatchRecord
@@ -343,24 +333,6 @@ func TestExecuteAtHash(t *testing.T) {
 		// must not pass silently; the warning is what surfaces a future regression.
 		if !strings.Contains(logBuf.String(), "no resolvable block number") {
 			t.Fatalf("expected a warning about the unresolvable block number, got logs: %q", logBuf.String())
-		}
-	})
-
-	t.Run("inner without hash support returns a descriptive error", func(t *testing.T) {
-		rec := &recordingArchiver{}
-		var wg sync.WaitGroup
-		d := newTestDecorator(numberOnlyInner{}, rec, &wg)
-
-		_, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
-		if err == nil {
-			t.Fatal("expected an error for an inner multicaller without hash support, got nil")
-		}
-		if !strings.Contains(err.Error(), "hash-pinned") {
-			t.Fatalf("error = %q, want it to mention hash-pinned reads", err)
-		}
-		d.Close()
-		if len(rec.batches) != 0 {
-			t.Fatalf("archived %d batches on capability error, want 0", len(rec.batches))
 		}
 	})
 }

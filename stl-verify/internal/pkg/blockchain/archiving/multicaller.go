@@ -2,7 +2,6 @@ package archiving
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"math/big"
 	"runtime/debug"
@@ -50,6 +49,8 @@ type Multicaller struct {
 	writes   metric.Int64Counter
 }
 
+var _ outbound.Multicaller = (*Multicaller)(nil)
+
 // NewMulticaller wraps inner so its calls are archived via arch.
 func NewMulticaller(inner outbound.Multicaller, arch outbound.CallArchiver, cfg Config) *Multicaller {
 	if cfg.Wait == nil {
@@ -91,16 +92,9 @@ func (m *Multicaller) Execute(ctx context.Context, calls []outbound.Call, blockN
 
 // ExecuteAtHash forwards to the inner multicaller's hash-pinned path, then
 // archives the batch the same way Execute does. It passes a nil blockNumber;
-// archiveBatch recovers the real number from the context (see there). An inner
-// multicaller without hash support is a hard error rather than a fallback to
-// Execute: silently downgrading to number-pinning would defeat the reorg
-// correctness the caller asked for.
+// archiveBatch recovers the real number from the context (see there).
 func (m *Multicaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
-	hashInner, ok := m.inner.(outbound.HashPinnedMulticaller)
-	if !ok {
-		return nil, fmt.Errorf("inner multicaller %T does not support hash-pinned reads", m.inner)
-	}
-	results, err := hashInner.ExecuteAtHash(ctx, calls, blockHash)
+	results, err := m.inner.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return results, err
 	}

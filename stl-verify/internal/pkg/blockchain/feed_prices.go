@@ -49,12 +49,17 @@ type FeedPriceResult struct {
 //
 // feedABI is passed as a parameter rather than stored in FeedConfig because
 // all feeds share the same ABI (AggregatorV3Interface).
+// blockHash pins each latestRoundData()/latestAnswer() read to the exact block
+// via ExecuteAtHash (see ExecutePinned in oracle.go). Pass common.Hash{}
+// from the oracle backfill service (no live BlockEvent, settled blocks) to fall
+// back to number-pinning — the reorg-correctness concern doesn't apply there.
 func FetchFeedPrices(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
 	feedABI *abi.ABI,
 	feeds []FeedConfig,
 	blockNum int64,
+	blockHash common.Hash,
 	logger *slog.Logger,
 ) ([]FeedPriceResult, error) {
 	if len(feeds) == 0 {
@@ -65,15 +70,13 @@ func FetchFeedPrices(
 		return nil, fmt.Errorf("invalid feed config: %w", err)
 	}
 
-	block := new(big.Int).SetInt64(blockNum)
-
-	out, failedFeedResults, err := fetchWithLatestRoundData(ctx, multicaller, feedABI, feeds, block, blockNum, logger)
+	out, failedFeedResults, err := fetchWithLatestRoundData(ctx, multicaller, feedABI, feeds, blockNum, blockHash, logger)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(failedFeedResults) > 0 {
-		if err := retryWithLatestAnswer(ctx, multicaller, feedABI, feeds, block, blockNum, logger, out, failedFeedResults); err != nil {
+		if err := retryWithLatestAnswer(ctx, multicaller, feedABI, feeds, blockNum, blockHash, logger, out, failedFeedResults); err != nil {
 			return nil, err
 		}
 	}
@@ -110,8 +113,8 @@ func fetchWithLatestRoundData(
 	multicaller outbound.Multicaller,
 	feedABI *abi.ABI,
 	feeds []FeedConfig,
-	block *big.Int,
 	blockNum int64,
+	blockHash common.Hash,
 	logger *slog.Logger,
 ) ([]FeedPriceResult, []int, error) {
 	callData, err := feedABI.Pack("latestRoundData")
@@ -128,7 +131,7 @@ func fetchWithLatestRoundData(
 		}
 	}
 
-	results, err := multicaller.Execute(ctx, calls, block)
+	results, err := ExecutePinned(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("executing multicall at block %d: %w", blockNum, err)
 	}
@@ -180,8 +183,8 @@ func retryWithLatestAnswer(
 	multicaller outbound.Multicaller,
 	feedABI *abi.ABI,
 	feeds []FeedConfig,
-	block *big.Int,
 	blockNum int64,
+	blockHash common.Hash,
 	logger *slog.Logger,
 	out []FeedPriceResult,
 	failedFeedResults []int,
@@ -200,7 +203,7 @@ func retryWithLatestAnswer(
 		}
 	}
 
-	results, err := multicaller.Execute(ctx, calls, block)
+	results, err := ExecutePinned(ctx, multicaller, calls, blockNum, blockHash)
 	if err != nil {
 		return fmt.Errorf("executing latestAnswer multicall at block %d: %w", blockNum, err)
 	}
@@ -267,6 +270,10 @@ func unpackLatestRoundData(feedABI *abi.ABI, data []byte) (*big.Int, error) {
 // be off by orders of magnitude, so any mismatch is a hard error.
 // Feeds where decimals() reverts are logged as warnings and skipped (the feed
 // may not exist at the given block).
+//
+// Number-pinned intentionally: a feed's decimals() is structurally static
+// config validated once at startup, not versioned per-block state — the
+// reorg-correctness concern behind ExecuteAtHash (VEC-471) doesn't apply.
 func ValidateFeedDecimals(
 	ctx context.Context,
 	multicaller outbound.Multicaller,
