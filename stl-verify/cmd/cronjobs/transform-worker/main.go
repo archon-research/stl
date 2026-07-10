@@ -21,16 +21,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/transform_worker"
 )
 
-var (
-	GitCommit string
-	GitBranch string
-	BuildTime string
-)
-
-func init() {
-	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
-}
-
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -47,6 +37,17 @@ func main() {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// Build metadata, populated from VCS in init() (GitBranch is set at link time).
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() {
+	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
 func setupRunner(_ context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
