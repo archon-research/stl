@@ -32,6 +32,14 @@
 -- Comment text is carried verbatim from each raw source table; a raw column that was itself
 -- undocumented is flagged "verify before computing" rather than given a fabricated unit/scale.
 
+-- Fail fast rather than convoy ingestion. The migrator runs this whole file in one
+-- transaction, and each CREATE TRIGGER below takes SHARE ROW EXCLUSIVE on its (often
+-- busy) raw table, held until commit and propagated to that hypertable's chunks. A
+-- bounded lock_timeout makes the migration abort and roll back if it cannot acquire a
+-- lock promptly, instead of blocking raw writers behind it; re-run during a quieter
+-- window. Scoped to this transaction via SET LOCAL.
+SET LOCAL lock_timeout = '10s';
+
 CREATE SCHEMA IF NOT EXISTS transformed;
 
 -- Registry of transformed tables the worker iterates (replaces the _watermark row set).
@@ -1545,9 +1553,12 @@ BEGIN
     END IF;
 
     -- Advance the baseline to the value just observed (the same read the decision used).
+    -- The IS DISTINCT FROM guard makes an unchanged chunk a no-op write, so the steady
+    -- state does not rewrite every baseline row each tick.
     INSERT INTO transformed._parity_chunk_activity (source, chunk_name, activity)
     VALUES (_source, c.name, c.activity)
-    ON CONFLICT (source, chunk_name) DO UPDATE SET activity=EXCLUDED.activity;
+    ON CONFLICT (source, chunk_name) DO UPDATE SET activity=EXCLUDED.activity
+      WHERE transformed._parity_chunk_activity.activity IS DISTINCT FROM EXCLUDED.activity;
   END LOOP;
 END $fn$ LANGUAGE plpgsql;
 
@@ -1603,7 +1614,8 @@ BEGIN
   LEFT JOIN pg_stat_all_tables st
     ON st.schemaname = ch.chunk_schema AND st.relname = ch.chunk_name
   WHERE ch.hypertable_schema='public' AND ch.hypertable_name=_source
-  ON CONFLICT (source, chunk_name) DO UPDATE SET activity=EXCLUDED.activity;
+  ON CONFLICT (source, chunk_name) DO UPDATE SET activity=EXCLUDED.activity
+    WHERE transformed._parity_chunk_activity.activity IS DISTINCT FROM EXCLUDED.activity;
 
   -- Tiered day-buckets (frozen=true), guarded so this is a no-op without OSM.
   IF to_regclass('timescaledb_osm.tiered_chunks') IS NOT NULL THEN
