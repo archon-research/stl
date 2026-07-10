@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -136,14 +138,25 @@ func bootstrapSource(ctx context.Context, conn *pgxpool.Conn, source string, fro
 
 // prepareConn includes S3-tiered history and lifts the statement timeout on the
 // bootstrap's single connection. statement_timeout must be lifted (full-history
-// windows can exceed any default) so a failure is fatal; enable_tiered_reads is
-// best-effort because the GUC is absent on environments without tiering.
+// windows can exceed any default), so a failure is fatal.
+//
+// enable_tiered_reads is fatal too, with ONE exception: when the GUC is unrecognized
+// (SQLSTATE 42704), this environment has no tiering (e.g. OSS TimescaleDB without
+// OSM), so there is no tiered history to miss and we proceed on local data. Any
+// other failure (a permission or configuration error where tiering DOES exist) is
+// fatal: proceeding would silently bootstrap only local history, and parity cannot
+// catch the gap because raw and transformed both undercount by the tiered rows.
 func prepareConn(ctx context.Context, conn *pgxpool.Conn, logger *slog.Logger) error {
 	if _, err := conn.Exec(ctx, "SET statement_timeout = 0"); err != nil {
 		return fmt.Errorf("disabling statement timeout: %w", err)
 	}
 	if _, err := conn.Exec(ctx, "SET timescaledb.enable_tiered_reads = on"); err != nil {
-		logger.Warn("could not enable tiered reads (tiering may be unavailable); bootstrapping untiered data only", "error", err)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42704" { // undefined_object: GUC not present
+			logger.Warn("tiered reads GUC unavailable; environment has no tiering, bootstrapping local data only", "error", err)
+			return nil
+		}
+		return fmt.Errorf("enabling tiered reads (tiering is available but could not be enabled; would silently skip tiered history): %w", err)
 	}
 	return nil
 }

@@ -1,6 +1,6 @@
 # Vector — transformation-layer worker runbook
 
-Owner: vector team · Source rules: [alerts/vector-transform-worker.yaml](../../alerts/vector-transform-worker.yaml)
+Owner: vector team · Source rules: [alerts/vector-cronjobs.yaml](../../alerts/vector-cronjobs.yaml)
 
 The `transform-worker` cronjob (Temporal, `vector` namespace, default interval
 `TRANSFORM_INTERVAL`=10m) materialises the `transformed.*` layer. Each raw table
@@ -11,8 +11,9 @@ upserts the canonical rows.
 
 Generic run-failure and worker-liveness are covered by
 [vector-cronjobs.md](vector-cronjobs.md) (`service_name="transform-worker"`).
-These two alerts cover the silent case that path can't: the worker is up and its
-runs succeed, but a source's queue stops draining.
+These three alerts cover the silent cases that path can't: the worker is up and
+its runs succeed, but a source's queue stops draining, or a row reaches neither
+the transformed table nor its queue.
 
 Signal: `transform_queue_oldest_age_seconds{table="<source>"}` — seconds since
 the oldest un-drained queue row was enqueued (companion depth gauge
@@ -94,10 +95,15 @@ bootstrap the invariant is `raw = transformed + pending`, so drift is 0. Causes:
   a new raw write path bypasses it) — positive drift, growing.
 - The initial bootstrap never covered some history — positive drift, static. This
   is also the expected state *during* bootstrap, before it finishes.
-- An in-place `UPDATE`/`DELETE` on the raw table (violates the append-only
-  assumption; the `AFTER INSERT` trigger cannot see it).
 - Negative drift: the transformed table has rows with no raw counterpart (orphans
   — a raw delete, or a bug). Should never happen.
+
+Not detected by this check: an in-place `UPDATE` on a raw row changes neither the
+row count nor the insert/delete activity the ledger keys on, so drift stays 0
+while the transformed copy silently goes stale. This is a known limitation,
+acceptable only because the raw tables are verified INSERT-only (corrections and
+reorgs arrive as new rows with a new PK). A raw `DELETE` is different — it drops
+the raw count, so it surfaces as negative drift above.
 
 ### What to do
 1. `SELECT * FROM transformed._parity_status WHERE source = '<table>'` — read

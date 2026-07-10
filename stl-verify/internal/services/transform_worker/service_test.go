@@ -15,10 +15,11 @@ import (
 type mockRunner struct {
 	sources      []string
 	listErr      error
-	runErrs      map[string]error // source -> error returned by RunTable
-	runRows      map[string]int64 // source -> consumed count returned by RunTable
-	runUpserts   map[string]int64 // source -> upserted count returned by RunTable
-	runCalls     []string         // sources RunTable was invoked with, in order
+	runErrs      map[string]error    // source -> error returned by RunTable
+	runRows      map[string]int64    // source -> consumed count returned by RunTable
+	runUpserts   map[string]int64    // source -> upserted count returned by RunTable
+	runCalls     []string            // sources RunTable was invoked with, in order
+	runHook      func(source string) // optional: called at the start of RunTable (e.g. to cancel the parent)
 	queue        []outbound.QueueDepth
 	queueErr     error
 	parity       []outbound.ParityRow
@@ -31,8 +32,16 @@ func (m *mockRunner) ListSources(context.Context) ([]string, error) {
 	return m.sources, m.listErr
 }
 
-func (m *mockRunner) RunTable(_ context.Context, source string) (int64, int64, error) {
+func (m *mockRunner) RunTable(ctx context.Context, source string) (int64, int64, error) {
 	m.runCalls = append(m.runCalls, source)
+	if m.runHook != nil {
+		m.runHook(source)
+	}
+	// Mirror the adapter: a done context surfaces as the context error, so the
+	// service can tell a parent cancellation from a clean time-slice expiry.
+	if err := ctx.Err(); err != nil {
+		return 0, 0, err
+	}
 	if err := m.runErrs[source]; err != nil {
 		return 0, 0, err
 	}
@@ -64,19 +73,21 @@ func TestNewService_DefaultsWhenLoggerAndTelemetryNil(t *testing.T) {
 	}
 }
 
-// TestRunOnce_QueueStatusErrorTolerated: a QueueStatus read failure is logged,
-// not fatal — materialization has already succeeded by that point.
-func TestRunOnce_QueueStatusErrorTolerated(t *testing.T) {
+// TestRunOnce_QueueStatusErrorSurfaced: a QueueStatus read failure must fail the
+// run. The queue gauges are a silent-failure detector, so a permanently broken read
+// has to surface rather than leave stale gauges reading healthy.
+func TestRunOnce_QueueStatusErrorSurfaced(t *testing.T) {
+	boom := errors.New("queue read boom")
 	svc, err := NewService(&mockRunner{
 		sources:  []string{"a"},
 		runRows:  map[string]int64{"a": 1},
-		queueErr: errors.New("queue read boom"),
+		queueErr: boom,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	if err := svc.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce should tolerate a QueueStatus error, got: %v", err)
+	if err := svc.RunOnce(context.Background()); err == nil || !errors.Is(err, boom) {
+		t.Fatalf("RunOnce should surface a QueueStatus error, got: %v", err)
 	}
 }
 
@@ -103,19 +114,21 @@ func TestRunOnce_RecordsQueueDepthAndParity(t *testing.T) {
 	}
 }
 
-// TestRunOnce_ParityRefreshErrorTolerated: a RefreshParity failure is logged, not
-// fatal (a stale ledger still reports the last-known drift).
-func TestRunOnce_ParityRefreshErrorTolerated(t *testing.T) {
+// TestRunOnce_ParityRefreshErrorSurfaced: a RefreshParity failure must fail the run
+// (the parity ledger is the correctness backstop; a silently failing refresh cannot
+// be allowed to leave a stale gauge reading healthy).
+func TestRunOnce_ParityRefreshErrorSurfaced(t *testing.T) {
+	boom := errors.New("refresh boom")
 	svc, err := NewService(&mockRunner{
 		sources:    []string{"a"},
 		runRows:    map[string]int64{"a": 1},
-		refreshErr: errors.New("refresh boom"),
+		refreshErr: boom,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	if err := svc.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce should tolerate a RefreshParity error, got: %v", err)
+	if err := svc.RunOnce(context.Background()); err == nil || !errors.Is(err, boom) {
+		t.Fatalf("RunOnce should surface a RefreshParity error, got: %v", err)
 	}
 }
 
@@ -140,19 +153,43 @@ func TestRunOnce_DrainBudgetStopsCleanly(t *testing.T) {
 	}
 }
 
-// TestRunOnce_ParityStatusErrorTolerated: a ParityStatus read failure is logged,
-// not fatal.
-func TestRunOnce_ParityStatusErrorTolerated(t *testing.T) {
+// TestRunOnce_ParityStatusErrorSurfaced: a ParityStatus read failure must fail the run.
+func TestRunOnce_ParityStatusErrorSurfaced(t *testing.T) {
+	boom := errors.New("parity read boom")
 	svc, err := NewService(&mockRunner{
 		sources:   []string{"a"},
 		runRows:   map[string]int64{"a": 1},
-		parityErr: errors.New("parity read boom"),
+		parityErr: boom,
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	if err := svc.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce should tolerate a ParityStatus error, got: %v", err)
+	if err := svc.RunOnce(context.Background()); err == nil || !errors.Is(err, boom) {
+		t.Fatalf("RunOnce should surface a ParityStatus error, got: %v", err)
+	}
+}
+
+// TestRunOnce_ParentCancelDuringDrainFails: a parent-context cancellation while
+// draining the LAST source (the case with no next-iteration guard) must fail the
+// run, not be mistaken for the clean per-source budget expiry.
+func TestRunOnce_ParentCancelDuringDrainFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &mockRunner{
+		sources: []string{"a", "b"},
+		runRows: map[string]int64{"a": 1, "b": 1},
+	}
+	m.runHook = func(source string) {
+		if source == "b" { // cancel mid-drain of the final source
+			cancel()
+		}
+	}
+	svc, err := NewService(m, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	err = svc.RunOnce(ctx)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunOnce should fail wrapping context.Canceled on a mid-drain parent cancel, got: %v", err)
 	}
 }
 
@@ -190,7 +227,7 @@ func TestRunOnce(t *testing.T) {
 				runErrs: map[string]error{"b": errBoom},
 				runRows: map[string]int64{"a": 1, "c": 2},
 			},
-			wantErr:   "1 of 3 tables failed",
+			wantErr:   "1 error(s)",
 			wantCalls: []string{"a", "b", "c"},
 		},
 	}

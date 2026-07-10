@@ -236,10 +236,12 @@ groups:
         # transformed._parity_status. In a consistent snapshot after bootstrap every
         # raw row is either transformed or still queued, so drift is exactly 0. A
         # sustained nonzero value means a row reached neither the transformed table
-        # nor the queue -- a trigger gap, a bootstrap miss, or an append-only
-        # violation the stall alert cannot see. Warning (not a page) because it is
-        # also nonzero during the initial bootstrap; it must read 0 once bootstrap
-        # completes, and can be promoted to critical after rollout is stable.
+        # nor the queue -- a trigger gap or a bootstrap miss -- that the stall alert
+        # cannot see. Note this is a row-count check: an in-place raw UPDATE changes
+        # no count and is NOT caught here (the raw tables are verified INSERT-only, so
+        # that should not occur). Warning (not a page) because it is also nonzero
+        # during the initial bootstrap; it must read 0 once bootstrap completes, and
+        # can be promoted to critical after rollout is stable.
         expr: |
           transform_parity_drift{
             service_name="transform-worker",
@@ -257,7 +259,8 @@ groups:
             `transformed.{{ $labels.table }}` is out of parity with raw by
             `{{ $value | printf "%.0f" }}` row(s) (raw - transformed - pending). After
             bootstrap this should be 0. A positive value means raw rows never made it
-            into the transformed layer or its queue (trigger gap / bootstrap miss /
-            in-place raw UPDATE); negative means the transformed table has orphan rows.
+            into the transformed layer or its queue (a trigger gap or a bootstrap
+            miss); negative means the transformed table has orphan rows (a raw delete
+            or a bug). An in-place raw UPDATE changes no count and is not caught here.
             Check `SELECT * FROM transformed._parity_status WHERE source = '{{ $labels.table }}'`.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformparitydrift

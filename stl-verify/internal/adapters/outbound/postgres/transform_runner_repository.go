@@ -64,28 +64,32 @@ const drainBatch = 10000
 const maxDrainIterations = 1000
 
 // RunTable drains source's queue by calling transformed._run_<source>() until a
-// call consumes fewer than drainBatch rows, and returns the totals consumed
-// (queue rows drained) and upserted (rows actually written; <= consumed after the
-// IS DISTINCT FROM guard). It
-// stops early (cleanly, not an error) when ctx is done, so the caller's per-tick
-// drain budget bounds the work and a large backlog degrades to "picked up next
-// tick" rather than overrunning the Temporal activity: each _run call autocommits,
-// so progress persists. The function name is built from source and quoted as an
-// identifier; source originates from transformed._sources (our own controlled
-// table), so this is not attacker-controlled, but it is quoted regardless.
+// call consumes fewer than drainBatch rows, and returns the totals consumed (queue
+// rows drained) and upserted (rows actually written; <= consumed after the IS
+// DISTINCT FROM guard). Each _run call autocommits, so partial progress persists.
+//
+// When ctx is done it returns the accumulated totals AND ctx.Err(): the caller
+// cannot otherwise tell a clean per-source time-slice expiry (context.DeadlineExceeded,
+// carry the rest to the next tick) from a real parent shutdown/activity cancellation
+// (context.Canceled, a genuine abort). The caller inspects the error to decide.
+//
+// The function name is built from source and quoted as an identifier; source
+// originates from transformed._sources (our own controlled table), so this is not
+// attacker-controlled, but it is quoted regardless.
 func (r *TransformRunnerRepository) RunTable(ctx context.Context, source string) (consumed, upserted int64, err error) {
 	fn := pgx.Identifier{"transformed", "_run_" + source}.Sanitize()
 	for range maxDrainIterations {
 		// Between-iteration budget check: stop before starting another batch.
 		if ctx.Err() != nil {
-			return consumed, upserted, nil
+			return consumed, upserted, ctx.Err()
 		}
 		var c, u int64
 		if scanErr := r.pool.QueryRow(ctx, "SELECT consumed, upserted FROM "+fn+"()").Scan(&c, &u); scanErr != nil {
-			// Budget expired mid-call: the batch rolled back (queue restored) and
-			// earlier batches committed, so this is a clean stop, not a failure.
+			// Budget/cancel mid-call: the batch rolled back (queue restored) and
+			// earlier batches committed. Surface the context error so the caller can
+			// distinguish a clean slice expiry from a real cancellation.
 			if ctx.Err() != nil {
-				return consumed, upserted, nil
+				return consumed, upserted, ctx.Err()
 			}
 			return consumed, upserted, fmt.Errorf("running transform %q: %w", source, scanErr)
 		}

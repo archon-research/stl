@@ -18,9 +18,13 @@ type TransformRunner interface {
 	// transformed._sources (seeded by the migration).
 	ListSources(ctx context.Context) ([]string, error)
 
-	// RunTable drains a source's queue to empty and returns the number of queue
-	// rows consumed and the number actually upserted this pass (upserted <=
-	// consumed: the IS DISTINCT FROM guard skips rows whose values are unchanged).
+	// RunTable drains a source's queue (bounded by ctx) and returns the queue rows
+	// consumed and the number actually upserted this pass (upserted <= consumed: the
+	// IS DISTINCT FROM guard skips rows whose values are unchanged). When ctx is
+	// done it returns the partial totals AND ctx.Err(), so the caller can tell a
+	// clean per-source time-slice expiry (DeadlineExceeded) from a parent
+	// cancellation (Canceled); each drained batch is committed, so the remainder is
+	// safely picked up next call.
 	RunTable(ctx context.Context, source string) (consumed, upserted int64, err error)
 
 	// QueueStatus returns the per-source change-queue backlog, for the

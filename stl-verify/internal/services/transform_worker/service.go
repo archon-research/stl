@@ -65,37 +65,59 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("no transform sources in transformed._sources (migration not applied or wrong database?)")
 	}
 
-	// Bound the whole drain phase to a per-tick budget shared across sources, so the
-	// tick fits inside the Temporal activity. Budget expiry is a clean stop (the rest
-	// is picked up next tick), distinct from parent-context cancellation (shutdown),
-	// which is a real abort.
+	// Bound the whole drain phase to a per-tick budget so the tick fits inside the
+	// Temporal activity, then hand each source an equal slice of the time that is
+	// left. A source that finishes early donates its slack (the slice is recomputed
+	// from the sources still to go), so a large backlog in an early source cannot
+	// use the whole budget and starve the later queues. Slice expiry is a clean stop
+	// (the rest is picked up next tick); parent-context cancellation (shutdown /
+	// activity cancel) is a real abort that must fail the run.
 	drainCtx, cancel := context.WithTimeout(ctx, drainBudget)
 	defer cancel()
+	deadline, _ := drainCtx.Deadline()
 
 	var (
 		errs           []error
 		total          int64
 		budgetExceeded bool
 	)
-	for _, source := range sources {
+	for i, source := range sources {
 		// Parent cancellation (shutdown): abort and mark the run failed so it retries.
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			errs = append(errs, ctxErr)
 			break
 		}
-		// Drain budget spent: stop cleanly without failing the run.
-		if drainCtx.Err() != nil {
+		slice := time.Until(deadline) / time.Duration(len(sources)-i)
+		if slice <= 0 {
 			budgetExceeded = true
 			break
 		}
-		consumed, upserted, err := s.runner.RunTable(drainCtx, source)
-		if err != nil {
-			s.logger.Error("transform run failed", "source", source, "error", err)
-			s.telemetry.RecordTableFailure(ctx, source)
-			errs = append(errs, err)
+		srcCtx, srcCancel := context.WithTimeout(ctx, slice)
+		consumed, upserted, runErr := s.runner.RunTable(srcCtx, source)
+		srcCancel()
+		total += consumed
+
+		if runErr != nil {
+			switch {
+			case ctx.Err() != nil:
+				// Parent cancelled mid-drain (possibly on the last source, where there
+				// is no next-iteration check): a real abort, not the budget.
+				errs = append(errs, ctx.Err())
+			case errors.Is(runErr, context.DeadlineExceeded):
+				// This source's time slice expired with backlog remaining; carry the
+				// rest to the next tick and still credit the partial progress.
+				budgetExceeded = true
+				s.telemetry.RecordTableSuccess(ctx, source, consumed, upserted)
+			default:
+				s.logger.Error("transform run failed", "source", source, "error", runErr)
+				s.telemetry.RecordTableFailure(ctx, source)
+				errs = append(errs, runErr)
+			}
+			if ctx.Err() != nil {
+				break
+			}
 			continue
 		}
-		total += consumed
 		s.logger.Info("transform run complete", "source", source, "consumed", consumed, "upserted", upserted)
 		s.telemetry.RecordTableSuccess(ctx, source, consumed, upserted)
 	}
@@ -105,49 +127,57 @@ func (s *Service) RunOnce(ctx context.Context) error {
 		s.telemetry.RecordDrainBudgetExceeded(ctx)
 	}
 
-	s.recordQueueDepth(ctx)
-	s.recordParity(ctx, sources)
+	// The queue-depth and parity reads are the silent-failure backstop, so a failure
+	// to READ them must itself surface: otherwise a permanently broken parity or
+	// queue query leaves the gauges stale and the alerts looking healthy. Join their
+	// errors into the run result; the drain is idempotent, so the retry is safe.
+	if err := s.recordQueueDepth(ctx); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.recordParity(ctx, sources); err != nil {
+		errs = append(errs, err)
+	}
 
 	s.logger.Info("transform cycle complete",
-		"tables", len(sources), "failed", len(errs), "rows", total)
+		"tables", len(sources), "errors", len(errs), "rows", total)
 
 	if len(errs) > 0 {
-		return fmt.Errorf("transform cycle: %d of %d tables failed: %w",
-			len(errs), len(sources), errors.Join(errs...))
+		return fmt.Errorf("transform cycle: %d error(s): %w", len(errs), errors.Join(errs...))
 	}
 	return nil
 }
 
 // recordQueueDepth emits the per-source backlog gauges that back the
-// stalled-transform alert. A read failure is logged but does not fail the run:
-// materialization already succeeded, so a metrics-read hiccup should not mark the
-// cycle failed; the next tick re-emits.
-func (s *Service) recordQueueDepth(ctx context.Context) {
+// stalled-transform alert, and returns any read error so RunOnce can surface it: a
+// permanently failing queue read would otherwise leave the gauges stale while the
+// alerts read healthy.
+func (s *Service) recordQueueDepth(ctx context.Context) error {
 	depths, err := s.runner.QueueStatus(ctx)
 	if err != nil {
-		s.logger.Warn("reading transform queue status failed; queue-depth metrics skipped this tick", "error", err)
-		return
+		return fmt.Errorf("reading transform queue status: %w", err)
 	}
 	for _, d := range depths {
 		s.telemetry.RecordQueueDepth(ctx, d.Source, d.Pending, d.OldestAgeSecs)
 	}
+	return nil
 }
 
-// recordParity incrementally refreshes each source's parity ledger, then emits the
-// parity gauges and logs any source whose drift is nonzero (a row that reached
-// neither the transformed table nor the queue). A refresh or read failure is
-// logged, not fatal: materialization already succeeded, and a stale ledger still
-// reports the last-known drift.
-func (s *Service) recordParity(ctx context.Context, sources []string) {
+// recordParity refreshes each source's parity ledger, emits the parity gauges, and
+// logs any nonzero drift (a row that reached neither the transformed table nor the
+// queue). Refresh and read errors are joined and returned so RunOnce surfaces them:
+// the parity ledger is the correctness backstop, so a silently failing refresh or
+// read must not leave a stale gauge looking healthy.
+func (s *Service) recordParity(ctx context.Context, sources []string) error {
+	var errs []error
 	for _, source := range sources {
 		if err := s.runner.RefreshParity(ctx, source); err != nil {
-			s.logger.Warn("transform parity refresh failed; ledger may be stale this tick", "source", source, "error", err)
+			errs = append(errs, fmt.Errorf("refreshing transform parity %q: %w", source, err))
 		}
 	}
 	rows, err := s.runner.ParityStatus(ctx)
 	if err != nil {
-		s.logger.Warn("reading transform parity status failed; parity metrics skipped this tick", "error", err)
-		return
+		errs = append(errs, fmt.Errorf("reading transform parity status: %w", err))
+		return errors.Join(errs...)
 	}
 	for _, p := range rows {
 		s.telemetry.RecordParity(ctx, p.Source, p.RawRows, p.TransformedRows, p.Drift)
@@ -157,4 +187,5 @@ func (s *Service) recordParity(ctx context.Context, sources []string) {
 				"pending", p.PendingRows, "drift", p.Drift)
 		}
 	}
+	return errors.Join(errs...)
 }
