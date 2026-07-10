@@ -91,18 +91,20 @@ type abiTotalSupplyAndBorrow struct {
 	AbsorbedBorrow            *big.Int
 }
 
-// blockchainService reads Fluid's VaultResolver via the Multicall3 adapter.
+// blockchainService reads Fluid's VaultResolver through the StateReader seam,
+// which owns the block-pin dispatch (hash on the live path, number for static
+// probes) and the result-count invariant.
 type blockchainService struct {
-	multicaller  outbound.Multicaller
+	reader       outbound.StateReader
 	resolverABI  *abi.ABI
 	erc20ABI     *abi.ABI
 	resolverAddr common.Address
 	logger       *slog.Logger
 }
 
-func newBlockchainService(multicaller outbound.Multicaller, logger *slog.Logger) (*blockchainService, error) {
-	if multicaller == nil {
-		return nil, fmt.Errorf("multicaller is required")
+func newBlockchainService(reader outbound.StateReader, logger *slog.Logger) (*blockchainService, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("state reader is required")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -116,7 +118,7 @@ func newBlockchainService(multicaller outbound.Multicaller, logger *slog.Logger)
 		return nil, fmt.Errorf("loading ERC20 ABI: %w", err)
 	}
 	return &blockchainService{
-		multicaller:  multicaller,
+		reader:       reader,
 		resolverABI:  resolverABI,
 		erc20ABI:     erc20ABI,
 		resolverAddr: FluidVaultResolverAddress,
@@ -124,12 +126,13 @@ func newBlockchainService(multicaller outbound.Multicaller, logger *slog.Logger)
 	}, nil
 }
 
-// GetTokenMetadata reads symbol() and decimals() for token, pinned to
-// blockNumber. The Fluid native-ETH sentinel is short-circuited to canonical
-// ETH metadata (it is not an ERC-20). decimals() is mandatory — a revert is a
-// hard error because a silent 0 would corrupt every downstream amount; symbol()
-// is best-effort and yields "" on revert/undecodable data.
-func (s *blockchainService) GetTokenMetadata(ctx context.Context, token common.Address, blockNumber int64) (TokenMetadata, error) {
+// GetTokenMetadata reads symbol() and decimals() for token at pin (the pin
+// decides how the read is anchored: the block hash on the live path, the block
+// number for static probes). The Fluid native-ETH sentinel is short-circuited
+// to canonical ETH metadata (it is not an ERC-20). decimals() is mandatory — a
+// revert is a hard error because a silent 0 would corrupt every downstream
+// amount; symbol() is best-effort and yields "" on revert/undecodable data.
+func (s *blockchainService) GetTokenMetadata(ctx context.Context, token common.Address, pin outbound.BlockPin) (TokenMetadata, error) {
 	if token == ethSentinel {
 		return TokenMetadata{Symbol: "ETH", Decimals: 18}, nil
 	}
@@ -142,15 +145,12 @@ func (s *blockchainService) GetTokenMetadata(ctx context.Context, token common.A
 	if err != nil {
 		return TokenMetadata{}, fmt.Errorf("packing decimals(): %w", err)
 	}
-	results, err := s.multicaller.Execute(ctx, []outbound.Call{
+	results, err := s.reader.Read(ctx, pin, []outbound.Call{
 		{Target: token, AllowFailure: true, CallData: symbolData},
 		{Target: token, AllowFailure: true, CallData: decimalsData},
-	}, big.NewInt(blockNumber))
+	})
 	if err != nil {
 		return TokenMetadata{}, fmt.Errorf("multicall token metadata for %s: %w", token.Hex(), err)
-	}
-	if len(results) != 2 {
-		return TokenMetadata{}, fmt.Errorf("token metadata for %s: expected 2 results, got %d", token.Hex(), len(results))
 	}
 	if !results[1].Success || len(results[1].ReturnData) == 0 {
 		return TokenMetadata{}, fmt.Errorf("decimals() reverted for %s", token.Hex())
@@ -177,23 +177,20 @@ func (s *blockchainService) GetTokenMetadata(ctx context.Context, token common.A
 	return md, nil
 }
 
-// GetAllVaultAddresses enumerates every vault the resolver knows about, pinned
-// to blockNumber. Used for startup reconcile and unknown-vault discovery.
-func (s *blockchainService) GetAllVaultAddresses(ctx context.Context, blockNumber int64) ([]common.Address, error) {
+// GetAllVaultAddresses enumerates every vault the resolver knows about at pin.
+// Used for startup reconcile and unknown-vault discovery.
+func (s *blockchainService) GetAllVaultAddresses(ctx context.Context, pin outbound.BlockPin) ([]common.Address, error) {
 	callData, err := s.resolverABI.Pack("getAllVaultsAddresses")
 	if err != nil {
 		return nil, fmt.Errorf("packing getAllVaultsAddresses: %w", err)
 	}
-	results, err := s.multicaller.Execute(ctx, []outbound.Call{{
+	results, err := s.reader.Read(ctx, pin, []outbound.Call{{
 		Target:       s.resolverAddr,
 		AllowFailure: false,
 		CallData:     callData,
-	}}, big.NewInt(blockNumber))
+	}})
 	if err != nil {
 		return nil, fmt.Errorf("multicall getAllVaultsAddresses: %w", err)
-	}
-	if len(results) != 1 {
-		return nil, fmt.Errorf("getAllVaultsAddresses: expected 1 result, got %d", len(results))
 	}
 	if !results[0].Success || len(results[0].ReturnData) == 0 {
 		return nil, fmt.Errorf("getAllVaultsAddresses call failed")
@@ -219,13 +216,13 @@ func (s *blockchainService) GetAllVaultAddresses(ctx context.Context, blockNumbe
 const vaultEntireDataBatchSize = 50
 
 // GetVaultsEntireData reads getVaultEntireData for every vault, chunked into
-// fixed-size Multicall3 batches, pinned to blockNumber. Results are returned in
-// the same order as vaults. A vault whose sub-call reverted or fails to decode
-// aborts with an error — the on-chain read is the truth, so a partial read must
-// not silently produce a snapshot. This is the strict path used for snapshots
-// of known vaults, where all-or-nothing is correct.
-func (s *blockchainService) GetVaultsEntireData(ctx context.Context, vaults []common.Address, blockNumber int64) ([]*VaultEntireData, error) {
-	return s.getVaultsEntireData(ctx, vaults, blockNumber, false)
+// fixed-size Multicall3 batches, at pin. Results are returned in the same order
+// as vaults. A vault whose sub-call reverted or fails to decode aborts with an
+// error — the on-chain read is the truth, so a partial read must not silently
+// produce a snapshot. This is the strict path used for snapshots of known
+// vaults, where all-or-nothing is correct.
+func (s *blockchainService) GetVaultsEntireData(ctx context.Context, vaults []common.Address, pin outbound.BlockPin) ([]*VaultEntireData, error) {
+	return s.getVaultsEntireData(ctx, vaults, pin, false)
 }
 
 // GetVaultsEntireDataBestEffort reads getVaultEntireData for every vault, chunked
@@ -234,11 +231,11 @@ func (s *blockchainService) GetVaultsEntireData(ctx context.Context, vaults []co
 // a warning rather than aborting the batch. This is the classification path for
 // unknown vaults — Fluid ships new vault types ahead of resolver redeployments,
 // so one unservable vault must not stall discovery of the rest.
-func (s *blockchainService) GetVaultsEntireDataBestEffort(ctx context.Context, vaults []common.Address, blockNumber int64) ([]*VaultEntireData, error) {
-	return s.getVaultsEntireData(ctx, vaults, blockNumber, true)
+func (s *blockchainService) GetVaultsEntireDataBestEffort(ctx context.Context, vaults []common.Address, pin outbound.BlockPin) ([]*VaultEntireData, error) {
+	return s.getVaultsEntireData(ctx, vaults, pin, true)
 }
 
-func (s *blockchainService) getVaultsEntireData(ctx context.Context, vaults []common.Address, blockNumber int64, bestEffort bool) ([]*VaultEntireData, error) {
+func (s *blockchainService) getVaultsEntireData(ctx context.Context, vaults []common.Address, pin outbound.BlockPin, bestEffort bool) ([]*VaultEntireData, error) {
 	if len(vaults) == 0 {
 		return nil, nil
 	}
@@ -246,14 +243,14 @@ func (s *blockchainService) getVaultsEntireData(ctx context.Context, vaults []co
 	for start := 0; start < len(vaults); start += vaultEntireDataBatchSize {
 		end := min(start+vaultEntireDataBatchSize, len(vaults))
 		chunk := vaults[start:end]
-		if err := s.readVaultEntireDataChunk(ctx, chunk, blockNumber, bestEffort, out[start:end]); err != nil {
+		if err := s.readVaultEntireDataChunk(ctx, chunk, pin, bestEffort, out[start:end]); err != nil {
 			return nil, fmt.Errorf("getVaultEntireData chunk [%d:%d): %w", start, end, err)
 		}
 	}
 	return out, nil
 }
 
-func (s *blockchainService) readVaultEntireDataChunk(ctx context.Context, vaults []common.Address, blockNumber int64, bestEffort bool, out []*VaultEntireData) error {
+func (s *blockchainService) readVaultEntireDataChunk(ctx context.Context, vaults []common.Address, pin outbound.BlockPin, bestEffort bool, out []*VaultEntireData) error {
 	calls := make([]outbound.Call, len(vaults))
 	for i, v := range vaults {
 		callData, err := s.resolverABI.Pack("getVaultEntireData", v)
@@ -263,12 +260,9 @@ func (s *blockchainService) readVaultEntireDataChunk(ctx context.Context, vaults
 		calls[i] = outbound.Call{Target: s.resolverAddr, AllowFailure: bestEffort, CallData: callData}
 	}
 
-	results, err := s.multicaller.Execute(ctx, calls, big.NewInt(blockNumber))
+	results, err := s.reader.Read(ctx, pin, calls)
 	if err != nil {
 		return fmt.Errorf("multicall getVaultEntireData batch: %w", err)
-	}
-	if len(results) != len(vaults) {
-		return fmt.Errorf("getVaultEntireData batch: expected %d results, got %d", len(vaults), len(results))
 	}
 
 	for i, r := range results {

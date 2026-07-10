@@ -26,7 +26,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -94,13 +93,13 @@ func NewService(
 	consumer outbound.SQSConsumer,
 	cache outbound.BlockCacheReader,
 	blockQuerier entity.BlockQuerier,
-	multicaller outbound.Multicaller,
+	reader outbound.StateReader,
 	txManager outbound.TxManager,
 	vaultRepo outbound.FluidVaultRepository,
 	tokenRepo outbound.TokenRepository,
 	protocolRepo outbound.ProtocolRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cache, blockQuerier, multicaller, txManager, vaultRepo, tokenRepo, protocolRepo); err != nil {
+	if err := validateDependencies(consumer, cache, blockQuerier, reader, txManager, vaultRepo, tokenRepo, protocolRepo); err != nil {
 		return nil, err
 	}
 
@@ -113,7 +112,7 @@ func NewService(
 	}
 
 	logger := config.Logger.With("component", "fluid-vault-indexer")
-	blockchain, err := newBlockchainService(multicaller, logger)
+	blockchain, err := newBlockchainService(reader, logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockchain service: %w", err)
 	}
@@ -157,7 +156,7 @@ func validateDependencies(
 	consumer outbound.SQSConsumer,
 	cache outbound.BlockCacheReader,
 	blockQuerier entity.BlockQuerier,
-	multicaller outbound.Multicaller,
+	reader outbound.StateReader,
 	txManager outbound.TxManager,
 	vaultRepo outbound.FluidVaultRepository,
 	tokenRepo outbound.TokenRepository,
@@ -170,8 +169,8 @@ func validateDependencies(
 		return fmt.Errorf("block cache is required")
 	case blockQuerier == nil:
 		return fmt.Errorf("block querier is required")
-	case multicaller == nil:
-		return fmt.Errorf("multicaller is required")
+	case reader == nil:
+		return fmt.Errorf("state reader is required")
 	case txManager == nil:
 		return fmt.Errorf("tx manager is required")
 	case vaultRepo == nil:
@@ -244,8 +243,8 @@ func (s *Service) Stop() error {
 // timestamp, so there is no correct ts to stamp a reconcile-time snapshot with.
 // Backfilling historical states for pre-existing vaults is a separate concern.
 func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error {
-	ctx = archiving.WithBlockVersion(ctx, 0)
-	addrs, err := s.blockchain.GetAllVaultAddresses(ctx, blockNumber)
+	pin := outbound.PinForStaticRead(blockNumber)
+	addrs, err := s.blockchain.GetAllVaultAddresses(ctx, pin)
 	if err != nil {
 		return fmt.Errorf("enumerating vaults: %w", err)
 	}
@@ -261,7 +260,7 @@ func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error 
 		return nil
 	}
 
-	data, err := s.blockchain.GetVaultsEntireDataBestEffort(ctx, unknown, blockNumber)
+	data, err := s.blockchain.GetVaultsEntireDataBestEffort(ctx, unknown, pin)
 	if err != nil {
 		return fmt.Errorf("reading vault data for reconcile: %w", err)
 	}
@@ -272,7 +271,7 @@ func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error 
 		if ved == nil {
 			continue
 		}
-		if err := s.classifyAndRegister(ctx, ved, blockNumber); err != nil {
+		if err := s.classifyAndRegister(ctx, ved, pin); err != nil {
 			return fmt.Errorf("registering vault %s: %w", ved.Vault.Hex(), err)
 		}
 	}
@@ -287,14 +286,17 @@ func (s *Service) ReconcileVaults(ctx context.Context, blockNumber int64) error 
 func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEvent) (retErr error) {
 	defer func() { s.recordBlockProcessed(ctx, retErr) }()
 
-	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	pin, err := outbound.PinForEvent(event)
+	if err != nil {
+		return fmt.Errorf("pinning reads for block %d: %w", event.BlockNumber, err)
+	}
 
 	receipts, err := s.fetchReceipts(ctx, event)
 	if err != nil {
 		return err
 	}
 
-	touched, err := s.scanLogs(ctx, receipts, event.BlockNumber)
+	touched, err := s.scanLogs(ctx, receipts, pin)
 	if err != nil {
 		return err
 	}
@@ -302,7 +304,7 @@ func (s *Service) processBlockEvent(ctx context.Context, event outbound.BlockEve
 		return nil
 	}
 
-	return s.snapshotVaults(ctx, touched, event)
+	return s.snapshotVaults(ctx, touched, event, pin)
 }
 
 func (s *Service) recordBlockProcessed(ctx context.Context, err error) {
@@ -334,7 +336,7 @@ func (s *Service) fetchReceipts(ctx context.Context, event outbound.BlockEvent) 
 // scanLogs walks every log once. A VaultDeployed log from the factory discovers
 // a new vault; any log from a known vault marks it for an end-of-block read.
 // Returns the deduplicated set of known-vault addresses touched this block.
-func (s *Service) scanLogs(ctx context.Context, receipts []shared.TransactionReceipt, blockNumber int64) ([]common.Address, error) {
+func (s *Service) scanLogs(ctx context.Context, receipts []shared.TransactionReceipt, pin outbound.BlockPin) ([]common.Address, error) {
 	touchedSet := make(map[common.Address]struct{})
 	for _, r := range receipts {
 		for _, log := range r.Logs {
@@ -345,7 +347,7 @@ func (s *Service) scanLogs(ctx context.Context, receipts []shared.TransactionRec
 			topic0 := common.HexToHash(log.Topics[0])
 
 			if addr == FluidVaultFactoryAddress && topic0 == s.deployedTopic {
-				if err := s.discoverDeployedVault(ctx, log, blockNumber); err != nil {
+				if err := s.discoverDeployedVault(ctx, log, pin); err != nil {
 					return nil, err
 				}
 				continue
@@ -369,7 +371,7 @@ func (s *Service) scanLogs(ctx context.Context, receipts []shared.TransactionRec
 
 // discoverDeployedVault reads the newly-deployed vault's data and registers it
 // if in scope. The deployed vault address is the first indexed topic.
-func (s *Service) discoverDeployedVault(ctx context.Context, log shared.Log, blockNumber int64) error {
+func (s *Service) discoverDeployedVault(ctx context.Context, log shared.Log, pin outbound.BlockPin) error {
 	if len(log.Topics) < 2 {
 		return fmt.Errorf("VaultDeployed log missing vault topic: %v", log.Topics)
 	}
@@ -377,7 +379,11 @@ func (s *Service) discoverDeployedVault(ctx context.Context, log shared.Log, blo
 	if s.registry.IsKnownVault(vault) || s.registry.IsKnownNotVault(vault) {
 		return nil
 	}
-	data, err := s.blockchain.GetVaultsEntireDataBestEffort(ctx, []common.Address{vault}, blockNumber)
+	// Classification probes are static-intent (identity data, not versioned
+	// per-block state) but issued mid-block, so they derive from the event pin
+	// to preserve the block's version rather than resetting to 0.
+	staticPin := pin.Static()
+	data, err := s.blockchain.GetVaultsEntireDataBestEffort(ctx, []common.Address{vault}, staticPin)
 	if err != nil {
 		return fmt.Errorf("reading deployed vault %s: %w", vault.Hex(), err)
 	}
@@ -388,14 +394,14 @@ func (s *Service) discoverDeployedVault(ctx context.Context, log shared.Log, blo
 	if data[0] == nil {
 		return nil
 	}
-	return s.classifyAndRegister(ctx, data[0], blockNumber)
+	return s.classifyAndRegister(ctx, data[0], staticPin)
 }
 
 // classifyAndRegister decides whether a vault is in scope (plain single-debt
 // vault whose debt is the targeted token). Out-of-scope vaults are cached as
 // not-vault so they are not re-read. In-scope vaults resolve their token ids
 // and are persisted + registered.
-func (s *Service) classifyAndRegister(ctx context.Context, ved *VaultEntireData, blockNumber int64) error {
+func (s *Service) classifyAndRegister(ctx context.Context, ved *VaultEntireData, pin outbound.BlockPin) error {
 	if !ved.IsPlainSingle() {
 		s.logger.Info("skipping smart/DEX Fluid vault (out of scope)",
 			"vault", ved.Vault.Hex(), "vaultType", ved.VaultType, "isSmartCol", ved.IsSmartCol, "isSmartDebt", ved.IsSmartDebt)
@@ -409,15 +415,18 @@ func (s *Service) classifyAndRegister(ctx context.Context, ved *VaultEntireData,
 		return nil
 	}
 
-	collMD, err := s.blockchain.GetTokenMetadata(ctx, ved.CollateralToken, blockNumber)
+	collMD, err := s.blockchain.GetTokenMetadata(ctx, ved.CollateralToken, pin)
 	if err != nil {
 		return fmt.Errorf("collateral token metadata: %w", err)
 	}
-	debtMD, err := s.blockchain.GetTokenMetadata(ctx, ved.DebtToken, blockNumber)
+	debtMD, err := s.blockchain.GetTokenMetadata(ctx, ved.DebtToken, pin)
 	if err != nil {
 		return fmt.Errorf("debt token metadata: %w", err)
 	}
 
+	// The vault's created-at block and the token first-seen block are the pin's
+	// block number regardless of pin mode.
+	blockNumber := pin.Number()
 	var registered *entity.FluidVault
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, s.config.ChainID, FluidLiquidityAddress, fluidProtocolName, fluidProtocolType, fluidLiquidityNumber)
@@ -462,8 +471,8 @@ func (s *Service) classifyAndRegister(ctx context.Context, ved *VaultEntireData,
 
 // snapshotVaults reads each touched vault's end-of-block state from the resolver
 // and appends one snapshot per vault in a single transaction.
-func (s *Service) snapshotVaults(ctx context.Context, touched []common.Address, event outbound.BlockEvent) error {
-	data, err := s.blockchain.GetVaultsEntireData(ctx, touched, event.BlockNumber)
+func (s *Service) snapshotVaults(ctx context.Context, touched []common.Address, event outbound.BlockEvent, pin outbound.BlockPin) error {
+	data, err := s.blockchain.GetVaultsEntireData(ctx, touched, pin)
 	if err != nil {
 		return fmt.Errorf("reading touched vault state at block %d: %w", event.BlockNumber, err)
 	}

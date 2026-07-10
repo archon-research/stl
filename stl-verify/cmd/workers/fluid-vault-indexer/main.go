@@ -29,6 +29,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/statereader"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
@@ -285,13 +286,14 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
 
+	reader := statereader.New(mc)
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault")
+	archiveWrap, archiveDrain, err := archivingwire.BootstrapReader(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault", mc.Address())
 	if err != nil {
 		return fmt.Errorf("bootstrapping SC call archiving: %w", err)
 	}
 	defer archiveDrain()
-	mc = archiveWrap(mc)
+	pinnedReader := archiveWrap(reader)
 
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
@@ -326,7 +328,7 @@ func run(ctx context.Context, args []string) error {
 		sqsConsumer,
 		cacheReader,
 		ethClient,
-		mc,
+		pinnedReader,
 		txManager,
 		vaultRepo,
 		tokenRepo,
