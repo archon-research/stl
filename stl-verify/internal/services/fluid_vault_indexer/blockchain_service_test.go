@@ -201,8 +201,11 @@ func TestGetAllVaultAddresses(t *testing.T) {
 	if len(got) != 2 || got[0] != addrs[0] || got[1] != addrs[1] {
 		t.Errorf("got %v, want %v", got, addrs)
 	}
-	if len(mc.Invocations) != 1 || mc.Invocations[0].BlockNumber.Int64() != 100 {
-		t.Errorf("expected block 100 pinned, got %v", mc.Invocations)
+	if len(mc.Invocations) != 1 {
+		t.Fatalf("expected 1 invocation, got %d", len(mc.Invocations))
+	}
+	if mc.Invocations[0].BlockNumber.Int64() != 100 {
+		t.Errorf("expected block 100 pinned, got %d", mc.Invocations[0].BlockNumber.Int64())
 	}
 	if mc.Invocations[0].Calls[0].Target != FluidVaultResolverAddress {
 		t.Errorf("call target = %s, want resolver", mc.Invocations[0].Calls[0].Target)
@@ -245,7 +248,7 @@ func TestGetVaultsEntireData_BatchesAndDecodes(t *testing.T) {
 	}
 	// All sub-calls must be batched into a single Execute.
 	if len(mc.Invocations) != 1 {
-		t.Errorf("expected 1 batched Execute, got %d", len(mc.Invocations))
+		t.Fatalf("expected 1 batched Execute, got %d", len(mc.Invocations))
 	}
 	if len(mc.Invocations[0].Calls) != 2 {
 		t.Errorf("expected 2 sub-calls, got %d", len(mc.Invocations[0].Calls))
@@ -307,10 +310,10 @@ func TestGetVaultsEntireData_ChunksLargeBatch(t *testing.T) {
 		t.Fatalf("expected 2 chunked Execute calls, got %d", len(mc.Invocations))
 	}
 	if len(mc.Invocations[0].Calls) != vaultEntireDataBatchSize {
-		t.Errorf("first chunk = %d sub-calls, want %d", len(mc.Invocations[0].Calls), vaultEntireDataBatchSize)
+		t.Fatalf("first chunk = %d sub-calls, want %d", len(mc.Invocations[0].Calls), vaultEntireDataBatchSize)
 	}
 	if len(mc.Invocations[1].Calls) != n-vaultEntireDataBatchSize {
-		t.Errorf("second chunk = %d sub-calls, want %d", len(mc.Invocations[1].Calls), n-vaultEntireDataBatchSize)
+		t.Fatalf("second chunk = %d sub-calls, want %d", len(mc.Invocations[1].Calls), n-vaultEntireDataBatchSize)
 	}
 
 	// The packed getVaultEntireData(address) calldata ends with the 32-byte
