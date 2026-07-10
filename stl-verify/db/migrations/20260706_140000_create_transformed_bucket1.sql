@@ -97,6 +97,7 @@ COMMENT ON COLUMN transformed."morpho_market_state".build_id IS 'Audit. Deployme
 CREATE TABLE IF NOT EXISTS transformed."_pending_morpho_market_state" AS SELECT "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp" FROM public."morpho_market_state" WHERE false;
 ALTER TABLE transformed."_pending_morpho_market_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_morpho_market_state_enqueued_at" ON transformed."_pending_morpho_market_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_morpho_market_state_timestamp" ON transformed."_pending_morpho_market_state" ("timestamp");
 COMMENT ON TABLE transformed."_pending_morpho_market_state" IS '[Operational] Change queue for transformed.morpho_market_state. The AFTER INSERT trigger on public.morpho_market_state appends the raw PK here; transformed._run_morpho_market_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_morpho_market_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -112,7 +113,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_market_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_state" ORDER BY "timestamp" LIMIT 10000)
     RETURNING "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
   INSERT INTO transformed."morpho_market_state" AS t ("chain_id", "protocol_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "total_supply_assets", "total_supply_shares", "total_borrow_assets", "total_borrow_shares", "last_update_at", "fee", "prev_borrow_rate", "interest_accrued", "fee_shares", "processing_version", "build_id")
@@ -216,6 +217,7 @@ COMMENT ON COLUMN transformed."morpho_market_position".build_id IS 'Audit. Deplo
 CREATE TABLE IF NOT EXISTS transformed."_pending_morpho_market_position" AS SELECT "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp" FROM public."morpho_market_position" WHERE false;
 ALTER TABLE transformed."_pending_morpho_market_position" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_morpho_market_position_enqueued_at" ON transformed."_pending_morpho_market_position" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_morpho_market_position_timestamp" ON transformed."_pending_morpho_market_position" ("timestamp");
 COMMENT ON TABLE transformed."_pending_morpho_market_position" IS '[Operational] Change queue for transformed.morpho_market_position. The AFTER INSERT trigger on public.morpho_market_position appends the raw PK here; transformed._run_morpho_market_position() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_morpho_market_position"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -231,7 +233,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_market_position"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_position" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_market_position" ORDER BY "timestamp" LIMIT 10000)
     RETURNING "user_id", "morpho_market_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
   INSERT INTO transformed."morpho_market_position" AS t ("chain_id", "protocol_id", "user_id", "morpho_market_id", "block_number", "block_version", "block_timestamp", "supply_shares", "borrow_shares", "collateral", "supply_assets", "borrow_assets", "processing_version", "build_id")
@@ -329,6 +331,7 @@ COMMENT ON COLUMN transformed."morpho_vault_state".build_id IS 'Audit. Deploymen
 CREATE TABLE IF NOT EXISTS transformed."_pending_morpho_vault_state" AS SELECT "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp" FROM public."morpho_vault_state" WHERE false;
 ALTER TABLE transformed."_pending_morpho_vault_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_morpho_vault_state_enqueued_at" ON transformed."_pending_morpho_vault_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_morpho_vault_state_timestamp" ON transformed."_pending_morpho_vault_state" ("timestamp");
 COMMENT ON TABLE transformed."_pending_morpho_vault_state" IS '[Operational] Change queue for transformed.morpho_vault_state. The AFTER INSERT trigger on public.morpho_vault_state appends the raw PK here; transformed._run_morpho_vault_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_morpho_vault_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -344,7 +347,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_vault_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_state" ORDER BY "timestamp" LIMIT 10000)
     RETURNING "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
   INSERT INTO transformed."morpho_vault_state" AS t ("chain_id", "protocol_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "total_assets", "total_shares", "fee_shares", "new_total_assets", "previous_total_assets", "management_fee_shares", "processing_version", "build_id")
@@ -436,6 +439,7 @@ COMMENT ON COLUMN transformed."morpho_vault_position".build_id IS 'Audit. Deploy
 CREATE TABLE IF NOT EXISTS transformed."_pending_morpho_vault_position" AS SELECT "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp" FROM public."morpho_vault_position" WHERE false;
 ALTER TABLE transformed."_pending_morpho_vault_position" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_morpho_vault_position_enqueued_at" ON transformed."_pending_morpho_vault_position" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_morpho_vault_position_timestamp" ON transformed."_pending_morpho_vault_position" ("timestamp");
 COMMENT ON TABLE transformed."_pending_morpho_vault_position" IS '[Operational] Change queue for transformed.morpho_vault_position. The AFTER INSERT trigger on public.morpho_vault_position appends the raw PK here; transformed._run_morpho_vault_position() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_morpho_vault_position"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -451,7 +455,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_morpho_vault_position"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_position" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_morpho_vault_position" ORDER BY "timestamp" LIMIT 10000)
     RETURNING "user_id", "morpho_vault_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
   INSERT INTO transformed."morpho_vault_position" AS t ("chain_id", "protocol_id", "user_id", "morpho_vault_id", "block_number", "block_version", "block_timestamp", "shares", "assets", "processing_version", "build_id")
@@ -543,6 +547,7 @@ COMMENT ON COLUMN transformed."fluid_vault_state".build_id IS 'Audit. Deployment
 CREATE TABLE IF NOT EXISTS transformed."_pending_fluid_vault_state" AS SELECT "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version" FROM public."fluid_vault_state" WHERE false;
 ALTER TABLE transformed."_pending_fluid_vault_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_fluid_vault_state_enqueued_at" ON transformed."_pending_fluid_vault_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_fluid_vault_state_block_timestamp" ON transformed."_pending_fluid_vault_state" ("block_timestamp");
 COMMENT ON TABLE transformed."_pending_fluid_vault_state" IS '[Operational] Change queue for transformed.fluid_vault_state. The AFTER INSERT trigger on public.fluid_vault_state appends the raw PK here; transformed._run_fluid_vault_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_fluid_vault_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -558,7 +563,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_fluid_vault_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_fluid_vault_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_fluid_vault_state" ORDER BY "block_timestamp" LIMIT 10000)
     RETURNING "fluid_vault_id", "block_number", "block_version", "block_timestamp", "processing_version"
   ), ins AS (
   INSERT INTO transformed."fluid_vault_state" AS t ("chain_id", "protocol_id", "fluid_vault_id", "block_number", "block_version", "block_timestamp", "total_collateral", "total_debt", "supply_exchange_price", "borrow_exchange_price", "supply_rate", "borrow_rate", "processing_version", "build_id")
@@ -650,6 +655,7 @@ COMMENT ON COLUMN transformed."token_total_supply".created_at IS 'Audit. Wall-cl
 CREATE TABLE IF NOT EXISTS transformed."_pending_token_total_supply" AS SELECT "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp" FROM public."token_total_supply" WHERE false;
 ALTER TABLE transformed."_pending_token_total_supply" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_token_total_supply_enqueued_at" ON transformed."_pending_token_total_supply" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_token_total_supply_block_timestamp" ON transformed."_pending_token_total_supply" ("block_timestamp");
 COMMENT ON TABLE transformed."_pending_token_total_supply" IS '[Operational] Change queue for transformed.token_total_supply. The AFTER INSERT trigger on public.token_total_supply appends the raw PK here; transformed._run_token_total_supply() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_token_total_supply"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -665,7 +671,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_token_total_supply"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_token_total_supply" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_token_total_supply" ORDER BY "block_timestamp" LIMIT 10000)
     RETURNING "chain_id", "token_id", "block_number", "block_version", "processing_version", "block_timestamp"
   ), ins AS (
   INSERT INTO transformed."token_total_supply" AS t ("chain_id", "token_id", "total_supply", "scaled_total_supply", "block_number", "block_version", "block_timestamp", "source", "processing_version", "build_id", "created_at")
@@ -747,6 +753,7 @@ COMMENT ON COLUMN transformed."onchain_token_price".build_id IS 'Audit. Deployme
 CREATE TABLE IF NOT EXISTS transformed."_pending_onchain_token_price" AS SELECT "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp" FROM public."onchain_token_price" WHERE false;
 ALTER TABLE transformed."_pending_onchain_token_price" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_onchain_token_price_enqueued_at" ON transformed."_pending_onchain_token_price" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_onchain_token_price_timestamp" ON transformed."_pending_onchain_token_price" ("timestamp");
 COMMENT ON TABLE transformed."_pending_onchain_token_price" IS '[Operational] Change queue for transformed.onchain_token_price. The AFTER INSERT trigger on public.onchain_token_price appends the raw PK here; transformed._run_onchain_token_price() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_onchain_token_price"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -762,7 +769,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_onchain_token_price"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_onchain_token_price" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_onchain_token_price" ORDER BY "timestamp" LIMIT 10000)
     RETURNING "token_id", "oracle_id", "block_number", "block_version", "processing_version", "timestamp"
   ), ins AS (
   INSERT INTO transformed."onchain_token_price" AS t ("chain_id", "token_id", "oracle_id", "block_number", "block_version", "block_timestamp", "price_usd", "processing_version", "build_id")
@@ -840,6 +847,7 @@ COMMENT ON COLUMN transformed."maple_loan_state".build_id IS 'Audit. Deployment 
 CREATE TABLE IF NOT EXISTS transformed."_pending_maple_loan_state" AS SELECT "maple_loan_id", "synced_at", "processing_version" FROM public."maple_loan_state" WHERE false;
 ALTER TABLE transformed."_pending_maple_loan_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_maple_loan_state_enqueued_at" ON transformed."_pending_maple_loan_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_maple_loan_state_synced_at" ON transformed."_pending_maple_loan_state" ("synced_at");
 COMMENT ON TABLE transformed."_pending_maple_loan_state" IS '[Operational] Change queue for transformed.maple_loan_state. The AFTER INSERT trigger on public.maple_loan_state appends the raw PK here; transformed._run_maple_loan_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_maple_loan_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -855,7 +863,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_loan_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_state" ORDER BY "synced_at" LIMIT 10000)
     RETURNING "maple_loan_id", "synced_at", "processing_version"
   ), ins AS (
   INSERT INTO transformed."maple_loan_state" AS t ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "state", "principal_owed", "acm_ratio", "processing_version", "build_id")
@@ -941,6 +949,7 @@ COMMENT ON COLUMN transformed."maple_loan_collateral".build_id IS 'Audit. Deploy
 CREATE TABLE IF NOT EXISTS transformed."_pending_maple_loan_collateral" AS SELECT "maple_loan_id", "synced_at", "processing_version" FROM public."maple_loan_collateral" WHERE false;
 ALTER TABLE transformed."_pending_maple_loan_collateral" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_maple_loan_collateral_enqueued_at" ON transformed."_pending_maple_loan_collateral" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_maple_loan_collateral_synced_at" ON transformed."_pending_maple_loan_collateral" ("synced_at");
 COMMENT ON TABLE transformed."_pending_maple_loan_collateral" IS '[Operational] Change queue for transformed.maple_loan_collateral. The AFTER INSERT trigger on public.maple_loan_collateral appends the raw PK here; transformed._run_maple_loan_collateral() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_maple_loan_collateral"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -956,7 +965,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_loan_collateral"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_collateral" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_loan_collateral" ORDER BY "synced_at" LIMIT 10000)
     RETURNING "maple_loan_id", "synced_at", "processing_version"
   ), ins AS (
   INSERT INTO transformed."maple_loan_collateral" AS t ("chain_id", "protocol_id", "maple_loan_id", "snapshot_time", "asset_symbol", "asset_amount", "asset_decimals", "asset_value_usd", "state", "custodian", "liquidation_level", "processing_version", "build_id")
@@ -1050,6 +1059,7 @@ COMMENT ON COLUMN transformed."maple_pool_state".build_id IS 'Audit. Deployment 
 CREATE TABLE IF NOT EXISTS transformed."_pending_maple_pool_state" AS SELECT "maple_pool_id", "synced_at", "processing_version" FROM public."maple_pool_state" WHERE false;
 ALTER TABLE transformed."_pending_maple_pool_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_maple_pool_state_enqueued_at" ON transformed."_pending_maple_pool_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_maple_pool_state_synced_at" ON transformed."_pending_maple_pool_state" ("synced_at");
 COMMENT ON TABLE transformed."_pending_maple_pool_state" IS '[Operational] Change queue for transformed.maple_pool_state. The AFTER INSERT trigger on public.maple_pool_state appends the raw PK here; transformed._run_maple_pool_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_maple_pool_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -1065,7 +1075,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_pool_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_pool_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_pool_state" ORDER BY "synced_at" LIMIT 10000)
     RETURNING "maple_pool_id", "synced_at", "processing_version"
   ), ins AS (
   INSERT INTO transformed."maple_pool_state" AS t ("chain_id", "protocol_id", "maple_pool_id", "snapshot_time", "tvl", "liquid_assets", "collateral_value_usd", "principal_out", "utilization", "monthly_apy", "spot_apy", "processing_version", "build_id")
@@ -1157,6 +1167,7 @@ COMMENT ON COLUMN transformed."maple_sky_strategy_state".build_id IS 'Audit. Dep
 CREATE TABLE IF NOT EXISTS transformed."_pending_maple_sky_strategy_state" AS SELECT "maple_sky_strategy_id", "synced_at", "processing_version" FROM public."maple_sky_strategy_state" WHERE false;
 ALTER TABLE transformed."_pending_maple_sky_strategy_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_maple_sky_strategy_state_enqueued_at" ON transformed."_pending_maple_sky_strategy_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_maple_sky_strategy_state_synced_at" ON transformed."_pending_maple_sky_strategy_state" ("synced_at");
 COMMENT ON TABLE transformed."_pending_maple_sky_strategy_state" IS '[Operational] Change queue for transformed.maple_sky_strategy_state. The AFTER INSERT trigger on public.maple_sky_strategy_state appends the raw PK here; transformed._run_maple_sky_strategy_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_maple_sky_strategy_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -1172,7 +1183,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_sky_strategy_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_sky_strategy_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_sky_strategy_state" ORDER BY "synced_at" LIMIT 10000)
     RETURNING "maple_sky_strategy_id", "synced_at", "processing_version"
   ), ins AS (
   INSERT INTO transformed."maple_sky_strategy_state" AS t ("chain_id", "protocol_id", "maple_sky_strategy_id", "snapshot_time", "state", "currently_deployed", "deposited_assets", "withdrawn_assets", "strategy_fee_rate", "total_fees_collected", "processing_version", "build_id")
@@ -1256,6 +1267,7 @@ COMMENT ON COLUMN transformed."maple_syrup_global_state".build_id IS 'Audit. Dep
 CREATE TABLE IF NOT EXISTS transformed."_pending_maple_syrup_global_state" AS SELECT "chain_id", "synced_at", "processing_version" FROM public."maple_syrup_global_state" WHERE false;
 ALTER TABLE transformed."_pending_maple_syrup_global_state" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_maple_syrup_global_state_enqueued_at" ON transformed."_pending_maple_syrup_global_state" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_maple_syrup_global_state_synced_at" ON transformed."_pending_maple_syrup_global_state" ("synced_at");
 COMMENT ON TABLE transformed."_pending_maple_syrup_global_state" IS '[Operational] Change queue for transformed.maple_syrup_global_state. The AFTER INSERT trigger on public.maple_syrup_global_state appends the raw PK here; transformed._run_maple_syrup_global_state() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_maple_syrup_global_state"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -1271,7 +1283,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_maple_syrup_global_state"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_syrup_global_state" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_maple_syrup_global_state" ORDER BY "synced_at" LIMIT 10000)
     RETURNING "chain_id", "synced_at", "processing_version"
   ), ins AS (
   INSERT INTO transformed."maple_syrup_global_state" AS t ("chain_id", "snapshot_time", "tvl", "apy", "collateral_apy", "pool_apy", "drips_yield_boost", "processing_version", "build_id")
@@ -1347,6 +1359,7 @@ COMMENT ON COLUMN transformed."offchain_token_price".build_id IS 'Audit. Deploym
 CREATE TABLE IF NOT EXISTS transformed."_pending_offchain_token_price" AS SELECT "token_id", "source_id", "processing_version", "timestamp" FROM public."offchain_token_price" WHERE false;
 ALTER TABLE transformed."_pending_offchain_token_price" ADD COLUMN IF NOT EXISTS enqueued_at timestamptz NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS "_pending_offchain_token_price_enqueued_at" ON transformed."_pending_offchain_token_price" (enqueued_at);
+CREATE INDEX IF NOT EXISTS "_pending_offchain_token_price_timestamp" ON transformed."_pending_offchain_token_price" ("timestamp");
 COMMENT ON TABLE transformed."_pending_offchain_token_price" IS '[Operational] Change queue for transformed.offchain_token_price. The AFTER INSERT trigger on public.offchain_token_price appends the raw PK here; transformed._run_offchain_token_price() drains it. A backlog with an old enqueued_at means the transform has stalled.';
 CREATE OR REPLACE FUNCTION transformed."_enqueue_offchain_token_price"() RETURNS trigger
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, transformed, public AS $tg$
@@ -1362,7 +1375,7 @@ BEGIN
   RETURN QUERY
   WITH batch AS (
     DELETE FROM transformed."_pending_offchain_token_price"
-    WHERE ctid IN (SELECT ctid FROM transformed."_pending_offchain_token_price" LIMIT 10000)
+    WHERE ctid IN (SELECT ctid FROM transformed."_pending_offchain_token_price" ORDER BY "timestamp" LIMIT 10000)
     RETURNING "token_id", "source_id", "processing_version", "timestamp"
   ), ins AS (
   INSERT INTO transformed."offchain_token_price" AS t ("token_id", "source_id", "snapshot_time", "price_usd", "market_cap_usd", "volume_usd", "processing_version", "build_id")
