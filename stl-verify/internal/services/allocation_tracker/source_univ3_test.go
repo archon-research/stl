@@ -9,38 +9,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-// fakeMulticaller returns pre-configured results for testing.
-type fakeMulticaller struct {
-	results []outbound.Result
-	err     error
-}
-
-func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.results, nil
-}
-
-func (f *fakeMulticaller) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.results, nil
-}
-
-func (f *fakeMulticaller) Address() common.Address {
-	return common.Address{}
-}
 
 // ---------------------------------------------------------------------------
 // UniV3Source adapter tests
 // ---------------------------------------------------------------------------
 
 func TestUniV3Source_Name(t *testing.T) {
-	src, err := NewUniV3Source(&fakeMulticaller{}, slog.Default())
+	src, err := NewUniV3Source(testutil.NewMockMulticaller(), slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,7 +27,7 @@ func TestUniV3Source_Name(t *testing.T) {
 }
 
 func TestUniV3Source_Supports(t *testing.T) {
-	src, err := NewUniV3Source(&fakeMulticaller{}, slog.Default())
+	src, err := NewUniV3Source(testutil.NewMockMulticaller(), slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -78,7 +55,7 @@ func TestUniV3Source_Supports(t *testing.T) {
 }
 
 func TestUniV3Source_FetchBalances_EmptyEntries(t *testing.T) {
-	src, err := NewUniV3Source(&fakeMulticaller{}, slog.Default())
+	src, err := NewUniV3Source(testutil.NewMockMulticaller(), slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +70,7 @@ func TestUniV3Source_FetchBalances_EmptyEntries(t *testing.T) {
 }
 
 func TestUniV3Source_FetchBalances_UnknownChain(t *testing.T) {
-	src, err := NewUniV3Source(&fakeMulticaller{}, slog.Default())
+	src, err := NewUniV3Source(testutil.NewMockMulticaller(), slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,7 +101,13 @@ func TestUniV3Source_FetchBalances_UnknownChain(t *testing.T) {
 // state, which can silently disagree with the reorged (older-version) data
 // this fetch is being made for.
 func TestUniV3Source_FetchBalances_PinsToBlockHash(t *testing.T) {
-	mc := &hashRecordingFakeMulticaller{}
+	// An empty-but-successful result batch sized to the call count lets the test
+	// assert the reader pins state reads to the block hash rather than the block
+	// number, without modelling exact multicall shapes.
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return make([]outbound.Result, len(calls)), nil
+	}
 	src, err := NewUniV3Source(mc, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -144,41 +127,14 @@ func TestUniV3Source_FetchBalances_PinsToBlockHash(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if mc.callCount == 0 {
+	if len(mc.Invocations) == 0 {
 		t.Fatal("expected at least one multicall")
 	}
-	if mc.executedVia != "hash" {
-		t.Fatalf("multicaller invoked via %q, want the hash-pinned path", mc.executedVia)
+	last := mc.Invocations[len(mc.Invocations)-1]
+	if !last.ViaHash {
+		t.Fatal("multicaller invoked via the number path, want the hash-pinned path")
 	}
-	if mc.gotHash != testBlockHash {
-		t.Fatalf("multicall block hash = %s, want %s", mc.gotHash, testBlockHash)
+	if last.BlockHash != testBlockHash {
+		t.Fatalf("multicall block hash = %s, want %s", last.BlockHash, testBlockHash)
 	}
-}
-
-// hashRecordingFakeMulticaller is a test double for outbound.Multicaller that
-// records the block hash it was called with via ExecuteAtHash and returns an
-// empty-but-successful result batch big enough for any call count, so tests
-// can assert the reader pins state reads to the block hash rather than the
-// block number, without needing to model exact multicall shapes.
-type hashRecordingFakeMulticaller struct {
-	callCount   int
-	gotHash     common.Hash
-	executedVia string // "hash" or "number", whichever method was actually called
-}
-
-func (m *hashRecordingFakeMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	m.callCount++
-	m.executedVia = "number"
-	return make([]outbound.Result, len(calls)), nil
-}
-
-func (m *hashRecordingFakeMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
-	m.callCount++
-	m.executedVia = "hash"
-	m.gotHash = blockHash
-	return make([]outbound.Result, len(calls)), nil
-}
-
-func (m *hashRecordingFakeMulticaller) Address() common.Address {
-	return common.Address{}
 }

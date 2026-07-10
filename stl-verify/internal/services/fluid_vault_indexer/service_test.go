@@ -14,18 +14,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// fakeChain is a Multicaller that routes each sub-call by its 4-byte selector:
-// getAllVaultsAddresses, getVaultEntireData (per-vault fixture), and ERC-20
-// symbol()/decimals(). It lets a service test exercise the full
-// receipt → resolver-read → persist path without a real RPC.
+// fakeChain routes each sub-call by its 4-byte selector: getAllVaultsAddresses,
+// getVaultEntireData (per-vault fixture), and ERC-20 symbol()/decimals(). It backs
+// a testutil.MockMulticaller via multicaller(), letting a service test exercise the
+// full receipt → resolver-read → persist path without a real RPC.
 type fakeChain struct {
 	// t.Fatalf must only be called from the goroutine that runs the test, so
-	// Execute (which calls it on packing errors) must only run on the test
+	// execute (which calls it on packing errors) must only run on the test
 	// goroutine. Drive processBlockEvent/ReconcileVaults directly; never feed
-	// messages through Start's consumer goroutine, which would call Execute — and
-	// thus t.Fatalf — off-goroutine.
+	// messages through Start's consumer goroutine, which would call execute (and
+	// thus t.Fatalf) off-goroutine.
 	t *testing.T
 
 	resolverABI *abi.ABI
@@ -36,8 +37,8 @@ type fakeChain struct {
 	tokenSymbol map[common.Address]string
 	tokenDec    map[common.Address]uint8
 
-	// executeErr fails every Execute call. executeErrAfterGetAll fails only
-	// Execute batches that are not the getAllVaultsAddresses enumeration (i.e.
+	// executeErr fails every execute call. executeErrAfterGetAll fails only
+	// execute batches that are not the getAllVaultsAddresses enumeration (i.e.
 	// the getVaultEntireData read), so a test can drive the enumerate-succeeds /
 	// read-fails path.
 	executeErr            error
@@ -68,13 +69,15 @@ func newFakeChain(t *testing.T) *fakeChain {
 	return fc
 }
 
-func (f *fakeChain) Address() common.Address { return common.Address{} }
-
-func (f *fakeChain) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return f.Execute(ctx, calls, nil)
+// multicaller returns a MockMulticaller backed by this chain's selector routing,
+// so fakeChain feeds the shared double instead of implementing the port itself.
+func (f *fakeChain) multicaller() *testutil.MockMulticaller {
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = f.execute
+	return mc
 }
 
-func (f *fakeChain) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+func (f *fakeChain) execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 	if f.executeErr != nil {
 		return nil, f.executeErr
 	}
@@ -156,7 +159,7 @@ func newServiceForTest(t *testing.T) *serviceFixture {
 
 	svc, err := NewService(
 		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}, Metrics: metrics},
-		stubConsumer{}, cache, querier, chain, txm, repo, tokenRepo, &stubProtocolRepo{},
+		stubConsumer{}, cache, querier, chain.multicaller(), txm, repo, tokenRepo, &stubProtocolRepo{},
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -223,7 +226,7 @@ func validDeps(t *testing.T) deps {
 	t.Helper()
 	return deps{
 		consumer: stubConsumer{}, cache: &stubCache{}, querier: stubBlockQuerier{},
-		multicaller: newFakeChain(t), txManager: &stubTxManager{}, vaultRepo: newStubFluidRepo(),
+		multicaller: testutil.NewMockMulticaller(), txManager: &stubTxManager{}, vaultRepo: newStubFluidRepo(),
 		tokenRepo: newStubTokenRepo(), protocolRepo: &stubProtocolRepo{},
 	}
 }
