@@ -2,7 +2,9 @@ package statereader_test
 
 import (
 	"context"
+	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -79,16 +81,44 @@ func TestRead_NumberPinnedModes_DispatchToExecute(t *testing.T) {
 	}
 }
 
-func TestRead_ZeroPin_FailsWithoutRPC(t *testing.T) {
-	mc := testutil.NewMockMulticaller() // no Fns set: any dispatch would error differently
-
-	_, err := statereader.New(mc).Read(context.Background(), outbound.BlockPin{}, oneCall)
-
-	if err == nil {
-		t.Fatal("expected error for zero pin")
+func TestRead_InvalidPin_FailsWithoutRPC(t *testing.T) {
+	cases := []struct {
+		name string
+		pin  outbound.BlockPin
+	}{
+		{"zero pin", outbound.BlockPin{}},
+		{"non-positive number", outbound.PinForSettledBlock(0, 1)},
 	}
-	if mc.CallCount != 0 {
-		t.Fatalf("CallCount = %d, want 0 (no RPC on invalid pin)", mc.CallCount)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := testutil.NewMockMulticaller() // no Fns set: any dispatch would error differently
+
+			_, err := statereader.New(mc).Read(context.Background(), tc.pin, oneCall)
+
+			if err == nil {
+				t.Fatal("expected error for invalid pin")
+			}
+			if mc.CallCount != 0 {
+				t.Fatalf("CallCount = %d, want 0 (no RPC on invalid pin)", mc.CallCount)
+			}
+		})
+	}
+}
+
+func TestRead_TransportError_IsWrapped(t *testing.T) {
+	sentinel := errors.New("transport down")
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, sentinel
+	}
+
+	_, err := statereader.New(mc).Read(context.Background(), outbound.PinForStaticRead(100), oneCall)
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want it to wrap the transport error", err)
+	}
+	if !strings.Contains(err.Error(), "state read at block") {
+		t.Fatalf("err = %q, want it to contain %q", err.Error(), "state read at block")
 	}
 }
 

@@ -288,7 +288,7 @@ func run(ctx context.Context, args []string) error {
 
 	reader := statereader.New(mc)
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.BootstrapReader(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault", mc.Address())
+	archiveWrap, archiveDrain, err := archivingwire.BootstrapReader(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "fluid-vault", reader.TransportAddress())
 	if err != nil {
 		return fmt.Errorf("bootstrapping SC call archiving: %w", err)
 	}
