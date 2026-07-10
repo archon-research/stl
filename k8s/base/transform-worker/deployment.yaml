@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transform-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transform-worker
+  template:
+    metadata:
+      labels:
+        app: transform-worker
+    spec:
+      serviceAccountName: transform-worker
+      containers:
+        - name: transform-worker
+          image: transform-worker
+          env:
+            # Inject the deployment name so the worker registers its Temporal
+            # schedule/task queue under this name (cfg.Name) and its metrics
+            # carry service_name="transform-worker".
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: transform-worker
+            - secretRef:
+                name: transform-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60
