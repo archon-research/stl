@@ -40,6 +40,28 @@ func Enabled() bool {
 	return err == nil && enabled
 }
 
+// archivingGate defaults the logger and reports whether archiving is enabled,
+// so the Bootstrap variants share one enablement gate. When disabled it logs
+// the resolved state so a mistyped flag (e.g. ARCHIVE_SC_CALLS=yes) is visible
+// at startup rather than silently leaving archiving off; it warns loudly when
+// the value is non-empty but unparseable, since that signals intent to enable
+// archiving that we are not honouring.
+func archivingGate(logger *slog.Logger) (*slog.Logger, bool) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !Enabled() {
+		if raw := env.Get(EnvFlag, ""); raw != "" {
+			if _, err := strconv.ParseBool(raw); err != nil {
+				logger.Warn("ARCHIVE_SC_CALLS set to an unrecognised value; archiving stays off", EnvFlag, raw)
+			}
+		}
+		logger.Info("raw SC call archiving disabled")
+		return logger, false
+	}
+	return logger, true
+}
+
 // identityWrap returns its argument unchanged; used when archiving is disabled
 // so callers can apply the returned Wrap unconditionally.
 func identityWrap(inner outbound.Multicaller) outbound.Multicaller { return inner }
@@ -56,20 +78,8 @@ func identityWrap(inner outbound.Multicaller) outbound.Multicaller { return inne
 // This keeps the enable/build/log/drain wiring in one place instead of repeating
 // it across every cmd binary.
 func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if !Enabled() {
-		// Log the resolved state so a mistyped flag (e.g. ARCHIVE_SC_CALLS=yes) is
-		// visible at startup rather than silently leaving archiving off. Warn loudly
-		// when the value is non-empty but unparseable, since that signals intent to
-		// enable archiving that we are not honouring.
-		if raw := env.Get(EnvFlag, ""); raw != "" {
-			if _, err := strconv.ParseBool(raw); err != nil {
-				logger.Warn("ARCHIVE_SC_CALLS set to an unrecognised value; archiving stays off", EnvFlag, raw)
-			}
-		}
-		logger.Info("raw SC call archiving disabled")
+	logger, enabled := archivingGate(logger)
+	if !enabled {
 		return identityWrap, func() {}, nil
 	}
 	wrap, drain, err := NewS3WrapFromEnv(ctx, logger, chainID, buildID, source)
@@ -89,16 +99,8 @@ func identityReaderWrap(inner outbound.StateReader) outbound.StateReader { retur
 // pin-keyed read path. transportAddr is the Multicall3 address stamped on
 // archived records.
 func BootstrapReader(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string, transportAddr common.Address) (ReaderWrap, func(), error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if !Enabled() {
-		if raw := env.Get(EnvFlag, ""); raw != "" {
-			if _, err := strconv.ParseBool(raw); err != nil {
-				logger.Warn("ARCHIVE_SC_CALLS set to an unrecognised value; archiving stays off", EnvFlag, raw)
-			}
-		}
-		logger.Info("raw SC call archiving disabled")
+	logger, enabled := archivingGate(logger)
+	if !enabled {
 		return identityReaderWrap, func() {}, nil
 	}
 	archiver, chainName, err := newS3ArchiverFromEnv(ctx, logger, chainID)
