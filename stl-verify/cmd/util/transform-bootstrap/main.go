@@ -47,6 +47,12 @@ func run(ctx context.Context) error {
 	only := flag.String("source", "", "restrict to a single source (default: all)")
 	flag.Parse()
 
+	// A non-positive step never advances the per-window loop in bootstrapSource,
+	// so guard it here rather than spin forever.
+	if *step <= 0 {
+		return fmt.Errorf("step must be positive, got %v", *step)
+	}
+
 	from, err := parseTime(*fromStr)
 	if err != nil {
 		return fmt.Errorf("parsing -from: %w", err)
