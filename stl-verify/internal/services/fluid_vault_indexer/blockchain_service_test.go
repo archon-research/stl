@@ -14,6 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 func mustResolverABI(t *testing.T) *abi.ABI {
@@ -64,37 +65,38 @@ func mustBig(t *testing.T, s string) *big.Int {
 
 var errMC = errors.New("multicall failed")
 
-// stubMulticaller returns canned results for each Execute call in order.
-type stubMulticaller struct {
+// stubReader backs a testutil.StateReaderStub with canned per-Read responses
+// (returned in call order) and captures the calls it received, so a test can
+// assert both decoded results and the call shape. Pins are recorded by the
+// embedded stub and read back via sr.Pins().
+type stubReader struct {
+	*testutil.StateReaderStub
 	calls     [][]outbound.Call
-	blocks    []*big.Int
 	responses [][]outbound.Result
 	err       error
-	addr      common.Address
 }
 
-func (m *stubMulticaller) Execute(_ context.Context, calls []outbound.Call, block *big.Int) ([]outbound.Result, error) {
-	m.calls = append(m.calls, calls)
-	m.blocks = append(m.blocks, block)
-	if m.err != nil {
-		return nil, m.err
+func newStubReader(responses ...[]outbound.Result) *stubReader {
+	sr := &stubReader{responses: responses}
+	sr.StateReaderStub = &testutil.StateReaderStub{ReadFn: sr.read}
+	return sr
+}
+
+func (sr *stubReader) read(_ context.Context, _ outbound.BlockPin, calls []outbound.Call) ([]outbound.Result, error) {
+	sr.calls = append(sr.calls, calls)
+	if sr.err != nil {
+		return nil, sr.err
 	}
-	idx := len(m.calls) - 1
-	if idx >= len(m.responses) {
+	idx := len(sr.calls) - 1
+	if idx >= len(sr.responses) {
 		return nil, nil
 	}
-	return m.responses[idx], nil
+	return sr.responses[idx], nil
 }
 
-func (m *stubMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return m.Execute(ctx, calls, nil)
-}
-
-func (m *stubMulticaller) Address() common.Address { return m.addr }
-
-func newBlockchainServiceForTest(t *testing.T, mc outbound.Multicaller) *blockchainService {
+func newBlockchainServiceForTest(t *testing.T, reader outbound.StateReader) *blockchainService {
 	t.Helper()
-	svc, err := newBlockchainService(mc, testLogger())
+	svc, err := newBlockchainService(reader, testLogger())
 	if err != nil {
 		t.Fatalf("newBlockchainService: %v", err)
 	}
@@ -105,7 +107,7 @@ func newBlockchainServiceForTest(t *testing.T, mc outbound.Multicaller) *blockch
 // getVaultEntireData blob for VaultT1 ETH/sUSDS (plain single-collateral,
 // single-debt) and asserts the fields the indexer reads.
 func TestDecodeVaultEntireData_SinglePlainVault(t *testing.T) {
-	svc := newBlockchainServiceForTest(t, &stubMulticaller{})
+	svc := newBlockchainServiceForTest(t, newStubReader())
 	raw := readFixture(t, "vault_entire_data_single_susds.hex")
 
 	got, err := svc.decodeVaultEntireData(raw)
@@ -157,7 +159,7 @@ func TestDecodeVaultEntireData_SinglePlainVault(t *testing.T) {
 // TestDecodeVaultEntireData_SmartVault decodes a real mainnet smart (DEX)
 // vault and asserts the smart flags are set so the service skips it.
 func TestDecodeVaultEntireData_SmartVault(t *testing.T) {
-	svc := newBlockchainServiceForTest(t, &stubMulticaller{})
+	svc := newBlockchainServiceForTest(t, newStubReader())
 	raw := readFixture(t, "vault_entire_data_smart.hex")
 
 	got, err := svc.decodeVaultEntireData(raw)
@@ -176,7 +178,7 @@ func TestDecodeVaultEntireData_SmartVault(t *testing.T) {
 }
 
 func TestDecodeVaultEntireData_Garbage(t *testing.T) {
-	svc := newBlockchainServiceForTest(t, &stubMulticaller{})
+	svc := newBlockchainServiceForTest(t, newStubReader())
 	if _, err := svc.decodeVaultEntireData([]byte{0x01, 0x02, 0x03}); err == nil {
 		t.Fatal("expected error decoding garbage, got nil")
 	}
@@ -192,28 +194,29 @@ func TestGetAllVaultAddresses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("packing return: %v", err)
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{{Success: true, ReturnData: packed}}}}
-	svc := newBlockchainServiceForTest(t, mc)
+	sr := newStubReader([]outbound.Result{{Success: true, ReturnData: packed}})
+	svc := newBlockchainServiceForTest(t, sr)
 
-	got, err := svc.GetAllVaultAddresses(context.Background(), 100)
+	got, err := svc.GetAllVaultAddresses(context.Background(), outbound.PinForStaticRead(100))
 	if err != nil {
 		t.Fatalf("GetAllVaultAddresses: %v", err)
 	}
 	if len(got) != 2 || got[0] != addrs[0] || got[1] != addrs[1] {
 		t.Errorf("got %v, want %v", got, addrs)
 	}
-	if len(mc.blocks) != 1 || mc.blocks[0].Int64() != 100 {
-		t.Errorf("expected block 100 pinned, got %v", mc.blocks)
+	pins := sr.Pins()
+	if len(pins) != 1 || pins[0].Number() != 100 {
+		t.Errorf("expected block 100 pinned, got %v", pins)
 	}
-	if mc.calls[0][0].Target != FluidVaultResolverAddress {
-		t.Errorf("call target = %s, want resolver", mc.calls[0][0].Target)
+	if sr.calls[0][0].Target != FluidVaultResolverAddress {
+		t.Errorf("call target = %s, want resolver", sr.calls[0][0].Target)
 	}
 }
 
 func TestGetAllVaultAddresses_CallReverted(t *testing.T) {
-	mc := &stubMulticaller{responses: [][]outbound.Result{{{Success: false}}}}
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetAllVaultAddresses(context.Background(), 1); err == nil {
+	sr := newStubReader([]outbound.Result{{Success: false}})
+	svc := newBlockchainServiceForTest(t, sr)
+	if _, err := svc.GetAllVaultAddresses(context.Background(), outbound.PinForStaticRead(1)); err == nil {
 		t.Fatal("expected error on reverted call")
 	}
 }
@@ -225,13 +228,13 @@ func TestGetVaultsEntireData_BatchesAndDecodes(t *testing.T) {
 		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
 		common.HexToAddress("0x57fed7c9b3c763999c519264931790cBcA331417"),
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: single},
 		{Success: true, ReturnData: smart},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
+	})
+	svc := newBlockchainServiceForTest(t, sr)
 
-	got, err := svc.GetVaultsEntireData(context.Background(), vaults, 200)
+	got, err := svc.GetVaultsEntireData(context.Background(), vaults, outbound.PinForStaticRead(200))
 	if err != nil {
 		t.Fatalf("GetVaultsEntireData: %v", err)
 	}
@@ -244,21 +247,21 @@ func TestGetVaultsEntireData_BatchesAndDecodes(t *testing.T) {
 	if got[1].IsPlainSingle() {
 		t.Errorf("vault[1] should be smart")
 	}
-	// All sub-calls must be batched into a single Execute.
-	if len(mc.calls) != 1 {
-		t.Errorf("expected 1 batched Execute, got %d", len(mc.calls))
+	// All sub-calls must be batched into a single Read.
+	if len(sr.calls) != 1 {
+		t.Errorf("expected 1 batched Read, got %d", len(sr.calls))
 	}
-	if len(mc.calls[0]) != 2 {
-		t.Errorf("expected 2 sub-calls, got %d", len(mc.calls[0]))
+	if len(sr.calls[0]) != 2 {
+		t.Errorf("expected 2 sub-calls, got %d", len(sr.calls[0]))
 	}
 }
 
 // TestGetVaultsEntireData_ChunksLargeBatch verifies that a vault set exceeding
-// vaultEntireDataBatchSize is split across multiple Execute calls while
-// preserving input order in the returned slice. The `smart` fixture is placed at
-// indices 49 and 50 (straddling the chunk boundary at 50) so per-index identity
-// is observable — an ordering bug would surface a plain vault where a smart one
-// is expected, or vice versa.
+// vaultEntireDataBatchSize is split across multiple Read calls while preserving
+// input order in the returned slice. The `smart` fixture is placed at indices 49
+// and 50 (straddling the chunk boundary at 50) so per-index identity is
+// observable — an ordering bug would surface a plain vault where a smart one is
+// expected, or vice versa.
 func TestGetVaultsEntireData_ChunksLargeBatch(t *testing.T) {
 	single := readFixture(t, "vault_entire_data_single_susds.hex")
 	smart := readFixture(t, "vault_entire_data_smart.hex")
@@ -285,10 +288,10 @@ func TestGetVaultsEntireData_ChunksLargeBatch(t *testing.T) {
 	for i := range secondChunk {
 		secondChunk[i] = outbound.Result{Success: true, ReturnData: fixtureFor(vaultEntireDataBatchSize + i)}
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{firstChunk, secondChunk}}
-	svc := newBlockchainServiceForTest(t, mc)
+	sr := newStubReader(firstChunk, secondChunk)
+	svc := newBlockchainServiceForTest(t, sr)
 
-	got, err := svc.GetVaultsEntireData(context.Background(), vaults, 200)
+	got, err := svc.GetVaultsEntireData(context.Background(), vaults, outbound.PinForStaticRead(200))
 	if err != nil {
 		t.Fatalf("GetVaultsEntireData: %v", err)
 	}
@@ -304,14 +307,14 @@ func TestGetVaultsEntireData_ChunksLargeBatch(t *testing.T) {
 			t.Errorf("result[%d].IsPlainSingle() = %v, want %v (ordering not preserved)", i, ved.IsPlainSingle(), wantPlain)
 		}
 	}
-	if len(mc.calls) != 2 {
-		t.Fatalf("expected 2 chunked Execute calls, got %d", len(mc.calls))
+	if len(sr.calls) != 2 {
+		t.Fatalf("expected 2 chunked Read calls, got %d", len(sr.calls))
 	}
-	if len(mc.calls[0]) != vaultEntireDataBatchSize {
-		t.Errorf("first chunk = %d sub-calls, want %d", len(mc.calls[0]), vaultEntireDataBatchSize)
+	if len(sr.calls[0]) != vaultEntireDataBatchSize {
+		t.Errorf("first chunk = %d sub-calls, want %d", len(sr.calls[0]), vaultEntireDataBatchSize)
 	}
-	if len(mc.calls[1]) != n-vaultEntireDataBatchSize {
-		t.Errorf("second chunk = %d sub-calls, want %d", len(mc.calls[1]), n-vaultEntireDataBatchSize)
+	if len(sr.calls[1]) != n-vaultEntireDataBatchSize {
+		t.Errorf("second chunk = %d sub-calls, want %d", len(sr.calls[1]), n-vaultEntireDataBatchSize)
 	}
 
 	// The packed getVaultEntireData(address) calldata ends with the 32-byte
@@ -320,9 +323,9 @@ func TestGetVaultsEntireData_ChunksLargeBatch(t *testing.T) {
 	// chunk slot. Indices 0/49 fall in the first chunk, 50/52 in the second.
 	callAt := func(globalIdx int) outbound.Call {
 		if globalIdx < vaultEntireDataBatchSize {
-			return mc.calls[0][globalIdx]
+			return sr.calls[0][globalIdx]
 		}
-		return mc.calls[1][globalIdx-vaultEntireDataBatchSize]
+		return sr.calls[1][globalIdx-vaultEntireDataBatchSize]
 	}
 	for _, idx := range []int{0, 49, 50, 52} {
 		cd := callAt(idx).CallData
@@ -344,14 +347,14 @@ func TestGetVaultsEntireDataBestEffort_SkipsFailedVault(t *testing.T) {
 		common.HexToAddress("0x1111111111111111111111111111111111111111"),
 		common.HexToAddress("0x57fed7c9b3c763999c519264931790cBcA331417"),
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: single},
 		{Success: false},
 		{Success: true, ReturnData: smart},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
+	})
+	svc := newBlockchainServiceForTest(t, sr)
 
-	got, err := svc.GetVaultsEntireDataBestEffort(context.Background(), vaults, 1)
+	got, err := svc.GetVaultsEntireDataBestEffort(context.Background(), vaults, outbound.PinForStaticRead(1))
 	if err != nil {
 		t.Fatalf("GetVaultsEntireDataBestEffort: %v", err)
 	}
@@ -369,7 +372,7 @@ func TestGetVaultsEntireDataBestEffort_SkipsFailedVault(t *testing.T) {
 	}
 	// The best-effort path must mark sub-calls AllowFailure so the resolver
 	// serves the servable vaults instead of the whole batch reverting.
-	for _, c := range mc.calls[0] {
+	for _, c := range sr.calls[0] {
 		if !c.AllowFailure {
 			t.Errorf("best-effort sub-call must set AllowFailure=true")
 		}
@@ -386,13 +389,13 @@ func TestGetVaultsEntireDataBestEffort_SkipsUndecodableVault(t *testing.T) {
 		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
 		common.HexToAddress("0x1111111111111111111111111111111111111111"),
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: single},
 		{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}, // succeeds but cannot decode
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
+	})
+	svc := newBlockchainServiceForTest(t, sr)
 
-	got, err := svc.GetVaultsEntireDataBestEffort(context.Background(), vaults, 1)
+	got, err := svc.GetVaultsEntireDataBestEffort(context.Background(), vaults, outbound.PinForStaticRead(1))
 	if err != nil {
 		t.Fatalf("GetVaultsEntireDataBestEffort: %v", err)
 	}
@@ -416,12 +419,12 @@ func TestGetVaultsEntireData_StrictRejectsUndecodable(t *testing.T) {
 		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
 		common.HexToAddress("0x1111111111111111111111111111111111111111"),
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: single},
 		{Success: true, ReturnData: []byte{0x01, 0x02, 0x03}}, // succeeds but cannot decode
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, 1); err == nil {
+	})
+	svc := newBlockchainServiceForTest(t, sr)
+	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, outbound.PinForStaticRead(1)); err == nil {
 		t.Fatal("expected error when one sub-call returns undecodable data on the strict path")
 	}
 }
@@ -434,15 +437,15 @@ func TestGetVaultsEntireData_StrictRejectsFailure(t *testing.T) {
 		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
 		common.HexToAddress("0x1111111111111111111111111111111111111111"),
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: single},
 		{Success: false},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, 1); err == nil {
+	})
+	svc := newBlockchainServiceForTest(t, sr)
+	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, outbound.PinForStaticRead(1)); err == nil {
 		t.Fatal("expected error when a sub-call fails on the strict path")
 	}
-	for _, c := range mc.calls[0] {
+	for _, c := range sr.calls[0] {
 		if c.AllowFailure {
 			t.Errorf("strict sub-call must set AllowFailure=false")
 		}
@@ -455,19 +458,19 @@ func TestGetVaultsEntireData_SubCallReverted(t *testing.T) {
 		common.HexToAddress("0x75305a6a8977E998573076FA3293A235E23C32Ad"),
 		common.HexToAddress("0x57fed7c9b3c763999c519264931790cBcA331417"),
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: single},
 		{Success: false},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, 1); err == nil {
+	})
+	svc := newBlockchainServiceForTest(t, sr)
+	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, outbound.PinForStaticRead(1)); err == nil {
 		t.Fatal("expected error when a sub-call reverts (no partial reads)")
 	}
 }
 
 func TestGetVaultsEntireData_Empty(t *testing.T) {
-	svc := newBlockchainServiceForTest(t, &stubMulticaller{})
-	got, err := svc.GetVaultsEntireData(context.Background(), nil, 1)
+	svc := newBlockchainServiceForTest(t, newStubReader())
+	got, err := svc.GetVaultsEntireData(context.Background(), nil, outbound.PinForStaticRead(1))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -476,49 +479,33 @@ func TestGetVaultsEntireData_Empty(t *testing.T) {
 	}
 }
 
-func TestGetAllVaultAddresses_ResultCountMismatch(t *testing.T) {
-	mc := &stubMulticaller{responses: [][]outbound.Result{{}}} // 0 results
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetAllVaultAddresses(context.Background(), 1); err == nil {
-		t.Fatal("expected error on result-count mismatch")
-	}
-}
-
 func TestGetAllVaultAddresses_MulticallError(t *testing.T) {
-	mc := &stubMulticaller{err: errMC}
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetAllVaultAddresses(context.Background(), 1); err == nil {
-		t.Fatal("expected error from multicaller")
+	sr := newStubReader()
+	sr.err = errMC
+	svc := newBlockchainServiceForTest(t, sr)
+	if _, err := svc.GetAllVaultAddresses(context.Background(), outbound.PinForStaticRead(1)); err == nil {
+		t.Fatal("expected error from state reader")
 	}
 }
 
-func TestGetVaultsEntireData_ResultCountMismatch(t *testing.T) {
-	vaults := []common.Address{common.HexToAddress("0x1"), common.HexToAddress("0x2")}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{{Success: true}}}} // 1 result for 2 calls
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetVaultsEntireData(context.Background(), vaults, 1); err == nil {
-		t.Fatal("expected error on result-count mismatch")
-	}
-}
-
-func TestNewBlockchainService_NilMulticaller(t *testing.T) {
+func TestNewBlockchainService_NilReader(t *testing.T) {
 	if _, err := newBlockchainService(nil, testLogger()); err == nil {
-		t.Fatal("expected error for nil multicaller")
+		t.Fatal("expected error for nil state reader")
 	}
 }
 
 func TestGetTokenMetadata_ETHSentinel(t *testing.T) {
-	mc := &stubMulticaller{}
-	svc := newBlockchainServiceForTest(t, mc)
-	md, err := svc.GetTokenMetadata(context.Background(), ethSentinel, 1)
+	sr := newStubReader()
+	svc := newBlockchainServiceForTest(t, sr)
+	md, err := svc.GetTokenMetadata(context.Background(), ethSentinel, outbound.PinForStaticRead(1))
 	if err != nil {
 		t.Fatalf("GetTokenMetadata: %v", err)
 	}
 	if md.Symbol != "ETH" || md.Decimals != 18 {
 		t.Errorf("got %+v, want {ETH 18}", md)
 	}
-	if len(mc.calls) != 0 {
-		t.Errorf("ETH sentinel must not issue an RPC call, got %d", len(mc.calls))
+	if sr.CallCount() != 0 {
+		t.Errorf("ETH sentinel must not issue an RPC call, got %d", sr.CallCount())
 	}
 }
 
@@ -532,13 +519,13 @@ func TestGetTokenMetadata_ERC20(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pack decimals: %v", err)
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: symbol},
 		{Success: true, ReturnData: decimals},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
+	})
+	svc := newBlockchainServiceForTest(t, sr)
 
-	md, err := svc.GetTokenMetadata(context.Background(), common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"), 1)
+	md, err := svc.GetTokenMetadata(context.Background(), common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"), outbound.PinForStaticRead(1))
 	if err != nil {
 		t.Fatalf("GetTokenMetadata: %v", err)
 	}
@@ -553,12 +540,12 @@ func TestGetTokenMetadata_DecimalsReverted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pack symbol: %v", err)
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: true, ReturnData: symbol},
 		{Success: false},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
-	if _, err := svc.GetTokenMetadata(context.Background(), common.HexToAddress("0xabc0000000000000000000000000000000000001"), 1); err == nil {
+	})
+	svc := newBlockchainServiceForTest(t, sr)
+	if _, err := svc.GetTokenMetadata(context.Background(), common.HexToAddress("0xabc0000000000000000000000000000000000001"), outbound.PinForStaticRead(1)); err == nil {
 		t.Fatal("expected error when decimals() reverts")
 	}
 }
@@ -569,12 +556,12 @@ func TestGetTokenMetadata_SymbolRevertedTolerated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pack decimals: %v", err)
 	}
-	mc := &stubMulticaller{responses: [][]outbound.Result{{
+	sr := newStubReader([]outbound.Result{
 		{Success: false},
 		{Success: true, ReturnData: decimals},
-	}}}
-	svc := newBlockchainServiceForTest(t, mc)
-	md, err := svc.GetTokenMetadata(context.Background(), common.HexToAddress("0xabc0000000000000000000000000000000000002"), 1)
+	})
+	svc := newBlockchainServiceForTest(t, sr)
+	md, err := svc.GetTokenMetadata(context.Background(), common.HexToAddress("0xabc0000000000000000000000000000000000002"), outbound.PinForStaticRead(1))
 	if err != nil {
 		t.Fatalf("symbol revert should be tolerated: %v", err)
 	}

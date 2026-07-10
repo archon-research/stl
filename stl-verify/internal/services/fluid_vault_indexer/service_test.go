@@ -14,17 +14,21 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// fakeChain is a Multicaller that routes each sub-call by its 4-byte selector:
+// fakeChain is a StateReader that routes each sub-call by its 4-byte selector:
 // getAllVaultsAddresses, getVaultEntireData (per-vault fixture), and ERC-20
 // symbol()/decimals(). It lets a service test exercise the full
-// receipt → resolver-read → persist path without a real RPC.
+// receipt → resolver-read → persist path without a real RPC. The embedded
+// StateReaderStub records every pin, so tests can assert pin mode/hash/version.
 type fakeChain struct {
+	*testutil.StateReaderStub
+
 	// t.Fatalf must only be called from the goroutine that runs the test, so
-	// Execute (which calls it on packing errors) must only run on the test
+	// read (which calls it on packing errors) must only run on the test
 	// goroutine. Drive processBlockEvent/ReconcileVaults directly; never feed
-	// messages through Start's consumer goroutine, which would call Execute — and
+	// messages through Start's consumer goroutine, which would call read — and
 	// thus t.Fatalf — off-goroutine.
 	t *testing.T
 
@@ -36,8 +40,8 @@ type fakeChain struct {
 	tokenSymbol map[common.Address]string
 	tokenDec    map[common.Address]uint8
 
-	// executeErr fails every Execute call. executeErrAfterGetAll fails only
-	// Execute batches that are not the getAllVaultsAddresses enumeration (i.e.
+	// executeErr fails every Read call. executeErrAfterGetAll fails only
+	// Read batches that are not the getAllVaultsAddresses enumeration (i.e.
 	// the getVaultEntireData read), so a test can drive the enumerate-succeeds /
 	// read-fails path.
 	executeErr            error
@@ -65,16 +69,11 @@ func newFakeChain(t *testing.T) *fakeChain {
 	copy(fc.getAllSel[:], rABI.Methods["getAllVaultsAddresses"].ID)
 	copy(fc.symbolSel[:], eABI.Methods["symbol"].ID)
 	copy(fc.decimalsSel[:], eABI.Methods["decimals"].ID)
+	fc.StateReaderStub = &testutil.StateReaderStub{ReadFn: fc.read}
 	return fc
 }
 
-func (f *fakeChain) Address() common.Address { return common.Address{} }
-
-func (f *fakeChain) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return f.Execute(ctx, calls, nil)
-}
-
-func (f *fakeChain) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+func (f *fakeChain) read(_ context.Context, _ outbound.BlockPin, calls []outbound.Call) ([]outbound.Result, error) {
 	if f.executeErr != nil {
 		return nil, f.executeErr
 	}
@@ -136,6 +135,7 @@ func isGetAllBatch(calls []outbound.Call, getAllSel [4]byte) bool {
 type serviceFixture struct {
 	svc       *Service
 	chain     *fakeChain
+	stub      *testutil.StateReaderStub // chain's embedded stub; records every pin
 	repo      *stubFluidRepo
 	tokenRepo *stubTokenRepo
 	cache     *stubCache
@@ -161,7 +161,7 @@ func newServiceForTest(t *testing.T) *serviceFixture {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return &serviceFixture{svc: svc, chain: chain, repo: repo, tokenRepo: tokenRepo, cache: cache, txm: txm, querier: querier, metrics: metrics}
+	return &serviceFixture{svc: svc, chain: chain, stub: chain.StateReaderStub, repo: repo, tokenRepo: tokenRepo, cache: cache, txm: txm, querier: querier, metrics: metrics}
 }
 
 // logOperateTopic returns the topic0 the service treats as a position-change
@@ -197,8 +197,17 @@ func receiptsWithLog(t *testing.T, address common.Address, topics ...common.Hash
 	return raw
 }
 
+// blockEvent builds a live BlockEvent with a synthetic, per-block hash — the
+// hash is deliberately distinct from the block number so a pin-to-hash
+// assertion cannot pass by accident. processBlockEvent fails hard without one.
 func blockEvent(block int64) outbound.BlockEvent {
-	return outbound.BlockEvent{ChainID: 1, BlockNumber: block, Version: 0, BlockTimestamp: 1_700_000_000}
+	return outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    block,
+		Version:        0,
+		BlockHash:      common.BigToHash(big.NewInt(block + 0xf00d)).Hex(),
+		BlockTimestamp: 1_700_000_000,
+	}
 }
 
 const (
@@ -212,7 +221,7 @@ type deps struct {
 	consumer     outbound.SQSConsumer
 	cache        outbound.BlockCacheReader
 	querier      entity.BlockQuerier
-	multicaller  outbound.Multicaller
+	reader       outbound.StateReader
 	txManager    outbound.TxManager
 	vaultRepo    outbound.FluidVaultRepository
 	tokenRepo    outbound.TokenRepository
@@ -223,7 +232,7 @@ func validDeps(t *testing.T) deps {
 	t.Helper()
 	return deps{
 		consumer: stubConsumer{}, cache: &stubCache{}, querier: stubBlockQuerier{},
-		multicaller: newFakeChain(t), txManager: &stubTxManager{}, vaultRepo: newStubFluidRepo(),
+		reader: newFakeChain(t), txManager: &stubTxManager{}, vaultRepo: newStubFluidRepo(),
 		tokenRepo: newStubTokenRepo(), protocolRepo: &stubProtocolRepo{},
 	}
 }
@@ -237,7 +246,7 @@ func TestNewService_MissingDependency(t *testing.T) {
 		{"nil consumer", func(d *deps) { d.consumer = nil }},
 		{"nil cache", func(d *deps) { d.cache = nil }},
 		{"nil block querier", func(d *deps) { d.querier = nil }},
-		{"nil multicaller", func(d *deps) { d.multicaller = nil }},
+		{"nil state reader", func(d *deps) { d.reader = nil }},
 		{"nil tx manager", func(d *deps) { d.txManager = nil }},
 		{"nil vault repo", func(d *deps) { d.vaultRepo = nil }},
 		{"nil token repo", func(d *deps) { d.tokenRepo = nil }},
@@ -247,7 +256,7 @@ func TestNewService_MissingDependency(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := validDeps(t)
 			tc.null(&d)
-			_, err := NewService(cfg, d.consumer, d.cache, d.querier, d.multicaller, d.txManager, d.vaultRepo, d.tokenRepo, d.protocolRepo)
+			_, err := NewService(cfg, d.consumer, d.cache, d.querier, d.reader, d.txManager, d.vaultRepo, d.tokenRepo, d.protocolRepo)
 			if err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
@@ -620,6 +629,75 @@ func TestProcessBlockEvent_NegativeRatePreserved(t *testing.T) {
 	}
 	if states[0].BorrowRate == nil || states[0].BorrowRate.Cmp(big.NewInt(7)) != 0 {
 		t.Errorf("positive borrowRate should be preserved as 7, got %v", states[0].BorrowRate)
+	}
+}
+
+// TestService_ProcessBlockEvent_MissingBlockHash_ReturnsError: an event with an
+// empty BlockHash must fail hard rather than silently number-pinning the reads
+// (the reorg gap fluid lacked). The pin is built before any read, so no chain
+// data is needed.
+func TestService_ProcessBlockEvent_MissingBlockHash_ReturnsError(t *testing.T) {
+	f := newServiceForTest(t)
+	err := f.svc.processBlockEvent(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 100, Version: 0, BlockHash: "",
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing block hash") {
+		t.Fatalf("err = %v, want missing-block-hash failure", err)
+	}
+}
+
+// TestService_SnapshotPinsToBlockHash: the end-of-block snapshot read must pin
+// to the event's exact block hash (reorg-safe), closing the reorg gap. A known
+// vault's LogOperate triggers exactly one read — the snapshot — so it is the
+// last recorded pin.
+func TestService_SnapshotPinsToBlockHash(t *testing.T) {
+	f := newServiceForTest(t)
+	vault := common.HexToAddress(susdsVaultAddr)
+	f.svc.registry.RegisterVault(&entity.FluidVault{
+		ID: 5, ChainID: 1, ProtocolID: 42, Address: vault.Bytes(),
+		VaultType: "10000", CollateralTokenID: 1, DebtTokenID: 2, CreatedAtBlock: 1,
+	})
+	f.chain.vaultData[vault] = readFixture(t, "vault_entire_data_single_susds.hex")
+
+	event := blockEvent(10)
+	f.cache.receipts[10] = receiptsWithLog(t, vault, logOperateTopic(t))
+	if err := f.svc.processBlockEvent(context.Background(), event); err != nil {
+		t.Fatalf("processBlockEvent: %v", err)
+	}
+
+	pins := f.stub.Pins()
+	if len(pins) == 0 {
+		t.Fatal("no reads recorded")
+	}
+	last := pins[len(pins)-1]
+	h, ok := last.Hash()
+	if last.Mode() != outbound.PinReorgSafe || !ok || h != common.HexToHash(event.BlockHash) {
+		t.Fatalf("snapshot pin = mode %d hash %s, want reorg-safe pin to the event hash %s", last.Mode(), h.Hex(), event.BlockHash)
+	}
+}
+
+// TestReconcileVaults_PinsStaticVersionZero: the startup reconcile has no event,
+// so every read it issues must be a static, version-0 probe — matching the
+// archive keys such reads produced before the pin existed.
+func TestReconcileVaults_PinsStaticVersionZero(t *testing.T) {
+	f := newServiceForTest(t)
+	vault := common.HexToAddress(susdsVaultAddr)
+	f.chain.allVaults = []common.Address{vault}
+	f.chain.vaultData[vault] = readFixture(t, "vault_entire_data_single_susds.hex")
+	f.chain.tokenSymbol[common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD")] = "sUSDS"
+	f.chain.tokenDec[common.HexToAddress("0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD")] = 18
+
+	if err := f.svc.ReconcileVaults(context.Background(), 100); err != nil {
+		t.Fatalf("ReconcileVaults: %v", err)
+	}
+	pins := f.stub.Pins()
+	if len(pins) == 0 {
+		t.Fatal("no reads recorded")
+	}
+	for i, p := range pins {
+		if p.Mode() != outbound.PinStatic || p.Version() != 0 {
+			t.Errorf("pin[%d] = mode %d version %d, want PinStatic version 0", i, p.Mode(), p.Version())
+		}
 	}
 }
 
