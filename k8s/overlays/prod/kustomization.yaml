@@ -41,6 +41,7 @@ resources:
   - ../../base/base-watcher-data-validator
   - ../../base/arbitrum-watcher-data-validator
   - ../../base/avalanche-watcher-data-validator
+  - ../../base/transform-worker
   - ../../base/migrate
   - ../../base/python-api
   - external-secrets.yaml
@@ -155,6 +156,11 @@ images:
   - name: watcher-data-validator
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "watcher-data-validator-594a03c351cf677be9d2d4198f7fc6a6ae17f889"
+  - name: transform-worker
+    # Shares the cronjob image (cmd/cronjobs/transform-worker); the deploy
+    # pipeline bumps this tag once the transform-worker image is built.
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "transform-worker-c92be2379ea1a366a5825a7c79b7efba91e7dfe0"
   - name: optimism-watcher-data-validator
     # Shares the cronjob image, same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
