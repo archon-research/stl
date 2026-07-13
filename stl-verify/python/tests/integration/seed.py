@@ -348,20 +348,22 @@ async def insert_allocation_position(
     underlying_value: Decimal | None = None,
     underlying_token_id: int | None = None,
     created_at: dt.datetime | None = None,
+    tx_amount: int | Decimal | None = None,
 ) -> None:
-    """Insert one allocation_position row (chain_id=1, tx_amount=balance).
+    """Insert one allocation_position row (chain_id=1; tx_amount defaults to balance).
 
     ``underlying_value``/``underlying_token_id`` default to NULL (both-or-neither,
     matching the tracker's domain invariant) so existing callers are unaffected.
     ``created_at`` defaults to the column's NOW(); pass it to place rows in
-    specific buckets for the time-bucketed reads.
+    specific buckets for the time-bucketed reads. Pass ``tx_amount`` when a flow
+    scenario needs the tx magnitude decoupled from the post-tx balance.
     """
     await conn.execute(
         "INSERT INTO allocation_position "
         "(chain_id, token_id, prime_id, proxy_address, balance, "
         "block_number, block_version, tx_hash, log_index, tx_amount, direction, "
         "underlying_value, underlying_token_id, created_at) "
-        "VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $4, $9, $10, $11, COALESCE($12, NOW()))",
+        "VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, COALESCE($12, NOW()))",
         token_id,
         prime_id,
         bytes.fromhex(proxy_hex),
@@ -374,6 +376,7 @@ async def insert_allocation_position(
         underlying_value,
         underlying_token_id,
         created_at,
+        Decimal(tx_amount) if tx_amount is not None else Decimal(balance),
     )
 
 
@@ -959,3 +962,150 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
         underlying_value=RUV_MORPHO_UNDERLYING_VALUE,
         underlying_token_id=underlying_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Flow share-ratio seed (net_flow_usd valued at the per-row share ratio)
+#
+# One prime; one receipt token (a non-1:1 vault share) wrapping frUSDC, priced
+# at 1.03 (not 1.00, so a dropped price multiplication is visible). One proxy
+# per flow-valuation branch of ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``, plus a
+# mixed proxy whose rows must sum within one bucket:
+#   * FR_PROXY_RATIO      deposit at a 1.17 share ratio -> tx_amount x ratio
+#   * FR_PROXY_LEGACY     NULL underlying_value (pre-column row) -> tx_amount
+#   * FR_PROXY_FULL_EXIT  balance = 0 after a full exit -> tx_amount (ratio undefined)
+#   * FR_PROXY_DRAINED    underlying_value = 0 with balance > 0 -> flow worth 0
+#   * FR_PROXY_DIVERGENT  row's own underlying_token_id diverges from the
+#                         registry's -> refused, contributes nothing
+#   * FR_PROXY_MIXED      ratio in + ratio out + legacy in + sweep, one bucket
+# Every row carries the same explicit created_at so each proxy's events land
+# in a single hourly bucket.
+# ---------------------------------------------------------------------------
+
+FR_PROXY_RATIO = "1e" * 20
+FR_PROXY_LEGACY = "2e" * 20
+FR_PROXY_FULL_EXIT = "3e" * 20
+FR_PROXY_DRAINED = "4e" * 20
+FR_PROXY_MIXED = "5e" * 20
+FR_PROXY_DIVERGENT = "6e" * 20
+
+_FR_VAULT_HEX = "97" * 20
+_FR_UNDERLYING_HEX = "e5" * 20
+_FR_RECEIPT_HEX = "e6" * 20
+# Priced like the RUV divergent scenario so the refusal is what keeps the
+# wrong-unit value out, not a missing price.
+_FR_ALT_UNDERLYING_HEX = "e7" * 20
+
+FR_UNDERLYING_PRICE = Decimal("1.03")
+FR_BUCKET_TS = dt.datetime(2026, 3, 5, 0, 30, tzinfo=dt.UTC)
+
+# Ratio deposit: 100 shares in while the row's own balance/underlying_value pin
+# the share ratio at 234 / 200 = 1.17.
+FR_RATIO_TX_AMOUNT = Decimal("100")
+FR_RATIO_BALANCE = Decimal("200")
+FR_RATIO_UNDERLYING_VALUE = Decimal("234")
+
+# Legacy row written before underlying_value existed (both columns NULL).
+FR_LEGACY_TX_AMOUNT = Decimal("100")
+FR_LEGACY_BALANCE = Decimal("500")
+
+# Full exit: the withdrawal leaves balance = 0 on its own row.
+FR_FULL_EXIT_TX_AMOUNT = Decimal("150")
+
+# Drained vault: shares outstanding but redeemable value exactly 0.
+FR_DRAINED_TX_AMOUNT = Decimal("80")
+FR_DRAINED_BALANCE = Decimal("400")
+
+# Divergent row: its 2.5 ratio would price to a plausible wrong number if the
+# refusal were dropped.
+FR_DIVERGENT_TX_AMOUNT = Decimal("8")
+FR_DIVERGENT_BALANCE = Decimal("4")
+FR_DIVERGENT_UNDERLYING_VALUE = Decimal("10")
+FR_ALT_UNDERLYING_PRICE = Decimal("5.00")
+
+# Mixed bucket: both ratio rows sit at the same 1.17 share ratio.
+FR_MIXED_IN_TX_AMOUNT = Decimal("100")
+FR_MIXED_IN_BALANCE = Decimal("200")
+FR_MIXED_IN_UNDERLYING_VALUE = Decimal("234")
+FR_MIXED_OUT_TX_AMOUNT = Decimal("40")
+FR_MIXED_OUT_BALANCE = Decimal("160")
+FR_MIXED_OUT_UNDERLYING_VALUE = Decimal("187.2")
+FR_MIXED_LEGACY_TX_AMOUNT = Decimal("10")
+FR_MIXED_LEGACY_BALANCE = Decimal("300")
+FR_MIXED_SWEEP_TX_AMOUNT = Decimal("1000")
+
+
+async def seed_flow_share_ratio_activity(db_url: str) -> None:
+    """Seed the flow share-ratio activity scenarios into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('flow_ratio', $1) RETURNING id",
+                bytes.fromhex(_FR_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+            if protocol_id is None or oracle_id is None:
+                raise RuntimeError("Aave V3 protocol / aave_v3 oracle not seeded by migrations")
+
+            underlying_id = await insert_token(conn, "frUSDC", 6, bytes.fromhex(_FR_UNDERLYING_HEX))
+            await _insert_price(conn, underlying_id, oracle_id, FR_UNDERLYING_PRICE)
+            alt_underlying_id = await insert_token(conn, "frALT", 6, bytes.fromhex(_FR_ALT_UNDERLYING_HEX))
+            await _insert_price(conn, alt_underlying_id, oracle_id, FR_ALT_UNDERLYING_PRICE)
+            receipt_id = await insert_token(conn, "frRatioVault", 6, bytes.fromhex(_FR_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_FR_RECEIPT_HEX),
+                symbol="frRatioVault",
+            )
+
+            # (proxy, direction, tx_amount, balance, underlying_value); the FK
+            # underlying_token_id follows the both-or-neither invariant.
+            rows = [
+                (FR_PROXY_RATIO, "in", FR_RATIO_TX_AMOUNT, FR_RATIO_BALANCE, FR_RATIO_UNDERLYING_VALUE),
+                (FR_PROXY_LEGACY, "in", FR_LEGACY_TX_AMOUNT, FR_LEGACY_BALANCE, None),
+                (FR_PROXY_FULL_EXIT, "out", FR_FULL_EXIT_TX_AMOUNT, Decimal(0), Decimal(0)),
+                (FR_PROXY_DRAINED, "in", FR_DRAINED_TX_AMOUNT, FR_DRAINED_BALANCE, Decimal(0)),
+                (FR_PROXY_MIXED, "in", FR_MIXED_IN_TX_AMOUNT, FR_MIXED_IN_BALANCE, FR_MIXED_IN_UNDERLYING_VALUE),
+                (FR_PROXY_MIXED, "out", FR_MIXED_OUT_TX_AMOUNT, FR_MIXED_OUT_BALANCE, FR_MIXED_OUT_UNDERLYING_VALUE),
+                (FR_PROXY_MIXED, "in", FR_MIXED_LEGACY_TX_AMOUNT, FR_MIXED_LEGACY_BALANCE, None),
+                (FR_PROXY_MIXED, "sweep", FR_MIXED_SWEEP_TX_AMOUNT, FR_MIXED_IN_BALANCE, FR_MIXED_IN_UNDERLYING_VALUE),
+            ]
+            for index, (proxy_hex, direction, tx_amount, balance, underlying_value) in enumerate(rows):
+                await insert_allocation_position(
+                    conn,
+                    token_id=receipt_id,
+                    prime_id=prime_id,
+                    proxy_hex=proxy_hex,
+                    balance=balance,
+                    block=9000 + index,
+                    tx=f"{0xE0 + index:02x}" * 32,
+                    direction=direction,
+                    underlying_value=underlying_value,
+                    underlying_token_id=underlying_id if underlying_value is not None else None,
+                    created_at=FR_BUCKET_TS,
+                    tx_amount=tx_amount,
+                )
+
+            # The row's own underlying_token_id diverges from the registry's:
+            # its underlying_value is denominated in a different asset, so the
+            # flow read must refuse the ratio rather than mix units.
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_id,
+                prime_id=prime_id,
+                proxy_hex=FR_PROXY_DIVERGENT,
+                balance=FR_DIVERGENT_BALANCE,
+                block=9000 + len(rows),
+                tx=f"{0xE0 + len(rows):02x}" * 32,
+                direction="in",
+                underlying_value=FR_DIVERGENT_UNDERLYING_VALUE,
+                underlying_token_id=alt_underlying_id,
+                created_at=FR_BUCKET_TS,
+                tx_amount=FR_DIVERGENT_TX_AMOUNT,
+            )
+    finally:
+        await conn.close()

@@ -905,8 +905,8 @@ class AllocationRepository:
 # priced as if one share redeemed one underlying unit; NULL (rows written
 # before the column existed) falls back to the balance basis, and 1:1 aTokens
 # are unchanged (their underlying_value equals balance by construction).
-# Flow-level reads (``net_flow_usd``) deliberately stay balance-based; see
-# ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``.
+# Flow-level reads (``net_flow_usd``) convert each flow at its row's share
+# ratio; see ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``.
 #
 # The underlying is priced via the registry's ``receipt_token.underlying_token_id``,
 # not the position's own ``underlying_token_id`` (verified identical on every
@@ -1219,11 +1219,31 @@ LIMIT :limit
 # classification is trustworthy. Flows with no receipt-token oracle price
 # contribute 0.
 #
-# Flows stay balance-based (share units x underlying price) even though the
-# position-valuation reads price by redeemable value: ``underlying_value``
-# describes the position's balance at one block, not individual tx amounts, so
-# converting a flow needs a per-tx share ratio that is not stored. Accepted
-# limitation.
+# Receipt-token flows are valued at the per-row share ratio. Every
+# allocation_position row is per-tx (tx_hash, log_index, direction) and carries
+# ``balance`` and ``underlying_value`` read at its own pinned block, so
+# ``underlying_value / balance`` on the row is the vault's share ratio at that
+# tx's block, and ``tx_amount x ratio`` converts the share-denominated flow
+# into underlying units before pricing (a syrupUSDC-like deposit is no longer
+# understated by its ~1.17 ratio). Guards, in evaluation order:
+#   * The row's own ``underlying_token_id`` diverges from the registry's: its
+#     ``underlying_value`` is denominated in a different asset than the
+#     registry price multiplies, so the flow is refused and contributes
+#     nothing, per the refusal policy on ``_RECEIPT_TOKEN_POSITIONS_SQL`` and
+#     matching the SUM behavior of ``_TOTAL_USD_EXPOSURE_SQL``.
+#   * ``underlying_value`` NULL (rows written before the column existed):
+#     fall back to the raw ``tx_amount``, consistent with the position reads'
+#     COALESCE(underlying_value, balance) fallback.
+#   * ``balance = 0`` (a full exit's own row): the ratio is undefined, so fall
+#     back to the raw ``tx_amount`` (the pre-ratio behavior) rather than
+#     divide by zero.
+#   * ``underlying_value = 0`` with ``balance > 0`` (drained vault): a real
+#     ratio of 0, so the flow values to 0, matching the position basis.
+# Remaining approximation: the ratio is the post-tx position ratio at the
+# flow's block, not a per-leg execution price. Acceptable because a yield
+# vault's share ratio moves slowly (basis points per day), so the same-block
+# position ratio is indistinguishable from the execution price at this read's
+# resolution.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH receipt_token_price AS (
     -- Latest underlying oracle price per receipt token, computed ONCE per token
@@ -1232,6 +1252,7 @@ WITH receipt_token_price AS (
     SELECT
         rt.chain_id,
         rt.receipt_token_address,
+        rt.underlying_token_id,
         (
             SELECT otp.price_usd
             FROM onchain_token_price otp
@@ -1252,7 +1273,14 @@ SELECT
             WHEN 'in' THEN ap.tx_amount
             WHEN 'out' THEN -ap.tx_amount
             ELSE 0
-        END * COALESCE(price.price_usd, 0)
+        END
+        * CASE
+            WHEN ap.underlying_token_id IS NOT NULL
+             AND ap.underlying_token_id <> price.underlying_token_id THEN 0
+            WHEN ap.underlying_value IS NULL OR ap.balance = 0 THEN 1
+            ELSE ap.underlying_value / ap.balance
+        END
+        * COALESCE(price.price_usd, 0)
     ), 0) AS net_flow_usd
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
