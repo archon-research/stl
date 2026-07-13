@@ -8,7 +8,7 @@ include lint.mk
 	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
-		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
+		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-cronjob-%-internal \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -25,6 +25,8 @@ include lint.mk
         docker-build-morpho-indexer-staging docker-push-morpho-indexer-staging docker-release-morpho-indexer-staging \
         docker-build-fluid-vault-indexer docker-push-fluid-vault-indexer docker-release-fluid-vault-indexer \
         docker-build-fluid-vault-indexer-staging docker-push-fluid-vault-indexer-staging docker-release-fluid-vault-indexer-staging \
+        docker-build-dex-indexer docker-push-dex-indexer docker-release-dex-indexer \
+        docker-build-dex-indexer-staging docker-push-dex-indexer-staging docker-release-dex-indexer-staging \
         docker-build-prime-debt-indexer docker-push-prime-debt-indexer docker-release-prime-debt-indexer \
         docker-build-prime-debt-indexer-staging docker-push-prime-debt-indexer-staging docker-release-prime-debt-indexer-staging \
         docker-build-psm3-indexer docker-push-psm3-indexer docker-release-psm3-indexer \
@@ -932,6 +934,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-fluid-vault-indexer-internal ENV=$(ENV)
 	@echo ""
+	@$(MAKE) _docker-release-dex-indexer-internal ENV=$(ENV)
+	@echo ""
 	@$(MAKE) _docker-release-allocation-tracker-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-prime-debt-indexer-internal ENV=$(ENV)
@@ -1311,6 +1315,62 @@ docker-push-fluid-vault-indexer-staging:
 
 docker-release-fluid-vault-indexer-staging:
 	@$(MAKE) docker-release-fluid-vault-indexer ENV=sentinelstaging
+
+# =============================================================================
+# Docker Build & Push - DEX Indexer
+# =============================================================================
+# One shared image for every DEX deployment (curve-indexer, uniswap-v3-indexer);
+# the DEX env var selects the factory at runtime (cmd/workers/dex-indexer).
+
+ECR_REPO_DEX_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-dex-indexer
+
+# Build Docker image for dex indexer (ARM64 for Fargate Graviton)
+docker-build-dex-indexer:
+ifdef LOCAL
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/workers/dex-indexer --build-arg BIN=dex-indexer -t stl-dex-indexer:local -f Dockerfile.common .
+else
+	@echo "==> Building DEX Indexer Docker image for ARM64..."
+	@echo "    Repository: $(ECR_REPO_DEX_INDEXER)"
+	@echo "    Tag: $(IMAGE_TAG)"
+	@echo "    Commit: $(GIT_COMMIT_FULL)"
+	@echo "    Branch: $(GIT_BRANCH)"
+	docker buildx build --platform linux/arm64 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) \
+		--build-arg GIT_BRANCH=$(GIT_BRANCH) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg CMD_PATH=cmd/workers/dex-indexer \
+		--build-arg BIN=dex-indexer \
+		-f Dockerfile.common \
+		-t $(ECR_REPO_DEX_INDEXER):$(IMAGE_TAG) \
+		-t $(ECR_REPO_DEX_INDEXER):latest \
+		--load .
+endif
+
+# Push dex indexer Docker image to ECR
+docker-push-dex-indexer: ecr-login
+	@echo "==> Pushing DEX Indexer Docker image to ECR..."
+	docker push $(ECR_REPO_DEX_INDEXER):$(IMAGE_TAG)
+	docker push $(ECR_REPO_DEX_INDEXER):latest
+
+# Build and push dex indexer in one step (captures tag at start to ensure consistency)
+docker-release-dex-indexer: ecr-login _docker-release-dex-indexer-internal
+
+_docker-release-dex-indexer-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="DEX Indexer" GO_REPO="$(ECR_REPO_DEX_INDEXER)" GO_CMD_PATH=cmd/workers/dex-indexer GO_BIN=dex-indexer GO_CACHE_KEY=dex-indexer
+
+# =============================================================================
+# Sentinelstaging DEX Indexer Docker Shortcuts
+# =============================================================================
+
+docker-build-dex-indexer-staging:
+	@$(MAKE) docker-build-dex-indexer ENV=sentinelstaging
+
+docker-push-dex-indexer-staging:
+	@$(MAKE) docker-push-dex-indexer ENV=sentinelstaging
+
+docker-release-dex-indexer-staging:
+	@$(MAKE) docker-release-dex-indexer ENV=sentinelstaging
 
 # =============================================================================
 # Docker Build & Push - Prime Debt Indexer
