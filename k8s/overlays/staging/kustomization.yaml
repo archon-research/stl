@@ -9,6 +9,10 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
+  # curve-indexer + uniswap-v3-indexer (bases kept) are deferred to VEC-329,
+  # which re-adds the staging/prod overlay wiring once the dex-indexer image +
+  # SQS queues + secrets (ethereum_sqs_curve_indexing_url,
+  # ethereum_sqs_uniswap_v3_indexing_url) are provisioned in the infra repo.
   - ../../base/fluid-vault-indexer
   - ../../base/allocation-tracker
   - ../../base/avalanche-watcher
@@ -67,6 +71,7 @@ images:
   - name: morpho-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
     newTag: "0f0833f4f685878152303bc87a26994d9879f0d2"
+  # dex-indexer image override deferred to VEC-329 (see resources note above).
   - name: fluid-vault-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-fluid-vault-indexer
     newTag: "0f0833f4f685878152303bc87a26994d9879f0d2"
