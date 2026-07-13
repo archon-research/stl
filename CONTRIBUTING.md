@@ -930,6 +930,22 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    review on that run; on approval the run syncs `stl-prod` in ArgoCD to
    the approved commit. Rejecting leaves the bump on `main` (it batches
    into the next approved deploy).
+6. **Adding a brand-new service image? Split it across two PRs.** If one PR
+   both introduces a new image (a new `make docker-*` target, or a base that
+   references an image name never built before) *and* the Deployment/CronJob
+   that runs it, ArgoCD syncs the new manifest on merge *before* the image
+   exists in ECR: the pods sit in `ImagePullBackOff` and the staging health
+   gate can hard-fail and skip prod promotion (see ORB-313). Instead:
+   - **PR 1** adds the build (Makefile target + the `SERVICES` / `CRONJOBS`
+     promotion lists in `.github/workflows/deploy.yaml`) so the image is
+     built and pushed to ECR.
+   - **PR 2** adds the `k8s/base/...` Deployment plus overlay wiring that
+     references it.
+
+   The pipeline enforces this: `scripts/deploy/verify-ecr-images.sh` fails the
+   deploy if any image an overlay references is missing from ECR, so a single
+   combined PR is blocked with an explicit missing-image list instead of a
+   silent prod `ImagePullBackOff`.
 
 ---
 
