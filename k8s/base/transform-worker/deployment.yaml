@@ -3,7 +3,13 @@ kind: Deployment
 metadata:
   name: transform-worker
 spec:
-  replicas: 1
+  # Ships at 0 on purpose: the worker registers its Temporal schedule and starts
+  # ticking as soon as a replica runs, so an ungated rollout would overlap the first
+  # full parity recount with the one-off transform-bootstrap over the whole history.
+  # Rollout is: apply (worker at 0) -> run transform-bootstrap + _parity_verify_all ->
+  # validate parity/load -> bump to 1 in a separate change. VectorCronjobWorkerDown is
+  # guarded on desired replicas > 0, so it does not page while this is intentionally 0.
+  replicas: 0
   selector:
     matchLabels:
       app: transform-worker
