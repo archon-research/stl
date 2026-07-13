@@ -109,7 +109,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Post PR comment
+      - name: Publish security summary
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
         env:
           ACTIONLINT: ${{ needs.actionlint.result }}
@@ -138,6 +138,20 @@ jobs:
               '|---|---|---|',
               table,
             ].join('\n');
+
+            // Always publish to the run summary. This needs no write token, so it
+            // works on fork PRs too, where GITHUB_TOKEN is read-only.
+            await core.summary.addRaw(body).write();
+
+            // The PR comment needs pull-requests: write, which GitHub withholds from
+            // fork-PR workflows regardless of the permissions block. Skip it there (the
+            // run summary already carries the result) rather than fail the job on a 403.
+            const sameRepo = context.payload.pull_request
+              && context.payload.pull_request.head.repo.full_name === `${context.repo.owner}/${context.repo.repo}`;
+            if (!sameRepo) {
+              core.info('Fork PR: skipping the PR comment (read-only token); result is in the run summary.');
+              return;
+            }
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
