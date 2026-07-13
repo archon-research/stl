@@ -13,19 +13,21 @@ import (
 
 // mockRunner is a hand-written outbound.TransformRunner for unit tests.
 type mockRunner struct {
-	sources      []string
-	listErr      error
-	runErrs      map[string]error    // source -> error returned by RunTable
-	runRows      map[string]int64    // source -> consumed count returned by RunTable
-	runUpserts   map[string]int64    // source -> upserted count returned by RunTable
-	runCalls     []string            // sources RunTable was invoked with, in order
-	runHook      func(source string) // optional: called at the start of RunTable (e.g. to cancel the parent)
-	queue        []outbound.QueueDepth
-	queueErr     error
-	parity       []outbound.ParityRow
-	parityErr    error
-	refreshCalls []string
-	refreshErr   error
+	sources       []string
+	listErr       error
+	runErrs       map[string]error    // source -> error returned by RunTable
+	runRows       map[string]int64    // source -> consumed count returned by RunTable
+	runUpserts    map[string]int64    // source -> upserted count returned by RunTable
+	runCalls      []string            // sources RunTable was invoked with, in order
+	runHook       func(source string) // optional: called at the start of RunTable (e.g. to cancel the parent)
+	deExpires     map[string]int      // source -> times RunTable returns DeadlineExceeded before succeeding (drives the second drain pass)
+	blockUntilCtx map[string]bool     // source -> block until the slice ctx is done, then return its error (a real slice expiry)
+	queue         []outbound.QueueDepth
+	queueErr      error
+	parity        []outbound.ParityRow
+	parityErr     error
+	refreshCalls  []string
+	refreshErr    error
 }
 
 func (m *mockRunner) ListSources(context.Context) ([]string, error) {
@@ -37,10 +39,22 @@ func (m *mockRunner) RunTable(ctx context.Context, source string) (int64, int64,
 	if m.runHook != nil {
 		m.runHook(source)
 	}
+	// Block until the slice ctx expires, then surface its error: simulates a batch
+	// that cannot finish within its slice (a real slice expiry / backlog).
+	if m.blockUntilCtx[source] {
+		<-ctx.Done()
+		return 0, 0, ctx.Err()
+	}
 	// Mirror the adapter: a done context surfaces as the context error, so the
 	// service can tell a parent cancellation from a clean time-slice expiry.
 	if err := ctx.Err(); err != nil {
 		return 0, 0, err
+	}
+	// Simulate a source that needs several passes: return DeadlineExceeded (a clean
+	// slice expiry with backlog) a fixed number of times, then succeed.
+	if m.deExpires[source] > 0 {
+		m.deExpires[source]--
+		return 0, 0, context.DeadlineExceeded
 	}
 	if err := m.runErrs[source]; err != nil {
 		return 0, 0, err
@@ -190,6 +204,77 @@ func TestRunOnce_ParentCancelDuringDrainFails(t *testing.T) {
 	err = svc.RunOnce(ctx)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunOnce should fail wrapping context.Canceled on a mid-drain parent cancel, got: %v", err)
+	}
+}
+
+// TestRunOnce_SecondPassDrainsBacklog: a source whose slice expires with backlog is
+// retried in the second pass with the slack the other sources left, until it drains.
+// Here "b" reports two slice expiries then succeeds, so it is called three times while
+// "a" is called once, and the run succeeds (a clean slice expiry is not a failure).
+func TestRunOnce_SecondPassDrainsBacklog(t *testing.T) {
+	m := &mockRunner{
+		sources:   []string{"a", "b"},
+		runRows:   map[string]int64{"a": 1, "b": 5},
+		deExpires: map[string]int{"b": 2},
+	}
+	svc, err := NewService(m, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce should not fail on a clean slice expiry, got: %v", err)
+	}
+	if !slices.Equal(m.runCalls, []string{"a", "b", "b", "b"}) {
+		t.Errorf("RunTable calls = %v, want [a b b b] (b retried in the second pass)", m.runCalls)
+	}
+}
+
+// TestRunOnce_BudgetExpiryIsCleanNotFailure: a source that never finishes within the
+// budget ends the tick budget-expired, which is a clean stop (no run error), and the
+// drain-budget-exceeded path fires.
+func TestRunOnce_BudgetExpiryIsCleanNotFailure(t *testing.T) {
+	origBudget, origFloor := drainBudget, minDrainSlice
+	drainBudget, minDrainSlice = 150*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { drainBudget, minDrainSlice = origBudget, origFloor })
+
+	m := &mockRunner{
+		sources:       []string{"b"},
+		blockUntilCtx: map[string]bool{"b": true},
+	}
+	svc, err := NewService(m, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("budget expiry should be a clean stop, got: %v", err)
+	}
+	if !slices.Equal(m.runCalls, []string{"b"}) {
+		t.Errorf("RunTable calls = %v, want [b]", m.runCalls)
+	}
+}
+
+// TestRunOnce_FloorReducesSourceCount: when the fair split falls below minDrainSlice,
+// the slice is floored and fewer sources are served this tick (the rest carry
+// forward), rather than every source getting a doomed sub-batch slice. With a budget
+// under two floors and two slow sources, only the first is served this tick.
+func TestRunOnce_FloorReducesSourceCount(t *testing.T) {
+	origBudget, origFloor := drainBudget, minDrainSlice
+	drainBudget, minDrainSlice = 80*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { drainBudget, minDrainSlice = origBudget, origFloor })
+
+	m := &mockRunner{
+		sources:       []string{"a", "b"},
+		blockUntilCtx: map[string]bool{"a": true, "b": true},
+	}
+	svc, err := NewService(m, nil, nil)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("budget expiry should be a clean stop, got: %v", err)
+	}
+	if !slices.Equal(m.runCalls, []string{"a"}) {
+		t.Errorf("RunTable calls = %v, want [a] (budget under two floors serves one source)", m.runCalls)
 	}
 }
 

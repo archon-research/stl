@@ -1491,12 +1491,24 @@ CREATE TABLE IF NOT EXISTS transformed._parity_chunk_activity(
 );
 COMMENT ON TABLE transformed._parity_chunk_activity IS '[Operational] Per raw-chunk n_tup_ins+n_tup_del baseline that decides when _parity_refresh re-counts the day-buckets a chunk overlaps.';
 
--- _parity_count: count rows of _tbl whose time column _col is in [_lo, _hi).
-CREATE OR REPLACE FUNCTION transformed._parity_count(_tbl text, _col text, _lo timestamptz, _hi timestamptz) RETURNS bigint AS $fn$
-DECLARE n bigint;
+-- _parity_counts: raw, transformed and pending counts for one day-bucket, produced by
+-- a SINGLE statement so all three share one snapshot. Counting them as three separate
+-- statements let a drain commit between the transformed and pending reads (moving a row
+-- out of pending and into transformed) and record a false nonzero drift; one statement
+-- closes that window. raw and pending key on the raw time column, transformed on its own.
+CREATE OR REPLACE FUNCTION transformed._parity_counts(
+  _raw_tbl text, _raw_col text, _xf_tbl text, _xf_col text, _pend_tbl text,
+  _lo timestamptz, _hi timestamptz,
+  OUT raw_n bigint, OUT xform_n bigint, OUT pend_n bigint) AS $fn$
 BEGIN
-  EXECUTE format('SELECT count(*) FROM %s WHERE %I >= $1 AND %I < $2', _tbl, _col, _col) INTO n USING _lo, _hi;
-  RETURN n;
+  EXECUTE format(
+    'SELECT (SELECT count(*) FROM %s WHERE %I >= $1 AND %I < $2),
+            (SELECT count(*) FROM %s WHERE %I >= $1 AND %I < $2),
+            (SELECT count(*) FROM %s WHERE %I >= $1 AND %I < $2)',
+    _raw_tbl,  _raw_col, _raw_col,
+    _xf_tbl,   _xf_col,  _xf_col,
+    _pend_tbl, _raw_col, _raw_col)
+  INTO raw_n, xform_n, pend_n USING _lo, _hi;
 END $fn$ LANGUAGE plpgsql;
 
 -- _parity_refresh: steady-state incremental refresh for one source. Iterates only
@@ -1504,7 +1516,7 @@ END $fn$ LANGUAGE plpgsql;
 -- absent, e.g. the OSS test image). Re-counts the day-buckets overlapping the head
 -- chunk plus any local chunk whose activity moved, reset, or is new; skips days
 -- already frozen (tiered). Compares on day boundaries, not chunk boundaries.
-CREATE OR REPLACE FUNCTION transformed._parity_refresh(_source text) RETURNS void AS $fn$
+CREATE OR REPLACE FUNCTION transformed._parity_refresh(_source text) RETURNS void SET timezone TO 'UTC' AS $fn$
 DECLARE
   raw_col text; xf_col text; head_chunk text; day_ts timestamptz; prev_activity bigint;
   raw_tbl  text := format('public.%I', _source);
@@ -1513,9 +1525,9 @@ DECLARE
   c record;
 BEGIN
   SELECT column_name INTO raw_col FROM timescaledb_information.dimensions
-    WHERE hypertable_schema='public' AND hypertable_name=_source;
+    WHERE hypertable_schema='public' AND hypertable_name=_source AND dimension_number = 1;
   SELECT column_name INTO xf_col FROM timescaledb_information.dimensions
-    WHERE hypertable_schema='transformed' AND hypertable_name=_source;
+    WHERE hypertable_schema='transformed' AND hypertable_name=_source AND dimension_number = 1;
   IF raw_col IS NULL OR xf_col IS NULL THEN
     RAISE EXCEPTION 'parity_refresh: no time dimension for %', _source;
   END IF;
@@ -1553,11 +1565,9 @@ BEGIN
       LOOP
         INSERT INTO transformed._parity_ledger
           (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, frozen, verified_at)
-        VALUES (_source, day_ts, day_ts + interval '1 day',
-                transformed._parity_count(raw_tbl,  raw_col, day_ts, day_ts + interval '1 day'),
-                transformed._parity_count(xf_tbl,   xf_col,  day_ts, day_ts + interval '1 day'),
-                transformed._parity_count(pend_tbl, raw_col, day_ts, day_ts + interval '1 day'),
-                false, now())
+        SELECT _source, day_ts, day_ts + interval '1 day', pc.raw_n, pc.xform_n, pc.pend_n, false, now()
+        FROM transformed._parity_counts(raw_tbl, raw_col, xf_tbl, xf_col, pend_tbl,
+                                        day_ts, day_ts + interval '1 day') pc
         ON CONFLICT (source, bucket_start) DO UPDATE SET
           bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
           xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,
@@ -1581,7 +1591,7 @@ END $fn$ LANGUAGE plpgsql;
 -- never re-reads S3), and seeds the per-chunk activity baseline. The tiered/OSM
 -- catalog is referenced only through a guarded dynamic query, so the tiered pass is
 -- a no-op where OSM is absent.
-CREATE OR REPLACE FUNCTION transformed._parity_verify_all(_source text) RETURNS void AS $fn$
+CREATE OR REPLACE FUNCTION transformed._parity_verify_all(_source text) RETURNS void SET timezone TO 'UTC' AS $fn$
 DECLARE
   raw_col text; xf_col text; day_ts timestamptz;
   raw_tbl  text := format('public.%I', _source);
@@ -1589,9 +1599,9 @@ DECLARE
   pend_tbl text := format('transformed.%I', '_pending_' || _source);
 BEGIN
   SELECT column_name INTO raw_col FROM timescaledb_information.dimensions
-    WHERE hypertable_schema='public' AND hypertable_name=_source;
+    WHERE hypertable_schema='public' AND hypertable_name=_source AND dimension_number = 1;
   SELECT column_name INTO xf_col FROM timescaledb_information.dimensions
-    WHERE hypertable_schema='transformed' AND hypertable_name=_source;
+    WHERE hypertable_schema='transformed' AND hypertable_name=_source AND dimension_number = 1;
   IF raw_col IS NULL OR xf_col IS NULL THEN
     RAISE EXCEPTION 'parity_verify_all: no time dimension for %', _source;
   END IF;
@@ -1608,11 +1618,9 @@ BEGIN
   LOOP
     INSERT INTO transformed._parity_ledger
       (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, frozen, verified_at)
-    VALUES (_source, day_ts, day_ts + interval '1 day',
-            transformed._parity_count(raw_tbl,  raw_col, day_ts, day_ts + interval '1 day'),
-            transformed._parity_count(xf_tbl,   xf_col,  day_ts, day_ts + interval '1 day'),
-            transformed._parity_count(pend_tbl, raw_col, day_ts, day_ts + interval '1 day'),
-            false, now())
+    SELECT _source, day_ts, day_ts + interval '1 day', pc.raw_n, pc.xform_n, pc.pend_n, false, now()
+    FROM transformed._parity_counts(raw_tbl, raw_col, xf_tbl, xf_col, pend_tbl,
+                                    day_ts, day_ts + interval '1 day') pc
     ON CONFLICT (source, bucket_start) DO UPDATE SET
       bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
       xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,
@@ -1642,11 +1650,9 @@ BEGIN
     LOOP
       INSERT INTO transformed._parity_ledger
         (source, bucket_start, bucket_end, raw_count, xform_count, pending_count, frozen, verified_at)
-      VALUES (_source, day_ts, day_ts + interval '1 day',
-              transformed._parity_count(raw_tbl,  raw_col, day_ts, day_ts + interval '1 day'),
-              transformed._parity_count(xf_tbl,   xf_col,  day_ts, day_ts + interval '1 day'),
-              transformed._parity_count(pend_tbl, raw_col, day_ts, day_ts + interval '1 day'),
-              true, now())
+      SELECT _source, day_ts, day_ts + interval '1 day', pc.raw_n, pc.xform_n, pc.pend_n, true, now()
+      FROM transformed._parity_counts(raw_tbl, raw_col, xf_tbl, xf_col, pend_tbl,
+                                      day_ts, day_ts + interval '1 day') pc
       ON CONFLICT (source, bucket_start) DO UPDATE SET
         bucket_end=EXCLUDED.bucket_end, raw_count=EXCLUDED.raw_count,
         xform_count=EXCLUDED.xform_count, pending_count=EXCLUDED.pending_count,

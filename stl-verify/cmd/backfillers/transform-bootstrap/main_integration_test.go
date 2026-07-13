@@ -57,6 +57,40 @@ func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
 	}
 }
 
+// TestRunBootstrap_DerivesStartFromEarliestRawRow: with a zero from (the -from-unset
+// sentinel), runBootstrap starts each source at its own earliest raw row rather than a
+// fixed default, so history older than any hardcoded start is still copied. The seeded
+// row predates the old 2025-01-01 default, so a correct derive copies it and parity is 0.
+func TestRunBootstrap_DerivesStartFromEarliestRawRow(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	marketID := seedMorphoMarket(ctx, t, pool)
+	seedMorphoMarketState(ctx, t, pool, marketID, time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC))
+
+	if _, err := pool.Exec(ctx, `DELETE FROM transformed."_pending_morpho_market_state"`); err != nil {
+		t.Fatalf("clearing queue: %v", err)
+	}
+
+	// Zero from => derive per source from min(raw time column).
+	if err := runBootstrap(ctx, pool, time.Time{}, 30*24*time.Hour, "morpho_market_state", slog.Default()); err != nil {
+		t.Fatalf("runBootstrap: %v", err)
+	}
+
+	if got := countTransformed(ctx, t, pool); got != 1 {
+		t.Fatalf("after bootstrap: transformed count = %d, want 1 (2024 row copied via derived start)", got)
+	}
+	var drift int64
+	if err := pool.QueryRow(ctx,
+		`SELECT drift FROM transformed._parity_status WHERE source = 'morpho_market_state'`).Scan(&drift); err != nil {
+		t.Fatalf("parity ledger not seeded: %v", err)
+	}
+	if drift != 0 {
+		t.Fatalf("parity drift = %d, want 0", drift)
+	}
+}
+
 func countTransformed(ctx context.Context, t *testing.T, pool *pgxpool.Pool) int {
 	t.Helper()
 	var n int

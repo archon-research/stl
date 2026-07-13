@@ -44,7 +44,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	fromStr := flag.String("from", "2025-01-01", "start of the backfill window (RFC3339 or YYYY-MM-DD)")
+	fromStr := flag.String("from", "", "start of the backfill window (RFC3339 or YYYY-MM-DD); unset = each source's earliest raw row")
 	step := flag.Duration("step", 30*24*time.Hour, "window size per _bootstrap call")
 	only := flag.String("source", "", "restrict to a single source (default: all)")
 	flag.Parse()
@@ -55,9 +55,17 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("step must be positive, got %v", *step)
 	}
 
-	from, err := parseTime(*fromStr)
-	if err != nil {
-		return fmt.Errorf("parsing -from: %w", err)
+	// A zero from is the "derive per source" sentinel: runBootstrap starts each source
+	// at its own earliest raw row. A fixed default (e.g. 2025-01-01) would silently
+	// exclude older history from the copy while the parity ledger still counts it, so
+	// drift would alert until someone re-ran with an earlier -from.
+	var from time.Time
+	if *fromStr != "" {
+		parsed, err := parseTime(*fromStr)
+		if err != nil {
+			return fmt.Errorf("parsing -from: %w", err)
+		}
+		from = parsed
 	}
 
 	logger := slog.Default()
@@ -96,8 +104,21 @@ func runBootstrap(ctx context.Context, pool *pgxpool.Pool, from time.Time, step 
 
 	end := time.Now().UTC().Add(step) // one step past now so the live tail is included
 	for _, source := range sources {
-		total, err := bootstrapSource(ctx, conn, source, from, end, step, logger)
-		if err != nil {
+		// A zero from means "start at this source's earliest raw row" (see run). Deriving
+		// it per source avoids both a guessed global start that excludes older history and
+		// a walk from an arbitrary early epoch across empty windows.
+		srcFrom := from
+		if srcFrom.IsZero() {
+			srcFrom, err = earliestRawTime(ctx, conn, source)
+			if err != nil {
+				return fmt.Errorf("deriving start for %q: %w", source, err)
+			}
+		}
+		var total int64
+		if srcFrom.IsZero() {
+			// No raw rows: nothing to copy, but still verify parity so the ledger is seeded.
+			logger.Info("bootstrap source has no raw rows; nothing to copy", "source", source)
+		} else if total, err = bootstrapSource(ctx, conn, source, srcFrom, end, step, logger); err != nil {
 			return fmt.Errorf("bootstrapping %q: %w", source, err)
 		}
 		// Seed + freeze the parity ledger for this source on the same tiered-reads-on
@@ -185,6 +206,31 @@ func selectSources(ctx context.Context, conn *pgxpool.Conn, only string) ([]stri
 		return []string{only}, nil
 	}
 	return nil, fmt.Errorf("source %q not found in transformed._sources", only)
+}
+
+// earliestRawTime returns the minimum value of a source's time-dimension column in
+// raw, used as the per-source backfill start when -from is unset. It reads the time
+// column from the hypertable's first dimension (the same lookup the parity functions
+// use) so it does not hardcode per-table column names. A NULL minimum (empty raw
+// table) returns the zero time, which the caller treats as "nothing to copy".
+func earliestRawTime(ctx context.Context, conn *pgxpool.Conn, source string) (time.Time, error) {
+	var col string
+	err := conn.QueryRow(ctx,
+		`SELECT column_name FROM timescaledb_information.dimensions
+		  WHERE hypertable_schema='public' AND hypertable_name=$1 AND dimension_number = 1`, source).Scan(&col)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("looking up time column: %w", err)
+	}
+	q := fmt.Sprintf("SELECT min(%s) FROM %s",
+		pgx.Identifier{col}.Sanitize(), pgx.Identifier{"public", source}.Sanitize())
+	var earliest *time.Time
+	if err := conn.QueryRow(ctx, q).Scan(&earliest); err != nil {
+		return time.Time{}, fmt.Errorf("reading earliest row: %w", err)
+	}
+	if earliest == nil {
+		return time.Time{}, nil
+	}
+	return earliest.UTC(), nil
 }
 
 func openPool(ctx context.Context) (*pgxpool.Pool, error) {

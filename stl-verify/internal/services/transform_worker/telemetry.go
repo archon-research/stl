@@ -105,6 +105,20 @@ func (t *Telemetry) RecordTableSuccess(ctx context.Context, source string, rowsC
 	t.rowsUpserted.Add(ctx, rowsUpserted, metric.WithAttributes(table))
 }
 
+// RecordTableBudgetExpired counts one run stopped by the per-tick drain budget with
+// backlog still queued, tagged status="budget_expired" rather than "success" so a
+// source that never finishes within budget is distinguishable, and credits the rows
+// it did drain before the cut. Nil-safe.
+func (t *Telemetry) RecordTableBudgetExpired(ctx context.Context, source string, rowsConsumed, rowsUpserted int64) {
+	if t == nil {
+		return
+	}
+	table := attribute.String("table", source)
+	t.tableRuns.Add(ctx, 1, metric.WithAttributes(table, attribute.String("status", "budget_expired")))
+	t.rowsConsumed.Add(ctx, rowsConsumed, metric.WithAttributes(table))
+	t.rowsUpserted.Add(ctx, rowsUpserted, metric.WithAttributes(table))
+}
+
 // RecordTableFailure counts one failed run. Nil-safe.
 func (t *Telemetry) RecordTableFailure(ctx context.Context, source string) {
 	if t == nil {
