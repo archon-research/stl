@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"maps"
 	"sync"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // SourceRegistry routes token entries to the appropriate PositionSource.
@@ -76,7 +78,9 @@ func (r *SourceRegistry) warnUntrackedOnce(entry *TokenEntry, msg string) {
 
 // FetchAll groups entries by source, fetches in batch, unions both the balance
 // and supply maps across sources, and returns the aggregated FetchResult.
-func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+// blockHash pins every source's read to the exact block being processed (see
+// PositionSource.FetchBalances).
+func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	grouped := make(map[PositionSource][]*TokenEntry)
 	for _, entry := range entries {
 		source := r.Route(entry)
@@ -96,7 +100,7 @@ func (r *SourceRegistry) FetchAll(ctx context.Context, entries []*TokenEntry, bl
 	var errs []error
 
 	for source, sourceEntries := range grouped {
-		res, err := source.FetchBalances(ctx, sourceEntries, blockNumber)
+		res, err := source.FetchBalances(ctx, sourceEntries, blockHash)
 		if err != nil {
 			r.logger.Error("source fetch failed",
 				"source", source.Name(),

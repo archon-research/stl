@@ -209,8 +209,8 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	t.Cleanup(sqsServer.Close)
 	sqsState.AddMessage(fmt.Sprintf(
-		`{"chainId":1,"blockNumber":%d,"version":%d,"blockHash":"0xabc","blockTimestamp":1700000000}`,
-		blockNum, version,
+		`{"chainId":1,"blockNumber":%d,"version":%d,"blockHash":"0x%064x","blockTimestamp":1700000000}`,
+		blockNum, version, blockNum,
 	))
 
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -286,6 +286,26 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("run() did not return after context cancellation")
+	}
+
+	// run() has returned, so every fire-and-forget archive write has drained. The
+	// positive check above can be satisfied by an unrelated number-pinned Execute
+	// batch at the same block, so assert directly that nothing was archived at
+	// block 0: a hash-pinned state read reaching the archiver without
+	// WithBlockNumber would key its batch there (VEC-471). A real archive's
+	// filename starts with the block number, never "0_".
+	listOut, listErr := s3Client.ListObjectsV2(bgCtx, &s3.ListObjectsV2Input{
+		Bucket: aws.String(archiveBucket),
+		Prefix: aws.String(archivePrefix),
+	})
+	if listErr != nil {
+		t.Fatalf("listing archive bucket: %v", listErr)
+	}
+	for _, obj := range listOut.Contents {
+		key := aws.ToString(obj.Key)
+		if base := key[strings.LastIndex(key, "/")+1:]; strings.HasPrefix(base, "0_") {
+			t.Fatalf("raw SC call archive keyed at block 0 (%s): a hash-pinned state read was archived without WithBlockNumber", key)
+		}
 	}
 }
 

@@ -332,7 +332,7 @@ func TestResolveImmutables_FailedCall(t *testing.T) {
 
 func TestReadState_BeforeResolve(t *testing.T) {
 	caller := newTestCaller(t, testutil.NewMockMulticaller())
-	_, err := caller.ReadState(context.Background(), big.NewInt(100))
+	_, err := caller.ReadState(context.Background(), common.HexToHash("0xdead"))
 	if err == nil || !strings.Contains(err.Error(), "ResolveImmutables") {
 		t.Fatalf("expected not-resolved error, got: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestReadState_BeforeResolve(t *testing.T) {
 func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 	cfg := baseConfig(t)
 	pocket := common.HexToAddress("0x9999999999999999999999999999999999999999") // distinct from PSM3
-	block := big.NewInt(31_000_000)
+	blockHash := common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
 
 	usdsBal := big.NewInt(111)
 	susdsBal := big.NewInt(222)
@@ -352,9 +352,16 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 	mc := testutil.NewMockMulticaller()
 	caller := resolvedCaller(t, mc)
 
-	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-		if blockNumber == nil || blockNumber.Cmp(block) != 0 {
-			t.Errorf("blockNumber = %v, want %v (both rounds pinned to the same block)", blockNumber, block)
+	// State reads must pin to the block hash, not the number: after a reorg an
+	// archive node answers eth_call-by-number with the new fork's reserves,
+	// which can silently disagree with the reorged block being processed (VEC-471).
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("ReadState must call ExecuteAtHash, not Execute")
+		return nil, nil
+	}
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, gotHash common.Hash) ([]outbound.Result, error) {
+		if gotHash != blockHash {
+			t.Errorf("blockHash = %s, want %s (both rounds pinned to the same block hash)", gotHash, blockHash)
 		}
 		switch mc.CallCount {
 		case 1: // round 1
@@ -395,7 +402,7 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 		}
 	}
 
-	state, err := caller.ReadState(context.Background(), block)
+	state, err := caller.ReadState(context.Background(), blockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -435,7 +442,7 @@ func TestReadState_Round1Failures(t *testing.T) {
 				return results, nil
 			}
 
-			_, err := caller.ReadState(context.Background(), big.NewInt(100))
+			_, err := caller.ReadState(context.Background(), common.HexToHash("0xdead"))
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error %v does not contain %q", err, tc.wantErr)
 			}
@@ -460,7 +467,7 @@ func TestReadState_Round2Error(t *testing.T) {
 		return nil, errors.New("RPC unavailable")
 	}
 
-	_, err := caller.ReadState(context.Background(), big.NewInt(100))
+	_, err := caller.ReadState(context.Background(), common.HexToHash("0xdead"))
 	if err == nil || !strings.Contains(err.Error(), "usdc balance at pocket") {
 		t.Fatalf("expected round 2 error, got: %v", err)
 	}
@@ -481,7 +488,7 @@ func TestReadState_ZeroPocket(t *testing.T) {
 	}
 
 	// A zero pocket must hard-fail before reading USDC.balanceOf(0x0).
-	_, err := caller.ReadState(context.Background(), big.NewInt(100))
+	_, err := caller.ReadState(context.Background(), common.HexToHash("0xdead"))
 	if err == nil || !strings.Contains(err.Error(), "pocket() returned the zero address") {
 		t.Fatalf("expected zero-pocket error, got: %v", err)
 	}

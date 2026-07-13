@@ -6,58 +6,30 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// appendDecodedCaptured json.Marshals eventData and appends a CapturedEvent for a
-// successfully ABI-decoded log. Used by both the stableswap and cryptoswap handlers
-// for their capture-net tail so the duplication lives in one place.
-func appendDecodedCaptured(
-	captured []CapturedEvent,
-	addr common.Address,
-	logIndex uint,
-	txHash common.Hash,
-	eventName string,
-	eventData any,
-) ([]CapturedEvent, error) {
-	payload, err := json.Marshal(eventData)
-	if err != nil {
-		return nil, fmt.Errorf("marshalling %s capture payload: %w", eventName, err)
-	}
-	return append(captured, CapturedEvent{
-		Address:   addr,
-		LogIndex:  logIndex,
-		TxHash:    txHash,
-		EventName: eventName,
-		Payload:   payload,
-	}), nil
-}
-
-// appendRawCaptured appends a capture-net entry holding the raw {topics, data} of
-// a log. Used for logs that are not ABI-decoded into a typed payload (unknown
-// topic0, zero-topic logs, and word-sliced fixed-array liquidity events), so
-// protocol_event stays a complete mirror of the on-chain log surface. eventName
-// is the log's topic0 hex (or "" for a zero-topic log); addr is the log's
-// already-validated emitting contract (the pool, or the separate LP-token contract).
+// appendRawCaptured appends a raw {topics, data} capture-net entry (via
+// dexconsumer.NewRawCapturedLog) for a log not ABI-decoded into a typed payload
+// (unknown topic0, zero-topic logs, and word-sliced fixed-array liquidity
+// events), so protocol_event stays a complete mirror of the on-chain log
+// surface. eventName is the log's topic0 hex, or dexconsumer.AnonymousLogEventName
+// for a zero-topic log; addr is the log's already-validated emitting contract
+// (the pool, or the separate LP-token contract).
 func appendRawCaptured(
-	captured []CapturedEvent,
+	captured []dexconsumer.CapturedLog,
 	addr common.Address,
 	logIndex uint,
 	txHash common.Hash,
 	eventName string,
 	log shared.Log,
-) ([]CapturedEvent, error) {
-	payload, err := json.Marshal(map[string]any{"topics": log.Topics, "data": log.Data})
+) ([]dexconsumer.CapturedLog, error) {
+	entry, err := dexconsumer.NewRawCapturedLog(addr, logIndex, txHash, eventName, log)
 	if err != nil {
-		return nil, fmt.Errorf("marshalling captured event payload (log index %s): %w", log.LogIndex, err)
+		return nil, err
 	}
-	return append(captured, CapturedEvent{
-		Address:   addr,
-		LogIndex:  logIndex,
-		TxHash:    txHash,
-		EventName: eventName,
-		Payload:   payload,
-	}), nil
+	return append(captured, entry), nil
 }
 
 // ERC-20 LP-token event names as persisted on curve_lp_token_event.event_name.
@@ -95,15 +67,15 @@ func extractLpTokenEvent(
 		return LpTokenEventRecord{}, fmt.Errorf("not an LP-token event: %s", eventName)
 	}
 
-	from, err := getAddrField(data, fromKey)
+	from, err := shared.GetAddrField(data, fromKey)
 	if err != nil {
 		return LpTokenEventRecord{}, err
 	}
-	to, err := getAddrField(data, toKey)
+	to, err := shared.GetAddrField(data, toKey)
 	if err != nil {
 		return LpTokenEventRecord{}, err
 	}
-	value, err := getBigIntField(data, "value")
+	value, err := shared.GetBigIntField(data, "value")
 	if err != nil {
 		return LpTokenEventRecord{}, err
 	}
@@ -154,7 +126,7 @@ func marshalParameterParams(data map[string]any, pairs [][2]string) (json.RawMes
 	out := make(map[string]string, len(pairs))
 	for _, p := range pairs {
 		jsonKey, abiField := p[0], p[1]
-		v, err := getBigIntField(data, abiField)
+		v, err := shared.GetBigIntField(data, abiField)
 		if err != nil {
 			return nil, fmt.Errorf("parameter event field %q: %w", abiField, err)
 		}
@@ -174,7 +146,7 @@ func marshalAddressParams(data map[string]any, addrPairs, bigIntPairs [][2]strin
 	out := make(map[string]string, len(addrPairs)+len(bigIntPairs))
 	for _, p := range addrPairs {
 		jsonKey, abiField := p[0], p[1]
-		a, err := getAddrField(data, abiField)
+		a, err := shared.GetAddrField(data, abiField)
 		if err != nil {
 			return nil, fmt.Errorf("parameter event field %q: %w", abiField, err)
 		}
@@ -182,7 +154,7 @@ func marshalAddressParams(data map[string]any, addrPairs, bigIntPairs [][2]strin
 	}
 	for _, p := range bigIntPairs {
 		jsonKey, abiField := p[0], p[1]
-		v, err := getBigIntField(data, abiField)
+		v, err := shared.GetBigIntField(data, abiField)
 		if err != nil {
 			return nil, fmt.Errorf("parameter event field %q: %w", abiField, err)
 		}

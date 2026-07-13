@@ -13,6 +13,7 @@ Tables checked but skipped (not governed by this register yet):
 - `migrations` — the migrator's own bookkeeping table (never governed).
 - `*_ref` — the reference layer (#515); column-level cataloguing is a follow-up.
 - `curve_*` — the Curve DEX layer, added after this snapshot; cataloguing is a follow-up. The conformance check flagged these as unregistered, exactly as designed.
+- `uniswap_v3_*` — the Uniswap V3 DEX layer (VEC-261), same situation as `curve_*`; column-level cataloguing is a follow-up alongside it.
 
 ### `canonical`
 The rulebook: one entry per canonical concept, keyed by column name. `type` is the invariant type the column must have wherever it appears. `class` and `semantics` are defaults; `not_null` marks a column that must be declared NOT NULL (with sanctioned exceptions in `nullable_exempt`).

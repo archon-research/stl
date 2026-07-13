@@ -15,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // ---------------------------------------------------------------------------
@@ -28,11 +29,14 @@ func integrationMulticaller(t *testing.T, prices []*big.Int) *testutil.MockMulti
 }
 
 // integrationMulticallerBlockDependent creates a mock multicaller where prices depend on block number.
+// The oracle worker pins state reads to the block hash (VEC-471) via ExecuteAtHash,
+// and blockEventMessage encodes the block number as the hash (0x%064x), so recover
+// the number from the hash to keep the returned prices block-dependent.
 func integrationMulticallerBlockDependent(t *testing.T, numTokens int) *testutil.MockMulticaller {
 	t.Helper()
 	return &testutil.MockMulticaller{
-		ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-			bn := blockNumber.Int64()
+		ExecuteAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+			bn := blockHash.Big().Int64()
 			prices := make([]*big.Int, numTokens)
 			for i := range numTokens {
 				prices[i] = new(big.Int).Mul(
@@ -241,10 +245,12 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
-	// Deliver two messages with the same prices
+	// Deliver two messages with the same prices. Version 0: fresh head blocks;
+	// unchanged-price suppression applies only to those (reorg republishes
+	// always re-emit).
 	batches := [][]outbound.SQSMessage{
-		{blockEventMessage(18000000, 1, blockTimestamp, "receipt-1")},
-		{blockEventMessage(18000001, 1, blockTimestamp+12, "receipt-2")},
+		{blockEventMessage(18000000, 0, blockTimestamp, "receipt-1")},
+		{blockEventMessage(18000001, 0, blockTimestamp+12, "receipt-2")},
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
@@ -576,9 +582,10 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
 	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
+	// Version 0: unchanged-price suppression applies only to fresh head blocks.
 	newBlockTimestamp := blockTimestamp.Add(12 * time.Second).Unix()
 	messages := []outbound.SQSMessage{
-		blockEventMessage(18000000, 1, newBlockTimestamp, "receipt-cache"),
+		blockEventMessage(18000000, 0, newBlockTimestamp, "receipt-cache"),
 	}
 	consumer := consumerWithMessages(messages)
 

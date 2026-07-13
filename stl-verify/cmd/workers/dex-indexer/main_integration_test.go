@@ -57,6 +57,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEX", "curve")
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
@@ -72,12 +73,26 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	}
 }
 
+// TestRunIntegration_StartupAndShutdown exercises the full cmd-level boot path
+// (Bootstrap -> factory.BuildHandler -> LoadPools over the seeded registry ->
+// RunLoop) for BOTH DEX factories. Running only DEX=curve would let a
+// uniswap-v3-specific wiring regression (nil dep, chain-ID plumbing, seed drift
+// in RegisteredPoolsFromRows) ship green, since the registry-map unit test only
+// checks ServiceName/MetricPrefix, not the production build path.
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
+	for _, dex := range []string{"curve", "uniswap-v3"} {
+		t.Run(dex, func(t *testing.T) {
+			runStartupAndShutdown(t, dex)
+		})
+	}
+}
+
+func runStartupAndShutdown(t *testing.T, dex string) {
 	ctx := context.Background()
 
-	// SetupTestSchema applies all migrations, which seed the four Curve pools on
-	// chain_id=1. run() calls LoadPools(chainID) and fails hard on zero pools, so
-	// CHAIN_ID must be "1" to match the seeded rows.
+	// SetupTestSchema applies all migrations, which seed the Curve pools and the
+	// 18 Uniswap V3 pools on chain_id=1. run() calls LoadPools(chainID) and fails
+	// hard on zero pools, so CHAIN_ID must be "1" to match the seeded rows.
 	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
@@ -116,6 +131,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("S3_BUCKET", bucket)
 	t.Setenv("DEPLOY_ENV", deployEnv)
 	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DEX", dex)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -129,8 +145,8 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		})
 	}()
 
-	// A ReceiveMessage call means Bootstrap -> LoadPools -> NewCurveService all
-	// succeeded and RunLoop is polling.
+	// A ReceiveMessage call means Bootstrap -> LoadPools -> the DEX's
+	// BuildHandler all succeeded and RunLoop is polling.
 	select {
 	case <-sqsState.FirstCallReceived:
 	case <-time.After(30 * time.Second):
