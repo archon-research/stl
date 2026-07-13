@@ -34,3 +34,5 @@ func requireEnv(key string) string {
 	}
 	return value
 }
+
+// ci-control-check: no-op comment to trigger go-ci against current main (throwaway).
