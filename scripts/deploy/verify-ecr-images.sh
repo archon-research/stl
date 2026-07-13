@@ -18,12 +18,14 @@
 #   --tag SHA   Resolve every newTag to this deploy SHA before checking
 #               (mirrors the sed the deploy bot uses to stamp tags: the trailing
 #               40-hex is replaced, any cronjob "name-" prefix is preserved).
-#               Omit to check the tags exactly as written in the overlay
-#               (PR-time / pre-sync mode).
+#               Omit to check the tags exactly as written in the overlay. The
+#               deploy pipeline omits it: update-staging / update-prod run this
+#               against the already-stamped overlay just before committing.
 #
 # Requires AWS credentials for the account that owns the overlay's ECR registry
 # (the caller configures the right role; a single overlay only references one
-# account). Uses `aws ecr describe-images`, which needs `ecr:DescribeImages`.
+# account). Uses `aws ecr batch-get-image` (the deploy ECR role grants
+# ecr:BatchGetImage but not ecr:DescribeImages).
 set -euo pipefail
 
 KUSTOMIZATION=""
