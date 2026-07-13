@@ -245,10 +245,12 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
-	// Deliver two messages with the same prices
+	// Deliver two messages with the same prices. Version 0: fresh head blocks;
+	// unchanged-price suppression applies only to those (reorg republishes
+	// always re-emit).
 	batches := [][]outbound.SQSMessage{
-		{blockEventMessage(18000000, 1, blockTimestamp, "receipt-1")},
-		{blockEventMessage(18000001, 1, blockTimestamp+12, "receipt-2")},
+		{blockEventMessage(18000000, 0, blockTimestamp, "receipt-1")},
+		{blockEventMessage(18000001, 0, blockTimestamp+12, "receipt-2")},
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
@@ -580,9 +582,10 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
 	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
+	// Version 0: unchanged-price suppression applies only to fresh head blocks.
 	newBlockTimestamp := blockTimestamp.Add(12 * time.Second).Unix()
 	messages := []outbound.SQSMessage{
-		blockEventMessage(18000000, 1, newBlockTimestamp, "receipt-cache"),
+		blockEventMessage(18000000, 0, newBlockTimestamp, "receipt-cache"),
 	}
 	consumer := consumerWithMessages(messages)
 

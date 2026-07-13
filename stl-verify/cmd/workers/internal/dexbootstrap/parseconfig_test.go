@@ -14,7 +14,7 @@ func envSet(t *testing.T, vars map[string]string) {
 	all := []string{
 		"AWS_SQS_QUEUE_URL", "DATABASE_URL", "ALCHEMY_API_KEY", "ALCHEMY_HTTP_URL",
 		"REDIS_ADDR", "REDIS_PASSWORD", "SQS_WAIT_TIME", "SQS_VISIBILITY_TIMEOUT",
-		"CHAIN_ID", "S3_BUCKET", "DEPLOY_ENV",
+		"CHAIN_ID", "S3_BUCKET", "DEPLOY_ENV", "DEX",
 	}
 	for _, k := range all {
 		t.Setenv(k, "")
@@ -34,6 +34,40 @@ func happyEnv() map[string]string {
 		"CHAIN_ID":          "1",
 		"S3_BUCKET":         "stl-sentinelstaging-ethereum-raw",
 		"DEPLOY_ENV":        "staging",
+		"DEX":               "curve",
+	}
+}
+
+// TestParseConfig_SweepBlocksSet: SweepBlocksSet is true only when an operator
+// explicitly provided the knob (flag or env), not for the shared default, so a
+// no-sweep DEX factory can warn without tripping on every default boot.
+func TestParseConfig_SweepBlocksSet(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		args    []string
+		wantSet bool
+		wantVal int64
+	}{
+		{name: "default is not marked set", env: "", args: nil, wantSet: false, wantVal: 50},
+		{name: "env var marks set", env: "300", args: nil, wantSet: true, wantVal: 300},
+		{name: "explicit flag marks set even at zero", env: "", args: []string{"-sweep-blocks", "0"}, wantSet: true, wantVal: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envSet(t, happyEnv())
+			t.Setenv("SWEEP_BLOCKS", tt.env)
+			cfg, err := ParseConfig("test", tt.args)
+			if err != nil {
+				t.Fatalf("ParseConfig: %v", err)
+			}
+			if cfg.SweepBlocksSet != tt.wantSet {
+				t.Errorf("SweepBlocksSet = %v, want %v", cfg.SweepBlocksSet, tt.wantSet)
+			}
+			if cfg.SweepBlocks != tt.wantVal {
+				t.Errorf("SweepBlocks = %d, want %d", cfg.SweepBlocks, tt.wantVal)
+			}
+		})
 	}
 }
 
@@ -58,6 +92,9 @@ func TestParseConfig_HappyPath(t *testing.T) {
 	if cfg.MaxMessages != 10 || cfg.WaitTime != 20 || cfg.VisibilityTimeout != 300 {
 		t.Errorf("defaults not applied: max=%d wait=%d vis=%d", cfg.MaxMessages, cfg.WaitTime, cfg.VisibilityTimeout)
 	}
+	if cfg.Dex != "curve" {
+		t.Errorf("Dex = %q, want curve", cfg.Dex)
+	}
 }
 
 func TestParseConfig_RequiredEnvVars(t *testing.T) {
@@ -72,6 +109,7 @@ func TestParseConfig_RequiredEnvVars(t *testing.T) {
 		{"CHAIN_ID", "CHAIN_ID"},
 		{"S3_BUCKET", "S3_BUCKET"},
 		{"DEPLOY_ENV", "DEPLOY_ENV"},
+		{"DEX", "DEX"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.drop, func(t *testing.T) {
@@ -279,6 +317,19 @@ func TestParseConfig_FlagOverridesEnvVar(t *testing.T) {
 	}
 	if cfg.QueueURL != "flag-queue" {
 		t.Errorf("QueueURL = %q, want flag-queue (flag wins over env)", cfg.QueueURL)
+	}
+}
+
+func TestParseConfig_DexFlagOverridesEnvVar(t *testing.T) {
+	vars := happyEnv()
+	vars["DEX"] = "curve"
+	envSet(t, vars)
+	cfg, err := ParseConfig("test", []string{"-dex", "uniswap-v3"})
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.Dex != "uniswap-v3" {
+		t.Errorf("Dex = %q, want uniswap-v3 (flag wins over env)", cfg.Dex)
 	}
 }
 

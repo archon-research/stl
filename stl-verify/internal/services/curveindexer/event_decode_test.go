@@ -141,6 +141,66 @@ func TestStableswapHandler_TokenExchangeIsNotUnderlying(t *testing.T) {
 	}
 }
 
+// TestStableswapHandler_CapturedPayloadStringifiesBigInts proves the decoded
+// capture-net payload encodes every *big.Int as a JSON string, both at the top
+// level (invariant/token_supply) and nested inside the uint256[] arrays
+// (token_amounts/fees), so uint256 values above 2^53 survive a float-parsing
+// consumer without precision loss (PR#519 review #5).
+func TestStableswapHandler_CapturedPayloadStringifiesBigInts(t *testing.T) {
+	h, a := newStableswapHandlerForTest(t)
+	pool := stableswapPoolNG()
+	provider := common.HexToAddress("0xabc")
+
+	// uint256 max — far beyond a float64's 2^53 lossless range.
+	huge, ok := new(big.Int).SetString(
+		"115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
+	if !ok {
+		t.Fatal("parsing uint256 max")
+	}
+
+	log := buildEventLog(t, a, "AddLiquidity", pool.Address,
+		[]common.Hash{addrTopic(provider)},
+		[]*big.Int{huge, big.NewInt(200)},          // token_amounts (uint256[])
+		[]*big.Int{big.NewInt(10), big.NewInt(20)}, // fees (uint256[])
+		huge, // invariant
+		huge, // token_supply
+	)
+
+	got, err := h.DecodeEvents(buildReceiptFromLog(log), pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Captured) != 1 {
+		t.Fatalf("captured = %d, want 1", len(got.Captured))
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(got.Captured[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshalling captured payload: %v", err)
+	}
+
+	// Top-level uint256 must be a JSON string, not a bare number.
+	if s, isStr := payload["invariant"].(string); !isStr {
+		t.Errorf("invariant encoded as %T (%v), want JSON string", payload["invariant"], payload["invariant"])
+	} else if s != huge.String() {
+		t.Errorf("invariant = %q, want %q", s, huge.String())
+	}
+
+	// Nested uint256[] elements must also be JSON strings.
+	amounts, isSlice := payload["token_amounts"].([]any)
+	if !isSlice {
+		t.Fatalf("token_amounts encoded as %T, want JSON array", payload["token_amounts"])
+	}
+	if len(amounts) != 2 {
+		t.Fatalf("token_amounts len = %d, want 2", len(amounts))
+	}
+	if s, isStr := amounts[0].(string); !isStr {
+		t.Errorf("token_amounts[0] encoded as %T (%v), want JSON string", amounts[0], amounts[0])
+	} else if s != huge.String() {
+		t.Errorf("token_amounts[0] = %q, want %q", s, huge.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Parameter events
 // ---------------------------------------------------------------------------
