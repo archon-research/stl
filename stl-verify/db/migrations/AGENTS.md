@@ -1,12 +1,8 @@
----
-description: Database schema, migration, and snapshot-read rules for stl-verify
-paths:
-  - stl-verify/db/migrations/**
-  - stl-verify/internal/adapters/outbound/**/*repository*.go
-  - "**/*repository*.go"
----
-
 # Database & migrations
+
+Schema, migration, and snapshot-read rules for stl-verify. These load when you work under
+`stl-verify/db/migrations/`; they also apply when writing repository adapters
+(`internal/adapters/outbound/**/*repository*.go`), so read them for that work too.
 
 - Always think hard and carefully about how the wrong data could be written to the database.
 - Always think hard and carefully about schema design.
