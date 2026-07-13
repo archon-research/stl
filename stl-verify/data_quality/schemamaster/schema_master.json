@@ -23,7 +23,13 @@
     "curve_pool_coin",
     "curve_stableswap_config",
     "curve_stableswap_state",
-    "curve_swap"
+    "curve_swap",
+    "uniswap_v3_liquidity_event",
+    "uniswap_v3_pool",
+    "uniswap_v3_pool_event",
+    "uniswap_v3_pool_state",
+    "uniswap_v3_swap",
+    "uniswap_v3_tick"
   ],
   "canonical": {
     "accrued_to_treasury_scaled": {

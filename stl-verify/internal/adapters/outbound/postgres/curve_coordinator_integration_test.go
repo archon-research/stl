@@ -37,6 +37,17 @@ type stableswapCallCountResults struct {
 }
 
 func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return m.resultsFor(calls)
+}
+
+// ExecuteAtHash is the path CurveService.snapshotPools actually calls
+// (state snapshots are pinned to the block hash); Execute is kept to satisfy
+// outbound.Multicaller for callers that only have a block number.
+func (m *stableswapCallCountResults) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return m.resultsFor(calls)
+}
+
+func (m *stableswapCallCountResults) resultsFor(calls []outbound.Call) ([]outbound.Result, error) {
 	switch len(calls) {
 	case len(m.pre):
 		return m.pre, nil
@@ -46,10 +57,6 @@ func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound
 		m.t.Fatalf("unexpected snapshot call count %d (pre=%d ng=%d)", len(calls), len(m.pre), len(m.ng))
 		return nil, nil
 	}
-}
-
-func (m *stableswapCallCountResults) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return m.Execute(ctx, calls, nil)
 }
 
 func (m *stableswapCallCountResults) Address() common.Address { return common.Address{} }
@@ -304,10 +311,9 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	if err != nil {
 		t.Fatalf("loading cryptoswap ABI: %v", err)
 	}
-	handlers := curveindexer.NewHandlerRegistry(
-		curveindexer.NewStableswapHandler(stableABI),
-		curveindexer.NewCryptoswapHandler(cryptoABI),
-	)
+	stableHandler := curveindexer.NewStableswapHandler(stableABI)
+	cryptoHandler := curveindexer.NewCryptoswapHandler(cryptoABI)
+	handlers := curveindexer.NewHandlerRegistry(stableHandler, cryptoHandler)
 
 	txMgr, err := NewTxManager(curveTestPool, logger)
 	if err != nil {
@@ -326,15 +332,17 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	mc := &stableswapCallCountResults{t: t, pre: coordPreNGResults(), ng: coordNGResults(t)}
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
-		Pools:       registered,
-		Handlers:    handlers,
-		Multicaller: mc,
-		Repo:        repo,
-		EventWriter: eventWriter,
-		TxManager:   txMgr,
-		SweepBlocks: 0,
-		ChainID:     curveCoordChainID,
-		Logger:      logger,
+		Pools:         registered,
+		Handlers:      handlers,
+		StableHandler: stableHandler,
+		CryptoHandler: cryptoHandler,
+		Multicaller:   mc,
+		Repo:          repo,
+		EventWriter:   eventWriter,
+		TxManager:     txMgr,
+		SweepBlocks:   0,
+		ChainID:       curveCoordChainID,
+		Logger:        logger,
 	})
 	if err != nil {
 		t.Fatalf("NewCurveService: %v", err)
@@ -442,6 +450,7 @@ func TestCurveCurveService_FullBlock_RoutesLpTokenLogsAndPopulatesEveryTable(t *
 		BlockNumber:    bn,
 		Version:        0,
 		BlockTimestamp: 1_700_000_000,
+		BlockHash:      common.HexToHash("0x01").Hex(),
 	}
 
 	if err := coord.BlockHandler()(ctx, event, []shared.TransactionReceipt{receipt}); err != nil {
@@ -503,6 +512,7 @@ func TestCurveCurveService_PreNGPoolTouchedOnlyByLpTokenLog_GetsStateSnapshot(t 
 		BlockNumber:    bn,
 		Version:        0,
 		BlockTimestamp: 1_700_000_100,
+		BlockHash:      common.HexToHash("0x02").Hex(),
 	}
 
 	if err := coord.BlockHandler()(ctx, event, []shared.TransactionReceipt{receipt}); err != nil {
