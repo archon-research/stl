@@ -55,6 +55,33 @@ pull request.
 You do **not** need AWS credentials to develop locally — the kind cluster
 runs LocalStack to emulate SNS/SQS/S3.
 
+### AI coding assistants (optional)
+
+`AGENTS.md` is the canonical source of repository instructions. The sibling
+`CLAUDE.md` files import it for Claude Code; Codex and other `AGENTS.md`-aware
+tools read it directly. Before an assistant modifies a subtree, it must read
+every `AGENTS.md` from the repository root through that subtree. In particular,
+Codex builds its automatic instruction chain from the repository root through
+its startup directory and does not add nested or sibling guidance later in the
+session.
+
+Repository skills have canonical sources in `skills/` and are deployed to each
+supported tool through the root `Skillfile`. After a fresh clone, run this once
+from the repository root to make the same skills available to Codex, Claude
+Code, and Copilot:
+
+```bash
+make skills-install
+make skills-list
+```
+
+The generated `.codex/skills/` and `.github/skills/` directories are ignored;
+rerun `make skills-install` after pulling a skill change, then start a new
+assistant session so its skill catalogue is refreshed. When adding or editing a
+skill, change its source under `skills/`, update `Skillfile` if needed, deploy it,
+and commit the canonical source plus the checked-in `.claude/skills/` deployment
+copy.
+
 ---
 
 ## 2. Five-minute quick start

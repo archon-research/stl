@@ -54,7 +54,7 @@ func setupFluidIntegration(t *testing.T) *fluidIntegrationFixture {
 
 	svc, err := NewService(
 		Config{SQSConsumerConfig: shared.SQSConsumerConfig{ChainID: 1, Logger: testLogger()}},
-		stubConsumer{}, cache, stubBlockQuerier{head: 19_500_000}, chain, txManager, vaultRepo, tokenRepo, protocolRepo,
+		stubConsumer{}, cache, stubBlockQuerier{head: 19_500_000}, chain.multicaller(), txManager, vaultRepo, tokenRepo, protocolRepo,
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
