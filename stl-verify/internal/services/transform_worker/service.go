@@ -145,10 +145,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			budgetExceeded = true
 			break
 		}
-		slice := remaining / time.Duration(len(sources)-i)
-		if slice < minDrainSlice {
-			slice = minDrainSlice
-		}
+		slice := max(remaining/time.Duration(len(sources)-i), minDrainSlice)
 		if drain(source, slice) {
 			backlog = append(backlog, source)
 		}
@@ -176,10 +173,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 				next = append(next, backlog[i:]...)
 				break
 			}
-			slice := remaining / time.Duration(len(backlog)-i)
-			if slice < minDrainSlice {
-				slice = minDrainSlice
-			}
+			slice := max(remaining/time.Duration(len(backlog)-i), minDrainSlice)
 			if drain(source, slice) {
 				next = append(next, source)
 			}
