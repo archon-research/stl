@@ -124,20 +124,32 @@ groups:
         # pipeline is the thing that broke (a dead worker emits no
         # cronjob_runs_total at all, so the metric-based rules above cannot see
         # it). <1 available replica = no worker pod is running, so the schedule
-        # fires into the void.
+        # fires into the void. Guarded on desired replicas > 0 so a deployment that
+        # is intentionally scaled to 0 (e.g. transform-worker before the post-bootstrap
+        # enable step) is not reported as down; a real crash keeps desired >= 1.
         #
         # NB: keyed on the kube-state-metrics `deployment` label, NOT the OTel
         # service_name — anchorage-indexer's Deployment is `spark-anchorage-
         # indexer`. maple-graphql-indexer is excluded (it has its own
         # VectorMapleIndexerDown). When a new cronjob ships, add its Deployment
-        # name to this regex.
+        # name to both regexes below.
         expr: |
-          max by (cluster, deployment) (
-            kube_deployment_status_replicas_available{
-              namespace="vector",
-              deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
-            }
-          ) < 1
+          (
+            max by (cluster, deployment) (
+              kube_deployment_status_replicas_available{
+                namespace="vector",
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+              }
+            ) < 1
+          )
+          and on (cluster, deployment) (
+            max by (cluster, deployment) (
+              kube_deployment_spec_replicas{
+                namespace="vector",
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+              }
+            ) > 0
+          )
         for: 10m
         labels:
           team: vector
