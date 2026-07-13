@@ -433,6 +433,65 @@ func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
 	}
 }
 
+// TestSweep_ThreadsPoolPairOntoSnapshot: sweep is the only path uni_v3
+// snapshots take in production (V3 pool contracts emit no ERC20 transfers to
+// match), so the pool pair must survive the sweep copy or univ3RowMeta fails
+// every sweep block.
+func TestSweep_ThreadsPoolPairOntoSnapshot(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+
+	poolToken0 := common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a")
+	poolToken1 := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	entry := &TokenEntry{
+		ContractAddress: common.HexToAddress("0x1111"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "uni_v3_pool",
+	}
+	result := NewFetchResult()
+	result.Balances[entry.Key()] = &PositionBalance{
+		Balance:         big.NewInt(500),
+		UnderlyingValue: big.NewInt(500),
+		PoolToken0:      &poolToken0,
+		PoolToken1:      &poolToken1,
+	}
+
+	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(&mockSource{
+		name:       "uni-v3",
+		tokenTypes: map[string]bool{"uni_v3_pool": true},
+		result:     result,
+	})
+
+	handler := &testHandler{}
+	svc := &Service{
+		cache:            cache,
+		extractor:        NewTransferExtractor(nil),
+		registry:         registry,
+		entries:          []*TokenEntry{entry},
+		handler:          handler,
+		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
+		blocksSinceSweep: 0,
+	}
+
+	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
+	if err := svc.processBlock(context.Background(), event); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if len(handler.batches) != 1 || len(handler.batches[0].Snapshots) != 1 {
+		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(handler.batches))
+	}
+	got := handler.batches[0].Snapshots[0]
+	if got.PoolToken0 == nil || *got.PoolToken0 != poolToken0 {
+		t.Fatalf("PoolToken0 = %v, want %s", got.PoolToken0, poolToken0.Hex())
+	}
+	if got.PoolToken1 == nil || *got.PoolToken1 != poolToken1 {
+		t.Fatalf("PoolToken1 = %v, want %s", got.PoolToken1, poolToken1.Hex())
+	}
+}
+
 // ── matchTransfers ──
 
 func TestMatchTransfers_MatchesKnownEntry(t *testing.T) {
@@ -535,8 +594,16 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 
 	entry := &TokenEntry{ContractAddress: contract, WalletAddress: wallet, Star: "spark", Chain: "mainnet"}
 
+	poolToken0 := common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a")
+	poolToken1 := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	balances := map[EntryKey]*PositionBalance{
-		entry.Key(): {Balance: big.NewInt(1000000), ScaledBalance: big.NewInt(2000000), UnderlyingValue: big.NewInt(42)},
+		entry.Key(): {
+			Balance:         big.NewInt(1000000),
+			ScaledBalance:   big.NewInt(2000000),
+			UnderlyingValue: big.NewInt(42),
+			PoolToken0:      &poolToken0,
+			PoolToken1:      &poolToken1,
+		},
 	}
 
 	transfers := []*TransferEvent{
@@ -561,6 +628,12 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 	}
 	if s.UnderlyingValue == nil || s.UnderlyingValue.Cmp(big.NewInt(42)) != 0 {
 		t.Errorf("expected underlyingValue 42, got %v", s.UnderlyingValue)
+	}
+	if s.PoolToken0 == nil || *s.PoolToken0 != poolToken0 {
+		t.Errorf("expected poolToken0 %s, got %v", poolToken0.Hex(), s.PoolToken0)
+	}
+	if s.PoolToken1 == nil || *s.PoolToken1 != poolToken1 {
+		t.Errorf("expected poolToken1 %s, got %v", poolToken1.Hex(), s.PoolToken1)
 	}
 	if s.ChainID != 1 {
 		t.Errorf("expected chainID 1, got %d", s.ChainID)

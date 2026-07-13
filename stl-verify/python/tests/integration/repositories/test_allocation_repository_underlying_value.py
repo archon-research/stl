@@ -26,9 +26,11 @@ from tests.integration.seed import (
     UV_PROXY_PLAIN,
     UV_PROXY_PRICED,
     UV_PROXY_UNDERLYING_UNPRICED,
+    UV_PROXY_UNIV3_POOL,
     UV_SPARK_OWN_PRICE,
     UV_SPARKPRIME_BALANCE,
     UV_SPARKPRIME_UNDERLYING_VALUE,
+    UV_UNIV3_UNDERLYING_VALUE,
     UV_USDC_BALANCE,
     UV_USDC_PRICE,
     seed_underlying_value_direct_holdings,
@@ -73,6 +75,9 @@ async def _holding(repo: AllocationRepository, proxy_hex: str, symbol: str):
         (UV_PROXY_NON_ALLOWLISTED, "unlistedVault", None),
         # Plain token held directly -> legacy balance x own price.
         (UV_PROXY_PLAIN, "USDC", UV_USDC_BALANCE * UV_USDC_PRICE),
+        # Allowlisted Uni V3 pool position (not an ERC20, never has its own
+        # oracle) -> tracker-computed underlying_value x USDC price.
+        (UV_PROXY_UNIV3_POOL, "AUSDUSDC-UNIV3", UV_UNIV3_UNDERLYING_VALUE * UV_USDC_PRICE),
     ],
 )
 @pytest.mark.asyncio

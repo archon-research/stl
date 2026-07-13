@@ -71,7 +71,8 @@ func (h *PrimePositionHandler) HandleBatch(
 
 	// Token types where the contract itself isn't ERC20-compatible
 	// (e.g. Uniswap V3 pool contracts don't have decimals/symbol).
-	// For these, we use the AssetAddress metadata instead.
+	// Their row metadata comes from univ3RowMeta: decimals from the hint
+	// asset, symbol composed from the pool pair.
 	nonERC20Types := map[string]bool{
 		"uni_v3_pool": true,
 		"uni_v3_lp":   true,
@@ -82,6 +83,13 @@ func (h *PrimePositionHandler) HandleBatch(
 		if nonERC20Types[s.Entry.TokenType] {
 			if s.Entry.AssetAddress != nil {
 				addrs = append(addrs, *s.Entry.AssetAddress)
+			}
+			// The pool pair symbols feed the composed pool-row symbol.
+			if s.PoolToken0 != nil {
+				addrs = append(addrs, *s.PoolToken0)
+			}
+			if s.PoolToken1 != nil {
+				addrs = append(addrs, *s.PoolToken1)
 			}
 			continue
 		}
@@ -134,31 +142,21 @@ func (h *PrimePositionHandler) buildPositions(
 	positions := make([]*entity.AllocationPosition, 0, len(snapshots))
 	for _, s := range snapshots {
 		var meta tokenMeta
-		var ok bool
-
 		if nonERC20Types[s.Entry.TokenType] {
-			if s.Entry.AssetAddress == nil {
-				return nil, fmt.Errorf(
-					"uni_v3 entry %s has no asset address",
-					s.Entry.ContractAddress.Hex(),
-				)
+			m, err := h.univ3RowMeta(s)
+			if err != nil {
+				return nil, err
 			}
-			meta, ok = h.metadata.get(*s.Entry.AssetAddress)
-			if !ok {
-				return nil, fmt.Errorf(
-					"metadata missing for asset %s (pool %s)",
-					s.Entry.AssetAddress.Hex(),
-					s.Entry.ContractAddress.Hex(),
-				)
-			}
+			meta = m
 		} else {
-			meta, ok = h.metadata.get(s.Entry.ContractAddress)
+			m, ok := h.metadata.get(s.Entry.ContractAddress)
 			if !ok {
 				return nil, fmt.Errorf(
 					"metadata missing for token %s",
 					s.Entry.ContractAddress.Hex(),
 				)
 			}
+			meta = m
 		}
 
 		primeID, ok := h.primeLookup[s.Entry.Star]
@@ -214,16 +212,84 @@ func (h *PrimePositionHandler) buildPositions(
 	return positions, nil
 }
 
+// univ3RowMeta names a uni_v3 position's token-registry row (keyed by the
+// POOL address; a V3 pool contract is not an ERC20 and has no symbol or
+// decimals of its own). Decimals come from the hint asset because the row's
+// balance is denominated in it; the symbol is composed from the pool pair
+// (e.g. AUSDUSDC-UNIV3) because reusing the hint asset's own symbol labeled
+// the pool row as the asset itself (an impostor "USDC" row).
+func (h *PrimePositionHandler) univ3RowMeta(s *PositionSnapshot) (tokenMeta, error) {
+	if s.Entry.AssetAddress == nil {
+		return tokenMeta{}, fmt.Errorf(
+			"uni_v3 entry %s has no asset address",
+			s.Entry.ContractAddress.Hex(),
+		)
+	}
+	asset, ok := h.metadata.get(*s.Entry.AssetAddress)
+	if !ok {
+		return tokenMeta{}, fmt.Errorf(
+			"metadata missing for asset %s (pool %s)",
+			s.Entry.AssetAddress.Hex(),
+			s.Entry.ContractAddress.Hex(),
+		)
+	}
+	if s.PoolToken0 == nil || s.PoolToken1 == nil {
+		return tokenMeta{}, fmt.Errorf(
+			"uni_v3 snapshot for pool %s is missing the pool token pair; cannot compose the pool row symbol",
+			s.Entry.ContractAddress.Hex(),
+		)
+	}
+	token0, err := h.poolPairSymbol(*s.PoolToken0, s.Entry.ContractAddress)
+	if err != nil {
+		return tokenMeta{}, err
+	}
+	token1, err := h.poolPairSymbol(*s.PoolToken1, s.Entry.ContractAddress)
+	if err != nil {
+		return tokenMeta{}, err
+	}
+	return tokenMeta{
+		symbol:   fmt.Sprintf("%s%s-UNIV3", token0, token1),
+		decimals: asset.decimals,
+	}, nil
+}
+
+// poolPairSymbol resolves one pool token's symbol for composition. The
+// metadata cache falls back to "UNKNOWN" when a symbol() read fails, and the
+// token upsert never refreshes symbol on conflict, so composing with the
+// fallback would permanently bake an impostor-class name into the registry;
+// failing the batch retries the read instead.
+func (h *PrimePositionHandler) poolPairSymbol(token, pool common.Address) (string, error) {
+	meta, ok := h.metadata.get(token)
+	if !ok {
+		return "", fmt.Errorf(
+			"metadata missing for pool token %s (pool %s)",
+			token.Hex(), pool.Hex(),
+		)
+	}
+	if meta.symbol == "UNKNOWN" {
+		return "", fmt.Errorf(
+			"symbol unresolved for pool token %s (pool %s); refusing to compose the pool row symbol from the UNKNOWN fallback",
+			token.Hex(), pool.Hex(),
+		)
+	}
+	return meta.symbol, nil
+}
+
 // underlyingValuation applies the per-token-type denomination policy
 // (VEC-307). Only types whose read result is a value in a known asset's units
 // get a valuation. NAV/RWA share tokens (buidl, securitize, superstate,
-// centrifuge, proxy) and pool positions (curve, uni_v3) stay nil: their
-// balanceOf is a share count, and denominating it in the entry's
-// asset_address (a pricing hint, e.g. USTB->USDC) would be plausible-but-wrong
-// data. The empty reason means "nil by design, not a failure".
+// centrifuge, proxy) and curve pool positions stay nil: their balanceOf is a
+// share count, and denominating it in the entry's asset_address (a pricing
+// hint, e.g. USTB->USDC) would be plausible-but-wrong data. The empty reason
+// means "nil by design, not a failure".
 func (h *PrimePositionHandler) underlyingValuation(s *PositionSnapshot) (*entity.UnderlyingValuation, FailureReason) {
 	switch s.Entry.TokenType {
-	case "erc4626":
+	case "erc4626", "uni_v3_pool", "uni_v3_lp":
+		// Both carry a source-computed value denominated in asset_address:
+		// erc4626 reads convertToAssets(shares); uni_v3 computes the full
+		// position value (both sides at the pool's own spot price). The V3
+		// pool is not an ERC20 and can never have its own oracle, so this
+		// valuation is the only way the API can price the position.
 		if s.Entry.AssetAddress == nil {
 			return nil, reasonMissingAssetAddress
 		}
