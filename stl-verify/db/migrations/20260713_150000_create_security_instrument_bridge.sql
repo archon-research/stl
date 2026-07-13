@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS security_instrument_bridge (
     change_reason      text NOT NULL,   -- mandatory: why this mapping / re-point exists
     created_at         timestamp with time zone NOT NULL DEFAULT now(),
     PRIMARY KEY (instrument_kind, instrument_key, processing_version),
+    CONSTRAINT sib_processing_version_chk CHECK (processing_version >= 1),
     -- The 7 shapes (9 kinds). Extending the vocabulary for a new protocol is a deliberate new migration.
     CONSTRAINT sib_kind_chk CHECK (instrument_kind IN (
         'token', 'lending_reserve',            -- Morpho / SparkLend / Aave / prices (token-based)
@@ -36,6 +37,16 @@ CREATE TABLE IF NOT EXISTS security_instrument_bridge (
         'maple_loan', 'maple_pool', 'maple_strategy'  -- Maple
     ))
 );
+
+-- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
+COMMENT ON TABLE security_instrument_bridge IS 'Maps every on-chain instrument shape (instrument_kind, instrument_key) to a security_id. Soft ref to security_master (no FK: security_id is a non-unique SCD2 key); resolve via security_master_current. Append-only; latest mapping per instrument is security_instrument_bridge_current.';
+COMMENT ON COLUMN security_instrument_bridge.instrument_kind IS 'Instrument shape; one of the CHECK-pinned kinds (token, lending_reserve, morpho_market, morpho_vault, sky_ilk, anchorage_package, maple_loan/pool/strategy).';
+COMMENT ON COLUMN security_instrument_bridge.instrument_key IS 'Id within the kind; composite values joined with '':'' (components are '':''-free: hex/int).';
+COMMENT ON COLUMN security_instrument_bridge.security_id IS 'Soft ref to security_master.security_id (resolve via security_master_current; not an FK).';
+COMMENT ON COLUMN security_instrument_bridge.processing_version IS 'Monotonic version per (instrument_kind, instrument_key) (>=1); loader-assigned. Latest is the current mapping.';
+COMMENT ON COLUMN security_instrument_bridge.valid_from IS 'Date this mapping became effective.';
+COMMENT ON COLUMN security_instrument_bridge.change_reason IS 'Mandatory: why this mapping / re-point exists.';
+COMMENT ON COLUMN security_instrument_bridge.created_at IS 'Write timestamp.';
 
 -- Reverse lookup: every instrument mapped to a given security. Forward resolution
 -- (WHERE instrument_kind = ? AND instrument_key = ?) is served by the leading PK columns.
