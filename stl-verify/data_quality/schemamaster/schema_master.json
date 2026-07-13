@@ -1723,5 +1723,39 @@
       "table": "sparklend_reserve_data",
       "column": "processing_version"
     }
-  ]
+  ],
+  "transform_config": {
+    "prime_debt": {
+      "key": [
+        "prime_id",
+        "ilk_name",
+        "block_number",
+        "block_version",
+        "processing_version"
+      ]
+    },
+    "anchorage_operation": {
+      "key": [
+        "prime_id",
+        "operation_id",
+        "processing_version"
+      ]
+    },
+    "anchorage_package_snapshot": {
+      "key": [
+        "prime_id",
+        "package_id",
+        "snapshot_time",
+        "processing_version"
+      ]
+    },
+    "cex_orderbook_snapshots": {
+      "key": [
+        "exchange",
+        "symbol",
+        "event_time",
+        "persisted_at"
+      ]
+    }
+  }
 }
