@@ -18,7 +18,7 @@
 -- (instrument_kind, instrument_key), matching security_master.
 SET search_path TO public;
 
-CREATE TABLE security_instrument_bridge (
+CREATE TABLE IF NOT EXISTS security_instrument_bridge (
     instrument_kind    text NOT NULL,   -- which instrument shape (see CHECK); pinned so a typo'd kind fails hard
     instrument_key     text NOT NULL,   -- id within the kind; composite values joined with ':' (components are ':'-free: hex/int)
     security_id        text NOT NULL,   -- soft ref to security_master.security_id (resolve via security_master_current)
@@ -39,12 +39,12 @@ CREATE TABLE security_instrument_bridge (
 
 -- Reverse lookup: every instrument mapped to a given security. Forward resolution
 -- (WHERE instrument_kind = ? AND instrument_key = ?) is served by the leading PK columns.
-CREATE INDEX sib_security_idx ON security_instrument_bridge (security_id);
+CREATE INDEX IF NOT EXISTS sib_security_idx ON security_instrument_bridge (security_id);
 
 -- Current mapping per instrument: latest valid_from wins, processing_version breaks same-day ties
 -- (deterministic, matching security_master_current). VEC-420 must resolve security_sk against THIS view,
 -- not the base table, or a historical re-point would fan out to multiple rows.
-CREATE VIEW security_instrument_bridge_current AS
+CREATE OR REPLACE VIEW security_instrument_bridge_current AS
 SELECT DISTINCT ON (instrument_kind, instrument_key) *
 FROM security_instrument_bridge
 ORDER BY instrument_kind, instrument_key, valid_from DESC, processing_version DESC;
