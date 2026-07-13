@@ -81,6 +81,72 @@ downstream lag.
 
 ---
 
+## VectorOracleUnitStale
+
+**Severity:** warning · **For:** 5m (on 30m staleness)
+
+### What it means
+
+The oracle-price-worker on the labelled `chain` is still consuming blocks,
+but the single oracle unit `oracle_name` has not completed a successful
+processing pass for over 30 minutes. Prices for that unit's tokens in
+TimescaleDB are going stale while every whole-worker signal (Stalled,
+ErrorsHigh) can look healthy.
+
+The gauge `oracle_unit_last_success_timestamp_seconds` advances after every
+successful per-unit pass **whether or not any row was written** (writes are
+change-only), so this alert means "the worker stopped successfully
+processing this unit", not "the upstream feed stopped updating". Slow
+heartbeat feeds (daily NAV, e.g. JTRSY, JAAA, STAC, BUIDL-I) do not fire
+this when they are merely quiet. The gauge is baselined per unit at worker
+startup, so a unit that has never succeeded since the last deploy fires
+roughly 30 minutes after startup, and a pod restart re-arms the alert
+rather than resolving it. Note the alert does not cover SQS backlog lag: a
+worker grinding through a deep backlog reads fresh while DB prices lag;
+check queue depth for that.
+
+### First checks (≤5 min)
+
+1. **Per-unit errors in the logs**: a unit hard-erroring on every block is
+   the most likely cause and is logged per pass. Pick the deployment
+   matching the alert's `chain` label (`oracle-price-worker` for ethereum,
+   `avalanche-oracle-price-worker` for avalanche):
+   `kubectl -n vector logs deploy/oracle-price-worker | grep "failed to process oracle"`
+   (the `oracle` field names the unit).
+2. **Registry state**: after a recent migration, confirm the unit's oracle
+   row and its assets/feeds are still sane: enabled flags, feed addresses,
+   decimals, oracle type. A misconfigured unit fails every pass with the
+   same error.
+3. **Upstream RPC**: if the errors are timeouts/429s, check
+   `VectorRPCRetryRatioHigh` and `VectorOracleIndexerRPCLatencyHigh` for the
+   same window; a degraded RPC can starve one expensive unit while cheaper
+   units keep succeeding.
+4. **Cross-check the fetched counter**
+   (`rate(oracle_unit_prices_fetched_total{oracle_name="..."}[15m])`):
+   - Fresh gauge + zero fetched: every feed in the unit is reverting
+     (guard-skipped, not errored); this alert stays quiet by design and the
+     counter is the only signal.
+   - Stale gauge + nonzero fetched: fetch works but the pass fails after it
+     (change detection or the DB upsert); check upsert errors in the logs.
+
+### Common causes
+
+- Unit hard-erroring every block after a contract / feed upgrade: fix the
+  feed address or ABI handling and redeploy.
+- Registry misconfig introduced by a migration (wrong feed address, wrong
+  oracle type, disabled asset set): correct the registry rows; the worker
+  reloads units on restart.
+- Upstream RPC degradation making the unit's multicall persistently fail:
+  see the RPC alerts above.
+
+### Verify recovery
+
+`time() - oracle_unit_last_success_timestamp_seconds{oracle_name="..."}`
+drops back under a few minutes for the affected unit, and
+`rate(oracle_unit_prices_fetched_total{oracle_name="..."}[15m]) > 0`.
+
+---
+
 ## maple-graphql-indexer (VEC-320)
 
 Unlike morpho/oracle, `maple-graphql-indexer` is **not** a block consumer. It

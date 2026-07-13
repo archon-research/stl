@@ -20,14 +20,18 @@ type Telemetry struct {
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed metric.Int64Counter
-	pricesChanged   metric.Int64Counter
-	rpcCallsTotal   metric.Int64Counter
-	errorsTotal     metric.Int64Counter
+	blocksProcessed   metric.Int64Counter
+	pricesChanged     metric.Int64Counter
+	rpcCallsTotal     metric.Int64Counter
+	errorsTotal       metric.Int64Counter
+	unitPricesFetched metric.Int64Counter
 
 	// Histograms
 	blockDuration metric.Float64Histogram
 	rpcDuration   metric.Float64Histogram
+
+	// Gauges
+	unitLastSuccess metric.Float64Gauge
 
 	// chainAttr is the constant per-chain attribute attached to every metric.
 	// One worker process serves one chain, so the value is fixed at
@@ -111,6 +115,34 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
 	}
 
+	// Per-unit freshness is tracked per ORACLE, not per token: the label set is
+	// bounded by the oracle registry (a handful of series per chain), whereas a
+	// per-token label would mint a series per feed and grow with every asset
+	// onboarding. The failure modes this signal exists for (a unit erroring on
+	// every block, including a misconfigured unit that has never succeeded,
+	// thanks to the load-time baseline) hit the whole unit anyway; a single
+	// dark feed inside a healthy unit shows up as oracle.unit.prices_fetched
+	// falling below the unit's feed count, not here. Known limit: a unit
+	// dropped from the registry entirely stops exporting the series, and an
+	// absent series cannot age, so that case is invisible to the staleness
+	// alert (it needs an expected-units signal, tracked as follow-up).
+	t.unitLastSuccess, err = meter.Float64Gauge(
+		"oracle.unit.last_success_timestamp_seconds",
+		metric.WithDescription("Unix timestamp of the last successful per-oracle processing pass, baselined to load time at startup"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating unitLastSuccess gauge: %w", err)
+	}
+
+	t.unitPricesFetched, err = meter.Int64Counter(
+		"oracle.unit.prices_fetched",
+		metric.WithDescription("Usable prices fetched per oracle unit (successful, non-zero reads), before change detection"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating unitPricesFetched counter: %w", err)
+	}
+
 	return t, nil
 }
 
@@ -132,6 +164,58 @@ func (t *Telemetry) RecordPricesChanged(ctx context.Context, oracleName string, 
 		return
 	}
 	t.pricesChanged.Add(ctx, int64(count), metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("oracle.name", oracleName),
+	))
+}
+
+// RecordUnitSuccess marks a successful per-oracle processing pass by setting
+// the unit's last-success timestamp to the current wall-clock time. It must be
+// recorded on every successful pass regardless of whether rows were written:
+// change-only persistence means a healthy unit can go hours without a write,
+// so staleness has to mean "the worker stopped successfully processing this
+// unit", never "prices stopped changing".
+func (t *Telemetry) RecordUnitSuccess(ctx context.Context, oracleName string) {
+	if t == nil {
+		return
+	}
+	t.recordUnitFreshness(ctx, oracleName)
+}
+
+// RecordUnitLoaded baselines the unit's freshness gauge at load time. Without
+// it, a unit that never completes a successful pass (a misconfigured feed
+// hard-erroring from the first block after a deploy) never creates the
+// series, an absent series cannot age, and a pod restart would silently
+// resolve a firing staleness alert forever. With the baseline, such a unit
+// goes stale one threshold after startup and a restart merely re-arms the
+// alert.
+func (t *Telemetry) RecordUnitLoaded(ctx context.Context, oracleName string) {
+	if t == nil {
+		return
+	}
+	t.recordUnitFreshness(ctx, oracleName)
+}
+
+// recordUnitFreshness records fractional seconds (not whole) so consecutive
+// recordings within one second stay distinguishable, e.g. the startup
+// baseline versus the first pass.
+func (t *Telemetry) recordUnitFreshness(ctx context.Context, oracleName string) {
+	t.unitLastSuccess.Record(ctx, float64(time.Now().UnixNano())/1e9, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("oracle.name", oracleName),
+	))
+}
+
+// RecordPricesFetched counts the usable prices a per-oracle pass fetched. A
+// zero count is recorded on purpose: it creates/keeps the series so "the unit
+// passes but every feed reverts" is queryable as a zero rate instead of being
+// indistinguishable from an absent series (the uniswap-v3 NotWritingState
+// lesson).
+func (t *Telemetry) RecordPricesFetched(ctx context.Context, oracleName string, count int) {
+	if t == nil {
+		return
+	}
+	t.unitPricesFetched.Add(ctx, int64(count), metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("oracle.name", oracleName),
 	))

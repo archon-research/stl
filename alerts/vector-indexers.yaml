@@ -182,6 +182,65 @@ groups:
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
 
+      - alert: VectorOracleUnitStale
+        # Per-oracle-unit freshness (PR #548 review). The whole-worker Stalled /
+        # ErrorsHigh rules cannot see a single oracle unit going dark: a unit
+        # hard-erroring on every block keeps oracle_blocks_processed_total
+        # advancing (status="error"), a feed reverting forever is guard-skipped
+        # without erroring, and change-only writes mean a frozen upstream
+        # produces no rows anyway.
+        #
+        # Gauge `oracle.unit.last_success_timestamp_seconds` (OTel) ->
+        # Prometheus `oracle_unit_last_success_timestamp_seconds`, set by the
+        # worker after every successful per-unit pass, written rows or not, and
+        # baselined per unit at startup: a unit that never succeeds still
+        # creates the series and goes stale one threshold after a deploy, and a
+        # restart re-arms the alert instead of silencing it. Because the gauge
+        # advances regardless of whether the price CHANGED, the signal is "the
+        # worker stopped successfully processing this unit", NOT "the upstream
+        # feed stopped updating". One tight generic threshold therefore works
+        # for every oracle type, including slow NAV-heartbeat feeds (e.g.
+        # JTRSY/JAAA/STAC/BUIDL-I, ~daily): no per-feed-heartbeat tuning. 30m
+        # of consecutive failure (~150 mainnet blocks at ~12s) is decisively
+        # wedged, in the same spirit as the 15m Stalled rule but with slack for
+        # SQS redelivery/backoff bursts.
+        #
+        # Gated on the worker still consuming blocks so a whole-worker stall
+        # stays VectorOracleIndexerStalled's page instead of also firing once
+        # per unit here. Known gaps: a dead OTLP export silences BOTH rules
+        # (Stalled is a bare rate()==0, which goes no-data on staleness-expired
+        # series; see the fluid-vault Stalled zero-fill note), and a unit
+        # dropped from the registry stops exporting its series entirely, which
+        # an instant vector cannot age. Both need follow-up (kube-state
+        # zero-fill on Stalled / an expected-units signal).
+        expr: |
+          (
+            time()
+            - max by (chain, cluster, oracle_name) (
+                oracle_unit_last_success_timestamp_seconds{k8s_namespace_name="vector"}
+              )
+          ) > 1800
+          and on (chain, cluster)
+          sum by (chain, cluster) (
+            rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector oracle unit `{{ $labels.oracle_name }}` stale on {{ $labels.chain }}"
+          description: |
+            `oracle-price-worker` on chain `{{ $labels.chain }}` is still
+            consuming blocks but has not completed a successful pass for oracle
+            unit `{{ $labels.oracle_name }}` in >30m. Prices from this unit in
+            TimescaleDB are going stale while the worker looks healthy. Check
+            the pod logs for per-unit errors and the oracle registry for a
+            misconfigured unit.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitstale
+
       # ---------------------------------------------------------------------
       # Raw SC call archiving (VEC-364 / PR #399)
       # ---------------------------------------------------------------------

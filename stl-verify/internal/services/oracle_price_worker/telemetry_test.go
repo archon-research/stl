@@ -56,6 +56,10 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 	tel.RecordRPCCall(ctx, "getAssetsPrices", time.Millisecond, nil)
 	tel.RecordRPCCall(ctx, "getAssetsPrices", time.Millisecond, someErr)
 	tel.RecordError(ctx, "op", someErr)
+	tel.RecordUnitSuccess(ctx, "test")
+	tel.RecordUnitLoaded(ctx, "test")
+	tel.RecordPricesFetched(ctx, "test", 1)
+	tel.RecordPricesFetched(ctx, "test", 0)
 
 	_, span := tel.StartBlockSpan(ctx, 1)
 	span.End()
@@ -184,6 +188,18 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	t.Run("RecordRPCCall", func(t *testing.T) {
 		tel.RecordRPCCall(ctx, "eth_call", time.Millisecond*100, nil)
 		tel.RecordRPCCall(ctx, "eth_call", time.Millisecond*100, someErr)
+	})
+
+	t.Run("RecordUnitSuccess", func(t *testing.T) {
+		tel.RecordUnitSuccess(ctx, "test-oracle")
+	})
+
+	t.Run("RecordUnitLoaded", func(t *testing.T) {
+		tel.RecordUnitLoaded(ctx, "test-oracle")
+	})
+
+	t.Run("RecordPricesFetched", func(t *testing.T) {
+		tel.RecordPricesFetched(ctx, "test-oracle", 3)
 	})
 
 	t.Run("RecordError", func(t *testing.T) {
