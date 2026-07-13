@@ -838,6 +838,141 @@ groups:
             rows. The snapshot loop may be silently empty (all pools skipped,
             sweep disabled, or snapshotSet always returning empty).
 
+  # uniswap-v3-indexer (VEC-261) — Uniswap V3 DEX pool/swap/liquidity indexer.
+  # Runs via the unified dex-indexer binary (DEX=uniswap-v3); metric prefix
+  # uniswap_v3 (dextelemetry.NewTelemetry("uniswap_v3", ...) in
+  # cmd/workers/dex-indexer/factories.go). Unlike curve, there is no sweep:
+  # state/tick rows are written only for pools touched by decoded events in
+  # the block (dexconsumer.DueSet), so a quiet block with no Uniswap V3
+  # activity legitimately writes zero rows.
+  - name: vector-uniswap-v3-indexer
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV3IndexerStalled
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Uniswap V3 pool state in TimescaleDB will go
+            stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV3IndexerErrorsHigh
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexererrorshigh
+
+      - alert: VectorUniswapV3IndexerBlockLatencyHigh
+        # Block processing p99 >3s for 15m. Sustained high latency means the
+        # multicall/RPC path (DueSet snapshot reads) is degraded or event
+        # decoding/persistence is blocking.
+        #
+        # Histogram `uniswap_v3.block.duration_seconds` (OTel instrument, with
+        # explicit seconds-scale buckets set in dextelemetry.NewTelemetry —
+        # the ms-scale default would pin histogram_quantile near the top
+        # bucket), exported as `uniswap_v3_block_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(uniswap_v3_block_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m.
+            Indexer is degraded; expect lag in downstream Uniswap V3 pool
+            state.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerblocklatencyhigh
+
+      - alert: VectorUniswapV3IndexerNotWritingState
+        # Silent-empty guard: blocks are advancing (success rate > 0) but no
+        # state/tick snapshot rows are being written. The error path will NOT
+        # catch a quietly-empty DueSet (e.g. touched-pool detection always
+        # returning empty, or every snapshotDueSet call silently no-op). This
+        # alert catches that gap.
+        #
+        # 30m window (not curve's sweep-driven cadence, since uniswap-v3 has
+        # none) tolerates a genuinely quiet block with no Uniswap V3 events;
+        # a 30m stretch of zero on an active pool set is the actionable
+        # signal.
+        #
+        # Counter `uniswap_v3.state.rows.written` (OTel) -> Prometheus
+        # `uniswap_v3_state_rows_written_total`. Emitted by handleBlock after
+        # each successful persistBlock that writes at least one state/tick row.
+        # `unless`, not `and … == 0`: state rows are written only for
+        # event-touched pools (no sweep), and RecordStateRows is a no-op for
+        # n<=0, so under the exact bug this targets (DueSet always empty, or on
+        # a fresh deploy) the state-rows counter series is never created. With
+        # `and … == 0` the empty right side yields no match and the alert can
+        # never fire. `A > 0 unless B > 0` keeps each (chain,cluster) that is
+        # processing blocks unless it is also writing state rows — so an absent
+        # OR zero state-rows series correctly fires. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v3_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer writing no state rows on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 30m but written zero state/tick snapshot
+            rows. The touched-pool detection (DueSet) may be silently empty,
+            or the registered pool set may be empty for this chain.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernotwritingstate
+
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange
   # (service_name="cex-orderbook-indexer-<exchange>", label `exchange`). Unlike

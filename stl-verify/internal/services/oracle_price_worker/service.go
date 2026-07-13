@@ -31,8 +31,9 @@ import (
 )
 
 // MulticallerFactory creates a new Multicaller for the given oracle type.
-// Returns the appropriate implementation (e.g. Multicall3 for Chainlink/Aave,
-// DirectCaller for Chronicle where msg.sender must be address(0)).
+// Types where entity.RequiresDirectCall is true (chronicle, erc4626_share)
+// get a DirectCaller because their feeds revert when read through Multicall3;
+// everything else gets the Multicall3 client.
 type MulticallerFactory func(entity.OracleType) (outbound.Multicaller, error)
 
 // oracleUnit wraps a shared OracleUnit with a per-oracle price cache
@@ -40,7 +41,30 @@ type MulticallerFactory func(entity.OracleType) (outbound.Multicaller, error)
 type oracleUnit struct {
 	*oracle_pricing.OracleUnit
 	priceCache  map[int64]float64    // tokenID → last stored price
-	multicaller outbound.Multicaller // per-unit multicaller (DirectCaller for chronicle, Multicall3 for others)
+	multicaller outbound.Multicaller // per-unit multicaller; type routing is documented on MulticallerFactory
+}
+
+// commitPriceCache records the upserted prices in the change-detection cache.
+// Call it only after UpsertPrices succeeds: caching earlier would make the SQS
+// redelivery of a failed block detect "no change", ack, and silently drop the
+// rows forever.
+func (u *oracleUnit) commitPriceCache(changed []*entity.OnchainTokenPrice) {
+	for _, p := range changed {
+		u.priceCache[p.TokenID] = p.PriceUSD
+	}
+}
+
+// suppressAsUnchanged reports whether the price for tokenID can be skipped as
+// unchanged from the cached value. A reorg republish (event.Version > 0) is
+// never suppressed: readers order by block_version DESC, so the reorged block
+// needs a row at its new version even when the value happens to match the
+// cache; the upsert is idempotent, so re-emitting is safe.
+func (u *oracleUnit) suppressAsUnchanged(event outbound.BlockEvent, tokenID int64, priceUSD float64) bool {
+	if event.Version > 0 {
+		return false
+	}
+	cached, ok := u.priceCache[tokenID]
+	return ok && cached == priceUSD
 }
 
 // Service processes SQS block events and fetches oracle prices for each block.
@@ -51,10 +75,11 @@ type Service struct {
 	repo           outbound.OnchainPriceRepository
 	newMulticaller MulticallerFactory
 
-	oracleABI *abi.ABI
-	feedABI   *abi.ABI
-	shareABI  *abi.ABI
-	units     []*oracleUnit
+	oracleABI    *abi.ABI
+	feedABI      *abi.ABI
+	shareABI     *abi.ABI
+	curvePoolABI *abi.ABI
+	units        []*oracleUnit
 
 	decimalsValidated bool // set after first successful feed decimals check
 
@@ -114,6 +139,11 @@ func NewService(
 		return nil, fmt.Errorf("loading ERC4626 ABI: %w", err)
 	}
 
+	curvePoolABI, err := abis.GetCurveNGPoolABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading Curve NG pool ABI: %w", err)
+	}
+
 	return &Service{
 		config:         config,
 		consumer:       consumer,
@@ -123,6 +153,7 @@ func NewService(
 		oracleABI:      oracleABI,
 		feedABI:        feedABI,
 		shareABI:       shareABI,
+		curvePoolABI:   curvePoolABI,
 		logger:         config.Logger.With("component", "oracle-price-worker"),
 	}, nil
 }
@@ -168,17 +199,18 @@ func (s *Service) initialize(ctx context.Context) error {
 		return err
 	}
 
+	// A failed unit fails startup so the orchestrator restarts the worker;
+	// warn-and-skip would leave the oracle silently unpriced for the whole
+	// process lifetime.
 	for _, su := range shared {
 		cached, err := s.repo.GetLatestPrices(ctx, su.Oracle.ID)
 		if err != nil {
-			s.logger.Warn("skipping oracle", "name", su.Oracle.Name, "error", fmt.Errorf("loading latest prices: %w", err))
-			continue
+			return fmt.Errorf("oracle %s: loading latest prices: %w", su.Oracle.Name, err)
 		}
 
 		mc, err := s.newMulticaller(su.Oracle.OracleType)
 		if err != nil {
-			s.logger.Warn("skipping oracle", "name", su.Oracle.Name, "error", fmt.Errorf("creating multicaller: %w", err))
-			continue
+			return fmt.Errorf("oracle %s: creating multicaller: %w", su.Oracle.Name, err)
 		}
 
 		s.logOracleUnit(su, cached)
@@ -211,6 +243,17 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 			"vaults", len(su.ERC4626Vaults),
 			"vaultAddrs", vaultAddrs,
 			"cachedPrices", len(cached))
+	case su.Oracle.OracleType.IsCurveLPNGOracle():
+		coinFeedAddrs := make([]string, len(su.CurveLPNGPool.CoinFeeds))
+		for i, f := range su.CurveLPNGPool.CoinFeeds {
+			coinFeedAddrs[i] = f.FeedAddress.Hex()
+		}
+		s.logger.Info("loaded curve lp oracle",
+			"name", su.Oracle.Name,
+			"type", su.Oracle.OracleType,
+			"pool", su.CurveLPNGPool.PoolAddress.Hex(),
+			"coinFeeds", coinFeedAddrs,
+			"cachedPrices", len(cached))
 	case su.Oracle.OracleType.IsFeedOracle():
 		feedAddrs := make([]string, len(su.Feeds))
 		for i, f := range su.Feeds {
@@ -240,10 +283,8 @@ func (s *Service) logOracleUnit(su *oracle_pricing.OracleUnit, cached map[int64]
 
 func (s *Service) validateFeedDecimals(ctx context.Context, blockNum int64) error {
 	for _, unit := range s.units {
-		feeds := unit.Feeds
-		if unit.Oracle.OracleType.IsERC4626Oracle() {
-			feeds = blockchain.ERC4626UnderlyingFeeds(unit.ERC4626Vaults)
-		} else if !unit.Oracle.OracleType.IsFeedOracle() {
+		feeds, ok := oracle_pricing.ValidationFeeds(unit.OracleUnit)
+		if !ok {
 			continue
 		}
 		if err := blockchain.ValidateFeedDecimals(
@@ -361,6 +402,8 @@ func (s *Service) processBlockForOracle(ctx context.Context, event outbound.Bloc
 		return s.processBlockForAaveOracle(ctx, event, blockTimestamp, unit)
 	case entity.OracleTypeERC4626Share:
 		return s.processBlockForERC4626Oracle(ctx, event, blockTimestamp, unit)
+	case entity.OracleTypeCurveLPNG:
+		return s.processBlockForCurveLPNGOracle(ctx, event, blockTimestamp, unit)
 	default:
 		return fmt.Errorf("unsupported oracle type: %s", unit.Oracle.OracleType)
 	}
@@ -420,6 +463,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	if err != nil {
 		return fmt.Errorf("storing prices at block %d: %w", event.BlockNumber, err)
 	}
+	unit.commitPriceCache(changed)
 
 	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
 
@@ -480,9 +524,33 @@ func (s *Service) processBlockForERC4626Oracle(ctx context.Context, event outbou
 	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "erc4626 changes", "stored erc4626 share prices", len(unit.ERC4626Vaults))
 }
 
-// storeFeedResults runs the detect-changes + upsert tail shared by processBlockForFeedOracle
-// and processBlockForERC4626Oracle. kind and logMsg carry the per-path strings that differ
-// between the two callers; total is the source-collection size for the log line.
+func (s *Service) processBlockForCurveLPNGOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) error {
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return fmt.Errorf("parse block hash: %w", err)
+	}
+
+	ctx, fetchSpan := s.telemetry.StartSpan(ctx, "oracle.fetchPrices",
+		attribute.String("rpc.method", "get_virtual_price"))
+	rpcStart := time.Now()
+	results, err := blockchain.FetchCurveLPNGPrices(ctx, unit.multicaller, s.curvePoolABI, s.feedABI, *unit.CurveLPNGPool, event.BlockNumber, blockHash)
+	rpcDuration := time.Since(rpcStart)
+	s.telemetry.RecordRPCCall(ctx, "get_virtual_price", rpcDuration, err)
+	if err != nil {
+		telemetry.SetSpanError(fetchSpan, err, "fetch curve lp prices failed")
+	}
+	fetchSpan.End()
+	if err != nil {
+		return fmt.Errorf("fetching curve lp prices at block %d: %w", event.BlockNumber, err)
+	}
+
+	return s.storeFeedResults(ctx, event, blockTimestamp, unit, results, "curve lp changes", "stored curve lp prices", len(unit.CurveLPNGPool.CoinFeeds))
+}
+
+// storeFeedResults runs the detect-changes, upsert, and cache-commit tail
+// shared by every oracle path that produces FeedPriceResult slices. kind and
+// logMsg carry the per-path strings; total is the source-collection size for
+// the log line.
 func (s *Service) storeFeedResults(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit, results []blockchain.FeedPriceResult, kind, logMsg string, total int) error {
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))
@@ -511,6 +579,7 @@ func (s *Service) storeFeedResults(ctx context.Context, event outbound.BlockEven
 	if err != nil {
 		return fmt.Errorf("storing prices at block %d: %w", event.BlockNumber, err)
 	}
+	unit.commitPriceCache(changed)
 
 	s.telemetry.RecordPricesChanged(ctx, unit.Oracle.Name, len(changed))
 
@@ -550,7 +619,7 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent,
 
 		priceUSD := blockchain.ScaleByDecimals(rawPrice, priceDecimals)
 
-		if cachedPrice, ok := unit.priceCache[tokenID]; ok && cachedPrice == priceUSD {
+		if unit.suppressAsUnchanged(event, tokenID, priceUSD) {
 			continue
 		}
 
@@ -566,7 +635,6 @@ func (s *Service) detectChanges(rawPrices []*big.Int, event outbound.BlockEvent,
 			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", tokenID, err)
 		}
 		changed = append(changed, price)
-		unit.priceCache[tokenID] = priceUSD
 	}
 
 	return changed, nil
@@ -581,7 +649,7 @@ func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event 
 			continue
 		}
 
-		if cachedPrice, ok := unit.priceCache[result.TokenID]; ok && cachedPrice == result.Price {
+		if unit.suppressAsUnchanged(event, result.TokenID, result.Price) {
 			continue
 		}
 
@@ -597,7 +665,6 @@ func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event 
 			return nil, fmt.Errorf("invalid price entity for tokenID %d: %w", result.TokenID, err)
 		}
 		changed = append(changed, price)
-		unit.priceCache[result.TokenID] = result.Price
 	}
 
 	return changed, nil

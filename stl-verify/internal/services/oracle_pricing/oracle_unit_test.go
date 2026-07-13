@@ -638,6 +638,179 @@ func TestLoadOracleUnits_ERC4626(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestLoadOracleUnits_CurveLPNG
+// ---------------------------------------------------------------------------
+
+func TestLoadOracleUnits_CurveLPNG(t *testing.T) {
+	poolAddr := common.HexToAddress("0xE79c1C7E24755574438A26D5e062AD2626c04662")
+	usdcFeed := common.HexToAddress("0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6")
+	ausdFeed := common.HexToAddress("0xB00341502DfEA6Ced8A5786b4059d29dA5E4D1FD")
+	const lpTokenID = 587717
+
+	curveOracle := func(addr common.Address) *entity.Oracle {
+		return &entity.Oracle{
+			ID: 7, Name: "curve_ausdusdc_lp", Enabled: true,
+			OracleType: entity.OracleTypeCurveLPNG, Address: addr, PriceDecimals: 8,
+		}
+	}
+	twoFeeds := func() []*entity.OracleAsset {
+		return []*entity.OracleAsset{
+			{ID: 1, OracleID: 7, TokenID: lpTokenID, Enabled: true, FeedAddress: usdcFeed, FeedDecimals: 8, QuoteCurrency: "USD"},
+			{ID: 2, OracleID: 7, TokenID: lpTokenID, Enabled: true, FeedAddress: ausdFeed, FeedDecimals: 18, QuoteCurrency: "USD"},
+		}
+	}
+	lpTokenInfos := func() map[int64]outbound.TokenInfo {
+		return map[int64]outbound.TokenInfo{lpTokenID: {Address: poolAddr.Bytes(), Decimals: 18}}
+	}
+	repoWith := func(oracle *entity.Oracle, assets []*entity.OracleAsset, infos map[int64]outbound.TokenInfo) *mockRepo {
+		return &mockRepo{
+			getEnabledOraclesByChainFn: func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
+				return []*entity.Oracle{oracle}, nil
+			},
+			getEnabledAssetsFn: func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+				return assets, nil
+			},
+			getTokenInfosFn: func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+				return infos, nil
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		setupRepo   func() *mockRepo
+		wantErr     bool
+		errContains string
+		checkUnits  func(t *testing.T, units []*OracleUnit)
+	}{
+		{
+			name: "success builds pool config from oracle address and coin feeds",
+			setupRepo: func() *mockRepo {
+				return repoWith(curveOracle(poolAddr), twoFeeds(), lpTokenInfos())
+			},
+			checkUnits: func(t *testing.T, units []*OracleUnit) {
+				t.Helper()
+				u := units[0]
+				if u.CurveLPNGPool == nil {
+					t.Fatal("CurveLPNGPool is nil")
+				}
+				p := u.CurveLPNGPool
+				if p.PoolAddress != poolAddr {
+					t.Errorf("PoolAddress = %s, want %s", p.PoolAddress, poolAddr)
+				}
+				if p.TokenID != lpTokenID {
+					t.Errorf("TokenID = %d, want %d", p.TokenID, lpTokenID)
+				}
+				if len(p.CoinFeeds) != 2 {
+					t.Fatalf("CoinFeeds len = %d, want 2", len(p.CoinFeeds))
+				}
+				if p.CoinFeeds[0].FeedAddress != usdcFeed || p.CoinFeeds[0].FeedDecimals != 8 {
+					t.Errorf("CoinFeeds[0] = %+v, want USDC feed with 8 decimals", p.CoinFeeds[0])
+				}
+				if p.CoinFeeds[1].FeedAddress != ausdFeed || p.CoinFeeds[1].FeedDecimals != 18 {
+					t.Errorf("CoinFeeds[1] = %+v, want AUSD feed with 18 decimals", p.CoinFeeds[1])
+				}
+				if len(u.TokenIDs) != 1 || u.TokenIDs[0] != lpTokenID {
+					t.Errorf("TokenIDs = %v, want [%d]", u.TokenIDs, lpTokenID)
+				}
+			},
+		},
+		{
+			name: "missing pool address returns error",
+			setupRepo: func() *mockRepo {
+				return repoWith(curveOracle(common.Address{}), twoFeeds(), lpTokenInfos())
+			},
+			wantErr: true, errContains: "oracle address (the pool) is required",
+		},
+		{
+			name: "single coin feed returns error",
+			setupRepo: func() *mockRepo {
+				return repoWith(curveOracle(poolAddr), twoFeeds()[:1], lpTokenInfos())
+			},
+			wantErr: true, errContains: "at least 2 coin feeds",
+		},
+		{
+			name: "assets spanning different tokens returns error",
+			setupRepo: func() *mockRepo {
+				assets := twoFeeds()
+				assets[1].TokenID = 42
+				return repoWith(curveOracle(poolAddr), assets, lpTokenInfos())
+			},
+			wantErr: true, errContains: "same LP token",
+		},
+		{
+			name: "missing coin feed address returns error",
+			setupRepo: func() *mockRepo {
+				assets := twoFeeds()
+				assets[1].FeedAddress = common.Address{}
+				return repoWith(curveOracle(poolAddr), assets, lpTokenInfos())
+			},
+			wantErr: true, errContains: "feed address missing",
+		},
+		{
+			name: "zero coin feed decimals returns error",
+			setupRepo: func() *mockRepo {
+				assets := twoFeeds()
+				assets[1].FeedDecimals = 0
+				return repoWith(curveOracle(poolAddr), assets, lpTokenInfos())
+			},
+			wantErr: true, errContains: "invalid coin feed decimals",
+		},
+		{
+			name: "non-USD coin feed returns error",
+			setupRepo: func() *mockRepo {
+				assets := twoFeeds()
+				assets[1].QuoteCurrency = "ETH"
+				return repoWith(curveOracle(poolAddr), assets, lpTokenInfos())
+			},
+			wantErr: true, errContains: "must be USD",
+		},
+		{
+			name: "missing token info returns error",
+			setupRepo: func() *mockRepo {
+				return repoWith(curveOracle(poolAddr), twoFeeds(), map[int64]outbound.TokenInfo{})
+			},
+			wantErr: true, errContains: "token address not found",
+		},
+		{
+			name: "LP token address differing from pool address returns error",
+			setupRepo: func() *mockRepo {
+				otherAddr := common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a")
+				return repoWith(curveOracle(poolAddr), twoFeeds(),
+					map[int64]outbound.TokenInfo{lpTokenID: {Address: otherAddr.Bytes(), Decimals: 18}})
+			},
+			wantErr: true, errContains: "must equal the pool address",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := tt.setupRepo()
+			units, err := LoadOracleUnits(context.Background(), repo, 1, testutil.DiscardLogger())
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q does not contain %q", err, tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(units) != 1 {
+				t.Fatalf("units count = %d, want 1", len(units))
+			}
+			if tt.checkUnits != nil {
+				tt.checkUnits(t, units)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test_buildRefFeedIdx
 // ---------------------------------------------------------------------------
 

@@ -13,8 +13,8 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // TestStableswapHandler_RemoveLiquidityOne_ValidatesCoinIndex: the NG
@@ -313,6 +313,52 @@ func TestStableswapHandler_UnknownTopicCaptured(t *testing.T) {
 	}
 }
 
+// TestStableswapHandler_ZeroTopicsLogUsesNonEmptySentinel guards the sanctioned
+// standardization onto dexconsumer.AnonymousLogEventName: a zero-topic log's
+// capture entry must carry a non-empty event_name, since entity.ProtocolEvent
+// rejects an empty one (an empty name would abort SaveBatch and poison-stall the
+// block on redelivery).
+func TestStableswapHandler_ZeroTopicsLogUsesNonEmptySentinel(t *testing.T) {
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	h := NewStableswapHandler(a)
+	pool := RegisteredPool{
+		ID:      1,
+		Address: common.HexToAddress("0xDC24316b9AE028F1497c275EB9192a3Ea0f67022"),
+		Kind:    KindStableswapPreNG,
+		NCoins:  2,
+	}
+
+	txHash := common.HexToHash("0xdeadbeef01020304050607080900010203040506070809000102030405060708")
+	log := shared.Log{
+		Address:         pool.Address.Hex(),
+		Topics:          nil,
+		Data:            "0x0a0b0c",
+		TransactionHash: txHash.Hex(),
+		LogIndex:        "0x0",
+	}
+	receipt := shared.TransactionReceipt{
+		Logs:            []shared.Log{log},
+		TransactionHash: txHash.Hex(),
+	}
+
+	got, err := h.DecodeEvents(receipt, pool, 1, 100, 0, time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Captured) != 1 {
+		t.Fatalf("expected 1 captured event, got %d", len(got.Captured))
+	}
+	if got.Captured[0].EventName == "" {
+		t.Fatal("zero-topics log captured with empty event_name; want non-empty sentinel")
+	}
+	if got.Captured[0].EventName != dexconsumer.AnonymousLogEventName {
+		t.Errorf("event_name = %q, want %q", got.Captured[0].EventName, dexconsumer.AnonymousLogEventName)
+	}
+}
+
 func TestStableswapHandler_CorruptKnownEventErrors(t *testing.T) {
 	a, err := abis.CurveStableswapABI()
 	if err != nil {
@@ -361,26 +407,22 @@ func TestStableswapHandler_CorruptKnownEventErrors(t *testing.T) {
 // SnapshotState tests
 // ---------------------------------------------------------------------------
 
-// curveMC returns a MockMulticaller that serves the given canned results for
-// every Execute/ExecuteAtHash call, recording each call on mc.Invocations so
-// snapshot tests can assert which Target address each sub-call uses.
-func curveMC(results []outbound.Result) *testutil.MockMulticaller {
-	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return results, nil
-	}
-	return mc
+// fakeMulticaller is a test double for outbound.Multicaller that returns
+// pre-built results in order.
+type fakeMulticaller struct {
+	results []outbound.Result
 }
 
-// snapshotCalls returns the calls of the snapshot's multicall batch, pinning the
-// contract that SnapshotState issues exactly one batch: the capturing assertions
-// index into it, and a second batch would otherwise escape them silently.
-func snapshotCalls(t *testing.T, mc *testutil.MockMulticaller) []outbound.Call {
-	t.Helper()
-	if len(mc.Invocations) != 1 {
-		t.Fatalf("snapshot issued %d multicall batches, want exactly 1", len(mc.Invocations))
-	}
-	return mc.Invocations[0].Calls
+func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return f.results, nil
+}
+
+func (f *fakeMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return f.Execute(ctx, calls, nil)
+}
+
+func (f *fakeMulticaller) Address() common.Address {
+	return common.Address{}
 }
 
 // packUint256 ABI-encodes a uint256 value as a 32-byte big-endian word.
@@ -409,7 +451,8 @@ func packUint256Array2(t *testing.T, a, b int64) outbound.Result {
 }
 
 // stableswapPreNGResults builds canned multicall results for a 2-coin pre-NG pool.
-// Order matches buildSnapshotCalls for NCoins=2, Kind=plain_pre_ng: the 8 core
+// Order matches the snapshot reads issued by SnapshotState (via
+// shared.RunSnapshotReads) for NCoins=2, Kind=plain_pre_ng: the 8 core
 // reads, then the extended reads (A_precise, admin_balances x2, calc_token_amount,
 // calc_withdraw_one_coin x2), then the 6 config getters, then future_admin_fee.
 func stableswapPreNGResults(t *testing.T, _ *abi.ABI) []outbound.Result {
@@ -441,7 +484,8 @@ func stableswapPreNGResults(t *testing.T, _ *abi.ABI) []outbound.Result {
 }
 
 // stableswapNGResults builds canned results for a 2-coin NG pool. Order matches
-// buildSnapshotCalls for NCoins=2, Kind=plain_ng: 8 core + price_oracle +
+// the snapshot reads issued by SnapshotState (via shared.RunSnapshotReads) for
+// NCoins=2, Kind=plain_ng: 8 core + price_oracle +
 // last_price + extended (A_precise, admin_balances x2, calc_token_amount,
 // calc_withdraw x2) + NG (stored_rates, ema_price, get_p) + 6 config getters +
 // ma_exp_time + oracle_method.
@@ -493,32 +537,31 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 		CoinDecimals: []int{18, 18},
 		HasAPrecise:  true,
 	}
-	mc := curveMC(stableswapPreNGResults(t, a))
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if ss.Stableswap == nil || ss.Cryptoswap != nil {
-		t.Fatal("want stableswap snapshot, cryptoswap must be nil")
+	if st == nil {
+		t.Fatal("want stableswap state")
 	}
-	if ss.Stableswap.LastPrice != nil {
+	if st.LastPrice != nil {
 		t.Fatal("pre-NG must not populate last_price")
 	}
-	if ss.Stableswap.PriceOracle != nil {
+	if st.PriceOracle != nil {
 		t.Fatal("pre-NG must not populate price_oracle")
 	}
-	if len(ss.Stableswap.Balances) != 2 {
-		t.Fatalf("balances len = %d, want 2", len(ss.Stableswap.Balances))
+	if len(st.Balances) != 2 {
+		t.Fatalf("balances len = %d, want 2", len(st.Balances))
 	}
-	if len(ss.Stableswap.SpotDy) != 2 {
-		t.Fatalf("spot_dy len = %d, want 2 (ordered pairs (0,1),(1,0))", len(ss.Stableswap.SpotDy))
+	if len(st.SpotDy) != 2 {
+		t.Fatalf("spot_dy len = %d, want 2 (ordered pairs (0,1),(1,0))", len(st.SpotDy))
 	}
-	if ss.BlockNumber != 100 {
-		t.Errorf("BlockNumber = %d, want 100", ss.BlockNumber)
+	if st.BlockNumber != 100 {
+		t.Errorf("BlockNumber = %d, want 100", st.BlockNumber)
 	}
 
 	// Extended fields populate for pre-NG (NG-only fields stay nil).
-	st := ss.Stableswap
 	if st.APrecise == nil || st.APrecise.Cmp(big.NewInt(90000)) != 0 {
 		t.Errorf("a_precise = %v, want 90000", st.APrecise)
 	}
@@ -536,10 +579,9 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 	}
 
 	// Config is built from the pre-NG config getters incl. future_admin_fee.
-	if ss.StableswapConfig == nil {
+	if cfg == nil {
 		t.Fatal("pre-NG snapshot must build a config")
 	}
-	cfg := ss.StableswapConfig
 	if cfg.InitialA.Cmp(big.NewInt(20000)) != 0 {
 		t.Errorf("config initial_a = %v, want 20000", cfg.InitialA)
 	}
@@ -568,26 +610,25 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 		CoinDecimals: []int{18, 6},
 		HasAPrecise:  true,
 	}
-	mc := curveMC(stableswapNGResults(t, a))
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
+	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
+	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, common.Hash{}, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot NG: %v", err)
 	}
-	if ss.Stableswap == nil {
-		t.Fatal("want stableswap snapshot")
+	if st == nil {
+		t.Fatal("want stableswap state")
 	}
-	if ss.Stableswap.LastPrice == nil {
+	if st.LastPrice == nil {
 		t.Fatal("NG must populate last_price")
 	}
-	if ss.Stableswap.PriceOracle == nil {
+	if st.PriceOracle == nil {
 		t.Fatal("NG must populate price_oracle")
 	}
-	if len(ss.Stableswap.SpotDy) != 2 {
-		t.Fatalf("spot_dy len = %d, want 2", len(ss.Stableswap.SpotDy))
+	if len(st.SpotDy) != 2 {
+		t.Fatalf("spot_dy len = %d, want 2", len(st.SpotDy))
 	}
 
 	// NG-only extended fields populate.
-	st := ss.Stableswap
 	if len(st.StoredRates) != 2 {
 		t.Errorf("stored_rates len = %d, want 2", len(st.StoredRates))
 	}
@@ -602,10 +643,9 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	}
 
 	// NG config has ma_exp_time + oracle_method and NO future_admin_fee.
-	if ss.StableswapConfig == nil {
+	if cfg == nil {
 		t.Fatal("NG snapshot must build a config")
 	}
-	cfg := ss.StableswapConfig
 	if cfg.FutureAdminFee != nil {
 		t.Errorf("NG config future_admin_fee = %v, want nil", cfg.FutureAdminFee)
 	}
@@ -615,6 +655,26 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	if cfg.OracleMethod == nil || cfg.OracleMethod.Sign() != 0 {
 		t.Errorf("NG config oracle_method = %v, want 0", cfg.OracleMethod)
 	}
+}
+
+// capturingMulticaller records the calls it receives and returns preset results.
+// It is used to assert which Target address each call uses.
+type capturingMulticaller struct {
+	captured []outbound.Call
+	results  []outbound.Result
+}
+
+func (c *capturingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	c.captured = append(c.captured, calls...)
+	return c.results, nil
+}
+
+func (c *capturingMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+	return c.Execute(ctx, calls, nil)
+}
+
+func (c *capturingMulticaller) Address() common.Address {
+	return common.Address{}
 }
 
 // totalSupplyCallIndex returns the index of the totalSupply call in a pre-NG 2-coin
@@ -643,24 +703,23 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 		HasAPrecise:    true,
 	}
 
-	mc := curveMC(stableswapPreNGResults(t, a))
-	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	captured := snapshotCalls(t, mc)
-	if len(captured) <= stableswapPreNG2CoinTotalSupplyIdx {
-		t.Fatalf("captured %d calls, want at least %d", len(captured), stableswapPreNG2CoinTotalSupplyIdx+1)
+	if len(mc.captured) <= stableswapPreNG2CoinTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), stableswapPreNG2CoinTotalSupplyIdx+1)
 	}
 
-	tsCall := captured[stableswapPreNG2CoinTotalSupplyIdx]
+	tsCall := mc.captured[stableswapPreNG2CoinTotalSupplyIdx]
 	if tsCall.Target != lpAddr {
 		t.Errorf("totalSupply call Target = %s, want LP token %s", tsCall.Target, lpAddr)
 	}
 
 	// All other calls must target the pool, not the LP token.
-	for i, c := range captured {
+	for i, c := range mc.captured {
 		if i == stableswapPreNG2CoinTotalSupplyIdx {
 			continue
 		}
@@ -692,18 +751,17 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 		HasAPrecise:    true,
 	}
 
-	mc := curveMC(stableswapNGResults(t, a))
-	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &capturingMulticaller{results: stableswapNGResults(t, a)}
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	captured := snapshotCalls(t, mc)
-	if len(captured) <= stableswapPreNG2CoinTotalSupplyIdx {
-		t.Fatalf("captured %d calls, want at least %d", len(captured), stableswapPreNG2CoinTotalSupplyIdx+1)
+	if len(mc.captured) <= stableswapPreNG2CoinTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), stableswapPreNG2CoinTotalSupplyIdx+1)
 	}
 
-	tsCall := captured[stableswapPreNG2CoinTotalSupplyIdx]
+	tsCall := mc.captured[stableswapPreNG2CoinTotalSupplyIdx]
 	if tsCall.Target != poolAddr {
 		t.Errorf("totalSupply call Target = %s, want pool %s", tsCall.Target, poolAddr)
 	}
@@ -732,8 +790,8 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 	}
 	revertResults[0] = outbound.Result{Success: false, ReturnData: nil} // First balances call reverts
 
-	mc := curveMC(revertResults)
-	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &fakeMulticaller{results: revertResults}
+	_, _, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Errorf("snapshot with required call revert should error, got nil")
 	}
@@ -759,8 +817,8 @@ func TestStableswapHandler_SnapshotExtendedRevertErrors(t *testing.T) {
 	results := stableswapPreNGResults(t, a)
 	results[preNG2CoinAPreciseIdx] = outbound.Result{Success: false} // A_precise reverts
 
-	mc := curveMC(results)
-	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &fakeMulticaller{results: results}
+	_, _, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted extended read (A_precise) must error, got nil")
 	}
@@ -777,8 +835,8 @@ func TestStableswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	results := stableswapPreNGResults(t, a)
 	results[preNG2CoinInitialAIdx] = outbound.Result{Success: false} // initial_A reverts
 
-	mc := curveMC(results)
-	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &fakeMulticaller{results: results}
+	_, _, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
 	}
@@ -806,21 +864,20 @@ func TestStableswapHandler_SnapshotNoAPreciseGatesCall(t *testing.T) {
 		t.Fatalf("packing A_precise: %v", err)
 	}
 
-	mc := curveMC(results)
-	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
+	mc := &capturingMulticaller{results: results}
+	st, cfg, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, common.Hash{}, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	for i, c := range snapshotCalls(t, mc) {
+	for i, c := range mc.captured {
 		if bytes.Equal(c.CallData, aPreciseData) {
 			t.Errorf("call[%d] is A_precise, but HasAPrecise=false must issue no A_precise call", i)
 		}
 	}
 
-	st := ss.Stableswap
 	if st == nil {
-		t.Fatal("want stableswap snapshot")
+		t.Fatal("want stableswap state")
 	}
 	if st.APrecise != nil {
 		t.Errorf("a_precise = %v, want nil (structural NULL when gated off)", st.APrecise)
@@ -835,13 +892,13 @@ func TestStableswapHandler_SnapshotNoAPreciseGatesCall(t *testing.T) {
 	if len(st.CalcWithdrawOneCoin) != 2 {
 		t.Errorf("calc_withdraw_one_coin len = %d, want 2", len(st.CalcWithdrawOneCoin))
 	}
-	if ss.StableswapConfig == nil {
+	if cfg == nil {
 		t.Fatal("config must still build")
 	}
-	if ss.StableswapConfig.InitialA.Cmp(big.NewInt(20000)) != 0 {
-		t.Errorf("config initial_a = %v, want 20000", ss.StableswapConfig.InitialA)
+	if cfg.InitialA.Cmp(big.NewInt(20000)) != 0 {
+		t.Errorf("config initial_a = %v, want 20000", cfg.InitialA)
 	}
-	if ss.StableswapConfig.FutureAdminFee == nil || ss.StableswapConfig.FutureAdminFee.Cmp(big.NewInt(5000000000)) != 0 {
-		t.Errorf("config future_admin_fee = %v, want 5000000000", ss.StableswapConfig.FutureAdminFee)
+	if cfg.FutureAdminFee == nil || cfg.FutureAdminFee.Cmp(big.NewInt(5000000000)) != 0 {
+		t.Errorf("config future_admin_fee = %v, want 5000000000", cfg.FutureAdminFee)
 	}
 }

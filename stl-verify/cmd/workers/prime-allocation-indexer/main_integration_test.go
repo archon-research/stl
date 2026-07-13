@@ -209,8 +209,8 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	t.Cleanup(sqsServer.Close)
 	sqsState.AddMessage(fmt.Sprintf(
-		`{"chainId":1,"blockNumber":%d,"version":%d,"blockHash":"0xabc","blockTimestamp":1700000000}`,
-		blockNum, version,
+		`{"chainId":1,"blockNumber":%d,"version":%d,"blockHash":"0x%064x","blockTimestamp":1700000000}`,
+		blockNum, version, blockNum,
 	))
 
 	t.Setenv("BUILD_GIT_HASH", "test")
