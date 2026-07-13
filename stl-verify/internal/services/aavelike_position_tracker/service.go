@@ -62,6 +62,7 @@ type Service struct {
 	positionRepo     outbound.PositionRepository
 	eventRepo        outbound.EventRepository
 	receiptTokenRepo outbound.ReceiptTokenRepository
+	debtTokenRepo    outbound.DebtTokenRepository
 
 	reader         *aavelike.PositionReader
 	eventExtractor *EventExtractor
@@ -85,8 +86,9 @@ func NewService(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 	receiptTokenRepo outbound.ReceiptTokenRepository,
+	debtTokenRepo outbound.DebtTokenRepository,
 ) (*Service, error) {
-	if err := validateDependencies(consumer, cacheReader, ethClient, multicaller, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo); err != nil {
+	if err := validateDependencies(consumer, cacheReader, ethClient, multicaller, txManager, userRepo, protocolRepo, tokenRepo, positionRepo, eventRepo, receiptTokenRepo, debtTokenRepo); err != nil {
 		return nil, err
 	}
 
@@ -120,6 +122,7 @@ func NewService(
 		positionRepo:     positionRepo,
 		eventRepo:        eventRepo,
 		receiptTokenRepo: receiptTokenRepo,
+		debtTokenRepo:    debtTokenRepo,
 		reader:           reader,
 		eventExtractor:   eventExtractor,
 		logger:           config.Logger.With("component", "aavelike-position-tracker"),
@@ -471,6 +474,31 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 			}
 			if _, err := s.receiptTokenRepo.GetOrCreateReceiptToken(ctx, tx, *receiptToken); err != nil {
 				return fmt.Errorf("failed to upsert receipt token: %w", err)
+			}
+		}
+
+		// Create debt token entry for the variable and/or stable debt tokens.
+		if tokenAddresses != nil && (tokenAddresses.VariableDebtTokenAddress != (common.Address{}) || tokenAddresses.StableDebtTokenAddress != (common.Address{})) {
+			var variableAddr, stableAddr []byte
+			var variableSymbol, stableSymbol string
+			if tokenAddresses.VariableDebtTokenAddress != (common.Address{}) {
+				variableAddr = tokenAddresses.VariableDebtTokenAddress.Bytes()
+				if meta, ok := metadataMap[tokenAddresses.VariableDebtTokenAddress]; ok {
+					variableSymbol = meta.Symbol
+				}
+			}
+			if tokenAddresses.StableDebtTokenAddress != (common.Address{}) {
+				stableAddr = tokenAddresses.StableDebtTokenAddress.Bytes()
+				if meta, ok := metadataMap[tokenAddresses.StableDebtTokenAddress]; ok {
+					stableSymbol = meta.Symbol
+				}
+			}
+			debtToken, err := entity.NewDebtToken(protocolID, tokenID, blockNumber, variableAddr, stableAddr, variableSymbol, stableSymbol)
+			if err != nil {
+				return fmt.Errorf("creating debt token entity: %w", err)
+			}
+			if _, err := s.debtTokenRepo.GetOrCreateDebtToken(ctx, tx, *debtToken); err != nil {
+				return fmt.Errorf("failed to upsert debt token: %w", err)
 			}
 		}
 
@@ -1219,6 +1247,7 @@ func validateDependencies(
 	positionRepo outbound.PositionRepository,
 	eventRepo outbound.EventRepository,
 	receiptTokenRepo outbound.ReceiptTokenRepository,
+	debtTokenRepo outbound.DebtTokenRepository,
 ) error {
 	// consumer and cacheReader may be nil in backfill mode (ProcessReceipts only).
 	if ethClient == nil {
@@ -1247,6 +1276,9 @@ func validateDependencies(
 	}
 	if receiptTokenRepo == nil {
 		return fmt.Errorf("receiptTokenRepo is required")
+	}
+	if debtTokenRepo == nil {
+		return fmt.Errorf("debtTokenRepo is required")
 	}
 	return nil
 }
