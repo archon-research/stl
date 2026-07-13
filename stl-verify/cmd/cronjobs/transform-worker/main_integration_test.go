@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -41,25 +42,43 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 
-	// The migration seeds one _sources row per transformed table. Assert a lower
-	// bound plus a known source rather than an exact count, so adding tables in a
-	// later bucket does not break this test.
-	var sources int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM transformed._sources`).Scan(&sources); err != nil {
-		t.Fatalf("counting _sources rows: %v", err)
+	// The migration must register exactly the bucket-1 source set. This is the
+	// concrete migration's own test, so a missing (or extra) registration is a real
+	// regression that would leave a table unprocessed -- assert the exact set rather
+	// than a lower bound. Update this list when a later bucket actually lands.
+	want := []string{
+		"fluid_vault_state",
+		"maple_loan_collateral",
+		"maple_loan_state",
+		"maple_pool_state",
+		"maple_sky_strategy_state",
+		"maple_syrup_global_state",
+		"morpho_market_position",
+		"morpho_market_state",
+		"morpho_vault_position",
+		"morpho_vault_state",
+		"offchain_token_price",
+		"onchain_token_price",
+		"token_total_supply",
 	}
-	if sources < 1 {
-		t.Fatalf("transformed._sources rows = %d, want at least 1 (migration not applied?)", sources)
+	rows, err := pool.Query(ctx, `SELECT source FROM transformed._sources ORDER BY source`)
+	if err != nil {
+		t.Fatalf("listing transformed._sources: %v", err)
 	}
-
-	var present bool
-	if err := pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM transformed._sources WHERE source = 'morpho_market_state')`,
-	).Scan(&present); err != nil {
-		t.Fatalf("checking known source: %v", err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatalf("scanning transformed._sources: %v", err)
+		}
+		got = append(got, s)
 	}
-	if !present {
-		t.Fatal("expected transformed._sources to contain source 'morpho_market_state'")
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating transformed._sources: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("transformed._sources = %v, want exactly %v", got, want)
 	}
 }
 
