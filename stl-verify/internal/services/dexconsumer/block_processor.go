@@ -21,15 +21,29 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// CanonicalChecker reports the canonical block hash at a height. BlockProcessor
-// uses it to tell a block that was reorged out after the watcher published it
-// (nothing valid to index — the canonical block at this height is republished as
-// a new version and processed separately) apart from a genuine processing
-// failure (which must retry). Optional: a nil checker disables reorg-skipping,
-// preserving the original always-retry behaviour.
-type CanonicalChecker interface {
-	// CanonicalHashAt returns the hash of the canonical block at blockNumber.
-	CanonicalHashAt(ctx context.Context, blockNumber int64) (common.Hash, error)
+// ReorgChecker reports whether a published block was reorged out of the
+// canonical chain. BlockProcessor uses it to tell such a block (nothing valid to
+// index — the watcher republishes the canonical block at that height as a new
+// version, which is processed separately) apart from a genuine processing
+// failure, which must retry.
+//
+// The verdict MUST be final: an implementation may only answer true for a block
+// at or below the chain's finalized head. Above that boundary our own RPC node's
+// view of "canonical" can differ from the watcher's (tip churn, a lagging or
+// minority-fork node behind a load balancer), and a false positive there would
+// permanently drop a still-canonical block that the watcher never republishes —
+// the exact data loss this feature must not cause. Below the finalized head the
+// answer is identical on every honest node, so the verdict is safe.
+//
+// Optional: a nil checker disables reorg-skipping, preserving the original
+// always-retry behaviour.
+type ReorgChecker interface {
+	// ReorgedOut reports true only when blockHash is provably no longer the
+	// canonical block at blockNumber AND blockNumber is at or below the finalized
+	// head. It returns false for a still-canonical block and for any block it
+	// cannot conclusively judge (e.g. not yet finalized). A non-nil error means
+	// the check could not be performed — the caller must retry, never skip.
+	ReorgedOut(ctx context.Context, blockNumber int64, blockHash common.Hash) (bool, error)
 }
 
 // BlockHandler processes every receipt of one block within a single SQS message
@@ -52,19 +66,23 @@ type BlockProcessor struct {
 	cache     outbound.BlockCacheReader
 	telemetry *dextelemetry.Telemetry
 	handle    BlockHandler
-	canonical CanonicalChecker // optional; nil disables reorg-skipping
+	reorg     ReorgChecker // optional; nil disables reorg-skipping
 	logger    *slog.Logger
 }
 
 // Option configures optional BlockProcessor behaviour.
 type Option func(*BlockProcessor)
 
-// WithCanonicalChecker enables reorg-skipping: on a handler error the processor
-// consults the checker and, only when the event's block is positively confirmed
-// non-canonical, acks the message instead of retrying it into the DLQ. A nil
-// checker is ignored (reorg-skipping stays off).
-func WithCanonicalChecker(c CanonicalChecker) Option {
-	return func(p *BlockProcessor) { p.canonical = c }
+// WithReorgChecker enables reorg-skipping: on a handler error the processor
+// consults the checker and, only when the block is proven reorged out at or
+// below the finalized head, acks the message instead of retrying it into the
+// DLQ. A nil checker is ignored (reorg-skipping stays off).
+func WithReorgChecker(c ReorgChecker) Option {
+	return func(p *BlockProcessor) {
+		if c != nil {
+			p.reorg = c
+		}
+	}
 }
 
 // WithLogger sets the logger used for reorg-skip notices. A nil logger is ignored.
@@ -87,6 +105,10 @@ func NewBlockProcessor(cache outbound.BlockCacheReader, telemetry *dextelemetry.
 	for _, opt := range opts {
 		opt(p)
 	}
+	// Log the resolved state once: reorg-skipping is an optional dependency, so a
+	// wiring regression would otherwise silently revert to always-retry (the DLQ
+	// churn this exists to remove) with no signal that it happened.
+	p.logger.Info("dex block processor ready", "reorgSkipEnabled", p.reorg != nil)
 	return p
 }
 
@@ -96,7 +118,14 @@ func NewBlockProcessor(cache outbound.BlockCacheReader, telemetry *dextelemetry.
 // redelivery.
 func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.BlockEvent) (retErr error) {
 	start := time.Now()
+	reorgSkipped := false
 	defer func() {
+		// A reorg-skip is neither a processed block nor a failure: counting it as
+		// status="success" would keep blocks_processed above zero and so mask a
+		// skip storm from the Stalled alert. It is counted via RecordReorgSkip only.
+		if reorgSkipped {
+			return
+		}
 		p.telemetry.RecordBlockProcessed(ctx, time.Since(start), retErr)
 	}()
 
@@ -122,47 +151,58 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 
 	if err := p.handle(ctx, event, receipts); err != nil {
 		if p.reorgedOut(ctx, event) {
-			// The block we were handed is no longer the canonical block at its
-			// height: it was reorged out after the watcher published it (common
-			// when replaying a multi-day backlog). Its hash-pinned state read can
-			// never succeed and there is nothing valid to index — the watcher
-			// republishes the canonical block at this height as a new version,
-			// which is processed separately. Ack it instead of burning retries
-			// into the DLQ. This is an explicit, observable discard (WARN + metric),
-			// not a swallow, and it fires only on a POSITIVE non-canonical
-			// confirmation (see reorgedOut).
-			p.telemetry.RecordReorgSkip(ctx)
-			p.logger.Warn("skipping reorged-out block: not on the canonical chain; canonical version is indexed separately",
-				"chainID", event.ChainID,
-				"block", event.BlockNumber,
-				"version", event.Version,
-				"blockHash", event.BlockHash,
-				"handlerError", err.Error(),
-			)
-			return nil
+			reorgSkipped = true
+			return p.ackReorgedOut(ctx, event, err)
 		}
 		return fmt.Errorf("handling block %d (chain=%d, version=%d): %w", event.BlockNumber, event.ChainID, event.Version, err)
 	}
 	return nil
 }
 
-// reorgedOut reports whether the event's block is no longer the canonical block
-// at its height — i.e. it was reorged out after the watcher published it. It
-// returns true ONLY on a positive confirmation (a different canonical hash was
-// fetched). A nil checker, an unparseable event hash, or a failed lookup all
-// return false, so a genuine (retryable) failure is never mistaken for a reorg
-// and dropped: never discard a block we could not prove is non-canonical.
+// ackReorgedOut discards a block proven reorged out: its hash-pinned state read
+// can never succeed and there is nothing valid to index, because the block is no
+// longer on the canonical chain. The watcher republishes the canonical block at
+// this height as a new version, which is processed separately, so acking here
+// leaves no gap — it only avoids burning retries into the DLQ. This is an
+// explicit, observable discard (WARN + metric), never a silent swallow.
+func (p *BlockProcessor) ackReorgedOut(ctx context.Context, event outbound.BlockEvent, handlerErr error) error {
+	p.telemetry.RecordReorgSkip(ctx)
+	p.logger.Warn("skipping reorged-out block: finalized chain has a different block at this height; canonical version is indexed separately",
+		"chainID", event.ChainID,
+		"block", event.BlockNumber,
+		"version", event.Version,
+		"blockHash", event.BlockHash,
+		"handlerError", handlerErr.Error(),
+	)
+	return nil
+}
+
+// reorgedOut reports whether the event's block was reorged out of the canonical
+// chain. It returns true ONLY on a positive, FINAL confirmation from the checker
+// (see ReorgChecker: a verdict is only given at or below the finalized head). A
+// nil checker, an unparseable event hash, or a failed check all return false, so
+// a genuine (retryable) failure is never mistaken for a reorg and dropped: never
+// discard a block we could not prove is reorged out.
 func (p *BlockProcessor) reorgedOut(ctx context.Context, event outbound.BlockEvent) bool {
-	if p.canonical == nil {
+	if p.reorg == nil {
 		return false
 	}
-	want, err := event.ParsedBlockHash()
+	hash, err := event.ParsedBlockHash()
 	if err != nil {
+		// A malformed/empty hash is a real defect, not a reorg. Let the handler
+		// error propagate (retry) rather than treating this as reorged.
+		p.logger.Warn("cannot check reorg status: unusable block hash on event; treating as retryable",
+			"chainID", event.ChainID, "block", event.BlockNumber, "version", event.Version, "error", err)
 		return false
 	}
-	got, err := p.canonical.CanonicalHashAt(ctx, event.BlockNumber)
+	out, err := p.reorg.ReorgedOut(ctx, event.BlockNumber, hash)
 	if err != nil {
+		// Inconclusive (e.g. the canonical-check RPC is down). Never skip on an
+		// unknown; surface it so a persistently-failing checker — which silently
+		// disables reorg-skipping and refills the DLQ — is diagnosable.
+		p.logger.Warn("reorg check inconclusive; treating block as retryable",
+			"chainID", event.ChainID, "block", event.BlockNumber, "version", event.Version, "error", err)
 		return false
 	}
-	return got != (common.Hash{}) && got != want
+	return out
 }

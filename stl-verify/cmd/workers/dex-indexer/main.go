@@ -85,7 +85,7 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, handler,
-		dexconsumer.WithCanonicalChecker(deps.CanonicalChecker),
+		dexconsumer.WithReorgChecker(deps.ReorgChecker),
 		dexconsumer.WithLogger(deps.Logger))
 	sqsutil.RunLoop(ctx, sqsutil.Config{
 		Consumer:     deps.SQSConsumer,

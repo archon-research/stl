@@ -283,6 +283,35 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordError(ctx, "op", nil)
 	tel.RecordStateRows(ctx, 5)
 	tel.RecordStateRows(ctx, 0)
+	tel.RecordReorgSkip(ctx)
+}
+
+func TestRecordReorgSkip_IncrementsCounter(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		if err := mp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown meter provider: %v", err)
+		}
+	})
+
+	tel, err := NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+	tel.RecordReorgSkip(context.Background())
+	tel.RecordReorgSkip(context.Background())
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if got := readSingleSumCount(t, &rm, "curve.reorg.skipped"); got != 2 {
+		t.Errorf("curve.reorg.skipped = %d, want 2", got)
+	}
 }
 
 func TestRecordStateRows_IncrementsCounter(t *testing.T) {

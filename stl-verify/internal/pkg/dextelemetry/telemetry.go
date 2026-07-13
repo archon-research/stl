@@ -38,8 +38,9 @@ type Telemetry struct {
 	reorgSkipped     metric.Int64Counter
 }
 
-// NewTelemetry registers three counters (`<prefix>.blocks.processed`,
-// `<prefix>.errors.total`, `<prefix>.state.rows.written`) plus the `<prefix>.block.duration_seconds`
+// NewTelemetry registers four counters (`<prefix>.blocks.processed`,
+// `<prefix>.errors.total`, `<prefix>.state.rows.written`, `<prefix>.reorg.skipped`)
+// plus the `<prefix>.block.duration_seconds`
 // histogram. The OTel-to-Prometheus exporter normalises the dots to
 // underscores and adds the `_total` suffix, yielding the metric series names
 // the alert rules expect. The chain NAME (via entity.ChainName) is baked into

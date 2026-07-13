@@ -18,21 +18,26 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// fakeCanonical is a test CanonicalChecker returning a fixed hash / error.
-type fakeCanonical struct {
-	hash  common.Hash
+// fakeReorg is a test ReorgChecker returning a fixed verdict / error.
+type fakeReorg struct {
+	out   bool
 	err   error
 	calls int
 }
 
-func (f *fakeCanonical) CanonicalHashAt(context.Context, int64) (common.Hash, error) {
+func (f *fakeReorg) ReorgedOut(context.Context, int64, common.Hash) (bool, error) {
 	f.calls++
-	return f.hash, f.err
+	return f.out, f.err
 }
 
 // errHandler returns a BlockHandler that always fails with err.
 func errHandler(err error) BlockHandler {
 	return func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error { return err }
+}
+
+// okHandler returns a BlockHandler that always succeeds.
+func okHandler() BlockHandler {
+	return func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error { return nil }
 }
 
 // The version-0 block hash observed reorged out of staging (block 25512663).
@@ -43,53 +48,126 @@ func reorgedEvent() outbound.BlockEvent {
 	return outbound.BlockEvent{ChainID: 1, BlockNumber: 25512663, Version: 0, BlockHash: reorgedEventHashHex, BlockTimestamp: 1}
 }
 
-// A handler error on a block whose hash is NO LONGER canonical means the block
-// was reorged out after publish: the message is acked (nil), not retried/DLQ'd.
+// A handler error on a block PROVEN reorged out (finalized chain holds a
+// different block) is acked (nil), not retried/DLQ'd.
 func TestProcessBlockEvent_SkipsReorgedOutBlockOnHandlerError(t *testing.T) {
 	cache := fakeCacheWithReceipts(t, 1)
-	// Canonical hash at this height differs from the event's -> reorged out.
-	canon := &fakeCanonical{hash: common.HexToHash("0xfd1f26821a60ec9745bfd3269ee949677fd188a6da2a7d9c7b40d2a471182bd0")}
-	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithCanonicalChecker(canon))
+	rc := &fakeReorg{out: true}
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithReorgChecker(rc))
 
 	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err != nil {
 		t.Fatalf("reorged-out block must be acked (nil), got: %v", err)
 	}
-	if canon.calls != 1 {
-		t.Errorf("canonical checker called %d times, want 1", canon.calls)
+	if rc.calls != 1 {
+		t.Errorf("reorg checker called %d times, want 1", rc.calls)
 	}
 }
 
-// A handler error on a block that IS still canonical must propagate (retry) —
-// the failure is real (e.g. a transient DB/RPC error), not a reorg.
-func TestProcessBlockEvent_PropagatesErrorWhenBlockIsCanonical(t *testing.T) {
+// A handler error on a block that is NOT reorged out (still canonical, or not
+// yet finalized so unjudgeable) must propagate — the failure is real.
+func TestProcessBlockEvent_PropagatesErrorWhenNotReorgedOut(t *testing.T) {
 	cache := fakeCacheWithReceipts(t, 1)
-	canon := &fakeCanonical{hash: common.HexToHash(reorgedEventHashHex)} // matches event hash
-	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("db timeout")), WithCanonicalChecker(canon))
+	rc := &fakeReorg{out: false} // canonical, or above the finalized head
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("db timeout")), WithReorgChecker(rc))
 
 	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err == nil {
-		t.Fatal("a canonical block's handler error must propagate (retry), got nil")
+		t.Fatal("a block not proven reorged out must propagate its handler error (retry), got nil")
 	}
 }
 
-// If canonicality cannot be determined (checker errors), never drop the block:
-// propagate the handler error so it retries rather than risk acking a canonical block.
-func TestProcessBlockEvent_PropagatesErrorWhenCanonicalCheckFails(t *testing.T) {
+// If the reorg check cannot be determined, never drop the block: propagate the
+// handler error so it retries rather than risk acking a still-canonical block.
+func TestProcessBlockEvent_PropagatesErrorWhenReorgCheckFails(t *testing.T) {
 	cache := fakeCacheWithReceipts(t, 1)
-	canon := &fakeCanonical{err: errors.New("rpc unavailable")}
-	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithCanonicalChecker(canon))
+	rc := &fakeReorg{err: errors.New("rpc unavailable")}
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithReorgChecker(rc))
 
 	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err == nil {
-		t.Fatal("an inconclusive canonical check must propagate the error (retry), got nil")
+		t.Fatal("an inconclusive reorg check must propagate the error (retry), got nil")
 	}
 }
 
-// Without a canonical checker wired, the original always-retry behaviour holds.
+// Without a reorg checker wired, the original always-retry behaviour holds.
 func TestProcessBlockEvent_NoCheckerPropagatesError(t *testing.T) {
 	cache := fakeCacheWithReceipts(t, 1)
 	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")))
 
 	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err == nil {
-		t.Fatal("without a canonical checker, a handler error must propagate, got nil")
+		t.Fatal("without a reorg checker, a handler error must propagate, got nil")
+	}
+}
+
+// A malformed event hash is a defect, not a reorg: propagate (retry) and never
+// even consult the checker.
+func TestProcessBlockEvent_MalformedHashPropagatesWithoutConsultingChecker(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	rc := &fakeReorg{out: true} // would skip if consulted — it must not be
+	ev := reorgedEvent()
+	ev.BlockHash = "0xabc" // malformed -> ParsedBlockHash errors
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithReorgChecker(rc))
+
+	if err := bp.ProcessBlockEvent(context.Background(), ev); err == nil {
+		t.Fatal("a malformed block hash must not be treated as reorged; the error must propagate")
+	}
+	if rc.calls != 0 {
+		t.Errorf("reorg checker consulted %d times despite an unusable hash, want 0", rc.calls)
+	}
+}
+
+// The happy path must not pay for the reorg check (no wasted RPC per block).
+func TestProcessBlockEvent_HappyPathDoesNotConsultChecker(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	rc := &fakeReorg{out: true}
+	bp := NewBlockProcessor(cache, nil, okHandler(), WithReorgChecker(rc))
+
+	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err != nil {
+		t.Fatalf("ProcessBlockEvent: %v", err)
+	}
+	if rc.calls != 0 {
+		t.Errorf("reorg checker consulted %d times on the success path, want 0", rc.calls)
+	}
+}
+
+// A reorg-skip must increment reorg_skipped AND must NOT be counted as a
+// processed block: counting it status="success" would keep blocks_processed
+// above zero and hide a skip storm from the Stalled alert.
+func TestProcessBlockEvent_ReorgSkipMetrics(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		if err := mp.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown meter provider: %v", err)
+		}
+	})
+
+	tel, err := dextelemetry.NewTelemetry("curve", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	bp := NewBlockProcessor(fakeCacheWithReceipts(t, 1), tel,
+		errHandler(errors.New("block not found")), WithReorgChecker(&fakeReorg{out: true}))
+	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err != nil {
+		t.Fatalf("reorged-out block must be acked, got: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if got := readSumCount(t, &rm, "curve.reorg.skipped"); got != 1 {
+		t.Errorf("curve.reorg.skipped = %d, want 1", got)
+	}
+	// blocks.processed must not have been recorded at all for the skip.
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == "curve.blocks.processed" {
+				t.Errorf("a reorg-skip was recorded as a processed block (%s); it must not inflate the success rate", m.Name)
+			}
+		}
 	}
 }
 
