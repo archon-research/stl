@@ -30,7 +30,7 @@ func main() {
 	// materializing nothing.
 	dbURL, err := env.Require("DATABASE_URL")
 	if err != nil {
-		slog.Error("fatal", "error", err)
+		slog.Error("transform-worker startup failed: missing configuration", "error", err)
 		os.Exit(1)
 	}
 
@@ -43,7 +43,7 @@ func main() {
 		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Setup:           setupRunner,
 	}); err != nil {
-		slog.Error("fatal", "error", err)
+		slog.Error("transform-worker cronjob exited with error", "error", err)
 		os.Exit(1)
 	}
 }

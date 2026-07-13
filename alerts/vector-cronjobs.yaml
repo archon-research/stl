@@ -243,10 +243,12 @@ groups:
         # during the initial bootstrap; it must read 0 once bootstrap completes, and
         # can be promoted to critical after rollout is stable.
         expr: |
-          transform_parity_drift{
-            service_name="transform-worker",
-            k8s_namespace_name="vector"
-          } != 0
+          max by (table, cluster) (
+            transform_parity_drift{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) != 0
         for: 30m
         labels:
           team: vector

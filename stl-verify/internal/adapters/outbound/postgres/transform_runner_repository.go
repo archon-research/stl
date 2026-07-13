@@ -14,6 +14,16 @@ import (
 // Compile-time check that TransformRunnerRepository implements outbound.TransformRunner.
 var _ outbound.TransformRunner = (*TransformRunnerRepository)(nil)
 
+// drainBatch is the max rows transformed._run_<t>() consumes per call (its
+// LIMIT). Must match the LIMIT in the generated migration: RunTable loops until a
+// call consumes fewer than this, i.e. the queue is drained, so each call's DELETE
+// stays a bounded transaction even after a long backlog.
+const drainBatch = 10000
+
+// maxDrainIterations caps the drain loop so a source being written faster than it
+// drains cannot spin forever within one tick; the remainder is picked up next tick.
+const maxDrainIterations = 1000
+
 // TransformRunnerRepository runs the transformation layer's generated run
 // functions and reads the table list from transformed._sources. Each
 // transformed._run_<table>() drains that table's change queue
@@ -52,16 +62,6 @@ func (r *TransformRunnerRepository) ListSources(ctx context.Context) ([]string, 
 	}
 	return sources, nil
 }
-
-// drainBatch is the max rows transformed._run_<t>() consumes per call (its
-// LIMIT). Must match the LIMIT in the generated migration: RunTable loops until a
-// call consumes fewer than this, i.e. the queue is drained, so each call's DELETE
-// stays a bounded transaction even after a long backlog.
-const drainBatch = 10000
-
-// maxDrainIterations caps the drain loop so a source being written faster than it
-// drains cannot spin forever within one tick; the remainder is picked up next tick.
-const maxDrainIterations = 1000
 
 // RunTable drains source's queue by calling transformed._run_<source>() until a
 // call consumes fewer than drainBatch rows, and returns the totals consumed (queue
