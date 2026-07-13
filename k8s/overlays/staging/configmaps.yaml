@@ -95,6 +95,34 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
+# curve-indexer + uniswap-v3-indexer run the shared dex-indexer binary; the DEX
+# key selects the factory. No SC-call archiving (dexbootstrap does not wire the
+# archiving decorator), so no ARCHIVE_SC_CALLS / RAW_SC_BUCKET here. The SQS
+# queue URL, DB, Redis, and Alchemy key come from the matching ExternalSecret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: curve-indexer-config
+data:
+  DEX: "curve"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniswap-v3-indexer-config
+data:
+  DEX: "uniswap-v3"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -243,6 +271,21 @@ data:
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
   DATA_VALIDATION_SCHEDULE_OFFSET: "0s"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: transform-worker
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # Drain cadence; the worker defaults to 10m if unset. Not chain-specific, so
+  # no CHAIN_ID (the worker drains every source in transformed._sources).
+  TRANSFORM_INTERVAL: "10m"
+  # Phase the 10m tick off the boundary-aligned producers (maple-graphql-indexer
+  # 10m, offchain-price-indexer 5m) so producer writes do not coincide with the
+  # queue drains, transformed upserts and parity reads.
+  TRANSFORM_SCHEDULE_OFFSET: "2m"
 ---
 apiVersion: v1
 kind: ConfigMap

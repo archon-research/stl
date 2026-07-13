@@ -117,7 +117,7 @@ func decodeClassicLiquidity(log shared.Log, pool RegisteredPool, sigs classicLiq
 	}
 	provider := common.HexToAddress(log.Topics[1])
 	txHash := common.HexToHash(log.TransactionHash)
-	logIndex, err := parseHexUint(log.LogIndex)
+	logIndex, err := shared.ParseHexUint(log.LogIndex)
 	if err != nil {
 		return nil, false, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
@@ -327,7 +327,7 @@ func decodeCryptoLiquidity(log shared.Log, pool RegisteredPool, sigs cryptoswapL
 	}
 	provider := common.HexToAddress(log.Topics[1])
 	txHash := common.HexToHash(log.TransactionHash)
-	logIndex, err := parseHexUint(log.LogIndex)
+	logIndex, err := shared.ParseHexUint(log.LogIndex)
 	if err != nil {
 		return nil, false, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}

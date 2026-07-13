@@ -1,11 +1,13 @@
 package archiving
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"sync"
 	"testing"
 
@@ -22,6 +24,10 @@ type stubInner struct {
 }
 
 func (s *stubInner) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	return s.results, s.err
+}
+
+func (s *stubInner) ExecuteAtHash(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 	return s.results, s.err
 }
 func (s *stubInner) Address() common.Address { return s.addr }
@@ -232,6 +238,125 @@ func TestExecute(t *testing.T) {
 				tt.extra(t, res, tt.calls, rec)
 			}
 		})
+	}
+}
+
+// TestExecuteAtHash covers the same forwarding/archiving/error-suppression
+// contract as TestExecute, exercised through the hash-pinned entry point.
+func TestExecuteAtHash(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	t.Run("forwards results and inner error without archiving", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		var wg sync.WaitGroup
+		d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true}}, err: errBoom}, rec, &wg)
+
+		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("err = %v, want %v", err, errBoom)
+		}
+		if len(res) != 1 || !res[0].Success {
+			t.Fatalf("results not forwarded: %+v", res)
+		}
+		d.Close()
+		if len(rec.batches) != 0 {
+			t.Fatalf("archived %d batches on inner error, want 0", len(rec.batches))
+		}
+	})
+
+	t.Run("stamps BlockNumber from the context on the hash-pinned path", func(t *testing.T) {
+		rec := &recordingArchiver{}
+		var wg sync.WaitGroup
+		d := newTestDecorator(&stubInner{results: []outbound.Result{
+			{Success: true, ReturnData: []byte{0xaa}},
+			{Success: false, ReturnData: []byte{0xbb}},
+		}}, rec, &wg)
+
+		calls := []outbound.Call{
+			{Target: common.HexToAddress("0x01"), CallData: []byte{0xfe, 0xaf, 0x96, 0x8c}},
+			{Target: common.HexToAddress("0x02"), CallData: []byte{0x18, 0x16, 0x0d, 0xdd}},
+		}
+		// A live block event carries both the number and the hash, so the worker
+		// stamps both on the context. ExecuteAtHash has no blockNumber argument;
+		// the archive record must still key to the real block, not block 0
+		// (VEC-471: block 0 would collide every hash-pinned archive under one key).
+		ctx := WithBlockNumber(WithBlockVersion(context.Background(), 3), 21500042)
+		res, err := d.ExecuteAtHash(ctx, calls, common.HexToHash("0xabc"))
+		if err != nil {
+			t.Fatalf("ExecuteAtHash: %v", err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("results = %d, want 2", len(res))
+		}
+		d.Close()
+
+		if len(rec.batches) != 1 {
+			t.Fatalf("archived %d batches, want 1", len(rec.batches))
+		}
+		b := rec.batches[0]
+		if b.BlockNumber != 21500042 || b.BlockVersion != 3 || b.ChainID != 1 || b.BuildID != 47 {
+			t.Fatalf("batch metadata wrong: %+v", b)
+		}
+		if len(b.Calls) != 2 {
+			t.Fatalf("archived %d calls, want 2", len(b.Calls))
+		}
+	})
+
+	t.Run("stamps BlockNumber 0 and warns when the context carries no number", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		rec := &recordingArchiver{}
+		var wg sync.WaitGroup
+		d := NewMulticaller(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, Config{
+			Source:  "oracle-price",
+			ChainID: 1,
+			BuildID: 47,
+			Wait:    &wg,
+			Logger:  slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		})
+
+		res, err := d.ExecuteAtHash(context.Background(), []outbound.Call{{CallData: []byte{0x01}}}, common.HexToHash("0xabc"))
+		if err != nil {
+			t.Fatalf("ExecuteAtHash: %v", err)
+		}
+		if len(res) != 1 {
+			t.Fatalf("results = %d, want 1", len(res))
+		}
+		d.Close()
+
+		if len(rec.batches) != 1 {
+			t.Fatalf("archived %d batches, want 1", len(rec.batches))
+		}
+		if got := rec.batches[0].BlockNumber; got != 0 {
+			t.Fatalf("BlockNumber = %d, want 0 when no block number on context", got)
+		}
+		// A block-0 archive is always a bug (genesis holds no indexer read), so it
+		// must not pass silently; the warning is what surfaces a future regression.
+		if !strings.Contains(logBuf.String(), "no resolvable block number") {
+			t.Fatalf("expected a warning about the unresolvable block number, got logs: %q", logBuf.String())
+		}
+	})
+}
+
+// TestExecutePositionalBlockNumberWinsOverContext pins that the number-pinned
+// Execute path uses its positional argument even when the context also carries
+// a different block number: the context is only a fallback for the
+// argument-less ExecuteAtHash path, never an override of an explicit number.
+func TestExecutePositionalBlockNumberWinsOverContext(t *testing.T) {
+	rec := &recordingArchiver{}
+	var wg sync.WaitGroup
+	d := newTestDecorator(&stubInner{results: []outbound.Result{{Success: true, ReturnData: []byte{0xaa}}}}, rec, &wg)
+
+	ctx := WithBlockNumber(context.Background(), 999)
+	if _, err := d.Execute(ctx, []outbound.Call{{CallData: []byte{0x01}}}, big.NewInt(10)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	d.Close()
+
+	if len(rec.batches) != 1 {
+		t.Fatalf("archived %d batches, want 1", len(rec.batches))
+	}
+	if got := rec.batches[0].BlockNumber; got != 10 {
+		t.Fatalf("BlockNumber = %d, want 10 (positional arg must win over context)", got)
 	}
 }
 

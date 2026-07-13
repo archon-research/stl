@@ -47,7 +47,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 	tests := []struct {
 		name        string
 		vaults      []ERC4626VaultConfig
-		mock        *mockMulticaller
+		mock        *testutil.MockMulticaller
 		wantErr     bool
 		errContains string
 		wantResults []FeedPriceResult
@@ -55,8 +55,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "happy path - ratio 1.05 times sUSDS 1.0",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					if len(calls) != 2 {
 						t.Fatalf("expected 2 calls (convertToAssets + latestRoundData), got %d", len(calls))
 					}
@@ -79,8 +79,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "underlying above peg propagates to share price",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					// ratio 1.0, sUSDS/USD = 1.01 → $1.01
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackConvertToAssets(t, testutil.E18(1))},
@@ -95,8 +95,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "sole vault convertToAssets reverts - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: false},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
@@ -108,8 +108,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "sole underlying feed reverts - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: false},
@@ -121,8 +121,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "sole underlying feed non-positive answer - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(0), big.NewInt(1000))},
@@ -134,8 +134,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "sole vault convertToAssets returns zero assets - all failed, returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackConvertToAssets(t, big.NewInt(0))},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
@@ -147,8 +147,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "one of two vaults fails - partial success returns no error",
 			vaults: []ERC4626VaultConfig{vault, {TokenID: 11, VaultAddress: fsusds, ShareDecimals: 18, UnderlyingFeed: sUSDSFeed, UnderlyingDecimals: 18, FeedDecimals: 8}},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
@@ -165,7 +165,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "multicall error returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				return nil, errors.New("RPC down")
 			}},
 			wantErr: true, errContains: "executing multicall at block",
@@ -173,8 +173,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "convertToAssets unpack error returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: []byte{0xde, 0xad}},
 						{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
@@ -186,8 +186,8 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "result count mismatch returns error",
 			vaults: []ERC4626VaultConfig{vault},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: testutil.PackConvertToAssets(t, ratio105)}}, nil
 				},
 			},
@@ -196,7 +196,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 		{
 			name:   "empty vaults returns nil",
 			vaults: nil,
-			mock: &mockMulticaller{executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				t.Fatal("Execute should not be called")
 				return nil, nil
 			}},
@@ -213,6 +213,7 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 				fABI,
 				tt.vaults,
 				blockNum,
+				oracleTestBlockHash,
 				testutil.DiscardLogger(),
 			)
 
@@ -244,5 +245,48 @@ func TestFetchERC4626SharePrices(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFetchERC4626SharePrices_PinsToBlockHash(t *testing.T) {
+	shareABI := erc4626ABI(t)
+	fABI := feedABI(t)
+
+	vault := ERC4626VaultConfig{
+		TokenID:            10,
+		VaultAddress:       common.HexToAddress("0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11"),
+		ShareDecimals:      18,
+		UnderlyingFeed:     common.HexToAddress("0xfF30586cD0F29eD462364C7e81375FC0C71219b1"),
+		UnderlyingDecimals: 18,
+		FeedDecimals:       8,
+	}
+
+	// convertToAssets (share ratio) and latestRoundData are per-block state, so a
+	// reorg must not answer eth_call-by-number from the wrong fork (VEC-471).
+	mock := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			t.Fatal("FetchERC4626SharePrices must call ExecuteAtHash for a non-zero block hash, not Execute")
+			return nil, nil
+		},
+		ExecuteAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+			if blockHash != oracleTestBlockHash {
+				t.Errorf("blockHash = %s, want %s", blockHash, oracleTestBlockHash)
+			}
+			return []outbound.Result{
+				{Success: true, ReturnData: testutil.PackConvertToAssets(t, testutil.E18(1))},
+				{Success: true, ReturnData: packRoundData(t, big.NewInt(100_000_000), big.NewInt(1000))},
+			}, nil
+		},
+	}
+
+	results, err := FetchERC4626SharePrices(
+		context.Background(), mock, shareABI, fABI,
+		[]ERC4626VaultConfig{vault}, 22_000_000, oracleTestBlockHash, testutil.DiscardLogger(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 || !results[0].Success {
+		t.Fatalf("expected 1 successful result, got %+v", results)
 	}
 }

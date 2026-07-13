@@ -13,11 +13,15 @@ import (
 
 // CurvePoolRow is the data returned by LoadPools for each pool in the registry.
 type CurvePoolRow struct {
-	ID           int64
-	ProtocolID   int64
-	Address      common.Address
-	Kind         string // matches curve_pool.pool_kind
-	NCoins       int
+	ID         int64
+	ProtocolID int64
+	Address    common.Address
+	Kind       string // matches curve_pool.pool_kind
+	NCoins     int
+	// DeployBlock is the pool's on-chain deployment block (curve_pool.deploy_block,
+	// 0 when not yet backfilled), used to gate snapshot sweeps so a newly-registered
+	// pool isn't multicalled before it exists on chain.
+	DeployBlock  int64
 	CoinDecimals []int // index-aligned (ordered by coin_index)
 	// LpTokenAddress is the pool's LP/share token. For pre-NG pools this is a
 	// separate contract (totalSupply lives there, not on the pool); nil when the

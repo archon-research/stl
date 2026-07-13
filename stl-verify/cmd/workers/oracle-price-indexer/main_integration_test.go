@@ -136,7 +136,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
 
 	// Enqueue one block event message for the service to process.
-	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
+	sqsState.AddMessage(fmt.Sprintf(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0x%064x","blockTimestamp":1700000000}`, 18_000_000))
 
 	// Configure environment for run()
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -267,6 +267,25 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	}, "a raw SC call archive whose key contains "+wantSegment)
 
 	env.waitForShutdown(t)
+
+	// Shutdown drained every fire-and-forget archive write. The positive check
+	// above only proves an archive at the real block exists; assert directly that
+	// nothing was archived at block 0, the signature of a hash-pinned read
+	// reaching the archiver without WithBlockNumber (VEC-471). A real archive's
+	// filename starts with the block number, never "0_".
+	listOut, listErr := env.s3Client.ListObjectsV2(env.bgCtx, &s3.ListObjectsV2Input{
+		Bucket: aws.String(archiveBucket),
+		Prefix: aws.String(archivePrefix),
+	})
+	if listErr != nil {
+		t.Fatalf("listing archive bucket: %v", listErr)
+	}
+	for _, obj := range listOut.Contents {
+		key := aws.ToString(obj.Key)
+		if base := key[strings.LastIndex(key, "/")+1:]; strings.HasPrefix(base, "0_") {
+			t.Fatalf("raw SC call archive keyed at block 0 (%s): a hash-pinned state read was archived without WithBlockNumber", key)
+		}
+	}
 }
 
 func TestRunIntegration_BadDatabaseURL(t *testing.T) {

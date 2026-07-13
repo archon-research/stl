@@ -36,6 +36,14 @@ func TestLoad(t *testing.T) {
 	if len(r.NullableExempt) == 0 {
 		t.Error("no nullable_exempt entries loaded")
 	}
+	// transform_config binds to the Register struct (a structural typo in the key
+	// would otherwise be silently dropped by json.Unmarshal).
+	if len(r.TransformConfig) == 0 {
+		t.Error("no transform_config entries loaded")
+	}
+	if got := r.TransformConfig["cex_orderbook_snapshots"].Key; len(got) == 0 {
+		t.Error("cex_orderbook_snapshots transform_config key missing or empty")
+	}
 }
 
 // TestNullability exercises the nullability pass: a column whose canonical is not_null must not be
