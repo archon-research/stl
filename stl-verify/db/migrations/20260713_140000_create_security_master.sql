@@ -24,7 +24,7 @@
 -- VEC-445) was cancelled, so the vocabularies are pinned in the CHECKs rather than a composite FK.
 SET search_path TO public;
 
-CREATE TABLE security_master (
+CREATE TABLE IF NOT EXISTS security_master (
     security_sk          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- immutable surrogate, stamped onto positions
     security_id          text NOT NULL,                 -- natural key (sm-...), stable across all versions
     processing_version   integer NOT NULL DEFAULT 1,    -- monotonic per security_id; SCD2 dedup key
@@ -77,18 +77,18 @@ CREATE TABLE security_master (
 -- state tables (ADR-0002), there is no auto-increment trigger here: this is a curated master whose
 -- inserts are deliberate loader operations (VEC-419), so the loader owns monotonic processing_version
 -- assignment per security_id. A collision fails hard on this unique index rather than silently merging.
-CREATE UNIQUE INDEX sm_id_version_uidx ON security_master (security_id, processing_version);
+CREATE UNIQUE INDEX IF NOT EXISTS sm_id_version_uidx ON security_master (security_id, processing_version);
 -- Current-version lookup (the ORDER BY of security_master_current).
-CREATE INDEX sm_current_idx ON security_master (security_id, valid_from DESC, processing_version DESC);
+CREATE INDEX IF NOT EXISTS sm_current_idx ON security_master (security_id, valid_from DESC, processing_version DESC);
 -- FK-support indexes not covered by a leading PK column. The 3-col classification index also serves the
 -- (asset_class) and (asset_class, security_type) FKs as a prefix.
-CREATE INDEX sm_classification_idx ON security_master (asset_class, security_type, security_subtype);
-CREATE INDEX sm_currency_idx ON security_master (currency);
-CREATE INDEX sm_country_risk_idx ON security_master (country_of_risk);
-CREATE INDEX sm_country_issue_idx ON security_master (country_of_issuance);
+CREATE INDEX IF NOT EXISTS sm_classification_idx ON security_master (asset_class, security_type, security_subtype);
+CREATE INDEX IF NOT EXISTS sm_currency_idx ON security_master (currency);
+CREATE INDEX IF NOT EXISTS sm_country_risk_idx ON security_master (country_of_risk);
+CREATE INDEX IF NOT EXISTS sm_country_issue_idx ON security_master (country_of_issuance);
 
 -- Current view: the latest version per security_id.
-CREATE VIEW security_master_current AS
+CREATE OR REPLACE VIEW security_master_current AS
 SELECT DISTINCT ON (security_id) *
 FROM security_master
 ORDER BY security_id, valid_from DESC, processing_version DESC;
@@ -98,7 +98,7 @@ ORDER BY security_id, valid_from DESC, processing_version DESC;
 -- bound (valid_from <= d AND (valid_to_exclusive IS NULL OR d < valid_to_exclusive)). A same-day
 -- correction (two versions sharing valid_from) yields a zero-width window on the superseded row, so
 -- it is correctly never selected for any date; the strict upper bound is what makes that hold.
-CREATE VIEW security_master_versions AS
+CREATE OR REPLACE VIEW security_master_versions AS
 SELECT *,
     lead(valid_from) OVER (PARTITION BY security_id ORDER BY valid_from, processing_version) AS valid_to_exclusive,
     (row_number() OVER (PARTITION BY security_id ORDER BY valid_from DESC, processing_version DESC) = 1) AS is_current
