@@ -1869,108 +1869,87 @@ func TestRun_DuplicateBlocksSafeWithIdempotentUpsert(t *testing.T) {
 // TestComputeOracleBlockRanges
 // ---------------------------------------------------------------------------
 
-func TestComputeOracleBlockRanges(t *testing.T) {
+func TestComputeOracleValidFromBlocks(t *testing.T) {
 	tests := []struct {
 		name     string
 		bindings []*entity.ProtocolOracle
-		want     map[int64]*oracleBlockRange
+		want     map[int64]int64
 	}{
 		{
 			name:     "empty bindings",
 			bindings: nil,
-			want:     map[int64]*oracleBlockRange{},
+			want:     map[int64]int64{},
 		},
 		{
-			name: "single oracle active in one protocol",
+			name: "single binding",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 0},
-			},
+			want: map[int64]int64{10: 1000},
 		},
 		{
-			name: "oracle superseded by another in same protocol",
+			name: "second oracle added later in the same protocol leaves both open",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 1999},
-				20: {validFrom: 2000, validTo: 0},
-			},
+			want: map[int64]int64{10: 1000, 20: 2000},
 		},
 		{
-			name: "oracle active in multiple protocols",
+			name: "oracle bound by multiple protocols takes the earliest from_block",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 2, OracleID: 10, FromBlock: 500},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 500, validTo: 0},
-			},
+			want: map[int64]int64{10: 500},
 		},
 		{
-			name: "oracle superseded in one protocol but active in another",
+			name: "mixed protocols and oracles",
 			bindings: []*entity.ProtocolOracle{
-				// Protocol 1: oracle 10 superseded by oracle 20 at block 2000
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
-				// Protocol 2: oracle 10 still active
 				{ProtocolID: 2, OracleID: 10, FromBlock: 1500},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 0}, // still active in protocol 2
-				20: {validFrom: 2000, validTo: 0},
-			},
+			want: map[int64]int64{10: 1000, 20: 2000},
 		},
 		{
-			name: "oracle superseded in all protocols",
-			bindings: []*entity.ProtocolOracle{
-				// Protocol 1: oracle 10 → oracle 20 at block 2000
-				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
-				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
-				// Protocol 2: oracle 10 → oracle 30 at block 3000
-				{ProtocolID: 2, OracleID: 10, FromBlock: 500},
-				{ProtocolID: 2, OracleID: 30, FromBlock: 3000},
-			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 500, validTo: 2999}, // max superseded block
-				20: {validFrom: 2000, validTo: 0},
-				30: {validFrom: 3000, validTo: 0},
-			},
-		},
-		{
-			name: "oracle re-used after supersession",
+			name: "duplicate bindings for one oracle keep the earliest from_block",
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 10, FromBlock: 1000},
 				{ProtocolID: 1, OracleID: 20, FromBlock: 2000},
-				{ProtocolID: 1, OracleID: 10, FromBlock: 3000}, // oracle 10 re-used
+				{ProtocolID: 1, OracleID: 10, FromBlock: 3000},
 			},
-			want: map[int64]*oracleBlockRange{
-				10: {validFrom: 1000, validTo: 0}, // active again
-				20: {validFrom: 2000, validTo: 2999},
+			want: map[int64]int64{10: 1000, 20: 2000},
+		},
+		{
+			// Regression: a protocol ADDING a second oracle (concurrent
+			// binding, e.g. SparkLend -> chainlink next to the original
+			// SparkLend -> sparklend) must not cap the first oracle's range:
+			// the pricing API resolves bindings as a union, not a temporal
+			// sequence, so both oracles stay live.
+			name: "concurrent second binding does not cap the first oracle",
+			bindings: []*entity.ProtocolOracle{
+				{ProtocolID: 1, OracleID: 10, FromBlock: 16664447},
+				{ProtocolID: 1, OracleID: 20, FromBlock: 16776401},
 			},
+			want: map[int64]int64{10: 16664447, 20: 16776401},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := computeOracleBlockRanges(tt.bindings)
+			got := computeOracleValidFromBlocks(tt.bindings)
 			if len(got) != len(tt.want) {
-				t.Fatalf("got %d ranges, want %d", len(got), len(tt.want))
+				t.Fatalf("got %d entries, want %d", len(got), len(tt.want))
 			}
-			for oracleID, wantRange := range tt.want {
-				gotRange, ok := got[oracleID]
+			for oracleID, wantFrom := range tt.want {
+				gotFrom, ok := got[oracleID]
 				if !ok {
-					t.Errorf("missing range for oracle %d", oracleID)
+					t.Errorf("missing entry for oracle %d", oracleID)
 					continue
 				}
-				if gotRange.validFrom != wantRange.validFrom {
-					t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, gotRange.validFrom, wantRange.validFrom)
-				}
-				if gotRange.validTo != wantRange.validTo {
-					t.Errorf("oracle %d: validTo = %d, want %d", oracleID, gotRange.validTo, wantRange.validTo)
+				if gotFrom != wantFrom {
+					t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, gotFrom, wantFrom)
 				}
 			}
 		})
@@ -1986,7 +1965,6 @@ func TestClampBlockRange(t *testing.T) {
 		name      string
 		from, to  int64
 		validFrom int64
-		validTo   int64
 		wantFrom  int64
 		wantTo    int64
 		wantOK    bool
@@ -1994,62 +1972,44 @@ func TestClampBlockRange(t *testing.T) {
 		{
 			name: "no clamping needed",
 			from: 100, to: 200,
-			validFrom: 50, validTo: 300,
-			wantFrom: 100, wantTo: 200, wantOK: true,
+			validFrom: 50,
+			wantFrom:  100, wantTo: 200, wantOK: true,
 		},
 		{
 			name: "clamp from",
 			from: 100, to: 200,
-			validFrom: 150, validTo: 0,
-			wantFrom: 150, wantTo: 200, wantOK: true,
-		},
-		{
-			name: "clamp to",
-			from: 100, to: 200,
-			validFrom: 0, validTo: 150,
-			wantFrom: 100, wantTo: 150, wantOK: true,
-		},
-		{
-			name: "clamp both",
-			from: 100, to: 200,
-			validFrom: 120, validTo: 180,
-			wantFrom: 120, wantTo: 180, wantOK: true,
+			validFrom: 150,
+			wantFrom:  150, wantTo: 200, wantOK: true,
 		},
 		{
 			name: "from > to after clamping",
 			from: 100, to: 200,
-			validFrom: 300, validTo: 0,
-			wantFrom: 300, wantTo: 200, wantOK: false,
+			validFrom: 300,
+			wantFrom:  300, wantTo: 200, wantOK: false,
 		},
 		{
 			name: "no lower bound (validFrom=0)",
 			from: 100, to: 200,
-			validFrom: 0, validTo: 0,
-			wantFrom: 100, wantTo: 200, wantOK: true,
+			validFrom: 0,
+			wantFrom:  100, wantTo: 200, wantOK: true,
 		},
 		{
-			name: "no upper bound (validTo=0)",
+			name: "exact boundary",
 			from: 100, to: 200,
-			validFrom: 50, validTo: 0,
-			wantFrom: 100, wantTo: 200, wantOK: true,
-		},
-		{
-			name: "exact boundaries",
-			from: 100, to: 200,
-			validFrom: 100, validTo: 200,
-			wantFrom: 100, wantTo: 200, wantOK: true,
+			validFrom: 100,
+			wantFrom:  100, wantTo: 200, wantOK: true,
 		},
 		{
 			name: "entire range before deployment",
 			from: 10, to: 50,
-			validFrom: 100, validTo: 0,
-			wantFrom: 100, wantTo: 50, wantOK: false,
+			validFrom: 100,
+			wantFrom:  100, wantTo: 50, wantOK: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotFrom, gotTo, gotOK := clampBlockRange(tt.from, tt.to, tt.validFrom, tt.validTo)
+			gotFrom, gotTo, gotOK := clampBlockRange(tt.from, tt.to, tt.validFrom)
 			if gotFrom != tt.wantFrom {
 				t.Errorf("from = %d, want %d", gotFrom, tt.wantFrom)
 			}
@@ -2130,7 +2090,10 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			},
 		},
 		{
-			name:      "clamps to supersession block",
+			// A protocol adding a second oracle binding must not cap the
+			// first oracle's range: bindings are a union, not a temporal
+			// sequence (see computeOracleValidFromBlocks).
+			name:      "concurrent second binding does not cap the range",
 			fromBlock: 100,
 			toBlock:   300,
 			oracle: &entity.Oracle{
@@ -2145,19 +2108,14 @@ func TestRun_BlockRangeClamping(t *testing.T) {
 			},
 			bindings: []*entity.ProtocolOracle{
 				{ProtocolID: 1, OracleID: 1, FromBlock: 80},
-				{ProtocolID: 1, OracleID: 2, FromBlock: 201}, // oracle 1 superseded at 200
+				{ProtocolID: 1, OracleID: 2, FromBlock: 201},
 			},
 			checkResult: func(t *testing.T, repo *mockRepo) {
 				t.Helper()
 				upserted := repo.getUpserted()
-				// Blocks 100-200 = 101 blocks x 2 tokens = 202 prices
-				if len(upserted) != 202 {
-					t.Errorf("upserted count = %d, want 202", len(upserted))
-				}
-				for _, p := range upserted {
-					if p.BlockNumber > 200 {
-						t.Errorf("found price for block %d which is after supersession block 200", p.BlockNumber)
-					}
+				// Blocks 100-300 = 201 blocks x 2 tokens = 402 prices
+				if len(upserted) != 402 {
+					t.Errorf("upserted count = %d, want 402", len(upserted))
 				}
 			},
 		},

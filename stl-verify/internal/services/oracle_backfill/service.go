@@ -56,13 +56,6 @@ func configDefaults() Config {
 type oracleWorkUnit struct {
 	*oracle_pricing.OracleUnit
 	validFrom int64 // earliest block to query (0 = no lower bound)
-	validTo   int64 // latest block to query (0 = no upper bound)
-}
-
-// oracleBlockRange represents the valid block range for an oracle across all protocols.
-type oracleBlockRange struct {
-	validFrom int64
-	validTo   int64 // 0 = no upper bound (still active)
 }
 
 // Service orchestrates parallel oracle price backfilling.
@@ -215,7 +208,7 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 	if err != nil {
 		return nil, fmt.Errorf("getting protocol oracle bindings: %w", err)
 	}
-	blockRanges := computeOracleBlockRanges(bindings)
+	validFromBlocks := computeOracleValidFromBlocks(bindings)
 
 	var workUnits []*oracleWorkUnit
 	for _, su := range shared {
@@ -224,11 +217,8 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 			validFrom:  su.Oracle.DeploymentBlock,
 		}
 
-		if br, ok := blockRanges[su.Oracle.ID]; ok {
-			if br.validFrom > wu.validFrom {
-				wu.validFrom = br.validFrom
-			}
-			wu.validTo = br.validTo
+		if vf, ok := validFromBlocks[su.Oracle.ID]; ok && vf > wu.validFrom {
+			wu.validFrom = vf
 		}
 
 		workUnits = append(workUnits, wu)
@@ -239,12 +229,11 @@ func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, 
 
 func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBlock, toBlock int64) error {
 	var ok bool
-	fromBlock, toBlock, ok = clampBlockRange(fromBlock, toBlock, wu.validFrom, wu.validTo)
+	fromBlock, toBlock, ok = clampBlockRange(fromBlock, toBlock, wu.validFrom)
 	if !ok {
 		s.logger.Info("no blocks to process after clamping to oracle valid range",
 			"oracle", wu.Oracle.Name,
-			"validFrom", wu.validFrom,
-			"validTo", wu.validTo)
+			"validFrom", wu.validFrom)
 		return nil
 	}
 
@@ -328,66 +317,29 @@ func (s *Service) runForOracle(ctx context.Context, wu *oracleWorkUnit, fromBloc
 	return nil
 }
 
-// computeOracleBlockRanges groups protocol-oracle bindings by protocol, then
-// determines each oracle's valid block range as the union across all protocols.
-// Assumes bindings are ordered by (protocol_id, from_block) as returned by
-// GetAllProtocolOracleBindings.
-func computeOracleBlockRanges(bindings []*entity.ProtocolOracle) map[int64]*oracleBlockRange {
-	byProtocol := make(map[int64][]*entity.ProtocolOracle)
+// computeOracleValidFromBlocks determines each oracle's earliest valid block
+// as the minimum from_block across every binding that references it. A
+// protocol's bindings are a union, not a temporal sequence: the pricing API
+// resolves a protocol's price as the latest row across ALL of its bound
+// oracles (see the allocations receipt join), so a protocol adding a second
+// oracle must not cap the first one's backfill range.
+func computeOracleValidFromBlocks(bindings []*entity.ProtocolOracle) map[int64]int64 {
+	result := make(map[int64]int64)
 	for _, b := range bindings {
-		byProtocol[b.ProtocolID] = append(byProtocol[b.ProtocolID], b)
-	}
-
-	type rangeAccum struct {
-		minFrom     int64
-		maxTo       int64
-		stillActive bool
-	}
-	accum := make(map[int64]*rangeAccum)
-
-	for _, protocolBindings := range byProtocol {
-		for i, b := range protocolBindings {
-			a, ok := accum[b.OracleID]
-			if !ok {
-				a = &rangeAccum{minFrom: b.FromBlock}
-				accum[b.OracleID] = a
-			}
-			if b.FromBlock < a.minFrom {
-				a.minFrom = b.FromBlock
-			}
-
-			isLast := i == len(protocolBindings)-1
-			if isLast {
-				a.stillActive = true
-			} else {
-				supersededAt := protocolBindings[i+1].FromBlock - 1
-				if supersededAt > a.maxTo {
-					a.maxTo = supersededAt
-				}
-			}
+		vf, ok := result[b.OracleID]
+		if !ok || b.FromBlock < vf {
+			result[b.OracleID] = b.FromBlock
 		}
-	}
-
-	result := make(map[int64]*oracleBlockRange, len(accum))
-	for oracleID, a := range accum {
-		r := &oracleBlockRange{validFrom: a.minFrom}
-		if !a.stillActive {
-			r.validTo = a.maxTo
-		}
-		result[oracleID] = r
 	}
 	return result
 }
 
-// clampBlockRange restricts the requested [from, to] range to the oracle's valid
-// [validFrom, validTo] range. Returns the clamped from/to and whether any blocks
-// remain (ok=true means from <= to after clamping).
-func clampBlockRange(from, to, validFrom, validTo int64) (int64, int64, bool) {
+// clampBlockRange restricts the requested [from, to] range to start no earlier
+// than validFrom. Returns the clamped from/to and whether any blocks remain
+// (ok=true means from <= to after clamping).
+func clampBlockRange(from, to, validFrom int64) (int64, int64, bool) {
 	if validFrom > 0 {
 		from = max(from, validFrom)
-	}
-	if validTo > 0 {
-		to = min(to, validTo)
 	}
 	return from, to, from <= to
 }
