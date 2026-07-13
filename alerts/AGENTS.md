@@ -2,6 +2,8 @@
 
 A new indexer / data service that emits metrics ships its alert rules **and**
 runbook sections in the same PR — same definition-of-done as tests.
+Before modifying either side, read both this file and
+[`docs/runbooks/AGENTS.md`](../docs/runbooks/AGENTS.md); they are sibling scopes.
 
 - Rules → a group in `alerts/vector-<service>.yaml`; runbooks → matching
   `## AlertName` sections in `docs/runbooks/vector-<service>.md`. Copy an

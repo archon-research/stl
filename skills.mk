@@ -72,6 +72,23 @@ skills-update: skillfile-install-cli ## Update upstream refs and redeploy to con
 skills-install-dry-run: skillfile-install-cli ## Preview install/update changes without writing files
 	@$(SKILLFILE_BIN) install --dry-run
 
-skills-validate: skillfile-install-cli ## Validate and normalize Skillfile manifest
+skills-validate: skillfile-install-cli ## Validate Skillfile and checked-in Claude copies
 	@$(SKILLFILE_BIN) validate
+	@set -e; \
+	for source in skills/*; do \
+		[ -d "$$source" ] || continue; \
+		deployed=".claude/skills/$$(basename "$$source")"; \
+		if [ ! -d "$$deployed" ] || ! diff -qr "$$source" "$$deployed" >/dev/null; then \
+			echo "Skill deployment is stale: $$deployed (run make skills-install)"; \
+			exit 1; \
+		fi; \
+	done; \
+	for deployed in .claude/skills/*; do \
+		[ -d "$$deployed" ] || continue; \
+		source="skills/$$(basename "$$deployed")"; \
+		if [ ! -d "$$source" ]; then \
+			echo "Orphaned Claude skill deployment: $$deployed"; \
+			exit 1; \
+		fi; \
+	done
 	@$(SKILLFILE_BIN) format --dry-run

@@ -1,8 +1,9 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repo. This root file loads on every session;
-per-directory `AGENTS.md` files add detail on demand when you work in that subtree, so most
-guidance is paid for only when it is relevant.
+Guidance for AI coding agents working in this repo. This root file loads on every session.
+Before modifying files in a subtree, read and apply every `AGENTS.md` from the repository
+root through that subtree; do not assume the tool loaded nested files after the session began.
+If a task spans subtrees, read the instruction chain for each one.
 
 Canonical guidance lives in these `AGENTS.md` files. Each directory also has a one-line
 `CLAUDE.md` that imports its sibling `AGENTS.md`, so Claude Code and `AGENTS.md`-aware tools
@@ -25,18 +26,25 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 - **On-chain data comes from chain RPC or the cached block payload, never third-party indexers.** Off-chain feeds need maintainer approval, justified in the PR description.
 - **Data pipelines and model pipelines stay separate**: ingest writes "what happened" to Postgres; models read from Postgres and write "what it means" to their own tables. Separate entry points, usually separate PRs.
 - **Language policy**: APIs and risk models are Python; workers/cronjobs/backfillers are Go (preferred) or Python; `stl-verify/ts/` is frontend only.
-- **Never commit generated files or binaries.**
+- **Never commit generated files or binaries**, except the checked-in `.claude/skills/`
+  deployment artifacts generated from the canonical `skills/` sources.
 - **Don't bypass git hooks** (lefthook). The CI workflows in `.github/workflows/` are the source of truth for linting and tests. The `stl-verify/Makefile` is the source of truth for workflows — grep it before inventing a command.
 - **Git**: branch `VEC-123-short-slug`; PR title `VEC-123: <what it does>`; GitHub squash-merges, don't squash locally. Run `make ci` (and `make test-integration` if data-adjacent) before pushing.
-- **Skill naming**: repo-committed skills (`.claude/skills/`) are prefixed `stl-` (e.g. `stl-review-phase`) so they're distinguishable from personal/global skills when both are in scope.
+- **Skill naming**: canonical skill sources live in `skills/` and are deployed through the
+  `Skillfile`; repo skills are prefixed `stl-` (e.g. `stl-review-phase`) so they're
+  distinguishable from personal/global skills when both are in scope.
 
-## Where the rest lives (loads on demand)
+## Where the rest lives (read before working in scope)
 
 - **[stl-verify/AGENTS.md](stl-verify/AGENTS.md)** — Go service: architecture, language-agnostic conventions (testing, function composition, comments, registries, external-API lore), build/run, plus the folded-in Go style rules (database/migration rules are scoped to `stl-verify/db/migrations/`).
 - **[stl-verify/python/AGENTS.md](stl-verify/python/AGENTS.md)** and **[stl-verify/ts/AGENTS.md](stl-verify/ts/AGENTS.md)** — per-language tooling/CI.
 - **[k8s/AGENTS.md](k8s/AGENTS.md)** — Kustomize base/overlays/dev-infra conventions.
 - **[alerts/AGENTS.md](alerts/AGENTS.md)** and **[docs/runbooks/AGENTS.md](docs/runbooks/AGENTS.md)** — alerts + runbooks definition-of-done for new indexers.
 - **`stl-review-phase` skill** — run the standard review pass after a substantive change, before declaring work done.
+
+Some guidance deliberately applies outside its directory. Before modifying a PostgreSQL
+repository adapter, also read `stl-verify/db/migrations/AGENTS.md`. Before modifying either
+an alert rule or its runbook, read both `alerts/AGENTS.md` and `docs/runbooks/AGENTS.md`.
 
 <!--
 Maintainer notes (stripped from context, free):

@@ -181,7 +181,8 @@ Go-only rules for the stl-verify service. Language-agnostic conventions (testing
 
 ## Database & migrations
 
-Schema, migration, and snapshot-read rules are scoped to [db/migrations/AGENTS.md](db/migrations/AGENTS.md): they load when you work under `db/migrations/`, and also apply when writing repository adapters.
+Schema, migration, and snapshot-read rules live in [db/migrations/AGENTS.md](db/migrations/AGENTS.md). In Codex, they are in the automatic instruction chain only when a session starts under `db/migrations/`, but they also apply to the PostgreSQL adapters.
+Before modifying anything under `internal/adapters/outbound/postgres/`, read and apply that file explicitly.
 
 ## Adding New Features
 
