@@ -1,10 +1,3 @@
----
-description: Alerts & runbooks definition-of-done for new indexers
-paths:
-  - alerts/**
-  - docs/runbooks/**
----
-
 # Observability — alerts & runbooks (required for new indexers)
 
 A new indexer / data service that emits metrics ships its alert rules **and**
