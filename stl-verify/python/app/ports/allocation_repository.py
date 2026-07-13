@@ -62,11 +62,18 @@ class AllocationRepositoryPort(Protocol):
         ...
 
     async def get_usd_exposure(self, receipt_token_id: int, prime_id: EthAddress) -> Decimal:
-        """Return ``balance × price_usd`` for the prime's holding of a receipt token.
+        """Return the redeemable-value USD exposure of the prime's receipt-token holding.
+
+        Valued as ``COALESCE(underlying_value, balance) × underlying price``:
+        ``underlying_value`` is the on-chain redeemable value (convertToAssets)
+        in underlying units; NULL (rows written before the column existed)
+        falls back to the share balance.
 
         Raises ``ValueError`` if the position or price cannot be resolved. A
         position whose latest balance is zero (closed or swept) is treated as
-        unresolved and raises, rather than resurfacing a stale non-zero balance.
+        unresolved and raises, rather than resurfacing a stale non-zero
+        balance; so does a position whose own underlying diverges from the
+        registry's, which cannot be priced in registry units.
         """
         ...
 
