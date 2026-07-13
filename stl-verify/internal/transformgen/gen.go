@@ -257,7 +257,7 @@ func rawColumnExpr(reg *schemamaster.Register, table, col, sourceAlias string) (
 // castExpr renders a cast transform: an epoch (int8 -> timestamptz) cast guarded
 // with plausibility bounds, or a plain CAST to the canonical type's Postgres name.
 func castExpr(reg *schemamaster.Register, t schemamaster.Transform, ref string) (string, error) {
-	if schemamaster.NormalizeType(t.From) == "int8" && isObservationCanonical(t.Canonical) == false && t.GuardMin != nil {
+	if schemamaster.NormalizeType(t.From) == "int8" && !isObservationCanonical(t.Canonical) && t.GuardMin != nil {
 		if t.GuardMax == nil {
 			return "", fmt.Errorf("epoch cast %s.%s missing guard bounds", t.Table, t.Column)
 		}
