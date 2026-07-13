@@ -124,20 +124,32 @@ groups:
         # pipeline is the thing that broke (a dead worker emits no
         # cronjob_runs_total at all, so the metric-based rules above cannot see
         # it). <1 available replica = no worker pod is running, so the schedule
-        # fires into the void.
+        # fires into the void. Guarded on desired replicas > 0 so a deployment that
+        # is intentionally scaled to 0 (e.g. transform-worker before the post-bootstrap
+        # enable step) is not reported as down; a real crash keeps desired >= 1.
         #
         # NB: keyed on the kube-state-metrics `deployment` label, NOT the OTel
         # service_name — anchorage-indexer's Deployment is `spark-anchorage-
         # indexer`. maple-graphql-indexer is excluded (it has its own
         # VectorMapleIndexerDown). When a new cronjob ships, add its Deployment
-        # name to this regex.
+        # name to both regexes below.
         expr: |
-          max by (cluster, deployment) (
-            kube_deployment_status_replicas_available{
-              namespace="vector",
-              deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator"
-            }
-          ) < 1
+          (
+            max by (cluster, deployment) (
+              kube_deployment_status_replicas_available{
+                namespace="vector",
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+              }
+            ) < 1
+          )
+          and on (cluster, deployment) (
+            max by (cluster, deployment) (
+              kube_deployment_spec_replicas{
+                namespace="vector",
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+              }
+            ) > 0
+          )
         for: 10m
         labels:
           team: vector
@@ -153,3 +165,116 @@ groups:
             produced. Check the pod (CrashLoopBackOff, OOM, image pull) before
             data goes stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobworkerdown
+
+      # =======================================================================
+      # transform-worker (VEC-484): queue-drain and parity rules
+      # =======================================================================
+      # These live here, not in a vector-transform-worker.yaml, because the
+      # rules-sync namespace regex only accepts vector-{watcher,backup-worker,
+      # indexers,psm3,postgres,cronjobs}. The transform-worker cronjob drains a
+      # per-source change queue (transformed._pending_<t>) into the transformed
+      # hypertables. Generic run-failure and worker-liveness above already cover
+      # it (service_name / deployment "transform-worker"); these add the
+      # silent-failure cases that path can't see: the worker is up and its runs
+      # "succeed", but a source's queue stops draining, or a row reaches neither
+      # the transformed table nor the queue. Signals (OTel gauges, once per tick):
+      #   transform_queue_oldest_age_seconds{table="<source>"}  (from _queue_status)
+      #   transform_parity_drift{table="<source>"}              (from _parity_status)
+
+      # -----------------------------------------------------------------------
+      # WARNING — a source's queue is lagging (draining slower than it fills)
+      # -----------------------------------------------------------------------
+      - alert: VectorTransformQueueLagging
+        # Oldest un-drained row for some source is older than 30m for 15m. In
+        # steady state the queue drains every tick (default 10m), so a sustained
+        # 30m age means that source is falling behind.
+        expr: |
+          max by (table, cluster) (
+            transform_queue_oldest_age_seconds{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) > 1800
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: transform-worker
+          namespace: vector
+        annotations:
+          summary: "Transform queue for `{{ $labels.table }}` is lagging"
+          description: |
+            The oldest un-drained row in `transformed._pending_{{ $labels.table }}`
+            has been waiting `{{ $value | humanizeDuration }}`. The worker is
+            running but this source is not draining each tick. Check the
+            transform-worker logs and `transformed._queue_status`; if it keeps
+            climbing, VectorTransformQueueStalled will page.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformqueuelagging
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — a source's queue is stalled (transformed layer going stale)
+      # -----------------------------------------------------------------------
+      - alert: VectorTransformQueueStalled
+        # Oldest un-drained row older than 2h for 30m: the transformed table for
+        # this source is materially behind raw and not recovering.
+        expr: |
+          max by (table, cluster) (
+            transform_queue_oldest_age_seconds{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) > 7200
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: transform-worker
+          namespace: vector
+        annotations:
+          summary: "Transform queue for `{{ $labels.table }}` is stalled"
+          description: |
+            The oldest un-drained row in `transformed._pending_{{ $labels.table }}`
+            has been waiting `{{ $value | humanizeDuration }}`. `transformed.{{ $labels.table }}`
+            is materially behind raw. The worker is up (else VectorCronjobWorkerDown
+            fires), so the drain itself is failing or wedged — check the
+            transform-worker error logs and for a stuck `transformed._run_{{ $labels.table }}()`.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformqueuestalled
+
+      # -----------------------------------------------------------------------
+      # WARNING — raw-vs-transformed parity drift (the correctness backstop)
+      # -----------------------------------------------------------------------
+      - alert: VectorTransformParityDrift
+        # drift = raw - transformed - pending, recorded per source each tick from
+        # transformed._parity_status. In a consistent snapshot after bootstrap every
+        # raw row is either transformed or still queued, so drift is exactly 0. A
+        # sustained nonzero value means a row reached neither the transformed table
+        # nor the queue -- a trigger gap or a bootstrap miss -- that the stall alert
+        # cannot see. Note this is a row-count check: an in-place raw UPDATE changes
+        # no count and is NOT caught here (the raw tables are verified INSERT-only, so
+        # that should not occur). Warning (not a page) because it is also nonzero
+        # during the initial bootstrap; it must read 0 once bootstrap completes, and
+        # can be promoted to critical after rollout is stable.
+        expr: |
+          max by (table, cluster) (
+            transform_parity_drift{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) != 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: transform-worker
+          namespace: vector
+        annotations:
+          summary: "Transform parity drift on `{{ $labels.table }}`"
+          description: |
+            `transformed.{{ $labels.table }}` is out of parity with raw by
+            `{{ $value | printf "%.0f" }}` row(s) (raw - transformed - pending). After
+            bootstrap this should be 0. A positive value means raw rows never made it
+            into the transformed layer or its queue (a trigger gap or a bootstrap
+            miss); negative means the transformed table has orphan rows (a raw delete
+            or a bug). An in-place raw UPDATE changes no count and is not caught here.
+            Check `SELECT * FROM transformed._parity_status WHERE source = '{{ $labels.table }}'`.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformparitydrift
