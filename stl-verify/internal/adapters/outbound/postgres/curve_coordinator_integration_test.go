@@ -20,39 +20,32 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/curveindexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // curveCoordChainID is a dedicated chain id for the coordinator full-block tests
 // so their seeds never collide with the repo-level tests on chain 999.
 const curveCoordChainID = int64(998)
 
-// stableswapCallCountResults is a fake Multicaller for the coordinator full-block
-// tests. The number of multicall calls is deterministic per pool kind (a 2-coin
-// pre-NG pool issues 21 calls, a 2-coin NG pool 27), so it returns the matching
-// canned result set keyed on len(calls). An unexpected count fails the test.
-type stableswapCallCountResults struct {
-	t   *testing.T
-	pre []outbound.Result
-	ng  []outbound.Result
-}
-
-func (m *stableswapCallCountResults) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	switch len(calls) {
-	case len(m.pre):
-		return m.pre, nil
-	case len(m.ng):
-		return m.ng, nil
-	default:
-		m.t.Fatalf("unexpected snapshot call count %d (pre=%d ng=%d)", len(calls), len(m.pre), len(m.ng))
-		return nil, nil
+// newStableswapCallCountMC returns a MockMulticaller for the coordinator
+// full-block tests. The number of multicall calls is deterministic per pool kind
+// (a 2-coin pre-NG pool issues 21 calls, a 2-coin NG pool 27), so it serves the
+// matching canned result set keyed on len(calls). An unexpected count fails the test.
+func newStableswapCallCountMC(t *testing.T, pre, ng []outbound.Result) *testutil.MockMulticaller {
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case len(pre):
+			return pre, nil
+		case len(ng):
+			return ng, nil
+		default:
+			t.Fatalf("unexpected snapshot call count %d (pre=%d ng=%d)", len(calls), len(pre), len(ng))
+			return nil, nil
+		}
 	}
+	return mc
 }
-
-func (m *stableswapCallCountResults) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return m.Execute(ctx, calls, nil)
-}
-
-func (m *stableswapCallCountResults) Address() common.Address { return common.Address{} }
 
 // coordPreNGResults mirrors the curveindexer unit-test canned results for a
 // 2-coin pre-NG pool (21 reads). Kept local to the postgres package because the
@@ -278,7 +271,7 @@ func seedCurveCoordCoins(t *testing.T, ctx context.Context, poolID, tokenID0, to
 // newCurveCurveService wires a real CurveRepository, EventRepository, TxManager,
 // and the canned-result multicaller into a curveindexer.CurveService over the
 // pools seeded on chain 998.
-func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.CurveService, *stableswapCallCountResults) {
+func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.CurveService, *testutil.MockMulticaller) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
@@ -323,7 +316,7 @@ func newCurveCurveService(t *testing.T, ctx context.Context) (*curveindexer.Curv
 	}
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, NewEventRepository(logger, buildregistry.BuildID(1)))
 
-	mc := &stableswapCallCountResults{t: t, pre: coordPreNGResults(), ng: coordNGResults(t)}
+	mc := newStableswapCallCountMC(t, coordPreNGResults(), coordNGResults(t))
 
 	coord, err := curveindexer.NewCurveService(curveindexer.CurveServiceDeps{
 		Pools:       registered,

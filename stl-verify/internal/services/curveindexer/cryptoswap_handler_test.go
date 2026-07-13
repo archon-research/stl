@@ -402,7 +402,7 @@ func TestCryptoswapHandler_Snapshot(t *testing.T) {
 		NCoins:       3,
 		CoinDecimals: []int{18, 18, 6},
 	}
-	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
+	mc := curveMC(cryptoswapResults(t, a))
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
@@ -511,7 +511,7 @@ func TestCryptoswapHandler_SnapshotDRevertErrors(t *testing.T) {
 	}
 	h := NewCryptoswapHandler(a)
 	pool := cryptoswapPool()
-	mc := &fakeMulticaller{results: cryptoswapResultsDRevert(t, a)}
+	mc := curveMC(cryptoswapResultsDRevert(t, a))
 	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Error("reverted D() read must error, got nil")
@@ -543,23 +543,24 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 		LpTokenAddress: &lpAddr,
 	}
 
-	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
+	mc := curveMC(cryptoswapResults(t, a))
 	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	if len(mc.captured) <= cryptoswapTotalSupplyIdx {
-		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), cryptoswapTotalSupplyIdx+1)
+	captured := snapshotCalls(t, mc)
+	if len(captured) <= cryptoswapTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(captured), cryptoswapTotalSupplyIdx+1)
 	}
 
-	tsCall := mc.captured[cryptoswapTotalSupplyIdx]
+	tsCall := captured[cryptoswapTotalSupplyIdx]
 	if tsCall.Target != lpAddr {
 		t.Errorf("totalSupply call Target = %s, want LP token %s", tsCall.Target, lpAddr)
 	}
 
 	// All other calls must target the pool, not the LP token.
-	for i, c := range mc.captured {
+	for i, c := range captured {
 		if i == cryptoswapTotalSupplyIdx {
 			continue
 		}
@@ -588,17 +589,18 @@ func TestCryptoswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 		LpTokenAddress: nil,
 	}
 
-	mc := &capturingMulticaller{results: cryptoswapResults(t, a)}
+	mc := curveMC(cryptoswapResults(t, a))
 	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	if len(mc.captured) <= cryptoswapTotalSupplyIdx {
-		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), cryptoswapTotalSupplyIdx+1)
+	captured := snapshotCalls(t, mc)
+	if len(captured) <= cryptoswapTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(captured), cryptoswapTotalSupplyIdx+1)
 	}
 
-	tsCall := mc.captured[cryptoswapTotalSupplyIdx]
+	tsCall := captured[cryptoswapTotalSupplyIdx]
 	if tsCall.Target != poolAddr {
 		t.Errorf("totalSupply call Target = %s, want pool %s", tsCall.Target, poolAddr)
 	}
@@ -624,7 +626,7 @@ func TestCryptoswapHandler_SnapshotRevertErrors(t *testing.T) {
 	copy(revertResults, baseResults)
 	revertResults[0] = outbound.Result{Success: false, ReturnData: nil}
 
-	mc := &fakeMulticaller{results: revertResults}
+	mc := curveMC(revertResults)
 	_, err = h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Errorf("snapshot with required call revert should error, got nil")
@@ -667,7 +669,7 @@ func TestCryptoswapHandler_SnapshotAdminBalancesNotIssued(t *testing.T) {
 		}
 	}
 
-	mc := &fakeMulticaller{results: cryptoswapResults(t, a)}
+	mc := curveMC(cryptoswapResults(t, a))
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
@@ -693,7 +695,7 @@ func TestCryptoswapHandler_SnapshotGetDxRevertErrors(t *testing.T) {
 	const firstGetDxIdx = 25
 	results[firstGetDxIdx] = outbound.Result{Success: false, ReturnData: nil}
 
-	_, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, err = h.SnapshotState(context.Background(), curveMC(results), pool, 200, 0, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Error("reverted get_dx element must error, got nil")
 	}
@@ -713,7 +715,7 @@ func TestCryptoswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	results := cryptoswapResults(t, a)
 	results[cryptoswapConfigFirstIdx] = outbound.Result{Success: false, ReturnData: nil}
 
-	_, err = h.SnapshotState(context.Background(), &fakeMulticaller{results: results}, pool, 200, 0, time.Unix(2, 0).UTC())
+	_, err = h.SnapshotState(context.Background(), curveMC(results), pool, 200, 0, time.Unix(2, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
 	}
