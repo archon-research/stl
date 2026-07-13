@@ -37,11 +37,12 @@ func main() {
 	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
-		Name:            env.Get("SERVICE_NAME", "transform-worker"),
-		IntervalEnv:     "TRANSFORM_INTERVAL",
-		IntervalDefault: "10m",
-		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Setup:           setupRunner,
+		Name:              env.Get("SERVICE_NAME", "transform-worker"),
+		IntervalEnv:       "TRANSFORM_INTERVAL",
+		IntervalDefault:   "10m",
+		IntervalOffsetEnv: "TRANSFORM_SCHEDULE_OFFSET",
+		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
+		Setup:             setupRunner,
 	}); err != nil {
 		slog.Error("transform-worker cronjob exited with error", "error", err)
 		os.Exit(1)
