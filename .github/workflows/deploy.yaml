@@ -102,15 +102,6 @@ jobs:
         working-directory: stl-verify
         run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO" DOCKER_PUSH=${{ inputs.push && '1' || '0' }}
 
-      # ORB-299/ORB-313: fail before update-staging stamps if the overlay
-      # references any image the build did not produce at this SHA.
-      - name: Verify staging overlay images exist in ECR
-        if: ${{ inputs.push }}
-        run: |
-          scripts/deploy/verify-ecr-images.sh \
-            --kustomization k8s/overlays/staging/kustomization.yaml \
-            --tag "${{ inputs.sha || github.sha }}"
-
   update-staging:
     name: Update Staging Image Tags
     needs: build-push-staging
@@ -119,6 +110,9 @@ jobs:
     concurrency:
       group: deploy-update-staging
       cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write  # AWS OIDC for the pre-stamp ECR verify
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -131,6 +125,14 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+
+      # ORB-299: read-only ECR creds so the pre-stamp verify below can confirm
+      # every image the staging overlay references exists before we commit.
+      - name: Configure AWS credentials (staging ECR read)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+          aws-region: eu-west-1
 
       - name: Commit and push to main (via API for verified commits)
         env:
@@ -154,6 +156,14 @@ jobs:
             if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
               echo "No changes to commit"
               exit 0
+            fi
+
+            # ORB-299/ORB-313: verify the exact file about to be committed (this
+            # fetched-and-stamped overlay), not the workflow's initial checkout,
+            # so a concurrent merge cannot slip an unbuilt image past the gate.
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization k8s/overlays/staging/kustomization.yaml; then
+              echo "::error::Refusing to stamp staging: overlay references image(s) missing from ECR."
+              exit 1
             fi
 
             # Get current main HEAD and its tree
@@ -302,17 +312,6 @@ jobs:
             docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
           done
 
-      # ORB-299: fail before update-prod stamps the prod manifest if any image
-      # the prod overlay references is missing from prod ECR. This is the safety
-      # net for promotion-list drift: a service present in the overlay but absent
-      # from the SERVICES/CRONJOBS lists above is never pushed, so it surfaces
-      # here as a missing image instead of a silent ImagePullBackOff in prod.
-      - name: Verify prod overlay images exist in ECR
-        run: |
-          scripts/deploy/verify-ecr-images.sh \
-            --kustomization k8s/overlays/prod/kustomization.yaml \
-            --tag "${{ inputs.sha || github.sha }}"
-
   update-prod:
     name: Auto-merge Prod Image Tags
     needs: build-push-prod
@@ -323,6 +322,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      id-token: write  # AWS OIDC for the pre-stamp ECR verify
     outputs:
       deploy_sha: ${{ steps.commit.outputs.deploy_sha }}
       changed: ${{ steps.commit.outputs.changed }}
@@ -338,6 +338,14 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+
+      # ORB-299: read-only ECR creds so the pre-stamp verify can confirm every
+      # image the prod overlay references exists in prod ECR before we commit.
+      - name: Configure AWS credentials (prod ECR read)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+          aws-region: eu-west-1
 
       # Auto-merge the prod image-tag bump straight to main (no PR), guarded so a
       # compromised CI/bot cannot smuggle anything else into a prod deploy:
@@ -424,6 +432,16 @@ jobs:
             if [ -n "$BAD_TAGS" ]; then
               echo "::error::Prod tags do not all target ${DEPLOY_SHA}:"
               echo "$BAD_TAGS"
+              exit 1
+            fi
+
+            # ORB-299: verify every image the (now SHA-stamped) prod overlay
+            # references exists in prod ECR, against the exact file about to be
+            # committed. Fails closed before the stamp; catches promotion-list
+            # drift and any image a concurrent merge added but this run did not
+            # push.
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
+              echo "::error::Refusing to stamp prod: overlay references image(s) missing from prod ECR."
               exit 1
             fi
 

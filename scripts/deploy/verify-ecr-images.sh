@@ -90,15 +90,20 @@ while IFS=$'\t' read -r newName newTag; do
     exit 2
   fi
 
-  if aws ecr describe-images \
+  # batch-get-image (not describe-images): the deploy ECR role grants
+  # ecr:BatchGetImage but not ecr:DescribeImages. It returns 0 even when the
+  # tag is absent, so assert on the image count, not the exit code. A missing
+  # repo raises RepositoryNotFoundException (non-zero) -> treated as missing.
+  found="$(aws ecr batch-get-image \
         --region "$region" \
         --repository-name "$repo" \
         --image-ids "imageTag=${newTag}" \
-        >/dev/null 2>&1; then
-    echo "  ok   ${repo}:${newTag}"
-  else
+        --query 'length(images)' --output text 2>/dev/null || echo 0)"
+  if [ "$found" = "0" ] || [ -z "$found" ] || [ "$found" = "None" ]; then
     echo "  MISS ${repo}:${newTag}"
     MISSING+=("${repo}:${newTag}")
+  else
+    echo "  ok   ${repo}:${newTag}"
   fi
   CHECKED=$((CHECKED + 1))
 done < "$PAIRS_FILE"
