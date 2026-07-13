@@ -102,6 +102,15 @@ jobs:
         working-directory: stl-verify
         run: make docker-release-all ENV=sentinelstaging IMAGE_TAG=${{ inputs.sha || github.sha }} DOCKER_CACHE=1 DOCKER_CACHE_REPO="$DOCKER_CACHE_REPO" DOCKER_PUSH=${{ inputs.push && '1' || '0' }}
 
+      # ORB-299/ORB-313: fail before update-staging stamps if the overlay
+      # references any image the build did not produce at this SHA.
+      - name: Verify staging overlay images exist in ECR
+        if: ${{ inputs.push }}
+        run: |
+          scripts/deploy/verify-ecr-images.sh \
+            --kustomization k8s/overlays/staging/kustomization.yaml \
+            --tag "${{ inputs.sha || github.sha }}"
+
   update-staging:
     name: Update Staging Image Tags
     needs: build-push-staging
@@ -196,7 +205,10 @@ jobs:
     needs: update-staging
     if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised 10 -> 20 min: a brand-new service's first rollout can sit in
+    # ImagePullBackOff (kubelet backoff up to ~5 min) until its first image
+    # lands, so this job must outlast the argocd-wait timeout below. See ORB-313.
+    timeout-minutes: 20
     concurrency:
       group: deploy-wait-staging
       cancel-in-progress: false
@@ -215,7 +227,10 @@ jobs:
         with:
           app: stl-staging
           server: http://argocd-prod-archon
-          timeout: "300"
+          # 900s (was 300s): tolerate a slow first rollout of a brand-new
+          # service image (ImagePullBackOff race) without hard-failing the
+          # gate and silently skipping prod promotion. See ORB-313.
+          timeout: "900"
           min-wait: "30"
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
@@ -236,7 +251,7 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer migrate python-api
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer fluid-vault-indexer migrate python-api
       CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator transform-worker
     permissions:
       id-token: write
@@ -286,6 +301,17 @@ jobs:
             docker tag "$STAGING_REGISTRY/stl-sentinelstaging-cronjob:$cj-$SHA" "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
             docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
           done
+
+      # ORB-299: fail before update-prod stamps the prod manifest if any image
+      # the prod overlay references is missing from prod ECR. This is the safety
+      # net for promotion-list drift: a service present in the overlay but absent
+      # from the SERVICES/CRONJOBS lists above is never pushed, so it surfaces
+      # here as a missing image instead of a silent ImagePullBackOff in prod.
+      - name: Verify prod overlay images exist in ECR
+        run: |
+          scripts/deploy/verify-ecr-images.sh \
+            --kustomization k8s/overlays/prod/kustomization.yaml \
+            --tag "${{ inputs.sha || github.sha }}"
 
   update-prod:
     name: Auto-merge Prod Image Tags
@@ -475,6 +501,30 @@ jobs:
       failed-jobs: |
         Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
         Auto-merge Prod Image Tags=${{ needs.update-prod.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  # ORB-313: when the staging health gate fails, build-push-prod is *skipped*
+  # (not failed), so prod promotion silently stops with no alert. Make that
+  # explicit on the prod channel. Fires only when staging built + stamped fine
+  # and the gate itself failed (wait=failure => build-push-staging succeeded).
+  notify-prod-promotion-skipped:
+    name: Notify Prod Promotion Skipped
+    if: ${{ always() && inputs.push && github.event_name != 'workflow_dispatch' && needs.wait-staging-healthy.result == 'failure' && needs.build-push-prod.result == 'skipped' }}
+    needs: [wait-staging-healthy, build-push-prod]
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Promotion Skipped
+      body: |
+        Prod promotion was skipped because the staging health gate did not pass.
+        This is often a slow first rollout of a new service image, not a regression.
+        No prod images were built or promoted.
+
+        Recovery: once `stl-staging` is Healthy and Synced in ArgoCD, re-run the
+        failed jobs on this workflow run. Prod promotion still sits behind the
+        manual `production` approval gate.
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
