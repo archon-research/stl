@@ -12,6 +12,7 @@ func TestOracleTypeClassification(t *testing.T) {
 		oracleType     OracleType
 		wantFeed       bool
 		wantERC4626    bool
+		wantCurveLPNG  bool
 		wantDirectCall bool
 	}{
 		{name: "chainlink is feed", oracleType: OracleTypeChainlinkFeed, wantFeed: true},
@@ -19,6 +20,7 @@ func TestOracleTypeClassification(t *testing.T) {
 		{name: "redstone is feed", oracleType: OracleTypeRedstone, wantFeed: true},
 		{name: "aave is neither", oracleType: OracleTypeAave},
 		{name: "erc4626 share requires direct call", oracleType: OracleTypeERC4626Share, wantERC4626: true, wantDirectCall: true},
+		{name: "curve lp ng works through multicall3", oracleType: OracleTypeCurveLPNG, wantCurveLPNG: true},
 	}
 
 	for _, tt := range tests {
@@ -28,6 +30,9 @@ func TestOracleTypeClassification(t *testing.T) {
 			}
 			if got := tt.oracleType.IsERC4626Oracle(); got != tt.wantERC4626 {
 				t.Errorf("IsERC4626Oracle() = %v, want %v", got, tt.wantERC4626)
+			}
+			if got := tt.oracleType.IsCurveLPNGOracle(); got != tt.wantCurveLPNG {
+				t.Errorf("IsCurveLPNGOracle() = %v, want %v", got, tt.wantCurveLPNG)
 			}
 			if got := tt.oracleType.RequiresDirectCall(); got != tt.wantDirectCall {
 				t.Errorf("RequiresDirectCall() = %v, want %v", got, tt.wantDirectCall)

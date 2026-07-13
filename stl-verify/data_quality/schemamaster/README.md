@@ -25,7 +25,7 @@ Governed tables, with optional per-table governance (`type`, `owner`). A live ta
 Columns the transformation layer rewrites: `rename` / `cast` / `fill`. A `rename` must already be the canonical type; a `cast` declares its source type in `from`. `guard_min` / `guard_max` are plausibility bounds for an epoch (`int8` → `timestamptz`) cast — values outside the range are NULLed rather than cast. Those bounds are policy read by the transform materializer and the runtime cast check; the conformance check does not use them.
 
 ### `overrides`
-Sanctioned TYPE exemptions the conformance check honours (`accepted_type`): a column deliberately kept at `accepted_type` rather than its canonical type (e.g. an infra surrogate key). Semantics/class overrides and derived-column formulas are deferred to the semantic-layer checks that consume them; the conformance check reads only `canonical` + `tables` + `transforms` + these.
+Sanctioned TYPE exemptions the conformance check honours (`accepted_type`): a column deliberately kept at `accepted_type` rather than its canonical type (e.g. an infra surrogate key). Semantics/class overrides and derived-column formulas are deferred to the DQ3 (semantic/enrichment) checks that consume them; the conformance check reads only `canonical` + `tables` + `transforms` + these.
 
 ### `fills`
 How a governed table obtains a canonical key it lacks natively (the transform layer derives it). The conformance check treats a required key as satisfied if it is a native column, produced by a transform, OR produced by one of these fills.
@@ -46,3 +46,10 @@ A `raw_pipeline` (on-chain observation) table must resolve each requirement, as 
 Columns kept NULL-able despite a `not_null` canonical, sanctioned.
 - `build_id` was retrofitted onto pre-existing hypertables (ADR-0002, 2026-04-14). TigerData blocks the validating full-table scan that `SET NOT NULL` needs on tiered chunks, so NOT NULL is enforced implicitly via the PK/UNIQUE key + `DEFAULT 0` + backfill; residual nullability is a harmless leftover. Tables created after the convention (`psm3_reserves`, fluid/maple state, `token_total_supply`) declare `build_id NOT NULL` inline and need no exemption.
 - `processing_version` (the audit sibling of `build_id`) is `not_null` too; the same four pre-convention retrofit tables (anchorage ×2, `prime_debt`, `sparklend_reserve_data`) carry a residual nullable `processing_version` for the identical reason and are exempted alongside `build_id`.
+
+### `transform_config`
+Upsert key for tables the transform generator can't key from a raw primary key (no usable PK, or a PK that doesn't survive canonicalisation). Each entry gives the column list the generator upserts on. Read by the generator, not by the conformance check. Each key was verified unique against live data (counts omitted as they drift):
+- `prime_debt`: `(prime_id, ilk_name, block_number, block_version, processing_version)`.
+- `anchorage_operation`: `(prime_id, operation_id, processing_version)`.
+- `anchorage_package_snapshot`: `(prime_id, package_id, snapshot_time, processing_version)`.
+- `cex_orderbook_snapshots`: `(exchange, symbol, event_time, persisted_at)`. `event_time` alone repeats (multiple rows per exchange/symbol/event_time across re-polls) and `ingested_at` doesn't fully disambiguate; `persisted_at` (write time) does. No `processing_version` on this table.

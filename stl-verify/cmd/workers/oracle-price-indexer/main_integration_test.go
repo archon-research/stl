@@ -136,7 +136,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
 
 	// Enqueue one block event message for the service to process.
-	sqsState.AddMessage(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0xabc","blockTimestamp":1700000000}`)
+	sqsState.AddMessage(fmt.Sprintf(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0x%064x","blockTimestamp":1700000000}`, 18_000_000))
 
 	// Configure environment for run()
 	t.Setenv("BUILD_GIT_HASH", "test")
