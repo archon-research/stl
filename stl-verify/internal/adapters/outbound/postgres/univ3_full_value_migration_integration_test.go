@@ -20,7 +20,7 @@ const univ3FullValueSchemaName = "test_univ3_full_value"
 // The AUSD/USDC Uniswap V3 pool contract whose token row the migration renames.
 const univ3PoolAddressHex = "bafead7c60ea473758ed6c6021505e8bbd7e8e5d"
 
-const univ3FullValueMigrationFile = "20260713_120000_univ3_full_position_value.sql"
+const univ3FullValueMigrationFile = "20260713_140000_univ3_full_position_value.sql"
 
 var univ3FullValuePool *pgxpool.Pool
 

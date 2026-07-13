@@ -60,5 +60,5 @@ BEGIN
 END $$;
 
 INSERT INTO migrations (filename)
-VALUES ('20260713_120000_univ3_full_position_value.sql')
+VALUES ('20260713_140000_univ3_full_position_value.sql')
 ON CONFLICT (filename) DO NOTHING;
