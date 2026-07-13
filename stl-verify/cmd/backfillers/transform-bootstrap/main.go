@@ -188,7 +188,12 @@ func selectSources(ctx context.Context, conn *pgxpool.Conn, only string) ([]stri
 }
 
 func openPool(ctx context.Context) (*pgxpool.Pool, error) {
-	dsn := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
+	// Require DATABASE_URL: a one-off backfill that silently ran against a local
+	// (empty) database would do nothing and report success.
+	dsn, err := env.Require("DATABASE_URL")
+	if err != nil {
+		return nil, err
+	}
 	return postgres.PoolOpener(postgres.DefaultDBConfig(dsn))(ctx)
 }
 

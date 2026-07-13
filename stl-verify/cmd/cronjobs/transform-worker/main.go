@@ -25,13 +25,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	// Require DATABASE_URL rather than default to localhost: a deployed worker that
+	// silently connected to a local (empty) database would report healthy while
+	// materializing nothing.
+	dbURL, err := env.Require("DATABASE_URL")
+	if err != nil {
+		slog.Error("fatal", "error", err)
+		os.Exit(1)
+	}
+
 	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		Name:            env.Get("SERVICE_NAME", "transform-worker"),
 		IntervalEnv:     "TRANSFORM_INTERVAL",
 		IntervalDefault: "10m",
-		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
+		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Setup:           setupRunner,
 	}); err != nil {
 		slog.Error("fatal", "error", err)
