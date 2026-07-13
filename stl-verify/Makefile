@@ -1924,7 +1924,7 @@ _docker-release-cronjob-%-internal:
 docker-release-transform-bootstrap: ecr-login _docker-release-transform-bootstrap-internal
 
 _docker-release-transform-bootstrap-internal:
-	@$(MAKE) _docker-release-go-service GO_NAME="Transform Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/util/transform-bootstrap GO_BIN=transform-bootstrap GO_CACHE_KEY="cronjob-transform-bootstrap" GO_TAG="transform-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="transform-bootstrap-latest"
+	@$(MAKE) _docker-release-go-service GO_NAME="Transform Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/transform-bootstrap GO_BIN=transform-bootstrap GO_CACHE_KEY="cronjob-transform-bootstrap" GO_TAG="transform-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="transform-bootstrap-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"
