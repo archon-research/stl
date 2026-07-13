@@ -305,7 +305,7 @@ func makeBlockEventJSON(blockNumber int64, version int, blockTimestamp int64) st
 		ChainID:        1,
 		BlockNumber:    blockNumber,
 		Version:        version,
-		BlockHash:      "0xabc123",
+		BlockHash:      "0x0000000000000000000000000000000000000000000000000000000000abc123",
 		BlockTimestamp: blockTimestamp,
 	}
 	data, _ := json.Marshal(event)
@@ -520,7 +520,7 @@ func TestStart(t *testing.T) {
 			errContains: "token address not found",
 		},
 		{
-			name: "error GetLatestPrices fails is warned and skipped",
+			name: "error GetLatestPrices fails startup",
 			setupRepo: func(r *mockRepo) {
 				r.getEnabledOraclesByChainFn = func(_ context.Context, _ int64) ([]*entity.Oracle, error) {
 					return []*entity.Oracle{defaultOracle()}, nil
@@ -536,7 +536,7 @@ func TestStart(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "no oracles with enabled assets found",
+			errContains: "loading latest prices",
 		},
 		{
 			name: "success multiple oracles deduplicates by oracle_id",
@@ -654,6 +654,34 @@ func TestStart(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestStart_MulticallerFactoryErrorFailsStartup: a multicaller factory error
+// is a static wiring bug; startup must fail so the orchestrator restarts,
+// not warn-and-skip into a silently unpriced oracle.
+// ---------------------------------------------------------------------------
+
+func TestStart_MulticallerFactoryErrorFailsStartup(t *testing.T) {
+	repo := &mockRepo{}
+	defaultRepoSetup(repo)
+
+	factory := func(_ entity.OracleType) (outbound.Multicaller, error) {
+		return nil, errors.New("no rpc endpoint configured")
+	}
+
+	svc, err := NewService(validConfig(), &mockConsumer{}, defaultBlockCacheReader(), repo, factory)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	err = svc.Start(context.Background())
+	if err == nil {
+		t.Fatal("expected Start to fail when the multicaller factory errors, got nil")
+	}
+	if !strings.Contains(err.Error(), "creating multicaller") {
+		t.Errorf("error = %q, expected it to contain 'creating multicaller'", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestStartAndProcessMessages - end-to-end message processing
 // ---------------------------------------------------------------------------
 
@@ -676,8 +704,10 @@ func TestStartAndProcessMessages(t *testing.T) {
 		mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
 
 		// Deliver one message on first call, then empty on subsequent calls.
+		// Version 0: fresh head blocks; unchanged-price suppression applies
+		// only to those (reorg republishes always re-emit).
 		messageDelivered := false
-		body1 := makeBlockEventJSON(18000000, 1, blockTimestamp)
+		body1 := makeBlockEventJSON(18000000, 0, blockTimestamp)
 		receipt1 := "receipt-1"
 
 		consumer := &mockConsumer{
@@ -741,8 +771,8 @@ func TestStartAndProcessMessages(t *testing.T) {
 		event2 := outbound.BlockEvent{
 			ChainID:        1,
 			BlockNumber:    18000001,
-			Version:        1,
-			BlockHash:      "0xdef456",
+			Version:        0,
+			BlockHash:      "0x0000000000000000000000000000000000000000000000000000000000def456",
 			BlockTimestamp: blockTimestamp + 12,
 		}
 		err = svc.processBlock(ctx, event2)
@@ -797,7 +827,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 		}()
 
 		event := outbound.BlockEvent{
-			ChainID: 1, BlockNumber: 18000000, Version: 1, BlockHash: "0xabc", BlockTimestamp: blockTimestamp,
+			ChainID: 1, BlockNumber: 18000000, Version: 1, BlockHash: "0x0000000000000000000000000000000000000000000000000000000000000abc", BlockTimestamp: blockTimestamp,
 		}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
@@ -1291,7 +1321,7 @@ func TestStartAndProcessMessages(t *testing.T) {
 			ChainID:        1,
 			BlockNumber:    0, // will fail entity validation: "blockNumber must be positive"
 			Version:        1,
-			BlockHash:      "0xabc",
+			BlockHash:      "0x0000000000000000000000000000000000000000000000000000000000000abc",
 			BlockTimestamp: blockTimestamp,
 		}
 		err = svc.processBlock(context.Background(), event)
@@ -1311,6 +1341,147 @@ func TestStartAndProcessMessages(t *testing.T) {
 			t.Errorf("Stop: %v", stopErr)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_AaveOracle_UpsertFailureIsRetriable: a failed upsert must
+// leave the change-detection cache uncommitted, so the SQS redelivery of the
+// same block detects the prices again and retries the write instead of acking
+// with the rows never persisted.
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_AaveOracle_UpsertFailureIsRetriable(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	defaultRepoSetup(repo)
+	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		return map[int64]float64{}, nil
+	}
+	failNext := true
+	repo.upsertPricesFn = func(_ context.Context, _ []*entity.OnchainTokenPrice) error {
+		if failNext {
+			failNext = false
+			return fmt.Errorf("database write failure")
+		}
+		return nil
+	}
+
+	price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
+	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
+	mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	event := outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 18000000, Version: 0,
+		BlockHash: "0x0000000000000000000000000000000000000000000000000000000000aa0001", BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), event); err == nil {
+		t.Fatal("expected processBlock to fail when UpsertPrices fails")
+	}
+
+	if err := svc.processBlock(context.Background(), event); err != nil {
+		t.Fatalf("processBlock (redelivery): %v", err)
+	}
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if repo.upsertPricesCalls != 2 {
+		t.Fatalf("UpsertPrices call count = %d, want 2 (redelivery must retry the failed write)", repo.upsertPricesCalls)
+	}
+	if len(repo.lastUpserted) != 2 {
+		t.Fatalf("lastUpserted length = %d, want 2 (both prices re-detected on redelivery)", len(repo.lastUpserted))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestProcessBlock_AaveOracle_ReorgRepublishBypassesCache: a reorg republish
+// (Version > 0) of an already-priced block must upsert at the new
+// block_version even when the prices are unchanged; readers order by
+// block_version DESC, so suppressing the write would leave the reorged block
+// without rows at its current version.
+// ---------------------------------------------------------------------------
+
+func TestProcessBlock_AaveOracle_ReorgRepublishBypassesCache(t *testing.T) {
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	repo := &mockRepo{}
+	defaultRepoSetup(repo)
+	repo.getLatestPricesFn = func(_ context.Context, _ int64) (map[int64]float64, error) {
+		return map[int64]float64{}, nil
+	}
+
+	price1 := new(big.Int).Mul(big.NewInt(2000), big.NewInt(1e8))
+	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
+	mc := newOracleMulticallerWithT(t, []*big.Int{price1, price2})
+
+	consumer := &mockConsumer{
+		receiveMessagesFn: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+
+	svc, err := NewService(validConfig(), consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if stopErr := svc.Stop(); stopErr != nil {
+			t.Errorf("Stop: %v", stopErr)
+		}
+	})
+
+	v0 := outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 18000000, Version: 0,
+		BlockHash: "0x0000000000000000000000000000000000000000000000000000000000aa0002", BlockTimestamp: blockTimestamp,
+	}
+	if err := svc.processBlock(context.Background(), v0); err != nil {
+		t.Fatalf("processBlock (v0): %v", err)
+	}
+
+	v1 := v0
+	v1.Version = 1
+	v1.BlockHash = "0x0000000000000000000000000000000000000000000000000000000000aa0003"
+	if err := svc.processBlock(context.Background(), v1); err != nil {
+		t.Fatalf("processBlock (v1 republish): %v", err)
+	}
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if repo.upsertPricesCalls != 2 {
+		t.Fatalf("UpsertPrices call count = %d, want 2 (reorg republish must re-emit)", repo.upsertPricesCalls)
+	}
+	if len(repo.lastUpserted) != 2 {
+		t.Fatalf("lastUpserted length = %d, want 2", len(repo.lastUpserted))
+	}
+	for _, p := range repo.lastUpserted {
+		if p.BlockVersion != 1 {
+			t.Errorf("tokenID %d: BlockVersion = %d, want 1", p.TokenID, p.BlockVersion)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1526,7 +1697,7 @@ func TestProcessBlock_FeedOracle(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
-		BlockHash:      "0xfeedblock1",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000010",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
@@ -1592,12 +1763,13 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	}
 	svc.decimalsValidated = true // skip decimals validation for this test
 
-	// First block: prices are new, should be upserted
+	// First block: prices are new, should be upserted. Version 0: fresh head
+	// blocks; unchanged-price suppression applies only to those.
 	event1 := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000000,
-		Version:        1,
-		BlockHash:      "0xfeed1",
+		Version:        0,
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000000000000feed1",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event1); err != nil {
@@ -1614,8 +1786,8 @@ func TestProcessBlock_FeedOracle_ChangeDetection(t *testing.T) {
 	event2 := outbound.BlockEvent{
 		ChainID:        1,
 		BlockNumber:    18000001,
-		Version:        1,
-		BlockHash:      "0xfeed2",
+		Version:        0,
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000000000000feed2",
 		BlockTimestamp: blockTimestamp + 12,
 	}
 	if err := svc.processBlock(context.Background(), event2); err != nil {
@@ -1705,7 +1877,7 @@ func TestProcessBlock_FeedOracle_NonUSDConversion(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
-		BlockHash:      "0xnonusd",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000011",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
@@ -1801,7 +1973,7 @@ func TestProcessBlock_FeedOracle_AllFeedsFail(t *testing.T) {
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        1,
-		BlockHash:      "0xallfail",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000012",
 		BlockTimestamp: blockTimestamp,
 	}
 	if err := svc.processBlock(context.Background(), event); err != nil {
@@ -1922,7 +2094,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xdecfail", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000013", BlockTimestamp: blockTimestamp,
 		}
 		err = svc.processBlock(context.Background(), event)
 		if err == nil {
@@ -1982,7 +2154,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xdecok", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000014", BlockTimestamp: blockTimestamp,
 		}
 		if err := svc.processBlock(context.Background(), event); err != nil {
 			t.Fatalf("processBlock: %v", err)
@@ -2047,7 +2219,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event1 := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xonce1", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000015", BlockTimestamp: blockTimestamp,
 		}
 		if err := svc.processBlock(context.Background(), event1); err != nil {
 			t.Fatalf("processBlock 1: %v", err)
@@ -2057,7 +2229,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event2 := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000001, Version: 1,
-			BlockHash: "0xonce2", BlockTimestamp: blockTimestamp + 12,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000016", BlockTimestamp: blockTimestamp + 12,
 		}
 		if err := svc.processBlock(context.Background(), event2); err != nil {
 			t.Fatalf("processBlock 2: %v", err)
@@ -2099,7 +2271,7 @@ func TestProcessBlock_FeedDecimalsValidation(t *testing.T) {
 
 		event := outbound.BlockEvent{
 			ChainID: 1, BlockNumber: 18000000, Version: 1,
-			BlockHash: "0xaave", BlockTimestamp: blockTimestamp,
+			BlockHash: "0x00000000000000000000000000000000000000000000000000c0ffee00000017", BlockTimestamp: blockTimestamp,
 		}
 		// Should succeed because aave oracles skip decimals validation
 		if err := svc.processBlock(context.Background(), event); err != nil {
@@ -2217,7 +2389,7 @@ func runProcessBlockWithCache(t *testing.T, cache outbound.BlockCacheReader) (*S
 		ChainID:        1,
 		BlockNumber:    18000000,
 		Version:        2,
-		BlockHash:      "0xcache",
+		BlockHash:      "0x00000000000000000000000000000000000000000000000000c0ffee00000018",
 		BlockTimestamp: 0,
 	}
 	procErr := svc.processBlock(context.Background(), event)
