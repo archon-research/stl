@@ -12,6 +12,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `anchorage-indexer` | `spark-anchorage-indexer` | 15m | Anchorage collateral / operations snapshots |
 | `offchain-price-indexer` | `offchain-price-indexer` | 5m | CoinGecko token prices |
 | `watcher-data-validator` | `watcher-data-validator` | 1h | Validates stored chain data vs Etherscan |
+| `transform-worker` | `transform-worker` | 10m | Drains the transformed-layer change queues and refreshes the parity ledger |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -20,6 +21,11 @@ The shared activity records `cronjob_runs_total{status="success"|"error"}` and
 `cronjob_run_duration_seconds` per run, labelled `service_name=<cronjob>`. New
 cronjobs are covered automatically; only `VectorCronjobWorkerDown` needs the new
 Deployment name added to its regex.
+
+> `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
+> the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
+> `kube_deployment_spec_replicas > 0`, so a deliberately scaled-to-zero deployment
+> does not page (see that section).
 
 General triage:
 
@@ -105,6 +111,14 @@ not running, so its Temporal schedule fires with no worker to pick it up — no
 snapshots/validations are produced. Sourced from kube-state-metrics, so it fires
 even when the OTLP/metrics pipeline is the thing that broke (a dead worker emits
 no `cronjob_runs_total`, so the metric-based alerts can't see it).
+
+The alert is guarded on `kube_deployment_spec_replicas > 0`, so a deployment
+deliberately scaled to zero does not page. This matters for triage: a
+scaled-to-zero deployment (e.g. `transform-worker` before it is enabled) is
+fully silent — no page and no metrics — which is expected, not an outage.
+`transform-worker` must only be scaled to 1 after the one-off bootstrap has run;
+if it is enabled first, the first tick runs the full parity verify inline and can
+run long. Keep that rollout order explicit in the deploy notes.
 
 ### First checks
 
