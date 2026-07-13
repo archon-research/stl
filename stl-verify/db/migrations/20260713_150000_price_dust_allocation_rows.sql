@@ -418,5 +418,5 @@ BEGIN
 END $$;
 
 INSERT INTO migrations (filename)
-VALUES ('20260713_130000_price_dust_allocation_rows.sql')
+VALUES ('20260713_150000_price_dust_allocation_rows.sql')
 ON CONFLICT (filename) DO NOTHING;
