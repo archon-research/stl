@@ -19,7 +19,9 @@ Tables checked but skipped (not governed by this register yet):
 The rulebook: one entry per canonical concept, keyed by column name. `type` is the invariant type the column must have wherever it appears. `class` and `semantics` are defaults; `not_null` marks a column that must be declared NOT NULL (with sanctioned exceptions in `nullable_exempt`).
 
 ### `tables`
-Governed tables, with optional per-table governance (`type`, `owner`). A live table not listed here is flagged `unregistered_table`. `type` (`raw_pipeline` / `config` / `dimension`) drives which required-key rules apply.
+Governed tables, with optional per-table governance (`type`, `owner`, `transform_defer`). A live table not listed here is flagged `unregistered_table`. `type` (`raw_pipeline` / `config` / `dimension`) drives which required-key rules apply, and is also the transform-target signal: a governed `raw_pipeline` table is a transform target (the transformed layer canonicalises on-chain / observation data); `config` / `dimension` / infrastructure tables are governed but never transformed.
+
+`transform_defer` (optional, on a `raw_pipeline` table) is a reason string marking a transform target that is intentionally not built yet (a later bucket), e.g. `"VEC-494: bucket 3 (no natural PK)"`. `CheckTransformCoverage` enforces that every `raw_pipeline` table is either **built** (has a `transformed._sources` row) or **deferred** (`transform_defer` set), never neither and never both; and that every `_sources` row maps back to a governed `raw_pipeline` table. So a new `raw_pipeline` table cannot be added and left silently un-transformed. The integration test reads the live `_sources` rows.
 
 A few `maple_*` entries (`maple_ftl_loan`, `maple_ftl_loan_state`, `maple_loan_meta`, `maple_pool_meta`, `maple_sky_strategy_meta`) are intentionally left untyped for now, so the required-key pass (gated on `type`) skips them; they still get the per-column, table-coverage, and nullability checks. Typing them is pending per-table classification.
 
