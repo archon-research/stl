@@ -58,7 +58,8 @@ func TestPositionIdHelper(t *testing.T) {
 
 	// Guards must fail hard rather than emit a silently-wrong identity.
 	for _, g := range []struct{ name, sql string }{
-		{"user_id XOR prime_id", `SELECT position_key(1,3,'k','x',42,5,'LOAN')`},
+		{"user_id + prime_id both set", `SELECT position_key(1,3,'k','x',42,5,'LOAN')`},
+		{"user_id + prime_id both null", `SELECT position_key(1,3,'k','x',NULL,NULL,'LOAN')`},
 		{"deal_type_code required", `SELECT position_key(1,3,'k','x',42,NULL,NULL)`},
 		{"kind/instrument_key required", `SELECT position_key(1,3,NULL,'x',42,NULL,'LOAN')`},
 	} {

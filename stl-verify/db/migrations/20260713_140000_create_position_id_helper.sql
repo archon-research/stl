@@ -7,7 +7,8 @@
 --   chain_id;protocol_id;<kind>:<instrument_key>;user_id;prime_id;deal_type_code
 -- Nullable identity fields (chain_id/protocol_id/user_id/prime_id) render as empty between the
 -- ';' delimiters (so field positions are stable); kind/instrument_key/deal_type_code are
--- required; user_id and prime_id are mutually exclusive. IMMUTABLE so it can back a generated
+-- required; exactly one of user_id / prime_id must be set (a position always has a holder).
+-- IMMUTABLE so it can back a generated
 -- column or index. Fail hard on bad inputs rather than emit a silently-wrong identity.
 CREATE OR REPLACE FUNCTION public.position_key(
   _chain_id integer, _protocol_id bigint, _kind text, _instrument_key text,
@@ -21,8 +22,8 @@ BEGIN
   IF _deal_type_code IS NULL THEN
     RAISE EXCEPTION 'position_key: deal_type_code is required (assign it in position_classification before hashing)';
   END IF;
-  IF _user_id IS NOT NULL AND _prime_id IS NOT NULL THEN
-    RAISE EXCEPTION 'position_key: user_id and prime_id are mutually exclusive (user_id=%, prime_id=%)', _user_id, _prime_id;
+  IF (_user_id IS NULL) = (_prime_id IS NULL) THEN
+    RAISE EXCEPTION 'position_key: exactly one of user_id / prime_id must be set (user_id=%, prime_id=%)', _user_id, _prime_id;
   END IF;
   RETURN concat_ws(';',
     coalesce(_chain_id::text, ''),
